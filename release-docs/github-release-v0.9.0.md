@@ -38,7 +38,7 @@ npm link --workspace packages/cli
 tl doctor --json
 ```
 
-See [Getting started](getting-started.md) for workspace setup.
+See [Getting started](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/main/release-docs/getting-started.md) for workspace setup.
 
 ## Privacy and permissions
 
@@ -63,7 +63,7 @@ These counts are a dated snapshot, not a guarantee of zero vulnerabilities. Reru
 
 ## License and support
 
-TokenLighten is source-available and is not licensed under an OSI-approved open-source license. Properly attributed personal non-organizational redistribution is permitted; product/service integration and organizational or commercial redistribution require prior written permission. See [Licensing and use policy](licensing.md).
+TokenLighten is source-available and is not licensed under an OSI-approved open-source license. Properly attributed personal non-organizational redistribution is permitted; product/service integration and organizational or commercial redistribution require prior written permission. See [Licensing and use policy](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/main/release-docs/licensing.md).
 
 Support is best effort. No response-time, resolution-time, uptime, or compatibility SLA is provided.
 
