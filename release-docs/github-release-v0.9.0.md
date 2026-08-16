@@ -75,5 +75,5 @@ Support is best effort. No response-time, resolution-time, uptime, or compatibil
 Verified VSIX SHA-256:
 
 ```text
-f3b4a5ca1f3c875abf5a09f663f8302db392c890c081333f0059cd9447bcf353  tokenlighten-vscode-extension-0.9.0.vsix
+10dc680e1ce46dc0fce43445a76c9b6300ec5e8e257d8d86fa0e867c37647612  tokenlighten-vscode-extension-0.9.0.vsix
 ```

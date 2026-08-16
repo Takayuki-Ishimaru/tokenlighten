@@ -102,7 +102,7 @@
   "scripts": {
     "build": "node ../../scripts/clean-package-dist.mjs && node esbuild.config.mjs && tsc --noEmit",
     "bundle-cli": "node scripts/bundle-cli.mjs",
-    "vscode:prepublish": "npm run build && npm run bundle-cli",
+    "vscode:prepublish": "npm --prefix ../.. run build && npm run bundle-cli",
     "package": "vsce package --no-dependencies",
     "typecheck:test": "tsc --project tsconfig.test.json",
     "test:bundle-cli": "node scripts/test-bundle-cli-setup.mjs",
