@@ -1,5 +1,7 @@
 # TokenLighten
 
+[English](README.md) | [日本語](README.ja.md)
+
 **TokenLighten** is a local-first MCP toolkit that gives coding agents focused repository context instead of repeatedly sending whole files.
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.

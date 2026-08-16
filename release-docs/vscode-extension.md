@@ -1,5 +1,7 @@
 # VS Code extension
 
+[English](vscode-extension.md) | [日本語](vscode-extension.ja.md)
+
 The TokenLighten VS Code extension bundles the TokenLighten CLI, MCP server, parsers, and required assets in a VSIX. A separate `tl` installation is not required when you use the packaged extension.
 
 ## Install without building

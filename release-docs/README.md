@@ -6,13 +6,13 @@ This directory contains the public documentation for the TokenLighten v0.9 relea
 
 - [Getting started](getting-started.md) — build from source and set up a workspace.
 - [MCP tools](mcp-tools.md) — the three tools exposed by the server.
-- [VS Code extension](vscode-extension.md) — install and use the VSIX.
+- [VS Code extension](vscode-extension.md) / [日本語](vscode-extension.ja.md) — install and use the VSIX.
 - [Language support](language-support.md) — supported languages, file formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md) — local processing, write permissions, and support expectations.
 - [Licensing](licensing.md) — source-available use and redistribution policy.
 - [Public-source manifest](public-source-manifest.md) — material permitted in the new public repository.
 - [Release checklist](release-checklist.md) — required manual release gates.
-- [GitHub Release v0.9.0 draft](github-release-v0.9.0.md) — public release-note copy with an artifact checksum placeholder.
+- [GitHub Release v0.9.0 draft](github-release-v0.9.0.md) — public release-note copy with the verified artifact checksum.
 - [GitHub repository settings](github-repository-settings.md) — About text, topics, security features, and visibility sequence.
 - [Public root package template](templates/public-package.json) — build/test scripts with desktop and benchmark workspaces removed.
 - [Public CI template](templates/public-ci.yml) — Node.js 20 checks on Ubuntu, macOS, and Windows plus VSIX packaging.
