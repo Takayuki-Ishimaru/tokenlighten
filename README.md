@@ -22,9 +22,11 @@ Repository indexing and context selection run locally on the CPU. TokenLighten d
 
 Savings vary by repository, task, client, and model behavior. Usage and cost figures shown by TokenLighten are local estimates, not provider billing records.
 
-## Install the VS Code extension
+## Install the VS Code extension (no build required)
 
-Download the `.vsix` attached to the GitHub release, then either:
+For most users, download **[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)** from the latest GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+
+Then:
 
 1. open the VS Code **Extensions** view;
 2. choose **Install from VSIX…**; and

@@ -1,8 +1,14 @@
 # Getting started
 
-TokenLighten runs locally and provides an MCP server for coding agents. You need Node.js 20 or later.
+TokenLighten runs locally and provides an MCP server for coding agents.
+
+## Install the VS Code extension without building
+
+Most users can download **[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)** and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 ## Build from source
+
+Building the source requires Node.js 20 or later.
 
 ```bash
 git clone https://github.com/Takayuki-Ishimaru/tokenlighten.git

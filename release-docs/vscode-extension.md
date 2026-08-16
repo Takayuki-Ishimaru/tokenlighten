@@ -2,9 +2,11 @@
 
 The TokenLighten VS Code extension bundles the TokenLighten CLI, MCP server, parsers, and required assets in a VSIX. A separate `tl` installation is not required when you use the packaged extension.
 
-## Install
+## Install without building
 
-Download the release VSIX and install it from VS Code:
+Download **[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)** from the latest GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+
+Install it from VS Code:
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…** from the Extensions view menu.
