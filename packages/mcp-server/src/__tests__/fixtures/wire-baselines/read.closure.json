@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "kind": "read.closure",
+  "open": [],
+  "done": 0,
+  "total": 0,
+  "applicability": "no-registered-checks",
+  "note": "no closure checks were registered for this session — completeness NOT verified; verify with git diff / tests (this call is only needed after an edit response carried a closure field)",
+  "summary": {
+    "edits": 0,
+    "files": [],
+    "checks_closed": 0,
+    "checks_open": 0
+  }
+}

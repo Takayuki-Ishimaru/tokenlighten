@@ -1,0 +1,23 @@
+<!-- tokenlighten:mcp-instructions:start -->
+<!-- tl-instructions-version: {{VERSION}} -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+## TokenLighten MCP
+
+TLは必要slice+edit handleを返す. TL公開時、ファイル作業は必ずTLから: `read_file mode=task_pack query="<依頼全文>"`(+既知`paths`); 切詰め禁止. hostがnative-bypassまたはTL非公開ならnativeを使いtask内activate禁止. `taskProfile`: user-declared `answer`=read-only,`generic`=change; task固有の推測禁止; change task内の副質問も`generic`/省略. workspace共有時は各agentが固定`lane`; 単独なら省略. worktreeは全callに自分の`cwd`; 無宣言rootは`cwd-required-for-edit`. STANDING RULE: 別taskは`taskEpoch:"new"`で再pack.
+
+貼付/添付は再読不要。TL=workspace内。拒絶時は`did_you_mean`/`cwd_candidates`。
+
+- 応答は必ず`{v:1,kind,...}`; `kind`だけが内容を決める — fieldの有無でなく`kind`で分岐し、不在を意味として読む(`limit`無し=完全配信). 15種: `read.task_pack|text|map|batch|artifact|receipt|closure`, `search.matches|references|tree`, `edit.applied|reclassified|rolled_back|state_unknown`, `refusal`. 未知の`kind`=SAFE-STOP: 報告のみでeditを発行せず、fieldからの推測禁止.
+- `decision.kind`に従う(`read.task_pack`): `act.answer`/`act.edit`=>discovery閉鎖、配信contentで即answer/edit; readyな独立concern（独立した回帰test追加を含む）は一回の`edit_file` `edits[]`にbatch; `prepared`後はread/search禁止. `act.edit`は書込可能な`frontier`(時にready な`apply`)を運ぶ. `discover`=>その`next`を実行(複数なら全部); `gaps`の`code`はSEMANTICでcallは付かず、bytesを増やしても閉じない. `await_input`=>安全なら配信済み`candidates`のbodyを使い、無理なら質問. `done`=>停止. pack残りは`plan`に載る(まず`evidence_model`).
+- `refusal`: `code`が失敗内容、`retry`が唯一許可された遷移. `call`=名指しされた`field`(path修飾; `did_you_mean`=近似候補、`keys`=広告済みkey全体)を直して再発行. `challenge`=広告済みrequest schemaから自作した`challenge`を付け同一callを再発行 — 新証拠で証明済み判断が変わる時のみ. `user-input`=質問. `new-task`=再pack. `none`=このcall形は閉鎖; `remaining`=残件. `detail`/`candidate`/`expected_shapes`/`nearest_match`はADVISORY — 回復に使い分岐に使わない; `cause:"capped"`はbytes上限で切り詰めが起きた合図なので、より小さい要求で`next`を再試行する. `nearest_match.out_of_range`ならcovering handleで再発行、再読不要. `next`は常に実行可能: 逐語実行しtemplate扱い禁止.
+- `read.receipt`=文脈は既に最新、tagで判別: `pack-unchanged`; `code-unchanged`(`served_by`=bytesをwireに載せた過去callのprovenance、新規read扱い禁止); `decision-unchanged`(証明済み決定が不変でbytesの話ではない; `certified_query`=閉じた問い); `kit-unchanged`; `closure-complete`. レシートで行き止まりにしない: その`next`を実行するか、restateされた証拠で行動する.
+- Zoom: `evidence`の各itemは`body`=今回配信, `prior`=文脈に保持済み(skip), `remaining`=同handleの未配信窓(複数は`ranges=[..]`), `role`=surface. `limit`=応答レベルの切詰め; 回復可能な`cause`(`wire`/`records`)は必ず`next`を持つので実行、`source`は持たない. `read.map`/`search.tree`にzoomするrangeは無い — 名指しの`symbol`/`path`で再要求; `read.artifact`は`sheet`/`slides`/`pages`/`rows`/`sections`でaddressing; `read.batch`のentryは各自`truncated`を持つ. `mode=full`はtask毎キャップ超過後にskeleton+`remaining_ranges`+`next`を返す — sliceを取りfull再試行禁止. 再packは返却`qref`で`query`省略.
+- Search: `action=find query=<識別子1語>`; 一覧=>`tree`; 呼び出し網羅=>`references`; 0件+`absence`=そのtoken確実に不在, 再grep不要; `references`は`limit`でページング: 返却`next`を尽きるまで実行し`files`で全件回収、`cursor`の自作禁止; `coverage_reason=candidate-list`=>`decision`の`next`を実行(qref+paths)、直列`mode=full`sweep禁止; 同一task再質問は保留candidateに自動bind.
+- Edit: preparedな`fast_path.kind="single-site-unique-match"`は未適用のproof: その`handle`/`search`/`replace`/`precondition`+`allowPathFallback:false`で`edit_file`を1回、再read/re-pack禁止. それ以外はread handle+`edits[]`+item`unique-match`. readyな`change_contract`はbounded effect area: dependency stage順に`action:"edit"`だけ編集し独立itemをbatch; `action:"review"`は証拠で自動write禁止. 新規scratch/test=>`create:true`+明示`cwd`/rooted handle; `cwd-required-for-create`は`cwd_candidates`から選び再送、workspace内でnative Write/Edit禁止; >32 KiB=fail. `edit.applied`=適用済み: `core`(`counts`+`paths`)=post-edit真実, `applied`+`brace_delta`=file毎の詳細, `reclassification`=answer->edit fenceの遷移. `edit.rolled_back`=何も残らない; `edit.state_unknown`=disk未証明、まず`recovery`を実行.
+- wiring pack(`plan`の`wiring`)は`edit_frontier`のみwrite; `mode=construct-receiver`=>その`next`; artifact packはsourceごとにcontent入り`artifact_sections`必須.
+- 圧縮ファイルは`read_file mode=archive|task_pack archive={path,member?}`/`search_files find|tree`で読む; 仮想member handleは不変; native展開禁止. `--allow-write`時のみ外側ZIPを`edit_file artifact={kind:"zip",members:[...]}`で編集可; tar/tar.gz/7z/rarは読取専用.
+- 資格情報: opaqueな`credentialRef`/`outputCredentialRef`のみ, 生passwordは禁止; serverの`TOKENLIGHTEN_PASSWORD_<REF>`で解決.
+- Shellはbuild/tests/gitのみ — TLで読めるreadを`cat`/`sed`/`rg`/ネイティブReadで代替しない.
+- `verifying`: edit後はtestsか`diff`; edit/closure応答に乗る`verification` kit(変更を参照するtest/mock+handle)のhandleからハーネスを組む(新規は`create:true`), native読み書き禁止; kit body: `code`=今回配信, `served-earlier`=文脈に保持済み(skip), `omitted`=未配信(空ではない)=>返却`next`のbatched `handles`で初回compile/test前に取得; `named_paths`/`missing_include_handles`=path+handle(同call); `kit-unchanged`=変化なし. `read.closure`をopenのまま残す時だけ指定closureまたは`next`を実行; それ以外はtest/diff通過で停止 — 儀礼的な`mode=closure`不要. 失敗editの同一再試行禁止; tests通過で停止 — 装飾/空白edit禁止.
+
+<!-- tokenlighten:mcp-instructions:end -->

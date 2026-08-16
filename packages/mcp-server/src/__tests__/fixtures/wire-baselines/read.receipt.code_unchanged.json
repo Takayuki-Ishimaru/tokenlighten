@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "kind": "read.receipt",
+  "receipt": {
+    "receipt": "code-unchanged",
+    "handle": "$H1",
+    "sha": "$SHA1",
+    "next": {
+      "tool": "read_file",
+      "arguments": {
+        "mode": "task_pack",
+        "taskEpoch": "new",
+        "paths": [
+          "fw/src/estimator/qkf.cpp"
+        ]
+      }
+    }
+  }
+}

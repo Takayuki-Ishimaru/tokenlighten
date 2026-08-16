@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "paths": {
+      "@tokenlighten/types": ["../types/dist/index.d.ts"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["src/__tests__"]
+}

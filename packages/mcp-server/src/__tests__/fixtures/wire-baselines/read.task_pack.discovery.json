@@ -1,0 +1,85 @@
+{
+  "v": 1,
+  "kind": "read.task_pack",
+  "task": {
+    "id": "task-472ce02e2178817b",
+    "replay": "$QREF",
+    "coverage": "partial",
+    "coverage_reason": "candidate-list"
+  },
+  "profile": "generic",
+  "evidence": [
+    {
+      "handle": "$H1",
+      "path": "fw/src/estimator/qkf.cpp",
+      "range": "21-26",
+      "body": "QkfHealthReport QKF::estimatorHealthStatus() const {\n    QkfHealthReport r{};\n    r.healthy = isHealthy();\n    r.trace = traceP();\n    return r;\n}",
+      "remaining": [
+        "1-20",
+        "27-201"
+      ],
+      "role": "unknown",
+      "symbol": "QKF::estimatorHealthStatus",
+      "why": "anchor-focus: query-matched symbol QKF::estimatorHealthStatus; caller-supplied",
+      "likely_edits": [
+        {
+          "kind": "inspect-slice",
+          "handle": "$H1",
+          "target": "read_file mode=slice handle=$H1",
+          "confidence": 0.5
+        },
+        {
+          "kind": "handle-scoped-edit",
+          "handle": "$H1",
+          "target": "edit_file handle=$H1 allowPathFallback=false",
+          "confidence": 0.4
+        }
+      ]
+    }
+  ],
+  "decision": {
+    "kind": "discover",
+    "next": {
+      "tool": "search_files",
+      "arguments": {
+        "action": "tree",
+        "path": "fw/src/estimator"
+      }
+    },
+    "gaps": [
+      {
+        "code": "missing-evidence",
+        "refs": [
+          "surface-content"
+        ]
+      }
+    ]
+  },
+  "plan": {
+    "verification": {
+      "available": true,
+      "command": "clang++ (project build system at fw/CMakeLists.txt)"
+    }
+  },
+  "profile_binding": {
+    "requested": "auto",
+    "selected": "generic",
+    "source": "inferred",
+    "confidence": 0.4,
+    "reason": "no high-confidence task-shape marker"
+  },
+  "frontier_index": [
+    {
+      "path": "fw/src/estimator/qkf.cpp",
+      "role": "unknown",
+      "handle": "$H1"
+    }
+  ],
+  "checks": [
+    "dir-scoped pack embeds no query-grounded implementation body — slice the implicated source before editing"
+  ],
+  "verify": [
+    "cmake --build fw"
+  ],
+  "qref": "$QREF"
+}

@@ -1,0 +1,652 @@
+{
+  "v": 1,
+  "kind": "search.matches",
+  "matches": {
+    "form": "find",
+    "query": "hotSym",
+    "files": [
+      {
+        "path": "src/m0/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_0_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m1/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_1_0 = 0;",
+          "const hotSym_1_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m10/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_10_0 = 0;",
+          "const hotSym_10_1 = 1;",
+          "const hotSym_10_2 = 2;"
+        ]
+      },
+      {
+        "path": "src/m11/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_11_0 = 0;",
+          "const hotSym_11_1 = 1;",
+          "const hotSym_11_2 = 2;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m12/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_12_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m13/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_13_0 = 0;",
+          "const hotSym_13_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m14/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_14_0 = 0;",
+          "const hotSym_14_1 = 1;",
+          "const hotSym_14_2 = 2;"
+        ]
+      },
+      {
+        "path": "src/m15/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_15_0 = 0;",
+          "const hotSym_15_1 = 1;",
+          "const hotSym_15_2 = 2;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m16/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_16_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m17/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_17_0 = 0;",
+          "const hotSym_17_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m18/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_18_0 = 0;",
+          "const hotSym_18_1 = 1;",
+          "const hotSym_18_2 = 2;"
+        ]
+      },
+      {
+        "path": "src/m19/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_19_0 = 0;",
+          "const hotSym_19_1 = 1;",
+          "const hotSym_19_2 = 2;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m2/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_2_0 = 0;",
+          "const hotSym_2_1 = 1;",
+          "const hotSym_2_2 = 2;"
+        ]
+      },
+      {
+        "path": "src/m20/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_20_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m21/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_21_0 = 0;",
+          "const hotSym_21_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m22/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_22_0 = 0;",
+          "const hotSym_22_1 = 1;",
+          "const hotSym_22_2 = 2;"
+        ]
+      },
+      {
+        "path": "src/m23/f.ts",
+        "lines": [
+          1,
+          2,
+          3
+        ],
+        "snippets": [
+          "const hotSym_23_0 = 0;",
+          "const hotSym_23_1 = 1;",
+          "const hotSym_23_2 = 2;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m24/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_24_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m25/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_25_0 = 0;",
+          "const hotSym_25_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m26/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_26_0 = 0;",
+          "const hotSym_26_1 = 1;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m27/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_27_0 = 0;",
+          "const hotSym_27_1 = 1;"
+        ],
+        "more_lines": 2
+      },
+      {
+        "path": "src/m28/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_28_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m29/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_29_0 = 0;",
+          "const hotSym_29_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m3/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_3_0 = 0;",
+          "const hotSym_3_1 = 1;"
+        ],
+        "more_lines": 2
+      },
+      {
+        "path": "src/m30/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_30_0 = 0;",
+          "const hotSym_30_1 = 1;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m31/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_31_0 = 0;",
+          "const hotSym_31_1 = 1;"
+        ],
+        "more_lines": 2
+      },
+      {
+        "path": "src/m32/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_32_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m33/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_33_0 = 0;",
+          "const hotSym_33_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m34/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_34_0 = 0;",
+          "const hotSym_34_1 = 1;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m35/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_35_0 = 0;",
+          "const hotSym_35_1 = 1;"
+        ],
+        "more_lines": 2
+      },
+      {
+        "path": "src/m36/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_36_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m37/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_37_0 = 0;",
+          "const hotSym_37_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m38/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_38_0 = 0;",
+          "const hotSym_38_1 = 1;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m39/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_39_0 = 0;",
+          "const hotSym_39_1 = 1;"
+        ],
+        "more_lines": 2
+      },
+      {
+        "path": "src/m4/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_4_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m5/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_5_0 = 0;",
+          "const hotSym_5_1 = 1;"
+        ]
+      },
+      {
+        "path": "src/m6/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_6_0 = 0;",
+          "const hotSym_6_1 = 1;"
+        ],
+        "more_lines": 1
+      },
+      {
+        "path": "src/m7/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_7_0 = 0;",
+          "const hotSym_7_1 = 1;"
+        ],
+        "more_lines": 2
+      },
+      {
+        "path": "src/m8/f.ts",
+        "lines": [
+          1
+        ],
+        "snippets": [
+          "const hotSym_8_0 = 0;"
+        ]
+      },
+      {
+        "path": "src/m9/f.ts",
+        "lines": [
+          1,
+          2
+        ],
+        "snippets": [
+          "const hotSym_9_0 = 0;",
+          "const hotSym_9_1 = 1;"
+        ]
+      }
+    ],
+    "total_files": 40,
+    "total_matches": 100,
+    "literal": true,
+    "inventory_complete": true,
+    "note": "inventory[] plus total_files/total_matches are exhaustive (100% of matches); only the per-file snippets in files[] were capped — re-searching this exact query will not surface additional files",
+    "inventory": [
+      {
+        "path": "src/m11/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m15/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m19/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m23/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m27/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m3/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m31/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m35/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m39/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m7/f.ts",
+        "matches": 4
+      },
+      {
+        "path": "src/m10/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m14/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m18/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m2/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m22/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m26/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m30/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m34/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m38/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m6/f.ts",
+        "matches": 3
+      },
+      {
+        "path": "src/m1/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m13/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m17/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m21/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m25/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m29/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m33/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m37/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m5/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m9/f.ts",
+        "matches": 2
+      },
+      {
+        "path": "src/m0/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m12/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m16/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m20/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m24/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m28/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m32/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m36/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m4/f.ts",
+        "matches": 1
+      },
+      {
+        "path": "src/m8/f.ts",
+        "matches": 1
+      }
+    ],
+    "related_lookups": {
+      "definition": {
+        "tool": "search_files",
+        "arguments": {
+          "action": "symbols",
+          "query": "hotSym"
+        }
+      },
+      "callers": {
+        "tool": "search_files",
+        "arguments": {
+          "action": "references",
+          "query": "hotSym"
+        }
+      }
+    }
+  },
+  "limit": {
+    "cause": "capped",
+    "omitted": [
+      "results"
+    ]
+  }
+}

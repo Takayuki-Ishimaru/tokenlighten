@@ -1,0 +1,14 @@
+# TokenLighten sample config fixture used by config.spec.ts
+[proxy]
+enabled = true
+port = 4000
+
+[mcp]
+workspaceRoot = "/home/user/myrepo"
+
+[skeleton]
+sizeCapBytes = 65536
+maxRanked = 40
+
+[agentsMd]
+driftPolicy = "diff-warn"

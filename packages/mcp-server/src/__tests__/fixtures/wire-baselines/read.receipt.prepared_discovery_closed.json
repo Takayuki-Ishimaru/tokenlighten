@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "kind": "read.receipt",
+  "receipt": {
+    "receipt": "decision-unchanged",
+    "certificate": {
+      "id": "$CERT",
+      "obligations": [
+        "surface-content"
+      ]
+    },
+    "certified_query": "increase the premium multiplier in the rating engine and the app checkout total",
+    "next": {
+      "tool": "read_file",
+      "arguments": {
+        "mode": "task_pack",
+        "taskEpoch": "new",
+        "paths": [
+          "src/app.py"
+        ]
+      }
+    }
+  }
+}

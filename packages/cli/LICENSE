@@ -1,0 +1,118 @@
+TokenLighten Source-Available License, Version 0.9
+
+Copyright (c) 2026 Takayuki Ishimaru
+
+1. Definitions
+
+"Software" means the TokenLighten source code, object code, documentation, and
+other material distributed with this license.
+
+"Individual" means a natural person acting personally and not on behalf of an
+organization or as part of a commercial distribution activity.
+
+"Organization" means a company, partnership, government body, nonprofit,
+school, or other legal or organized entity.
+
+"Product or Service" means an offering provided to another person or entity in
+which the Software is incorporated, bundled, embedded, hosted, or made
+available as a feature.
+
+"Licensor" means Takayuki Ishimaru (GitHub: @Takayuki-Ishimaru). Written
+permission requests and licensing questions may be submitted through the
+contact routes published at https://github.com/Takayuki-Ishimaru. GitHub does
+not provide private direct messages; confidential information must not be
+posted in a public issue.
+
+2. Permitted use
+
+Subject to these terms, the Licensor grants you a non-exclusive, worldwide,
+royalty-free license to copy, run, and modify the Software for:
+
+(a) personal use;
+
+(b) use by an Individual while performing work for an employer or client;
+
+(c) internal use by an Organization, including formal internal adoption; and
+
+(d) redistribution by an Individual outside any organizational or commercial
+activity, including redistribution of a modified copy, if the Individual:
+
+    (i) clearly and prominently states that the distribution includes
+    TokenLighten;
+
+    (ii) includes this license and all third-party notices distributed with the
+    Software;
+
+    (iii) identifies material modifications; and
+
+    (iv) does not suggest endorsement by the Licensor or any user.
+
+An Organization is welcome to notify the maintainer when it formally adopts
+the Software. That notification is voluntary and is not a condition of the
+internal-use permission in section 2(c).
+
+3. Permission required
+
+You must obtain the Licensor's prior written permission before:
+
+(a) incorporating, bundling, embedding, hosting, or otherwise making the
+Software available in a Product or Service; or
+
+(b) redistributing the Software, or a modified version of it, as an
+Organization or as part of a commercial activity.
+
+A permission may include additional terms. No permission is implied by the
+Licensor's failure to respond.
+
+4. Attribution, names, and trademarks
+
+You may use the TokenLighten name only as reasonably necessary to identify the
+Software and satisfy the attribution requirement in section 2(d). This license
+does not grant rights to any trademark or logo.
+
+You may not use the name or logo of an Organization that uses the Software in
+publicity, advertising, or announcements without that Organization's separate,
+explicit approval.
+
+5. Third-party material
+
+Third-party components remain governed by their own license terms. Their
+notices are included in the Software's third-party notices file. Nothing in
+this license limits rights granted directly by a third party.
+
+6. No support or service level
+
+The Software is provided without any support commitment, service-level
+agreement, response-time commitment, uptime guarantee, compatibility
+guarantee, or obligation to provide updates.
+
+7. Disclaimer of warranty
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE SOFTWARE IS PROVIDED "AS IS" AND
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+NON-INFRINGEMENT.
+
+8. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR AND CONTRIBUTORS WILL NOT
+BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR
+PUNITIVE DAMAGES, OR FOR ANY LOSS OF DATA, PROFITS, REVENUE, OR BUSINESS,
+ARISING FROM OR RELATED TO THE SOFTWARE OR THIS LICENSE, REGARDLESS OF THE
+THEORY OF LIABILITY.
+
+9. Termination
+
+Your rights under this license terminate automatically if you materially
+breach these terms. If the breach is curable and you cure it within 30 days
+after becoming aware of it, your rights are reinstated automatically.
+
+10. Future versions and terms
+
+The Licensor may distribute future versions of the Software under different
+license, pricing, or support terms. A later change does not retroactively alter
+the terms for a copy of the Software received under this license version.
+
+11. Reservation of rights
+
+All rights not expressly granted by this license are reserved.

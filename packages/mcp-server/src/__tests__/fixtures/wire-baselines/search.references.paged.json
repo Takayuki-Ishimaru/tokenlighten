@@ -1,0 +1,231 @@
+{
+  "v": 1,
+  "kind": "search.references",
+  "symbol": "cursorTarget",
+  "references": [
+    {
+      "path": "src/d0/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d1/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d10/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d11/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d12/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d13/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d14/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d15/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d16/f.ts",
+      "line": 1,
+      "in_comment": false
+    },
+    {
+      "path": "src/d17/f.ts",
+      "line": 1,
+      "in_comment": false
+    }
+  ],
+  "files": [
+    {
+      "path": "src/d0/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(0);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d1/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(1);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d10/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(10);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d11/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(11);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d12/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(12);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d13/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(13);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d14/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(14);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d15/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(15);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d16/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(16);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d17/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(17);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d18/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(18);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d19/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(19);"
+      ],
+      "in_comment": [
+        false
+      ]
+    },
+    {
+      "path": "src/d2/f.ts",
+      "lines": [
+        1
+      ],
+      "snippets": [
+        "cursorTarget(2);"
+      ],
+      "in_comment": [
+        false
+      ]
+    }
+  ],
+  "total": 40,
+  "limit": {
+    "cause": "wire",
+    "next": {
+      "tool": "search_files",
+      "arguments": {
+        "action": "references",
+        "query": "cursorTarget",
+        "cursor": "eyJ2IjoxLCJwIjoic3JjL2QyL2YudHMiLCJsIjoxfQ"
+      }
+    },
+    "omitted": [
+      "results",
+      "metadata"
+    ]
+  }
+}

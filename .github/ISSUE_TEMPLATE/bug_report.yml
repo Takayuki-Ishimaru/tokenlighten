@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible TokenLighten problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Use the private process in SECURITY.md. Remove credentials, private source, personal data, and workspace paths from anything you attach.
+  - type: input
+    id: version
+    attributes:
+      label: TokenLighten version
+      placeholder: 0.9.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Node.js version, editor or MCP host, and installation method.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Provide a minimal, self-contained reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Optional. Redact credentials, private source, personal data, and local paths.
+      render: shell

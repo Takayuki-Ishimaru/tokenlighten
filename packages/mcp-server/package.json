@@ -1,0 +1,62 @@
+{
+  "name": "@tokenlighten/mcp-server",
+  "version": "0.9.0",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "tl-mcp": "./dist/bin.js"
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.mjs && tsc --project tsconfig.json && node scripts/write-build-stamp.mjs",
+    "typecheck:test": "tsc --project tsconfig.test.json",
+    "test": "vitest run",
+    "test:dist": "npm run build && vitest run src/__tests__/distWiringIntegration.spec.ts"
+  },
+  "dependencies": {
+    "@libpdf/core": "^0.3.4",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@tokenlighten/agents-md": "*",
+    "@tokenlighten/skeleton-engine": "*",
+    "@tokenlighten/types": "*",
+    "@tokenlighten/usage": "*",
+    "@zip.js/zip.js": "^2.8.34",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
+    "libarchive.js": "^2.0.2",
+    "mammoth": "^1.8.0",
+    "officecrypto-tool": "^0.0.19",
+    "pptx2json": "^0.0.10",
+    "tree-sitter-wasms": "^0.1.12",
+    "unpdf": "^1.6.2",
+    "web-tree-sitter": "^0.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1"
+  },
+  "files": [
+    "dist",
+    "!dist/core2"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Takayuki-Ishimaru/tokenlighten.git"
+  },
+  "homepage": "https://github.com/Takayuki-Ishimaru/tokenlighten",
+  "bugs": {
+    "url": "https://github.com/Takayuki-Ishimaru/tokenlighten/issues"
+  }
+}

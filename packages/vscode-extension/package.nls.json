@@ -1,0 +1,13 @@
+{
+  "extension.description": "Workspace-scoped TokenLighten setup, savings, and logs for Copilot, Codex, and Claude Code",
+  "command.status": "TokenLighten: Show Status",
+  "command.setup": "TokenLighten: Set Up This Workspace",
+  "command.usage.show": "TokenLighten: Show This Workspace's Usage and Savings",
+  "command.logs.export": "TokenLighten: Export This Workspace's Usage Logs",
+  "view.controlCenter": "Workspace",
+  "config.enabled": "Enable TokenLighten in this workspace.",
+  "config.language": "Display language for all TokenLighten extension UI.",
+  "config.language.auto": "Automatic (use the VS Code display language)",
+  "config.language.en": "English",
+  "config.language.ja": "Japanese"
+}

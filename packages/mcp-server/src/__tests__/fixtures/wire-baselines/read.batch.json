@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "kind": "read.batch",
+  "entries": [
+    {
+      "form": "file",
+      "path": "fw/src/driver/drv_imu.h",
+      "truncated": false,
+      "handle": "$H1",
+      "content": "#pragma once\ntypedef struct { float accel[3]; } drv_imu_sample_t;\n",
+      "sha": "$SHA1",
+      "fullFileExpansion": true
+    },
+    {
+      "form": "file",
+      "path": "fw/src/driver/drv_gps.h",
+      "truncated": false,
+      "handle": "$H2",
+      "content": "#pragma once\ntypedef struct { double lat; double lon; } drv_gps_sample_t;\n",
+      "sha": "$SHA2",
+      "fullFileExpansion": true
+    },
+    {
+      "form": "file",
+      "path": "fw/src/driver/drv_baro.h",
+      "truncated": false,
+      "handle": "$H3",
+      "content": "#pragma once\ntypedef struct { float altitude_m; } drv_baro_sample_t;\n",
+      "sha": "$SHA3",
+      "fullFileExpansion": true
+    }
+  ]
+}

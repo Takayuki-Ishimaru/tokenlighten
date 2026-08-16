@@ -1,0 +1,114 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { usageWorkspaceId } from "@tokenlighten/usage";
+import { cliVersion, formatReductionRange, runLogs } from "../commands/logs.js";
+
+describe("formatReductionRange", () => {
+  it("prints one decimal 95% range only when an interval is available", () => {
+    expect(formatReductionRange({ low: 12.34, high: 45.67 }))
+      .toBe("Reduction range: 12.3–45.7% (95%)\n");
+    expect(formatReductionRange(null)).toBe("");
+  });
+});
+
+describe("cliVersion", () => {
+  it("derives from packages/cli's own package.json, not a hardcoded literal", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(
+      readFileSync(join(here, "..", "..", "package.json"), "utf8"),
+    ) as { name: string; version: string };
+    expect(manifest.name).toBe("@tokenlighten/cli");
+    expect(cliVersion()).toBe(manifest.version);
+  });
+});
+
+describe("tl logs summary scoping", () => {
+  const writes: string[] = [];
+  let logDirectory = "";
+
+  beforeEach(() => {
+    writes.length = 0;
+    logDirectory = join(tmpdir(), `tokenlighten-cli-logs-${randomUUID()}`);
+    mkdirSync(logDirectory, { recursive: true });
+    writeFileSync(join(logDirectory, ".privacy-salt"), "cli-logs-test-salt");
+    process.env["TOKENLIGHTEN_LOG_HOME"] = logDirectory;
+    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    }) as unknown as typeof process.stdout.write);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env["TOKENLIGHTEN_LOG_HOME"];
+  });
+
+  const event = (workspaceId: string, index: number, baselineTokens: number) => ({
+    schemaVersion: 1,
+    eventId: `${workspaceId}-${index}`,
+    occurredAt: "2026-08-11T00:00:00.000Z",
+    workspaceId,
+    sessionId: "session",
+    client: "claude-code",
+    tool: "read_file",
+    outcome: "ok",
+    durationMs: 1,
+    responseBytes: 40,
+    estimatedResponseTokens: 10,
+    baselineTokens,
+    estimatedSavedTokens: baselineTokens - 10,
+    baselineMethod: "file-bytes",
+    writeEnabled: true,
+  });
+
+  const lastJson = () => JSON.parse(writes.join("").trim()) as {
+    scope: { kind: string; workspaceId?: string | null };
+    eventCount: number;
+    estimatedSavedTokens: number;
+  };
+
+  it("reports machine scope over all events and workspace scope over its own", async () => {
+    const rootA = join(logDirectory, "ws-a");
+    const rootB = join(logDirectory, "ws-b");
+    mkdirSync(rootA, { recursive: true });
+    mkdirSync(rootB, { recursive: true });
+    const idA = usageWorkspaceId(rootA, logDirectory);
+    const idB = usageWorkspaceId(rootB, logDirectory);
+    expect(idA).not.toBeNull();
+    expect(idB).not.toBeNull();
+    const rows = [
+      event(idA!, 0, 100),
+      event(idA!, 1, 100),
+      event(idA!, 2, 100),
+      event(idB!, 0, 50),
+      event(idB!, 1, 50),
+    ];
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    );
+
+    await runLogs(["summary", "--json"]);
+    const machine = lastJson();
+    expect(machine.scope).toEqual({ kind: "machine" });
+    expect(machine.eventCount).toBe(5);
+    expect(machine.estimatedSavedTokens).toBe(3 * 90 + 2 * 40);
+
+    writes.length = 0;
+    await runLogs(["summary", "--json", "--workspace-root", rootA]);
+    const scoped = lastJson();
+    expect(scoped.scope).toEqual({ kind: "workspace", workspaceId: idA });
+    expect(scoped.eventCount).toBe(3);
+    expect(scoped.estimatedSavedTokens).toBe(3 * 90);
+
+    writes.length = 0;
+    await runLogs(["summary", "--workspace-root", rootA]);
+    const text = writes.join("");
+    expect(text).toContain("Scope: workspace\n");
+    expect(text).toContain("MCP calls: 3\n");
+  });
+});

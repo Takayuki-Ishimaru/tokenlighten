@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "kind": "read.map",
+  "outline": {
+    "form": "signatures",
+    "handle": "$H1",
+    "language": "typescript",
+    "signatures": "// tokenlighten:skeleton path=webapp/src/orchestrator.ts lang=typescript original_lines=126 elided_lines=113 profile=class-map\n\nexport type OrderStatus = 'NEW' | 'PAID' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED'; // L4-4\n\nexport interface Order { ... } // L6-6\n\nexport function createOrder(id: string, total: number): Order { ... } // L32-36\n\nexport const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = { ... ]; // L46-52\n\nexport function transitionTo(order: Order, next: OrderStatus): Order { ... } // L54-60\n\nexport function refundOrder(order: Order, amount: number): Order { ... } // L84-87\n\nexport function reconcile(orders: Order[]): Order[] { ... } // L100-105"
+  }
+}

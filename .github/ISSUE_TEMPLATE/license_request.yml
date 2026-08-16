@@ -1,0 +1,44 @@
+name: Product integration permission
+description: Ask Takayuki Ishimaru for permission to integrate TokenLighten into a product or service.
+title: "[License request] "
+assignees:
+  - Takayuki-Ishimaru
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Takayuki Ishimaru (@Takayuki-Ishimaru) decides product and service integration permissions.
+
+        This issue is public. Do not include confidential source code, credentials, customer data, contract terms, or other sensitive information. If the request requires confidential discussion, provide only a non-sensitive outline and ask the maintainer to arrange a private contact channel.
+  - type: input
+    id: requester
+    attributes:
+      label: Requester
+      description: Your name or GitHub account, and organization name if you can disclose it publicly.
+      placeholder: "@example (Example Corp.)"
+    validations:
+      required: true
+  - type: dropdown
+    id: use_type
+    attributes:
+      label: Intended use
+      options:
+        - Product or service integration
+        - Organizational or commercial redistribution
+        - Other use requiring written permission
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Non-confidential summary
+      description: Briefly describe the intended use without disclosing sensitive information.
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Public issue acknowledgement
+      options:
+        - label: I have not included confidential or sensitive information in this public issue.
+          required: true

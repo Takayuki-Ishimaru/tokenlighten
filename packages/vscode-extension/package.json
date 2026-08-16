@@ -1,0 +1,131 @@
+{
+  "name": "tokenlighten-vscode-extension",
+  "displayName": "TokenLighten",
+  "version": "0.9.0",
+  "private": true,
+  "description": "%extension.description%",
+  "publisher": "tokenlighten",
+  "license": "SEE LICENSE IN LICENSE",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#191827",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": ">=1.105.0"
+  },
+  "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "tokenlighten.status",
+        "title": "%command.status%"
+      },
+      {
+        "command": "tokenlighten.setup",
+        "title": "%command.setup%"
+      },
+      {
+        "command": "tokenlighten.usage.show",
+        "title": "%command.usage.show%"
+      },
+      {
+        "command": "tokenlighten.logs.export",
+        "title": "%command.logs.export%"
+      },
+      {
+        "command": "tokenlighten.session.native",
+        "title": "TokenLighten: Use Native Tools for This Session"
+      },
+      {
+        "command": "tokenlighten.session.tl",
+        "title": "TokenLighten: Resume Automatic Activation"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tokenlighten-sidebar",
+          "title": "TokenLighten",
+          "icon": "media/tokenlighten.png"
+        }
+      ]
+    },
+    "views": {
+      "tokenlighten-sidebar": [
+        {
+          "type": "webview",
+          "id": "tokenlighten-control-center",
+          "name": "%view.controlCenter%"
+        }
+      ]
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "tokenlighten.mcp",
+        "label": "TokenLighten"
+      }
+    ],
+    "configuration": {
+      "title": "TokenLighten",
+      "properties": {
+        "tokenlighten.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "%config.enabled%"
+        },
+        "tokenlighten.language": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "en",
+            "ja"
+          ],
+          "enumDescriptions": [
+            "%config.language.auto%",
+            "%config.language.en%",
+            "%config.language.ja%"
+          ],
+          "default": "auto",
+          "scope": "window",
+          "description": "%config.language%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.mjs && node esbuild.config.mjs && tsc --noEmit",
+    "bundle-cli": "node scripts/bundle-cli.mjs",
+    "vscode:prepublish": "npm run build && npm run bundle-cli",
+    "package": "vsce package --no-dependencies",
+    "typecheck:test": "tsc --project tsconfig.test.json",
+    "test:bundle-cli": "node scripts/test-bundle-cli-setup.mjs",
+    "test": "vitest run && npm run test:bundle-cli"
+  },
+  "dependencies": {
+    "@tokenlighten/cli": "*",
+    "cross-spawn": "^7.0.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.105.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.24",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Takayuki-Ishimaru/tokenlighten.git"
+  },
+  "homepage": "https://github.com/Takayuki-Ishimaru/tokenlighten",
+  "bugs": {
+    "url": "https://github.com/Takayuki-Ishimaru/tokenlighten/issues"
+  }
+}

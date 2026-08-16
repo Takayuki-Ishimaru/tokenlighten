@@ -1,0 +1,36 @@
+{
+  "v": 1,
+  "kind": "refusal",
+  "for": "edit_file",
+  "code": "create-target-exists",
+  "next": {
+    "tool": "edit_file",
+    "arguments": {
+      "handle": "$H1",
+      "content": "# regenerated harness",
+      "cwd": "$WS"
+    }
+  },
+  "detail": "src/test_pricing_harness.py already exists; create:true never overwrites an existing path",
+  "alternatives": [
+    {
+      "tool": "edit_file",
+      "arguments": {
+        "handle": "$H1"
+      }
+    },
+    {
+      "tool": "read_file",
+      "arguments": {
+        "mode": "full",
+        "handle": "$H1"
+      }
+    }
+  ],
+  "path": "src/test_pricing_harness.py",
+  "handle": "$H1",
+  "bytes": 79,
+  "sha": "$SHA1",
+  "content_identical": false,
+  "retry": "none"
+}

@@ -1,0 +1,7 @@
+{
+  "v": 1,
+  "kind": "search.tree",
+  "root": "fw/src",
+  "tree": "driver/\n  drv_baro.h\n  drv_gps.h\n  drv_imu.h\nestimator/\n  ekf.cpp\n  elevation_estimator.cpp\n  location_estimator.hpp\n  qkf.cpp\n  qkf.hpp\ntelemetry/\n  mavlink_dialect.cpp\n  telemetry_bridge.cpp\n  telemetry_bridge.hpp\n  telemetry_task.cpp",
+  "depth": 2
+}

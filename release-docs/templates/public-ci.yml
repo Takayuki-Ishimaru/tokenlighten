@@ -1,0 +1,73 @@
+name: public-ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    name: packages (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git config core.autocrlf false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:packages
+      - run: npm run test:bundle-cli
+      - run: npm run licenses
+      - run: npm run licenses:notices
+      - run: node scripts/verify-vscode-notices.mjs
+      - run: git ls-files --error-unmatch THIRD_PARTY_NOTICES.md
+      - run: git diff --exit-code -- THIRD_PARTY_NOTICES.md
+      - run: git diff --exit-code -- packages/vscode-extension/THIRD_PARTY_NOTICES.md
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run doctor
+
+  vsix:
+    name: VSIX
+    needs: packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: git config core.autocrlf false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Require approved extension license
+        run: test -f packages/vscode-extension/LICENSE
+      - run: npm run package -w tokenlighten-vscode-extension
+      - name: Verify VSIX legal files
+        run: |
+          npm exec --workspace tokenlighten-vscode-extension -- vsce ls --no-dependencies | grep -Fx 'LICENSE'
+          npm exec --workspace tokenlighten-vscode-extension -- vsce ls --no-dependencies | grep -Fx 'THIRD_PARTY_NOTICES.md'
+      - name: Create checksum
+        run: |
+          cd packages/vscode-extension
+          sha256sum tokenlighten-vscode-extension-*.vsix > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tokenlighten-vscode-extension
+          path: |
+            packages/vscode-extension/tokenlighten-vscode-extension-*.vsix
+            packages/vscode-extension/SHA256SUMS
+          if-no-files-found: error

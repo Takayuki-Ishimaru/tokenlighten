@@ -1,0 +1,43 @@
+{
+  "v": 1,
+  "kind": "read.text",
+  "evidence": [
+    {
+      "handle": "$H1",
+      "path": "fw/CONTRACT.md",
+      "range": "102-126",
+      "body": "Contract filler paragraph line 84.\nContract filler paragraph line 85.\nContract filler paragraph line 86.\nContract filler paragraph line 87.\nContract filler paragraph line 88.\nContract filler paragraph line 89.\nContract filler paragraph line 90.\nContract filler paragraph line 91.\nContract filler paragraph line 92.\nContract filler paragraph line 93.\nContract filler paragraph line 94.\nContract filler paragraph line 95.\nContract filler paragraph line 96.\nContract filler paragraph line 97.\nContract filler paragraph line 98.\nContract filler paragraph line 99.\nContract filler paragraph line 100.\nContract filler paragraph line 101.\nContract filler paragraph line 102.\nContract filler paragraph line 103.\nContract filler paragraph line 104.\nContract filler paragraph line 105.\nContract filler paragraph line 106.\nContract filler paragraph line 107.\nContract filler paragraph line 108."
+    }
+  ],
+  "sha": "$SHA1",
+  "total_lines": 1290,
+  "note": "boundary cuts symbol isHealthy (7-1191); use symbol=isHealthy",
+  "headings": [
+    {
+      "level": 1,
+      "text": "AcmeCtl Integration Contract",
+      "range": "1-1290"
+    },
+    {
+      "level": 2,
+      "text": "QKF health monitoring",
+      "range": "5-9"
+    },
+    {
+      "level": 2,
+      "text": "Telemetry NET_STATUS fields",
+      "range": "10-14"
+    },
+    {
+      "level": 2,
+      "text": "GPS contract",
+      "range": "15-1150"
+    },
+    {
+      "level": 2,
+      "text": "10.2 telemetry dialect (BIG file pair)",
+      "range": "1151-1290"
+    }
+  ],
+  "sections_hint": "pass sections:[\"<heading text>\"] (heading name, numbering token like \"10.3\", or substring) to slice this doc by section"
+}

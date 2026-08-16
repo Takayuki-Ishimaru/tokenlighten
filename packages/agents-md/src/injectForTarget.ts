@@ -1,0 +1,323 @@
+// Plain data output — no meta envelope. See docs/00-postmortem.md §2.2.
+//
+// --for-target injection mode: writes / updates target-repo AGENTS.md and
+// the canonical tool-specific stubs from the v0.4 stable-prefix template.
+// Spec: docs/06-stable-prefix-rebuild.md §3.5 / §3.7 / §4.4 Task C.
+//
+// Refuse safety net: if the target repoRoot package.json identifies itself as
+// the TokenLighten monorepo, return refusedAsTlRepo=true and write nothing.
+// (§2.5 — prevents accidental overwrites of TL's own root AGENTS.md.)
+
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  renameSync,
+  unlinkSync,
+} from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
+import type { StubTargetId } from "@tokenlighten/types";
+import { STUB_TARGETS } from "./stubs.js";
+import { renderTargetPreamble } from "./render.js";
+import { migrateLegacyTargetPath } from "./migrateLegacyTarget.js";
+import { assertSafeWriteTarget, ensureSafeWriteParent } from "./safeWritePath.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+/** Template directory (one level up from src/). */
+const TEMPLATE_DIR = join(__dirname, "..", "templates");
+const TEMPLATE_PATH = join(TEMPLATE_DIR, "target-repo.md.tmpl");
+
+/** Outer sentinels that wrap the entire managed block. */
+const OUTER_BEGIN = "<!-- tokenlighten:target-agents:begin -->";
+const OUTER_END = "<!-- tokenlighten:target-agents:end -->";
+
+/** Inner sentinels that wrap the skeleton section only. */
+const SKELETON_BEGIN = "<!-- tokenlighten:skeleton:begin -->";
+const SKELETON_END = "<!-- tokenlighten:skeleton:end -->";
+const CLAUDE_IMPORT_BLOCK = `${OUTER_BEGIN}
+# Claude Code
+
+@AGENTS.md
+${OUTER_END}
+`;
+const LEGACY_CLAUDE_PROLOGUE =
+  "> See [AGENTS.md](./AGENTS.md) for the full project guide.\n" +
+  "> TokenLighten MCP routing rules are mirrored below.\n\n";
+
+/** Tool-native files to write (relative to repoRoot). */
+const TARGET_FILES: readonly { target?: StubTargetId; file: string }[] = [
+  { file: "AGENTS.md" },
+  ...STUB_TARGETS.map((target) => ({ target: target.id, file: target.file })),
+];
+
+export interface InjectForTargetOptions {
+  /** Absolute path to the TARGET repo root (not the TL repo). */
+  repoRoot: string;
+  /**
+   * Pre-rendered compact skeleton text (substituted for {{REPO_SKELETON}}
+   * in the template). Caller (CLI) produces it via skeleton-engine.
+   */
+  repoSkeleton: string;
+  /** Test escape hatch: bypass TL-repo refuse check. Default false. */
+  unsafeAllowSelfWrite?: boolean;
+}
+
+export interface InjectForTargetResult {
+  wrote: string[];                                  // relative paths written
+  skipped: { path: string; reason: string }[];
+  refusedAsTlRepo: boolean;
+}
+
+/**
+ * Substitute {{REPO_SKELETON}} in the template and return the canonical text.
+ */
+function buildCanonicalText(template: string, repoSkeleton: string): string {
+  return template.replace("{{REPO_SKELETON}}", repoSkeleton);
+}
+
+/**
+ * Extract the text inside OUTER_BEGIN…OUTER_END from a string.
+ * Returns the outer-bounded region text (inclusive of sentinels), or null.
+ */
+function findOuterBlock(text: string): { start: number; end: number } | null {
+  const start = text.indexOf(OUTER_BEGIN);
+  const end = text.indexOf(OUTER_END);
+  if (start < 0 || end < 0 || end <= start) return null;
+  return { start, end: end + OUTER_END.length };
+}
+
+function replaceOuterBlock(existing: string, replacement: string): string {
+  const range = findOuterBlock(existing);
+  if (!range) {
+    const prefix = existing.trim().length > 0 ? `${existing.trimEnd()}\n\n` : "";
+    return ensureTrailingNewline(prefix + replacement.trimEnd());
+  }
+  const before = existing.slice(0, range.start).trimEnd();
+  const after = existing.slice(range.end).trimStart();
+  return ensureTrailingNewline(
+    [before, replacement.trimEnd(), after].filter((part) => part.length > 0).join("\n\n"),
+  );
+}
+
+/**
+ * Extract the text inside SKELETON_BEGIN…SKELETON_END from a string.
+ * Returns positions relative to the string passed in, or null.
+ */
+function findSkeletonBlock(text: string): { start: number; end: number } | null {
+  const start = text.indexOf(SKELETON_BEGIN);
+  const end = text.indexOf(SKELETON_END);
+  if (start < 0 || end < 0 || end <= start) return null;
+  return { start, end: end + SKELETON_END.length };
+}
+
+/**
+ * Build the replacement skeleton block content (inner sentinel pair + header).
+ */
+function buildSkeletonReplacement(repoSkeleton: string): string {
+  return `${SKELETON_BEGIN}\n## Repo skeleton (~800 tok)\n\n${repoSkeleton}\n${SKELETON_END}`;
+}
+
+/**
+ * Merge an updated repoSkeleton into the outer-bounded region of existingText,
+ * preserving user-edited content outside the inner skeleton block.
+ *
+ * If the inner skeleton sentinels are missing from the outer block, returns
+ * null to signal that a wholesale replace is needed.
+ */
+function mergeIntoExistingBlock(
+  existingText: string,
+  repoSkeleton: string
+): string | null {
+  const outerBlock = findOuterBlock(existingText);
+  if (!outerBlock) return null;
+
+  const outerRegion = existingText.slice(outerBlock.start, outerBlock.end);
+  const skeletonBlock = findSkeletonBlock(outerRegion);
+
+  if (!skeletonBlock) {
+    // Inner sentinel pair missing — caller handles wholesale replace
+    return null;
+  }
+
+  // Replace only the inner skeleton block
+  const replacement = buildSkeletonReplacement(repoSkeleton);
+  const updatedOuter =
+    outerRegion.slice(0, skeletonBlock.start) +
+    replacement +
+    outerRegion.slice(skeletonBlock.end);
+
+  return (
+    existingText.slice(0, outerBlock.start) +
+    updatedOuter +
+    existingText.slice(outerBlock.end)
+  );
+}
+
+/**
+ * Atomic write: write to a temp file then rename into place.
+ * Content is always LF only.
+ */
+function atomicWrite(repoRoot: string, absPath: string, content: string): void {
+  ensureSafeWriteParent(repoRoot, absPath, true);
+  assertSafeWriteTarget(repoRoot, absPath);
+  const tmpPath = `${absPath}.tl-tmp-${randomBytes(6).toString("hex")}`;
+  try {
+    writeFileSync(tmpPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    ensureSafeWriteParent(repoRoot, absPath, false);
+    assertSafeWriteTarget(repoRoot, absPath);
+    renameSync(tmpPath, absPath);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
+  }
+}
+
+/**
+ * Normalise content to LF only (no CRLF, no trailing mixed).
+ */
+function normalizeLf(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+/**
+ * Ensure content ends with exactly one trailing newline.
+ */
+function ensureTrailingNewline(text: string): string {
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+/**
+ * Determine whether a repoRoot is the TokenLighten repo itself.
+ * Returns true only when package.json parses successfully and name matches.
+ */
+function isTlRepo(repoRoot: string): boolean {
+  const pkgPath = join(repoRoot, "package.json");
+  try {
+    const raw = readFileSync(pkgPath, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && "name" in parsed) {
+      const name = (parsed as Record<string, unknown>).name;
+      return name === "tokenlighten-monorepo" || name === "tokenlighten";
+    }
+    return false;
+  } catch {
+    // Missing or unparseable — do NOT refuse
+    return false;
+  }
+}
+
+/**
+ * Write or update AGENTS.md and all tool-specific stubs in a target repo using
+ * the v0.4 stable-prefix template.
+ */
+export async function injectForTarget(opts: InjectForTargetOptions): Promise<InjectForTargetResult> {
+  const { repoRoot, repoSkeleton, unsafeAllowSelfWrite = false } = opts;
+
+  const result: InjectForTargetResult = {
+    wrote: [],
+    skipped: [],
+    refusedAsTlRepo: false,
+  };
+
+  // Refuse safety net (§2.5)
+  if (!unsafeAllowSelfWrite && isTlRepo(repoRoot)) {
+    result.refusedAsTlRepo = true;
+    result.skipped.push({
+      path: ".",
+      reason:
+        "refused: this looks like the TokenLighten repo itself; --for-target only writes into TARGET repos.",
+    });
+    return result;
+  }
+
+  // Load template
+  const template = normalizeLf(readFileSync(TEMPLATE_PATH, "utf8"));
+
+  // Build the shared managed body. Tool-native metadata is added per target.
+  const canonicalBody = ensureTrailingNewline(
+    normalizeLf(buildCanonicalText(template, repoSkeleton))
+  );
+
+  for (const { target, file: relPath } of TARGET_FILES) {
+    if (target) {
+      const migration = migrateLegacyTargetPath({
+        repoRoot,
+        target,
+        nextPath: relPath,
+      });
+      if (migration.status === "blocked") {
+        result.skipped.push({ path: relPath, reason: migration.reason ?? "legacy-migration-blocked" });
+        continue;
+      }
+    }
+
+    const absPath = join(repoRoot, relPath);
+    const preamble = renderTargetPreamble(target);
+    const isClaudeImport = target === "claude";
+    const canonicalText = isClaudeImport ? CLAUDE_IMPORT_BLOCK : preamble + canonicalBody;
+
+    try {
+      assertSafeWriteTarget(repoRoot, absPath);
+      if (!existsSync(absPath)) {
+        // Case 1 — file does not exist: write full template verbatim
+        atomicWrite(repoRoot, absPath, canonicalText);
+        result.wrote.push(relPath);
+        continue;
+      }
+
+      // File exists — read it
+      const existingRaw = readFileSync(absPath, "utf8");
+      let existing = normalizeLf(existingRaw);
+      if (isClaudeImport) {
+        if (existing.startsWith(LEGACY_CLAUDE_PROLOGUE)) {
+          existing = existing.slice(LEGACY_CLAUDE_PROLOGUE.length);
+        }
+        atomicWrite(repoRoot, absPath, replaceOuterBlock(existing, CLAUDE_IMPORT_BLOCK));
+        result.wrote.push(relPath);
+        continue;
+      }
+      const hasUserYaml = preamble.startsWith("---\n") && existing.startsWith("---\n");
+      if (preamble && !existing.startsWith(preamble) && !hasUserYaml) {
+        existing = preamble + existing;
+      }
+
+      if (!existing.includes(OUTER_BEGIN) || !existing.includes(OUTER_END)) {
+        // Case 3 — no outer sentinel: append after existing content
+        const appended =
+          ensureTrailingNewline(existing.trimEnd()) + "\n" + canonicalBody;
+        atomicWrite(repoRoot, absPath, appended);
+        result.wrote.push(relPath);
+        continue;
+      }
+
+      // Case 2 — file has outer sentinels: update skeleton only
+      const merged = mergeIntoExistingBlock(existing, repoSkeleton);
+
+      if (merged === null) {
+        // Outer block exists but inner skeleton sentinels are missing — wholesale replace
+        result.skipped.push({
+          path: relPath,
+          reason:
+            "outer-block-missing-inner-sentinel: existing block lacks skeleton sentinels; replaced wholesale",
+        });
+        atomicWrite(repoRoot, absPath, canonicalText);
+        result.wrote.push(relPath);
+        continue;
+      }
+
+      atomicWrite(repoRoot, absPath, ensureTrailingNewline(merged));
+      result.wrote.push(relPath);
+    } catch (err: unknown) {
+      result.skipped.push({
+        path: relPath,
+        reason: `write-error: ${String(err)}`,
+      });
+    }
+  }
+
+  return result;
+}

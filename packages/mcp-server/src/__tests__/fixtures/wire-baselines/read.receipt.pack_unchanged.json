@@ -1,0 +1,32 @@
+{
+  "v": 1,
+  "kind": "read.task_pack",
+  "task": {
+    "id": "task-3d178e5e58eaaab2",
+    "replay": "$QREF",
+    "coverage": "partial",
+    "coverage_reason": "candidate-list"
+  },
+  "profile": "generic",
+  "evidence": [
+    {
+      "handle": "$H1",
+      "path": "fw/src/estimator/qkf.cpp",
+      "range": "21-26",
+      "prior": "read_file mode=task_pack qref=$QREF",
+      "role": "unknown",
+      "sha": "$SHA1"
+    }
+  ],
+  "decision": {
+    "kind": "discover",
+    "next": {
+      "tool": "search_files",
+      "arguments": {
+        "action": "tree",
+        "path": "fw/src/estimator"
+      }
+    }
+  },
+  "qref": "$QREF"
+}

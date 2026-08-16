@@ -1,0 +1,44 @@
+{
+  "v": 1,
+  "kind": "edit.applied",
+  "core": {
+    "counts": {
+      "applied": 1,
+      "attempted": 1,
+      "reverted": 0,
+      "unproven": 0
+    },
+    "paths": [
+      "src/test_pricing_harness.py"
+    ],
+    "workspace": {
+      "fingerprint": "$SHA1",
+      "scope": "served-evidence",
+      "evidence_files": 1,
+      "inventory_files": 0,
+      "inventory_complete": false
+    }
+  },
+  "applied": [
+    {
+      "path": "src/test_pricing_harness.py",
+      "range": "1-1",
+      "handle": "$H1"
+    }
+  ],
+  "path": "src/test_pricing_harness.py",
+  "handle": "$H1",
+  "sha": "$SHA2",
+  "bytes": 79,
+  "total_lines": 1,
+  "read_back": {
+    "note": "a compiler/test error citing this file's line N is answered here — fill the range"
+  },
+  "create_target": {
+    "path": "src/test_pricing_harness.py",
+    "directory_evidence": [
+      "src/pricing_engine.py"
+    ],
+    "authorized_by": "explicit-cwd"
+  }
+}

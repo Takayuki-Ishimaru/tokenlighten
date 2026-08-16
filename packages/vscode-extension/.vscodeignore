@@ -1,0 +1,18 @@
+src/__tests__/**
+**/*.spec.ts
+tsconfig.json
+tsconfig.test.json
+esbuild.config.mjs
+vitest.config.ts
+scripts/bundle-cli.mjs
+scripts/import-meta-url-shim.js
+scripts/test-bundle-cli-setup.mjs
+.tokenlighten/**
+.gitignore
+# Anchored to the package root: excludes only this package's own top-level
+# node_modules (irrelevant anyway once packaged with --no-dependencies).
+# NOT `node_modules/**` (unanchored) — that would also match and exclude
+# dist/node_modules/, which is the CLI's own bundled runtime dependency
+# tree that scripts/bundle-cli.mjs builds (@tokenlighten/mcp-server,
+# web-tree-sitter, tree-sitter-wasms, etc.) and that the vsix must ship.
+/node_modules/**

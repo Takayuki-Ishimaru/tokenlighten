@@ -1,0 +1,54 @@
+{
+  "name": "@tokenlighten/cli",
+  "version": "0.9.0",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./launcher": {
+      "import": "./dist/launcher.js",
+      "types": "./dist/launcher.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "tl": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.mjs && tsc --project tsconfig.json",
+    "typecheck:test": "tsc --project tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tokenlighten/types": "*",
+    "@tokenlighten/agents-md": "*",
+    "@tokenlighten/mcp-server": "*",
+    "@tokenlighten/skeleton-engine": "*",
+    "@tokenlighten/usage": "*",
+    "smol-toml": "^1.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Takayuki-Ishimaru/tokenlighten.git"
+  },
+  "homepage": "https://github.com/Takayuki-Ishimaru/tokenlighten",
+  "bugs": {
+    "url": "https://github.com/Takayuki-Ishimaru/tokenlighten/issues"
+  }
+}
