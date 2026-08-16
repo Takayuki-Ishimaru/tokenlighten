@@ -936,8 +936,7 @@ function mockControlRefs(
 function findOnPath(candidates: readonly string[]): string | undefined {
   // path.delimiter is ";" on win32 and ":" elsewhere — a hardcoded ":" both
   // fails to split a win32 PATH and mis-splits inside each entry's drive
-  // letter ("C:\\..."); see core2/config.ts's TOKENLIGHTEN_ALLOWED_PARENTS
-  // parsing for the same pattern.
+  // letter ("C:\\...").
   const dirs = (process.env.PATH ?? "").split(path.delimiter);
   for (const dir of dirs) {
     if (dir.length === 0) continue;

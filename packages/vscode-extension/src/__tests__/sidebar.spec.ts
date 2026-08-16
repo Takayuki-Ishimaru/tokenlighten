@@ -51,7 +51,7 @@ vi.mock("vscode", () => ({
 const extensionUriStub = { fsPath: "/extension", scheme: "file" };
 
 vi.mock("../cli.js", () => ({
-  getTlVersion: vi.fn(() => "0.9.0"),
+  getTlVersion: vi.fn(() => "0.9.1"),
 }));
 
 vi.mock("../commands.js", () => ({
@@ -124,7 +124,7 @@ describe("TokenLighten sidebar", () => {
     provider.resolveWebviewView({ webview } as never);
 
     await vi.waitFor(() => expect(webview.html).toContain("tokenlighten.setup"));
-    expect(webview.html).toContain("Version: 0.9.0");
+    expect(webview.html).toContain("Version: 0.9.1");
     expect(webview.html).toContain("Workspace setup");
     expect(webview.html).toContain("Workspace logs");
     expect(webview.html).toContain(

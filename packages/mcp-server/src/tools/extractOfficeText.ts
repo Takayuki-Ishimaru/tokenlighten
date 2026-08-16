@@ -43,8 +43,8 @@ export interface ExtractOfficeTextInput {
   maxBytes?: number;
   /**
    * Hard byte cap on the rendered text field. Default: 12288
-   * (MAX_RESPONSE_BYTES). Internal callers that slice/continue the text
-   * themselves (core2 office view) may raise it.
+   * (MAX_RESPONSE_BYTES). Internal callers that perform their own bounded
+   * slicing or continuation may raise it.
    */
   maxResponseBytes?: number;
   /**
@@ -96,14 +96,14 @@ export const MAX_RESPONSE_BYTES = 12288;
 // real-world docx/xlsx/pptx/pdf sizes.
 const MAX_BYTES_CEILING = 10 * 1024 * 1024; // 10 MiB
 
-// MAX_TOKENS_CEILING must clear core2/read.ts's serveOffice — a legitimate
-// INTERNAL (trusted) caller that requests maxTokens:OFFICE_EXTRACT_TOKENS
+// MAX_TOKENS_CEILING must clear a legitimate internal trusted caller that
+// requests maxTokens:OFFICE_EXTRACT_TOKENS
 // (4,000,000) so its own maxResponseBytes-bounded slicing sees the full
 // extracted text before it re-slices. Keep headroom above that known value so
 // this clamp never clips a real internal request. External callers are
 // separately bounded regardless of maxTokens by the fixed MAX_RESPONSE_BYTES
-// byte cap below (maxResponseBytes itself is never forwarded by any external
-// dispatch site — only core2/read.ts sets it — so it is out of scope here).
+// byte cap below (`maxResponseBytes` is never forwarded by an external
+// dispatch site, so it is out of scope here).
 const MAX_TOKENS_CEILING = 5_000_000;
 
 /**
@@ -216,8 +216,8 @@ export async function extractOfficeText(
   const { path } = input;
   const maxBytes = clampCallerNumber(input.maxBytes, DEFAULT_MAX_BYTES, MAX_BYTES_CEILING);
   const maxTokens = clampCallerNumber(input.maxTokens, DEFAULT_MAX_TOKENS, MAX_TOKENS_CEILING);
-  // Response-cap override for INTERNAL callers that do their own bounded
-  // slicing/continuation (core2 office view — remediation R2 Blocker 3).
+  // Response-cap override for internal callers that do their own bounded
+  // slicing or continuation.
   // External/tool callers keep the 12KB default.
   const maxResponseBytes = input.maxResponseBytes ?? MAX_RESPONSE_BYTES;
 

@@ -10130,10 +10130,8 @@ function rootMismatchNote(resolvedRoot: string): string | undefined {
 }
 
 /**
- * Public dispatch entry point. Routes to the C2 lean protocol when
- * protocol v1 funnel (runWithProtocolCall / finalizeProtocolResponse) over
- * dispatchWithWorkspaceNotes, which carries Fix 3's cwd auto-correction and
- * Guard 1's root_note — see that function's own doc comment for both.
+ * Public dispatch entry point. Runs the protocol v1 funnel over the
+ * workspace-aware dispatcher, including cwd correction and root notes.
  */
 async function callToolUninstrumented(name: string, args: Record<string, unknown>) {
   const canonical = name;

@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -116,9 +116,9 @@
     "@types/node": "^20",
     "@types/vscode": "^1.105.0",
     "@vscode/vsce": "^3.9.2",
-    "esbuild": "^0.24",
+    "esbuild": "^0.28.2",
     "typescript": "^5.6.3",
-    "vitest": "^2.1"
+    "vitest": "^3.2.6"
   },
   "repository": {
     "type": "git",

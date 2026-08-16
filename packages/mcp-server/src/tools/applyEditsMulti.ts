@@ -225,9 +225,9 @@ export interface EditFileResult {
 /**
  * One row of the mid-batch rollback ledger (CWE-755, strategy §6.6).
  *
- * Field names and the `state` vocabulary are lifted verbatim from the C2
- * staged-transaction ledger (core2/edit.ts's `rollback[]`) so an agent learns
- * ONE contract across both edit paths. The sha VALUES use this path's own
+ * Field names and the `state` vocabulary match the shared staged-transaction
+ * response contract so an agent learns one contract across edit paths. The
+ * sha VALUES use this path's own
  * response idiom (`shortSha(shaOfText(...))` -> `sha256:<12 hex>`), matching
  * the `current_sha`/`served_sha` this same error union already emits, and
  * round-trippable straight back as an `expectedSha` precondition.
@@ -956,8 +956,8 @@ export async function applyEditsMulti(
       // plain `write-error` — the caller was told "nothing happened" about a
       // tree that now matches NEITHER the pre-edit nor the post-edit state,
       // with no way to learn which files were stranded. Surface it in the
-      // vocabulary the C2 staged transaction already speaks (core2/edit.ts):
-      // a per-file ledger, `workspace-state-unknown`, and a distinct
+      // shared staged-transaction vocabulary: a per-file ledger,
+      // `workspace-state-unknown`, and a distinct
       // `rollback-failed` code so an agent repairs instead of retrying.
       const rollback: RollbackFileState[] = [];
       let rollbackFailed = false;

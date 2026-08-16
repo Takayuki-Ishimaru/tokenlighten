@@ -1,5 +1,5 @@
 // serverInfo.version was a hardcoded "0.2.0" at two server.ts sites while
-// the package (and every sibling) ships 0.9.0 — the wire-visible remnant of
+// the package (and every sibling) ships 0.9.1 — the wire-visible remnant of
 // the version-drift class the 2026-08-09 release audit called the
 // "quadruple personality". These pins keep the derivation honest from both
 // directions: the walk-up resolver must find the real manifest, and the

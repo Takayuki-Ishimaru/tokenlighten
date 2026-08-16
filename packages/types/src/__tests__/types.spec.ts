@@ -237,17 +237,16 @@ describe("GenerateResult", () => {
 describe("TLConfig", () => {
   it("accepts an empty config", () => {
     const v = satisfies<TLConfig>({});
-    expect(v.proxy).toBeUndefined();
+    expect(v).toEqual({});
   });
 
   it("round-trips a full config", () => {
     const v = satisfies<TLConfig>({
-      proxy: { enabled: true },
       mcp: { workspaceRoot: "/home/user/myrepo" },
       skeleton: { sizeCapBytes: 65536, maxRanked: 40 },
       agentsMd: { driftPolicy: "fail-build" },
     });
-    expect(v.proxy?.enabled).toBe(true);
+    expect(v.mcp?.workspaceRoot).toBe("/home/user/myrepo");
     expect(v.skeleton?.maxRanked).toBe(40);
     expect(v.agentsMd?.driftPolicy).toBe("fail-build");
   });

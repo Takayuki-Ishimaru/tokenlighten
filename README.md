@@ -1,4 +1,12 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="media/brand/github-header-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="media/brand/github-header-light.png">
+  <img alt="TokenLighten MCP — hummingbird logo" src="media/brand/github-header-light.png">
+</picture>
+
 # TokenLighten
+
+<p align="center"><strong>Give coding agents the context they need—not the whole repository.</strong></p>
 
 [English](README.md) | [日本語](README.ja.md)
 
@@ -6,9 +14,9 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.9 release
+## v0.9.1 Public Beta
 
-**Public Beta.** TokenLighten v0.9 is an early public release. Interfaces and supported workflows may change as we incorporate feedback. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+TokenLighten v0.9.1 is an early public release. Interfaces and supported workflows may change as we incorporate feedback. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
 
 This release includes:
 
@@ -16,7 +24,13 @@ This release includes:
 - source code and package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-The desktop application is not included in v0.9.
+The desktop application is not included in v0.9.1.
+
+## See it in action
+
+![TokenLighten v0.9.1 Control Center in VS Code](media/control-center.png)
+
+The Control Center keeps setup, workspace status, local measurement, and the on/off switch in one place.
 
 ## Why TokenLighten
 
@@ -47,7 +61,7 @@ These are early, developer-run benchmark results, not guaranteed savings. Actual
 
 ## Install the VS Code extension (no build required)
 
-For most users, download **[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.0/tokenlighten-vscode-extension-0.9.0.vsix)** from the v0.9.0 Public Beta GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+For most users, download **[tokenlighten-vscode-extension-0.9.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1/tokenlighten-vscode-extension-0.9.1.vsix)** from the v0.9.1 Public Beta GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -58,12 +72,23 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.9.0.vsix
+code --install-extension tokenlighten-vscode-extension-0.9.1.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required.
 
 See [VS Code extension](release-docs/vscode-extension.md) for details.
+
+## Client compatibility
+
+| Client | Automatic setup | Manual configuration | v0.9.1 validation |
+|---|---|---|---|
+| Codex CLI / Codex for VS Code | Yes | Yes | CLI 0.148.0-alpha.9 and VS Code extension 26.810.52044 on macOS |
+| Claude Code / Claude Code for VS Code | Yes | Yes | CLI 2.1.211 and VS Code extension 2.1.233 on macOS |
+| VS Code / GitHub Copilot | Yes | Yes | VS Code 1.133.0 extension/setup smoke test on macOS; Copilot version not recorded |
+| Cursor | Partial: managed instructions only | Yes, through Cursor's MCP settings | Not part of the v0.9.1 release verification |
+
+The versions above record the local clients used for the 2026-08-16 v0.9.1 smoke checks; they are not minimum-version guarantees. Automated tests also verify the generated Codex, Claude Code, VS Code, Copilot, and Cursor configuration/instruction files. Cursor MCP registration itself remains manual.
 
 ## Build from source
 
@@ -148,7 +173,7 @@ npm run package -w tokenlighten-vscode-extension
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
-For v0.9.0, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
+For v0.9.1, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
 
 ## Documentation
 
@@ -159,17 +184,15 @@ For v0.9.0, the complete package test suite is a CI gate on Ubuntu and macOS. Wi
 - [Privacy, security, and support](release-docs/privacy-security-support.md)
 - [Licensing and use policy](release-docs/licensing.md)
 
-The existing `docs/` directory is development history and is not part of the public v0.9 source release.
-
 ## Security and support
 
 ### Dependency audit snapshot
 
-For the staged v0.9.0 public release audited on 2026-08-16, `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the dependency set used by the shipped VS Code extension and normal runtime operation.
+For TokenLighten v0.9.1 dependencies audited on 2026-08-16, `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the dependency set used by the shipped VS Code extension and normal runtime operation.
 
-A full source-development installation, including development dependencies, reported **1 Critical, 1 High, and 5 Moderate** findings. Those known development-toolchain findings are not a v0.9.0 release blocker and are not part of normal installed-VSIX runtime use. Contributors should review them before running development tools on untrusted source or content.
+A full source-development installation, including development dependencies, reported the same **0 Critical, 0 High, and 2 Moderate** findings after the v0.9.1 development-toolchain updates.
 
-This is a dated dependency-audit snapshot, not a guarantee that the software has no vulnerabilities. Audit data can change after publication; rerun `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation.
+The two scanner findings represent one transitive `uuid` advisory through `exceljs`. The affected `uuid` APIs are not used by the TokenLighten spreadsheet path. See [Dependency security status](release-docs/dependency-security.md) for the advisory ID, reachability analysis, remediation constraints, and update plan. This is a dated snapshot, not a guarantee that the software has no vulnerabilities.
 
 The server is read-only unless started with `--allow-write`. Review [SECURITY.md](SECURITY.md) before reporting a vulnerability and [SUPPORT.md](SUPPORT.md) for the best-effort support policy. Do not post credentials, private source code, customer data, or unsanitized logs in public issues.
 

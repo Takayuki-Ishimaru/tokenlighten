@@ -2,7 +2,7 @@
   "name": "tokenlighten-monorepo",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "type": "module",
   "repository": {
     "type": "git",
@@ -19,7 +19,8 @@
     "packages/*"
   ],
   "overrides": {
-    "unzipper": "0.12.5"
+    "unzipper": "0.12.5",
+    "vite": "6.4.3"
   },
   "scripts": {
     "build": "npm run build --workspace @tokenlighten/types && npm run build --workspace @tokenlighten/usage && npm run build --workspace @tokenlighten/skeleton-engine && npm run build --workspace @tokenlighten/agents-md && npm run build --workspace @tokenlighten/cli && npm run build --workspace @tokenlighten/mcp-server && npm run build --workspace tokenlighten-vscode-extension",
@@ -36,12 +37,12 @@
   "devDependencies": {
     "@types/node": "^20",
     "cross-spawn": "^7.0.6",
-    "esbuild": "^0.24",
+    "esbuild": "^0.28.2",
     "license-checker-rseidelsohn": "^4",
     "js-tiktoken": "^1.0.21",
     "tsx": "^4",
     "typescript": "^5.6.3",
-    "vitest": "^2.1",
+    "vitest": "^3.2.6",
     "jszip": "3.10.1"
   }
 }

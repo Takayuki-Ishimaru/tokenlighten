@@ -4,11 +4,7 @@
  * Walks up from the current file's directory looking for sentinel paths.
  * Honours TOKENLIGHTEN_REPO_ROOT env override for CI / test environments.
  *
- * Design refs:
- *   docs/components/06-platform-support.md §2 (process management, repo root)
- *
  * Output policy: plain data — no meta envelope.
- * See docs/00-postmortem.md §2.2 for rationale.
  */
 
 import * as fs from "fs";
@@ -23,14 +19,17 @@ import { fileURLToPath } from "url";
  *  2. Walk upward from this file's directory, looking for sentinel files.
  *
  * @param opts.sentinels - Relative paths to check at each ancestor directory.
- *   Defaults to ['proxy/pyproject.toml', 'proxy/.venv'].
+ *   Defaults to the public CLI and MCP package manifests.
  * @throws Error if neither env variable nor sentinel is found within 12 levels.
  */
 export function resolveRepoRoot(opts?: { sentinels?: string[] }): string {
   if (process.env["TOKENLIGHTEN_REPO_ROOT"]) {
     return path.resolve(process.env["TOKENLIGHTEN_REPO_ROOT"]);
   }
-  const sentinels = opts?.sentinels ?? ["proxy/pyproject.toml", "proxy/.venv"];
+  const sentinels = opts?.sentinels ?? [
+    "packages/cli/package.json",
+    "packages/mcp-server/package.json",
+  ];
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 12; i++) {
     if (sentinels.some((s) => fs.existsSync(path.join(dir, s)))) return dir;

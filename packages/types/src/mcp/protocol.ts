@@ -33,9 +33,8 @@
 //    value is breaking — free before v1 publishes, breaking after it. Several
 //    obligations in A.9.2 exist only because of that asymmetry.
 //  - §1.5 Deprecation is a procedure, not a silent removal.
-//  - §1.7 v1 covers the three advertised MCP tools on the default path only.
-//    `--core2`, `proto/`, and the usage/clients contracts (their own
-//    `schemaVersion`) are outside it.
+//  - §1.7 v1 covers the three advertised MCP tools. Other package contracts
+//    with their own `schemaVersion` are outside it.
 // ---------------------------------------------------------------------------
 
 import type { ImpactSurface } from "./locate-impact.js";
@@ -536,9 +535,8 @@ export type RetryTransition =
 //  - locate abstains (`LocateAbstainData.reason`) — a `hit:false` locate is a
 //    valid, complete `search.matches` result (§4.3);
 //  - `ReferenceTruncationReason` — pagination, i.e. `Limit.cause:"records"`;
-//  - `C2ErrorCode` — D9(a) excludes core2 from the public dist;
-//  - `TokenLightenHostProfileReason` and everything in `proto/` — not the MCP
-//    wire (§1.7);
+//  - implementation-only error-code unions that never reach the MCP wire;
+//  - host-profile reasons governed by a separate package contract (§1.7);
 //  - `profile_binding.reason` — prose, not a code.
 // ---------------------------------------------------------------------------
 

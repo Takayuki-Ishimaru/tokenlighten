@@ -2,6 +2,27 @@
 
 All notable public changes to TokenLighten are documented here.
 
+## 0.9.1
+
+Public Beta maintenance release.
+
+### Changed
+
+- Corrected public documentation and simplified CLI and VS Code diagnostics.
+- Added direct v0.9.1 VSIX download links for users who do not build from
+  source.
+- Updated package and runtime version metadata to 0.9.1.
+- Updated Vitest, Vite, and esbuild so the full development audit no longer
+  reports Critical or High findings.
+- Added client-compatibility evidence, weekly Dependabot version updates, and
+  advisory-level dependency-security documentation.
+- Added the TokenLighten hummingbird header and dawn-palette Social Preview
+  asset.
+- Added a v0.9.1 Control Center screenshot to the English and Japanese
+  READMEs.
+
+No public MCP protocol change is intended in this maintenance release.
+
 ## 0.9.0
 
 Initial public source release.

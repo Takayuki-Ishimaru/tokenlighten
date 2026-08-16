@@ -8,8 +8,7 @@
  *   4. exceljs importable
  *   5. license-checker-rseidelsohn presence
  *   6. MCP dist build freshness (source newer than dist/bin.js)
- *   7. Public MCP artifact excludes Core 2 entry surfaces
- *   8. Per-client MCP registration status (evaluateDoctorAsync/runDoctor only)
+ *   7. Per-client MCP registration status (evaluateDoctorAsync/runDoctor only)
  *
  * Flags:
  *   --json   Emit a JSON object instead of human-readable text
@@ -21,12 +20,11 @@
  *   evaluateDoctorAsync(opts?) — pure; adds prereq detection + client registration checks
  *   runDoctor(args)            — prints result, calls process.exit if !ok
  *
- * Output policy: plain data — no meta envelope.
- * See docs/00-postmortem.md §2.2 for rationale.
+ * Output policy: plain data — no metadata envelope.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { join } from "path";
 import { createRequire } from "module";
 import { resolvePath } from "../paths.js";
 import { detectPrereqs, type PrereqStatus, type PrereqId } from "../prereqs.js";
@@ -178,104 +176,6 @@ export function checkMcpDistFresh(opts: DoctorOptions = {}): DoctorCheck {
   }
 }
 
-/**
- * Pure evaluation — runs all health checks and returns the result.
- * No stdout/stderr output. No process.exit. Safe to call from tests.
- *
- * Note: prereq detection is async; this sync overload returns empty prereqs
- * for backward compat. Use evaluateDoctorAsync for the full result.
- */
-function publicMcpDistBin(opts: DoctorOptions): string {
-  if (opts.mcpDistBin !== undefined) return opts.mcpDistBin;
-  try {
-    const require = createRequire(import.meta.url);
-    const entry = require.resolve("@tokenlighten/mcp-server");
-    return join(dirname(entry), "bin.js");
-  } catch {
-    try {
-      return join(resolveRepoRoot(), "packages", "mcp-server", "dist", "bin.js");
-    } catch {
-      return join(process.cwd(), "packages", "mcp-server", "dist", "bin.js");
-    }
-  }
-}
-
-function runtimeJavaScriptFiles(root: string): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const absolute = join(root, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...runtimeJavaScriptFiles(absolute));
-    } else if (
-      entry.isFile()
-      && (entry.name.endsWith(".js")
-        || entry.name.endsWith(".cjs")
-        || entry.name.endsWith(".mjs"))
-    ) {
-      files.push(absolute);
-    }
-  }
-  return files;
-}
-
-/**
- * Proves that a public MCP artifact has no Core 2 entry surface. The three
- * forbidden surfaces are a packaged core2 module tree, --core2 flag
- * acceptance, and the alternate C2_TOOLS schema.
- */
-export function checkMcpCore2Excluded(opts: DoctorOptions = {}): DoctorCheck {
-  const distBin = publicMcpDistBin(opts);
-  if (!existsSync(distBin)) {
-    return {
-      name: "mcp_core2_excluded",
-      ok: false,
-      detail: `${distBin} is missing; build the public MCP artifact before checking Core 2 exclusion`,
-    };
-  }
-
-  const distRoot = dirname(distBin);
-  const adjacentSource = join(dirname(distRoot), "src");
-  if (existsSync(adjacentSource)) {
-    return {
-      name: "mcp_core2_excluded",
-      ok: true,
-      detail: `${distRoot}: adjacent development source tree detected at ${adjacentSource}; Core 2 exclusion applies to shipped dist artifacts, so inspect the packaged artifact instead of the development build`,
-    };
-  }
-
-  const findings: string[] = [];
-  if (existsSync(join(distRoot, "core2"))) {
-    findings.push("packaged core2 module directory");
-  }
-  try {
-    for (const file of runtimeJavaScriptFiles(distRoot)) {
-      const source = readFileSync(file, "utf8");
-      if (source.includes("--core2")) findings.push("--core2 flag acceptance marker");
-      if (
-        source.includes("C2_TOOLS")
-        || source.includes("Read known paths. <=64KB returns full text")
-      ) {
-        findings.push("C2_TOOLS alternate schema marker");
-      }
-    }
-  } catch (error) {
-    return {
-      name: "mcp_core2_excluded",
-      ok: false,
-      detail: `could not inspect ${distRoot}: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-
-  const uniqueFindings = [...new Set(findings)];
-  return {
-    name: "mcp_core2_excluded",
-    ok: uniqueFindings.length === 0,
-    detail: uniqueFindings.length === 0
-      ? `${distRoot}: no --core2 flag, C2_TOOLS schema, or core2 module entry surface`
-      : `Public MCP artifact still exposes Core 2 via ${uniqueFindings.join(", ")}; remove the flag, alternate schema, and prototype modules from the public build while retaining the experiment outside the published artifact`,
-  };
-}
-
 export function checkClientRegistration(
   registration: TokenLightenClientRegistrationStatus,
   localTokenLightenVersion: string,
@@ -310,6 +210,13 @@ export function checkClientRegistration(
   };
 }
 
+/**
+ * Pure evaluation — runs all health checks and returns the result.
+ * No stdout/stderr output. No process.exit. Safe to call from tests.
+ *
+ * Note: prereq detection is async; this sync overload returns empty prereqs
+ * for backward compat. Use evaluateDoctorAsync for the full result.
+ */
 export function evaluateDoctor(opts: DoctorOptions = {}): DoctorResult {
   const checks: DoctorCheck[] = [
     checkNodeVersion(),
@@ -318,7 +225,6 @@ export function evaluateDoctor(opts: DoctorOptions = {}): DoctorResult {
     checkExcelJs(),
     checkLicenseChecker(),
     checkMcpDistFresh(opts),
-    checkMcpCore2Excluded(opts),
   ];
 
   const ok = checks.every((c) => c.ok);
@@ -336,7 +242,6 @@ export async function evaluateDoctorAsync(opts: DoctorOptions = {}): Promise<Doc
     checkExcelJs(),
     checkLicenseChecker(),
     checkMcpDistFresh(opts),
-    checkMcpCore2Excluded(opts),
   ];
 
   const prereqs = await detectPrereqs(["node", "python", "git"]);

@@ -15,10 +15,12 @@ link it globally:
 ```bash
 git clone https://github.com/Takayuki-Ishimaru/tokenlighten.git
 cd tokenlighten
-npm install
+npm ci
 npm run build
 npm link --workspace packages/cli
 ```
+
+Use `npm install` instead only when intentionally changing dependencies and updating `package-lock.json`.
 
 ## Quickstart
 

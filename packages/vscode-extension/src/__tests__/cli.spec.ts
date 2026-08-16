@@ -179,10 +179,10 @@ describe("TL CLI availability and version", () => {
     mockSpawnSync.mockReturnValue({
       status: 0,
       error: undefined,
-      stdout: "TokenLighten 0.9.0\n",
+      stdout: "TokenLighten 0.9.1\n",
       stderr: "",
     });
-    expect(getTlVersion()).toBe("0.9.0");
+    expect(getTlVersion()).toBe("0.9.1");
   });
 
   it("returns true when spawnSync exits with status 0", () => {

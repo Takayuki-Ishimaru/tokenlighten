@@ -1,4 +1,12 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="media/brand/github-header-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="media/brand/github-header-light.png">
+  <img alt="TokenLighten MCP — ハチドリのロゴ" src="media/brand/github-header-light.png">
+</picture>
+
 # TokenLighten
+
+<p align="center"><strong>リポジトリ全体ではなく、エージェントが必要とする正確なコンテキストを。</strong></p>
 
 [English](README.md) | [日本語](README.ja.md)
 
@@ -6,9 +14,9 @@
 
 公開するツールは`read_file`、`search_files`、`edit_file`の3つです。
 
-## v0.9 リリース
+## v0.9.1 Public Beta
 
-**パブリックベータ。** TokenLighten v0.9は初期の公開版です。フィードバックを反映する過程で、インターフェースや対応ワークフローが変更される場合があります。重要な作業はバックアップを取り、公開Issueには非公開のソースコード、認証情報、顧客データを含めないでください。
+TokenLighten v0.9.1は初期の公開版です。フィードバックを反映する過程で、インターフェースや対応ワークフローが変更される場合があります。重要な作業はバックアップを取り、公開Issueには非公開のソースコード、認証情報、顧客データを含めないでください。
 
 このリリースには以下が含まれます。
 
@@ -16,7 +24,13 @@
 - 開発者向けのソースコードとパッケージテスト
 - 単体で動作するVSIX形式のVS Code拡張機能
 
-デスクトップアプリケーションはv0.9に含まれません。
+デスクトップアプリケーションはv0.9.1に含まれません。
+
+## 実際の動作
+
+![VS Codeで動作するTokenLighten v0.9.1 Control Center](media/control-center.png)
+
+Control Centerでは、セットアップ、ワークスペースの状態、ローカル計測、有効／無効の切り替えを一か所で確認できます。
 
 ## TokenLightenを使う理由
 
@@ -47,7 +61,7 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 
 ## VS Code拡張機能をインストールする（ビルド不要）
 
-一般ユーザーは、v0.9.0 Public BetaのGitHub Releaseから[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.0/tokenlighten-vscode-extension-0.9.0.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
+一般ユーザーは、v0.9.1 Public BetaのGitHub Releaseから[tokenlighten-vscode-extension-0.9.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1/tokenlighten-vscode-extension-0.9.1.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
 
 インストール手順は次のとおりです。
 
@@ -58,12 +72,23 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 ターミナルからインストールすることもできます。
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.9.0.vsix
+code --install-extension tokenlighten-vscode-extension-0.9.1.vsix
 ```
 
 信頼済みのプロジェクトフォルダを開き、TokenLightenビューから**このワークスペースをセットアップ**を選択します。VSIXにはCLI、MCPサーバー、パーサー、必要なアセットが含まれるため、別途グローバルインストールする必要はありません。
 
 詳しくは[VS Code拡張機能](release-docs/vscode-extension.ja.md)を参照してください。
+
+## 対応クライアント
+
+| クライアント | 自動セットアップ | 手動設定 | v0.9.1での検証 |
+|---|---|---|---|
+| Codex CLI / VS Code版Codex | Yes | Yes | macOS上のCLI 0.148.0-alpha.9、VS Code拡張機能 26.810.52044 |
+| Claude Code / VS Code版Claude Code | Yes | Yes | macOS上のCLI 2.1.211、VS Code拡張機能 2.1.233 |
+| VS Code / GitHub Copilot | Yes | Yes | macOS上のVS Code 1.133.0で拡張機能とセットアップをスモークテスト。Copilotのバージョンは未記録 |
+| Cursor | Partial：管理対象の指示ファイルのみ | Yes：CursorのMCP設定を使用 | v0.9.1のリリース検証対象外 |
+
+上記のバージョンは、2026-08-16のv0.9.1スモークテストで使用したローカル環境の記録であり、最低対応バージョンを保証するものではありません。自動テストでは、Codex、Claude Code、VS Code、Copilot、Cursor向けの設定／指示ファイル生成も確認しています。CursorへのMCP登録は手動です。
 
 ## ソースからビルドする
 
@@ -148,7 +173,7 @@ npm run package -w tokenlighten-vscode-extension
 
 変更を送る前に[CONTRIBUTING.md](CONTRIBUTING.md)を確認してください。
 
-v0.9.0では、完全なパッケージテストをUbuntuとmacOSのCIゲートにしています。Windows CIでは、ソースのビルド、同梱CLI、依存関係のライセンスと通知、実行時依存関係の監査、診断を確認します。一部のテストfixtureがまだWindowsへ移植できていないため、完全なパッケージテストはWindowsのリリースゲートではありません。これはWindowsやVSIXのインストールが非対応であることを意味せず、Windows固有のテスト範囲は今後拡充します。
+v0.9.1では、完全なパッケージテストをUbuntuとmacOSのCIゲートにしています。Windows CIでは、ソースのビルド、同梱CLI、依存関係のライセンスと通知、実行時依存関係の監査、診断を確認します。一部のテストfixtureがまだWindowsへ移植できていないため、完全なパッケージテストはWindowsのリリースゲートではありません。これはWindowsやVSIXのインストールが非対応であることを意味せず、Windows固有のテスト範囲は今後拡充します。
 
 ## ドキュメント
 
@@ -159,17 +184,15 @@ v0.9.0では、完全なパッケージテストをUbuntuとmacOSのCIゲート�
 - [プライバシー、セキュリティ、サポート](release-docs/privacy-security-support.md)
 - [ライセンスと利用方針](release-docs/licensing.md)
 
-既存の`docs/`ディレクトリは開発履歴であり、公開するv0.9ソースリリースには含まれません。
-
 ## セキュリティとサポート
 
 ### 依存関係監査のスナップショット
 
-2026-08-16にステージング済みのv0.9.0公開リリースを監査した時点で、`npm audit --omit=dev`は、配布するVS Code拡張機能と通常の実行時に使用される依存関係について、**Critical 0件、High 0件、Moderate 2件**を報告しました。
+2026-08-16にTokenLighten v0.9.1の依存関係を監査した時点で、`npm audit --omit=dev`は、配布するVS Code拡張機能と通常の実行時に使用される依存関係について、**Critical 0件、High 0件、Moderate 2件**を報告しました。
 
-開発用依存関係を含むソース開発環境全体では、**Critical 1件、High 1件、Moderate 5件**が報告されました。これら既知の開発ツールチェーンの問題はv0.9.0のリリース停止条件ではなく、通常のインストール済みVSIXの実行時依存関係には含まれません。コントリビューターは、信頼できないソースやコンテンツを開発ツールで処理する前に内容を確認してください。
+v0.9.1で開発ツールチェーンを更新した後は、開発用依存関係を含む環境全体でも同じく**Critical 0件、High 0件、Moderate 2件**でした。
 
-これは特定日時点の依存関係監査であり、脆弱性が存在しないことを保証するものではありません。監査情報は公開後に変化する可能性があります。実行時依存関係には`npm audit --omit=dev`、開発環境全体には`npm audit`を再実行してください。
+2件という表示は、`exceljs`経由の1件の`uuid`アドバイザリを依存パッケージ側でも数えているものです。TokenLightenのスプレッドシート処理は、問題のある`uuid` APIを使用していません。アドバイザリID、到達可能性、すぐ更新できない理由、更新予定は[依存関係のセキュリティ状況（英語）](release-docs/dependency-security.md)を参照してください。これは特定日時点の監査結果であり、脆弱性が存在しないことを保証するものではありません。
 
 サーバーは`--allow-write`を指定しない限り読み取り専用です。脆弱性を報告する前に[SECURITY.md](SECURITY.md)、ベストエフォートのサポート方針については[SUPPORT.md](SUPPORT.md)を確認してください。公開Issueには認証情報、非公開のソースコード、顧客データ、未加工のログを投稿しないでください。
 

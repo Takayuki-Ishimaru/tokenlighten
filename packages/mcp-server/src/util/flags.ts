@@ -46,10 +46,7 @@
  *       TL_GENERIC_TEXT_DISCOVERY (tools/walkRepo.ts — discovery scope, not
  *       wire shape), TL_KILL_SWITCH
  *       (server.ts), TL_MCP_CONFIG_SHA256 + TL_P1_CAUSAL_RUN_NONCE
- *       (util/trace.ts provenance), the core2 fault-injection trio
- *       TL_C2_TEST_COMMIT_DELAY_MS / TL_C2_TEST_FAIL_<name>_AT /
- *       TL_SHADOW_CANDIDATE_COMMIT (core2/edit.ts; core2 is excluded from the
- *       public dist per D9), and the TOKENLIGHTEN_* operational vars.
+ *       (util/trace.ts provenance), and the TOKENLIGHTEN_* operational vars.
  *       TL_ENABLE_DEPRECATED_ALIASES and the three per-tool disables
  *       (TL_DISABLE_GET_FILE_SKELETON, TL_DISABLE_GET_SYMBOL_WITH_CONTEXT,
  *       TL_DISABLE_EXTRACT_OFFICE_TEXT) are D11 territory, not D10's, and are

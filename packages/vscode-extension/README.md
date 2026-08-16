@@ -65,11 +65,15 @@ The status bar shows whether the local TokenLighten workspace data is fresh, ref
 
 ## Install from VSIX
 
-Build the self-contained VSIX from the repository:
+Download **[tokenlighten-vscode-extension-0.9.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1/tokenlighten-vscode-extension-0.9.1.vsix)** from the v0.9.1 Public Beta GitHub Release, then use VS Code's **Extensions → Install from VSIX…** command. No source build or separate Node.js installation is required.
+
+ソースからビルドせずに、v0.9.1 Public BetaのGitHub Releaseから上記のVSIXをダウンロードし、VS Codeの**拡張機能 → VSIXからのインストール…**を選択してください。Node.jsを別途インストールする必要はありません。
+
+Developers can instead build the self-contained VSIX from the repository:
 
 ```bash
 npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](../../README.md) and [public release documentation](../../release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](../../README.md) / [日本語](../../README.ja.md) and [documentation](../../release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
