@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { SourceIndexManifestV1, IndexedFileV1 } from "../indexStore.js";
 import { buildTlGraphFromManifest, writeGraphIfStale, getTlGraphPath } from "../graphBuilder.js";
 
@@ -12,7 +13,7 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = join(
-    "/private/tmp",
+    tmpdir(),
     `graphBuilder-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   await fs.mkdir(tmpDir, { recursive: true });

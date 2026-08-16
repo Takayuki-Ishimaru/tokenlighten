@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   loadOrBuildSourceIndex,
   resetManifestMemoForTest,
@@ -26,7 +27,7 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = join(
-    "/private/tmp",
+    tmpdir(),
     `correctness-gate-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   await fs.mkdir(tmpDir, { recursive: true });
