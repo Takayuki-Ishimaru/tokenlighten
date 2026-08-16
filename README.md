@@ -24,6 +24,25 @@ Repository indexing and context selection run locally on the CPU. TokenLighten d
 
 Savings vary by repository, task, client, and model behavior. Usage and cost figures shown by TokenLighten are local estimates, not provider billing records.
 
+## Where TokenLighten can reduce token and task cost
+
+TokenLighten is designed to deliver its largest advantage when an agent must identify and correctly update every affected location across multiple files, packages, or document formats. The benefit is expected to be smaller when a task is limited to one known location.
+
+Symbol and reference search can return relevant definitions and call sites directly. Document readers can extract structured content from spreadsheets and other supported formats without loading each entire file. Together, these capabilities can reduce repeated search and rereading while the agent gathers the context required for repository-wide or cross-document work.
+
+### Early developer benchmark observations
+
+In one multi-package code task, the agent added a value to a shared enum and propagated it consistently through a frontend component, backend validation, and category-based aggregation logic. Across six repeated benchmark runs, using TokenLighten reduced verified task cost by approximately **56%** compared with the same agent without TokenLighten.
+
+In a cross-document implementation task, the agent combined a rate table maintained in a spreadsheet with calculation procedures described in a separate document, then implemented a new pricing module consistent with both sources. Across six repeated benchmark runs, TokenLighten reduced verified task cost by approximately **48%**.
+
+The early results also show where TokenLighten may not help:
+
+- No clear advantage was observed when the main task was to analyze one large spreadsheet in isolation, without combining it with other sources to produce new code.
+- Results varied for small, localized changes that only passed an already-known value through an existing code path and did not require broad repository discovery. In these cases, TokenLighten's context-collection overhead can exceed the cost it saves.
+
+These are early, developer-run benchmark results, not guaranteed savings. Actual token use and task cost vary by repository, task, client, model behavior, and provider pricing.
+
 ## Install the VS Code extension (no build required)
 
 For most users, download **[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)** from the latest GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
