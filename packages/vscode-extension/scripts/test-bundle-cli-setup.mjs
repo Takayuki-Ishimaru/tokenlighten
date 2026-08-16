@@ -35,7 +35,8 @@ const BUNDLED_AGENTS_MD = join(
   "@tokenlighten",
   "agents-md",
 );
-const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
+const NPM_CLI = process.env.npm_execpath;
+assert.ok(NPM_CLI, "npm_execpath is required to verify the VSIX file list");
 
 function isolatedEnvironment(root) {
   const userRoot = join(root, "user");
@@ -109,10 +110,14 @@ assert.match(
 // private:true, and without a "files" field npm pack falls back to
 // .gitignore, which excludes dist/ entirely (a "files" field is not an
 // option either: combined with .vscodeignore it is a fatal vsce error).
-const vsceResult = run(NPM_COMMAND, ["exec", "--", "vsce", "ls", "--no-dependencies"], {
-  cwd: EXTENSION_ROOT,
-  env: process.env,
-});
+const vsceResult = run(
+  process.execPath,
+  [NPM_CLI, "exec", "--", "vsce", "ls", "--no-dependencies"],
+  {
+    cwd: EXTENSION_ROOT,
+    env: process.env,
+  },
+);
 const packagedFiles = vsceResult.stdout
   .split(/\r?\n/)
   .map((line) => line.trim().replaceAll("\\", "/"))
