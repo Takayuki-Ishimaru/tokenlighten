@@ -125,6 +125,8 @@ npm run package -w tokenlighten-vscode-extension
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
+For v0.9.0, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
+
 ## Documentation
 
 - [Getting started](release-docs/getting-started.md)

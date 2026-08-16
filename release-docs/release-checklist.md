@@ -32,7 +32,7 @@ npm run doctor
 - [ ] Confirm the runtime audit remains free of Critical and High findings. This is the v0.9.0 release gate.
 - [ ] Run a separate full `npm audit` and record the development-toolchain result. The 2026-08-16 known baseline is 1 Critical, 1 High, and 5 Moderate findings; these development-only findings are disclosed but are not a v0.9.0 release blocker.
 - [ ] Do not use the root `npm test` command in public CI unless it has been changed: it currently includes private benchmark tests.
-- [ ] Configure GitHub Actions for Node.js 20 on macOS, Ubuntu, and Windows, running the six public commands above.
+- [ ] Configure GitHub Actions for Node.js 20 on macOS, Ubuntu, and Windows. Run the complete package suite on Ubuntu and macOS; on Windows, gate the build, bundled CLI, dependency licenses/notices, runtime dependency audit, and diagnostics while the remaining non-portable test fixtures are tracked as a known v0.9.0 development limitation.
 - [ ] Rewrite the staged public `package.json` scripts so `npm run build` references only included workspaces and `npm test` runs only public package and VSIX bundle tests; remove the private benchmark commands.
 - [ ] Confirm `tl help` contains no benchmark command, `tl bench` returns the ordinary unknown-command error, and generated package output contains no benchmark or Core 2 implementation.
 - [ ] Confirm that generated package output and tests do not depend on excluded files.

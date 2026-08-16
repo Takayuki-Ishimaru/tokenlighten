@@ -53,6 +53,7 @@ These counts are a dated snapshot, not a guarantee of zero vulnerabilities. Reru
 ## Known limitations
 
 - The desktop application is not included in v0.9.0.
+- The complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the build, bundled CLI, dependency licenses/notices, runtime dependency audit, and diagnostics, but some non-portable test fixtures keep the complete suite from being a Windows release gate in v0.9.0. Windows and VSIX installation remain supported.
 - Savings vary by task, repository, client, and model behavior; local estimates are not provider billing records.
 - Rename and reference operations are conservative and lexical rather than language-server semantic operations.
 - Scanned or image-only PDFs are unsupported because PDF reading requires a text layer.

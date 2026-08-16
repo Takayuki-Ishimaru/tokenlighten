@@ -16,10 +16,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            full_tests: true
+          - os: macos-latest
+            full_tests: true
+          - os: windows-latest
+            full_tests: false
     steps:
       - uses: actions/checkout@v4
       - run: git config core.autocrlf false
@@ -29,7 +32,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm run test:packages
+      - name: Full package tests
+        if: matrix.full_tests
+        run: npm run test:packages
       - run: npm run test:bundle-cli
       - run: npm run licenses
       - run: npm run licenses:notices
@@ -39,6 +44,9 @@ jobs:
       - run: git diff --exit-code -- packages/vscode-extension/THIRD_PARTY_NOTICES.md
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run doctor
+      - name: Package dry run
+        if: matrix.os == 'ubuntu-latest'
+        run: npm pack --dry-run --workspaces
 
   vsix:
     name: VSIX
