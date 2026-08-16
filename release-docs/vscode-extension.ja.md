@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、TokenLighten CLI、MCPサーバー、パ
 
 ## ビルドせずにインストールする
 
-最新のGitHub Releaseから**[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)**をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
+最新のGitHub Releaseから[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
 
 VS Codeからインストールする手順は次のとおりです。
 

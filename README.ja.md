@@ -47,7 +47,7 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 
 ## VS Code拡張機能をインストールする（ビルド不要）
 
-一般ユーザーは、最新のGitHub Releaseから**[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)**をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
+一般ユーザーは、最新のGitHub Releaseから[tokenlighten-vscode-extension-0.9.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/latest/download/tokenlighten-vscode-extension-0.9.0.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
 
 インストール手順は次のとおりです。
 
