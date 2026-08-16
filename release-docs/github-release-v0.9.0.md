@@ -13,7 +13,7 @@ TokenLighten is a local-first MCP toolkit that gives coding agents focused repos
 
 ## Install the VS Code extension
 
-Download `tokenlighten-vscode-extension-0.9.0.vsix` from the Assets section below.
+Download `tokenlighten-vscode-extension-0.9.0.vsix` from the Assets section below. No source build or separate Node.js installation is required. This same VSIX is used on Windows, macOS, and Linux.
 
 In VS Code, open **Extensions**, choose **Install from VSIX…**, and select the downloaded file. Or run:
 
@@ -72,5 +72,5 @@ Support is best effort. No response-time, resolution-time, uptime, or compatibil
 Verified VSIX SHA-256:
 
 ```text
-9ff982b1eca938833d24cc43fb099df2eecd0e4277ab8097e854ce34b8f10464  tokenlighten-vscode-extension-0.9.0.vsix
+0ed873c1fcf90da4d1bbb811efa6f1805c5b4da3e55e94dc5e051a108b943136  tokenlighten-vscode-extension-0.9.0.vsix
 ```
