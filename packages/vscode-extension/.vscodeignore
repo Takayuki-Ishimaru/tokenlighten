@@ -9,6 +9,7 @@ scripts/import-meta-url-shim.js
 scripts/test-bundle-cli-setup.mjs
 .tokenlighten/**
 .gitignore
+SHA256SUMS
 # Anchored to the package root: excludes only this package's own top-level
 # node_modules (irrelevant anyway once packaged with --no-dependencies).
 # NOT `node_modules/**` (unanchored) — that would also match and exclude

@@ -8,7 +8,7 @@ This checklist is for the new public repository described in [Public-source mani
 - [ ] Confirm that `bench/`, the CLI benchmark command/tests, MCP Core 2 source/tests, the Core 2 agent template, historical `docs/`, `proto/`, `TL-*`, `DESIGN-*`, private reports, and desktop source are absent.
 - [ ] Check every public document and package README for benchmark claims, private paths, internal design links, and stale LiteLLM-proxy references.
 - [ ] Obtain appropriate legal review of the maintainer license draft kept outside the public staging tree, then use only the approved text as the release's `LICENSE`.
-- [ ] Replace the root `LICENSE` and every package metadata license field with the approved source-available terms before publishing. The currently checked-in MIT labels must not be released alongside the policy in [Licensing](licensing.md).
+- [x] Confirm the public root `LICENSE` contains the approved source-available terms, every public package metadata license field says `SEE LICENSE IN LICENSE`, and no TokenLighten package retains the private repository's legacy MIT label.
 - [ ] Run the third-party dependency license check and publish the required notices.
 - [ ] Include the approved license text in the VSIX and confirm the packaging command emits no missing-license warning.
 
@@ -28,7 +28,7 @@ npm audit --omit=dev --audit-level=high
 npm run doctor
 ```
 
-- [ ] Run the commands above from a clean clone of the staged public repository.
+- [ ] Run the commands above from a clean clone of the staged public repository. Dependency counts below apply to this public repository and its exact `package-lock.json`, not to the separate private development repository.
 - [ ] Confirm the runtime audit remains free of Critical and High findings. This is the v0.9.0 release gate.
 - [ ] Run a separate full `npm audit` and record the development-toolchain result. The 2026-08-16 known baseline is 1 Critical, 1 High, and 5 Moderate findings; these development-only findings are disclosed but are not a v0.9.0 release blocker.
 - [ ] Do not use the root `npm test` command in public CI unless it has been changed: it currently includes private benchmark tests.

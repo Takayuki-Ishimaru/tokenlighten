@@ -137,6 +137,11 @@ assert.equal(
   false,
   "VS Code .vsix listing contains a Core 2 path",
 );
+assert.equal(
+  packagedFiles.includes("SHA256SUMS"),
+  false,
+  "VS Code .vsix listing contains the release asset checksum",
+);
 
 const sandbox = mkdtempSync(join(tmpdir(), "tl-bundled-setup-"));
 const workspace = join(sandbox, "workspace");

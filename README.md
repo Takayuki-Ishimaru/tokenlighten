@@ -6,6 +6,8 @@ It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
 ## v0.9 release
 
+**Public Beta.** TokenLighten v0.9 is an early public release. Interfaces and supported workflows may change as we incorporate feedback. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+
 This release includes:
 
 - the TokenLighten CLI and MCP server;

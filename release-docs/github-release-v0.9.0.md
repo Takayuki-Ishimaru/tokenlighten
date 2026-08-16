@@ -1,5 +1,7 @@
 # TokenLighten v0.9.0
 
+**Public Beta.** TokenLighten v0.9 is an early public release. Interfaces and supported workflows may change as we incorporate feedback. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+
 TokenLighten is a local-first MCP toolkit that gives coding agents focused repository context. This first public source release includes the CLI, MCP server, developer source and tests, and a self-contained VS Code extension.
 
 ## Highlights
@@ -73,5 +75,5 @@ Support is best effort. No response-time, resolution-time, uptime, or compatibil
 Verified VSIX SHA-256:
 
 ```text
-0ed873c1fcf90da4d1bbb811efa6f1805c5b4da3e55e94dc5e051a108b943136  tokenlighten-vscode-extension-0.9.0.vsix
+f3b4a5ca1f3c875abf5a09f663f8302db392c890c081333f0059cd9447bcf353  tokenlighten-vscode-extension-0.9.0.vsix
 ```

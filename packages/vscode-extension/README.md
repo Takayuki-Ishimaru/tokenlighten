@@ -1,6 +1,6 @@
 # TokenLighten for VS Code
 
-TokenLighten helps coding agents use fewer input tokens by giving them precise, task-relevant code context through MCP. This extension provides a self-contained TokenLighten installation for VS Code: the CLI, MCP server, parsers, and required assets are bundled in the VSIX.
+TokenLighten (TL) helps coding agents use fewer input tokens by giving them precise, task-relevant code context through MCP. This extension provides a self-contained TL installation for VS Code: the CLI, MCP server, parsers, and required assets are bundled in the VSIX.
 
 ## What the extension does
 
@@ -28,7 +28,7 @@ The coding agent and its model do not change. TokenLighten reduces the amount of
 
 ## 日本語での要点
 
-- **「このワークスペースをセットアップ」だけで導入・修復できます。**
+- **「このワークスペースをセットアップ」だけでTokenLighten（以下「TL」）を導入・修復できます。**
 - セットアップするとTLが自動的に有効になります。
 - 不具合時は「このワークスペースでTLを有効にする」を外すと、一時的に無効化できます。
 - TLはファイル全体ではなく、タスクに必要な構造・シンボル・コード範囲を優先してAIへ渡し、入力トークンを削減します。
