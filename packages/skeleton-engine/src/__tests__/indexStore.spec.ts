@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   loadManifest,
   writeManifest,
@@ -19,7 +20,7 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = join(
-    "/private/tmp",
+    tmpdir(),
     `indexStore-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   await fs.mkdir(tmpDir, { recursive: true });
@@ -93,7 +94,7 @@ describe("loadManifest / writeManifest", () => {
   });
 
   it("refuses to write a cache through a symlinked parent", async () => {
-    const outside = await fs.mkdtemp(join("/private/tmp", "indexStore-outside-"));
+    const outside = await fs.mkdtemp(join(tmpdir(), "indexStore-outside-"));
     try {
       await fs.symlink(outside, join(tmpDir, ".tokenlighten"), "dir");
       await expect(writeManifest(tmpDir, makeManifest())).rejects.toThrow(/unsafe-write-path/);
@@ -322,7 +323,7 @@ describe("loadOrBuildSourceIndex — text-bearing files (textOnly, Task B)", () 
 describe("searchSymbols neutrality — text-bearing files do not change results for code files", () => {
   async function makeRoot(withDocs: boolean): Promise<string> {
     const root = join(
-      "/private/tmp",
+      tmpdir(),
       `indexStore-neutrality-${withDocs ? "docs" : "code"}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
     await fs.mkdir(join(root, "src"), { recursive: true });
