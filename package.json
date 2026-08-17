@@ -35,7 +35,7 @@
     "package:vsix": "npm run package --workspace tokenlighten-vscode-extension"
   },
   "devDependencies": {
-    "@types/node": "^20",
+    "@types/node": "^26",
     "cross-spawn": "^7.0.6",
     "esbuild": "^0.28.2",
     "js-tiktoken": "^1.0.21",
