@@ -8,6 +8,7 @@ const {
   mockRegisterSetup,
   mockRegisterMcp,
   mockRegisterSidebar,
+  mockCheckForUpdate,
   mockWatcher,
   mockBar,
 } = vi.hoisted(() => ({
@@ -18,6 +19,7 @@ const {
   mockRegisterSetup: vi.fn(),
   mockRegisterMcp: vi.fn(),
   mockRegisterSidebar: vi.fn(),
+  mockCheckForUpdate: vi.fn(),
   mockWatcher: vi.fn(),
   mockBar: {
     setActivationState: vi.fn(),
@@ -55,6 +57,7 @@ vi.mock("../commands.js", () => ({
 vi.mock("../cli.js", () => ({ spawnTl: vi.fn() }));
 vi.mock("../mcpProvider.js", () => ({ registerMcpProvider: mockRegisterMcp }));
 vi.mock("../sidebar.js", () => ({ registerControlCenter: mockRegisterSidebar }));
+vi.mock("../updateChecker.js", () => ({ checkForExtensionUpdate: mockCheckForUpdate }));
 vi.mock("../workspaceState.js", () => ({
   invalidateWorkspaceConfigured: mockInvalidate,
   workspaceActivationState: mockActivationState,
@@ -80,6 +83,7 @@ describe("extension activation", () => {
     expect(mockRegisterSetup).toHaveBeenCalledOnce();
     expect(mockRegisterCommands).toHaveBeenCalledOnce();
     expect(mockRegisterMcp).toHaveBeenCalledOnce();
+    expect(mockCheckForUpdate).toHaveBeenCalledOnce();
     expect(mockBar.setActivationState).toHaveBeenCalledWith("not-configured");
     expect(mockWatcher).not.toHaveBeenCalled();
   });

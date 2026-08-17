@@ -9,6 +9,7 @@ import { registerCommands, registerSetupCommand } from "./commands.js";
 import { spawnTl } from "./cli.js";
 import { registerMcpProvider } from "./mcpProvider.js";
 import { registerControlCenter } from "./sidebar.js";
+import { checkForExtensionUpdate } from "./updateChecker.js";
 import {
   invalidateWorkspaceConfigured,
   workspaceActivationState,
@@ -26,6 +27,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerSetupCommand(context, bar);
   registerCommands(context, bar);
   registerMcpProvider(context);
+  void checkForExtensionUpdate(context);
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {

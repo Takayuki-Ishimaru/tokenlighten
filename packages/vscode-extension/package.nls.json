@@ -6,6 +6,7 @@
   "command.logs.export": "TokenLighten: Export This Workspace's Usage Logs",
   "view.controlCenter": "Workspace",
   "config.enabled": "Enable TokenLighten in this workspace.",
+  "config.updateCheck.enabled": "Check GitHub Releases for a newer TokenLighten VSIX when VS Code starts.",
   "config.language": "Display language for all TokenLighten extension UI.",
   "config.language.auto": "Automatic (use the VS Code display language)",
   "config.language.en": "English",

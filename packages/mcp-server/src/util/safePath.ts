@@ -13,12 +13,28 @@ import { realpathSync, statSync, type Stats } from "fs";
 import { trace } from "./trace.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
+const WINDOWS_DRIVE_ABSOLUTE = /^[A-Za-z]:[\\/]/;
+
+function normalizeWindowsDriveLetter(value: string): string {
+  return WINDOWS_DRIVE_ABSOLUTE.test(value)
+    ? value.charAt(0).toUpperCase() + value.slice(1)
+    : value;
+}
+
 export function resolveReal(p: string): string {
-  try { return realpathSync(p); } catch { return path.resolve(p); }
+  try { return normalizeWindowsDriveLetter(realpathSync(p)); }
+  catch { return normalizeWindowsDriveLetter(path.resolve(p)); }
 }
 
 export function isWithin(child: string, base: string): boolean {
-  return child === base || child.startsWith(base + path.sep);
+  const normalizedChild = normalizeWindowsDriveLetter(child);
+  const normalizedBase = normalizeWindowsDriveLetter(base);
+  const separator = WINDOWS_DRIVE_ABSOLUTE.test(normalizedChild)
+    && WINDOWS_DRIVE_ABSOLUTE.test(normalizedBase)
+    ? path.win32.sep
+    : path.sep;
+  return normalizedChild === normalizedBase
+    || normalizedChild.startsWith(normalizedBase + separator);
 }
 
 export function safeResolve(rel: string, root: string): string | undefined {
@@ -44,7 +60,7 @@ export function safeResolveForWrite(
 
 export async function safeRealPath(abs: string, rootReal: string): Promise<string | undefined> {
   try {
-    const real = await fs.realpath(abs);
+    const real = normalizeWindowsDriveLetter(await fs.realpath(abs));
     return isWithin(real, rootReal) ? real : undefined;
   } catch { return undefined; }
 }

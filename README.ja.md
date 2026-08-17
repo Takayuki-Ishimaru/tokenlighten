@@ -14,9 +14,9 @@
 
 公開するツールは`read_file`、`search_files`、`edit_file`の3つです。
 
-## v0.9.1 Public Beta
+## v0.9.1a Public Beta
 
-TokenLighten v0.9.1は初期の公開版です。フィードバックを反映する過程で、インターフェースや対応ワークフローが変更される場合があります。重要な作業はバックアップを取り、公開Issueには非公開のソースコード、認証情報、顧客データを含めないでください。
+TokenLighten v0.9.1aは初期の公開版です。フィードバックを反映する過程で、インターフェースや対応ワークフローが変更される場合があります。重要な作業はバックアップを取り、公開Issueには非公開のソースコード、認証情報、顧客データを含めないでください。
 
 このリリースには以下が含まれます。
 
@@ -24,7 +24,7 @@ TokenLighten v0.9.1は初期の公開版です。フィードバックを反映�
 - 開発者向けのソースコードとパッケージテスト
 - 単体で動作するVSIX形式のVS Code拡張機能
 
-デスクトップアプリケーションはv0.9.1に含まれません。
+デスクトップアプリケーションはv0.9.1aに含まれません。
 
 ## 実際の動作
 
@@ -61,7 +61,7 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 
 ## VS Code拡張機能をインストールする（ビルド不要）
 
-一般ユーザーは、v0.9.1 Public BetaのGitHub Releaseから[tokenlighten-vscode-extension-0.9.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1/tokenlighten-vscode-extension-0.9.1.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
+一般ユーザーは、v0.9.1a Public BetaのGitHub Releaseから[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
 
 インストール手順は次のとおりです。
 
@@ -72,7 +72,7 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 ターミナルからインストールすることもできます。
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.9.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.9.2.vsix
 ```
 
 信頼済みのプロジェクトフォルダを開き、TokenLightenビューから**このワークスペースをセットアップ**を選択します。VSIXにはCLI、MCPサーバー、パーサー、必要なアセットが含まれるため、別途グローバルインストールする必要はありません。

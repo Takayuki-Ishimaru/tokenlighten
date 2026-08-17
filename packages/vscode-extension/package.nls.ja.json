@@ -6,6 +6,7 @@
   "command.logs.export": "TokenLighten: このワークスペースの使用ログを出力",
   "view.controlCenter": "ワークスペース",
   "config.enabled": "このワークスペースでTokenLightenを有効にします。",
+  "config.updateCheck.enabled": "VS Codeの起動時にGitHub Releasesで新しいTokenLighten VSIXを確認します。",
   "config.language": "TokenLighten拡張機能全体の表示言語です。",
   "config.language.auto": "自動（VS Codeの表示言語を使用）",
   "config.language.en": "英語",

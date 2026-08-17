@@ -12,6 +12,7 @@ The TokenLighten Workspace view is for developers using GitHub Copilot, the VS C
 - Current TL status and the version reported by the bundled TL CLI.
 - Local estimates of this workspace's token and billing reduction rates.
 - Export of privacy-safe usage logs for this workspace.
+- A startup check for newer published GitHub Releases, including Public Beta prereleases.
 - Japanese and English display languages.
 
 For normal installation or recovery, use **Set up this workspace**. It installs or repairs the TokenLighten MCP configuration and managed AI instructions in one operation, then enables TL for the workspace. Existing project instructions outside TokenLighten-managed sections are preserved.
@@ -48,7 +49,12 @@ Workspace-changing actions require a trusted VS Code workspace.
 | Setting | Default | Description |
 |---|---:|---|
 | `tokenlighten.enabled` | `true` | Enables or disables TokenLighten for the current workspace. |
+| `tokenlighten.updateCheck.enabled` | `true` | Checks GitHub Releases for a newer VSIX when VS Code starts. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically, or selects Japanese or English explicitly. |
+
+## Updates from GitHub
+
+When VS Code starts, the extension checks the public TokenLighten GitHub Releases list for a newer published VSIX. Public Beta prereleases are included. If one is available, the extension offers to open its VSIX download in your browser. The check can be disabled with `tokenlighten.updateCheck.enabled`; failures are silent and do not affect workspace setup or MCP operation.
 
 ## Main workflow
 
@@ -65,9 +71,9 @@ The status bar shows whether the local TokenLighten workspace data is fresh, ref
 
 ## Install from VSIX
 
-Download **[tokenlighten-vscode-extension-0.9.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1/tokenlighten-vscode-extension-0.9.1.vsix)** from the v0.9.1 Public Beta GitHub Release, then use VS Code's **Extensions → Install from VSIX…** command. No source build or separate Node.js installation is required.
+Download **[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)** from the v0.9.1a Public Beta GitHub Release, then use VS Code's **Extensions → Install from VSIX…** command. No source build or separate Node.js installation is required.
 
-ソースからビルドせずに、v0.9.1 Public BetaのGitHub Releaseから上記のVSIXをダウンロードし、VS Codeの**拡張機能 → VSIXからのインストール…**を選択してください。Node.jsを別途インストールする必要はありません。
+ソースからビルドせずに、v0.9.1a Public BetaのGitHub Releaseから上記のVSIXをダウンロードし、VS Codeの**拡張機能 → VSIXからのインストール…**を選択してください。Node.jsを別途インストールする必要はありません。
 
 Developers can instead build the self-contained VSIX from the repository:
 

@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -15,6 +15,9 @@
     "vscode": ">=1.105.0"
   },
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false
@@ -79,6 +82,12 @@
           "default": true,
           "scope": "resource",
           "description": "%config.enabled%"
+        },
+        "tokenlighten.updateCheck.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "%config.updateCheck.enabled%"
         },
         "tokenlighten.language": {
           "type": "string",

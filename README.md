@@ -14,9 +14,9 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.9.1 Public Beta
+## v0.9.1a Public Beta
 
-TokenLighten v0.9.1 is an early public release. Interfaces and supported workflows may change as we incorporate feedback. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+TokenLighten v0.9.1a is an early public release. Interfaces and supported workflows may change as we incorporate feedback. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
 
 This release includes:
 
@@ -24,7 +24,7 @@ This release includes:
 - source code and package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-The desktop application is not included in v0.9.1.
+The desktop application is not included in v0.9.1a.
 
 ## See it in action
 
@@ -61,7 +61,7 @@ These are early, developer-run benchmark results, not guaranteed savings. Actual
 
 ## Install the VS Code extension (no build required)
 
-For most users, download **[tokenlighten-vscode-extension-0.9.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1/tokenlighten-vscode-extension-0.9.1.vsix)** from the v0.9.1 Public Beta GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+For most users, download **[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)** from the v0.9.1a Public Beta GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -72,7 +72,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.9.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.9.2.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required.

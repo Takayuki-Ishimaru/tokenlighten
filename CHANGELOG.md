@@ -2,6 +2,27 @@
 
 All notable public changes to TokenLighten are documented here.
 
+## 0.9.2 (GitHub tag v0.9.1a)
+
+Public Beta refresh containing the 2026-08-17 Windows and VS Code fixes.
+
+### Added
+
+- VS Code checks published GitHub Releases, including Public Beta prereleases,
+  for a newer VSIX when it starts and offers an explicit download action.
+- English and Japanese UI text and an application setting to disable the
+  update check.
+
+### Fixed
+
+- Windows workspace containment no longer rejects the same drive when the
+  drive letter uses different casing, such as `C:` and `c:`.
+- Public Beta tags such as `v0.9.1a` participate in extension update checks.
+
+The GitHub release tag is `v0.9.1a`. The packaged VSIX uses version `0.9.2`
+because VS Code extension manifests require a numeric `major.minor.patch`
+version and it must supersede the previously installed `0.9.1` beta.
+
 ## 0.9.1
 
 Public Beta maintenance release.

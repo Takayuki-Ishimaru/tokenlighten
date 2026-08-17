@@ -109,6 +109,36 @@ describe("A.5.8 search.matches — Rule K's `matches:{form}` tag and [R4-4] per-
     expect(matches["truncated"]).toBeUndefined();
   });
 
+  it.skipIf(process.platform !== "win32")(
+    "find: its exact returned path round-trips to read_file when cwd drive-letter case differs",
+    async () => {
+      const flippedDrive = root.charAt(0) === root.charAt(0).toUpperCase()
+        ? root.charAt(0).toLowerCase()
+        : root.charAt(0).toUpperCase();
+      const differentlyCasedRoot = flippedDrive + root.slice(1);
+      expect(differentlyCasedRoot).not.toBe(root);
+
+      const { body, isError } = await call({
+        cwd: differentlyCasedRoot,
+        action: "find",
+        query: "priceOrder",
+      });
+      expect(isError).toBe(false);
+      const matches = matchesOf(body, "find");
+      const files = matches["files"] as Array<Body>;
+      const returnedPath = String(files[0]?.["path"]);
+      expect(returnedPath).toBe("src/orchestrator.ts");
+
+      const readResult = await callTool("read_file", {
+        path: returnedPath,
+        cwd: differentlyCasedRoot,
+      });
+      const readBody = JSON.parse(readResult.content[0]?.text ?? "{}") as Body;
+      expect(readBody["kind"]).toBe("read.text");
+      expect(JSON.stringify(readBody)).toContain("priceOrder");
+    },
+  );
+
   it("find: a zero-hit response is VALID and COMPLETE — `absence`, no limit, no refusal", async () => {
     const { body, isError } = await call({ cwd: root, action: "find", query: "NOTHING_MATCHES_THIS_TOKEN" });
     expect(isError).toBe(false);

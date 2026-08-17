@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the TokenLighten CLI, MCP server, par
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.9.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1/tokenlighten-vscode-extension-0.9.1.vsix)** from the v0.9.1 Public Beta GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)** from the v0.9.1a Public Beta GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Install it from VS Code:
 
@@ -47,6 +47,7 @@ Usage and saving figures shown by the extension are local estimates, not provide
 | Setting | Default | Description |
 |---|---:|---|
 | `tokenlighten.enabled` | `true` | Enables or disables TokenLighten for the current workspace. |
+| `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases, including Public Beta prereleases, for a newer VSIX when VS Code starts. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically, or selects English or Japanese explicitly. |
 
 The desktop application is not included in this release.
