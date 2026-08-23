@@ -88,26 +88,17 @@ assert.equal(existsSync(BUNDLED_CLI), true, "bundled CLI missing");
 assert.equal(existsSync(BUNDLED_NOTICES), true, "third-party notices missing");
 assert.equal(existsSync(BUNDLED_MCP), true, "bundled MCP server missing");
 assert.equal(existsSync(templates), true, "agents-md templates missing");
-for (const packageName of ["mcp-server", "skeleton-engine", "agents-md"]) {
-  const manifest = JSON.parse(
-    readFileSync(
-      join(
-        EXTENSION_ROOT,
-        "dist",
-        "node_modules",
-        "@tokenlighten",
-        packageName,
-        "package.json",
-      ),
-      "utf8",
-    ),
-  );
-  assert.equal(
-    manifest.license,
-    "SEE LICENSE IN LICENSE",
-    `${packageName} bundled license metadata is incorrect`,
-  );
-}
+const bundledMcp = readFileSync(BUNDLED_MCP, "utf8");
+assert.doesNotMatch(
+  bundledMcp,
+  /--core2\b/,
+  "public MCP bundle still accepts the --core2 prototype flag",
+);
+assert.doesNotMatch(
+  bundledMcp,
+  /Read known paths\. <=64KB returns full text/,
+  "public MCP bundle still contains the C2_TOOLS schema",
+);
 assert.match(
   readFileSync(BUNDLED_CLI, "utf8"),
   /@tokenlighten\/agents-md/,
@@ -140,6 +131,11 @@ assert.ok(
 assert.ok(
   packagedFiles.includes("dist/THIRD_PARTY_NOTICES.md"),
   "VS Code .vsix listing does not contain third-party notices",
+);
+assert.equal(
+  packagedFiles.some((path) => /(?:^|\/)core2(?:\/|$)/.test(path)),
+  false,
+  "VS Code .vsix listing contains a Core 2 path",
 );
 assert.equal(
   packagedFiles.includes("SHA256SUMS"),

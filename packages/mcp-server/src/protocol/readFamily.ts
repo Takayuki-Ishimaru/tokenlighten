@@ -45,6 +45,11 @@
 import type { Evidence, Kind, Limit, OmittedClass, Receipt, ToolCall } from "@tokenlighten/types";
 
 import { emittableToolCall, parseProseToolCall } from "./refusal.js";
+// PI-03 attestation tier (default OFF). `clientAcknowledgedPrior` is false for
+// every unattested call, so the two uses below are dead code on the default
+// path — which is exactly the property that keeps this projector's bytes
+// unchanged without the flag.
+import { clientAcknowledgedPrior } from "../state/contextAttestation.js";
 
 type Body = Record<string, unknown>;
 
@@ -447,7 +452,26 @@ function receiptHasContinuation(receipt: Receipt): boolean {
   // Form 1 of the duty: an evidence restatement. `pack-unchanged` addresses
   // every surface it withholds and names the prior call for each, which is a
   // consumer's complete picture of what it holds and where it came from.
-  return receipt.receipt === "pack-unchanged" && receipt.evidence.length > 0;
+  if (receipt.receipt === "pack-unchanged") return receipt.evidence.length > 0;
+  // 2026-08-22 fence-serves-unserved-scope: `decision-unchanged`'s REQUIRED
+  // `certificate` member (A.4) is its own Form-1 restatement — the caller
+  // already holds the prepared act's frontier from the response that
+  // installed the fence, so this receipt needs no synthesised `next`. Before
+  // this, an absent `next` here minted `epochResetCall` below: a
+  // `taskEpoch:"new"` re-pack built from THIS call's own (unrelated) inbound
+  // args, which re-armed the fence with a fresh certificate on every
+  // discovery call it stopped. Measured: 27 such re-packs / 290 KB in one
+  // bench run (T09 rep1 alone: 8 receipts -> 8 re-packs). Ordinary
+  // read_file/search_files discovery no longer reaches this receipt at all
+  // (`state/session.ts`'s `guardExecutionDiscovery` now serves it directly);
+  // what remains is a `task_pack` re-ask a live certificate declined for
+  // cause (partial surface, changed file) — a query MISMATCH is its own
+  // `refusal` with `retry:"new-task"`, never this receipt (see server.ts's
+  // conversion) — and the epoch-reset floor was never a fit for that shape
+  // either, since `context.args` is scoped to THIS call, not to the task the
+  // certificate holds.
+  if (receipt.receipt === "decision-unchanged") return true;
+  return false;
 }
 
 /**
@@ -511,7 +535,24 @@ export function receiptOf(body: Body): Receipt | undefined {
         .filter((entry) => str(entry["handle"]) !== undefined && str(entry["body"]) === undefined)
         .map((entry) => {
           const projected: Body = { handle: entry["handle"], prior: str(entry["prior"]) ?? earlier };
-          keep(projected, entry, ["path", "range", "role"]);
+          // PI-03 `client_acknowledged_prior`: the addressing restatement
+          // (`path`/`range`/`role`) is this receipt's MICRO-RESTATE tier — the
+          // bytes that exist because the server cannot prove the caller still
+          // holds what it was served. A VERIFIED trusted-client-host
+          // attestation that NAMES THIS HANDLE is that proof, and `Evidence`
+          // already declares the resulting shape legal: `path`'s own type doc
+          // reads "absence means the caller already holds the addressing
+          // (receipt compaction, §2.3)".
+          //
+          // The frozen fields are untouched — nothing is added, renamed or
+          // re-typed; three optional fields are simply not emitted. `handle`
+          // and `prior` always survive, so the entry still addresses what it
+          // withholds and [R5-10]'s form-1 duty (a non-empty evidence
+          // restatement) is never violated. Per-HANDLE, not per-response: a
+          // client that attests to holding A and B licenses nothing about C.
+          if (!clientAcknowledgedPrior(str(entry["handle"]))) {
+            keep(projected, entry, ["path", "range", "role"]);
+          }
           return projected;
         });
       if (prior.length === 0) return undefined;
@@ -528,7 +569,13 @@ export function receiptOf(body: Body): Receipt | undefined {
       const handle = str(body["handle"]);
       const sha = str(body["sha"]);
       if (handle === undefined || sha === undefined) return undefined;
-      const servedBy = str(body["served_by"]);
+      // PI-03 `client_acknowledged_prior`: `served_by` is PROVENANCE — "which
+      // earlier call put these bytes in your context" — and it exists to help
+      // a caller that may not remember. An attestation naming this handle is
+      // that memory, proven, so the provenance line becomes restatement of
+      // something the client just asserted it holds. `handle` + `sha` (the
+      // residency claim itself) and `next` are never dropped.
+      const servedBy = clientAcknowledgedPrior(handle) ? undefined : str(body["served_by"]);
       return {
         receipt: "code-unchanged",
         handle,
@@ -1278,7 +1325,7 @@ const PLAN_MEMBERS = [
  */
 const KEPT_ON_TASK_PACK = [
   "profile_binding", "frontier_index", "checks", "verify", "roots", "server_build", "qref",
-  "create_target", "answer_resolution", "advisory",
+  "create_target", "answer_resolution", "advisory", "scope_inferred",
 ] as const;
 
 /**

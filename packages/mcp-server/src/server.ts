@@ -12,7 +12,6 @@
 
 import { existsSync, statSync, readFileSync, readdirSync } from "node:fs";
 import * as path from "path";
-import * as readline from "readline";
 import { randomBytes } from "crypto";
 import { deriveServerBuildId, deriveServerPackageVersion } from "./util/serverBuild.js";
 
@@ -35,7 +34,8 @@ import { attachSearchHop1 } from "./util/searchHopClosure.js";
 import { renameSymbol } from "./tools/renameSymbol.js";
 import { locateTaskContext, projectRootOf } from "./features/locator/locateTaskContext.js";
 import { pathlessExactEdit, pathlessSymbolEdit } from "./write/pathlessEdit.js";
-import { resolveWorkspaceRoot as resolveWorkspaceRootBase, isWorkspaceOverrideAccepted } from "./write/resolveWorkspace.js";
+import { resolveWorkspaceRoot as resolveWorkspaceRootBase } from "./write/resolveWorkspace.js";
+import { isWorkspaceCandidateAccepted, nearestValidWorkspaceAncestor, WORKSPACE_CANDIDATE_LIMIT } from "./workspace/candidates.js";
 import { nestedWorkspaceCrossing, nestedWorkspaceRoots } from "./write/workspaceBoundary.js";
 import {
   adoptGuardedWorkspaceRoot,
@@ -65,10 +65,35 @@ import {
   splitArchiveVirtualPath,
   virtualArchivePath,
 } from "./tools/archive.js";
-import { buildTaskPack, canServeCachedTaskPackReceipt, concernAnchorTokens } from "./features/task-pack/readCodeTaskPack.js";
+import { buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries } from "./features/task-pack/readCodeTaskPack.js";
 import { walkCodeFiles } from "./tools/walkRepo.js";
 import { classifySurface, deriveTokenVariants } from "./util/impact.js";
-import { handleTable, runWithDeclaredWorkspace, shaOfText, shaOfBytes, shortSha, type HandleEntry } from "./util/handles.js";
+import { callWorkspace, handleTable, runWithCallWorkspace, runWithDeclaredWorkspace, setHandlePersistence, shaOfText, shaOfBytes, shortSha, type HandleEntry } from "./util/handles.js";
+// PI-09 (v0.10 alpha.2) explicit state: purpose-bound handles over the
+// per-workspace persistent store. See state/stateHandles.ts's header for the
+// three namespaces and why `context` issuance is deliberately absent.
+import {
+  flushHandleEntries,
+  mintTaskHandle,
+  recordHandleEntry,
+  rehydrateHandleEntry,
+  resolveTaskHandle,
+} from "./state/stateHandles.js";
+// PI-09 close-out: the `operation_id` dedup table the store already keeps
+// (`rememberOperation` / `lookupOperation`). Imported here rather than behind
+// a stateHandles re-export because the idempotency wrapper is a DISPATCH
+// concern, not a handle one — it never mints or validates a token.
+import { stateStoreFor } from "./state/stateStore.js";
+// PI-03 attestation tier (default OFF behind TL_CONTEXT_ATTESTATION). See
+// state/contextAttestation.ts for the channel, the verification order, and the
+// generation-rotation triggers.
+import {
+  mintContextHandle,
+  runWithVerifiedContext,
+  verifyContextAttestation,
+  type VerifiedContextAttestation,
+} from "./state/contextAttestation.js";
+import { CONTEXT_STATE_META_KEY } from "@tokenlighten/types";
 import { resolveMap, resolveDigest, resolveSlice, resolveSliceRanges, extractSymbolsFromFile, READ_SYMBOL_CAP_BYTES } from "./tools/readCodeModes.js";
 // office/csv.ts is pure and dependency-free (unlike office/xlsx.ts, which is
 // dynamic-imported to defer exceljs), so a static import here costs nothing at
@@ -77,18 +102,21 @@ import { csvTable, type CsvTableResult } from "./office/csv.js";
 import { prepareOfficeDocument } from "./office/decrypt.js";
 import { resolveCredentialRef } from "./security/credentials.js";
 import { editArtifact } from "./write/artifactEdit.js";
-import { adaptiveWholeFileEnabled, decisionInvariantStrictEnabled } from "./util/flags.js";
+import { adaptiveWholeFileEnabled, decisionInvariantStrictEnabled, reasoningIrV2Enabled } from "./util/flags.js";
+// V11-04: the ONE advisory Task Reasoning IR v2 seam (trace-only; see its module header).
+import { recordReasoningIrV2FromPack } from "./task-state/irDispatchSeam.js";
 import { deriveCanonicalTaskDecision, enforceCanonicalTaskDecisionAtExit } from "./features/task-pack/canonicalDecision.js";
 import type { TaskPackResult } from "./features/task-pack/model.js";
 import { projectLeanExecutionContract } from "./util/leanExecutionContract.js";
 import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, type ServedRangeLedgerReceipt } from "./state/session.js";
-import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, type BodyMarker } from "./util/verificationPack.js";
+import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, type BodyMarker } from "./util/verificationPack.js";
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
 import { getFunctionalValidationObligation, clearFunctionalValidationObligation, recordExecutedLocate } from "./util/packServeLog.js";
 import { attachSupply } from "./util/attachSupply.js";
 import { mustFetchReadBudget } from "./util/mustFetch.js";
 import { getAdaptiveAdvice } from "./util/adaptive.js";
-import { trace, traceCausalAttestation } from "./util/trace.js";
+import { trace, traceCausalAttestation, runWithTraceCall, setTraceContext, isTraceEnabled } from "./util/trace.js";
+import { classifyRoute } from "./routing/classifier.js";
 import { decideFullRead, TINY_BYTES, TINY_LINES, LARGE_BYTES, LARGE_LINES, GOVERNED_FULL_SERVE_BYTES } from "./util/fullGovernor.js";
 import { buildSmallFile, type SmallFileContentMode } from "./tools/readCodeSmallFile.js";
 import { buildOverview } from "./tools/readCodeOverview.js";
@@ -115,7 +143,7 @@ import {
   withinRefusalBudget,
   type SchemaNode,
 } from "./validation/requestShape.js";
-import { MCP_LANGS, type McpLang, type RefusalCode, type TaskDecision, type TaskExecutionContract, type TaskProfileRequest } from "@tokenlighten/types";
+import { MCP_LANGS, type McpLang, type RefusalCode, type TaskDecision, type TaskExecutionContract, type TaskProfileRequest, type TaskRef } from "@tokenlighten/types";
 import {
   createUsageRecorder,
   estimateTokensFromBytes,
@@ -137,20 +165,32 @@ import {
   PROTOCOL_META,
   declareKind,
   finalizeProtocolResponse,
+  noteCodecTraceWorkspace,
   noteResolvedAction,
   noteResolvedMode,
   noteWorkspaceRoot,
   runWithProtocolCall,
 } from "./protocol/envelope.js";
 import { setEmittedToolCallValidator } from "./protocol/refusal.js";
+// issue #4 (host routing/discovery): the server-level `instructions` string
+// announced on every `initialize` result across all three transport legs.
+// Re-exported so the hand-rolled leg's own tests can import it from here.
+import { SERVER_INSTRUCTIONS } from "./protocol/serverInstructions.js";
+export { SERVER_INSTRUCTIONS } from "./protocol/serverInstructions.js";
 import {
   packUnchangedPriorLabel,
   projectEvidence,
   projectTaskDecision,
   projectTaskRef,
   sanctionFromEvidence,
+  taskDecisionWireViolations,
 } from "./protocol/decisionWire.js";
 import { assertStartupBudgetsAreSane } from "./protocol/budget/wireBudget.js";
+// v0.10 alpha.1 dual-era transport (DESIGN-v0.10-expansion-plan-v1.3.md §4.5).
+// The transport modules import back from this file (advertisedTools, callTool,
+// handleRequest, ...); the cycle is safe because every one of those bindings is
+// read inside a function body at call time, never at module evaluation.
+import { runTransport, runHttpTransport } from "./mcp/transport/index.js";
 
 // ---------------------------------------------------------------------------
 // Workspace root resolution
@@ -176,7 +216,32 @@ function workspaceRootArg(args: readonly string[]): string | undefined {
   return named ?? positional;
 }
 
-let activeRoot = workspaceRootArg(argv) ?? process.env["TOKENLIGHTEN_ROOT"] ?? process.cwd();
+// Exported as a live binding for ./mcp/transport/* (v0.10 alpha.1 transport
+// extraction); assigned exactly once, here.
+export let activeRoot = workspaceRootArg(argv) ?? process.env["TOKENLIGHTEN_ROOT"] ?? process.cwd();
+
+// F-A7 (v0.11 wave C): the client identity `initialize`'s clientInfo declares,
+// captured once per connection below (the only leg where our own code ever
+// sees clientInfo — the SDK-backed legs resolve initialize internally and
+// never surface it here); threaded into ProtocolCallContext.clientId by
+// callToolUninstrumented via resolvedClientId() just below.
+export let capturedClientId: string | undefined;
+
+/** Test-only reset for {@link capturedClientId}. */
+export function resetCapturedClientIdForTest(): void {
+  capturedClientId = undefined;
+}
+
+/**
+ * F-A7: TOKENLIGHTEN_CLIENT_ID overrides/supplies clientId for a leg that
+ * never populates capturedClientId (every leg but the hand-rolled fallback);
+ * an explicit override wins. Undefined resolves to the conservative "unknown"
+ * client profile (protocol/codec/clientProfile.ts) — the designed fallback.
+ */
+function resolvedClientId(): string | undefined {
+  const override = process.env["TOKENLIGHTEN_CLIENT_ID"];
+  return override !== undefined && override !== "" ? override : capturedClientId;
+}
 
 function configuredAllowedParents(_fallbackRoot: string): readonly string[] {
   // The public protocol still honors explicit parent grants, without loading
@@ -200,6 +265,24 @@ function configuredAllowedParents(_fallbackRoot: string): readonly string[] {
 function resolveWorkspaceRoot(cwd: string | undefined, fallbackRoot: string): string {
   return resolveWorkspaceRootBase(cwd, fallbackRoot, configuredAllowedParents(fallbackRoot));
 }
+
+// ---------------------------------------------------------------------------
+// PI-09: install the handle table's durable backing
+// ---------------------------------------------------------------------------
+//
+// Before this, `util/handles.ts`'s own header said the table "is never
+// persisted to disk", and the handle-unknown refusal told the agent so:
+// "handles are session-scoped and do not survive a server restart". Both were
+// true, and both were the T-PI09-03 dead end — every handle an agent held
+// became garbage the moment the server restarted, with a full re-read as the
+// only recovery.
+//
+// The hooks are registered UNCONDITIONALLY: `recordHandleEntry` only buffers,
+// and both hooks resolve to no-ops when the workspace has no writable store
+// (or when `TOKENLIGHTEN_STATE_STORE=off`), so installing them cannot make a
+// read-only or hostile filesystem fail — it degrades to exactly the v0.9
+// behavior the corpus pins.
+setHandlePersistence({ record: recordHandleEntry, rehydrate: rehydrateHandleEntry });
 
 // Read helpers (readFileSafe, readBytesSafe, resolveReal) are imported from
 // util/safePath.ts. Each call site passes an explicit workspace root — worktree-
@@ -225,8 +308,10 @@ const KILL_SWITCH = /^(1|true|yes|on)$/i.test(process.env["TL_KILL_SWITCH"] ?? "
 // build produced it. Computed once at module load (ES module top-level code
 // runs exactly once) — never re-derived per call/response.
 // ---------------------------------------------------------------------------
-const SERVER_BUILD_ID = deriveServerBuildId(import.meta.url);
-const SERVER_PACKAGE_VERSION = deriveServerPackageVersion(import.meta.url);
+export const SERVER_BUILD_ID = deriveServerBuildId(import.meta.url);
+// Exported for ./mcp/transport/* — derived from THIS module's URL, so the
+// transport legs must import it rather than re-derive it from their own depth.
+export const SERVER_PACKAGE_VERSION = deriveServerPackageVersion(import.meta.url);
 // Published to the session layer so responses IT builds — the prepared-stop
 // receipt in particular — can carry the same identity without re-deriving it
 // from a module that is a poor proxy for "did the server's behavior change".
@@ -443,6 +528,19 @@ const ARCHIVE_PROP = {
 
 const TASK_STATE_PROPS = {
   taskEpoch: { type: "string" },
+  // PI-09 (v0.10 alpha.2): the explicit-state REQUEST argument. Deviation D-2
+  // keeps the RESPONSE side free of a `CommonStateOutput` block — the handle
+  // rides `task.id`, which the agent already sees — so this is the only new
+  // wire surface the feature needs. Additive and optional: a legacy caller
+  // that never sends it gets byte-identical v0.9 behavior, which is what the
+  // 245-case replay corpus pins.
+  //
+  // ADVERTISED, not hidden: the server MINTS this value into `task.id` and its
+  // stale-handle refusal instructs replaying it, and "a capability the server
+  // instructs must not be one the schema hides" (the 2026-08-01 surfaceRoles
+  // defect, the same reasoning that re-advertised `qref`). A schema-validating
+  // client would otherwise drop the argument and silently start a fresh task.
+  task_handle: { type: "string", description: "opaque task-state handle: replay a prior task_pack's task.id to continue that task" },
   // §1.3.1(3), C-6: the challenge shape is declared IN FULL, on every tool
   // that accepts it. This is not an ergonomic extra — §2.6 abolishes
   // placeholder-bearing `next_call` templates on the ground that "a challenge
@@ -476,6 +574,28 @@ const TASK_STATE_PROPS = {
   // cooperative partition. Advertised on all three tools so schema-validating
   // clients never drop it (the B1e surfaceRoles lesson).
   lane: { type: "string", description: "isolation key: concurrent agents on one workspace each pass their own fixed value" },
+  // PI-09 close-out (v0.10 deferred cell): the two remaining explicit-state
+  // REQUEST arguments the reconciliation's §6 table lists beside `task_handle`
+  // (`expected_state_version` / `force_serve`; `operation_id` is edit-only and
+  // is declared on edit_file alone — see its own comment there).
+  //
+  // Both are ADDITIVE and OPTIONAL: a caller that sends neither gets
+  // byte-identical behavior, which wireBaselines + the replay corpus pin.
+  // Advertised for the same reason `task_handle`/`lane`/`surfaceRoles` are —
+  // §1.3.1(2)'s advertise-or-delete rule makes the advertised property set the
+  // ACCEPTANCE set, so a hidden argument is an argument a schema-validating
+  // client silently drops (the 2026-08-01 surfaceRoles defect).
+  //
+  // `expected_state_version` is a CAS GUARD, meaningful only beside
+  // `task_handle`: sent alone it is refused rather than ignored, because an
+  // ignored precondition is a precondition that did not hold.
+  expected_state_version: { type: "number", description: "CAS guard for task_handle: refuse rather than act if the task state moved past this version" },
+  // `force_serve` is the SAFE direction (more bytes, never fewer): a caller
+  // whose context was compacted asks for the bodies again, past this session's
+  // served-content receipts. Unconditional — no flag — because withholding
+  // bytes from a caller that says it lost them is the failure this exists to
+  // remove.
+  force_serve: { type: "boolean", description: "context lost: re-serve full bodies, bypassing this session's already-served receipts" },
 } as const;
 
 /**
@@ -484,7 +604,7 @@ const TASK_STATE_PROPS = {
  * `tools/call` accepts are the same set, so "accepted but not advertised" is
  * no longer a state this type can express.
  */
-interface ToolEntry {
+export interface ToolEntry {
   name: string;
   enabled: boolean;
   definition: Record<string, unknown>;
@@ -547,11 +667,54 @@ interface TaskPackQueryResolution {
   fromRef?: true;
 }
 
+/**
+ * F-C1 (wave D / D2, 2026-08-21): the args the guaranteed-receipt preflight
+ * (`canServeCachedTaskPackReceipt`) must be handed — the caller's own args with
+ * the RESOLVED task_pack query spliced in, plus the internal replay marker a
+ * qref resolution implies. Those are exactly the two fields dispatch itself
+ * hands `buildTaskPack` further down, so the preflight's verdict and the
+ * builder's own dedup decision are computed from the SAME request identity
+ * instead of drifting apart the moment a caller uses `qref`.
+ *
+ * A resolution ERROR (query+qref together, or an expired qref) deliberately
+ * keeps the RAW args: dispatch refuses such a call on its own terms a few
+ * hundred lines below, and this preflight must not change WHICH refusal the
+ * caller sees.
+ */
+function taskPackReceiptPreflightArgs(
+  args: Record<string, unknown>,
+  resolution: TaskPackQueryResolution,
+): Record<string, unknown> {
+  if (resolution.error !== undefined) return args;
+  // `taskQueryRefReplay` is internal-only: the two buildTaskPack call sites set
+  // it from THIS resolution and never from the wire, and B5's guard keys off it.
+  // Drop any inbound spelling before re-adding it from the resolution, so this
+  // new path cannot become the one place a caller reaches that marker — which
+  // would also split the preflight's verdict from the build's own dedup
+  // decision, the exact agreement servedRecordPartialSurface.spec.ts pins.
+  const base: Record<string, unknown> = { ...args };
+  delete base["taskQueryRefReplay"];
+  return {
+    ...base,
+    ...(resolution.query.length > 0 ? { query: resolution.query } : {}),
+    ...(resolution.fromRef === true ? { taskQueryRefReplay: true } : {}),
+  };
+}
+
 function resolveTaskPackQueryArg(
   args: Record<string, unknown>,
   workspace: string,
 ): TaskPackQueryResolution {
-  if (args["taskEpoch"] === "new") clearTaskQueryRef(workspace);
+  if (args["taskEpoch"] === "new") {
+    clearTaskQueryRef(workspace);
+    // 2026-08-21 smoke-gate forensics: an explicit new-epoch declaration must
+    // sever the pack-dedupe ledger too, or a workspace path reused by a
+    // later, unrelated task (e.g. a bench harness cell resealed across
+    // separate runs) can have its genuinely-first-served surfaces silently
+    // stripped to a false "— see prior pack" pointer. See
+    // clearPackDedupeForWorkspace's doc comment for the full incident.
+    clearPackDedupeForWorkspace(workspace);
+  }
   const explicit = typeof args["query"] === "string" ? args["query"].trim() : "";
   const requestedRef = typeof args["qref"] === "string" ? args["qref"].trim() : "";
   if (explicit.length > 0 && requestedRef.length > 0) {
@@ -599,7 +762,9 @@ function resolveTaskPackQueryArg(
   return { query: "" };
 }
 
-const ALL_TOOLS: ToolEntry[] = [
+// Exported for ./mcp/transport/* (the advertised-or-refused gate, D11); the
+// single source of truth for the advertised surface stays right here.
+export const ALL_TOOLS: ToolEntry[] = [
   // -------------------------------------------------------------------------
   // 3 consolidated tools (read_file / edit_file / search_files)
   // -------------------------------------------------------------------------
@@ -608,7 +773,7 @@ const ALL_TOOLS: ToolEntry[] = [
     enabled: !KILL_SWITCH,
     definition: {
       name: "read_file",
-      description: "Cheapest file reader (code/docs/config/Office): exact slices+edit handles. Start: mode=task_pack query=<request>",
+      description: "First stop for code/doc tasks incl. unknown-location/multi-file: mode=task_pack query=<request> serves slices+handles.",
       // anthropic/alwaysLoad: clients that defer MCP tool schemas (Claude Code
       // tool search) load these at turn 0 instead of mid-session, which would
       // invalidate the prompt cache. All 3 schemas total ~0.7K tokens.
@@ -769,6 +934,19 @@ const ALL_TOOLS: ToolEntry[] = [
           mode: { type: "string", enum: ["rename"], description: "Special edit mode; currently rename only." },
           to: { type: "string", description: "New symbol name for mode=rename." },
           review: { type: "boolean", description: "Attach bounded review metadata to a successful edit." },
+          // PI-09 close-out: the idempotency key, advertised on edit_file ONLY.
+          //
+          // WHY NOT ON THE READ TOOLS. `operation_id` deduplicates a MUTATING
+          // operation; `read_file` and `search_files` have no operation to
+          // deduplicate, so advertising it there would advertise a capability
+          // dispatch does not honour — the exact inverse of the §1.3.1(2)
+          // advertise-or-delete rule, and the reason `allow_create` was
+          // DELETED rather than declared. A read call that sends it is
+          // therefore REJECTED (the stricter honest option) by the existing
+          // strict recursive `unknown-arguments` fence, with `keys` naming the
+          // advertised set — never accepted-and-ignored, because a silently
+          // dropped idempotency key is a key the caller believes protected it.
+          operation_id: { type: "string", description: "idempotency key: a repeat of the same id replays the recorded outcome, never a second apply" },
           edits: {
             type: "array",
             items: {
@@ -847,15 +1025,23 @@ const ALL_TOOLS: ToolEntry[] = [
     enabled: !KILL_SWITCH,
     definition: {
       name: "search_files",
-      description: "find/symbols/references/diff/tree over code+docs; hits carry path+line+snippet, so a match rarely needs a read.",
+      description: "locate/find/symbols/references/diff/tree over code+docs (repo-wide, .gitignore-aware); hits carry path+line+snippet.",
       _meta: { "anthropic/alwaysLoad": true },
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: "object",
         properties: {
           action: { type: "string", enum: ["find", "symbols", "references", "diff", "locate", "tree"] },
-          query: { type: "string" },
-          queries: { type: "array", items: { type: "string" } },
+          // W9 (2026-08-22): `queries` had NO description and the tool
+          // description never mentioned batching, so the ONLY signal that a
+          // batched find exists was the reactive FIND_HINT_TEXT hint — emitted
+          // once per session, and only AFTER two single-token find calls had
+          // already been billed. Same class as the 2026-07-30 `qref` rot and
+          // the 2026-08-01 `surfaceRoles` rot this schema's own budget rows
+          // record: a capability the server implements and the guide teaches,
+          // invisible in the one place a schema-reading client looks.
+          query: { type: "string", description: "one identifier token for find; batch several with `queries`." },
+          queries: { type: "array", items: { type: "string" }, description: "find: batch several identifiers in ONE call; each term reports matched|absent|unknown (absent = scope-complete, no re-grep)." },
           path: { type: "string" },
           credentialRef: { type: "string" },
           ...ARCHIVE_PROP,
@@ -978,6 +1164,46 @@ export const EDIT_FILE_KNOWN_EDITS_ITEM_ARGS: ReadonlySet<string> = new Set(
   ),
 );
 
+// ---------------------------------------------------------------------------
+// F-R8 (W8-C, 2026-08-22): measured in bench/workflows/runs/
+// 2026-08-22-v011-decision-6t-1 (T05c rep0 arm A) — a solver placed `review`
+// (then, on retry, `replace_all`) inside three `edits[]` items. Both are
+// unknown-arguments refusals by construction (correct — a write tool must
+// fail closed), but neither refusal told the caller anything about WHERE the
+// key it used actually lives:
+//
+//  - `review`/`operation_id`/`cwd`/`lane`/… ARE real edit_file arguments —
+//    just top-level ones. `keys` on a per-item violation only ever lists the
+//    PER-ITEM advertised set (content/expectedSha/handle/path/precondition/
+//    range/replace/search), so a caller who typed a real name saw no
+//    evidence it was real anywhere on the wire.
+//  - `replace_all` is not advertised at EITHER nesting depth. It is the
+//    native Edit tool's vocabulary; edit_file's equivalent is
+//    `precondition:"unique-match"` for a single site, or one `edits[]` item
+//    per site.
+//
+// Both cost the caller a full round trip in the measured transcript. This
+// section only ADDS explanatory text (`detail` and, for the top-level-arg
+// case, `did_you_mean`) to an already-correct refusal — it never changes
+// whether edit_file refuses.
+// ---------------------------------------------------------------------------
+const EDIT_FILE_TOP_LEVEL_ONLY_ARGS: ReadonlySet<string> = new Set(
+  [...EDIT_FILE_KNOWN_ARGS].filter(
+    (key) => key !== "edits" && !EDIT_FILE_KNOWN_EDITS_ITEM_ARGS.has(key),
+  ),
+);
+
+/** The extra guidance for one unknown per-item key, or undefined if neither shape applies. */
+function editFileMisnestedArgHint(key: string): string | undefined {
+  if (key === "replace_all") {
+    return "per-item `replace_all` is not advertised; use `precondition:\"unique-match\"` for a single site or one edit item per site / `edits[]`";
+  }
+  if (EDIT_FILE_TOP_LEVEL_ONLY_ARGS.has(key)) {
+    return `\`${key}\` is a top-level edit_file argument, not a per-edit key — move it up`;
+  }
+  return undefined;
+}
+
 function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<string, unknown> | null {
   // §1.3.1(1) wants ONE recursive engine, so the detection lives in
   // validation/requestShape.ts and this function keeps only the RENDERING.
@@ -1010,12 +1236,30 @@ function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<s
     if (existing !== undefined) existing.arguments.push(nested[2]!);
     else unknownItems.push({ index, arguments: [nested[2]!] });
   }
+  // F-R8: a per-item key that is really one of edit_file's TOP-LEVEL
+  // arguments is a real capability one nesting level too deep, not noise —
+  // say so, and surface it via the existing `did_you_mean` near-miss slot
+  // even though it is a nesting error rather than a spelling one. Keyed off
+  // `violations[0]` because that is the one violation `did_you_mean` (below)
+  // already speaks for.
+  const first = violations[0]!;
+  const firstNested = /^edits\[(\d+)\]\.([\s\S]+)$/.exec(first.field);
+  const firstBareKey = firstNested !== null ? firstNested[2] : first.field;
+  const misnestedDidYouMean =
+    firstBareKey !== undefined && EDIT_FILE_TOP_LEVEL_ONLY_ARGS.has(firstBareKey) ? firstBareKey : undefined;
+  const misnestedHints: string[] = [];
+  for (const key of [...unknownTop, ...unknownItems.flatMap((item) => item.arguments)]) {
+    const hint = editFileMisnestedArgHint(key);
+    if (hint !== undefined && !misnestedHints.includes(hint)) misnestedHints.push(hint);
+  }
   // §1.3.1(4)(5) + CONDITION ②. `keys` is weighed against the bytes THIS
   // payload actually emits, not the shared renderer's shorter body.
   const shape = unknownPropertyRefusal("edit_file", violations)!;
   const pathQualified = {
     field: shape.field,
-    ...(shape.did_you_mean !== undefined ? { did_you_mean: shape.did_you_mean } : {}),
+    ...((shape.did_you_mean ?? misnestedDidYouMean) !== undefined
+      ? { did_you_mean: (shape.did_you_mean ?? misnestedDidYouMean)! }
+      : {}),
     retry: shape.retry,
   };
 
@@ -1040,7 +1284,8 @@ function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<s
     ...(unknownTop.length > 0 ? { unknown_arguments: unknownTop } : {}),
     ...(unknownItems.length > 0 ? { unknown_edits_item_arguments: unknownItems } : {}),
     error:
-      "edit_file refuses arguments outside its advertised schema instead of dropping them — on a write tool a dropped argument can silently change which span is overwritten (a dropped top-level `range` once turned a 113-line replacement into a whole-file overwrite)",
+      "edit_file refuses arguments outside its advertised schema instead of dropping them — on a write tool a dropped argument can silently change which span is overwritten (a dropped top-level `range` once turned a 113-line replacement into a whole-file overwrite)"
+      + (misnestedHints.length > 0 ? ` — ${misnestedHints.join("; ")}` : ""),
     ...(incidentShape
       ? {
           note: "top-level {handle, content} always replaces the handle's ENTIRE range; a line-range replacement is an edits[] item: edits:[{handle, range, content}]",
@@ -1709,32 +1954,6 @@ export const FIND_HINT_TEXT =
   "2nd single-token find call this session — batch related tokens into ONE queries:[...] call (<=5, OR-matched)";
 
 /**
- * Walk up from `requestedPath` (absolute or relative; need not exist) to the
- * nearest ancestor directory that DOES exist on disk — same ancestor-walk
- * shape as createFile.ts's path-escape check (`path.dirname` loop, `parent
- * === cur` as the filesystem-root termination guard), but with no workspace
- * containment bound: this is diagnosing an already-invalid cwd, not scoping a
- * workspace operation, so it may legitimately walk outside any workspace.
- * Returns undefined if nothing along the chain exists as a directory (e.g. an
- * empty string, or every ancestor down to "/" is missing — practically only
- * possible on a broken filesystem).
- */
-function nearestExistingAncestorPath(requestedPath: string): string | undefined {
-  if (!requestedPath) return undefined;
-  let cur = path.resolve(requestedPath);
-  while (true) {
-    try {
-      if (statSync(cur).isDirectory()) return cur;
-    } catch {
-      // Does not exist (or not statable) — keep walking up.
-    }
-    const parent = path.dirname(cur);
-    if (parent === cur) return undefined; // hit filesystem root, nothing existed
-    cur = parent;
-  }
-}
-
-/**
  * A1 (2026-08-04 review): collapse body-bearing arguments to the shared
  * prescription placeholders before echoing a caller's own call shape back in a
  * `next_call` template.
@@ -1824,10 +2043,13 @@ function checkCwdOrRefuse(
   // adoption sites treat as "no override" — used to draw an invalid-cwd refusal
   // on every call. Compare via realpath (resolveReal tolerates a missing path
   // by falling back to path.resolve, so a nonexistent requested cwd simply
-  // won't match — it falls through to the refusal below).
-  if (resolveReal(requested) === resolveReal(fallbackRoot)) return null;
+  // won't match — it falls through to the refusal below). PI-07 (2026-08-20):
+  // this accept check now lives in workspace/candidates.ts's
+  // isWorkspaceCandidateAccepted, which the new candidate/did_you_mean
+  // validators reuse verbatim rather than re-deriving the policy — this call
+  // site is unchanged in effect, only in where the two lines live.
   const allowedParents = configuredAllowedParents(fallbackRoot);
-  if (isWorkspaceOverrideAccepted(requested, allowedParents, fallbackRoot)) {
+  if (isWorkspaceCandidateAccepted(requested, fallbackRoot, allowedParents)) {
     return null; // valid — proceed normally.
   }
   // "resolved": what a call OMITTING cwd resolves to today (the pinned
@@ -1839,7 +2061,13 @@ function checkCwdOrRefuse(
   // one or two segments removed from a real directory, so an agent that reads
   // this can often just fix the last segment and retry rather than guessing
   // blind. Omitted (not present) when nothing existed along the chain.
-  const nearestExisting = nearestExistingAncestorPath(requested);
+  // PI-07 / F-A1-5 fix: nearestValidWorkspaceAncestor (workspace/candidates.ts)
+  // validates every candidate ancestor through the SAME check above before
+  // returning it, so this value is always safe to surface as `did_you_mean`
+  // on ANY tool's refusal (protocol/refusal.ts's mapping) — not just the
+  // read-path tools that re-validate again before silently adopting it
+  // (checkCwdWithCorrection below).
+  const nearestExisting = nearestValidWorkspaceAncestor(requested, fallbackRoot, allowedParents);
   return {
     ok: false,
     reason: "invalid-cwd",
@@ -1882,9 +2110,10 @@ interface CwdCorrection {
 /**
  * True when `p` resolves to the user's home directory ITSELF, not merely
  * somewhere inside it. Guards the nearest_existing branch of
- * checkCwdWithCorrection below: nearestExistingAncestorPath walking a
+ * checkCwdWithCorrection below: the ancestor walk (now
+ * workspace/candidates.ts's nearestValidWorkspaceAncestor) can, from a
  * bogus/sibling cwd (e.g. `<pinnedRoot>/../typo'd-name`, a real fixture
- * shape — pinnedRoot's own parent is $HOME) legitimately lands on $HOME
+ * shape — pinnedRoot's own parent is $HOME), legitimately reach $HOME
  * itself, which PASSES isWorkspaceOverrideAccepted's containment check
  * ($HOME is "within" itself) — but silently adopting the caller's ENTIRE
  * home directory as a read/search workspace is not what "one unambiguous
@@ -1892,7 +2121,11 @@ interface CwdCorrection {
  * action=find over a real $HOME can scan gigabytes and hang the call. A
  * `.claire`->`.claude` correction never hits this (it substitutes one
  * segment; it never walks upward), so only the nearest_existing fallback
- * needs this check.
+ * needs this check. PI-07 (2026-08-20): nearestValidWorkspaceAncestor now
+ * carries its OWN copy of this exact guard too (so the write path, which
+ * never runs checkCwdWithCorrection, inherits the same protection on
+ * `did_you_mean`); this copy stays here unchanged for the read-path
+ * re-validation below.
  */
 function isHomeDirItself(p: string): boolean {
   const home = process.env["HOME"] ?? process.env["USERPROFILE"] ?? "";
@@ -1937,14 +2170,16 @@ function checkCwdWithCorrection(
   }
 
   // nearest_existing only ever makes sense as a correction for an otherwise
-  // well-formed but not-quite-real ABSOLUTE path. nearestExistingAncestorPath
-  // resolves a RELATIVE requested string against path.resolve (i.e. this
-  // SERVER PROCESS's own launch cwd, not anything reflecting caller intent)
-  // before walking up — for ANY nonexistent relative path that walk always
-  // eventually reaches the server's own cwd, which routinely exists and
-  // routinely passes validation, so without this gate a merely-relative cwd
-  // (a real caller mistake `checkCwdOrRefuse` is right to reject) would
-  // silently "correct" to a directory that has nothing to do with the call.
+  // well-formed but not-quite-real ABSOLUTE path. nearestValidWorkspaceAncestor
+  // (workspace/candidates.ts) resolves a RELATIVE requested string against
+  // path.resolve (i.e. this SERVER PROCESS's own launch cwd, not anything
+  // reflecting caller intent) before walking up — for ANY nonexistent
+  // relative path that walk always eventually reaches the server's own cwd,
+  // which routinely exists and (when the server was launched from its own
+  // pinned root, the common case) routinely passes validation, so without
+  // this gate a merely-relative cwd (a real caller mistake `checkCwdOrRefuse`
+  // is right to reject) would silently "correct" to a directory that has
+  // nothing to do with the call.
   if (
     path.isAbsolute(requested) &&
     refusal.nearest_existing !== undefined &&
@@ -2145,17 +2380,29 @@ function readTargetPaths(args: Record<string, unknown>): string[] {
   return paths;
 }
 
-/** Server root + live nested workspaces + other active roots, deduplicated. */
+/**
+ * Server root + live nested workspaces + other active roots, deduplicated,
+ * validated, and capped. PI-07 / F-A1-5 unification: every entry here is
+ * ALREADY a known, already-registered root (not a similarity guess), so
+ * validation is normally a no-op — but routing it through the same
+ * `isWorkspaceCandidateAccepted` check every other producer uses means a
+ * stale/deleted root can never survive into a wire refusal just because it
+ * was still present in an in-memory registry.
+ */
 function workspaceCandidates(
   workspace: string,
   nested: readonly string[],
 ): Array<{ cwd: string; source: string }> {
+  const allowedParents = configuredAllowedParents(workspace);
   return [
     { cwd: workspace, source: "server-default" },
     ...nested.map((cwd) => ({ cwd, source: "nested-worktree" })),
     ...otherActiveRoots(workspace).map((cwd) => ({ cwd, source: "active-session" })),
-  ].filter((candidate, index, all) =>
-    all.findIndex((other) => other.cwd === candidate.cwd) === index);
+  ]
+    .filter((candidate, index, all) =>
+      all.findIndex((other) => other.cwd === candidate.cwd) === index)
+    .filter((candidate) => isWorkspaceCandidateAccepted(candidate.cwd, workspace, allowedParents))
+    .slice(0, WORKSPACE_CANDIDATE_LIMIT);
 }
 
 /**
@@ -2345,11 +2592,29 @@ function servedContentReceipt(args: {
    */
   servedBy?: string;
   extra?: Record<string, unknown>;
+  /** V10-02: the workspace this receipt is for, so this one function can
+   *  trace repeated_range for every mode that funnels through it. Optional
+   *  and additive — omitted callers simply do not emit the event. */
+  workspace?: string;
 }): Record<string, unknown> {
   const { mode, path: filePath, handle, sha, range, symbol, ledger, extra } = args;
   // F3: a receipt that cannot be checked is indistinguishable from a false
   // one — name the call that put these bytes on the wire (~30 B).
   const servedBy = args.servedBy ?? ledger.served_by;
+  // V10-02: repeated_range — a served-range ledger hit answered as a
+  // receipt/prior instead of fresh bytes. This function IS the shared
+  // receipt builder every servedContentReceipt call site already funnels
+  // through, so one trace() call here covers all of them.
+  if (args.workspace !== undefined) {
+    trace("repeated_range", {
+      mode,
+      path: filePath,
+      ...(range !== undefined ? { range } : {}),
+      ...(symbol !== undefined ? { symbol } : {}),
+      complete: ledger.complete,
+      clusters: ledger.clusters,
+    }, args.workspace);
+  }
   return {
     mode,
     path: filePath,
@@ -2369,6 +2634,12 @@ function servedContentReceipt(args: {
       complete: ledger.complete,
     },
     note: SERVED_CONTENT_RECEIPT_NOTE,
+    // A partial ledger receipt must point straight at the exact windows it did
+    // not establish. This is a fresh slice, not a task re-pack or a replay of
+    // the already-served range above.
+    ...(ledger.unserved.length > 0
+      ? { next: `read_file mode=slice handle=${handle} ranges=${JSON.stringify(ledger.unserved)}` }
+      : {}),
     ...(extra ?? {}),
   };
 }
@@ -2446,6 +2717,7 @@ async function buildFullDowngradePayload(args: {
     | "per-path-cap-reached"
     | "per-task-cap-reached"
     | "tiny-task-cap-reached"
+    | "tiny-skeleton-cap-reached"
     | "allowfull-task-cap-reached"
     | "candidate-pack-full-repeat"
     | "full-downgraded";
@@ -2468,6 +2740,22 @@ async function buildFullDowngradePayload(args: {
   // re-serve of what it has, and never a zero-content skeleton.
   if (wasFullyServed(workspace, filePath, sha)) {
     recordReadPath(workspace, filePath);
+    // V10-02: repeated_range — a wasFullyServed ledger hit answered as a
+    // code-unchanged receipt instead of a re-serve. This function is the
+    // single builder all three governed-downgrade call sites already share.
+    trace("repeated_range", { mode: "full", path: filePath, reason, complete: true }, workspace);
+    const totalLines = countLines(content);
+    const coverage = servedRangeCoverage(workspace, filePath, sha, totalLines);
+    const servedBy = coverage?.served[0] === undefined
+      ? undefined
+      : servedRangeReceipt(
+          workspace,
+          filePath,
+          sha,
+          coverage.served[0][0],
+          coverage.served[0][1],
+          totalLines,
+        )?.served_by;
     return {
       mode: "full",
       downgraded_from: "full",
@@ -2496,18 +2784,18 @@ async function buildFullDowngradePayload(args: {
       // wire, so the COVERAGE summary must come from the range ledger, which
       // now books only what shipped. Fall back to the old shape only when the
       // range ledger has nothing for this sha (e.g. TL_SERVED_RANGE_LEDGER=0).
-      summary: (() => {
-        const coverage = servedRangeCoverage(workspace, filePath, sha, countLines(content));
-        if (coverage === undefined) {
-          return { served: [`1-${countLines(content)}`], complete: true };
-        }
-        return {
-          served: coverage.served.map(([start, end]) => `${start}-${end}`),
-          ...(coverage.unserved.length > 0 ? { unserved: coverage.unserved } : {}),
-          complete: coverage.complete,
-        };
-      })(),
+      ...(servedBy !== undefined ? { served_by: servedBy } : {}),
+      summary: coverage === undefined
+        ? { served: [`1-${totalLines}`], complete: true }
+        : {
+            served: coverage.served.map(([start, end]) => `${start}-${end}`),
+            ...(coverage.unserved.length > 0 ? { unserved: coverage.unserved } : {}),
+            complete: coverage.complete,
+          },
       note: SERVED_CONTENT_RECEIPT_NOTE,
+      ...(coverage !== undefined && coverage.unserved.length > 0
+        ? { next: `read_file mode=slice handle=${handleId} ranges=${JSON.stringify(coverage.unserved)}` }
+        : {}),
       ...(allowFullWouldHelp ? { allow_full_would_help: true } : {}),
     };
   }
@@ -2524,10 +2812,11 @@ async function buildFullDowngradePayload(args: {
   // OTHER files"; the honest answer is the file's structure plus the exact
   // slice call that gets the part actually wanted, not another head.
   //
-  // Deliberately NOT applied to "candidate-pack-full-repeat": T05c rep0's
-  // recovery depended on that path still serving content, and the candidate-flow
-  // work (B1c) landed this same wave. Every other reason keeps the W1 head.
-  if (reason === "per-task-cap-reached") {
+  // Non-tiny candidate-pack repeats deliberately keep the W1 content path:
+  // T05c recovery depended on that path still serving content. Tiny files are
+  // the exception because their governed head would resend the whole body.
+  const tinyShapeDowngrade = bytes <= TINY_BYTES && countLines(content) <= TINY_LINES;
+  if (reason === "per-task-cap-reached" || reason === "tiny-skeleton-cap-reached" || tinyShapeDowngrade) {
     const totalLines = countLines(content);
     // F1 wave 2 note: with honest recording, `unserved` can now include a gap
     // that is purely an elided comment block. Naming it is not wrong — those
@@ -2888,6 +3177,84 @@ function buildFullServePayload(args: {
 }
 
 /**
+ * A partial task-pack/slice makes some file lines resident, but a later
+ * whole-file request must still serve every line the caller does not hold.
+ * Return mixed per-window evidence so the v1 projector can preserve both facts:
+ * fresh gaps carry code and resident gaps carry code_unchanged provenance.
+ */
+function buildLedgerDifferenceFullPayload(args: {
+  workspace: string;
+  filePath: string;
+  content: string;
+  handleId: string;
+  sha: string;
+  keepComments: boolean;
+  mode: "full" | "auto";
+  /** Coverage observed before a helper resolves a full expansion. */
+  priorCoverage?: ReturnType<typeof servedRangeCoverage>;
+}): Record<string, unknown> | undefined {
+  const totalLines = countLines(args.content);
+  const coverage = args.priorCoverage ?? servedRangeCoverage(args.workspace, args.filePath, args.sha, totalLines);
+  if (coverage === undefined || coverage.complete) return undefined;
+
+  const lines = args.content.split(/\r?\n/);
+  const segments: Array<Record<string, unknown>> = [];
+  const notes: string[] = [];
+  const serveCall = beginServeCall(args.workspace);
+
+  const appendFresh = (start: number, end: number): void => {
+    const raw = lines.slice(start - 1, end).join("\n");
+    const display = args.keepComments
+      ? { content: raw, note: undefined as string | undefined }
+      : elideDocCommentsForDisplay(raw, languageForPath(args.filePath), false, start);
+    segments.push({ range: `${start}-${end}`, code: display.content });
+    if (display.note !== undefined) notes.push(`${start}-${end}: ${display.note}`);
+    for (const [spanStart, spanEnd] of servedSpansOfDisplayedText(start, display.content, end)) {
+      recordServedRange(
+        args.workspace,
+        args.filePath,
+        args.sha,
+        spanStart,
+        spanEnd,
+        totalLines,
+        { mode: args.mode, range: `${start}-${end}`, call: serveCall },
+      );
+    }
+  };
+
+  let cursor = 1;
+  for (const [start, end] of coverage.served) {
+    if (cursor < start) appendFresh(cursor, start - 1);
+    const receipt = servedRangeReceipt(
+      args.workspace,
+      args.filePath,
+      args.sha,
+      start,
+      end,
+      totalLines,
+    );
+    segments.push({
+      range: `${start}-${end}`,
+      code_unchanged: true,
+      ...(receipt?.served_by !== undefined ? { served_by: receipt.served_by } : {}),
+    });
+    cursor = end + 1;
+  }
+  if (cursor <= totalLines) appendFresh(cursor, totalLines);
+
+  if (!segments.some((segment) => typeof segment["code"] === "string")) return undefined;
+  return {
+    mode: args.mode,
+    path: args.filePath,
+    handle: args.handleId,
+    sha: shortSha(args.sha),
+    total_lines: totalLines,
+    segments,
+    ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
+  };
+}
+
+/**
  * Resolve read_code mode=full for exactly one path: office-file redirect
  * (unless allowFull), then the full-read governor (byte cap, per-path/
  * per-task budgets, C5 auto-allow), then the success payload. Each call is
@@ -2906,6 +3273,7 @@ async function resolveFullReadForPath(
     maxTokens?: number;
     credentialRef?: string;
     credentialPassword?: string;
+    forceServe?: boolean;
   } = {},
 ): Promise<FullReadResolution> {
   const ext = (filePath.toLowerCase().match(/\.([^.\\/]+)$/)?.[1]) ?? "";
@@ -3075,19 +3443,23 @@ async function resolveFullReadForPath(
   // Governor check: consult decideFullRead before expanding. Preserves
   // anti-abuse intent (PER_PATH_FULL_CAP, PER_TASK_FULL_CAP, adaptive
   // per-task tightening) — allowFull bypasses only the per-task cap, never
-  // the per-path cap (fullGovernor.ts). Each paths[] item hits this SAME
-  // governor call as a single-path call would — no cap is weakened or
-  // bypassed by batching.
-  const govDecision = decideFullRead({
-    workspace,
-    path: filePath,
-    byteSize: fullBytes,
-    lineCount: fullLineCount,
-    sha: fullSha,
-    allowFull: allowFullRequested,
-    fileHandle: govHEntry.id,
-  });
-  if (govDecision.decision !== "allow") {
+  // the per-path cap (fullGovernor.ts). `force_serve` is narrower: it bypasses
+  // repeat-read receipts/governor state only after the byte cap above has
+  // accepted the payload, so it re-sends a cap-fitting body without raising
+  // either content ceiling. Each paths[] item otherwise hits this SAME
+  // governor call as a single-path call would.
+  const govDecision = officeOpts.forceServe === true
+    ? undefined
+    : decideFullRead({
+        workspace,
+        path: filePath,
+        byteSize: fullBytes,
+        lineCount: fullLineCount,
+        sha: fullSha,
+        allowFull: allowFullRequested,
+        fileHandle: govHEntry.id,
+      });
+  if (govDecision !== undefined && govDecision.decision !== "allow") {
     const allowFullWouldHelp = !allowFullRequested && govDecision.reason === "per-task-cap-reached";
     const hint = govDecision.reason === "candidate-pack-full-repeat"
       ? "A candidate-list task pack is pending: its served candidate handles already carry the disambiguation bodies — choose among them instead of further full reads. Pass taskEpoch:\"new\" only for a genuinely different task."
@@ -3102,6 +3474,7 @@ async function resolveFullReadForPath(
         : (govDecision.reason === "per-path-cap-reached"
             || govDecision.reason === "per-task-cap-reached"
             || govDecision.reason === "tiny-task-cap-reached"
+            || govDecision.reason === "tiny-skeleton-cap-reached"
             || govDecision.reason === "allowfull-task-cap-reached"
             || govDecision.reason === "candidate-pack-full-repeat")
           ? govDecision.reason
@@ -3274,6 +3647,43 @@ const UNREAD_SCAN_MAX_FILES = 400;
 const UNREAD_SCAN_MAX_FILE_BYTES = 256 * 1024;
 const UNREAD_NOTE_MAX_CHARS = 170;
 
+/** Small single-file edits at or below this hunk size skip the lexical sibling note by default. */
+export const UNREAD_NOTE_MAX_HUNK_LINES = 40;
+
+function unreadNoteSpecificityEnabled(): boolean {
+  return (process.env["TL_UNREAD_NOTE_SPECIFICITY"] ?? "").trim().toLowerCase() !== "off";
+}
+
+function unreadNoteMaxHunkLines(): number {
+  const raw = (process.env["TL_UNREAD_NOTE_MAX_HUNK_LINES"] ?? "").trim();
+  if (!/^\d+$/.test(raw)) return UNREAD_NOTE_MAX_HUNK_LINES;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : UNREAD_NOTE_MAX_HUNK_LINES;
+}
+
+/** Sum of each search/replace item's larger side; non-hunk edit shapes stay unknown. */
+export function editHunkLineCount(args: Record<string, unknown>): number | undefined {
+  const count = (value: string | undefined): number =>
+    value === undefined || value.length === 0 ? 0 : value.split(/\r?\n/).length;
+  let total = 0;
+  let sawHunk = false;
+  for (const hunks of editHunksByPath(args).values()) {
+    for (const hunk of hunks) {
+      if (hunk.search === undefined && hunk.replace === undefined) continue;
+      sawHunk = true;
+      total += Math.max(count(hunk.search), count(hunk.replace));
+    }
+  }
+  return sawHunk ? total : undefined;
+}
+
+/** Rule B: keep only code-shaped hunk identifiers, not ordinary shared domain prose. */
+function specificIdentifiersFromEditArgs(args: Record<string, unknown>): string[] {
+  return identifiersFromEditArgs(args).filter(
+    (token) => /[a-z][A-Z]/.test(token) || token.includes("_") || /^[A-Z0-9]{3,}$/.test(token),
+  );
+}
+
 /**
  * Extracts the workspace-relative path(s) a (successful) edit_code result
  * touched. Mirrors withReview's isBatch/touchedPaths split (applyEditsMulti
@@ -3324,11 +3734,24 @@ function topDirOf(relPath: string): string {
  * UNREAD_SCAN_MAX_FILES, and stops as soon as a file matches EVERY one of
  * the session's concern tokens (no later candidate could score higher).
  */
-async function buildUnreadSiblingNote(workspace: string, editedPaths: readonly string[]): Promise<string | undefined> {
+async function buildUnreadSiblingNote(
+  workspace: string,
+  editedPaths: readonly string[],
+  hunkArgs: Record<string, unknown>,
+): Promise<string | undefined> {
   const anchor = editedPaths[0];
   if (anchor === undefined) return undefined;
   const concernTokens = getConcernTokens(workspace);
   if (concernTokens.length === 0) return undefined;
+
+  const hunkLines = editHunkLineCount(hunkArgs);
+  const smallSingleFile = unreadNoteSpecificityEnabled()
+    && editedPaths.length === 1
+    && hunkLines !== undefined
+    && hunkLines <= unreadNoteMaxHunkLines();
+  const hunkIdentifiers = smallSingleFile ? specificIdentifiersFromEditArgs(hunkArgs) : [];
+  // No identifier can satisfy rule B, so avoid paying for the family scan.
+  if (smallSingleFile && hunkIdentifiers.length === 0) return undefined;
 
   const detectedRoot = projectRootOf(anchor, workspace);
   const familyRoot = detectedRoot !== "" ? detectedRoot : topDirOf(anchor);
@@ -3363,6 +3786,9 @@ async function buildUnreadSiblingNote(workspace: string, editedPaths: readonly s
     const lower = text.toLowerCase();
     const hitTokens = concernTokens.filter((t) => lower.includes(t));
     if (hitTokens.length < 2) continue;
+    // Rule C suppresses a small single-file hunk unless rule B proves that
+    // an identifier from that actual hunk also occurs in this flagged target.
+    if (smallSingleFile && !hunkIdentifiers.some((token) => lower.includes(token.toLowerCase()))) continue;
 
     if (
       best === undefined ||
@@ -3401,6 +3827,11 @@ export function recordTaskPackSurfaceReads(workspace: string, result: unknown): 
           Array.isArray(concern.evidence) ? concern.evidence : [])
       : []),
   ];
+  // V10-02: post_edit_readback — narrowest existing seam every task_pack
+  // read-exit already funnels through (4 call sites, one function). Gated on
+  // isTraceEnabled() so the getEditedPaths() lookup itself — not just the
+  // eventual trace() call — costs nothing when TL_TRACE is off.
+  const editedPaths = isTraceEnabled() ? new Set(getEditedPaths(workspace)) : undefined;
   for (const surface of surfaces) {
     if (
       surface &&
@@ -3408,6 +3839,9 @@ export function recordTaskPackSurfaceReads(workspace: string, result: unknown): 
       surface.code !== undefined
     ) {
       recordReadPath(workspace, surface.path);
+      if (editedPaths?.has(surface.path)) {
+        trace("post_edit_readback", { path: surface.path }, workspace);
+      }
     }
   }
 }
@@ -3612,6 +4046,39 @@ export function recordTaskPackExecution(
     evidence: emittedEvidence,
   });
 
+  // -------------------------------------------------------------------------
+  // DECISION-WIRE CONFORMANCE, at the same fence and on the same terms as the
+  // canonical repair above (2026-08-20).
+  //
+  // `projectTaskDecision` now makes the one rule below STRUCTURALLY true — it
+  // degrades a candidate-less `choose-candidate` rather than emitting it — so
+  // this is a residual check in exactly the sense `fence.residual` is: it
+  // should never fire, and its whole value is that CI hears about it if it
+  // ever does. Strict mode is on under vitest and off in production, so a live
+  // agent can never be handed an RPC error by a fence (`flags.ts`'s own
+  // rationale for `TL_DECISION_INVARIANT_STRICT`), while a regression that
+  // reopens the class fails the suite loudly.
+  //
+  // `projectTaskPackWire`'s second projector call is deliberately NOT fenced
+  // here: its contract is "WIRE ONLY" — it registers no fence, arms no brake
+  // and runs no repair, and adding one would be the §0.2 semantics change that
+  // comment forbids. It calls the same projector, so it inherits the
+  // structural guarantee regardless; only the CI alarm is scoped to this site.
+  // -------------------------------------------------------------------------
+  const decisionViolations = taskDecisionWireViolations(decision);
+  if (decisionViolations.length > 0) {
+    trace("decision_wire_conformance", {
+      violations: decisionViolations,
+      code: (decision as { code?: unknown } | undefined)?.code,
+      coverage_reason: result["coverage_reason"],
+      route: (result["route"] as { action?: unknown } | undefined)?.action,
+      evidence: emittedEvidence.length,
+    }, workspace);
+    if (decisionInvariantStrictEnabled()) {
+      throw new Error(`task-pack decision wire conformance: ${decisionViolations.join(", ")}`);
+    }
+  }
+
   // A.2.3: identity and replay token are two things, so two fields. `id` falls
   // back to the same `task-<sha16(profile\0query)>` derivation the certificate
   // uses (readCodeTaskPack.ts's `deterministicCertificate`), so a pack with no
@@ -3621,11 +4088,11 @@ export function recordTaskPackExecution(
     || (result["profile_binding"] as { selected?: unknown } | undefined)?.selected === "answer"
     ? "answer"
     : "generic";
-  const task = projectTaskRef(
+  const task = withTaskHandle(projectTaskRef(
     result,
     effectiveContract,
     `task-${shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16)}`,
-  );
+  ));
 
   // D10 (2026-08-14): `TL_LEAN_CONTRACT` is deleted. The lean projection is the
   // ONLY execution-contract shape that reaches the wire — the full internal
@@ -3674,6 +4141,30 @@ export function recordTaskPackExecution(
  * override: a contract this projector CAN read still wins, so the canonical
  * projection remains the only source of truth wherever one exists.
  */
+/**
+ * PI-09 / deviation D-2: `task_handle` RIDES `TaskRef.id` rather than becoming a
+ * top-level `CommonStateOutput` field, so the identity the agent already sees
+ * is the identity it can hand back — no new response surface, no per-response
+ * fixed cost, no second spelling of task identity to keep in sync.
+ *
+ * The projected fingerprint becomes the STORED identity and the opaque handle
+ * becomes the WIRE identity. When no durable store is available (read-only
+ * workspace, `TOKENLIGHTEN_STATE_STORE=off`, a call with no resolved
+ * workspace), the fingerprint ships exactly as it did in v0.9 — degradation is
+ * a smaller guarantee, never a wrong one.
+ */
+function withTaskHandle(task: TaskRef): TaskRef {
+  const workspace = callWorkspace();
+  if (workspace === undefined) return task;
+  const handle = mintTaskHandle(workspace, {
+    taskFingerprint: task.id,
+    ...(task.replay !== undefined ? { replay: task.replay } : {}),
+    coverage: task.coverage,
+    mintedAtMs: Date.now(),
+  });
+  return handle === undefined ? task : { ...task, id: handle };
+}
+
 function projectTaskPackWire(
   result: Record<string, unknown>,
   query: string,
@@ -3703,11 +4194,11 @@ function projectTaskPackWire(
     || (result["profile_binding"] as { selected?: unknown } | undefined)?.selected === "answer"
     ? "answer"
     : "generic";
-  result["task"] = projectTaskRef(
+  result["task"] = withTaskHandle(projectTaskRef(
     result,
     contract,
     `task-${shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16)}`,
-  );
+  ));
   result["profile"] = profile;
   if (decision !== undefined) result["decision"] = decision;
   result["evidence"] = evidence;
@@ -3725,9 +4216,45 @@ function projectTaskPackWire(
  * The section is entirely absent when nothing references the edited files.
  */
 function buildVerificationBody(workspace: string, editArgs?: Record<string, unknown>): Record<string, unknown> | undefined {
+  return buildVerificationBodyDetailed(workspace, editArgs).manifest;
+}
+
+/**
+ * W9 (2026-08-22 create-terminal-proof): buildVerificationBody used to
+ * collapse two different "nothing rides this response" reasons into the
+ * same `undefined` — genuinely nothing computable (no test/mock/compile-fact
+ * anywhere references the edited file(s), most commonly a brand-new file)
+ * versus merely "already served this session, staying quiet" (the
+ * unservedVerificationPaths dedup just below). Only the FIRST is something
+ * the caller should be told about explicitly; the second is intentional
+ * silence, not a gap. This split lets attachVerification attach an honest
+ * `verification: {status:"not-applicable", reason}` on the first case only,
+ * so an agent that just created a file (or edited one with no referencing
+ * test) gets a definite "nothing to verify against" instead of inferring it
+ * from the mere absence of a `verification` key — indistinguishable, from
+ * the wire alone, from every other reason the key can be missing (dedup,
+ * kit_unchanged, budget-omitted bodies all leave the key ABSENT or PRESENT
+ * for unrelated reasons; see attachVerification's own comment).
+ */
+function buildVerificationBodyDetailed(
+  workspace: string,
+  editArgs?: Record<string, unknown>,
+): { manifest: Record<string, unknown> | undefined; notApplicable: boolean } {
   const edited = getEditedPaths(workspace);
-  if (edited.length === 0) return undefined;
-  if (unservedVerificationPaths(workspace, edited).length === 0) return undefined;
+  if (edited.length === 0) return { manifest: undefined, notApplicable: false };
+  // PI-09 close-out: `force_serve:true` re-serves the verification kit in
+  // full. All three suppressions below — the per-path already-covered gate,
+  // the consecutive `kit_unchanged` receipt, and the session-once body
+  // inlining — are ledger claims about the caller's context, and the caller
+  // has just said that context is gone. The kit is exactly the material an
+  // agent needs to finish a verify step after a compaction, so withholding it
+  // here is the most expensive place to be wrong.
+  const forceServe = editArgs?.["force_serve"] === true;
+  // Already served this exact edited set this session — stay silent. This is
+  // NOT "not-applicable": a kit exists, the caller already has it.
+  if (!forceServe && unservedVerificationPaths(workspace, edited).length === 0) {
+    return { manifest: undefined, notApplicable: false };
+  }
   // K2 threading (2026-08-01 verify-kit-diet): when the edit args are in hand,
   // mine the search/replace hunk text for the PRECISE identifiers this edit
   // touched — sharper than the manifest's edited-file-content proxy — so the
@@ -3737,13 +4264,17 @@ function buildVerificationBody(workspace: string, editArgs?: Record<string, unkn
   const manifest = buildVerificationManifest(workspace, edited, {
     // K3a: the edit-attachment path is where consecutive identical kits were
     // measured riding back-to-back responses — dedupe applies HERE only.
-    dedupeConsecutive: true,
+    dedupeConsecutive: !forceServe,
     ...(changedIdentifiers.length > 0 ? { changedIdentifiers } : {}),
   });
   // Mark the CURRENT set covered either way — a later edit adding a new file
   // re-qualifies via the unserved check above.
   markVerificationPathsServed(workspace, edited);
-  if (manifest === undefined) return undefined;
+  // Genuinely nothing computable — no test/mock/compile-fact anywhere
+  // references the edited file(s). Distinct from every dedup/budget reason
+  // above and below: those all return a DEFINED manifest (kit_unchanged,
+  // omitted-body surfaces); this is the one case with no manifest at all.
+  if (manifest === undefined) return { manifest: undefined, notApplicable: true };
   // Pass 1 — session-once inlining, path-keyed in the shared served-surface
   // ledger (all three namespaces are workspace-relative file paths, and a body
   // served under any role is served). A body dropped here loses only `code`;
@@ -3751,22 +4282,28 @@ function buildVerificationBody(workspace: string, editArgs?: Record<string, unkn
   // AFTER every family has been walked — which is exactly why the labelling
   // cannot run per-family: one path can ride both as a role-mock surface
   // (body-less by design) and as a mock header served in this same response.
-  const surfaces = manifest.surfaces.map((s) => dropServedBody(workspace, s));
-  const linkSet = manifest.link_set.map((entry) => dropServedBody(workspace, entry));
+  const keepBody = <T extends { path: string; code?: string; body?: BodyMarker; content_completeness?: "partial" }>(
+    entry: T,
+  ): T | Omit<T, "code"> => (forceServe ? entry : dropServedBody(workspace, entry));
+  const surfaces = manifest.surfaces.map(keepBody);
+  const linkSet = manifest.link_set.map(keepBody);
   const harness = manifest.harness === undefined
     ? undefined
     : {
       ...manifest.harness,
       ...(manifest.harness.mock_headers !== undefined
-        ? { mock_headers: manifest.harness.mock_headers.map((entry) => dropServedBody(workspace, entry)) }
+        ? { mock_headers: manifest.harness.mock_headers.map(keepBody) }
         : {}),
     };
-  return labelKitBodies(workspace, {
-    ...manifest,
-    surfaces,
-    link_set: linkSet,
-    ...(harness !== undefined ? { harness } : {}),
-  });
+  return {
+    manifest: labelKitBodies(workspace, {
+      ...manifest,
+      surfaces,
+      link_set: linkSet,
+      ...(harness !== undefined ? { harness } : {}),
+    }),
+    notApplicable: false,
+  };
 }
 
 /**
@@ -3826,6 +4363,10 @@ function verificationBodyHeld(
   if (identity.lines < 1) return undefined;
   const receipt = servedRangeReceipt(workspace, rel, identity.sha, 1, identity.lines, identity.lines);
   if (receipt === undefined) return undefined;
+  // V10-02: repeated_range — a served-range ledger hit suppressed this
+  // verification-kit body. Distinct seam from servedContentReceipt (a
+  // different response shape) but the SAME underlying ledger-hit concept.
+  trace("repeated_range", { mode: "verification", path: rel, complete: receipt.complete }, workspace);
   return receipt.served_by !== undefined ? { by: receipt.served_by } : {};
 }
 
@@ -4033,12 +4574,41 @@ export function attachVerificationAdvisory(
   };
 }
 
+/**
+ * W9 (2026-08-22 create-terminal-proof): true only for a successful CREATE
+ * dispatch response — `read_back` and numeric `total_lines` are set
+ * unconditionally together, exactly once, by server.ts's create branch
+ * (createFile dispatch) and nowhere else. Used only to word the
+ * not-applicable reason below; attachAppliedReadback's own total_lines
+ * fallback does not depend on this helper.
+ */
+function isCreateDispatchResult(result: Record<string, unknown>): boolean {
+  return result["read_back"] !== undefined && typeof result["total_lines"] === "number";
+}
+
+function verificationNotApplicableReason(result: Record<string, unknown>): string {
+  return isCreateDispatchResult(result)
+    ? "new file — no test/mock references it"
+    : "no referencing test, mock, or compile fact";
+}
+
 function attachVerification(result: Record<string, unknown>, workspace: string, editArgs?: Record<string, unknown>): Record<string, unknown> {
   try {
     if ((result as { ok?: boolean }).ok === false) return result;
-    const manifest = buildVerificationBody(workspace, editArgs);
-    if (manifest === undefined) return result;
-    return attachVerificationAdvisory(result, manifest);
+    const { manifest, notApplicable } = buildVerificationBodyDetailed(workspace, editArgs);
+    if (manifest !== undefined) return attachVerificationAdvisory(result, manifest);
+    // W9: fires ONLY when neither a verification kit NOR a closure check
+    // landed on this response. attachClosure always runs before this
+    // (finishEdit calls it first), so result["closure"] already tells us
+    // whether it had something to say — never overridden here. Never fires
+    // on dedup/budget silence: notApplicable is false in both of those.
+    if (notApplicable && result["closure"] === undefined) {
+      return {
+        ...result,
+        verification: { status: "not-applicable" as const, reason: verificationNotApplicableReason(result) },
+      };
+    }
+    return result;
   } catch {
     return result;
   }
@@ -4098,14 +4668,26 @@ function braceDelta(search: string, replace: string): number {
  * K2 threading (2026-08-01 verify-kit-diet): identifier tokens mined from the
  * edit call's own search/replace hunk text — the exact code this edit touched.
  * Feeds buildVerificationManifest's relevance gate (options.changedIdentifiers).
+ *
+ * K2 tokenizer alignment (2026-08-22): reuses verificationPack.ts's own
+ * identifierTokens instead of a separate ad-hoc regex (length>=3, no
+ * stopwords). The two tokenizers disagreeing meant a hunk touching only
+ * short/stopword text (e.g. a 3-char method name plus its `public`/`return`
+ * scaffolding) could mine a set that activated the relevance gate with
+ * tokens the kit side's OWN content scanner can never produce — guaranteeing
+ * zero overlap and dropping a real referencing test regardless of how
+ * plainly it exercised the edit. Reusing identifierTokens closes the
+ * mismatch by construction. Exported for verificationPack.spec.ts, which
+ * reproduces the asymmetry directly against this function feeding
+ * buildVerificationManifest's changedIdentifiers.
  */
-function identifiersFromEditArgs(args: Record<string, unknown>): string[] {
+export function identifiersFromEditArgs(args: Record<string, unknown>): string[] {
   const out = new Set<string>();
   for (const hunks of editHunksByPath(args).values()) {
     for (const hunk of hunks) {
       for (const text of [hunk.search, hunk.replace]) {
         if (typeof text !== "string") continue;
-        for (const m of text.matchAll(/[A-Za-z_$][A-Za-z0-9_$]{2,}/g)) out.add(m[0]);
+        for (const tok of identifierTokens(text)) out.add(tok);
       }
     }
   }
@@ -4149,10 +4731,14 @@ async function attachAppliedReadback(
 ): Promise<Record<string, unknown>> {
   try {
     const single = typeof (result as { path?: unknown }).path === "string"
-      ? [{ path: (result as { path: string }).path, lines: (result as { lines?: unknown }).lines }]
+      ? [{
+          path: (result as { path: string }).path,
+          lines: (result as { lines?: unknown }).lines,
+          total_lines: (result as { total_lines?: unknown }).total_lines,
+        }]
       : [];
     const files = Array.isArray((result as { files?: unknown }).files)
-      ? ((result as { files: Array<{ path?: unknown; lines?: unknown }> }).files)
+      ? ((result as { files: Array<{ path?: unknown; lines?: unknown; total_lines?: unknown }> }).files)
       : single;
     if (files.length === 0) return result;
     const hunks = editHunksByPath(args);
@@ -4160,9 +4746,23 @@ async function attachAppliedReadback(
     const applied: Array<Record<string, unknown>> = [];
     let total = 0;
     const contentCache = new Map<string, string[] | null>();
+    let wholeFileEntries = 0;
     for (const f of files.slice(0, APPLIED_MAX_ENTRIES)) {
-      if (typeof f.path !== "string" || typeof f.lines !== "string") continue;
-      const m = f.lines.match(/^(\d+)(?:-(\d+))?$/);
+      if (typeof f.path !== "string") continue;
+      // Terminal proof for create (2026-08-22): a create carries no edited
+      // span — the whole file is new, so createFile's dispatch reports
+      // `total_lines` instead of `lines` (editFamily.ts's editedRows already
+      // normalizes this same asymmetry for the wire `range`). Treat it the
+      // same way here so a create earns the SAME slice_sha/head/applied_note
+      // terminal proof a search/replace edit already gets, instead of the
+      // caller re-reading its own just-written bytes to confirm them.
+      const linesSpec = typeof f.lines === "string"
+        ? f.lines
+        : typeof f.total_lines === "number"
+          ? `1-${Math.max(1, f.total_lines)}`
+          : undefined;
+      if (linesSpec === undefined) continue;
+      const m = linesSpec.match(/^(\d+)(?:-(\d+))?$/);
       if (m === null) continue;
       const start = parseInt(m[1]!, 10);
       const end = m[2] !== undefined ? parseInt(m[2], 10) : start;
@@ -4176,8 +4776,14 @@ async function attachAppliedReadback(
         contentCache.set(f.path, lines);
       }
       if (lines === null) continue;
-      let from = Math.max(1, start - APPLIED_CONTEXT_LINES);
-      let to = Math.min(lines.length, end + APPLIED_CONTEXT_LINES);
+      // A create (total_lines, no `lines` span) IS the whole file: no ±context
+      // and no enclosing-symbol upgrade apply, and the window must not run
+      // past total_lines onto the phantom "" that `.split("\n")` yields after
+      // a final newline (editFamily.spec A.5.11 pins `range:"1-1"` for a
+      // one-line create; the old synthesized entry already said so).
+      const wholeFile = typeof f.lines !== "string";
+      let from = wholeFile ? 1 : Math.max(1, start - APPLIED_CONTEXT_LINES);
+      let to = wholeFile ? Math.min(lines.length, end) : Math.min(lines.length, end + APPLIED_CONTEXT_LINES);
       if (to < from) continue;
       // Enclosing-symbol upgrade (2026-07-26 run-A T13 relapse): a hunk inside
       // a function larger than the ±8 window forced a native sed of the whole
@@ -4186,6 +4792,7 @@ async function attachAppliedReadback(
       // handle re-slice replaces the native read.
       let enclosing: { symbol: string; range: string } | undefined;
       try {
+        if (wholeFile) throw new Error("whole-file entry: no enclosing-symbol upgrade");
         const symbols = await extractSymbolsFromFile(lines.join("\n"), f.path, 256);
         let best: { name: string; s: number; e: number } | undefined;
         for (const sym of symbols) {
@@ -4230,6 +4837,16 @@ async function attachAppliedReadback(
       const delta = deltaKnown
         ? ownHunks.reduce((s, h) => s + braceDelta(h.search!, h.replace!), 0)
         : undefined;
+      if (wholeFile) {
+        // A create's content is what the caller just sent: the top-level
+        // sha/bytes/total_lines already prove it, so the entry carries no
+        // slice echo (no code → editFamily adds no slice_sha/head) — the
+        // terminal signal is the applied_note below (Phase 5 compactness:
+        // writeResponseSize.spec CREATE_CORE_CAP).
+        wholeFileEntries += 1;
+        applied.push({ path: f.path, range: `${from}-${to}` });
+        continue;
+      }
       applied.push({
         path: f.path,
         range: `${from}-${to}`,
@@ -4242,7 +4859,9 @@ async function attachAppliedReadback(
     return {
       ...result,
       applied,
-      applied_note: "post-edit disk state (whole enclosing symbol when it fits, else ±8 lines) — no follow-up read needed; brace_delta 0 = hunk preserves brace balance; enclosing_symbol names the full construct when larger — one handle re-slice serves it",
+      applied_note: wholeFileEntries === applied.length
+        ? "post-edit disk state is the content as sent (sha/bytes/total_lines) — no follow-up read needed"
+        : "post-edit disk state (whole enclosing symbol when it fits, else ±8 lines) — no follow-up read needed; brace_delta 0 = hunk preserves brace balance; enclosing_symbol names the full construct when larger — one handle re-slice serves it",
     };
   } catch {
     return result;
@@ -4280,6 +4899,10 @@ function annotateServedFindHits(
   workspace: string,
   args: Record<string, unknown>,
 ): ServedFindOutcome {
+  // PI-09 close-out: `force_serve` is honoured INSIDE applyServedFindProtocol,
+  // not here — that module owns the whole annotate/note/escalate decision, and
+  // a bypass in this wrapper would be one case of it made where the module's
+  // own tests cannot see it.
   return applyServedFindProtocol(
     response,
     workspace,
@@ -4342,7 +4965,424 @@ function closureSessionSummary(workspace: string, checksClosed: number): Record<
  * auto-correction pre/post-processing without touching a single line of this
  * switch — every case here is exactly as it was before that fix.
  */
-async function dispatchTool(canonical: string, args: Record<string, unknown>): Promise<ToolCallResult> {
+/**
+ * PI-09: validate the optional explicit-state REQUEST arguments —
+ * `task_handle`, its `expected_state_version` CAS guard, and `force_serve`.
+ *
+ * Returns null when the argument is absent (the overwhelmingly common case —
+ * every legacy caller, and every first call of a task) or when the handle is
+ * authentic, in-lifetime, in-workspace and still backed by live state. Anything
+ * else is a structured refusal with an EXECUTABLE recovery, because the one
+ * outcome PI-09 forbids outright is silently continuing against the wrong
+ * state ("暗黙のprocess memoryから「たぶん同じtask」と推測しない", item 12).
+ *
+ * REFUSAL CODE REUSE, deliberately. `Refusal.code` is a CLOSED enum frozen by
+ * Protocol v1 §A.7.1, and this wave adds no wire kinds and no codes — so the
+ * six distinct causes the store layer separates (`invalid`, `wrong-purpose`,
+ * `expired`, `stale`, `unknown`, `store-unavailable`) all ride the existing
+ * `handle-unknown`, and `wrong-workspace` rides the existing
+ * `handle-workspace-mismatch`. The CAUSE is never lost: it is named in `hint`,
+ * which is what the agent reads. Promoting any of them to its own code is a
+ * snapshot + classifier change for a later wave, not a silent one here.
+ */
+function taskHandleRefusal(args: Record<string, unknown>, workspace: string): Record<string, unknown> | null {
+  // PI-09 close-out: `force_serve` is a BOOLEAN, and a non-boolean spelling is
+  // refused rather than coerced. Coercion here has a specific hazard: every
+  // non-`true` value would read as "withhold", i.e. a caller that mis-typed
+  // the argument it sent BECAUSE it lost its context would silently be denied
+  // the bytes it asked for. Loud is the only safe direction.
+  const forceServeArg = args["force_serve"];
+  if (forceServeArg !== undefined && typeof forceServeArg !== "boolean") {
+    return {
+      ok: false,
+      reason: "invalid-input",
+      field: "force_serve",
+      detail: "force_serve must be true or false — it is the explicit \"I lost my context, send the bodies again\" switch",
+      next: "re-issue this exact call with force_serve:true, or omit it",
+    };
+  }
+  const token = args["task_handle"];
+  if (token === undefined) {
+    // PI-09 close-out: `expected_state_version` is a PRECONDITION on the state
+    // a `task_handle` names. Alone it names nothing, and an ignored
+    // precondition is worse than an absent one — the caller believes a guard
+    // ran. Refused, never dropped (§1.3.1's own words: "a dropped argument
+    // changes what the call does").
+    if (args["expected_state_version"] !== undefined) {
+      return {
+        ok: false,
+        reason: "invalid-input",
+        field: "expected_state_version",
+        detail: "expected_state_version guards a task_handle's state and is meaningless without one — send both, or neither",
+        next: 'read_file mode=task_pack query="<restate the request verbatim>" taskEpoch="new"',
+      };
+    }
+    return null;
+  }
+  if (typeof token !== "string" || token === "") {
+    return {
+      ok: false,
+      reason: "invalid-input",
+      field: "task_handle",
+      detail: "task_handle must be the opaque string a prior task_pack returned as task.id",
+      next: 'read_file mode=task_pack query="<restate the request verbatim>" taskEpoch="new"',
+    };
+  }
+  const freshPack = 'read_file mode=task_pack query="<restate the request verbatim>" taskEpoch="new"';
+
+  const resolved = resolveTaskHandle(token, workspace);
+  if (resolved.ok) {
+    // PI-09 close-out: the CAS guard, checked only once the handle itself is
+    // proven authentic/in-workspace/live — so a mismatch report can never leak
+    // the current version of state the caller was not entitled to name.
+    const expected = args["expected_state_version"];
+    if (expected !== undefined) {
+      if (typeof expected !== "number" || !Number.isInteger(expected) || expected < 0) {
+        return {
+          ok: false,
+          reason: "invalid-input",
+          field: "expected_state_version",
+          detail: "expected_state_version must be a non-negative integer — the state version a prior call reported for this task_handle",
+          next: freshPack,
+        };
+      }
+      if (expected !== resolved.stateVersion) {
+        // FAIL CLOSED. The handle is live, but the state it names has moved
+        // past the version the caller is reasoning about: proceeding would be
+        // exactly the "silently continue against the wrong state" outcome
+        // PI-09 forbids. `retry:"new-task"` is declared explicitly so the
+        // sanctioned transition is the re-pack family, not a bare re-issue of
+        // the same (now provably stale) precondition.
+        //
+        // CODE REUSE, deliberate — same reasoning as the handle causes above:
+        // A.7.1 is a closed enum and this wave mints no codes, so the coarse
+        // `invalid-input` carries the cause in `detail`.
+        //
+        // `actual` rather than a fresh `actual_state_version`: the A.8 advisory
+        // allowlist (`protocol/refusal.ts` REFUSAL_ADVISORY_KEYS) is a CLOSURE,
+        // not a filter, so a new key would be silently dropped by the funnel —
+        // and `actual` is already declared there for exactly this shape ("what
+        // the value actually is"). The EXPECTED half deliberately does not
+        // ride: the caller sent it, so it is caller-recoverable, and the
+        // `detail` names both numbers either way.
+        //
+        // This refusal is also the ONLY disclosure path for the current version
+        // — D-2 forbids a `CommonStateOutput` block, so no success-path field
+        // carries it. Recorded as a known gap rather than papered over.
+        return {
+          ok: false,
+          reason: "invalid-input",
+          field: "expected_state_version",
+          detail: `task state is at version ${resolved.stateVersion}; this call expected ${expected} — the task advanced under you, so nothing was done`,
+          requested_handle: token,
+          actual: resolved.stateVersion,
+          retry: "new-task",
+          next: freshPack,
+          alternatives: [{ mode: "task_pack" }],
+        };
+      }
+    }
+    return null;
+  }
+
+  const hint =
+    resolved.outcome === "wrong-purpose"
+      ? "this is not a task handle — task_handle takes the `task.id` of a prior task_pack, never a continuation cursor or a context handle"
+      : resolved.outcome === "expired"
+        ? "this task handle has expired; re-pack to open a fresh task"
+        : resolved.outcome === "invalid"
+          ? "this task handle failed authentication (edited, truncated, or minted by another installation)"
+          : resolved.outcome === "wrong-subject"
+            ? "this task handle was minted by a different TokenLighten installation"
+            : resolved.outcome === "stale"
+              ? "the state store was rebuilt, so this task handle names a generation that no longer exists"
+              : resolved.outcome === "store-unavailable"
+                ? "no durable state store is available for this workspace, so no task handle can be honoured here"
+                : "the state store no longer holds this task's state";
+
+  if (resolved.outcome === "wrong-workspace") {
+    return {
+      ok: false,
+      reason: "handle-workspace-mismatch",
+      requested_handle: token,
+      hint: "this task handle belongs to a different workspace; a task handle is bound to the workspace it was minted in",
+      next: freshPack,
+      alternatives: [{ mode: "task_pack" }],
+    };
+  }
+  return {
+    ok: false,
+    reason: "handle-unknown",
+    requested_handle: token,
+    hint,
+    next: freshPack,
+    alternatives: [{ mode: "task_pack" }],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PI-09 close-out — `operation_id` idempotency (edit_file only)
+// ---------------------------------------------------------------------------
+
+/** Longest `operation_id` accepted. A key, not a payload. */
+const OPERATION_ID_MAX_CHARS = 128;
+
+/**
+ * Largest recorded outcome an idempotent replay will store, in bytes.
+ *
+ * Sized against the store's own durability arithmetic, not against taste:
+ * `stateStore.ts` compacts at 512 journal lines and REFUSES to load a journal
+ * over 8 MB (a refusal that resets the whole generation and invalidates every
+ * outstanding handle). 512 x 16 KiB = 8 MB is exactly that boundary, so this
+ * cap is the largest value that cannot turn a busy idempotent workload into a
+ * store reset. The measured `edit.applied` wire sizes it must cover
+ * (protocol/budget/wireBudget.ts's table) are 420 B at 1 path and 10 KB at 64
+ * typical paths, so real edits fit with room; a 256-path adversarial batch
+ * does not, and takes the honest non-replaying refusal below.
+ */
+const OPERATION_REPLAY_MAX_BYTES = 16 * 1024;
+
+/**
+ * Marker recorded when the outcome was real but too large to replay.
+ *
+ * Unambiguous against a recorded payload by construction: the only other value
+ * this table ever holds is `JSON.stringify({v:1,…})`, which always begins `{`.
+ */
+const OPERATION_OVERSIZE_MARKER = "!oversize";
+
+/**
+ * In-process claim set: `${workspace}\u0000${operationId}` for every operation
+ * currently executing. The store's dedup table is INSERT-ONLY and is written
+ * after the edit lands, so it cannot by itself stop two overlapping calls with
+ * one key from both applying. This closes that window for the case that can
+ * actually occur here — two calls interleaved at an `await` inside one server
+ * process — and is cleared in a `finally` so a throw cannot strand a key.
+ * Cross-PROCESS overlap is out of scope and disclosed in the report.
+ */
+const _operationsInFlight = new Set<string>();
+
+/** Serialized replay payload for a recorded operation. */
+interface RecordedOperationOutcome {
+  v: 1;
+  text: string;
+  isError?: true;
+}
+
+function parseRecordedOperation(raw: string): RecordedOperationOutcome | undefined {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (record["v"] !== 1 || typeof record["text"] !== "string") return undefined;
+    return { v: 1, text: record["text"], ...(record["isError"] === true ? { isError: true as const } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * PI-09 close-out: run one `edit_file` call under its `operation_id`.
+ *
+ * POSITION MATTERS, and it is OUTSIDE the protocol funnel
+ * (`runWithProtocolCall` -> `finalizeProtocolResponse`), for two reasons the
+ * inner position got wrong when it was tried first:
+ *   - `isError` is stamped by the funnel (§2.5: every refusal carries it), so
+ *     inside the funnel a refusal is indistinguishable from an apply and a
+ *     failed attempt would claim the key forever;
+ *   - the recorded text is then the FINAL wire text, so a replay is
+ *     byte-identical rather than a second projection of the same body through
+ *     a workspace marker that has moved since (the edit itself moves it).
+ *
+ * The contract, in order:
+ *  1. a repeat whose operation ALREADY APPLIED replays the recorded outcome
+ *     and performs no second disk apply;
+ *  2. an overlapping call with the same key is refused, not raced;
+ *  3. a first (or previously refused) call runs normally, and its outcome is
+ *     recorded only when something actually landed.
+ *
+ * WHAT IS DELIBERATELY NOT RECORDED. A refusal — including `edit.rolled_back`
+ * and `edit.state_unknown`, which are `isError` — leaves the key unclaimed, so
+ * the caller may retry after acting on the refusal's own recovery. Recording a
+ * refusal would turn "nothing was applied" into a permanent answer for that
+ * key, which is the opposite of what an idempotency key is for.
+ *
+ * KNOWN WINDOW, disclosed rather than hidden: the record is written AFTER the
+ * apply, so a crash between the two leaves the operation unrecorded and a
+ * retry re-applies. Closing it needs a two-phase write the append-journal
+ * store does not offer (D-4), and a pre-claim would instead risk recording an
+ * apply that never happened — the strictly worse failure.
+ */
+async function runEditWithOperationId(
+  args: Record<string, unknown>,
+  run: () => Promise<ToolCallResult>,
+): Promise<ToolCallResult> {
+  // This wrapper short-circuits BEFORE the dispatch funnel, so every refusal it
+  // mints needs its own envelope — the same reason and the same shape as the
+  // lane refusal in `callTool`. D1 admits no exceptions: a refusal a client
+  // cannot version-identify is the class §1.2 exists to remove.
+  const refuse = (body: Record<string, unknown>): ToolCallResult =>
+    runWithProtocolCall({ tool: "edit_file", kind: "refusal" }, () =>
+      finalizeProtocolResponse("edit_file", toolStructuredError(body)));
+
+  const raw = args["operation_id"];
+  if (raw === undefined) return run();
+  if (typeof raw !== "string" || raw === "" || raw.length > OPERATION_ID_MAX_CHARS) {
+    return refuse({
+      ok: false,
+      reason: "invalid-input",
+      field: "operation_id",
+      detail: `operation_id must be a non-empty string of at most ${OPERATION_ID_MAX_CHARS} characters — one caller-chosen key per intended change`,
+      next: "re-issue this exact call with a valid operation_id, or omit it",
+    });
+  }
+
+  let workspace: string;
+  try {
+    workspace = resolveWorkspaceRoot(args["cwd"] as string | undefined, activeRoot);
+  } catch {
+    // An unresolvable cwd is refused by the guard inside `run()` with a far
+    // better message than anything this wrapper could invent.
+    return run();
+  }
+  const store = stateStoreFor(workspace);
+  if (store === undefined || !store.available) {
+    // No durable store: honest degradation to today's behavior. Refusing the
+    // edit instead would make `operation_id` a way to LOSE a write, and the
+    // caller can still verify what landed.
+    return run();
+  }
+
+  const key = `op:${raw}`;
+  const claim = `${workspace}\u0000${key}`;
+
+  const recorded = store.lookupOperation(key);
+  if (recorded !== undefined) {
+    if (recorded === OPERATION_OVERSIZE_MARKER) {
+      return refuse({
+        ok: false,
+        reason: "invalid-input",
+        field: "operation_id",
+        detail: "this operation_id already applied; its recorded outcome was too large to replay, so it cannot be re-served — nothing was applied a second time",
+        operation_id: raw,
+        retry: "none",
+        next: "search_files action=diff — the change is already on disk; verify it instead of re-sending the edit",
+      });
+    }
+    const replay = parseRecordedOperation(recorded);
+    if (replay !== undefined) {
+      // THE IDEMPOTENT REPLAY. No dispatch, so no second disk apply.
+      return { content: [{ type: "text", text: replay.text }], ...(replay.isError === true ? { isError: true as const } : {}) };
+    }
+    // An unreadable record is treated as absent: the alternative is refusing a
+    // write forever because one journal line got mangled.
+  }
+
+  if (_operationsInFlight.has(claim)) {
+    return refuse({
+      ok: false,
+      reason: "invalid-input",
+      field: "operation_id",
+      detail: "another call with this operation_id is still running in this server — nothing was applied, so this request cannot be told whether the first one landed",
+      operation_id: raw,
+      next: "wait for the first call to answer, then re-issue this exact call — the recorded outcome will be replayed",
+    });
+  }
+  _operationsInFlight.add(claim);
+  let result: ToolCallResult;
+  try {
+    result = await run();
+  } finally {
+    _operationsInFlight.delete(claim);
+  }
+
+  const isError = "isError" in result && result.isError === true;
+  if (!isError) {
+    const text = result.content.map((item) => item.text).join("");
+    const payload = JSON.stringify({ v: 1, text } satisfies RecordedOperationOutcome);
+    store.rememberOperation(
+      key,
+      Buffer.byteLength(payload, "utf8") <= OPERATION_REPLAY_MAX_BYTES ? payload : OPERATION_OVERSIZE_MARKER,
+    );
+  }
+  return result;
+}
+
+/**
+ * Normalize harmless, observed wire spellings before the strict schema fence.
+ * This is deliberately the one boundary for all consumers of task-pack
+ * arguments: downstream code may rely on `paths` being an array.
+ */
+function normalizeWireArgs(
+  canonical: string,
+  input: Record<string, unknown>,
+): { args: Record<string, unknown> } | { refusal: Record<string, unknown> } {
+  const args = { ...input };
+  if (canonical === "read_file") {
+    if (typeof args["paths"] === "string") args["paths"] = [args["paths"]];
+    else if (args["paths"] !== undefined && !Array.isArray(args["paths"])) {
+      return { refusal: { ok: false, code: "invalid-input", field: "paths", error: "paths must be an array (or one path string)", next: "read_file mode=task_pack paths=[\"path/to/file\"]" } };
+    }
+    if (args["mode"] === "slice" && Array.isArray(args["paths"]) && args["paths"].length > 1) {
+      return {
+        refusal: {
+          ok: false,
+          code: "invalid-input",
+          field: "paths",
+          error: "mode=slice accepts one path; multiple paths are discovery scope",
+          next: `read_file mode=task_pack paths=${JSON.stringify(args["paths"])}`,
+        },
+      };
+    }
+    if (typeof args["handles"] === "string") {
+      args["handles"] = args["handles"].split(",").map((value) => value.trim()).filter(Boolean);
+    }
+    if (args["lines"] !== undefined) {
+      if (args["range"] === undefined) args["range"] = String(args["lines"]);
+      delete args["lines"];
+    }
+    if (args["start"] !== undefined && args["end"] !== undefined) {
+      if (args["range"] === undefined) args["range"] = `${args["start"]}-${args["end"]}`;
+      delete args["start"];
+      delete args["end"];
+    }
+    if (typeof args["range"] === "string") {
+      const range = args["range"].trim();
+      const colon = /^(\d+)\s*:\s*(\d+)$/.exec(range);
+      const eof = /^(\d+)\s*-$/.exec(range);
+      if (colon) args["range"] = `${colon[1]}-${colon[2]}`;
+      else if (eof) args["range"] = `${eof[1]}-${Number.MAX_SAFE_INTEGER}`;
+    }
+  }
+  if (canonical === "search_files") {
+    const aliases: Record<string, string> = {
+      grep: "find", search: "find", list: "tree", def: "symbols",
+      definitions: "symbols", usages: "references", callers: "references",
+    };
+    if (typeof args["action"] === "string") args["action"] = aliases[args["action"].toLowerCase()] ?? args["action"];
+    if (args["action"] === undefined && (args["query"] !== undefined || args["queries"] !== undefined || args["symbol"] !== undefined)) args["action"] = "find";
+    if (args["action"] === "find" && args["query"] === undefined && typeof args["symbol"] === "string") {
+      args["query"] = args["symbol"];
+      delete args["symbol"];
+    }
+    if (typeof args["queries"] === "string") args["queries"] = [args["queries"]];
+    if (Array.isArray(args["query"])) {
+      if (args["queries"] === undefined) args["queries"] = args["query"];
+      delete args["query"];
+    }
+  }
+  for (const field of ["limit", "maxTokens", "maxBytes", "depth"]) {
+    if (typeof args[field] === "string" && /^\d+$/.test(args[field].trim())) args[field] = Number(args[field]);
+  }
+  if (typeof args["regex"] === "string") {
+    args["regex"] = !["false", "0", "no", ""].includes(args["regex"].trim().toLowerCase());
+  }
+  return { args };
+}
+
+async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>): Promise<ToolCallResult> {
+  const normalized = normalizeWireArgs(canonical, rawArgs);
+  if ("refusal" in normalized) return toolStructuredError(normalized.refusal);
+  const args = normalized.args;
   switch (canonical) {
     case "read_file": {
       // P1 / D2 / ORCHESTRATOR CONDITION ② (§1.3.1(1)): strict recursive NAME
@@ -4366,6 +5406,11 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       // time. Must be reassigned before any file I/O uses it.
       let workspace = resolveWorkspaceRoot(args["cwd"] as string | undefined, activeRoot);
       const cwdExplicit = isCwdExplicit(args["cwd"]);
+      // PI-09: a presented task_handle is validated against THIS workspace
+      // before any read runs, so a wrong-purpose/stale/foreign handle can never
+      // ride along as a silent no-op.
+      const taskHandleRefusalRead = taskHandleRefusal(args, workspace);
+      if (taskHandleRefusalRead !== null) return toolStructuredError(taskHandleRefusalRead);
       const credential = resolveCredentialRef(args["credentialRef"]);
       if (!credential.ok) {
         return toolStructuredError(credential as unknown as Record<string, unknown>);
@@ -4390,7 +5435,17 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       // served, so `content:"full"` / `allowFull:true` force a normal body
       // serve on every receipt-eligible read path (the receipt's own `note`
       // states this — see SERVED_CONTENT_RECEIPT_NOTE).
-      const forceContentServe = args["content"] === "full" || args["allowFull"] === true;
+      //
+      // PI-09 close-out: `force_serve:true` is the EXPLICIT spelling of that
+      // same request. `content:"full"`/`allowFull:true` mean "serve the whole
+      // file" and force a serve only as a side effect; `force_serve` says the
+      // thing itself, at any mode and any range, and is the recovery a
+      // context-compacted caller can execute without also changing WHAT it
+      // asked for. Folded into the one existing lever so every receipt-
+      // eligible read path honours it by construction rather than by a list.
+      const forceContentServe = args["content"] === "full"
+        || args["allowFull"] === true
+        || args["force_serve"] === true;
 
       // -----------------------------------------------------------------------
       // Handle resolution: when args.handle is provided, resolve it to
@@ -4488,7 +5543,13 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
             reason: "handle-unknown",
             requested_handle: handleArg,
             next: 'read_file path=<the file this handle pointed at> — or start fresh: read_file mode=task_pack query="<restate the request verbatim>"',
-            hint: "handles are session-scoped and do not survive a server restart; re-reading by path re-mints one",
+            // PI-09: this used to say "handles are session-scoped and do not
+            // survive a server restart". They now do, when the workspace has a
+            // durable state store — so the honest statement is the narrower
+            // one: THIS handle is not resolvable here, and a path re-read
+            // always re-mints. Overstating the loss taught agents to abandon
+            // live handles.
+            hint: "this handle is not resolvable in this workspace (expired, evicted, or minted elsewhere); re-reading by path re-mints one",
             alternatives: [{ mode: "task_pack" }],
           });
         }
@@ -4558,27 +5619,76 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       // than none at all.
       const discoveryGuardArgs = { ...args, mode };
       const discoveryGuardWorkspace = workspace;
+      // F-C1 (wave D / D2): EXACTLY ONE task_pack query resolution per dispatch,
+      // memoized here and reused by every site below that needs it (the archive
+      // pack branch and the shared `taskPackQuery` binding).
+      // `resolveTaskPackQueryArg` is NOT pure — a `taskEpoch:"new"` call severs
+      // both the qref map (clearTaskQueryRef) and the pack-dedupe ledger
+      // (clearPackDedupeForWorkspace) — so the preflight below must not become a
+      // SECOND resolution beside the existing ones. Memoizing keeps the count at
+      // one, exactly as before this change, whichever site asks first: no ledger
+      // clear is double-counted and no epoch boundary moves.
+      let taskPackQueryResolution: TaskPackQueryResolution | undefined;
+      const resolveTaskPackQueryOnce = (): TaskPackQueryResolution =>
+        (taskPackQueryResolution ??= resolveTaskPackQueryArg(args, workspace));
+      // F-C1: the guaranteed-receipt preflight now consumes the RESOLVED query.
+      // It used to read RAW pre-resolution args, so `args.query` was `undefined`
+      // for every wire `{mode:"task_pack", qref}` replay — the re-pack mechanism
+      // AGENTS.md documents — `computePackFingerprint` hashed an empty query,
+      // and no stored record could ever match. The bypass was therefore
+      // structurally unreachable for qref replays (pinned by
+      // __tests__/rc/v011ReceiptFence.rc.spec.ts), which always took the heavier
+      // honest path even when nothing had changed. Resolving here makes it
+      // reachable; every serve-honesty gate inside `revalidateRecordToReceipt`
+      // (B5's partial-surface decline, the per-surface sha proof, the
+      // workspace-state proof) now actually runs on the replay shape it was
+      // written for, instead of being dead code behind an unresolvable
+      // fingerprint.
+      //
+      // `taskEpoch:"new"` short-circuits BEFORE the resolver so this preflight
+      // never pulls that epoch clear ahead of `guardExecutionDiscovery`: the
+      // guard handles a declared new epoch itself and returns `allowed` before
+      // it ever reads this flag, so the value was unused for that shape anyway.
+      //
+      // `force_serve` is deliberately NOT special-cased: this flag only answers
+      // "does this request re-issue a still-valid record", and PI-09's
+      // unconditional bypass is applied where it has always been applied — at
+      // `buildTaskPack`'s entry, which skips every dedup path when `forceServe`
+      // is set and therefore re-serves full bodies once the fence lets the call
+      // through. Making the flag false for `force_serve` would instead have the
+      // fence BLOCK the one call shape whose entire purpose is recovering a lost
+      // context (and would regress today's plain re-ask behaviour).
       const exactPreparedTaskPackReceipt = mode === "task_pack"
-        && canServeCachedTaskPackReceipt(workspace, args as Parameters<typeof canServeCachedTaskPackReceipt>[1]);
+        && args["taskEpoch"] !== "new"
+        && canServeCachedTaskPackReceipt(
+          workspace,
+          taskPackReceiptPreflightArgs(args, resolveTaskPackQueryOnce()) as Parameters<typeof canServeCachedTaskPackReceipt>[1],
+        );
       /** This call resolved to nothing, so it put no file bytes on the wire. */
       const noteZeroByteServe = (): void =>
         noteDiscoveryServedNoBytes(discoveryGuardWorkspace, "read_file", discoveryGuardArgs);
-      const executionGuard = guardExecutionDiscovery(
-        workspace,
-        "read_file",
-        discoveryGuardArgs,
-        // Read-only handle->path resolution, the same shape the edit guard
-        // gets: it lets the loop brake recognize a repeat of THIS session's
-        // own served bytes and answer it with a receipt (L2a) instead of a
-        // refusal it cannot discharge.
-        (handleId) => {
-          const entry = handleTable.get(handleId);
-          return entry !== undefined && entry.workspaceRoot === workspace && entry.path !== undefined && entry.path !== ""
-            ? entry.path
-            : undefined;
-        },
-        exactPreparedTaskPackReceipt,
-      );
+      // W14 L1/L3: an explicit full-content request must reach the read
+      // dispatcher. The prepared-task fence can withhold a repeated slice, but
+      // it cannot decide a whole-file complement (or a force_serve recovery)
+      // without consulting the served-range ledger there.
+      const executionGuard = mode === "full" || forceContentServe
+        ? { allowed: true as const }
+        : guardExecutionDiscovery(
+            workspace,
+            "read_file",
+            discoveryGuardArgs,
+            // Read-only handle->path resolution, the same shape the edit guard
+            // gets: it lets the loop brake recognize a repeat of THIS session's
+            // own served bytes and answer it with a receipt (L2a) instead of a
+            // refusal it cannot discharge.
+            (handleId) => {
+              const entry = handleTable.get(handleId);
+              return entry !== undefined && entry.workspaceRoot === workspace && entry.path !== undefined && entry.path !== ""
+                ? entry.path
+                : undefined;
+            },
+            exactPreparedTaskPackReceipt,
+          );
       if (!executionGuard.allowed) {
         // A served receipt is NOT a refusal: it says the caller already holds
         // these bytes, so it travels as a normal (non-isError) result.
@@ -4999,7 +6109,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
             error: `File not found or outside workspace: ${taskArchivePath}`,
           });
         }
-        const queryResolution = resolveTaskPackQueryArg(args, workspace);
+        const queryResolution = resolveTaskPackQueryOnce();
         if (queryResolution.error) {
           return toolStructuredError(taskPackQueryErrorPayload(queryResolution));
         }
@@ -5107,7 +6217,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       // or actionable missing-markers.
       // -----------------------------------------------------------------------
       const taskPackQuery = mode === "task_pack" || args["mode"] === undefined || mode === "auto"
-        ? resolveTaskPackQueryArg(args, workspace)
+        ? resolveTaskPackQueryOnce()
         : {
             query: typeof args["query"] === "string" ? args["query"].trim() : "",
           };
@@ -5144,6 +6254,8 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           const result = await buildTaskPack(
             {
               ...taskCredential,
+              // PI-09 close-out: the explicit "I lost my context" switch.
+              ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
               ...(queryArg.length > 0
                 ? {
                     query: queryArg,
@@ -5212,6 +6324,8 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
         const result = await buildTaskPack(
           {
             ...taskCredential,
+            // PI-09 close-out: the explicit "I lost my context" switch.
+            ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
             query: taskPackQuery.query.length > 0 ? taskPackQuery.query : undefined,
             ...(taskPackQuery.query.length > 0
               ? {
@@ -5248,6 +6362,21 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
         );
         // Feature 1 (2026-07-12b2): task_pack surfaces with embedded code count as read.
         recordTaskPackSurfaceReads(workspace, result);
+        // V11-04 (TL_REASONING_IR_V2, class (B), default OFF): the ONE advisory
+        // Task Reasoning IR v2 seam. It reads the finished pack BEFORE protocol
+        // projection, persists IR state, and emits trace-only shadow Stop
+        // candidates. It returns void and cannot touch `result`: with the flag
+        // unset this branch is not entered, and with it set the helper is
+        // try/catch-total, so an IR failure traces `reasoning_ir_error` and the
+        // response bytes are unchanged either way. No wire field, no new kind.
+        if (reasoningIrV2Enabled()) {
+          recordReasoningIrV2FromPack({
+            result,
+            workspaceRoot: workspace,
+            lane: sessionLaneOf(args as Record<string, unknown>),
+            ...(taskPackQuery.query.length > 0 ? { query: taskPackQuery.query } : {}),
+          });
+        }
         // DESIGN-v0.9 §4.7: shared read-side post-processor (see the sibling
         // pack sites) — continuation/inlined normalization + FORBIDDEN_KEYS.
         const suppliedBase = attachSupply(result as unknown as Record<string, unknown>, workspace);
@@ -5470,15 +6599,18 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
         isMarkdownPath(resolvedPath) &&
         (requestedMarkdownSections.length > 0 || markdownSymbolSection !== undefined)
       ) {
-        if (requestedMarkdownSections.length > 3) {
-          return toolError("Markdown sections accepts at most 3 headings per call", { code: "invalid-input" });
-        }
+        // A capped section list is a partial serve, never a refusal: callers
+        // already supplied the remaining headings, so the server can return a
+        // literal continuation without making them reconstruct the request.
+        const markdownSectionCap = 8;
+        const cappedMarkdownSections = requestedMarkdownSections.slice(0, markdownSectionCap);
+        const remainingMarkdownSections = requestedMarkdownSections.slice(markdownSectionCap);
         const markdown = await readFileSafe(resolvedPath, workspace);
         if (markdown === null) return toolError(`File not found or outside workspace: ${resolvedPath}`, { code: "not-found" });
         const headings = parseMarkdownHeadings(markdown);
         const sectionQueries = markdownSymbolSection !== undefined
           ? [markdownSymbolSection]
-          : requestedMarkdownSections;
+          : cappedMarkdownSections;
         const selected = selectMarkdownSections(headings, sectionQueries);
         const ambiguityCandidates = selected.ambiguous
           .flatMap((entry) => entry.candidates.map((heading) => ({
@@ -5567,7 +6699,9 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
             candidates: entry.candidates.slice(0, 3).map((heading) => heading.path),
           })),
         ];
-        const continuation = omitted.length > 0 && firstCandidate
+        const continuation = remainingMarkdownSections.length > 0
+          ? `read_file path=${JSON.stringify(resolvedPath)} sections=${JSON.stringify(remainingMarkdownSections)}`
+          : omitted.length > 0 && firstCandidate
           ? `read_file path=${JSON.stringify(resolvedPath)} sections=${JSON.stringify([firstCandidate.section])}`
           : undefined;
 
@@ -5595,7 +6729,12 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           path: resolvedPath,
           items,
           omitted,
-          completeness: omitted.length === 0 ? "complete" : "partial",
+          // The v1 read-text projector carries continuation values through
+          // Evidence.remaining.  Section names are the addressable values for
+          // this surface (rather than line windows), but retain the familiar
+          // carrier so the continuation survives projection.
+          ...(remainingMarkdownSections.length > 0 ? { remaining_ranges: remainingMarkdownSections } : {}),
+          completeness: omitted.length === 0 && remainingMarkdownSections.length === 0 ? "complete" : "partial",
           ...(continuation ? { next: continuation } : {}),
         };
         if (partialServe) attachMarkdownHeadingIndex(multi, markdown, focus);
@@ -5854,6 +6993,17 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           const alreadyHeldBy = new Map<string, string>();
           if (!forceContentServe) {
             for (const segment of batchData.segments) {
+              // W2A-1 (2026-08-21 serve-honesty): a TRUNCATED segment's
+              // [segStart,segEnd] below is only the CLAMPED prefix
+              // resolveSlice fit under the cap, not the caller's whole
+              // requested window — `servedRangeReceipt` would correctly
+              // confirm that clamped prefix alone was already held, but
+              // marking the SEGMENT already-held then displays it as a bare
+              // `code_unchanged` placeholder (no code) with no signal that
+              // the segment itself never covered the rest of the request.
+              // Never eligible for the elision, same reasoning as the
+              // single-range branch's `sliceData.remaining_ranges` guard.
+              if (segment.truncated === true) continue;
               const segStart = rangeStartLine(segment.range);
               const segEnd = Math.min(fileTotalLines, segStart + countLines(segment.code) - 1);
               const heldReceipt = servedRangeReceipt(
@@ -5915,11 +7065,25 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
 
           // Every requested window is already held at this exact file sha — the
           // whole response collapses to the one shared receipt shape.
+          //
+          // W2A-1 (2026-08-21 serve-honesty): `batchData.remaining_ranges`
+          // only names WHOLE requested ranges resolveSliceRanges never
+          // attempted (overflow / total-byte-cap deferrals) — it says nothing
+          // about a single held segment that was itself clamped short of what
+          // it was asked for (e.g. `ranges=["587-8119"]` on a 21k-line file,
+          // internally capped to 587-1104). `batchData.truncated` is the field
+          // that already ORs in that per-segment signal
+          // (`segments.some(s => s.truncated)`, see resolveSliceRanges); the
+          // fast-path collapse must not fire while it holds, or the returned
+          // receipt claims full coverage of the caller's request while the
+          // clamped tail was never served OR disclosed (same defect and fix
+          // as the single-range branch below, servedContentReceipt call #2).
           if (
             batchData.segments.length > 0
             && alreadyHeld.size === batchData.segments.length
             && batchLedger !== undefined
             && batchData.remaining_ranges === undefined
+            && batchData.truncated !== true
           ) {
             const heldLabels = [...new Set(alreadyHeldBy.values())];
             const batchServedBy = heldLabels.length === 0
@@ -5936,6 +7100,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
               ledger: batchLedger,
               ...(batchServedBy !== undefined ? { servedBy: batchServedBy } : {}),
               extra: { served_range_ledger: batchLedger },
+              workspace,
             }), workspace));
           }
 
@@ -6256,7 +7421,31 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           // carries, so "added nothing" means "every line this response would
           // actually put on the wire is already held" — elided lines are
           // neither claimed nor required.
-          if (rangeLedger !== undefined && addedLines === 0 && !forceContentServe) {
+          //
+          // W2A-1 (2026-08-21 serve-honesty): `sliceData.range`/`.content` are
+          // already CLAMPED by resolveSlice/centeredSliceForCap when the
+          // caller's requested range is bigger than one serve's byte cap —
+          // `sliceData.remaining_ranges` is where the uncovered TAIL of the
+          // original request lives (`centeredSliceForCap`'s own doc comment:
+          // "report the uncovered spans of the ORIGINAL range as
+          // remaining_ranges"). `addedLines === 0` only proves the CLAMPED
+          // prefix was already held; it says nothing about that tail. Live
+          // repro: `range=587-8119` on a 21k-line file, clamped to 587-1104 by
+          // an earlier call, addedLines 0 on the immediate re-ask — without
+          // this guard the code-unchanged receipt below named `range:
+          // sliceData.range` ("587-1104") but was returned FOR the caller's
+          // "587-8119" ask, with no `remaining`/`next` disclosing that lines
+          // 1105-8119 (the majority of the request) were never served or even
+          // examined. Falling through instead re-enters the normal slice
+          // response below, which already composes `remaining_ranges`/`next`
+          // correctly for a truncated `sliceData` (proven by the SAME request
+          // on virgin ledger state, a few lines down).
+          if (
+            rangeLedger !== undefined
+            && addedLines === 0
+            && !forceContentServe
+            && sliceData.remaining_ranges === undefined
+          ) {
             return toolOk(attachSupply(servedContentReceipt({
               mode: "slice",
               handle: sliceData.handle,
@@ -6277,6 +7466,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
                   ? { concern_note: sliceData.concern_note }
                   : {}),
               },
+              workspace,
             }), workspace));
           }
           // Nth non-contiguous range demand is evidence that another slice
@@ -6465,6 +7655,8 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           const result = await buildTaskPack(
             {
               ...taskCredential,
+              // PI-09 close-out: the explicit "I lost my context" switch.
+              ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
               query: String(args["query"]),
               ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]) } : {}),
               ...(resolvedPath ? { path: resolvedPath } : {}),
@@ -6538,7 +7730,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
         const smallFileContent = parseSmallFileContent(args["content"]);
         if (!smallFileContent.ok) return toolError("content must be full, outline, defer, or auto", { code: "invalid-input" });
         try {
-          const sfResult = await buildSmallFile(workspace, sfPath, String(args["cwd"] ?? ""), { content: smallFileContent.value, keepComments });
+          const sfResult = await buildSmallFile(workspace, sfPath, String(args["cwd"] ?? ""), { content: smallFileContent.value, keepComments, allowedParents: configuredAllowedParents(workspace) });
           if (!("mode" in sfResult)) {
             // not-tiny refusal
             return toolOk(sfResult);
@@ -6864,6 +8056,61 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       }
 
       // -----------------------------------------------------------------------
+      // mode=skeleton paths=[...] — batch file skeletons.  This is the same
+      // per-file, order-preserving batch contract as mode=full: one bad path
+      // does not discard the useful skeletons already requested, and a byte
+      // cap leaves an executable continuation for the remainder.
+      // -----------------------------------------------------------------------
+      if (mode === "skeleton" && Array.isArray(args["paths"]) && (args["paths"] as unknown[]).length >= 1) {
+        declareKind("read.batch");
+        const requestedPaths = (args["paths"] as unknown[]).map((entry) =>
+          typeof entry === "object" && entry !== null
+            ? String((entry as Record<string, unknown>)["path"] ?? "")
+            : String(entry),
+        );
+        const items: Record<string, unknown>[] = [];
+        const omitted: Array<{ path: string; reason: string }> = [];
+        let servedBytes = 0;
+        for (let index = 0; index < requestedPaths.length; index += 1) {
+          const requestedPath = requestedPaths[index]!;
+          if (!requestedPath) { omitted.push({ path: requestedPath, reason: "path is required" }); continue; }
+          const content = await readFileSafe(requestedPath, workspace);
+          if (content === null) { omitted.push({ path: requestedPath, reason: "File not found or outside workspace" }); continue; }
+          const skeleton = await getFileSkeleton(content, { path: requestedPath });
+          if (!skeleton.ok) { omitted.push({ path: requestedPath, reason: skeleton.error }); continue; }
+          const entry: Record<string, unknown> = {
+            path: requestedPath,
+            language: skeleton.data.language,
+            handle: handleTable.upsert({ kind: "file", path: requestedPath, workspaceRoot: workspace }).id,
+            // `read.batch`'s established file-entry vocabulary is content,
+            // not a second skeleton-only union arm. Preserve the exact
+            // signature projection there so the common batch projector and
+            // wire predicates retain it end to end.
+            content: JSON.stringify(skeleton.data.signatures),
+            signatures: skeleton.data.signatures,
+            truncated: skeleton.data.truncated,
+          };
+          const entryBytes = Buffer.byteLength(JSON.stringify(entry), "utf8") + 1;
+          if (servedBytes + entryBytes > MULTI_FILE_MAP_CAP_BYTES) {
+            omitted.push({ path: requestedPath, reason: "skeleton-byte-cap" });
+            for (const remainder of requestedPaths.slice(index + 1)) omitted.push({ path: remainder, reason: "skeleton-byte-cap" });
+            break;
+          }
+          servedBytes += entryBytes;
+          items.push(entry);
+          recordReadPath(workspace, requestedPath);
+        }
+        const remaining = omitted.filter((entry) => entry.reason === "skeleton-byte-cap").map((entry) => entry.path);
+        return toolOk({
+          mode: "skeleton",
+          items,
+          omitted,
+          completeness: omitted.length === 0 ? "complete" : items.length === 0 ? "empty" : "partial",
+          ...(remaining.length > 0 ? { remaining, next: `read_file mode=skeleton paths=${JSON.stringify(remaining)}` } : {}),
+        });
+      }
+
+      // -----------------------------------------------------------------------
       // mode=full paths=[...] (1+ entries) — batch full-read. Observed
       // repeatedly in bench transcripts: `read_code mode=full paths=[a,b]`
       // errored "path is required" (mode=full only ever accepted a single
@@ -6899,6 +8146,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           ...taskCredential,
           ...(args["maxBytes"] !== undefined ? { maxBytes: Number(args["maxBytes"]) } : {}),
           ...(args["maxTokens"] !== undefined ? { maxTokens: Number(args["maxTokens"]) } : {}),
+          forceServe: args["force_serve"] === true,
         };
 
         const items: Record<string, unknown>[] = [];
@@ -6945,7 +8193,14 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       // Remaining modes (auto, skeleton, symbol, full) require a file path.
       // -----------------------------------------------------------------------
       const filePath = resolvedPath ?? "";
-      if (!filePath) return toolError("path is required", { code: "invalid-input" });
+      if (!filePath) {
+        return toolError("path is required", {
+          code: "invalid-input",
+          ...(mode === "symbol" && resolvedSymbol
+            ? { next: `search_files action=symbols query=${JSON.stringify(resolvedSymbol)}` }
+            : {}),
+        });
+      }
       const symbolArg = resolvedSymbol ?? "";
       const ext = (filePath.toLowerCase().match(/\.([^.\\/]+)$/)?.[1]) ?? "";
       const isOffice = ext === "docx" || ext === "xlsx" || ext === "pptx" || ext === "pdf";
@@ -6964,6 +8219,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
             ...taskCredential,
             ...(args["maxBytes"] !== undefined ? { maxBytes: Number(args["maxBytes"]) } : {}),
             ...(args["maxTokens"] !== undefined ? { maxTokens: Number(args["maxTokens"]) } : {}),
+            forceServe: args["force_serve"] === true,
           });
           // A.5.5 (C2-3 gap, closed in P2): the `allowFull:true` arm of that
           // helper does NOT serve file bytes — it runs `extractOfficeText` and
@@ -7260,6 +8516,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
               range: symRangeStr,
               symbol: symbolArg,
               ledger: symLedger,
+              workspace,
             }), workspace));
           }
         }
@@ -7467,6 +8724,38 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           && !wasFullyServed(workspace, filePath, fullSha)
         ) {
           const fullTotalLines = countLines(content);
+          const fullCoverage = servedRangeCoverage(workspace, filePath, fullSha, fullTotalLines);
+          if (fullCoverage !== undefined && !fullCoverage.complete) {
+            const partial = await resolveFullReadForPath(
+              workspace,
+              filePath,
+              args["allowFull"] === true,
+              keepComments,
+            );
+            if (!partial.ok) return fullReadRefusal(partial);
+            const partialHandle = partial.data["handle"];
+            if (
+              partial.data["fullFileExpansion"] === true
+              && typeof partialHandle === "string"
+            ) {
+              const difference = buildLedgerDifferenceFullPayload({
+                workspace,
+                filePath,
+                content,
+                handleId: partialHandle,
+                sha: fullSha,
+                keepComments,
+                mode: "full",
+                priorCoverage: fullCoverage,
+              });
+              if (difference !== undefined) {
+                recordReadPath(workspace, filePath);
+                return toolOk(attachSupply(difference, workspace));
+              }
+            }
+            return toolOk(attachSupply(partial.data as Record<string, unknown>, workspace));
+          }
+
           const fullLedger = servedRangeReceipt(workspace, filePath, fullSha, 1, fullTotalLines, fullTotalLines);
           if (fullLedger !== undefined) {
             const fullHandle = handleTable.upsert({
@@ -7483,10 +8772,17 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
               sha: shortSha(fullSha),
               range: `1-${fullTotalLines}`,
               ledger: fullLedger,
+              workspace,
             }), workspace));
           }
         }
-        const fr = await resolveFullReadForPath(workspace, filePath, args["allowFull"] === true, keepComments);
+        const fr = await resolveFullReadForPath(
+          workspace,
+          filePath,
+          args["allowFull"] === true,
+          keepComments,
+          { forceServe: args["force_serve"] === true },
+        );
         if (!fr.ok) return fullReadRefusal(fr);
         // A COMPLETE full serve makes every line resident — record it so a
         // later slice/full/symbol of the same sha qualifies for the receipt
@@ -7534,7 +8830,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           try {
             const smallFileContent = parseSmallFileContent(args["content"]);
             if (!smallFileContent.ok) return toolError("content must be full, outline, defer, or auto");
-            const sfRes = await buildSmallFile(workspace, filePath, String(args["cwd"] ?? ""), { content: smallFileContent.value, keepComments });
+            const sfRes = await buildSmallFile(workspace, filePath, String(args["cwd"] ?? ""), { content: smallFileContent.value, keepComments, allowedParents: configuredAllowedParents(workspace) });
             if ("mode" in sfRes) return toolOk(sfRes);
             // fallback on refusal (should not happen for tiny files, but be safe)
           } catch { /* fall through to skeleton */ }
@@ -7560,6 +8856,21 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
             languageForPath(filePath),
             keepComments,
           );
+          const difference = !forceContentServe
+            ? buildLedgerDifferenceFullPayload({
+                workspace,
+                filePath,
+                content,
+                handleId: hEntry.id,
+                sha,
+                keepComments,
+                mode: "auto",
+              })
+            : undefined;
+          if (difference !== undefined) {
+            recordReadPath(workspace, filePath);
+            return toolOk(attachSupply(difference, workspace));
+          }
           // Feature 1 (2026-07-12b2): successful mode=auto small-content serve.
           recordReadPath(workspace, filePath);
           return toolOk({
@@ -7743,6 +9054,11 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       // `GuardedWorkspaceRoot` every write entry point demands.
       const cwdGuardEdit = guardCwd(args, activeRoot);
       if (!cwdGuardEdit.ok) return toolStructuredError(cwdGuardEdit.refusal);
+      // PI-09: task_handle validation happens BELOW, against the
+      // GuardedWorkspaceRoot the stage-2 guard mints — a write case never
+      // resolves its workspace through the unbranded resolver
+      // (dispatchGuardConformance pins this), and the validation still runs
+      // before any write decision.
       const cwdExplicit = isCwdExplicit(args["cwd"]);
 
       // D5/W1: a new path has no served-file anchor. Never let a raw
@@ -7783,6 +9099,9 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
         && !cwdExplicit
         && createCapabilityHandleIds.length === 0
       ) {
+        // PI-07 / F-A1-5 unification: validated + capped through the same
+        // workspace/candidates.ts check that workspaceCandidates() above and
+        // every did_you_mean use (see checkCwdOrRefuse) also go through.
         const cwdCandidates = [
           { cwd: activeRoot, source: "server-default" },
           ...otherActiveRoots(activeRoot).map((cwd) => ({ cwd, source: "active-session" })),
@@ -7791,8 +9110,11 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
             source: "handle",
             handle: id,
           })),
-        ].filter((candidate, index, all) =>
-          all.findIndex((other) => other.cwd === candidate.cwd) === index);
+        ]
+          .filter((candidate, index, all) =>
+            all.findIndex((other) => other.cwd === candidate.cwd) === index)
+          .filter((candidate) => isWorkspaceCandidateAccepted(candidate.cwd, activeRoot, configuredAllowedParents(activeRoot)))
+          .slice(0, WORKSPACE_CANDIDATE_LIMIT);
         return toolStructuredError({
           ok: false,
           reason: "cwd-required-for-create",
@@ -7844,6 +9166,12 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       // with it the proof that both guards ran — survives adoption.
       let workspace: GuardedWorkspaceRoot =
         resolveGuardedWorkspaceRoot(args, activeRoot, routingGuardEdit.pass);
+      // PI-09 — see the read_file arm. Validated against the BRANDED root the
+      // guard stack just minted (pre-adoption, matching the read path's
+      // requested-cwd semantics), and still before any write decision, so a
+      // stale/foreign handle can never contribute to one.
+      const taskHandleRefusalEdit = taskHandleRefusal(args, workspace);
+      if (taskHandleRefusalEdit !== null) return toolStructuredError(taskHandleRefusalEdit);
       const artifactRequested = args["artifact"] !== undefined;
       const editCredential = artifactRequested
         ? resolveCredentialRef(args["credentialRef"])
@@ -8344,7 +9672,7 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
             // comment-only unread_note regression.
             if (isFirstEdit && !editWasPrepared && !hasUnreadSiblingNoteFired(workspace) && !isClosureSatisfied(workspace)) {
               markUnreadSiblingNoteFired(workspace);
-              unreadNote = await buildUnreadSiblingNote(workspace, editedNow);
+              unreadNote = await buildUnreadSiblingNote(workspace, editedNow, args);
             }
           }
         }
@@ -9700,6 +11028,9 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
       const cwdGuardExplore = guardCwd(args, activeRoot);
       if (!cwdGuardExplore.ok) return toolStructuredError(cwdGuardExplore.refusal);
       const workspace = resolveWorkspaceRoot(args["cwd"] as string | undefined, activeRoot);
+      // PI-09 — see the read_file arm.
+      const taskHandleRefusalSearch = taskHandleRefusal(args, workspace);
+      if (taskHandleRefusalSearch !== null) return toolStructuredError(taskHandleRefusalSearch);
       const credential = resolveCredentialRef(args["credentialRef"]);
       if (!credential.ok) {
         return toolStructuredError(credential as unknown as Record<string, unknown>);
@@ -9814,7 +11145,13 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           // forensics: zero task_packs that cell). queries[] entries are
           // already literal identifier tokens — record them directly through
           // the existing cap-24 FIFO (recordConcernTokens lowercases).
-          recordConcernTokens(workspace, queries);
+          //
+          // W9 (root-leak forensics): entries are verbatim tokens, not free
+          // text, so there is no span to scrub — only drop an entry that IS
+          // the workspace root's own basename, or that carries a path
+          // separator (a path handed to queries[] by mistake, not a literal
+          // token). See concernHarvestText's module doc for the fuller story.
+          recordConcernTokens(workspace, filterConcernQueryEntries(workspace, queries));
           const outcome = annotateServedFindHits(buildFindResponseForQueries(
             {
               queries,
@@ -9836,7 +11173,12 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
         // same concernAnchorTokens helper buildTaskPack's own harvest uses
         // (identifier-shaped extraction, not every raw query word) before
         // recording. See the queries[] branch above for the full doc.
-        recordConcernTokens(workspace, concernAnchorTokens(queryStr));
+        //
+        // W9 (root-leak forensics): scrub the workspace root's own folder
+        // name and any path-shaped span out of the query text BEFORE
+        // tokenization — see concernHarvestText's module doc in
+        // readCodeTaskPack.ts.
+        recordConcernTokens(workspace, concernAnchorTokens(concernHarvestText(workspace, queryStr)));
 
         // Fix B (2026-07-12c single-query-find-loop forensics): one-shot find-batching
         // hint — sibling of the edits[] BATCH_HINT_TEXT nudge (see
@@ -9957,6 +11299,8 @@ async function dispatchTool(canonical: string, args: Record<string, unknown>): P
           const result = await buildTaskPack(
             {
               ...searchTaskCredential,
+              // PI-09 close-out: the explicit "I lost my context" switch.
+              ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
               query: args["query"] ? String(args["query"]) : undefined,
               ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]) } : {}),
               ...(args["symbol"] !== undefined ? { symbol: String(args["symbol"]) } : {}),
@@ -10130,8 +11474,10 @@ function rootMismatchNote(resolvedRoot: string): string | undefined {
 }
 
 /**
- * Public dispatch entry point. Runs the protocol v1 funnel over the
- * workspace-aware dispatcher, including cwd correction and root notes.
+ * Public dispatch entry point. Routes to the C2 lean protocol when
+ * protocol v1 funnel (runWithProtocolCall / finalizeProtocolResponse) over
+ * dispatchWithWorkspaceNotes, which carries Fix 3's cwd auto-correction and
+ * Guard 1's root_note — see that function's own doc comment for both.
  */
 async function callToolUninstrumented(name: string, args: Record<string, unknown>) {
   const canonical = name;
@@ -10144,9 +11490,23 @@ async function callToolUninstrumented(name: string, args: Record<string, unknown
   // continuation from what the caller actually asked for (A.5.8's `find` and
   // `symbols` limits) rather than from a rendering of it — see
   // `ProtocolCallContext.args`.
-  return runWithProtocolCall({ tool: canonical, args }, async () =>
-    finalizeProtocolResponse(canonical, await dispatchWithWorkspaceNotes(canonical, args)),
-  );
+  // F-A7: clientId rides the SAME shared funnel context every era/leg
+  // already threads through this one call site.
+  const clientId = resolvedClientId();
+  const runThroughFunnel = (): Promise<ToolCallResult> =>
+    runWithProtocolCall(
+      { tool: canonical, args, ...(clientId !== undefined ? { clientId } : {}) },
+      async () => finalizeProtocolResponse(canonical, await dispatchWithWorkspaceNotes(canonical, args)),
+    );
+
+  // PI-09 close-out: `operation_id` is edit-only (see its schema comment), so
+  // only edit_file is wrapped; a read tool that sends it is refused by the
+  // strict `unknown-arguments` fence inside dispatch. The wrapper sits OUTSIDE
+  // the funnel deliberately — see `runEditWithOperationId`'s doc comment.
+  if (canonical === "edit_file" && args["operation_id"] !== undefined) {
+    return runEditWithOperationId(args, runThroughFunnel);
+  }
+  return runThroughFunnel();
 }
 
 /**
@@ -10190,10 +11550,61 @@ async function dispatchWithWorkspaceNotes(canonical: string, args: Record<string
   // it captured, never whether anyone chose it, and a cwd-less mint → cwd-less
   // edit chain has no premise for any guard to evaluate. See
   // util/handles.ts's workspaceDeclared.
-  const result = await runWithDeclaredWorkspace(
+  // PI-09 rehydration scope. DELIBERATELY SEPARATE from the declaration scope
+  // above: declaration is a security premise (did the CALLER name this root?)
+  // and must stay narrow, while "which store may this call read?" is a
+  // question every call can answer. Wrapping the two together would have
+  // widened the write guard as a side effect of adding persistence.
+  let callWorkspaceRoot: string | undefined;
+  try {
+    callWorkspaceRoot = resolveWorkspaceRoot(args["cwd"] as string | undefined, activeRoot);
+  } catch {
+    // An unresolvable cwd is refused inside dispatch with its own shape; no
+    // store scope simply means handle rehydration is unavailable for it.
+    callWorkspaceRoot = undefined;
+  }
+  // D1 (F-C2a): thread the workspace this call resolved against into a
+  // DEDICATED context slot for protocol/codec/pipeline.ts's trace emissions
+  // -- read_file/search_files never called `noteWorkspaceRoot` (only
+  // edit_file's finishEdit does), so the codec pipeline's
+  // `context.workspace !== undefined` trace gate was permanently closed for
+  // the two codec-ELIGIBLE tools, and the wire_codec_shadow/
+  // wire_codec_v2_cell measurement feed could never fire through real
+  // dispatch (F-C2). `callWorkspaceRoot` (just above) is exactly the root
+  // dispatchTool is about to run against (`runWithCallWorkspace` below), so
+  // this is the SAME value, taken at dispatch entry rather than at a
+  // write's completion because read_file/search_files have no post-dispatch
+  // completion hook to take it at.
+  //
+  // NOTE: this calls `noteCodecTraceWorkspace`, NOT `noteWorkspaceRoot` --
+  // an earlier version of this fix populated `context.workspace` directly
+  // and broke wireBaselines.spec.ts's pinned bytes, because
+  // `readFamily.ts`'s `projectReadBody` ALSO reads `context.workspace` (via
+  // this module's envelope, to decide whether a `read.receipt`'s
+  // continuation echoes `cwd`) and `emit.ts` reads it to settle the
+  // served-range ledger -- both wire/state-affecting, and both previously
+  // saw `undefined` on every read/search call. `codecTraceWorkspace` is
+  // read by nothing except the codec pipeline, so this note is genuinely
+  // TRACE-ONLY: zero wire bytes, zero served-range-ledger effect.
+  // `noteWorkspaceRoot`'s own edit_file call site (finishEdit, below) is
+  // untouched either way.
+  //
+  // We are still inside runWithProtocolCall's AsyncLocalStorage scope here
+  // (callToolUninstrumented's runThroughFunnel wraps this whole function), so
+  // the note lands in the same context finalizeProtocolResponse reads later,
+  // exactly like finishEdit's own call does many frames deeper.
+  if ((canonical === "read_file" || canonical === "search_files") && callWorkspaceRoot !== undefined) {
+    noteCodecTraceWorkspace(callWorkspaceRoot);
+  }
+  const result = await runWithCallWorkspace(callWorkspaceRoot, () => runWithDeclaredWorkspace(
     declaredWorkspaceForCall(args),
     () => dispatchTool(canonical, args),
-  );
+  ));
+  // Land this call's handle mints BEFORE the response is emitted. Flushing
+  // here rather than on a timer is what makes "answer, then SIGKILL, then
+  // replay the handle against a fresh process" a deterministic test instead of
+  // a race — and it batches a task_pack's dozens of mints into one append.
+  flushHandleEntries();
 
   // Guard 1 (2026-07-12b cross-workspace-bleed forensics; write paths added
   // 2026-08-01): a cwd-less, handle-less call silently resolves against the
@@ -10295,15 +11706,24 @@ function recorder(): UsageRecorder {
   usageRecorder ??= createUsageRecorder({
     workspaceRoot: activeRoot,
     sessionId: SESSION_ID,
+    serverVersion: SERVER_PACKAGE_VERSION,
+    serverBuild: SERVER_BUILD_ID,
   });
   return usageRecorder;
 }
 
-function readBaselineTokens(
+interface ReadBaselineMeasurement {
+  tokens: number | null;
+  uncreditedPaths: string[];
+}
+
+const creditedReadPathsByLane = new Map<string, Set<string>>();
+
+function readBaselineMeasurement(
   canonical: string,
   args: Readonly<Record<string, unknown>>,
-): number | null {
-  if (canonical !== "read_file") return null;
+): ReadBaselineMeasurement {
+  if (canonical !== "read_file") return { tokens: null, uncreditedPaths: [] };
   let workspace: string;
   try {
     workspace = resolveWorkspaceRoot(
@@ -10311,7 +11731,7 @@ function readBaselineTokens(
       activeRoot,
     );
   } catch {
-    return null;
+    return { tokens: null, uncreditedPaths: [] };
   }
   const requested: string[] = [];
   if (typeof args["path"] === "string") requested.push(args["path"]);
@@ -10328,8 +11748,12 @@ function readBaselineTokens(
       }
     }
   }
+
+  const lane = sessionLaneOf(args as Record<string, unknown>);
+  const credited = creditedReadPathsByLane.get(lane) ?? new Set<string>();
   let bytes = 0;
   let measured = 0;
+  const uncreditedPaths: string[] = [];
   for (const requestedPath of new Set(requested)) {
     const absolute = path.resolve(workspace, requestedPath);
     const relative = path.relative(workspace, absolute);
@@ -10342,15 +11766,33 @@ function readBaselineTokens(
     }
     try {
       const stat = statSync(absolute);
-      if (stat.isFile()) {
-        bytes += stat.size;
-        measured++;
-      }
+      if (!stat.isFile()) continue;
+      measured++;
+      const key = process.platform === "win32"
+        ? path.normalize(absolute).toLowerCase()
+        : path.normalize(absolute);
+      if (credited.has(key)) continue;
+      bytes += stat.size;
+      uncreditedPaths.push(key);
     } catch {
       // Missing and virtual/archive paths simply have no measurable baseline.
     }
   }
-  return measured > 0 ? estimateTokensFromBytes(bytes) : null;
+  return {
+    tokens: measured > 0 ? estimateTokensFromBytes(bytes) : null,
+    uncreditedPaths,
+  };
+}
+
+function commitReadBaseline(
+  measurement: ReadBaselineMeasurement,
+  args: Readonly<Record<string, unknown>>,
+): void {
+  if (measurement.uncreditedPaths.length === 0) return;
+  const lane = sessionLaneOf(args as Record<string, unknown>);
+  const credited = creditedReadPathsByLane.get(lane) ?? new Set<string>();
+  for (const key of measurement.uncreditedPaths) credited.add(key);
+  creditedReadPathsByLane.set(lane, credited);
 }
 
 // One fixed lane value per concurrent agent; 64 chars is plenty for any
@@ -10384,49 +11826,250 @@ export function modelVisibleBytes(result: { content: Array<{ text: string }> }):
   return bytes;
 }
 
+// Mirrors the `mode`/`action` enum literals advertised in the read_file/
+// search_files tool input schemas above (see the `mode`/`action` `enum:`
+// entries near each tool's registration) — kept as a private allowlist here,
+// not a shared contract, purely so the diagnostics ring file (packages/usage's
+// diagRing.ts) never carries anything but a known enum token in its `mode`
+// field.
+const DIAG_READ_FILE_MODES = new Set([
+  "auto", "skeleton", "symbol", "full", "pack", "map", "digest",
+  "slice", "task_pack", "small_file", "artifact", "archive", "overview", "closure",
+]);
+const DIAG_SEARCH_FILES_ACTIONS = new Set([
+  "find", "symbols", "references", "diff", "locate", "tree",
+]);
+
+/** Diagnostics-only mode label for the last-call ring file — an enum value, never free user text. */
+function observedCallMode(canonical: string, args: Record<string, unknown>): string | undefined {
+  if (canonical === "read_file") {
+    const mode = args["mode"];
+    return typeof mode === "string" && DIAG_READ_FILE_MODES.has(mode) ? mode : undefined;
+  }
+  if (canonical === "search_files") {
+    const action = args["action"];
+    return typeof action === "string" && DIAG_SEARCH_FILES_ACTIONS.has(action) ? action : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Diagnostics-only envelope peek for the last-call ring file: the response
+ * `kind` and, for a refusal, its short `code`. Parses content[0].text
+ * defensively — malformed/missing JSON yields {} and this must never throw
+ * or alter the MCP outcome.
+ */
+function observedEnvelopeMeta(
+  result: { content: Array<{ text: string }> },
+): { kind?: string; errorCode?: string; retry?: string; field?: string } {
+  try {
+    const text = result.content[0]?.text;
+    if (typeof text !== "string") return {};
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object") return {};
+    const envelope = parsed as { kind?: unknown; code?: unknown; retry?: unknown; field?: unknown };
+    return {
+      kind: typeof envelope.kind === "string" ? envelope.kind : undefined,
+      errorCode: typeof envelope.code === "string" ? envelope.code : undefined,
+      retry: typeof envelope.retry === "string" ? envelope.retry : undefined,
+      field: typeof envelope.field === "string" ? envelope.field : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * V10-02: the qref/task-identity CLASS for THIS call, derived GENERICALLY
+ * from `args.query` (a fresh request) or `args.qref` (a replay) so read_file
+ * and search_files both feed the trace envelope's `task_ref` without their
+ * own deep dispatch internals (resolveTaskPackQueryArg et al.) changing.
+ * `repeated` means this ref was ALREADY the workspace session's active qref
+ * before this call — a genuine same-qref re-pack. Returns undefined when
+ * neither arg names a task (edit_file; a path/handle-only read) — task_ref
+ * stays a "when known" envelope field, never fabricated. Must run inside the
+ * caller's OWN session lane (see the runWithSessionLane wrapper at the call
+ * site below) — resolveTaskQueryRef reads lane-scoped session state.
+ */
+function dispatchTaskRef(
+  args: Record<string, unknown>,
+  workspaceRoot: string,
+): { ref: string; repeated: boolean } | undefined {
+  const query = typeof args["query"] === "string" ? args["query"].trim() : "";
+  if (query.length > 0) {
+    const ref = taskQueryRef(workspaceRoot, query);
+    return { ref, repeated: resolveTaskQueryRef(workspaceRoot, ref) !== undefined };
+  }
+  const qref = typeof args["qref"] === "string" ? args["qref"].trim() : "";
+  if (qref.length === 0) return undefined;
+  // An explicit qref is trustworthy for the envelope only once VERIFIED
+  // against this session's own ledger — unverified it names no real task
+  // (stale, foreign, or simply fabricated), so it is omitted rather than
+  // echoing an unchecked caller string. Verified, a qref replay is BY
+  // DEFINITION a repeat of the same task.
+  return resolveTaskQueryRef(workspaceRoot, qref) !== undefined
+    ? { ref: qref, repeated: true }
+    : undefined;
+}
+
+/**
+ * PI-03: read the trusted-client-host channel and, when it VERIFIES, bind it to
+ * this call and mint the host-visible `context_handle`.
+ *
+ * Everything about this is fail-closed. The flag is off by default, so
+ * `verifyContextAttestation` returns `disabled` and this is a single boolean
+ * read; with the flag on, an absent / malformed / tampered / stale / foreign
+ * attestation returns `undefined`, which is byte-identically the unattested
+ * path. `try/catch` around the whole thing because an attestation channel that
+ * threw would otherwise be a way to fail a tool call from outside.
+ */
+function verifiedContextFor(
+  args: Record<string, unknown>,
+  requestMeta: Record<string, unknown> | undefined,
+): VerifiedContextAttestation | undefined {
+  if (requestMeta === undefined) return undefined;
+  try {
+    const workspaceRoot = resolveWorkspaceRoot(
+      typeof args["cwd"] === "string" ? args["cwd"] : undefined,
+      activeRoot,
+    );
+    const verdict = verifyContextAttestation({ meta: requestMeta, workspaceRoot });
+    if (!verdict.ok) return undefined;
+    const contextHandle = mintContextHandle(workspaceRoot, verdict.attestation, verdict.generation);
+    return {
+      attestation: verdict.attestation,
+      generation: verdict.generation,
+      workspaceRoot,
+      ...(contextHandle !== undefined ? { contextHandle } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Public tool boundary. Usage recording is best-effort and deliberately sees
  * only derived counts; raw arguments and result content are never handed to
  * the recorder.
+ *
+ * V10-02: the WHOLE body runs inside runWithTraceCall so every trace() line
+ * this invocation emits — route_decision below, and every downstream one
+ * nested arbitrarily deep across awaits — shares one call_id. This is the
+ * "per-call context setter from dispatch" the trace envelope depends on; see
+ * util/trace.ts's V10-02 header doc.
+ *
+ * `requestMeta` is the `tools/call` params `_meta`, forwarded verbatim by all
+ * three transport legs (legacy SDK, hand-rolled JSON-RPC fallback, modern SDK
+ * v2). It is UNTRUSTED INPUT: the only thing read out of it is PI-03's
+ * attestation channel, and that is authenticated before it can change
+ * anything. Optional, so every existing caller — and every test — is unchanged.
  */
-export async function callTool(name: string, args: Record<string, unknown>) {
+export async function callTool(
+  name: string,
+  args: Record<string, unknown>,
+  requestMeta?: Record<string, unknown>,
+) {
+  return runWithTraceCall(() => callToolTraced(name, args, requestMeta));
+}
+
+async function callToolTraced(
+  name: string,
+  args: Record<string, unknown>,
+  requestMeta?: Record<string, unknown>,
+) {
   const canonical = name;
+  // V10-04 (beta.1): advisory route classification (routing/classifier.ts) —
+  // observability only, nothing below branches on it. Cheap pure string
+  // classification, computed unconditionally so the trace call always has a
+  // decision to record.
+  const routeDecision = classifyRoute(canonical, args);
+  setTraceContext({ route: routeDecision.route });
   try {
     const cwd = typeof args["cwd"] === "string" ? args["cwd"] : undefined;
-    traceCausalAttestation(resolveWorkspaceRoot(cwd, activeRoot));
+    const workspaceRoot = resolveWorkspaceRoot(cwd, activeRoot);
+    traceCausalAttestation(workspaceRoot);
+    // V10-02: resolve task_ref BEFORE route_decision fires (must run inside
+    // the CALLER's session lane -- 2026-08-07 concurrent-agent lanes -- so a
+    // non-default-lane caller's qref resolves against ITS OWN session, not
+    // the shared default one) so route_decision, and every trace() line
+    // after it, carries the fullest context this call ever resolves rather
+    // than only the ones emitted after the fact.
+    const dispatchQueryRef = runWithSessionLane(
+      sessionLaneOf(args),
+      () => dispatchTaskRef(args, workspaceRoot),
+    );
+    if (dispatchQueryRef !== undefined) setTraceContext({ taskRef: dispatchQueryRef.ref });
+    trace("route_decision", { tool: canonical, route: routeDecision.route, reason: routeDecision.reason }, workspaceRoot);
+    // V10-02: forced_resend — a generic force_serve-style bypass arg, read
+    // structurally off the raw request args so this has NO hard dependency
+    // on the not-yet-landed PI-09 wire arg of the same name (D-8/deviation
+    // register). The event simply never fires while the arg does not exist
+    // in this tree, which is every call today.
+    if (args["force_serve"] === true) {
+      trace("forced_resend", { tool: canonical }, workspaceRoot);
+    }
+    if (dispatchQueryRef?.repeated === true) {
+      trace("repeated_query", { task_ref: dispatchQueryRef.ref }, workspaceRoot);
+    }
   } catch {
-    // Attestation is observability only and must never alter an MCP outcome.
+    // Attestation/route tracing is observability only and must never alter an MCP outcome.
   }
   const startedAt = performance.now();
-  const baselineTokens = readBaselineTokens(canonical, args);
+  const baselineMeasurement = readBaselineMeasurement(canonical, args);
+  const baselineTokens = baselineMeasurement.tokens;
   try {
     // 2026-08-07 concurrent-agent lanes: both transports funnel through this
     // function, so binding the async context here scopes EVERY session lookup
     // of the call — dispatch, features, guards — to the caller's lane. The
     // refusal flows through the recorder below like any other result.
     const laneRefusal = sessionLaneRefusal(args);
+    // PI-03: verified BEFORE dispatch so the binding covers the whole call —
+    // the receipt projector that consults it runs deep inside the funnel.
+    // `undefined` (the default, and every rejection) means the dispatch below
+    // runs with no binding at all, which is today's behavior exactly.
+    const verifiedContext = verifiedContextFor(args, requestMeta);
     const result = laneRefusal
       // protocol v1: the lane refusal short-circuits BEFORE the dispatch funnel,
       // so it needs its own envelope. D1 admits no exceptions — a refusal a
       // client cannot version-identify is the class §1.2 exists to remove.
       ? runWithProtocolCall({ tool: canonical, kind: "refusal" }, () =>
           finalizeProtocolResponse(canonical, laneRefusal))
-      : await runWithSessionLane(sessionLaneOf(args), () => callToolUninstrumented(name, args));
+      : await runWithVerifiedContext(verifiedContext, () =>
+          runWithSessionLane(sessionLaneOf(args), () => callToolUninstrumented(name, args)));
+    // PI-03: the ISSUED handle rides result `_meta`, host-visible and never in
+    // `content[*].text` — plan invariant 15's other half, the one that keeps a
+    // context handle out of the model's reach in BOTH directions.
+    if (verifiedContext?.contextHandle !== undefined) {
+      (result as ToolCallResult)._meta = {
+        ...(result as ToolCallResult)._meta,
+        [CONTEXT_STATE_META_KEY]: {
+          context_handle: verifiedContext.contextHandle,
+          context_generation: verifiedContext.generation,
+        },
+      };
+    }
+    const outcomeIsError = "isError" in result && result.isError === true;
+    if (!outcomeIsError) commitReadBaseline(baselineMeasurement, args);
     try {
       if (
         canonical === "read_file"
         || canonical === "search_files"
         || canonical === "edit_file"
       ) {
+        const envelopeMeta = observedEnvelopeMeta(result);
         recorder().record({
           tool: canonical,
-          outcome:
-            "isError" in result && result.isError === true ? "error" : "ok",
+          outcome: outcomeIsError ? "error" : "ok",
           durationMs: performance.now() - startedAt,
           responseBytes: modelVisibleBytes(result),
           baselineTokens,
           baselineMethod: baselineTokens === null ? null : "file-bytes",
           writeEnabled: ALLOW_WRITE,
+          kind: envelopeMeta.kind,
+          mode: observedCallMode(canonical, args),
+          errorCode: outcomeIsError ? envelopeMeta.errorCode : undefined,
+          retry: outcomeIsError ? envelopeMeta.retry : undefined,
+          field: outcomeIsError ? envelopeMeta.field : undefined,
         });
       }
     } catch {
@@ -10448,6 +12091,7 @@ export async function callTool(name: string, args: Record<string, unknown>) {
           baselineTokens,
           baselineMethod: baselineTokens === null ? null : "file-bytes",
           writeEnabled: ALLOW_WRITE,
+          mode: observedCallMode(canonical, args),
         });
       }
     } catch {
@@ -10475,11 +12119,25 @@ export type RpcResponse = {
   error?: JsonRpcError;
 };
 
-function makeError(id: string | number | null, code: number, message: string): RpcResponse {
+export function makeError(id: string | number | null, code: number, message: string): RpcResponse {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-async function handleRequest(req: RpcRequest): Promise<RpcResponse | null> {
+/**
+ * issue #4: the `initialize` result's `instructions` string.
+ * SERVER_INSTRUCTIONS always leads; when `degraded` is non-empty the existing
+ * `Degraded: ...` line is preserved verbatim, appended on its own line. Split
+ * out as a pure function so this shape is unit-testable directly — `degraded`
+ * currently has no live producer in `handleRequest` below, so the append
+ * branch has no reachable trigger through a real `initialize` call today.
+ */
+export function buildInitializeInstructions(degraded: readonly string[]): string {
+  return degraded.length > 0
+    ? `${SERVER_INSTRUCTIONS}\nDegraded: ${degraded.join(", ")}`
+    : SERVER_INSTRUCTIONS;
+}
+
+export async function handleRequest(req: RpcRequest): Promise<RpcResponse | null> {
   const id = req.id ?? null;
 
   switch (req.method) {
@@ -10491,6 +12149,8 @@ async function handleRequest(req: RpcRequest): Promise<RpcResponse | null> {
         process.stderr.write(
           `[tl-mcp] client: ${ci["name"] ?? "?"} ${ci["version"] ?? ""}\n`,
         );
+        // F-A7: capture once per connection — see capturedClientId's doc comment.
+        if (typeof ci["name"] === "string" && ci["name"] !== "") capturedClientId = ci["name"];
       }
       const degraded: string[] = [];
       return {
@@ -10509,16 +12169,21 @@ async function handleRequest(req: RpcRequest): Promise<RpcResponse | null> {
           serverInfo: {
             name: "@tokenlighten/mcp-server",
             version: SERVER_PACKAGE_VERSION,
-            _meta: { ...PROTOCOL_META },
+            _meta: {
+              ...PROTOCOL_META,
+              ...(SERVER_BUILD_ID !== undefined ? { server_build: SERVER_BUILD_ID } : {}),
+            },
           },
           // W3 (2026-07-30, dist build-id echo): initialize is inherently
           // one-shot per connection, so no session-state gating is needed
           // here (contrast the per-workspace claimServerBuildAnnouncement
           // gate attachServerBuildOnce uses for the first task_pack response).
           ...(SERVER_BUILD_ID !== undefined ? { server_build: SERVER_BUILD_ID } : {}),
-          ...(degraded.length > 0
-            ? { instructions: `Degraded: ${degraded.join(", ")}` }
-            : {}),
+          // issue #4: `instructions` is now ALWAYS present (previously only
+          // set when degraded) so a host that surfaces it in the system
+          // prompt (e.g. Claude Code's "MCP Server Instructions") routes
+          // discovery-shaped tasks to TL from turn 0.
+          instructions: buildInitializeInstructions(degraded),
         },
       };
     }
@@ -10546,7 +12211,17 @@ async function handleRequest(req: RpcRequest): Promise<RpcResponse | null> {
       }
 
       try {
-        const result = await callTool(toolName, toolArgs);
+        // PI-03: the hand-rolled JSON-RPC leg parses `params` itself, so
+        // `_meta` arrives verbatim. Same pass-through, same authentication
+        // downstream — all three legs reach one verifier.
+        const requestMeta = params["_meta"];
+        const result = await callTool(
+          toolName,
+          toolArgs,
+          typeof requestMeta === "object" && requestMeta !== null && !Array.isArray(requestMeta)
+            ? (requestMeta as Record<string, unknown>)
+            : undefined,
+        );
         return { jsonrpc: "2.0", id, result };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -10567,132 +12242,29 @@ async function handleRequest(req: RpcRequest): Promise<RpcResponse | null> {
 }
 
 // ---------------------------------------------------------------------------
-// SDK-first stdio transport
+// Stdio transports
 // ---------------------------------------------------------------------------
-
-async function tryRunWithSdk(): Promise<boolean> {
-  try {
-    const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
-    const { StdioServerTransport } = await import(
-      "@modelcontextprotocol/sdk/server/stdio.js"
-    );
-
-    const server = new Server(
-      // §1.2 point 2 on the SDK path: the SDK builds `initialize` itself and
-      // echoes `serverInfo` verbatim, so the announcement rides there.
-      // The SDK's `Implementation` type predates `_meta` on serverInfo; the
-      // schema itself passes unknown keys through, so the cast is the narrow
-      // way to reach the wire without widening the SDK's own contract.
-      { name: "@tokenlighten/mcp-server", version: SERVER_PACKAGE_VERSION, _meta: { ...PROTOCOL_META } } as unknown as { name: string; version: string },
-      { capabilities: { tools: {} } },
-    );
-
-    // Register tools/list handler.
-    server.setRequestHandler(
-      { method: "tools/list" } as Parameters<typeof server.setRequestHandler>[0],
-      async () => ({ tools: advertisedTools() }),
-    );
-
-    // Register tools/call handler.
-    server.setRequestHandler(
-      { method: "tools/call" } as Parameters<typeof server.setRequestHandler>[0],
-      async (req: unknown) => {
-        const r = req as { params: { name: string; arguments?: Record<string, unknown> } };
-        const toolName = r.params.name;
-        const toolArgs = r.params.arguments ?? {};
-        const toolDef = ALL_TOOLS.find((t) => t.name === toolName);
-        // D11: same advertised-or-refused gate as the non-SDK transport.
-        if (!toolDef || !toolDef.enabled) {
-          throw new Error(`Tool not found: ${toolName}`);
-        }
-        return callTool(toolName, toolArgs);
-      },
-    );
-
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    process.stderr.write(`[tl-mcp] stdio transport (MCP SDK)\n`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Hand-rolled stdio fallback
-// ---------------------------------------------------------------------------
-
-// SECURITY (TL-SECURITY-REVIEW-2026-08-15 finding 7, CWE-400): this legacy
-// path only runs when the SDK transport (tryRunWithSdk, above) is
-// unavailable — it used to buffer+JSON.parse any readline "line" of any
-// size and fire every handleRequest() concurrently with zero backpressure.
-// 16 MB matches this server's existing 16 MB-class per-unit ceiling family
-// (office/zipPreflight.ts ZIP_LIMITS.maxPartUncompressedBytes, tools/archive
-// .ts ARCHIVE_LIMITS.maxMemberBytes/maxScanBytes) — comfortably above any
-// legitimate single JSON-RPC request this server accepts (a create:true
-// file body alone is capped at 32 KiB per AGENTS.md; a large batched
-// edits[] call stays orders of magnitude under this), while still being a
-// hard, known ceiling rather than "whatever fits in memory".
-const MAX_FALLBACK_LINE_BYTES = 16 * 1024 * 1024;
-
-/**
- * `input`/`output`/`handler` are TEST-ONLY injection points (mirrors this
- * codebase's established quota-override-seam convention — see office/pdf.ts's
- * PdfExtractionQuotaOverrides) so a regression test can drive this transport
- * with in-memory streams and a controllable-latency handler instead of real
- * stdio and the full tool dispatch. Production always calls this with zero
- * arguments (see run(), below), so the defaults are the only path that ever
- * executes outside tests.
- */
-export function runStdioFallback(
-  input: NodeJS.ReadableStream = process.stdin,
-  output: NodeJS.WritableStream = process.stdout,
-  handler: (req: RpcRequest) => Promise<RpcResponse | null> = handleRequest,
-  maxLineBytes: number = MAX_FALLBACK_LINE_BYTES,
-): void {
-  process.stderr.write(`[tl-mcp] stdio transport (hand-rolled JSON-RPC 2.0)\n`);
-  process.stderr.write(`[tl-mcp] workspace root: ${activeRoot}\n`);
-
-  const rl = readline.createInterface({ input });
-  // In-flight requests are fully serialized (a queued line always gets its
-  // turn, in order) rather than firing unboundedly — this fallback is a
-  // degraded/legacy path, not the primary SDK transport, so trading away
-  // concurrency for a hard resource bound is the right tradeoff here.
-  let queueTail: Promise<void> = Promise.resolve();
-  rl.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    if (Buffer.byteLength(trimmed, "utf8") > maxLineBytes) {
-      // Ignored + warned, matching the (pre-existing, just below) convention
-      // for a line this transport cannot otherwise process: invalid JSON is
-      // also silently dropped rather than answered, since a request id
-      // cannot be trusted from an input we refuse to parse.
-      process.stderr.write(
-        `[tl-mcp] fallback transport: dropped oversized request line (> ${maxLineBytes} bytes)\n`,
-      );
-      return;
-    }
-    let msg: unknown;
-    try { msg = JSON.parse(trimmed); } catch { return; }
-    if (!msg || typeof msg !== "object") return;
-
-    const req = msg as RpcRequest;
-    queueTail = queueTail.then(() => handler(req)).then((res) => {
-      if (res) output.write(JSON.stringify(res) + "\n");
-    }).catch(() => {
-      const id = (req as RpcRequest).id ?? null;
-      output.write(
-        JSON.stringify(makeError(id, -32603, "Internal error")) + "\n",
-      );
-    });
-  });
-}
+//
+// v0.10 alpha.1 (DESIGN-v0.10-expansion-plan-reconciliation.md §4 alpha.1
+// item 4 / PI-09 items 1-2): the transport tail moved to ./mcp/transport/ so
+// the modern 2026-07-28 era can sit beside the legacy one behind
+// TOKENLIGHTEN_PROTOCOL_ERA. `runStdioFallback` keeps its server.ts export
+// site — it is an established test seam (__tests__/fallbackTransport.spec.ts).
+export { runStdioFallback } from "./mcp/transport/fallbackStdio.js";
 
 // ---------------------------------------------------------------------------
 // Public entry
 // ---------------------------------------------------------------------------
 
 export async function run(): Promise<void> {
+  // v0.10 PI-09 deferred cell: resolved and validated BEFORE any transport
+  // is wired up, so a TOKENLIGHTEN_HTTP_PORT set alongside
+  // TOKENLIGHTEN_PROTOCOL_ERA=legacy fails fast with a clear message rather
+  // than leaving the stdio transport connected while this call unwinds. See
+  // mcp/transport/index.ts's runHttpTransport and mcp/transport/modernHttp.ts's
+  // module header for the full policy.
+  await runHttpTransport();
+
   process.stderr.write(
     `[tl-mcp] starting v${SERVER_PACKAGE_VERSION} server, root: ${activeRoot}\n`,
   );
@@ -10712,9 +12284,8 @@ export async function run(): Promise<void> {
   // <message>, exit 1), with zero bytes ever written to stdout.
   assertStartupBudgetsAreSane();
 
-  // Try SDK first; fall back to hand-rolled if SDK unavailable.
-  const sdkOk = await tryRunWithSdk();
-  if (!sdkOk) {
-    runStdioFallback();
-  }
+  // Era-selected stdio transport. Default (`legacy`, or an unset/unknown
+  // TOKENLIGHTEN_PROTOCOL_ERA) is exactly the pre-v0.10 path: SDK first, then
+  // the hand-rolled JSON-RPC fallback if the SDK is unavailable.
+  await runTransport();
 }

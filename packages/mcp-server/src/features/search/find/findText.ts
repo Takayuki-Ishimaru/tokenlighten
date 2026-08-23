@@ -21,7 +21,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { FoundFile, LangKey } from "../../../tools/walkRepo.js";
-import { walkCodeFiles, createWalkOmissions, anyWalkOmission, genericTextDiscoveryEnabled, type WalkOmissions } from "../../../tools/walkRepo.js";
+import { walkCodeFiles, createWalkOmissions, anyWalkOmission, genericTextDiscoveryEnabled, TEXT_SCAN_MAX_FILE_SIZE_BYTES, type WalkOmissions } from "../../../tools/walkRepo.js";
 import { deriveTokenVariants } from "../../../util/impact.js";
 import { tokenizeQuery as tokenizeQueryShared } from "../../../util/queryShape.js";
 import { regexSignatureLines } from "../../../skeleton/regexFallback.js";
@@ -41,6 +41,11 @@ import type { MemberSweepAttachment } from "./memberSweep.js";
 // Type-only, same reason: relatedLookups.ts also imports MAX_RESPONSE_BYTES/
 // MAX_INVENTORY_RESPONSE_BYTES from this file.
 import type { RelatedLookups } from "./relatedLookups.js";
+// PI-05 generalization (beta.1+): the search family's shared hint/next
+// arbitration — see that module's header for the normative precedence
+// table this file's composeHint/absenceAwareHint/repeatedHitHint now defer
+// to (thin adapters over classifyRepeatedHit/decideHint/repeatedHitHintText).
+import { classifyRepeatedHit, decideHint, repeatedHitHintText } from "../nextActionPolicy.js";
 
 const MAX_MATCHES = 100;
 
@@ -740,6 +745,13 @@ export interface FindResponse {
    * `omitted`), so the claim's boundary is always visible.
    */
   absence?: FindAbsence;
+  /**
+   * PI-04 (F-A1-2/F-A1-3 register) — one entry per ORIGINAL `queries[]`
+   * term, present only on a multi-term call where at least one term missed
+   * while at least one other hit (fixed-cost discipline: never on a
+   * single-query call or an all-hit call). See `FindTermResult`.
+   */
+  term_results?: FindTermResult[];
   /** L1 (2026-07-30 T11 forensics): present when `query` resolves to a unique class/interface definition with >=2 members — see memberSweep.ts. Attached by server.ts's find dispatch (post-buildFindResponse), not by this function. */
   member_sweep?: MemberSweepAttachment;
   /** S9 (2026-08-07 native-IO-escape wave): optional, non-required companion calls for the SAME identifier's own definition (search_files action=symbols) and call sites (action=references) — see relatedLookups.ts. Present only for a literal (non-regex) exact single-identifier hit; never on absence, a naming-variant match, or a tokenized fallback. Unlike next_call elsewhere in this server, neither entry is a required continuation. Attached by server.ts's find dispatch (post-buildFindResponse), not by this function. */
@@ -769,6 +781,28 @@ export interface FindAbsence {
    * include them, so absence is never mistaken for a whole-repo claim.
    */
   caveat?: string;
+}
+
+/**
+ * PI-04 (F-A1-2/F-A1-3 register) — one `queries[]` term's own outcome,
+ * reusing `buildAbsenceExtra`'s scope gate rather than a parallel proof
+ * shape. Present only on `buildFindResponseForQueries`' multi-term,
+ * partial-hit path (see `FindResponse.term_results`).
+ */
+export interface FindTermResult {
+  /** The term exactly as the caller supplied it in `queries[]`. */
+  original: string;
+  /**
+   * `matched`: >=1 hit for this term alone. `absent`: the scan was complete
+   * (buildAbsenceExtra's own gate certified) and this term had zero hits.
+   * `unknown`: partial coverage (e.g. an unreadable subtree) made a real
+   * absence claim impossible — never asserted as `absent` under doubt.
+   */
+  status: "matched" | "absent" | "unknown";
+  /** Raw hit count for this term alone; omitted only when `unknown`. */
+  match_count?: number;
+  /** Present for `absent`/`unknown` — the same scope completeness the whole-set `FindAbsence` certificate is gated on. */
+  scope?: { completeness: "complete" | "partial"; scanned_files?: number };
 }
 
 /** One matched file's hit count in a truncated response's exhaustive inventory. */
@@ -949,9 +983,7 @@ export function attachDominantEditContext(
  */
 function repeatedHitHint(workspace: string, candidate: FindFileGroup): string {
   const where = `${candidate.path} ${candidate.range} handle=${candidate.handle}`;
-  return isPlausibleEditTarget(workspace, candidate.path)
-    ? `edit-grade repeated-hit candidate: ${where}; if the bundled context matches the symptom, edit this handle without another locate/read`
-    : `repeated-hit cluster: ${where}; exact source bundled below — read it from here instead of another locate. Not in this session's admissible edit set, so it is context, not an established edit target`;
+  return repeatedHitHintText(where, classifyRepeatedHit(isPlausibleEditTarget(workspace, candidate.path)));
 }
 
 /**
@@ -1205,6 +1237,17 @@ const INVENTORY_NOTE =
 const INVENTORY_NOTE_WITH_OMITTED =
   "inventory[] plus total_files/total_matches are exhaustive over every SCANNED file; paths counted in `omitted` were excluded from scanning (ignore rules / oversize) — re-scope directly at them to include them; only the per-file snippets in files[] were capped";
 
+/**
+ * Same "scanned, not the whole repo" caveat as INVENTORY_NOTE_WITH_OMITTED,
+ * for the untruncated path (attachInventory's early return): `files[]`
+ * itself is already complete — nothing was capped — but `total_files`/
+ * `total_matches`/`inventory_complete:true` still only cover the SCANNED
+ * set, so a caller must not read them as "this token appears nowhere else
+ * in the repo" while `omitted` names files the scan never opened.
+ */
+const INVENTORY_COMPLETE_NOTE_WITH_OMITTED =
+  "files[] plus total_files/total_matches are exhaustive over every SCANNED file (nothing here was capped); paths counted in `omitted` were excluded from scanning entirely (ignore rules / oversize) and are NOT reflected above — re-scope directly at them to include them";
+
 const ABSENCE_NOTE =
   "absence is authoritative over every scanned file — re-running this query, or a shell grep for the same token, will not surface a hit";
 
@@ -1255,6 +1298,23 @@ function buildAbsenceExtra(args: {
   /** True when the scan could not have seen a differently-cased occurrence. */
   caseSensitive: boolean;
 }): Record<string, unknown> {
+  // F-A1-2 (PI-04): a directory the walk could not even list leaves an
+  // unknown remainder — absence would be certifying over content nobody
+  // read. This is the ONE choke point every absence certificate (whole-set
+  // or per-term) is built through, so gating here closes both shapes at once.
+  if (args.omissions.unreadable_dirs > 0) return {};
+  // F-W2D-1: an oversize-skipped file is the SAME kind of unknown remainder
+  // — unlike ignored/gitignored/tokenlighten_ignored/symlinks (deliberate,
+  // policy-driven scope narrowing the caller chose or inherited), the
+  // walk's size ceiling is an involuntary internal limit nobody asked for.
+  // A file the walk never opened cannot be ruled out, so no certificate —
+  // not even a caveated one — is issued while any are outstanding; the
+  // caller sees the exclusion only via `omitted.oversize` (buildOmittedExtra)
+  // and must re-scope directly at it to get a real answer. `find`/
+  // `references` also raise the effective size ceiling for exactly this
+  // scan (TEXT_SCAN_MAX_FILE_SIZE_BYTES), so this gate should fire only for
+  // genuinely huge files, not the common case.
+  if (args.omissions.oversize > 0) return {};
   const scanned_files = args.coverage.scanned.size;
   if (scanned_files === 0) return {};
   const tokens = dedupeAbsenceTokens(args.tokens);
@@ -1268,12 +1328,15 @@ function buildAbsenceExtra(args: {
       : "references this token";
   const conclusion = `no file ${scope} ${subject}${args.caseSensitive ? " (case-sensitive scan)" : ""}`;
 
-  // Every skip class that could hide an occurrence, named by the rule the
-  // caller can act on — same honesty contract as `omitted`, plus the files
-  // the walk offered but whose bytes could not be read.
+  // Every DELIBERATE skip class that could hide an occurrence, named by the
+  // rule the caller can act on — same honesty contract as `omitted`, plus
+  // the files the walk offered but whose bytes could not be read. "oversize"
+  // is deliberately absent from this list: it now refuses the certificate
+  // entirely (the gate above), so it can never reach here with a nonzero
+  // count.
   const parts: string[] = [];
   let excluded = 0;
-  for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "oversize", "symlinks", "non_text", "secrets"] as const) {
+  for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "symlinks", "non_text", "secrets"] as const) {
     const n = args.omissions[key];
     if (n > 0) {
       parts.push(`${key}: ${n}`);
@@ -1299,10 +1362,10 @@ function buildAbsenceExtra(args: {
   return { absence, note: ABSENCE_NOTE };
 }
 
-function buildOmittedExtra(om: WalkOmissions): Record<string, unknown> {
+export function buildOmittedExtra(om: WalkOmissions): Record<string, unknown> {
   if (!anyWalkOmission(om)) return {};
   const pruned: Partial<WalkOmissions> = {};
-  for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "oversize", "symlinks", "non_text", "secrets"] as const) {
+  for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "oversize", "symlinks", "non_text", "secrets", "unreadable_dirs"] as const) {
     if (om[key] > 0) pruned[key] = om[key];
   }
   return { omitted: pruned };
@@ -1363,7 +1426,17 @@ function attachInventory(
   const withTotals: FindResponse = { ...response, total_files, total_matches, truncated: snippetTruncated };
 
   if (!snippetTruncated || fullGroups.length === 0) {
-    return { ...withTotals, inventory_complete: true };
+    // F-W2D-1: `inventory_complete:true` here means complete over the
+    // SCANNED set, never "no other file in the repo has this" — when the
+    // walk actually skipped files (oversize, ignore rules, …) that
+    // boundary must ride the response inline, not depend on the caller
+    // cross-referencing the sibling `omitted` object on their own (see
+    // INVENTORY_COMPLETE_NOTE_WITH_OMITTED's doc comment).
+    return {
+      ...withTotals,
+      inventory_complete: true,
+      ...(omissionsPresent ? { note: INVENTORY_COMPLETE_NOTE_WITH_OMITTED } : {}),
+    };
   }
 
   const note = omissionsPresent ? INVENTORY_NOTE_WITH_OMITTED : INVENTORY_NOTE;
@@ -2225,8 +2298,31 @@ function findViaIdentifierVariants(
  * problem), batching nudge second.
  */
 function composeHint(internalHint: string | undefined, extraHint: string | undefined): string | undefined {
-  if (internalHint && extraHint) return `${internalHint} | ${extraHint}`;
-  return internalHint ?? extraHint;
+  return decideHint({ primary: internalHint, secondary: extraHint }, { strongAbsence: false }).text;
+}
+
+/**
+ * PI-05 (F-A1-3 register) — seed of the plan's `NextActionPolicy` arbiter
+ * (DESIGN-v0.10-expansion-plan-v1.3.md:1392-1421; full module out of scope
+ * for this fix). Single rule enforced here: a response that just certified
+ * a strong absence must never ALSO carry the generic "batch related tokens
+ * into one queries:[...] call" nudge (`opts.extraHint` from server.ts's
+ * `recordSingleFindCompletion` gate) — following that nudge swaps query
+ * semantics on the very next call, and the caller loses track of which
+ * term this response proved absent. `extraHint` here is already
+ * `composeHint(scopeHint, opts.extraHint)`; dropping all of it on
+ * `hasAbsence` is equivalent to dropping only the batching component,
+ * because `scopeHint` (an excluded/empty-scope explanation) can only be set
+ * when nothing was scanned — the exact condition under which
+ * `buildAbsenceExtra`'s own `scanned_files === 0` gate already withholds
+ * the certificate, so the two never actually co-occur.
+ */
+function absenceAwareHint(
+  missHint: string,
+  extraHint: string | undefined,
+  hasAbsence: boolean,
+): string | undefined {
+  return decideHint({ primary: missHint, secondary: extraHint }, { strongAbsence: hasAbsence }).text;
 }
 
 /**
@@ -2278,6 +2374,11 @@ export function buildFindResponse(
     extraBasenames: FIND_ACTION_EXTRA_BASENAMES,
     respectGitignore: true,
     omissions: walkOmissions,
+    // A plain literal/regex line scan (scanLiteral, below) is cheap even at
+    // tens of thousands of lines — only the (separate, tree-sitter-driven)
+    // symbol/role machinery needs the tighter 1 MB default. See
+    // TEXT_SCAN_MAX_FILE_SIZE_BYTES's doc comment.
+    sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
   });
   const contentCache = createScanContentCache();
   // Which walked files really got content-scanned — the sole basis for the
@@ -2326,6 +2427,7 @@ export function buildFindResponse(
       includeGenericText: true,
       respectGitignore: true,
       omissions: genericOmissions,
+      sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
     }).filter((file) => file.kind === "generic-text");
     let genericMatches = scanLiteral(query, workspace, {
       ...(input.regex !== undefined ? { regex: input.regex } : {}),
@@ -2419,14 +2521,19 @@ export function buildFindResponse(
     // empty result, but it must still redirect, not return a bare object.
     const generic = genericFallbackResponse();
     if (generic) return generic;
+    // Certifies the PATTERN's absence; withheld when the regex failed to
+    // compile (scanLiteral returned before reading any file, so coverage is
+    // empty) — "the regex is invalid" must never read as "there is no match".
+    const regexAbsenceExtra = absenceExtraFor([query]);
     return {
       ...build([], omittedExtra),
       matched_terms: [],
-      // Certifies the PATTERN's absence; withheld when the regex failed to
-      // compile (scanLiteral returned before reading any file, so coverage is
-      // empty) — "the regex is invalid" must never read as "there is no match".
-      ...absenceExtraFor([query]),
-      hint: composeHint("regex matched nothing; retry with regex:false and one identifier token", extraHint),
+      ...regexAbsenceExtra,
+      hint: absenceAwareHint(
+        "regex matched nothing; retry with regex:false and one identifier token",
+        extraHint,
+        "absence" in regexAbsenceExtra,
+      ),
     };
   }
 
@@ -2438,17 +2545,19 @@ export function buildFindResponse(
   if (isSingleToken(query)) {
     const generic = genericFallbackResponse();
     if (generic) return generic;
+    // THE case the certificate exists for: a single identifier that is
+    // genuinely nowhere. The literal pass AND the naming-variant probes
+    // covered every scanned file, so this is a fact, not a weak search.
+    const singleTokenAbsenceExtra = absenceExtraFor([query]);
     return {
       ...build([], omittedExtra),
       matched_terms: [],
       ...didYouMeanExtra(workspace, [query], tokenizeQuery(query), 5, coverage.scanned),
-      // THE case the certificate exists for: a single identifier that is
-      // genuinely nowhere. The literal pass AND the naming-variant probes
-      // covered every scanned file, so this is a fact, not a weak search.
-      ...absenceExtraFor([query]),
-      hint: composeHint(
+      ...singleTokenAbsenceExtra,
+      hint: absenceAwareHint(
         "identifier matched neither literally nor via a specific compound naming variant; literal find does not decompose identifiers into broad terms — use queries=[...] for deliberate OR widening or action=references for call sites",
         extraHint,
+        "absence" in singleTokenAbsenceExtra,
       ),
     };
   }
@@ -2469,15 +2578,20 @@ export function buildFindResponse(
   if (searchTerms.length === 0) {
     const generic = genericFallbackResponse();
     if (generic) return generic;
+    // No token survived tokenization, but the VERBATIM query was still
+    // scanned against every walked file by Pass 1 — that literal absence is
+    // certifiable even though the tokenized pass has nothing to run.
+    const noTokenAbsenceExtra = absenceExtraFor([query]);
     return {
       ...build([], omittedExtra),
       matched_terms: [],
       ...didYouMeanExtra(workspace, [query], tokenizeQuery(query), 5, coverage.scanned),
-      // No token survived tokenization, but the VERBATIM query was still
-      // scanned against every walked file by Pass 1 — that literal absence is
-      // certifiable even though the tokenized pass has nothing to run.
-      ...absenceExtraFor([query]),
-      hint: composeHint("retry with one identifier token, e.g. query=\"parseConfig\"", extraHint),
+      ...noTokenAbsenceExtra,
+      hint: absenceAwareHint(
+        "retry with one identifier token, e.g. query=\"parseConfig\"",
+        extraHint,
+        "absence" in noTokenAbsenceExtra,
+      ),
     };
   }
 
@@ -2516,20 +2630,25 @@ export function buildFindResponse(
     // and never a base token that the budget dropped before scanning it.
     const scannedTermKeys = new Set(scannedTerms.map((t) => t.toLowerCase()));
     const certifiedTokens = baseTokens.filter((t) => scannedTermKeys.has(t.toLowerCase()));
+    // Per-term scans are always case-insensitive here (A1 point 6), so this
+    // branch's certificate never carries the case-sensitivity qualifier.
+    const tokenizedAbsenceExtra = buildAbsenceExtra({
+      tokens: certifiedTokens,
+      coverage,
+      omissions: walkOmissions,
+      ...(input.path ? { subPath: input.path } : {}),
+      caseSensitive: false,
+    });
     return {
       ...build([], omittedExtra),
       matched_terms: [],
       ...didYouMeanExtra(workspace, [query], baseTokens, 5, coverage.scanned),
-      // Per-term scans are always case-insensitive here (A1 point 6), so this
-      // branch's certificate never carries the case-sensitivity qualifier.
-      ...buildAbsenceExtra({
-        tokens: certifiedTokens,
-        coverage,
-        omissions: walkOmissions,
-        ...(input.path ? { subPath: input.path } : {}),
-        caseSensitive: false,
-      }),
-      hint: composeHint("retry with one identifier token, e.g. query=\"parseConfig\"", extraHint),
+      ...tokenizedAbsenceExtra,
+      hint: absenceAwareHint(
+        "retry with one identifier token, e.g. query=\"parseConfig\"",
+        extraHint,
+        "absence" in tokenizedAbsenceExtra,
+      ),
     };
   }
 
@@ -2634,6 +2753,11 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
     extraBasenames: FIND_ACTION_EXTRA_BASENAMES,
     respectGitignore: true,
     omissions: walkOmissions,
+    // A plain literal/regex line scan (scanLiteral, below) is cheap even at
+    // tens of thousands of lines — only the (separate, tree-sitter-driven)
+    // symbol/role machinery needs the tighter 1 MB default. See
+    // TEXT_SCAN_MAX_FILE_SIZE_BYTES's doc comment.
+    sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
   });
   const contentCache = createScanContentCache();
   const coverage = createScanCoverage();
@@ -2654,6 +2778,10 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
   // whole (a differently-cased occurrence could have been missed) — disclosed
   // in the conclusion rather than silently over-claimed.
   let anyCaseSensitiveScan = false;
+  // PI-04 (per-term absence, F-A1-2/F-A1-3 register): raw per-term literal
+  // hit count, captured alongside the existing hit/miss bookkeeping below —
+  // reused for term_results[].match_count without a second scan.
+  const termMatchCounts = new Map<string, number>();
 
   for (const q of queries) {
     const caseInsensitive = input.caseInsensitive ?? (!input.regex && isSingleToken(q));
@@ -2677,6 +2805,7 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
     }
 
     hitTerms.push(q);
+    termMatchCounts.set(q, literalMatches.length);
     const withSiblings = input.regex
       ? literalMatches
       : withSiblingStemMatches(q, literalMatches, workspace, { contentCache });
@@ -2695,6 +2824,7 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
       includeGenericText: true,
       respectGitignore: true,
       omissions: genericOmissions,
+      sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
     }).filter((file) => file.kind === "generic-text");
     for (const q of queries) {
       const caseInsensitive = input.caseInsensitive ?? (!input.regex && isSingleToken(q));
@@ -2707,6 +2837,7 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
       });
       if (genericMatches.length === 0) continue;
       hitTerms.push(q);
+      termMatchCounts.set(q, genericMatches.length);
       mergedMatches.push(...(input.regex ? genericMatches : withSiblingStemMatches(q, genericMatches, workspace, { contentCache })));
       const missedIndex = missedQueries.indexOf(q);
       if (missedIndex >= 0) missedQueries.splice(missedIndex, 1);
@@ -2747,12 +2878,49 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
   // response that JUST fits at the files-only stage can still burst
   // MAX_RESPONSE_BYTES once these fields are added back (matched_terms alone
   // can run to several tokens' worth of bytes with up to 5 queries).
+  //
+  // PI-04 (F-A1-2/F-A1-3 register): per-term absence rides the SAME baked-in
+  // budgeting discipline — only a multi-term call where >=1 term missed pays
+  // for it (v1.3.md:1365-1372's "2語以上または0件／partial match時にだけ
+  // term_resultsを詳細化する"); a single-query call via queries:[x] or an
+  // all-hit call gets nothing extra. Each missed term reuses
+  // buildAbsenceExtra's own scope gate (the SAME machinery the whole-set
+  // certificate above already calls) rather than a parallel proof shape, so
+  // the unreadable_dirs gate added there covers both shapes from one choke
+  // point: `absent` only when that gate actually certifies, else `unknown`.
+  const termResults: Record<string, unknown>[] | undefined =
+    queries.length > 1 && missedQueries.length > 0
+      ? queries.map((q) => {
+          const matchCount = termMatchCounts.get(q);
+          if (matchCount !== undefined) {
+            return { original: q, status: "matched", match_count: matchCount };
+          }
+          const termCaseInsensitive = input.caseInsensitive ?? (!input.regex && isSingleToken(q));
+          const termAbsence = buildAbsenceExtra({
+            tokens: [q],
+            coverage,
+            omissions: walkOmissions,
+            ...(input.path ? { subPath: input.path } : {}),
+            ...(input.regex ? { regex: true } : {}),
+            caseSensitive: !termCaseInsensitive,
+          })["absence"] as FindAbsence | undefined;
+          return termAbsence
+            ? {
+                original: q,
+                status: "absent",
+                match_count: 0,
+                scope: { completeness: "complete", scanned_files: termAbsence.scanned_files },
+              }
+            : { original: q, status: "unknown", scope: { completeness: "partial" } };
+        })
+      : undefined;
   const responseExtra: Record<string, unknown> = {
     ...omittedExtra,
     matched_terms: hitTerms,
     ...(input.regex || missedQueries.length === 0
       ? {}
       : didYouMeanExtra(workspace, missedQueries, missedTokens, 5, coverage.scanned)),
+    ...(termResults ? { term_results: termResults } : {}),
   };
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
 

@@ -25,6 +25,20 @@ export { PER_TASK_FULL_CAP } from "../shared/readLimits.js";
 
 export const TINY_BYTES = 8 * 1024;
 export const TINY_LINES = 250;
+
+/**
+ * Per-task full-read shape governor for tiny files. The default keeps the
+ * first six tiny full reads as full content; set TL_TINY_SKELETON_CAP=0 to
+ * disable this shape cap, or =N to override it for a process.
+ */
+export const TINY_SKELETON_CAP = 6;
+
+function configuredTinySkeletonCap(): number {
+  const raw = process.env["TL_TINY_SKELETON_CAP"];
+  if (raw === undefined || raw.trim() === "") return TINY_SKELETON_CAP;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : TINY_SKELETON_CAP;
+}
 /**
  * turn-economy wave 2 (W1): per-response byte budget for a GOVERNED full
  * serve. When a mode=full/auto/small_file read is downgraded by any governor
@@ -185,6 +199,17 @@ export function decideFullRead(args: DecideFullReadArgs): FullReadDecision {
       return {
         decision: "downgrade",
         reason: "tiny-task-cap-reached",
+        alternatives: buildAlternatives(args),
+      };
+    }
+    // Once the configured tiny shape budget is spent, return the same
+    // structure-first downgrade used by the per-task governor. A zero value
+    // explicitly disables this lower cap while retaining TINY_TASK_CAP.
+    const tinySkeletonCap = configuredTinySkeletonCap();
+    if (tinySkeletonCap > 0 && session.tinyFullExpansionsTotal >= tinySkeletonCap) {
+      return {
+        decision: "downgrade",
+        reason: "tiny-skeleton-cap-reached",
         alternatives: buildAlternatives(args),
       };
     }

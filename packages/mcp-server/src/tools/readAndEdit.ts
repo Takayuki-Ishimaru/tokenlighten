@@ -14,6 +14,12 @@ import { applySingleEdit } from "../write/textEdit.js";
 import { getSymbolWithContext } from "./getSymbolWithContext.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import { compressFormat } from "../util/formatCompress.js";
+import { shortSha } from "../util/handles.js";
+import { fastPathV2Enabled } from "../util/flags.js";
+import { trace } from "../util/trace.js";
+import { attemptGraphImpactProbe, evaluateImpactGuard, isFastPathEligible } from "../write/impactGuard.js";
+import { selectEditRepresentation } from "../write/editSelector.js";
+import { verifyTargetFingerprint } from "../write/targetFingerprint.js";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
@@ -38,6 +44,14 @@ export type ReadAndEditResult =
        */
       candidates?: string[];
       skeleton?: string;
+      /**
+       * F-B7 (v0.11 wave C): set only on the TL_FAST_PATH_V2
+       * fingerprint-drift refusal below — the SAME shape
+       * searchReplaceEdit.ts's own seam returns for the identical
+       * condition (a fresh re-read proving the target moved between
+       * selection and apply).
+       */
+      current_sha?: string;
     };
 
 function safeRealpathSync(absPath: string, workspaceReal: string): string | null {
@@ -118,6 +132,77 @@ export async function readAndEdit(
     };
   }
 
+  // -------------------------------------------------------------------
+  // F-B7 (v0.11 wave C) / V11-06 Known-Local Fast Path v2 (behind
+  // TL_FAST_PATH_V2, +TL_GRAPH_EVIDENCE for the probe half via
+  // attemptGraphImpactProbe's own internal gate) — pre-apply half, wired
+  // onto the symbol-bearing edit path exactly the way
+  // tools/searchReplaceEdit.ts's own TL_FAST_PATH_V2 seam does it: additive,
+  // best-effort (never blocks an edit this function could otherwise
+  // complete), and the guard verdict itself is diagnostic ONLY — see that
+  // file's doc comment for why isFastPathEligible is traced, not branched
+  // on. The one real behavioral consequence, same as that seam, is the
+  // fingerprint-drift refusal: a fresh re-read proving the target moved
+  // between selection and apply. Unlike searchReplaceEdit's search-only
+  // shape, this path HAS a symbol, so the graph half of the guard runs too.
+  // -------------------------------------------------------------------
+  if (fastPathV2Enabled() && input.search !== "") {
+    try {
+      const selection = selectEditRepresentation({ path: relPath, fileText: existingContent, search: input.search });
+      const graph = attemptGraphImpactProbe({
+        workspace,
+        path: relPath,
+        symbol: input.symbol,
+        fileText: existingContent,
+      });
+      const guard = evaluateImpactGuard({
+        path: relPath,
+        searchText: input.search,
+        replaceText: input.replace,
+        fileText: existingContent,
+        graph,
+      });
+      trace(
+        "fast_path_v2_guard",
+        {
+          path: relPath,
+          symbol: input.symbol,
+          selection: selection.ok
+            ? { representation: selection.selection.representation, rationale: selection.selection.rationale }
+            : { refused: selection.code, reason: selection.reason },
+          guard,
+          fast_path_eligible: isFastPathEligible(guard, selection),
+        },
+        workspace,
+      );
+
+      if (selection.ok) {
+        // Re-verify IMMEDIATELY before apply, against a FRESH read — same
+        // TOCTOU close as searchReplaceEdit.ts's identical block.
+        const freshRead = fs.readFileSync(absPath, "utf8");
+        const verification = verifyTargetFingerprint(selection.selection.fingerprint, {
+          currentFileText: freshRead,
+          anchorText: selection.selection.anchorText,
+        });
+        if (!verification.ok) {
+          trace(
+            "fast_path_v2_fingerprint_drift",
+            { path: relPath, reasons: verification.reasons },
+            workspace,
+          );
+          return {
+            ok: false,
+            error: `target fingerprint drift detected between selection and apply (${verification.reasons.join(", ")}) — the file changed after this edit was prepared; re-read the file and retry`,
+            code: "hash-mismatch",
+            current_sha: shortSha(verification.currentContentSha),
+          };
+        }
+      }
+    } catch {
+      // Best-effort — see this block's doc comment above.
+    }
+  }
+
   // Apply edit
   const editResult = applySingleEdit(existingContent, input.search, input.replace);
   if (!editResult.ok) {
@@ -131,7 +216,7 @@ export async function readAndEdit(
   // Atomic write — preserves the original file's mode (see
   // writeExistingFileAtomic's doc comment; 2026-08-07 chmod-reset incident).
   try {
-    writeExistingFileAtomic(absPath, editResult.text!, existingMode);
+    writeExistingFileAtomic(absPath, editResult.text!, existingMode, { root: workspaceReal, relPath });
   } catch (err) {
     return { ok: false, error: `Cannot write: ${(err as Error).message}`, code: "write-error" };
   }

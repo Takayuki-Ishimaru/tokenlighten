@@ -71,13 +71,13 @@ TL_RECORDED=${recorded}
 if [ -n "$TL_RECORDED" ] && [ -f "$TL_RECORDED" ] && command -v node >/dev/null 2>&1; then
   exec node "$TL_RECORDED" "$@"
 fi
-TL_GLOBAL="$(command -v tl 2>/dev/null || true)"
-if [ -n "$TL_GLOBAL" ] && [ "$TL_GLOBAL" != "$0" ]; then
-  exec "$TL_GLOBAL" "$@"
-fi
 TL_ELECTRON=${electron}
 if [ -n "$TL_ELECTRON" ] && [ -x "$TL_ELECTRON" ] && [ -n "$TL_RECORDED" ] && [ -f "$TL_RECORDED" ]; then
   ELECTRON_RUN_AS_NODE=1 exec "$TL_ELECTRON" "$TL_RECORDED" "$@"
+fi
+TL_GLOBAL="$(command -v tl 2>/dev/null || true)"
+if [ -n "$TL_GLOBAL" ] && [ "$TL_GLOBAL" != "$0" ]; then
+  exec "$TL_GLOBAL" "$@"
 fi
 echo "TokenLighten launcher cannot find a working CLI. Reinstall TokenLighten or set TOKENLIGHTEN_CLI_PATH." >&2
 exit 127

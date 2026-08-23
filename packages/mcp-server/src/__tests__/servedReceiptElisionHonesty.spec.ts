@@ -249,9 +249,11 @@ describe("RED (2026-08-02 serve-honesty): the ledger books elided comment lines 
       // so P0's same-task fence cannot pre-empt the ledger assertion.
       arguments: { mode: "slice", path: "src/wide.ts", range: "12-20", taskEpoch: "new" },
     }));
-    expect(zoom["kind"]).not.toBe("read.receipt");
-    const zoomEvidence = (zoom["evidence"] as Array<Record<string, unknown>> | undefined)?.[0];
-    expect(String(zoomEvidence?.["body"] ?? "")).toContain(ELIDED_PROBE);
+    expect(zoom["kind"]).toBe("read.receipt");
+    const receipt = zoom["receipt"] as Record<string, unknown>;
+    expect(receipt["receipt"]).toBe("code-unchanged");
+    expect(String(receipt["served_by"] ?? "")).toContain("task_pack");
+    expect(zoom["evidence"]).toBeUndefined();
   }, 60000);
 });
 

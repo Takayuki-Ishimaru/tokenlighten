@@ -3,16 +3,85 @@
  *
  * Enable with TL_TRACE=1. When disabled all calls are no-ops.
  * Output: ~/.tokenlighten/trace/<pid>-<sha8(workspaceRoot)>.jsonl
+ *
+ * ---------------------------------------------------------------------------
+ * V10-02 (Telemetry v2 / Measurement Engine v1) — envelope + observation
+ * events (2026-08-20)
+ * ---------------------------------------------------------------------------
+ *
+ * DESIGN-v0.10-expansion-plan-v1.3.md lines 885-941; deferred halves per
+ * DESIGN-v0.10-expansion-plan-reconciliation.md §5 D-8 (the paired
+ * calibration/ablation RUNS, not this engine or this enrichment).
+ *
+ * ENVELOPE. Every record `trace()`/`traceCausalAttestation()` writes now
+ * carries a common, additive envelope on top of its event-specific payload:
+ * `trace_id` (stable per server process — see TRACE_ID below), `call_id`
+ * (monotonic per tool call, ALS-scoped so concurrent/interleaved calls under
+ * different session `lane`s never see each other's counter — mirrors
+ * state/session.ts's `_sessionLane` pattern), `task_ref` (the qref/task
+ * IDENTITY CLASS a caller's `query`/`qref` argument resolves to — NEVER a
+ * `tlh_*` wire handle, which is single-mint, signed and expiring; `task_ref`
+ * is the pure, replayable hash session.ts's `taskQueryRef` already derives),
+ * `route` (routing/classifier.ts's advisory bucket), `flags_active` (the D10
+ * (B) out-of-contract experiment flags currently on, by name —
+ * flags.ts's `activeExperimentFlags()`), `workspaceRef` (state/
+ * handleCodec.ts's existing `workspaceRefOf` — a truncated sha256, never the
+ * raw path, already used to bind handle tokens to a workspace), and
+ * `protocol_era` (mcp/transport/index.ts's `resolveProtocolEra()` — D-3
+ * explicitly keeps this OUT of the wire body and puts it here instead).
+ * `call_id`/`task_ref`/`route` are "when known": they read as absent
+ * (dropped by JSON.stringify) for any record emitted outside
+ * `runWithTraceCall`'s scope, e.g. a call site invoked directly from a unit
+ * test. `trace_id`/`flags_active`/`workspaceRef`/`protocol_era` are always
+ * present. ONE enrichment point (`traceEnvelope` below, folded into both
+ * `trace()` and `traceCausalAttestation()`) plus ONE per-call context setter
+ * (`runWithTraceCall`/`setTraceContext`, invoked from server.ts's `callTool`
+ * dispatch boundary) means the ~20 existing `trace()` call sites across the
+ * tree never had to change individually.
+ *
+ * NEW OBSERVATION EVENTS (all additive, all behind the existing TL_TRACE
+ * gate, all zero-cost when it is off):
+ *   - `repeated_query`  — a call's resolved task_ref was ALREADY this
+ *     workspace session's active qref (a same-qref re-pack, or a verified
+ *     qref-replay). Emitted generically off `args.query`/`args.qref` at the
+ *     server.ts dispatch boundary, so read_file and search_files are both
+ *     covered without their own deep dispatch logic changing.
+ *   - `repeated_range`  — a served-range ledger hit answered with a receipt
+ *     ("code-unchanged"/prior) instead of fresh bytes. Emitted from the THREE
+ *     server.ts functions that already build that receipt shape —
+ *     `buildFullDowngradePayload`, `verificationBodyHeld`,
+ *     `servedContentReceipt` — each a single function several read-dispatch
+ *     branches already funnel through, not touched at each call site.
+ *   - `forced_resend`   — a generic `force_serve`-style bypass arg, read
+ *     structurally off the raw request args (no hard dependency on the
+ *     PI-09 wire-arg workstream that would introduce it; the event simply
+ *     never fires while the arg does not exist in this tree).
+ *   - `post_edit_readback` — a task_pack surface serving a path already
+ *     present in this session's edited-paths ledger (state/session.ts's
+ *     `getEditedPaths`). Emitted from `recordTaskPackSurfaceReads`, the one
+ *     function every task_pack read-exit already calls.
+ *   - `native_escape` is explicitly OUT OF SCOPE: it is CLIENT-side (an
+ *     agent choosing `cat`/`sed`/a native editor over TL) and structurally
+ *     unobservable from this server — there is no request this process ever
+ *     receives for a call that never happened. It is not faked or
+ *     approximated here.
+ *
+ * `state/session.ts` and `util/attachSupply.ts` are both documented I/O-free
+ * modules (their own file headers say so); every new `trace()` call this
+ * wave adds lives in server.ts, which already owns the ~20 existing ones —
+ * no side-effecting import was added to either pure module.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
+  activeExperimentFlags,
   adaptiveWholeFileEnabled,
   evidenceCompletionEnabled,
   evidenceCompletionShadowEnabled,
@@ -23,6 +92,98 @@ import {
   writeCapabilityEnabled,
 } from "./flags.js";
 import { deriveServerBuildId } from "./serverBuild.js";
+import { workspaceRefOf } from "../state/handleCodec.js";
+import { resolveProtocolEra } from "../mcp/transport/index.js";
+
+// ---------------------------------------------------------------------------
+// V10-02 Telemetry v2 — per-call trace context
+// ---------------------------------------------------------------------------
+
+/**
+ * Stable per SERVER PROCESS (not per call, not per workspace) — the envelope
+ * field that lets an analyzer group every record one process ever wrote,
+ * across every workspace root and every trace file it touched. Computed once
+ * at module load, same rationale as SERVER_BUILD_IDENTITY below: cheap,
+ * side-effect-free, and cannot change while the process runs.
+ */
+const TRACE_ID: string = randomUUID();
+
+/** Per-call fields the envelope reads back; refined via setTraceContext as
+ *  dispatch learns more (route is known immediately, task_ref only once the
+ *  caller's lane is resolved) — see runWithTraceCall's doc comment. */
+interface TraceCallContext {
+  callId: number;
+  taskRef?: string;
+  route?: string;
+}
+
+/**
+ * ALS-scoped, mirroring state/session.ts's `_sessionLane` exactly: a plain
+ * module-level counter/object would be corrupted by two tool calls
+ * interleaved across awaits (concurrent agents under different `lane`s are a
+ * first-class, already-supported scenario in this server — see
+ * runWithSessionLane), so `call_id` and the fields setTraceContext refines
+ * must live in an async-context-scoped store, not a bare variable.
+ */
+const _traceCallContext = new AsyncLocalStorage<TraceCallContext>();
+
+/** Monotonic; bumped once per tool call, never per trace line. */
+let callIdClock = 0;
+
+/**
+ * Per-call context setter — the dispatch boundary (server.ts's `callTool`)
+ * wraps its ENTIRE body in this ONCE, at the very top, before route
+ * classification or any trace() call for the invocation. Every trace() line
+ * emitted anywhere during that call — including nested calls many frames
+ * deep, and across every `await` — reads the SAME call_id back out, without
+ * threading it through a single function signature. A trace() call made
+ * outside any runWithTraceCall scope (e.g. a unit test exercising trace()
+ * directly) simply omits call_id/task_ref/route from its envelope; the
+ * degrade is graceful, matching every other "when known" envelope field.
+ */
+export function runWithTraceCall<T>(fn: () => T): T {
+  return _traceCallContext.run({ callId: ++callIdClock }, fn);
+}
+
+/**
+ * Refines the CURRENT call's context as dispatch learns more. A no-op
+ * outside runWithTraceCall's scope — refining a context that does not exist
+ * is silently discarded, never thrown, so a misordered call can never turn
+ * observability into an outage.
+ */
+export function setTraceContext(fields: { taskRef?: string; route?: string }): void {
+  const store = _traceCallContext.getStore();
+  if (store === undefined) return;
+  if (fields.taskRef !== undefined) store.taskRef = fields.taskRef;
+  if (fields.route !== undefined) store.route = fields.route;
+}
+
+/** Test-only: reset the call_id counter so pinned-envelope assertions do not
+ *  depend on suite execution order. Production never calls this — the
+ *  counter is meant to keep climbing for the life of the process. */
+export function resetTraceCallIdForTest(): void {
+  callIdClock = 0;
+}
+
+/**
+ * The common envelope every trace record carries, folded into both
+ * `trace()` and `traceCausalAttestation()` — see this file's V10-02 header
+ * doc for the field-by-field rationale. Spread AFTER a record's own
+ * event-specific payload wherever it is used, so these seven names can never
+ * be shadowed by an unrelated payload field of the same name.
+ */
+function traceEnvelope(workspaceRoot: string): Record<string, unknown> {
+  const ctx = _traceCallContext.getStore();
+  return {
+    trace_id: TRACE_ID,
+    ...(ctx?.callId !== undefined ? { call_id: ctx.callId } : {}),
+    ...(ctx?.taskRef !== undefined ? { task_ref: ctx.taskRef } : {}),
+    ...(ctx?.route !== undefined ? { route: ctx.route } : {}),
+    flags_active: activeExperimentFlags(),
+    workspaceRef: workspaceRefOf(workspaceRoot),
+    protocol_era: resolveProtocolEra(),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -316,7 +477,12 @@ export function traceCausalAttestation(workspaceRoot: string): void {
   const attestation = p1CausalAttestationPayload(canonicalRoot, filePath);
   if (attestation === undefined) return;
   if (appendTraceRecords(filePath, [
-    { event: "p1_causal_attestation", ts: tsClock++, ...attestation },
+    // V10-02: envelope spread AFTER the attestation payload — see
+    // traceEnvelope's doc comment. `attestation.workspace_root` (the raw
+    // canonical path, needed so record_run.mjs can join a trace file to a
+    // bench cell) and the envelope's `workspaceRef` (the opaque sha) are
+    // deliberately DIFFERENT fields; neither shadows the other.
+    { event: "p1_causal_attestation", ts: tsClock++, ...attestation, ...traceEnvelope(canonicalRoot) },
   ])) {
     attestedTracePaths.add(filePath);
   }
@@ -327,7 +493,10 @@ export function trace(event: string, payload: object, workspaceRoot: string): vo
   traceCausalAttestation(workspaceRoot);
   appendTraceRecords(
     getTracePath(workspaceRoot),
-    [{ event, ts: tsClock++, ...payload }],
+    // V10-02: envelope spread AFTER payload so trace_id/call_id/task_ref/
+    // route/flags_active/workspaceRef/protocol_era are never shadowable by
+    // an unrelated payload field a call site happens to name the same way.
+    [{ event, ts: tsClock++, ...payload, ...traceEnvelope(workspaceRoot) }],
   );
 }
 

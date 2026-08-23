@@ -6,6 +6,18 @@ import { supplyRefusalGuidance } from "../util/attachSupply.js";
 export type ToolCallResult = {
   content: Array<{ type: string; text: string }>;
   isError?: true;
+  /**
+   * PI-03: HOST-VISIBLE result metadata. Never part of `content[*].text`, so
+   * it is never in the model-facing payload and never in the byte budget the
+   * cost model measures — deviation D-3's position ("telemetry + `_meta` only,
+   * not response body") applied to the one value that has to reach the client
+   * HOST rather than the model: the issued `context_handle`.
+   *
+   * Absent on every default-path response. Nothing that already emits a result
+   * sets it, so the frozen 15-kind wire is untouched (wireBaselines and the
+   * replay corpus both read `content[0].text`).
+   */
+  _meta?: Record<string, unknown>;
 };
 
 /**

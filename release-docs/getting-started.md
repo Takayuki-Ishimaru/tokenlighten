@@ -4,7 +4,7 @@ TokenLighten runs locally and provides an MCP server for coding agents.
 
 ## Install the VS Code extension without building
 
-Most users can download **[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)** from the v0.9.1a Public Beta release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+After v0.11.1 is published, users can download **[tokenlighten-vscode-extension-0.11.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.11.1/tokenlighten-vscode-extension-0.11.1.vsix)** from its GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 ## Build from source
 
@@ -13,11 +13,9 @@ Building the source requires Node.js 20 or later.
 ```bash
 git clone https://github.com/Takayuki-Ishimaru/tokenlighten.git
 cd tokenlighten
-npm ci
+npm install
 npm run build
 ```
-
-Use `npm ci` for a reproducible build from the committed lockfile. Use `npm install` only when intentionally changing dependencies and updating `package-lock.json`.
 
 To make the `tl` command available in your shell:
 
@@ -63,3 +61,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - Learn the available operations in [MCP tools](mcp-tools.md).
 - If you use VS Code, see [VS Code extension](vscode-extension.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
+- Read the [v0.11.1 release draft](github-release-v0.11.1.md) for feature and benchmark disclosures.

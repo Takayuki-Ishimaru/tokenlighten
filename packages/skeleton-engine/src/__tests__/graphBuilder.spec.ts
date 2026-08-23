@@ -249,6 +249,72 @@ describe("writeGraphIfStale", () => {
     const content = JSON.parse(await fs.readFile(getTlGraphPath(tmpDir), "utf8"));
     expect(content.rootHash).toBe("hash-2");
   });
+
+  // -------------------------------------------------------------------------
+  // V11-09: forceRebuild — the crash-recovery override.
+  // -------------------------------------------------------------------------
+  //
+  // These prove forceRebuild is not redundant with the ordinary rootHash
+  // shortcut: it is specifically for the case the shortcut CANNOT
+  // distinguish on content alone — a stale on-disk graph left behind by a
+  // crashed publish whose rootHash happens to still equal the current
+  // manifest's (a content cycle: edit away, then edit back to the exact
+  // same bytes). Ordinary rootHash comparison would wrongly call that
+  // "fresh"; loadOrBuildSourceIndex's publish journal is what tells the
+  // caller to pass forceRebuild:true in exactly that situation (see
+  // faultInjection.spec.ts's "crash before the GRAPH rename" test for the
+  // full integration path this option exists to serve).
+
+  it("forceRebuild:true rewrites even when rootHash matches (bypasses the shortcut the ordinary path relies on)", async () => {
+    const manifest = makeManifest({}, "hash-same");
+    await writeGraphIfStale(tmpDir, manifest);
+
+    // Without forceRebuild, this would report written:false (proven by the
+    // "skips write when rootHash matches" test above, same manifest
+    // object, no option passed).
+    const result = await writeGraphIfStale(tmpDir, manifest, { forceRebuild: true });
+    expect(result.written).toBe(true);
+  });
+
+  it("forceRebuild:true on a manifest whose rootHash cycled back still republishes the CURRENT generation, not the stale one", async () => {
+    // Simulates the exact crash-recovery scenario: generation 1 (hash-A)
+    // published in full; generation 2 (hash-B) manifest committed but its
+    // graph write crashed (graph stays at generation 1 on disk); content
+    // is then edited back to hash-A's exact bytes, so the RECOVERY
+    // manifest is generation 3 but rootHash is hash-A again — coincidentally
+    // matching what is ALREADY on disk (graph generation 1). forceRebuild
+    // must still republish, stamping the CURRENT generation (3), not
+    // silently agree with the stale generation-1 file just because their
+    // rootHash happens to collide.
+    const gen1 = { ...makeManifest({}, "hash-A"), generation: 1 };
+    await writeGraphIfStale(tmpDir, gen1);
+
+    const gen3 = { ...makeManifest({}, "hash-A"), generation: 3 };
+    const result = await writeGraphIfStale(tmpDir, gen3, { forceRebuild: true });
+    expect(result.written).toBe(true);
+
+    const content = JSON.parse(await fs.readFile(getTlGraphPath(tmpDir), "utf8"));
+    expect(content.rootHash).toBe("hash-A");
+    expect(content.generation).toBe(3);
+  });
+
+  it("beforeRename hook fires right before publish and a throw there leaves the previous graph untouched", async () => {
+    const manifest1 = makeManifest({}, "hash-1");
+    await writeGraphIfStale(tmpDir, manifest1);
+    const before = await fs.readFile(getTlGraphPath(tmpDir), "utf8");
+
+    const manifest2 = makeManifest({}, "hash-2");
+    await expect(
+      writeGraphIfStale(tmpDir, manifest2, {
+        beforeRename: () => {
+          throw new Error("simulated crash");
+        },
+      }),
+    ).rejects.toThrow(/simulated crash/);
+
+    const after = await fs.readFile(getTlGraphPath(tmpDir), "utf8");
+    expect(after).toBe(before);
+  });
 });
 
 // ---------------------------------------------------------------------------

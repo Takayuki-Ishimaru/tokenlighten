@@ -1,0 +1,6 @@
+{"type":"session_meta","payload":{"type":"session_meta","cwd":"/home/demo/workspace/reasoning-repo"},"timestamp":"2026-08-18T09:00:00.000Z"}
+{"type":"turn_context","payload":{"type":"turn_context","model":"gpt-5.6-sol"},"timestamp":"2026-08-18T09:00:01.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"mcp__tokenlighten__read_file"},"timestamp":"2026-08-18T09:00:02.000Z"}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":0,"output_tokens":100,"total_tokens":400,"reasoning_tokens":40}}},"timestamp":"2026-08-18T09:00:05.000Z"}
+{"type":"response_item","payload":{"type":"function_call","name":"mcp__tokenlighten__edit_file"},"timestamp":"2026-08-18T09:01:00.000Z"}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":650,"cached_input_tokens":0,"output_tokens":210,"total_tokens":860,"reasoning_tokens":75}}},"timestamp":"2026-08-18T09:01:05.000Z"}

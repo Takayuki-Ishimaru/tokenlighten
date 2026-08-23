@@ -320,6 +320,25 @@ describe("workspace setup", () => {
     }
   });
 
+  it("reports the verified launcher build in JSON setup output", async () => {
+    const root = join(tmpdir(), "tokenlighten-self-check-" + randomUUID());
+    mkdirSync(root, { recursive: true });
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      await runWorkspace([
+        "setup", "--root", root, "--clients", "vscode", "--json",
+      ], {
+        registryPath: join(root, "registry.toml"),
+        launcher: { command: "verified-tl", argsPrefix: [], env: {} },
+        versionCheck: () => "0.11.1+6447649a",
+      });
+      const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as { server_build?: string };
+      expect(output.server_build).toBe("0.11.1+6447649a");
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+
   it("preserves registry entries this build cannot parse", () => {
     const registryRoot = join(
       tmpdir(),

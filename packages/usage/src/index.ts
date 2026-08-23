@@ -40,9 +40,144 @@ import {
   RESIDUAL_TURN_SHARE,
   SESSION_ESTIMATOR_CALIBRATION,
 } from "./calibration.js";
+import { recordDiagCall } from "./diagRing.js";
 
 export { readAiUsageLogs } from "./aiLogs.js";
 export type { TokenLightenSummaryScope as SummaryScope } from "@tokenlighten/types";
+
+// ---------------------------------------------------------------------------
+// V11-08 Attribution & Calibration v2 — additive public surface. Every
+// export below is NEW; nothing above this block changes shape or behavior.
+// ---------------------------------------------------------------------------
+
+export {
+  CLAUDE_CODE_PARSER_VERSION,
+  parseClaudeCodeSession,
+} from "./parsers/claudeCode.js";
+export { CODEX_PARSER_VERSION, parseCodexSession } from "./parsers/codex.js";
+export { splitJsonLines } from "./parsers/jsonl.js";
+export {
+  knownTokenCount,
+  sumTokenCounts,
+  tokenCountValue,
+  unknownTokenCount,
+} from "./parsers/types.js";
+export type {
+  NormalizedSessionClient,
+  NormalizedSessionUsage,
+  NormalizedTokenCounts,
+  NormalizedTurnUsage,
+  ParseResult,
+  TokenCount,
+} from "./parsers/types.js";
+
+export {
+  groupUsageEventsBySession,
+  matchSession,
+  normalizeToolCallName,
+  SESSION_MATCH_AMBIGUITY_MARGIN,
+  SESSION_MATCH_FINGERPRINT_WEIGHT,
+  SESSION_MATCH_HIGH_CONFIDENCE_SCORE,
+  SESSION_MATCH_MIN_CANDIDATE_SCORE,
+  SESSION_MATCH_TIME_WEIGHT,
+  SESSION_MATCH_TIME_WINDOW_SLACK_MS,
+} from "./sessionMatcher.js";
+export type {
+  SessionMatchCandidate,
+  SessionMatchFailureReason,
+  SessionMatchResult,
+  TlSessionEvent,
+  TlSessionGroup,
+} from "./sessionMatcher.js";
+
+export {
+  COEFFICIENT_MIN_COVERAGE_RATE,
+  computeCellHoldoutStats,
+  evaluateCellPolicy,
+  lookupCoefficient,
+  transferCoefficient,
+} from "./coefficientStore.js";
+export type {
+  CellHoldoutStats,
+  CoefficientCell,
+  CoefficientClient,
+  CoefficientProvenanceKind,
+  ConfidenceLevel,
+  PairedSample,
+  TaskFamily,
+} from "./coefficientStore.js";
+
+export {
+  estimateBilling,
+  estimateBillingAcrossSnapshots,
+  PRODUCTION_API_PRICING_SNAPSHOT,
+  PRODUCTION_CREDITS_PRICING_SNAPSHOTS,
+  PRODUCTION_PRICING_SNAPSHOTS,
+  PRODUCTION_SUBSCRIPTION_PRICING_SNAPSHOTS,
+} from "./pricingSnapshots.js";
+export type {
+  BillingEstimateBreakdown,
+  BillingEstimateResult,
+  BillingMode,
+  BillingUsage,
+  PricingSnapshot,
+  PricingSnapshotModelEntry,
+} from "./pricingSnapshots.js";
+
+export {
+  accumulateFeatureContributions,
+  aggregateFeatureContributionsAcrossTrajectories,
+  getFeatureContribution,
+} from "./featureContributions.js";
+export type {
+  FeatureContributionEvent,
+  FeatureContributionEventStatus,
+  FeatureContributionSummary,
+  FeatureContributionSummaryStatus,
+  TrajectoryFeatureContributions,
+} from "./featureContributions.js";
+
+export { buildHoldoutReport, unmatchedReasonKinds } from "./holdoutReport.js";
+export type {
+  FamilyClientReportRow,
+  HoldoutReport,
+  UnmatchedAttempt,
+  UnmatchedReasonHistogram,
+} from "./holdoutReport.js";
+
+export { attributionPrivacyReport } from "./attributionPrivacy.js";
+export type {
+  AttributionPrivacyReport,
+  AttributionStorePrivacy,
+} from "./attributionPrivacy.js";
+
+export {
+  buildMeasurementDisplay,
+} from "./measurementDisplay.js";
+export type {
+  BillingDisplayTier,
+  DisplayTier,
+  FeatureContributionDisplayTier,
+  MeasurementDisplayOptions,
+  MeasurementDisplayTiers,
+} from "./measurementDisplay.js";
+
+export {
+  computeMeasurementDecomposition,
+  DEFAULT_COEFFICIENTS,
+} from "./measurementEngine.js";
+export type {
+  ComponentProvenance,
+  MeasurementCoefficients,
+  MeasurementComponent,
+  MeasurementDecomposition,
+  MeasurementEngineConfig,
+  MeasurementInputEvent,
+  MeasurementPricingConfig,
+  ProvenanceStatus,
+  TelemetryEvent,
+  UsageLikeEvent,
+} from "./measurementEngine.js";
 
 const EVENT_FIELDS = [
   "schemaVersion",
@@ -217,6 +352,16 @@ export interface UsageObservation {
   baselineTokens?: number | null;
   baselineMethod?: "file-bytes" | null;
   writeEnabled: boolean;
+  /** Response envelope `kind` (e.g. "read.task_pack", "refusal") — diagnostics-only, never persisted to the usage NDJSON event. */
+  kind?: string;
+  /** read_file `mode` / search_files `action` enum value — diagnostics-only, never user text. */
+  mode?: string;
+  /** Short refusal/error code only — never message text. Diagnostics-only. */
+  errorCode?: string;
+  /** Structured refusal transition token; diagnostics-only. */
+  retry?: string;
+  /** Structured refusal argument name only; diagnostics-only. */
+  field?: string;
 }
 
 export interface UsageRecorder {
@@ -231,6 +376,12 @@ export function createUsageRecorder(options: {
   sessionId?: string;
   directory?: string;
   enabled?: boolean;
+  /** MCP server package version, mirrored into the diagnostics ring file. */
+  serverVersion?: string;
+  /** Exact MCP server build identity, mirrored into the diagnostics ring file. */
+  serverBuild?: string;
+  /** Diagnostics ring file directory override — tests only; production uses defaultDiagDir(). */
+  diagDirectory?: string;
 }): UsageRecorder {
   const directory = resolve(options.directory ?? defaultLogDir());
   const disabledByEnv = /^(0|false|off|no)$/i.test(
@@ -299,6 +450,23 @@ export function createUsageRecorder(options: {
         `${JSON.stringify(event)}\n`,
         { encoding: "utf8", mode: 0o600 },
       );
+      recordDiagCall({
+        workspaceRoot: options.workspaceRoot,
+        serverVersion: options.serverVersion ?? "unknown",
+        serverBuild: options.serverBuild,
+        directory: options.diagDirectory,
+        call: {
+          at: event.occurredAt,
+          tool: observation.tool,
+          mode: observation.mode,
+          kind: observation.kind,
+          ms: event.durationMs,
+          ok: observation.outcome === "ok",
+          error_code: observation.errorCode,
+          retry: observation.retry,
+          field: observation.field,
+        },
+      });
     },
   };
 }
@@ -874,6 +1042,7 @@ export function summarizeUsage(
   let measuredBaselineCalls = 0;
   let measuredResponseTokens = 0;
   let measuredBaselineTokens = 0;
+  let measuredResponseBytes = 0;
   let estimatedSavedTokens = 0;
   let automaticallyEstimatedSavedCostUsd = 0;
   let automaticallyEstimatedBaselineCostUsd = 0;
@@ -889,6 +1058,7 @@ export function summarizeUsage(
       measuredCallsByClient[event.client]++;
       measuredResponseTokens += event.estimatedResponseTokens;
       measuredBaselineTokens += event.baselineTokens;
+      measuredResponseBytes += event.responseBytes;
       estimatedSavedTokens += signedSavedTokens;
       savedTokensByClient[event.client] += signedSavedTokens;
       const automaticRate =
@@ -929,6 +1099,8 @@ export function summarizeUsage(
     measuredBaselineCalls,
     measuredResponseTokens,
     measuredBaselineTokens,
+    measuredResponseBytes,
+    measuredBaselineBytes: measuredBaselineTokens * 4,
     estimatedSavedTokens,
     estimatedReductionPercent: estimatedTokenReductionPercent,
     estimatedTokenReductionPercent,
@@ -1043,3 +1215,18 @@ export function usageLogDirectory(options?: { ensure?: boolean }): string {
   if (options?.ensure) ensurePrivateDir(directory);
   return directory;
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostics ring file (last-call mirror) — additive public surface shared
+// with tokenlighten-vscode-extension. See diagRing.ts for the schema, the
+// exact key derivation, and the privacy/multi-writer notes.
+// ---------------------------------------------------------------------------
+export {
+  DIAG_RING_MAX_CALLS,
+  defaultDiagDir,
+  diagRingFilePath,
+  diagWorkspaceKey,
+  readDiagRingFile,
+  recordDiagCall,
+} from "./diagRing.js";
+export type { DiagRingCall, DiagRingFile } from "./diagRing.js";

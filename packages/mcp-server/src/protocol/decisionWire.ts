@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import type {
+  AwaitInputCode,
   Candidate,
   CapabilityGap,
   CertificateRef,
@@ -491,9 +492,79 @@ function servedEvidenceZoom(evidence: readonly Evidence[]): ToolCall | undefined
   return undefined;
 }
 
-/** A.2.5: the choices an `await_input` decision is asking the caller between. */
-function projectCandidates(result: Record<string, unknown>, evidence: readonly Evidence[]): Candidate[] {
-  if (result["coverage_reason"] !== "candidate-list") return [];
+/**
+ * W9 (2026-08-22): the call a capability gap NAMED as its own recovery.
+ *
+ * Ordered strictly between the contract's own `next_call` and
+ * `servedEvidenceZoom`, and that order is the whole point:
+ *
+ *   - BELOW the contract call, because a contract that can name a call has
+ *     already decided what discovery owes; a gap never overrides it. (In
+ *     practice the `missing-evidence` gap's call IS the contract's, so
+ *     `discoverNext` returns it first and this helper is never consulted.)
+ *   - ABOVE `servedEvidenceZoom`, because the zoom widens a window of a file
+ *     THIS RESPONSE ALREADY SERVED, and an `ambiguous-target` gap over an
+ *     uncovered explicit identifier is precisely the claim that the identifier
+ *     is not in any served body. Zooming cannot close that gap; the batched
+ *     find the gap names can. Observed live 2026-08-22 (a4 m365-drive-mount):
+ *     a multi-file "how does a mount request flow …" pack answered its own gap
+ *     with a 519-byte `using` header.
+ *
+ * Only gaps that carry a call are considered, so every gap shape that has
+ * never carried one behaves exactly as before.
+ */
+function gapNamedNext(contract: TaskExecutionContract | undefined): ToolCall | undefined {
+  for (const gap of contract?.capability_gaps ?? []) {
+    const call = emittableToolCall(gap.next_call);
+    if (call !== undefined) return call;
+  }
+  return undefined;
+}
+
+/**
+ * A.2.5: the choices an `await_input` decision is asking the caller between.
+ *
+ * THE GATE IS THE EMITTED CODE, NOT A RE-DERIVED STRUCTURAL CONDITION
+ * (2026-08-20). Until this change the only gate was
+ * `coverage_reason === "candidate-list"` — a STRICT SUBSET of the condition
+ * under which `readCodeTaskPack.ts` actually declares a candidate choice
+ * pending:
+ *
+ *   candidateChoicePending = !accepted
+ *     && (route.action === "confirm_candidates" || coverage_reason === "candidate-list")
+ *     && contractSurfaces.length > 1 && contractSurfaces.every(hasServedCode)
+ *     && artifactFallback === undefined;                (readCodeTaskPack.ts:14526)
+ *
+ * The `route.action === "confirm_candidates"` arm had NO counterpart here, so
+ * a multi-concern pack that took that arm — `coverage_reason:"concerns-uncovered"`,
+ * `route.action:"confirm_candidates"`, every surface content-bearing — emitted
+ * `decision:{kind:"await_input",code:"choose-candidate"}` with the candidate
+ * set silently dropped. The contract's own `reason` on that same response
+ * ENUMERATES the choice ("every candidate body is served inline (handles
+ * ha8isxcbz0m,…); pick the surface matching the task"), so the set was never
+ * absent — only unprojected. The guide's canon for the kind is "use served
+ * `candidates` bodies when safe, else ask", which an empty set turns into a
+ * dead end for an autonomous caller.
+ *
+ * Gating on `awaitCode` rather than re-deriving `route.action` here is
+ * deliberate and is the lesson `canonicalDecision.ts` already records about
+ * F-A1-1: "a structural approximation drifting from the real projector is how
+ * F-A1-1 happened in the first place". `awaitCode` IS the branch's own verdict,
+ * so there is one condition, not two that must be kept agreeing. The historical
+ * `candidate-list` arm is retained rather than replaced: it is what pins every
+ * already-recorded candidate-list body byte-identical, and on those packs the
+ * two conditions coincide anyway.
+ *
+ * Bodies are NOT duplicated onto the rows. `Candidate.handle` is documented as
+ * the "join key into this response's `evidence[]`", and the bodies are already
+ * there; re-inlining them would double the serve for zero new information.
+ */
+function projectCandidates(
+  result: Record<string, unknown>,
+  evidence: readonly Evidence[],
+  awaitCode: AwaitInputCode,
+): Candidate[] {
+  if (result["coverage_reason"] !== "candidate-list" && awaitCode !== "choose-candidate") return [];
   const candidates: Candidate[] = [];
   for (const entry of evidence) {
     if (entry.path === undefined) continue;
@@ -578,7 +649,13 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   const { result, contract, canonicalKind, evidence } = input;
   if (canonicalKind === undefined || contract === undefined) return undefined;
 
-  const next = discoveryBundleNext(result as never) ?? discoverNext(contract, result);
+  // W9: `gapNamedNext` is the LAST of the three, so it can only supply a call
+  // when neither the bundle re-pack nor the contract has one — i.e. exactly the
+  // shapes that used to fall through to `servedEvidenceZoom` (or, on the
+  // `discover` arm, to `await_input:"no-grounded-call-remains"`).
+  const next = discoveryBundleNext(result as never)
+    ?? discoverNext(contract, result)
+    ?? gapNamedNext(contract);
 
   if (canonicalKind === "terminal-closed") return { kind: "done" };
 
@@ -612,10 +689,24 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
       }
     }
     // Floor breached -> degrade (§2.1.1). Never falsify the act.
-    if (next !== undefined) {
+    //
+    // 2026-08-21 smoke-gate dead-end forensics: this used to check ONLY
+    // `next` (the contract's own discovery call, always absent on a
+    // "prepared" phase contract by construction -- prepared means "no more
+    // discovery needed") before giving up. A "prepared/ready" contract whose
+    // certificate fails to project for any reason (observed: workspace_state
+    // dropped by a byte-cap trim pass) had NO other fallback, so a fully
+    // proved, evidence-bearing pack degraded straight to the bald
+    // `{await_input, no candidates, no next}` dead end -- the exact shape the
+    // "act-on-served-evidence" branch just below already guards against with
+    // `next ?? servedEvidenceZoom(evidence)`. Apply the identical, already
+    // load-bearing fallback here so a certificate-floor breach is never worse
+    // than "re-read a window you already have" when one is available.
+    const restoring = next ?? servedEvidenceZoom(evidence);
+    if (restoring !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);
-      return { kind: "discover", next, ...(advisory !== undefined ? { advisory } : {}), ...(gaps.length > 0 ? { gaps } : {}) };
+      return { kind: "discover", next: restoring, ...(advisory !== undefined ? { advisory } : {}), ...(gaps.length > 0 ? { gaps } : {}) };
     }
     return { kind: "await_input", code: "no-grounded-call-remains" };
   }
@@ -695,10 +786,89 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     }
   }
 
-  const candidates = projectCandidates(result, evidence);
+  const candidates = projectCandidates(result, evidence, awaitCode);
+
+  // -------------------------------------------------------------------------
+  // CHOOSE-CANDIDATE ⇔ A NON-EMPTY SERVED CANDIDATE SET (2026-08-20).
+  //
+  // `AwaitInputCode`'s own schema says `candidates` is "emitted iff the choice
+  // is between enumerable alternatives", and `choose-candidate` is the one
+  // member that IS a pick-one by definition — its absence is reserved for
+  // questions that are not ("e.g. a policy question"). So the pairing is not a
+  // nicety: a `choose-candidate` with nothing to choose between asserts an
+  // enumerable choice and then declines to enumerate it, which is the same
+  // decision↔delivery falsification class ruling 6 removed from branch 3.
+  //
+  // `projectCandidates` above closes the ONLY organic producer of that shape
+  // (the projector's gate was narrower than the contract's). This block is the
+  // residual fence, for a contract that reaches here already marked
+  // `choose-candidate` with no surface carrying a `path` to name — a pack whose
+  // evidence is entirely pathless. The order mirrors branch 3's re-siting, and
+  // each step is a floor rather than a preference:
+  //
+  //   1. a concrete restoring call -> `discover`. `next` is the contract's own
+  //      call when it has one; `servedEvidenceZoom` is the same widening call
+  //      branch 3 falls back to, built from an already-served handle, so it is
+  //      grounded in this response rather than invented.
+  //   2. otherwise the pack really is out of grounded calls, which is exactly
+  //      what A.7.2 branch 4's token says. It is the honest code precisely
+  //      BECAUSE the choice this branch claimed cannot be put on the wire.
+  //
+  // RE-SITING IS DOCUMENTED, NOT SILENT — same standing as ruling 6: the
+  // contract keeps marking WHICH BRANCH decided (`await_input_code`), and the
+  // projector remains the authority on whether that branch's claim survives
+  // contact with what the response can actually deliver. Unlike ruling 6, the
+  // wire and the contract still AGREE on the code in every organic case; this
+  // moves only the shapes where agreeing would mean both lying.
+  //
+  // A dead end — {await_input ∧ no candidates ∧ no next} for a pack that
+  // claimed a choice — is unreachable from here in either direction.
+  // -------------------------------------------------------------------------
+  if (awaitCode === "choose-candidate" && candidates.length === 0) {
+    const restoring = next ?? servedEvidenceZoom(evidence);
+    if (restoring !== undefined) {
+      const gaps = projectGaps(contract);
+      const advisory = discoveryBundleAdvisory(result as never);
+      return {
+        kind: "discover",
+        next: restoring,
+        ...(advisory !== undefined ? { advisory } : {}),
+        ...(gaps.length > 0 ? { gaps } : {}),
+      };
+    }
+    return { kind: "await_input", code: "no-grounded-call-remains" };
+  }
+
   return {
     kind: "await_input",
     code: awaitCode,
     ...(candidates.length > 0 ? { candidates } : {}),
   };
+}
+
+/**
+ * Emit-time conformance oracle for the projected decision, in the shape
+ * `canonicalTaskDecisionInvariantViolations` established: a pure function from
+ * the artifact to a list of named violations, empty when the artifact is
+ * honest.
+ *
+ * WHY IT EXISTS SEPARATELY FROM THAT ONE. `canonicalTaskDecisionInvariantViolations`
+ * reads a `TaskPackResult` — the PRE-projection object. The candidate set is
+ * not a field of that object at all; it is derived here, from the projected
+ * `evidence[]`, at the moment the decision is built. A rule about it is
+ * therefore unstateable at the canonical layer and belongs to this one.
+ *
+ * ONE RULE TODAY, deliberately. This is not a home for restating the type
+ * system: `TaskDecision` already makes `next` required on `discover` and
+ * `certificate` required on both `act.*` members, so a rule for those would be
+ * unreachable. `choose-candidate`'s pairing with `candidates` is the pairing
+ * the TYPES CANNOT express — `candidates` is optional on `await_input` because
+ * four of the five codes legitimately omit it.
+ */
+export function taskDecisionWireViolations(decision: TaskDecision | undefined): string[] {
+  if (decision === undefined || decision.kind !== "await_input") return [];
+  if (decision.code !== "choose-candidate") return [];
+  return (decision.candidates?.length ?? 0) > 0
+    ? []
+    : ["choose-candidate-requires-served-candidates"];
 }

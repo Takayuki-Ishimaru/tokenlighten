@@ -246,6 +246,36 @@ describe("L2 — repeated all-served find escalates to protocol", () => {
     expect(String(first.body["served_note"])).toContain("already served to you this session");
   });
 
+  it("PI-09: force_serve:true suppresses the residency layer entirely — no prose, no ledger pressure, no escalation", () => {
+    // The caller has said its context is gone. Every state this machine can
+    // reach asserts something about what the caller holds, so all of them are
+    // false — and braking a RECOVERING caller as though it were looping is the
+    // worst of them.
+    const ws = makeAeroctlWorkspace("force-serve");
+    servePackSurfaces(ws);
+    armCertificate(ws);
+
+    // CONTROL: without the flag this exact find is all-served and says so.
+    const control = runFind(ws, { action: "find", query: "yaw", path: "CONTRACT.md" });
+    expect(control.body["all_served"]).toBe(true);
+    expect(getServedFindLedgerForTest(ws)?.occurrences).toBe(1);
+
+    const forced = runFind(ws, { action: "find", query: "yaw", path: "CONTRACT.md", force_serve: true });
+    expect(forced.escalated).toBe(false);
+    expect(forced.body["all_served"]).toBeUndefined();
+    expect(forced.body["served_note"]).toBeUndefined();
+    // The result itself is untouched — force_serve suppresses the residency
+    // layer, never the matches.
+    expect(forced.body["total_matches"]).toBe(control.body["total_matches"]);
+    const files = forced.body["files"] as Record<string, unknown>[];
+    expect(files[0]?.["snippets"]).toBeDefined();
+    // Per-file residency annotation is gone with the rest of the layer.
+    expect(files[0]?.["served_this_session"]).toBeUndefined();
+    // And the escalation ledger neither advanced nor reset: a forced serve is
+    // not evidence about a loop in either direction.
+    expect(getServedFindLedgerForTest(ws)?.occurrences).toBe(1);
+  });
+
   it("escalates the SECOND distinct all-served find with a truthful unlock", () => {
     const ws = makeAeroctlWorkspace("second");
     servePackSurfaces(ws);

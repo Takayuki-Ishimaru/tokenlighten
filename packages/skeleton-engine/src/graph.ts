@@ -228,12 +228,40 @@ export function extractSymbolsRegex(text: string, language: string): ExtractedSy
   const out: ExtractedSymbol[] = [];
 
   const patterns = LANG_PATTERNS[language] ?? LANG_PATTERNS.default;
+  const suppressedLines = computeSuppressedLines(lines, language);
 
   for (const pattern of patterns) {
     for (const m of text.matchAll(pattern)) {
       const name = m[1];
       if (!name) continue;
-      const line = lineOf(text, m.index ?? 0);
+      // Every LANG_PATTERNS entry is anchored `^\s*...` (multiline `^`,
+      // which matches after ANY line terminator — \n, and independently
+      // \r, so CRLF text has an extra `^` position too). `\s` matches
+      // newlines, so a declaration preceded by blank line(s) lets the
+      // greedy `\s*` swallow those blank line(s)' terminators (plus the
+      // declaration's own leading indentation) as part of the SAME
+      // match — the match starts on the blank line, not on the
+      // declaration. Using the raw match index (m.index) for `line`
+      // therefore reported the blank line's number, and sliced
+      // `signature` off ITS (empty) text.
+      //
+      // Fixed once, here, instead of touching every pattern: walk past
+      // the match's own leading whitespace to find where its real
+      // content starts, and derive line/signature from that offset.
+      // Safe for every LANG_PATTERNS entry regardless of its specific
+      // syntax — `name` (just checked truthy above) is always captured
+      // from non-whitespace source text, so the match can never be
+      // all-whitespace and `search` below always finds a real offset.
+      // This also covers patterns whose whitespace isn't confined to a
+      // single leading `\s*` (java's `(?:public|...|\s)*` modifier
+      // group) and the CRLF quirk above — a blanket `^\s*` -> `^[ \t]*`
+      // rewrite across LANG_PATTERNS would dodge the blank-line case but
+      // not CRLF's lone-\r `^` position, and would break java's
+      // modifier group, which relies on \s spanning a multi-line list.
+      const leading = m[0].search(/\S/);
+      const matchStart = (m.index ?? 0) + (leading === -1 ? 0 : leading);
+      const line = lineOf(text, matchStart);
+      if (suppressedLines?.[line - 1]) continue;
       const sigLine = lines[line - 1]?.trimEnd() ?? "";
       out.push({
         name,
@@ -333,6 +361,153 @@ const LANG_PATTERNS: Record<string, RegExp[]> = {
     /^\s*(?:function|def|fn|func)\s+([A-Za-z_]\w*)\s*\(/gm,
   ],
 };
+
+// ---------------------------------------------------------------------------
+// Comment / string-state filter (F-A1-4)
+// ---------------------------------------------------------------------------
+//
+// extractSymbolsRegex's patterns are anchored at `^` (line start, modulo
+// leading whitespace) with the multiline flag — that only tests "start of a
+// text line", not "outside a comment". A commented-out or
+// docstring-embedded declaration-shaped line therefore matched exactly like
+// real code. This pass computes, once per file before any pattern runs,
+// which lines must be skipped, and every match's line number is checked
+// against it.
+//
+// Deliberately pragmatic — a lightweight per-line state machine, not a
+// lexer. Known, accepted limits:
+//  - Block comments (the C-family/JS/TS/Go/Rust/Java group below): tracks
+//    single/double/backtick-quoted strings well enough to ignore a comment
+//    delimiter that appears inside one, and a "//" line comment well
+//    enough to ignore comment delimiters after it — but only within a
+//    SINGLE line; a string or template literal that itself spans multiple
+//    raw lines is not modeled. Comments never nest here (the first closer
+//    ends it), even for the one language in the group whose real grammar
+//    allows nesting (Kotlin) — the same simplification every other
+//    language in the group already needed.
+//  - Triple-quoted strings (Python only): treats the two delimiter styles
+//    as one interchangeable state, and stops scanning a line at an
+//    unescaped "#" when not already inside one, so a line comment that
+//    merely mentions a triple-quote can't leak state into later lines.
+//    Ordinary short quoted strings are not tracked — only what the
+//    triple-quote gap needs.
+//  - Every other language (Ruby's =begin/=end blocks, e.g.) and the
+//    unrecognized-language default keep today's behavior: no filter at
+//    all. Guessing a comment syntax for a language we don't otherwise
+//    model would be worse than doing nothing — see pi06SymbolPurity's
+//    separate, already-tracked T-PI06-02 parser-unavailable-honesty gap.
+//  - "//" and "#" line comments themselves need no tracking here: every
+//    LANG_PATTERNS entry is anchored at line-start, and a line starting
+//    with "//" or "#" (after whitespace) can never satisfy any pattern's
+//    own leading keyword/export/modifier alternation, so they were already
+//    excluded by construction before this filter existed.
+
+/** Languages whose comments use C-style slash-star blocks. */
+const BLOCK_COMMENT_LANGS = new Set<string>([
+  "typescript", "typescriptreact", "javascript", "javascriptreact",
+  "java", "kotlin", "csharp", "php", "go", "rust", "c", "cpp",
+]);
+
+/** Languages that use Python-style triple-quoted string literals. */
+const TRIPLE_QUOTE_LANGS = new Set<string>(["python"]);
+
+/**
+ * Per-line suppression mask for `language`, or null when this language has
+ * no modeled comment/string filter (see the limits documented above).
+ */
+function computeSuppressedLines(lines: readonly string[], language: string): boolean[] | null {
+  if (BLOCK_COMMENT_LANGS.has(language)) return computeBlockCommentSuppressedLines(lines);
+  if (TRIPLE_QUOTE_LANGS.has(language)) return computeTripleQuoteSuppressedLines(lines);
+  return null;
+}
+
+// True at index i when line i's start sits inside a block comment opened on
+// this or an earlier line and not yet closed.
+function computeBlockCommentSuppressedLines(lines: readonly string[]): boolean[] {
+  const suppressed: boolean[] = new Array(lines.length);
+  let inComment = false;
+  for (let i = 0; i < lines.length; i++) {
+    suppressed[i] = inComment;
+    inComment = scanLineForBlockComment(lines[i] ?? "", inComment);
+  }
+  return suppressed;
+}
+
+// Block-comment state at the end of `line`, given the state entering it.
+function scanLineForBlockComment(line: string, startInComment: boolean): boolean {
+  let inComment = startInComment;
+  let quote: '"' | "'" | "`" | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inComment) {
+      if (ch === "*" && line[i + 1] === "/") {
+        inComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (ch === "\\") {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "/" && line[i + 1] === "/") break; // rest of line is a line comment
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "/" && line[i + 1] === "*") {
+      inComment = true;
+      i++;
+      continue;
+    }
+  }
+  return inComment;
+}
+
+// True at index i when line i's start sits inside a triple-quoted string
+// opened on this or an earlier line and not yet closed.
+function computeTripleQuoteSuppressedLines(lines: readonly string[]): boolean[] {
+  const suppressed: boolean[] = new Array(lines.length);
+  let openDelim: "'''" | '"""' | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    suppressed[i] = openDelim !== null;
+    openDelim = scanLineForTripleQuote(lines[i] ?? "", openDelim);
+  }
+  return suppressed;
+}
+
+// Triple-quote state at the end of `line`, given the state entering it.
+function scanLineForTripleQuote(
+  line: string,
+  startDelim: "'''" | '"""' | null,
+): "'''" | '"""' | null {
+  let openDelim = startDelim;
+  for (let i = 0; i < line.length; i++) {
+    if (openDelim) {
+      if (line.startsWith(openDelim, i)) {
+        i += 2; // consume the other 2 chars of the 3-char delimiter
+        openDelim = null;
+      }
+      continue;
+    }
+    if (line[i] === "#") break; // rest of line is a # comment
+    if (line.startsWith("'''", i)) {
+      openDelim = "'''";
+      i += 2;
+      continue;
+    }
+    if (line.startsWith('"""', i)) {
+      openDelim = '"""';
+      i += 2;
+      continue;
+    }
+  }
+  return openDelim;
+}
 
 // Callers invoke this once per matchAll hit with the SAME text string, so a
 // fresh scan from index 0 per call made extraction O(matches × bytes) on

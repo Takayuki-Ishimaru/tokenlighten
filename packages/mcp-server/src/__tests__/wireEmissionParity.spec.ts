@@ -233,13 +233,24 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
     // §1.2: "a payload without `v` is not a protocol-v1 payload". This is the
     // emission-parity form of that sentence — the announcement is worthless if
     // the responses do not carry it.
-    const root = workspace("envelope");
+    // Each case gets its OWN fresh workspace rather than sharing one `root`.
+    // 2026-08-21 (W1-A/W2-B answer-shaped auto-binding): "Explain X
+    // behavior" now certifies straight to `act.answer` on the first call
+    // (previously it did not reach a terminal decision this quickly), which
+    // arms the long-standing prepared fence (session.ts
+    // preparedDiscoveryReceipt, dedicated coverage in
+    // executionTypestate.spec.ts/preparedReceiptHonesty.spec.ts) for the
+    // REST of that session — by design, "an unrelated read mid-task is
+    // still usually a mistake" and is fenced into a `decision-unchanged`
+    // receipt rather than served fresh. A shared `root` therefore makes the
+    // slice/skeleton cases below assert the fence's receipt instead of the
+    // envelope shape this test exists to check; a fresh cwd per case keeps
+    // them independent, as the file each of them targets (never served by
+    // the pack above) was always meant to be.
     const cases: Array<[Record<string, unknown>, string]> = [
-      [{ mode: "task_pack", query: "Explain QuoteOrchestrator transition behavior", cwd: root }, "read.task_pack"],
-      // A file the pack above did NOT serve: a re-request of served bytes is a
-      // `read.receipt`, which is correct and a different assertion.
-      [{ mode: "slice", path: "src/ledger.ts", range: "1-2", cwd: root }, "read.text"],
-      [{ mode: "skeleton", path: "src/ledger.ts", cwd: root }, "read.map"],
+      [{ mode: "task_pack", query: "Explain QuoteOrchestrator transition behavior", cwd: workspace("envelope-pack") }, "read.task_pack"],
+      [{ mode: "slice", path: "src/ledger.ts", range: "1-2", cwd: workspace("envelope-slice") }, "read.text"],
+      [{ mode: "skeleton", path: "src/ledger.ts", cwd: workspace("envelope-map") }, "read.map"],
     ];
     for (const [args, kind] of cases) {
       const wire = body(await callTool("read_file", args));
@@ -248,7 +259,7 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
       // D6: body `ok` is deleted; `kind` is the outcome.
       expect(wire, JSON.stringify(args)).not.toHaveProperty("ok");
     }
-    const tree = body(await callTool("search_files", { action: "tree", cwd: root }));
+    const tree = body(await callTool("search_files", { action: "tree", cwd: workspace("envelope-tree") }));
     expect(tree["v"]).toBe(1);
     expect(tree["kind"]).toBe("search.tree");
   }, 30_000);

@@ -91,6 +91,34 @@ const MAX_FILE_SIZE_BYTES = 1_000_000;
 const GENERIC_TEXT_PROBE_BYTES = 8 * 1024;
 
 /**
+ * Discovery ceiling for plain text/identifier scan consumers (search_files
+ * find/references) that pass `sizeCapBytes` explicitly. `walkCodeFiles` is
+ * shared by every product surface — task-pack candidate enumeration, role
+ * derivation, rename, tree, AND find/references — but only the last two do a
+ * cheap line-by-line read+regex scan; the others (symbol/role indexing) carry
+ * real per-file parse cost the 1 MB default exists to bound. A plain grep
+ * scan has no such cost (a 21k-line/~1 MB hand-written source file is trivial
+ * to read and line-split), so gating it at the SAME 1 MB ceiling made a file
+ * that both exists and matches invisible to find/references while the walk's
+ * own `omitted.oversize` counter (correctly) recorded the skip — the caller
+ * had no reason to doubt an `absence`/`inventory_complete:true` that was
+ * silently scoped to less than the whole repo.
+ *
+ * 8 MB mirrors core2/walk.ts's already-validated bound (its own doc comment:
+ * "the adversarial payload gate requires 1MB single-line JSON / minified JS
+ * to be searchable with bounded evidence, so this sits at 8MB … above the
+ * 5MB grid top") — large enough for any realistic hand-written or
+ * single-line-minified source file, small enough to still exclude (and
+ * disclose via `omitted.oversize`) genuinely pathological blobs. Callers that
+ * only need a directory listing or symbol-index candidate (tree, task-pack,
+ * rename, role derivation) do not pass `sizeCapBytes` and keep the original
+ * 1 MB ceiling unchanged — `deriveFileRole` also carries its own independent
+ * ROLE_SKIP_FILE_OVER_BYTES gate (findText.ts), so widening discovery here
+ * never forces a >1 MB file's role to be derived.
+ */
+export const TEXT_SCAN_MAX_FILE_SIZE_BYTES = 8 * 1024 * 1024;
+
+/**
  * Runtime kill switch for public generic-text discovery. It is evaluated per
  * request for tests and embedders; a new server process picks up environment
  * changes without republishing the MCP.
@@ -152,6 +180,14 @@ export interface WalkOptions {
   respectGitignore?: boolean;
   /** When provided, per-layer skip counts accumulate into it. */
   omissions?: WalkOmissions;
+  /**
+   * Override the default MAX_FILE_SIZE_BYTES oversize ceiling for this walk.
+   * Pass TEXT_SCAN_MAX_FILE_SIZE_BYTES for a plain text/identifier scan
+   * (find, references) — see that constant's doc comment for why a much
+   * larger cap is safe there but not for every walkCodeFiles caller. Omitted
+   * keeps the original 1 MB ceiling.
+   */
+  sizeCapBytes?: number;
 }
 
 const SOURCE_ONLY_EXCLUDED_PREFIXES = [
@@ -260,14 +296,22 @@ export interface WalkOmissions {
   non_text: number;
   /** Secret/credential policy excluded generic candidates (names withheld). */
   secrets: number;
+  /**
+   * F-A1-2 (PI-04): a directory `readdirSync` could not list (e.g. EACCES).
+   * Unlike every other category above, this is NOT a known, nameable
+   * exclusion — the walk cannot say how many files or what they contain, so
+   * a zero-match response over the rest of the tree must not certify
+   * absence while this is > 0 (see findText.ts's buildAbsenceExtra gate).
+   */
+  unreadable_dirs: number;
 }
 
 export function createWalkOmissions(): WalkOmissions {
-  return { ignored: 0, gitignored: 0, tokenlighten_ignored: 0, oversize: 0, symlinks: 0, non_text: 0, secrets: 0 };
+  return { ignored: 0, gitignored: 0, tokenlighten_ignored: 0, oversize: 0, symlinks: 0, non_text: 0, secrets: 0, unreadable_dirs: 0 };
 }
 
 export function anyWalkOmission(o: WalkOmissions): boolean {
-  return o.ignored > 0 || o.gitignored > 0 || o.tokenlighten_ignored > 0 || o.oversize > 0 || o.symlinks > 0 || o.non_text > 0 || o.secrets > 0;
+  return o.ignored > 0 || o.gitignored > 0 || o.tokenlighten_ignored > 0 || o.oversize > 0 || o.symlinks > 0 || o.non_text > 0 || o.secrets > 0 || o.unreadable_dirs > 0;
 }
 
 const gitignorePatternsCache = new Map<string, string[]>();
@@ -520,6 +564,7 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
   const fullRecall = opts.fullRecall ?? false;
   const layers = buildLayerMatchers(workspace, fullRecall, opts.respectGitignore ?? false, opts.subPath);
   const om = opts.omissions;
+  const sizeCapBytes = opts.sizeCapBytes ?? MAX_FILE_SIZE_BYTES;
   const out: FoundFile[] = [];
   const workspaceResolved = path.resolve(workspace);
 
@@ -558,7 +603,7 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
         (extraExts?.has(ext) ?? false) ||
         (extraBasenames?.has(base) ?? false) ||
         artifactMatch;
-      if (stat.size > MAX_FILE_SIZE_BYTES) {
+      if (stat.size > sizeCapBytes) {
         if ((knownMatch || includeGenericText) && om) om.oversize += 1;
         return out;
       }
@@ -580,10 +625,10 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
       return out;
     }
     if (stat.isDirectory()) {
-      walkDir(workspaceReal, resolvedAbs, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, opts.subPath, fullRecall);
+      walkDir(workspaceReal, resolvedAbs, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, sizeCapBytes, opts.subPath, fullRecall);
     }
   } else {
-    walkDir(workspaceResolved, workspaceResolved, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, opts.subPath, fullRecall);
+    walkDir(workspaceResolved, workspaceResolved, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, sizeCapBytes, opts.subPath, fullRecall);
   }
 
   out.sort((a, b) => Buffer.compare(Buffer.from(a.relPath), Buffer.from(b.relPath)));
@@ -601,6 +646,7 @@ function walkDir(
   layers: LayerMatchers,
   out: FoundFile[],
   om: WalkOmissions | undefined,
+  sizeCapBytes: number,
   explicitSubPath?: string,
   fullRecall = false,
 ): void {
@@ -608,6 +654,10 @@ function walkDir(
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true }) as fs.Dirent[];
   } catch {
+    // F-A1-2 (PI-04): disclose the skipped subtree instead of vanishing it —
+    // an absence certificate built while this is > 0 would be certifying
+    // over an unknown remainder (see findText.ts's buildAbsenceExtra gate).
+    if (om) om.unreadable_dirs += 1;
     return;
   }
 
@@ -628,7 +678,7 @@ function walkDir(
         continue;
       }
       if (isSourceOnlyExcludedPath(relPath + "/", explicitSubPath, fullRecall)) continue;
-      walkDir(workspace, absPath, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, explicitSubPath, fullRecall);
+      walkDir(workspace, absPath, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, sizeCapBytes, explicitSubPath, fullRecall);
     } else if (entry.isFile()) {
       const layer = classifyIgnored(layers, relPath, false);
       if (layer) {
@@ -644,7 +694,7 @@ function walkDir(
       const knownMatch = trackedByDefault || extraExtMatch || basenameMatch || artifactMatch;
       let size: number;
       try { size = fs.statSync(absPath).size; } catch { continue; }
-      if (size > MAX_FILE_SIZE_BYTES) {
+      if (size > sizeCapBytes) {
         if ((knownMatch || includeGenericText) && om) om.oversize += 1;
         continue;
       }

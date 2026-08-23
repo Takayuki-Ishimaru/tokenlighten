@@ -3,5 +3,23 @@
   "kind": "search.tree",
   "root": "fw/src",
   "tree": "driver/\n  drv_baro.h\n  drv_gps.h\n  drv_imu.h\nestimator/\n  ekf.cpp\n  elevation_estimator.cpp\n  location_estimator.hpp\n  qkf.cpp\n  qkf.hpp\ntelemetry/\n  mavlink_dialect.cpp\n  telemetry_bridge.cpp\n  telemetry_bridge.hpp\n  telemetry_task.cpp",
-  "depth": 2
+  "depth": 2,
+  "scope_report": {
+    "completeness": "complete",
+    "counts": {
+      "visited": 12,
+      "returned": 12,
+      "excluded": 0,
+      "errors": 0
+    },
+    "excluded_by_reason": {
+      "ignored": 0,
+      "gitignored": 0,
+      "tokenlighten_ignored": 0,
+      "oversize": 0,
+      "symlinks": 0,
+      "non_text": 0,
+      "secrets": 0
+    }
+  }
 }

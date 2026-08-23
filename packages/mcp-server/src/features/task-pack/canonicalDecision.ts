@@ -6,6 +6,7 @@ import {
   type ContinuationPlan,
 } from "../../util/continuation.js";
 import type { TaskPackResult } from "./model.js";
+import { codeTaskPackSurfaces } from "./artifactSections.js";
 
 const DISCOVERY_BUNDLE_PATH_CAP = 8;
 
@@ -144,6 +145,43 @@ function requiredAnswerDocumentZoom(result: TaskPackResult): ContinuationCall | 
 }
 
 /**
+ * §3.4.1 / D1 (2026-08-07): the ONE sanctioned served-zoom affordance shape —
+ * an answer route that has granted EXACTLY one zoom call over a required
+ * surface THIS SAME response left partial. AGENTS.md states the intended
+ * joint shape directly: "prepared+partial primary grants
+ * `route.max_additional_tl_calls=1` — spend it on the served zoom", so this
+ * IS an affordance, not missing evidence, and `prepared`/`act.answer` must
+ * survive it. Shared by every site that could otherwise disagree about
+ * whether this shape holds: readCodeTaskPack.ts's reconcileContentSufficiency
+ * (must not downgrade the route just because the profile is answer) and its
+ * buildTaskExecutionContract (must let the shape reach an accepted,
+ * certificate-bearing contract), and this module's own
+ * deriveCanonicalTaskDecision below (must not re-force `discover` on the
+ * shape the certified gate just accepted).
+ */
+export function hasServedZoomAffordance(result: TaskPackResult): boolean {
+  if (result.route?.action !== "answer_from_handles") return false;
+  if ((result.route.max_additional_tl_calls ?? 0) !== 1) return false;
+  return codeTaskPackSurfaces(result.surfaces).some((surface) =>
+    surface.required !== false
+    && (surface.content_completeness === "partial" || (surface.remaining_ranges?.length ?? 0) > 0));
+}
+
+/**
+ * W9 (2026-08-22): is this pack's task read-only?
+ *
+ * Both spellings, for the same reason `projectTaskRef` reads both: a DECLARED
+ * `taskProfile:"answer"` lands on `task_profile`, while §14's inference lands
+ * on `profile_binding.selected`. Either way the value is the profile the pack
+ * was actually BUILT with — the obligations, the route relabel and the
+ * terminal action all derive from it — so it is the same authority the rest of
+ * the pipeline uses, not a second guess at the caller's intent.
+ */
+function isReadOnlyAnswerPack(result: TaskPackResult): boolean {
+  return result.task_profile === "answer" || result.profile_binding?.selected === "answer";
+}
+
+/**
  * Derive one decision from contract evidence. In particular, an
  * `answer_from_handles` route can never promote a pack by itself.
  */
@@ -174,6 +212,56 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
     };
   }
 
+  // -------------------------------------------------------------------------
+  // W9 (2026-08-22) — A READ-ONLY CANDIDATE LIST IS NOT A DEAD END.
+  //
+  // `choose-candidate` exists for EDIT SAFETY. With several plausible targets
+  // and no dominant one, choosing FOR the caller risks editing the wrong file,
+  // so readCodeTaskPack.ts deliberately suppresses every bounded fallback and
+  // lands `awaiting-input` (the 2026-07-19a thrash fix; readinessSemantics.ts
+  // pins it for the generic profile). That risk does not exist on a READ-ONLY
+  // task: "which of these is it" is answered by reading all of them, and
+  // `discoveryBundleNext` is exactly that call — one bounded re-pack over the
+  // candidates THIS pack already served and ranked.
+  //
+  // Measured on the a4 m365-drive-mount repro (2026-08-22): the awaiting-input
+  // arm made the caller invent the same re-pack by hand, without the `qref`,
+  // with the paths copied out of the candidate list — a turn the server could
+  // have named and did not.
+  //
+  // NARROW BY CONSTRUCTION. All four must hold, and each is load-bearing:
+  //   1. `await_input_code === "choose-candidate"` — the CONTRACT's own marker
+  //      of which branch decided (A.7.2 row 21), never re-derived from route or
+  //      prose. `no-grounded-call-remains`, `name-intended-target` (tied
+  //      concerns, which repository evidence provably cannot break) and
+  //      `act-on-served-evidence` are all untouched.
+  //   2. the pack's selected profile is `answer`. Edit/generic keep the fence
+  //      exactly as it is — this is the edit-safety half, and it does not move.
+  //   3. `discoveryBundleNext` can name a bundle at all: a live `qref` and >= 2
+  //      candidate paths. It NEVER invents a path (the advisory it ships says
+  //      so), so this cannot widen the frontier beyond what was served.
+  //   4. phase is really awaiting-input, i.e. nothing above already promoted
+  //      the pack to a certified terminal action.
+  //
+  // Deliberately AFTER the certificate gate and the required-document zoom, so
+  // a pack that has earned `act.*` still gets it, and a partial answer document
+  // is still zoomed first.
+  // -------------------------------------------------------------------------
+  if (
+    contract.typestate.phase === "awaiting-input"
+    && contract.await_input_code === "choose-candidate"
+    && isReadOnlyAnswerPack(result)
+  ) {
+    const bundle = discoveryBundleNext(result);
+    if (bundle !== undefined) {
+      return {
+        kind: "discover",
+        next_call: bundle,
+        reason: "read-only candidate list: re-pack every served candidate in one bounded call instead of asking which to read",
+      };
+    }
+  }
+
   // An awaiting-input decision is authoritative over any stale continuation
   // that a receipt or post-trim branch left behind.
   if (
@@ -185,7 +273,14 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
 
   const routeClaimsAnswer = result.route?.action === "answer_from_handles";
   const zoom = servedDocumentZoom(result);
-  if (routeClaimsAnswer && zoom !== undefined) {
+  // The certified gate above is where the sanctioned served-zoom affordance
+  // (hasServedZoomAffordance) is meant to land `act-answer` — with a real
+  // certificate. Reaching here means it did not (no certificate, or the
+  // affordance genuinely does not hold), so only force `discover` when the
+  // affordance is NOT what is blocking it; otherwise fall through to the
+  // shape below, which can still name the same zoom call without mislabeling
+  // a starved OTHER surface as "the document is partial".
+  if (routeClaimsAnswer && zoom !== undefined && !hasServedZoomAffordance(result)) {
     return {
       kind: "discover",
       next_call: zoom,
@@ -247,6 +342,12 @@ function applyDiscoverDecision(
   contract.next_action = "followup";
   contract.max_additional_discovery_calls = 1;
   delete contract.readiness_certificate;
+  // W9: `await_input_code` marks WHICH awaiting-input branch decided, so it is
+  // meaningless once the decision is `discover` — and actively misleading,
+  // since `projectTaskDecision` reads it on the await arm. A contract that has
+  // just been re-projected onto discovery must not keep claiming a pending
+  // human choice.
+  delete contract.await_input_code;
   contract.typestate = {
     phase: "discovery",
     allowed_actions: ["read", "search"],
@@ -386,6 +487,46 @@ function applyTerminalClosedDecision(
   };
 }
 
+/**
+ * PI-02 / F-A1-1 repair: a LIVE `discover` decision that still carries
+ * capability gaps, WHILE A REQUIRED ROLE IS STILL MISSING (`result.missing`
+ * non-empty — DESIGN-v0.8 §A4's coverage determinant), is itself proof
+ * `coverage:"complete"` was wrong — the gaps ARE the outstanding work the
+ * "complete" claim says does not exist (see the matching rule in
+ * `canonicalTaskDecisionInvariantViolations`, which this repair exactly
+ * mirrors, including the blocking/optional discriminator and why it is
+ * `missing`, not the gap's own kind). Demote coverage to the truthful lesser
+ * value. Never delete the gaps/next that justify the demotion — they are the
+ * caller's only route to actually closing the pack — and never upgrade the
+ * decision to make the contradiction disappear.
+ *
+ * A gap that exists only because a readiness-certificate proof obligation is
+ * unsatisfied (every required role already found; plan item 5's
+ * "optional_followups") is explicitly OUT of scope here — demoting THAT
+ * shape would itself be a false "a required role was never found" claim.
+ */
+function repairCompleteCoverageWithGaps(
+  result: TaskPackResult,
+  contract: TaskExecutionContract,
+  decision: CanonicalTaskDecision,
+): void {
+  if (
+    result.coverage === "complete"
+    && Array.isArray(result.missing) && result.missing.length > 0
+    && (contract.capability_gaps?.length ?? 0) > 0
+    && decision.kind === "discover"
+  ) {
+    // "partial" is the truthful lesser value (DESIGN-v0.8 coverage-honesty:
+    // "focused" claims a single confident site with no fan-out, which an
+    // open capability gap contradicts just as much as "complete" does).
+    // `coverage_reason`'s five-value vocabulary does not map cleanly onto a
+    // capability-gap kind, so none is fabricated here; an already-truthful
+    // value the shape happens to carry (rare — a "complete" pack does not
+    // normally carry one) is left untouched rather than cleared.
+    result.coverage = "partial";
+  }
+}
+
 /** Apply the canonical decision at the shared task-pack exit. */
 export function applyCanonicalTaskDecision(result: TaskPackResult): CanonicalTaskDecision | undefined {
   const decision = deriveCanonicalTaskDecision(result);
@@ -403,10 +544,27 @@ export function applyCanonicalTaskDecision(result: TaskPackResult): CanonicalTas
   // fence total: every shape the oracle can flag is a shape this function
   // repairs, so `enforceCanonicalTaskDecisionAtExit` converges instead of
   // reporting an unrepairable violation.
+  //
+  // W9 (2026-08-22) adds the third term, on the same footing as the second: a
+  // repair trigger the ORACLE deliberately does not encode. An awaiting-input
+  // contract carrying no call is not a protocol violation — it is a coherent
+  // shape, which is exactly why the oracle stays silent about it. What is
+  // incoherent is shipping it AFTER the derivation above has decided the pack
+  // should discover: the contract would keep phase `awaiting-input` while the
+  // wire said `discover`, re-creating the §6.1 "two incompatible orders in one
+  // response" class this fence exists to remove. The condition is the
+  // disagreement itself, so it is self-gating: no disagreement, no repair.
   const needsRepair =
     canonicalTaskDecisionInvariantViolations(result).length > 0
-    || (contract.typestate.phase === "prepared" && requiredAnswerDocumentZoom(result) !== undefined);
+    || (contract.typestate.phase === "prepared" && requiredAnswerDocumentZoom(result) !== undefined)
+    || (contract.typestate.phase === "awaiting-input" && decision.kind === "discover");
   if (!needsRepair) return decision;
+
+  // F-A1-1: a coverage-honesty repair, orthogonal to the decision-shape
+  // repairs below (it touches `result.coverage` only) and self-gated on the
+  // exact contradiction it addresses, so it is a no-op for every OTHER
+  // needsRepair trigger.
+  repairCompleteCoverageWithGaps(result, contract, decision);
 
   if (decision.kind === "discover") applyDiscoverDecision(result, contract, decision);
   else if (decision.kind === "await-input") applyAwaitInputDecision(result, contract, decision);
@@ -528,6 +686,51 @@ export function canonicalTaskDecisionInvariantViolations(result: TaskPackResult)
   }
   if (phase === "done" && (contract.next_call !== undefined || hasReadOnlyContinuation)) {
     violations.push("done-forbids-continuation");
+  }
+  // PI-02 / F-A1-1 (2026-08-20, narrowed 2026-08-20 after a same-day
+  // over-fire report): `coverage:"complete"` is model.ts's promise that
+  // "every REQUIRED ROLE is covered AND every query concern is addressed —
+  // trust it, edit directly" (DESIGN-v0.8 §A4: "coverage derives from
+  // required roles only, not the surface budget"). `result.missing` is that
+  // exact ledger — the required-role names nothing was ever found for
+  // (readCodeTaskPack.ts's coverage computation clears an entry the moment a
+  // surface fills the role). A LIVE `discover` decision that still carries
+  // capability gaps is the opposite claim inside the SAME response ONLY when
+  // `missing` is non-empty too: `discover` always names a concrete
+  // `next_call` (D-1), `gaps` rides the wire only beside `discover` (D-4), so
+  // "complete" beside "discover"+gaps+a real required-role omission asserts
+  // both "nothing more is needed" and "a required role was never found" at
+  // once — the plan's own item 3 ("required omissionがあるのにcompleteとなる
+  // response 0件", DESIGN-v0.10-expansion-plan-v1.3.md L1151).
+  //
+  // Deliberately NOT flagged (plan L1122, item 5 — "coverage=complete と
+  // optional_followupsの併存は許す"): a `capability_gaps` entry whose OWN
+  // existence has nothing to do with role identification — e.g. a
+  // readiness-certificate proof obligation ("surface-content": more of an
+  // ALREADY-IDENTIFIED surface's body could still be embedded) — while every
+  // required role already has a surface (`missing:[]`). v0.10 ships no
+  // separate `blocking_gaps`/`optional_followups` wire field (reconciliation
+  // §5 D-1 keeps the one `gaps` field for both), so `result.missing` is
+  // today's only truthful, domain-grounded way to tell the two apart; the gap
+  // KIND alone cannot (`readCodeTaskPack.spec.ts`'s "nothing required
+  // missing... not partial-by-budget" and "...blocks edit_from_handles when
+  // the edit body is partial" both carry `kind:"missing-evidence"`, the SAME
+  // kind PI-02's own blocking fixture uses, with `missing:[]`). Also
+  // deliberately NOT flagged: a `discover` decision with NO gaps (e.g.
+  // `requiredAnswerDocumentZoom`'s Markdown zoom), and `coverage:"complete"`
+  // beside a capability-gap-free contract in any other phase.
+  //
+  // `deriveCanonicalTaskDecision` — not a second, hand-rolled approximation
+  // of it — remains the source of truth for "would this contract actually
+  // project a discover decision" (a structural approximation drifting from
+  // the real projector is how F-A1-1 happened in the first place).
+  if (
+    result.coverage === "complete"
+    && Array.isArray(result.missing) && result.missing.length > 0
+    && (contract.capability_gaps?.length ?? 0) > 0
+    && deriveCanonicalTaskDecision(result)?.kind === "discover"
+  ) {
+    violations.push("complete-coverage-forbids-discover-gaps");
   }
   return violations;
 }

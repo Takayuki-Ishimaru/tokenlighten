@@ -12,8 +12,8 @@ The TokenLighten Workspace view is for developers using GitHub Copilot, the VS C
 - Current TL status and the version reported by the bundled TL CLI.
 - Local estimates of this workspace's token and billing reduction rates.
 - Export of privacy-safe usage logs for this workspace.
-- A startup check for newer published GitHub Releases, including Public Beta prereleases.
 - Japanese and English display languages.
+- An optional startup check for newer VSIX releases published on GitHub.
 
 For normal installation or recovery, use **Set up this workspace**. It installs or repairs the TokenLighten MCP configuration and managed AI instructions in one operation, then enables TL for the workspace. Existing project instructions outside TokenLighten-managed sections are preserved.
 
@@ -49,12 +49,8 @@ Workspace-changing actions require a trusted VS Code workspace.
 | Setting | Default | Description |
 |---|---:|---|
 | `tokenlighten.enabled` | `true` | Enables or disables TokenLighten for the current workspace. |
-| `tokenlighten.updateCheck.enabled` | `true` | Checks GitHub Releases for a newer VSIX when VS Code starts. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically, or selects Japanese or English explicitly. |
-
-## Updates from GitHub
-
-When VS Code starts, the extension checks the public TokenLighten GitHub Releases list for a newer published VSIX. Public Beta prereleases are included. If one is available, the extension offers to open its VSIX download in your browser. The check can be disabled with `tokenlighten.updateCheck.enabled`; failures are silent and do not affect workspace setup or MCP operation.
+| `tokenlighten.updateCheck.enabled` | `true` | Checks GitHub Releases for a newer VSIX when VS Code starts. |
 
 ## Main workflow
 
@@ -69,17 +65,17 @@ The setup command configures supported clients and managed AI instructions toget
 
 The status bar shows whether the local TokenLighten workspace data is fresh, refreshing, disabled, or in an error state. Saving a supported source file schedules a background refresh of the managed guidance and compact skeleton.
 
+## Updates from GitHub
+
+When `tokenlighten.updateCheck.enabled` is enabled, the extension checks published GitHub Releases, including public-beta prereleases, after VS Code finishes starting. If the release version is newer than the installed extension, a notification offers to download the published VSIX from GitHub. The check is best-effort: network or API failures are ignored and never block activation. TokenLighten never installs an update without an explicit user action.
+
 ## Install from VSIX
 
-Download **[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)** from the v0.9.1a Public Beta GitHub Release, then use VS Code's **Extensions → Install from VSIX…** command. No source build or separate Node.js installation is required.
-
-ソースからビルドせずに、v0.9.1a Public BetaのGitHub Releaseから上記のVSIXをダウンロードし、VS Codeの**拡張機能 → VSIXからのインストール…**を選択してください。Node.jsを別途インストールする必要はありません。
-
-Developers can instead build the self-contained VSIX from the repository:
+Build the self-contained VSIX from the repository:
 
 ```bash
 npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](../../README.md) / [日本語](../../README.ja.md) and [documentation](../../release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](../../README.md) and [public release documentation](../../release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.

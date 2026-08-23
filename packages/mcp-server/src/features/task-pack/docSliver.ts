@@ -81,6 +81,10 @@ export const DOC_SLIVER_HEADINGS_CAP_BYTES = 2048;
  * `prepared` survive the sanctioned zoom budget.
  */
 export const DOC_SLIVER_ROUTE_MARKER = "authority doc ";
+/** Minimum context around a Markdown anchor when its section is short. */
+const DOC_ANCHOR_RADIUS_LINES = 20;
+/** Keep a large heading bounded; short sections are expanded by context. */
+const DOC_ANCHOR_SECTION_MAX_LINES = 150;
 
 /** Minimum concern-match score before a heading is named as THE zoom target. */
 const DOC_SLIVER_MIN_MATCH_SCORE = 2;
@@ -278,7 +282,7 @@ export function planDocSliver(
   // first substantive section) and let the attached index do the steering.
   const fallback = headings.find((h) => h.level > 1) ?? headings[0]!;
   const target = match?.heading ?? fallback;
-  const targetRange = `${target.line}-${target.endLine}`;
+  const targetRange = docAnchorRange(target, totalLines);
 
   // Focus the index on the ZOOM TARGET, not on the served sliver. The sliver's
   // location is a token coincidence (the aeroctl defect anchored on the file's
@@ -311,6 +315,17 @@ export function planDocSliver(
     targetHeading: target.text,
     concernMatched: match !== undefined,
   };
+}
+
+function docAnchorRange(heading: MarkdownHeading, totalLines: number): string {
+  const sectionEnd = Math.min(heading.endLine, totalLines);
+  const sectionLines = sectionEnd - heading.line + 1;
+  const contextStart = Math.max(1, heading.line - DOC_ANCHOR_RADIUS_LINES);
+  const contextEnd = Math.min(totalLines, heading.line + DOC_ANCHOR_RADIUS_LINES);
+  if (sectionLines <= DOC_ANCHOR_SECTION_MAX_LINES) {
+    return `${Math.min(heading.line, contextStart)}-${Math.max(sectionEnd, contextEnd)}`;
+  }
+  return `${contextStart}-${contextEnd}`;
 }
 
 /** "0.07%" / "1.3%" — enough precision to make a sliver look like one. */

@@ -98,9 +98,13 @@
  */
 
 import * as fs from "fs";
-import type { LangKey } from "./walkRepo.js";
-import { walkCodeFiles } from "./walkRepo.js";
-import { escapeRegExp, trimMatchText } from "../features/search/find/findText.js";
+// PI-09 (v0.10 alpha.2): the paging cursor is now a purpose=continuation
+// signed handle. Same field, same opacity — see encodeReferencesCursor.
+import { looksLikeStateHandle } from "../state/handleCodec.js";
+import { mintContinuationHandle, resolveContinuationHandle } from "../state/stateHandles.js";
+import type { LangKey, WalkOmissions } from "./walkRepo.js";
+import { walkCodeFiles, createWalkOmissions, TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "./walkRepo.js";
+import { escapeRegExp, trimMatchText, buildOmittedExtra } from "../features/search/find/findText.js";
 import { collectLexicalSegments, segmentKindAt } from "./lexicalRanges.js";
 import {
   computeMemberSweep,
@@ -225,6 +229,16 @@ export interface FindReferencesResult {
   /** L2 (2026-08-01 references-contract): present exactly when `truncated`. */
   truncation_reason?: ReferenceTruncationReason;
   total: number;
+  /** F-W2D-1: per-layer skip counts from the walk, same shape/vocabulary as
+   * findText.ts's FindResponse.omitted (see WalkOmissions) — present exactly
+   * when at least one class fired. `total`/`files`/`absence` above cover only
+   * what THIS walk scanned; a nonzero `oversize` in particular means at least
+   * one file that could have referenced `symbol` was never opened (the walk's
+   * size ceiling, not a deliberate exclusion) — re-scope directly at it to
+   * include it. Was silently missing before F-W2D-1: this walk tracked no
+   * omissions at all, so an oversize file's absence from every field above
+   * was indistinguishable from "scanned and clean". */
+  omitted?: Partial<WalkOmissions>;
   /** L2 (2026-08-01 references-contract): file groups with NOTHING served on
    * this page — by the byte fit OR by the caller's `limit`
    * (`truncation_reason` says which). Per-PAGE number: groups served by
@@ -335,13 +349,69 @@ interface ReferencesCursorPos {
   l: number;
 }
 
-/** L4: server-issued opaque continuation token (base64url JSON, versioned). */
-export function encodeReferencesCursor(pos: ReferencesCursorPos): string {
+/**
+ * L4 / PI-09: server-issued opaque continuation token.
+ *
+ * WITH a workspace root this mints a purpose=`continuation` SIGNED handle
+ * (`tlh_cont_v1_…`) — MAC-authenticated, workspace-bound and expiring, with the
+ * `(path,line)` position riding the token's authenticated tail. Field position
+ * is unchanged (`next.arguments.cursor`, F5) and the value was always opaque,
+ * so this is a VALUE upgrade with no schema change: the guide's "never
+ * hand-build its cursor" law is now enforced by a MAC instead of asked for in
+ * prose.
+ *
+ * WITHOUT one (the no-arg form specs use) it emits the pre-PI-09 unsigned v1
+ * encoding, which `decodeReferencesCursor` still accepts — see its
+ * COMPATIBILITY WINDOW note.
+ *
+ * The mint falls back to the unsigned form rather than throwing: a cursor is a
+ * page offset, and losing paging because key material is unavailable would be a
+ * worse outcome than an unauthenticated offset into a search the server
+ * re-executes and re-scopes from scratch anyway.
+ */
+export function encodeReferencesCursor(pos: ReferencesCursorPos, workspaceRoot?: string): string {
+  if (workspaceRoot !== undefined) {
+    const signed = mintContinuationHandle(workspaceRoot, { v: 1, p: pos.p, l: pos.l });
+    if (signed !== undefined) return signed;
+  }
   return Buffer.from(JSON.stringify({ v: 1, p: pos.p, l: pos.l }), "utf8").toString("base64url");
 }
 
-/** L4: strict decode — anything malformed yields undefined (caller discloses via cursor_note). */
-export function decodeReferencesCursor(token: string): ReferencesCursorPos | undefined {
+/**
+ * L4: strict decode — anything malformed yields undefined, and the caller
+ * discloses that through `cursor_note` + serve-from-start rather than refusing
+ * a page outright (serving from the start re-serves at worst; a guessed window
+ * silently loses matches).
+ *
+ * COMPATIBILITY WINDOW, stated rather than assumed. Two forms are accepted:
+ *
+ *  - `tlh_cont_v1_…` — the signed form this server now MINTS. A failed MAC,
+ *    a wrong purpose, an expired lifetime or a foreign workspace all decode to
+ *    undefined and therefore take the existing fresh-first-page path.
+ *  - the pre-PI-09 unsigned base64url JSON. Still accepted in v0.10 because
+ *    tokens minted by an older server (and the frozen replay-corpus case
+ *    `rfc3_references_after_cursor_verbatim`, which carries one literally) must
+ *    keep paging. Dropping it is a v0.11 decision once no pinned fixture
+ *    carries one.
+ *
+ * Accepting the unsigned form costs nothing security-wise: this cursor is a
+ * page OFFSET into a search the server re-executes and re-scopes from the
+ * request, never a capability. A forged offset can only make the server skip
+ * results it would otherwise have served — it can reach nothing new. The signed
+ * form adds tamper-evidence, expiry and workspace binding to the tokens the
+ * server actually issues, which is what makes a cross-workspace replay of a
+ * SERVER-ISSUED cursor detectable.
+ */
+export function decodeReferencesCursor(token: string, workspaceRoot?: string): ReferencesCursorPos | undefined {
+  if (looksLikeStateHandle(token)) {
+    const resolved = resolveContinuationHandle<{ v?: unknown; p?: unknown; l?: unknown }>(token, workspaceRoot);
+    if (!resolved.ok) return undefined;
+    const payload = resolved.payload;
+    if (payload.v !== 1 || typeof payload.p !== "string" || typeof payload.l !== "number" || !Number.isFinite(payload.l)) {
+      return undefined;
+    }
+    return { p: payload.p, l: Math.floor(payload.l) };
+  }
   try {
     const raw = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as Record<string, unknown>;
     if (raw["v"] !== 1 || typeof raw["p"] !== "string" || typeof raw["l"] !== "number" || !Number.isFinite(raw["l"])) {
@@ -374,6 +444,7 @@ function continuationNextCall(
   symbol: string,
   pos: ReferencesCursorPos,
   input: FindReferencesInput,
+  workspaceRoot?: string,
 ): { tool: "search_files"; arguments: Record<string, unknown> } {
   return {
     tool: "search_files",
@@ -383,7 +454,7 @@ function continuationNextCall(
       ...(input.path ? { path: input.path } : {}),
       ...(input.lang ? { lang: input.lang } : {}),
       ...(input.limit !== undefined ? { limit: effectiveMatchLimit(input.limit) } : {}),
-      cursor: encodeReferencesCursor(pos),
+      cursor: encodeReferencesCursor(pos, workspaceRoot),
     },
   };
 }
@@ -395,11 +466,17 @@ function continuationNextCall(
  */
 function withAbsence(
   result: FindReferencesResult,
-  args: { symbol: string; scannedFiles: number; unreadableFiles: number; subPath?: string },
+  args: { symbol: string; scannedFiles: number; unreadableFiles: number; oversizeOmitted: number; subPath?: string },
 ): FindReferencesResult {
   // "Read nothing" must never render as "it isn't there" — no scan, no
   // certificate (same gate as findText's buildAbsenceExtra).
   if (args.scannedFiles === 0) return result;
+  // F-W2D-1: an oversize-skipped file is an unknown remainder, not a
+  // deliberate exclusion — the walk's size ceiling, not something the caller
+  // asked for. Mirrors buildAbsenceExtra's unreadable_dirs/oversize gate:
+  // no certificate, not even a caveated one, while any are outstanding. The
+  // caller still sees the exclusion via `result.omitted.oversize`.
+  if (args.oversizeOmitted > 0) return result;
   const scope = args.subPath ? ` under '${args.subPath}'` : "";
   const base: ReferenceAbsence = {
     scanned_files: args.scannedFiles,
@@ -432,10 +509,18 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // opts out of build-dir/generated noise filtering (a real `src/build/` or
   // `**/generated/` source file must not be silently dropped). The
   // bench-runs/cache/coverage exclusions still apply — those are never source.
+  // F-W2D-1: `omissions` used to be omitted entirely — this walk tracked NO
+  // skip counts, so an oversize (or ignored/gitignored) file's absence from
+  // `all` below was indistinguishable from "scanned and clean". `sizeCapBytes`
+  // widens the walk-time ceiling for this plain word-boundary scan the same
+  // way findText.ts's scanLiteral does — see TEXT_SCAN_MAX_FILE_SIZE_BYTES.
+  const walkOmissions = createWalkOmissions();
   const files = walkCodeFiles(workspace, {
     ...(input.lang ? { lang: input.lang } : {}),
     ...(input.path ? { subPath: input.path } : {}),
     fullRecall: true,
+    omissions: walkOmissions,
+    sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
   });
 
   const all: Reference[] = [];
@@ -506,7 +591,7 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // disclosed (cursor_note): serving from the start re-serves at worst,
   // while a guessed window would silently lose matches.
   const cursorToken = typeof input.cursor === "string" && input.cursor.length > 0 ? input.cursor : undefined;
-  const cursorPos = cursorToken !== undefined ? decodeReferencesCursor(cursorToken) : undefined;
+  const cursorPos = cursorToken !== undefined ? decodeReferencesCursor(cursorToken, workspace) : undefined;
   const cursorInvalid = cursorToken !== undefined && cursorPos === undefined;
   const windowed = cursorPos === undefined
     ? all
@@ -546,11 +631,12 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // candidates), so this is also the cheap path.
   if (all.length === 0) {
     return withAbsence(
-      { symbol, references: peekProbe, files: [], truncated: false, total: 0 },
+      { symbol, references: peekProbe, files: [], truncated: false, total: 0, ...buildOmittedExtra(walkOmissions) },
       {
         symbol,
         scannedFiles,
         unreadableFiles,
+        oversizeOmitted: walkOmissions.oversize,
         ...(input.path ? { subPath: input.path } : {}),
       },
     );
@@ -566,9 +652,15 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   const memberSweep = memberSweepCandidates.length > 0
     ? await computeMemberSweep(symbol, memberSweepCandidates)
     : undefined;
-  const extra: Record<string, unknown> = memberSweep
-    ? { member_sweep: memberSweep, hint: MEMBER_SWEEP_HINT_TEXT }
-    : {};
+  // F-W2D-1: `omitted` rides the SAME budgeted `extra` record member_sweep
+  // already uses — baked into every fitReferencesPrefix trial below via
+  // reasonProbe/continuationProbe (both spread `...extra`), never appended
+  // after the fit picked `files` (the L2 rule this file's other disclosure
+  // fields already follow).
+  const extra: Record<string, unknown> = {
+    ...buildOmittedExtra(walkOmissions),
+    ...(memberSweep ? { member_sweep: memberSweep, hint: MEMBER_SWEEP_HINT_TEXT } : {}),
+  };
 
   const fileGroups = groupReferencesByFile(servedRefs);
 
@@ -600,7 +692,13 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   const continuationProbe: Record<string, unknown> = {
     ...reasonProbe,
     files_omitted: new Set(windowed.map((r) => r.path)).size,
-    next_call: continuationNextCall(symbol, { p: widestPath, l: 2147483647 }, input),
+    // PI-09: the probe must be signed too. It exists to RESERVE bytes for the
+    // continuation the real emission will carry, and a signed token is ~3x the
+    // unsigned one — measuring the cheap form and emitting the expensive one
+    // would under-reserve and blow the fit. Widest path + max line keeps it an
+    // upper bound on the real token's authenticated tail, which is exactly the
+    // property this probe already relied on.
+    next_call: continuationNextCall(symbol, { p: widestPath, l: 2147483647 }, input, workspace),
   };
   // L4: matched lines of the LAST limit-sliced group lying beyond the slice —
   // stamped on that group (as more_lines) BEFORE the fit so every trial
@@ -660,7 +758,7 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
     ...(cursorInvalid ? { cursor_note: CURSOR_INVALID_NOTE } : {}),
     ...(omittedPaths.size > 0 ? { files_omitted: omittedPaths.size } : {}),
     ...(unservedAfter > 0 && lastPos !== undefined
-      ? { next_call: continuationNextCall(symbol, lastPos, input) }
+      ? { next_call: continuationNextCall(symbol, lastPos, input, workspace) }
       : {}),
     ...extra,
   };

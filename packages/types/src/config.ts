@@ -5,7 +5,17 @@
  */
 export interface TLConfig {
   /**
+   * LiteLLM proxy settings.
+   * See docs/components/01-litellm-proxy.md.
+   */
+  proxy?: {
+    /** Whether the proxy is enabled. Default: true when proxy is configured. */
+    enabled: boolean;
+  };
+
+  /**
    * MCP server settings.
+   * See docs/components/02-mcp-server.md.
    */
   mcp?: {
     /**
@@ -18,6 +28,7 @@ export interface TLConfig {
 
   /**
    * CI skeleton generator settings.
+   * See docs/components/03-ci-skeleton.md §4.1.
    */
   skeleton?: {
     /**
@@ -34,6 +45,7 @@ export interface TLConfig {
 
   /**
    * AGENTS.md generator settings.
+   * See docs/components/04-agents-md-generator.md §3.
    */
   agentsMd?: {
     /**

@@ -1,10 +1,19 @@
 /**
  * handles.ts — per-process handle table for v0.6 transactional context.
  *
- * A handle is a short session-local reference to a repo/file/symbol/range/text
- * or reference-set. The table is a singleton; it is never persisted to disk.
+ * A handle is a short reference to a repo/file/symbol/range/text or
+ * reference-set. The table is a singleton.
  *
  * No I/O in this module. Hashing only over caller-supplied text.
+ *
+ * v0.10 PI-09 (alpha.2): the table is no longer *necessarily* process-local.
+ * `setHandlePersistence` installs an OPTIONAL durable backing (implemented in
+ * `state/stateHandles.ts` over the per-workspace state store) so a restarted
+ * server resolves a handle it minted in a previous life instead of dead-ending
+ * on `handle-unknown`. This module stays I/O-free: it only calls the hooks it
+ * was given, and with no hooks installed its behavior is byte-identical to
+ * v0.9. Rehydration is scoped by `runWithCallWorkspace` so a lookup can never
+ * reach into a workspace the current call did not resolve.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -24,9 +33,25 @@ export type HandleKind =
   | "scope"
   | "directory";
 
+/**
+ * PI-09 purpose discriminator. `kind` says WHAT a handle addresses
+ * (file/symbol/range/…); `purpose` says WHY it was minted — a separate
+ * namespace, so a content handle can never be redeemed where a `task_handle`
+ * or `continuation_token` is required (T-PI09-02, "wrong purpose … acceptance
+ * = 0"). Every handle this table mints is `"content"`; the other three
+ * purposes live in the `tlh_*` wire namespace (`state/stateHandles.ts`) and
+ * never appear in this table.
+ */
+export type HandlePurpose = "content";
+
 export interface HandleEntry {
   /** Unguessable session-local capability identifier with an `h` prefix. */
   id: string;
+  /**
+   * Why this handle exists, as opposed to what it points at. Always
+   * `"content"` for table-minted handles — see `HandlePurpose`.
+   */
+  purpose: HandlePurpose;
   kind: HandleKind;
   /** Workspace-relative POSIX path (omit for repo / scope handles). */
   path?: string;
@@ -118,6 +143,49 @@ export function declaredWorkspace(): string | undefined {
   return root === undefined || root === "" ? undefined : root;
 }
 
+/**
+ * The workspace root the current call RESOLVED against, declared or not.
+ *
+ * Distinct from `_declaredWorkspace` on purpose: declaration is a security
+ * premise (who chose the root) and must stay narrow, while rehydration needs
+ * to know which store to read — a question every call can answer. Keeping them
+ * apart means installing a durable backing cannot widen the write guard.
+ */
+const _callWorkspace = new AsyncLocalStorage<string>();
+
+/** Run `fn` with `root` recorded as the workspace this call resolved against. */
+export function runWithCallWorkspace<T>(root: string | undefined, fn: () => T): T {
+  return _callWorkspace.run(root ?? "", fn);
+}
+
+/** The workspace root the current call resolved against, or undefined. */
+export function callWorkspace(): string | undefined {
+  const root = _callWorkspace.getStore();
+  return root === undefined || root === "" ? undefined : root;
+}
+
+// ---------------------------------------------------------------------------
+// Optional durable backing (PI-09)
+// ---------------------------------------------------------------------------
+
+/**
+ * The seam between this I/O-free module and the state store. `record` is
+ * called for every mint (buffered by the implementation, not written per
+ * call); `rehydrate` is consulted ONLY on a `get` miss, and only for the
+ * workspace the current call resolved against.
+ */
+export interface HandlePersistenceHooks {
+  record(entry: HandleEntry): void;
+  rehydrate(id: string, workspaceRoot: string): HandleEntry | undefined;
+}
+
+let _persistence: HandlePersistenceHooks | undefined;
+
+/** Install (or, with undefined, remove) the durable backing. */
+export function setHandlePersistence(hooks: HandlePersistenceHooks | undefined): void {
+  _persistence = hooks;
+}
+
 // ---------------------------------------------------------------------------
 // Canonical key
 // ---------------------------------------------------------------------------
@@ -131,13 +199,22 @@ export function declaredWorkspace(): string | undefined {
  * pass `workspaceDeclared` explicitly (e.g. when re-minting from an already
  * declared entry); either source is sufficient, neither is required.
  */
-function mintIsDeclared(entry: Omit<HandleEntry, "id" | "createdAt">): boolean {
+/**
+ * What a mint site supplies. `purpose` is OPTIONAL on the way in and TOTAL on
+ * the way out: every existing call site keeps compiling, and no minted entry
+ * can be missing its discriminator.
+ */
+export type HandleMintInput =
+  & Omit<HandleEntry, "id" | "createdAt" | "purpose">
+  & { purpose?: HandlePurpose };
+
+function mintIsDeclared(entry: HandleMintInput): boolean {
   if (entry.workspaceDeclared === true) return true;
   const declared = declaredWorkspace();
   return declared !== undefined && entry.workspaceRoot === declared;
 }
 
-function canonicalKey(entry: Omit<HandleEntry, "id" | "createdAt">): string {
+function canonicalKey(entry: HandleMintInput): string {
   return JSON.stringify([
     entry.kind,
     entry.path ?? "",
@@ -171,7 +248,7 @@ export class HandleTable {
   // -------------------------------------------------------------------------
   // create — always mints a new entry even if an equivalent one exists.
   // -------------------------------------------------------------------------
-  create(entry: Omit<HandleEntry, "id" | "createdAt">): HandleEntry {
+  create(entry: HandleMintInput): HandleEntry {
     this._maybeEvict();
     this._counter += 1;
     let id: string;
@@ -189,26 +266,53 @@ export class HandleTable {
     } while (this._entries.has(id));
     const full: HandleEntry = {
       ...entry,
+      purpose: entry.purpose ?? "content",
       ...(mintIsDeclared(entry) ? { workspaceDeclared: true } : {}),
       id,
       createdAt: this._counter,
     };
     this._entries.set(id, full);
+    _persistence?.record(full);
     return full;
   }
 
   // -------------------------------------------------------------------------
   // get — look up an entry by id.
+  //
+  // PI-09 (T-PI09-03): a MISS consults the durable backing before it becomes a
+  // `handle-unknown` refusal, so a handle minted before a server restart still
+  // resolves. Three properties make that safe rather than merely convenient:
+  //
+  //  - the lookup is scoped to `callWorkspace()`, so it can only ever read the
+  //    store of the workspace THIS call already resolved against;
+  //  - the rehydrated entry's own `workspaceRoot` is re-checked by the
+  //    implementation, so a store carried between workspaces resolves nothing;
+  //  - with no backing installed the miss is a miss, exactly as in v0.9.
+  //
+  // A rehydrated entry is promoted into the in-memory table so the rest of the
+  // call — and every later call in this process — takes the fast path.
   // -------------------------------------------------------------------------
   get(id: string): HandleEntry | undefined {
-    return this._entries.get(id);
+    const live = this._entries.get(id);
+    if (live !== undefined) return live;
+    if (_persistence === undefined) return undefined;
+    const workspace = callWorkspace();
+    if (workspace === undefined) return undefined;
+    const restored = _persistence.rehydrate(id, workspace);
+    if (restored === undefined) return undefined;
+    this._maybeEvict();
+    this._counter += 1;
+    const adopted: HandleEntry = { ...restored, createdAt: this._counter };
+    this._entries.set(id, adopted);
+    this._canonical.set(canonicalKey(adopted), id);
+    return adopted;
   }
 
   // -------------------------------------------------------------------------
   // upsert — canonical: if an equivalent entry exists (same kind, path, range,
   // symbol, sha, workspaceRoot) reuse its id; otherwise create a new one.
   // -------------------------------------------------------------------------
-  upsert(entry: Omit<HandleEntry, "id" | "createdAt">): HandleEntry {
+  upsert(entry: HandleMintInput): HandleEntry {
     const key = canonicalKey(entry);
     const existingId = this._canonical.get(key);
     if (existingId !== undefined) {
@@ -221,6 +325,7 @@ export class HandleTable {
         if (existing.workspaceDeclared !== true && mintIsDeclared(entry)) {
           const upgraded: HandleEntry = { ...existing, workspaceDeclared: true };
           this._entries.set(existingId, upgraded);
+          _persistence?.record(upgraded);
           return upgraded;
         }
         return existing;
@@ -257,7 +362,10 @@ export class HandleTable {
   //     entry with the refreshed sha/range immediately, no upsert needed.
   // -------------------------------------------------------------------------
   refreshSha(id: string, newSha: string, newRange?: string): HandleEntry | undefined {
-    const existing = this._entries.get(id);
+    // `get`, not `_entries.get`: a post-edit re-key must reach a handle the
+    // caller legitimately holds from before a restart, or the edit path would
+    // keep the pre-PI-09 dead end that reads no longer have.
+    const existing = this.get(id);
     if (existing === undefined) return undefined;
 
     const oldKey = canonicalKey(existing);
@@ -274,6 +382,7 @@ export class HandleTable {
 
     const newKey = canonicalKey(refreshed);
     this._canonical.set(newKey, id);
+    _persistence?.record(refreshed);
 
     return refreshed;
   }

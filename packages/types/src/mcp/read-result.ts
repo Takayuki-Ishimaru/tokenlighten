@@ -54,6 +54,8 @@ export type ReadTaskPackResult = {
   decision: TaskDecision;
   /** Optional, non-binding task lifecycle notice. */
   advisory?: string;
+  /** Additive provenance for a successful pathless locator scope retry. */
+  scope_inferred?: { path: string; reason: "pathless-locator-abstain" };
   /** Emitted iff >=1 rare extension carries information (§3.1). Absence means
    *  no evidence model, wiring, change contract, kit or artifact section
    *  applies. */

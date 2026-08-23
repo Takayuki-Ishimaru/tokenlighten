@@ -140,7 +140,7 @@ export async function applyAppendEnumMember(
 
   // Mode preservation: see writeExistingFileAtomic's doc comment
   // (2026-08-07 chmod-reset incident).
-  writeExistingFileAtomic(realPath, after, beforeMode);
+  writeExistingFileAtomic(realPath, after, beforeMode, { root: workspace, relPath });
 
   const startLine = changedLine(before, after);
   const added = Math.max(1, countLines(after) - countLines(before));

@@ -603,6 +603,8 @@ export interface ReadCodeTaskPackOutput {
   profile_binding?: TaskProfileBinding;
   /** Machine-readable stop condition for eliminating post-ready exploration. */
   execution_contract?: TaskExecutionContract;
+  /** Additive provenance for a successful pathless locator scope retry. */
+  scope_inferred?: { path: string; reason: "pathless-locator-abstain" };
   /** Present only when the server proved a single safe exact replacement. */
   fast_path?: TaskPackSingleSiteUniqueMatchFastPath;
   /** Handle-grounded edit/review responsibilities for multi-surface changes. */

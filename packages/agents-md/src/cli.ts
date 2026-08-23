@@ -32,6 +32,7 @@ OPTIONS (for update)
                      Valid values: ${VALID_TARGETS.join(", ")}
                      Default: all 5 targets
   --locale <locale>  Template language: en (default) or jp
+  --profile <profile> Guide profile: full (default) or medium
   --force            Overwrite even when manual edits detected inside the block
   --check            Use fail-build drift mode (same as \`tl-agents check\`)
 
@@ -48,6 +49,7 @@ function parseArgs(args: string[]): {
   command: string;
   targets?: StubTargetId[];
   locale?: Locale;
+  profile?: "full" | "medium";
   force: boolean;
   check: boolean;
 } {
@@ -59,6 +61,7 @@ function parseArgs(args: string[]): {
 
   let targets: StubTargetId[] | undefined;
   let locale: Locale | undefined;
+  let profile: "full" | "medium" | undefined;
   let force = false;
   let check = false;
 
@@ -78,6 +81,13 @@ function parseArgs(args: string[]): {
         }
       }
       targets = parsed;
+    } else if (arg === "--profile" && allArgs[i + 1]) {
+      const raw = allArgs[++i];
+      if (raw !== "full" && raw !== "medium") {
+        process.stderr.write(`[tl-agents] ERROR: unknown profile "${raw}". Valid: full, medium\n`);
+        process.exit(1);
+      }
+      profile = raw;
     } else if (arg === "--locale" && allArgs[i + 1]) {
       const raw = allArgs[++i]! as Locale;
       if (!VALID_LOCALES.includes(raw)) {
@@ -88,11 +98,11 @@ function parseArgs(args: string[]): {
     }
   }
 
-  return { command, targets, locale, force, check };
+  return { command, targets, locale, profile, force, check };
 }
 
 async function main(): Promise<void> {
-  const { command, targets, locale, force, check } = parseArgs(process.argv);
+  const { command, targets, locale, profile, force, check } = parseArgs(process.argv);
 
   if (command === "help" || command === "--help" || command === "-h") {
     printHelp();
@@ -108,6 +118,7 @@ async function main(): Promise<void> {
       driftMode: "fail-build",
       targets,
       locale,
+      profile,
       force: false,
     });
     printResult(result);
@@ -124,6 +135,7 @@ async function main(): Promise<void> {
       driftMode,
       targets,
       locale,
+      profile,
       force,
     });
     printResult(result);

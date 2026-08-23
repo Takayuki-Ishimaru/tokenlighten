@@ -207,6 +207,10 @@ function zoomTransition(
  *
  * Without a live certificate nothing escalates: "you already hold this" is a
  * protocol-grade claim only while the decision it belongs to is open.
+ *
+ * And without the caller's context, nothing here is true at all: `force_serve`
+ * (PI-09) short-circuits the whole machine below, because every state it can
+ * reach asserts something about what the caller holds.
  */
 export function applyServedFindProtocol(
   response: object,
@@ -215,6 +219,21 @@ export function applyServedFindProtocol(
   certificateIdOverride?: string,
 ): ServedFindOutcome {
   try {
+    // PI-09 close-out: `force_serve:true` is the caller stating that the
+    // context this state machine reasons about is GONE. Both of its outputs
+    // then become false: the residency prose would misdescribe the caller's
+    // context, and the escalation would brake a caller that is RECOVERING
+    // rather than looping. The find result itself is untouched either way —
+    // only the residency layer is suppressed, which is the safe direction.
+    //
+    // The guard lives HERE, not at the server.ts call site, because this
+    // module's own contract is that "the whole decision — annotate, note, or
+    // escalate — lives in servedFindEscalation.ts". A bypass in the wrapper
+    // would be a fifth case of that decision made somewhere the module's own
+    // tests cannot see.
+    if (args["force_serve"] === true) {
+      return { body: response as Record<string, unknown>, escalated: false };
+    }
     const record = response as Record<string, unknown>;
     const rawFiles = record["files"];
     if (!Array.isArray(rawFiles) || rawFiles.length === 0) {

@@ -51,7 +51,7 @@ vi.mock("vscode", () => ({
 const extensionUriStub = { fsPath: "/extension", scheme: "file" };
 
 vi.mock("../cli.js", () => ({
-  getTlVersion: vi.fn(() => "0.9.1"),
+  getTlVersion: vi.fn(() => "0.9.0"),
 }));
 
 vi.mock("../commands.js", () => ({
@@ -104,6 +104,7 @@ describe("TokenLighten sidebar", () => {
         status: "estimated",
         tokenReductionPercent: 45.6,
         costReductionPercent: 34.5,
+        confidence: "medium",
       },
     });
     mockRegisterProvider.mockReturnValue({ dispose: vi.fn() });
@@ -124,7 +125,7 @@ describe("TokenLighten sidebar", () => {
     provider.resolveWebviewView({ webview } as never);
 
     await vi.waitFor(() => expect(webview.html).toContain("tokenlighten.setup"));
-    expect(webview.html).toContain("Version: 0.9.1");
+    expect(webview.html).toContain("Version: 0.9.0");
     expect(webview.html).toContain("Workspace setup");
     expect(webview.html).toContain("Workspace logs");
     expect(webview.html).toContain(
@@ -143,14 +144,46 @@ describe("TokenLighten sidebar", () => {
     expect(webview.html).not.toContain("id=\"tokenCost\"");
   });
 
-  it("shows the measured fallback when attributable AI logs are unavailable", async () => {
+  it("shows calibration progress and measured byte ratio with empty paired logs", async () => {
     mockLoadUsageSummary.mockResolvedValue({
-      estimatedTokenReductionPercent: 12.3,
+      measuredBaselineCalls: 3,
+      measuredResponseBytes: 400,
+      measuredBaselineBytes: 800,
+      sessionEstimate: { status: "estimated", confidence: "low", calibration: { sampleCount: 0 }, warnings: [] },
+    });
+    mockRegisterProvider.mockReturnValue({ dispose: vi.fn() });
+    const context = { subscriptions: [] as unknown[], extensionUri: extensionUriStub };
+    registerControlCenter(context as never);
+    const [, provider] = mockRegisterProvider.mock.calls[0] as [string, { resolveWebviewView(view: unknown): void }];
+    const webview = { options: {}, html: "", cspSource: "test", asWebviewUri: (uri: unknown) => uri, onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })) };
+    provider.resolveWebviewView({ webview } as never);
+    await vi.waitFor(() => expect(webview.html).toContain("Calibrating: 0/24 paired samples"));
+    expect(webview.html).toContain("Measured calls: 3; response bytes vs baseline: 50.0%");
+    expect(webview.html).toContain("Calibrating: 0/24 paired samples");
+  });
+
+  it("renders distinct measurement-unavailable reasons", async () => {
+    for (const [reason, expected] of [["recorder-off", "Recorder is off."], ["log-dir-unavailable", "Usage log directory is unavailable."], ["scope-mismatch", "Usage logs do not match this workspace scope."]] as const) {
+      mockLoadUsageSummary.mockResolvedValue({ measuredBaselineCalls: 0, sessionEstimate: { status: "estimated", confidence: "low", calibration: { sampleCount: 0 }, warnings: [reason] } });
+      mockRegisterProvider.mockReturnValue({ dispose: vi.fn() });
+      const context = { subscriptions: [] as unknown[], extensionUri: extensionUriStub };
+      registerControlCenter(context as never);
+      const [, provider] = mockRegisterProvider.mock.calls.at(-1) as [string, { resolveWebviewView(view: unknown): void }];
+      const webview = { options: {}, html: "", cspSource: "test", asWebviewUri: (uri: unknown) => uri, onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })) };
+      provider.resolveWebviewView({ webview } as never);
+      await vi.waitFor(() => expect(webview.html).toContain(expected));
+    }
+  });
+
+  it("does not present a 99.9% per-call fallback when attributable AI logs are unavailable", async () => {
+    mockLoadUsageSummary.mockResolvedValue({
+      estimatedTokenReductionPercent: 99.9,
       estimatedCostReductionPercent: 4.5,
       sessionEstimate: {
         status: "provider-logs-unavailable",
         tokenReductionPercent: null,
         costReductionPercent: null,
+        confidence: "unavailable",
       },
     });
     mockRegisterProvider.mockReturnValue({ dispose: vi.fn() });
@@ -170,11 +203,10 @@ describe("TokenLighten sidebar", () => {
     };
     provider.resolveWebviewView({ webview } as never);
 
-    await vi.waitFor(() => expect(webview.html).toContain("Measured per-call reduction"));
-    expect(webview.html).toContain("12.3%");
-    expect(webview.html).toContain(
-      "Billing estimate unavailable: no attributable local AI logs for this workspace.",
-    );
+    await vi.waitFor(() => expect(webview.html).toContain(
+      "Token and billing reduction estimates unavailable: no attributable local AI logs for this workspace.",
+    ));
+    expect(webview.html).not.toContain("99.9%");
     expect(webview.html).not.toContain("4.5%");
   });
 

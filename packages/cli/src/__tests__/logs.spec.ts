@@ -69,6 +69,7 @@ describe("tl logs summary scoping", () => {
     scope: { kind: string; workspaceId?: string | null };
     eventCount: number;
     estimatedSavedTokens: number;
+    measurementUnavailableReason?: string;
   };
 
   it("reports machine scope over all events and workspace scope over its own", async () => {
@@ -110,5 +111,23 @@ describe("tl logs summary scoping", () => {
     const text = writes.join("");
     expect(text).toContain("Scope: workspace\n");
     expect(text).toContain("MCP calls: 3\n");
+  });
+
+  it("distinguishes a workspace scope mismatch from a fresh empty log", async () => {
+    const recordedRoot = join(logDirectory, "recorded");
+    const otherRoot = join(logDirectory, "other");
+    mkdirSync(recordedRoot, { recursive: true });
+    mkdirSync(otherRoot, { recursive: true });
+    const recordedId = usageWorkspaceId(recordedRoot, logDirectory)!;
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      JSON.stringify(event(recordedId, 0, 100)) + "\n",
+    );
+
+    await runLogs(["summary", "--json", "--workspace-root", otherRoot]);
+    expect(lastJson()).toMatchObject({
+      eventCount: 0,
+      measurementUnavailableReason: "scope-mismatch",
+    });
   });
 });

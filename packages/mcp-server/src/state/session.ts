@@ -1682,6 +1682,26 @@ function executionRefusal(
     discoveryBrake?: boolean;
     /** ND-3: a concrete, executable rescope call the ledger could name, if any. */
     brakeRescopeNextCall?: Record<string, unknown>;
+    /**
+     * F-R8 (W8-C, 2026-08-22): set ONLY when every currently-refused edit
+     * target (handle AND path) independently resolves through
+     * `resolveHandlePath` / the caller's own literal `path` — i.e. this
+     * session minted or was given every one of them, just under an earlier,
+     * now-superseded epoch/pack. Measured (T05c rep0 arm A,
+     * 2026-08-22-v011-decision-6t-1): the generic frontier prescription below
+     * can only point at the CURRENT (unrelated) frontier, and the bare
+     * `challenge` escape demands evidence the caller does not have — four
+     * refusals total; the caller's OWN recovery re-pack after this one still
+     * cost two more (an unknown-argument retry, then a `not-found` range
+     * guess) before it landed. `paths` re-establishes a covering
+     * certificate in ONE call; `pairs` documents the same targets on
+     * `also_admissible` so the refusal itself says they are known, not
+     * foreign. A handle this session never minted (e.g. a hallucinated one
+     * mixed into the same batch) leaves this undefined and the fence falls
+     * back to today's frontier/challenge guidance unchanged — this is the
+     * "two independent tasks' frontiers genuinely conflict" escape hatch.
+     */
+    knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[] };
   },
 ): ExecutionGuardDecision {
   const advanceableChallenge = challengeTemplate(fence, CHALLENGE_LEAD_EVIDENCE);
@@ -1752,7 +1772,18 @@ function executionRefusal(
   const admissibleCandidatePairs = isEditContext
     ? capTargetPairs([...session.admissibleEditTargetPairs].reverse(), FRONTIER_PATH_CAP)
     : [];
-  const alsoAdmissiblePairs = admissibleCandidatePairs.filter((pair) => !isWriteTargetPair(pair));
+  const knownOutsideRepack = isEditContext ? opts?.knownOutsideRepack : undefined;
+  const alsoAdmissiblePairsBase = admissibleCandidatePairs.filter((pair) => !isWriteTargetPair(pair));
+  // F-R8: the known-but-out-of-epoch targets ride `also_admissible` too — a
+  // refused handle the caller sees echoed back here is DOCUMENTED as known,
+  // not silently indistinguishable from a foreign/hallucinated one.
+  const alsoAdmissiblePairs = knownOutsideRepack === undefined
+    ? alsoAdmissiblePairsBase
+    : [
+        ...alsoAdmissiblePairsBase,
+        ...knownOutsideRepack.pairs.filter((pair) =>
+          !alsoAdmissiblePairsBase.some((existing) => existing.handle === pair.handle && existing.path === pair.path)),
+      ];
   const writeTargets = {
     handles: writeTargetPairs.map((pair) => pair.handle),
     paths: writeTargetPairs.map((pair) => pair.path),
@@ -1773,18 +1804,32 @@ function executionRefusal(
     prescriptionCandidateHandles.length > 0 ? prescriptionCandidateHandles : frontierHandles;
   const prescriptionPaths =
     prescriptionCandidatePaths.length > 0 ? prescriptionCandidatePaths : frontierPaths;
-  const nextCall = (brakeDeadEnd ? opts?.brakeRescopeNextCall : undefined) ?? frontierNextCall(
-    fence,
-    prescriptionHandles,
-    prescriptionPaths,
-    workspaceRoot,
-    // ND-3: `verifying` prescribes read_file mode=closure, which does NOT
-    // clear the brake. A braked call therefore never gets it — it falls back
-    // to the frontier/challenge prescription, every branch of which is a
-    // transition that actually releases the counter.
-    brakeDeadEnd ? false : verifying,
-    opts?.remedyRepackPaths,
-  );
+  // F-R8: a known-but-out-of-epoch batch takes priority over both the brake
+  // rescope and the generic frontier/challenge prescription — neither of
+  // those names the caller's actual targets, and this one is a real,
+  // placeholder-free `read_file` call that re-covers exactly them.
+  const nextCall = knownOutsideRepack !== undefined
+    ? {
+        tool: "read_file",
+        arguments: {
+          mode: "task_pack",
+          taskEpoch: "new",
+          paths: [...knownOutsideRepack.paths].slice(0, NEXT_CALL_EDIT_CAP),
+          ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
+        },
+      }
+    : (brakeDeadEnd ? opts?.brakeRescopeNextCall : undefined) ?? frontierNextCall(
+        fence,
+        prescriptionHandles,
+        prescriptionPaths,
+        workspaceRoot,
+        // ND-3: `verifying` prescribes read_file mode=closure, which does NOT
+        // clear the brake. A braked call therefore never gets it — it falls back
+        // to the frontier/challenge prescription, every branch of which is a
+        // transition that actually releases the counter.
+        brakeDeadEnd ? false : verifying,
+        opts?.remedyRepackPaths,
+      );
 
   // The PATHS the current prescription would have the caller write. Both the
   // terminality identity check and the demand ledger key on these — handle ids
@@ -1986,9 +2031,19 @@ function executionRefusal(
       // otherwise the payload promised a transition the validator refuses.
       // Everything else about the refusal (frontier, prescription, detail) is
       // unchanged, so an obligation-less fence stays fully advanceable.
-      ...(!verifying && advanceableChallenge !== undefined
+      //
+      // F-R8: a known-but-out-of-epoch batch gets the re-pack `next_call`
+      // above INSTEAD of the challenge invitation — a challenge demands new
+      // evidence that changes the certified decision, and the caller has
+      // none; it just wants a certificate that covers files this session
+      // already showed it. `retryOf` (protocol/refusal.ts) honours an
+      // explicit `retry` before it ever looks for a `challenge` affordance, so
+      // declaring it here is sufficient to route the wire's `retry` to
+      // `"call"` and let the real `next_call` ride as `next`.
+      ...(!verifying && knownOutsideRepack === undefined && advanceableChallenge !== undefined
         ? { challenge: advanceableChallenge }
         : {}),
+      ...(knownOutsideRepack !== undefined ? { retry: "call" as const } : {}),
     },
   };
 }
@@ -2099,12 +2154,14 @@ function refuseExecutionEdit(
   remedyRepackPaths?: readonly string[],
   editArgs?: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
+  knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[] },
 ): ExecutionGuardDecision {
   const full = executionRefusal(session, fence, detail, workspaceRoot, {
     editContext: true,
     ...(remedyRepackPaths !== undefined && remedyRepackPaths.length > 0 ? { remedyRepackPaths } : {}),
     ...(editArgs !== undefined ? { editArgs } : {}),
     ...(resolveHandlePath !== undefined ? { resolveHandlePath } : {}),
+    ...(knownOutsideRepack !== undefined ? { knownOutsideRepack } : {}),
   });
   // C2: a terminal refusal is already minimal and byte-idempotent — compacting
   // it would strip the very `unlock` it exists to advertise, which is the
@@ -3264,15 +3321,43 @@ export function guardExecutionDiscovery(
     // self-contradiction T13-A escaped to native reads over. Consumed from the
     // same sanctioned-discovery budget above, so an advertised zoom is
     // accounted exactly like the exact-signature follow-up rather than as a
-    // new, uncounted post-prepared class; exhausted, it falls through to the
-    // ordinary suppression below.
+    // new, uncounted post-prepared class. 2026-08-22 fence-serves-unserved-scope:
+    // exhaustion no longer falls to suppression — the fallthrough below now
+    // serves this same unserved territory unconditionally, so this budget
+    // survives only as a fast, bookkeeping early-exit for the advertised-zoom
+    // shape specifically, never as an actual limiter (required semantics #1).
     if (consumeSanctionedZoom(fence, tool, args)) {
       return { allowed: true };
     }
+    // A residency proof over the fence's OWN evidence/edit material: "content
+    // the caller already has" (required semantics #1(b)) — keeps its receipt
+    // unconditionally, including past the change below.
     const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
+    if (receipt !== undefined) {
+      return { allowed: false, servedReceipt: receipt };
+    }
+    // 2026-08-22 fence-serves-unserved-scope (measured: bench 2026-08-22, T09
+    // rep1 alone spent 8 receipts -> 8 taskEpoch:"new" re-packs, 290 KB
+    // arm-wide; v0.10 had the same loop on T07/T13). A prepared certificate is
+    // a terminal verdict about the ANSWER/EDIT decision, not a lock on
+    // further READ-ONLY discovery of scope this session has not proven itself
+    // to hold. `search_files` (any action) and `read_file` in any mode OTHER
+    // than `task_pack` now reach the ordinary, fence-INDEPENDENT serve/dedup
+    // path below this guard — the same one that runs when no fence exists at
+    // all, and the one `servedReceipts.spec.ts` / `receiptHonesty.spec.ts`
+    // already hold to "an already-served re-ask receipts, everything else
+    // serves real bytes" (servedContentReceipt's own code-unchanged tag).
+    // Only `task_pack` stays gated here: a fresh pack mints a NEW certificate,
+    // which is exactly the transition the epoch boundary (`taskEpoch:"new"`,
+    // or the qref/cache-hit shortcut above) exists to make deliberate rather
+    // than incidental — see `preparedDiscoveryReceipt` and `readFamily.ts`'s
+    // `receiptHasContinuation` for what still happens to that narrower class.
+    if (tool === "search_files" || (tool === "read_file" && args["mode"] !== "task_pack")) {
+      return { allowed: true };
+    }
     return {
       allowed: false,
-      servedReceipt: receipt ?? preparedDiscoveryReceipt(session, fence, workspaceRoot, seen > 0, tool, args),
+      servedReceipt: preparedDiscoveryReceipt(session, fence, workspaceRoot, seen > 0, tool, args),
     };
   }
 
@@ -3541,10 +3626,35 @@ export function guardExecutionEdit(
     return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, "edit has no certificate-backed handle or path", undefined, args, resolveHandlePath);
   }
   if (outsideHandles.length > 0 || outsidePaths.length > 0) {
+    // F-R8 (2026-08-22 T05c rep0 arm A): outside-frontier handles that this
+    // SESSION itself minted — just under an earlier, now-superseded epoch —
+    // are not foreign. Resolve every one of them; only when ALL resolve (a
+    // hallucinated handle mixed into the same batch stays on today's path) is
+    // the caller pointed at a real re-pack instead of a same-frontier
+    // template it cannot use and a challenge it cannot author.
+    const outsideHandlePairs: HandlePathPair[] = outsideHandles.map((handle) => ({
+      handle,
+      path: resolveHandlePath?.(handle) ?? "",
+    }));
+    const allOutsideHandlesKnown = outsideHandlePairs.every((pair) => pair.path !== "");
+    const knownOutsideRepackPaths = allOutsideHandlesKnown
+      ? [...new Set([...outsideHandlePairs.map((pair) => pair.path), ...outsidePaths])]
+      : [];
+    const knownOutsideRepack = knownOutsideRepackPaths.length > 0
+      ? {
+          paths: knownOutsideRepackPaths,
+          pairs: [...outsideHandlePairs, ...outsidePaths.map((path) => ({ handle: "", path }))],
+        }
+      : undefined;
     // The unified `frontier` payload (executionRefusal) now carries the epoch
     // admissible union structurally, so a stranded edit is pointed back at the
     // still-editable handles WITHOUT a free-text also_admissible note or a
     // reflexive re-pack + challenge cycle (the T10 thrash this fix removed).
+    // F-R8 narrows that on purpose: this only ever ADDS a real re-pack call
+    // when the refused targets are independently verified as session-known;
+    // it never widens the frontier itself and never fires for a genuinely
+    // unknown/foreign handle (h999-style in executionTypestate.spec.ts), so
+    // the T10 guard is unchanged for every case it protected.
     return refuseExecutionEdit(
       session,
       fence,
@@ -3554,6 +3664,7 @@ export function guardExecutionEdit(
       undefined,
       args,
       resolveHandlePath,
+      knownOutsideRepack,
     );
   }
   return { allowed: true };
@@ -4465,7 +4576,15 @@ export function recordConcernTokens(workspaceRoot: string, tokens: readonly stri
   const s = getSession(workspaceRoot);
   for (const raw of tokens) {
     const t = raw.toLowerCase();
-    if (t.length === 0 || s.concernTokens.includes(t)) continue;
+    // W9 backstop (root-leak forensics): significantQueryTokens /
+    // concreteIdentifierTokens / compactCodeTerms already enforce their own
+    // length floors (>=3) before a token ever reaches here, but the
+    // search_files find `queries[]` feeder records entries VERBATIM with no
+    // floor of its own (see server.ts's dispatchTool). A stray 1-2 char or
+    // purely-numeric token carries no locate-able concern either way, so
+    // drop it here once, for every feeder, rather than duplicating the
+    // check at each call site.
+    if (t.length < 3 || /^[0-9]+$/.test(t) || s.concernTokens.includes(t)) continue;
     s.concernTokens.push(t);
     if (s.concernTokens.length > MAX_CONCERN_TOKENS) s.concernTokens.shift();
   }

@@ -14,10 +14,18 @@ import * as fs from "fs";
 import * as path from "path";
 import { makeTmpPath, retryRename, writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
+import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 import { applySingleEdit } from "../write/textEdit.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import { countLines } from "../util/countLines.js";
+import { shortSha } from "../util/handles.js";
+import { fastPathV2Enabled } from "../util/flags.js";
+import { trace } from "../util/trace.js";
+import { evaluateImpactGuard, isFastPathEligible } from "../write/impactGuard.js";
+import { selectEditRepresentation } from "../write/editSelector.js";
+import { verifyTargetFingerprint } from "../write/targetFingerprint.js";
+import { runFocusedVerification } from "../write/focusedVerification.js";
 
 /**
  * Resolve the realpath of an existing file (or its first existing ancestor for
@@ -100,7 +108,21 @@ export type SearchReplaceEditResult =
       /** As above, for the unique full-line indentation-drift recovery. */
       normalized_whitespace?: true;
     }
-  | { ok: false; error: string; code: string };
+  | {
+      ok: false;
+      error: string;
+      code: string;
+      /**
+       * V11-06 (behind TL_FAST_PATH_V2), `code:"hash-mismatch"` only: the
+       * ALREADY-ADVERTISED short-sha display field write/preconditions.ts's
+       * own `precondition:"expected-hash"` hash-mismatch uses (util/handles.ts
+       * shortSha) — populated here with the CURRENT on-disk sha a target-
+       * fingerprint-drift refusal just proved, so a caller can round-trip it
+       * straight back as `expectedSha` on a `precondition:"expected-hash"`
+       * retry without a native re-read. Absent on every other failure code.
+       */
+      current_sha?: string;
+    };
 
 /**
  * Apply one search/replace edit to a file.
@@ -239,6 +261,16 @@ export async function searchReplaceEdit(
         code: "write-error",
       };
     }
+    // V10-10: this create path does not go through writeExistingFileAtomic
+    // (there is no existing mode to preserve), so it is not covered by that
+    // function's own index-invalidation call — invalidate directly.
+    // Best-effort: an index-cache problem must never fail a write that
+    // already landed on disk.
+    try {
+      invalidateCachedWorkspaceFiles(workspaceReal, [relPath]);
+    } catch {
+      // best-effort — see above
+    }
     // BUG FIX: was newContent.split("\n").length, which counts a phantom
     // final segment for trailing-newline content — reported "lines"/"delta"
     // on a brand-new file overstated its line count by one.
@@ -249,6 +281,76 @@ export async function searchReplaceEdit(
       lines: formatLines(1, lineCount),
       delta: formatDelta(lineCount, 0),
     };
+  }
+
+  // -------------------------------------------------------------------
+  // V11-06 Known-Local Fast Path v2 (behind TL_FAST_PATH_V2) — pre-apply
+  // half. Flag OFF ⇒ nothing below runs; this seam is byte-identical to
+  // pre-V11-06 (util/flags.ts's "V11-06 addendum" states this invariant).
+  //
+  // SAFETY: neither the selector nor the guard is ever allowed to change the
+  // OUTCOME of a call that would have succeeded or failed identically before
+  // this wave — `selectEditRepresentation` uses RAW (non-normalized)
+  // occurrence counting (see its own doc comment), which can disagree with
+  // `applySingleEdit`'s normalized count on exotic input (mixed line
+  // endings); the code below therefore NEVER short-circuits on the
+  // selector's verdict, success or failure. The ONLY new observable
+  // behavior is an ADDITIVE refusal when a fresh re-read PROVES the target
+  // drifted between selection and apply — a real TOCTOU window this closes
+  // — and additional TL_TRACE records. A failure anywhere in this block is
+  // swallowed (best-effort): a V11-06 diagnostic must never block an edit
+  // the existing machinery below can still complete correctly.
+  // -------------------------------------------------------------------
+  if (fastPathV2Enabled() && input.search !== "") {
+    try {
+      const selection = selectEditRepresentation({ path: relPath, fileText: existingContent, search: input.search });
+      const guard = evaluateImpactGuard({
+        path: relPath,
+        searchText: input.search,
+        replaceText: input.replace,
+        fileText: existingContent,
+      });
+      trace(
+        "fast_path_v2_guard",
+        {
+          path: relPath,
+          selection: selection.ok
+            ? { representation: selection.selection.representation, rationale: selection.selection.rationale }
+            : { refused: selection.code, reason: selection.reason },
+          guard,
+          fast_path_eligible: isFastPathEligible(guard, selection),
+        },
+        workspace,
+      );
+
+      if (selection.ok) {
+        // Re-verify IMMEDIATELY before apply, against a FRESH read — the
+        // in-memory `existingContent` above cannot have drifted from
+        // itself, so this is the one place in this synchronous function a
+        // genuine external mutation between selection and apply could
+        // actually be observed.
+        const freshRead = fs.readFileSync(absPath, "utf8");
+        const verification = verifyTargetFingerprint(selection.selection.fingerprint, {
+          currentFileText: freshRead,
+          anchorText: selection.selection.anchorText,
+        });
+        if (!verification.ok) {
+          trace(
+            "fast_path_v2_fingerprint_drift",
+            { path: relPath, reasons: verification.reasons },
+            workspace,
+          );
+          return {
+            ok: false,
+            error: `target fingerprint drift detected between selection and apply (${verification.reasons.join(", ")}) — the file changed after this edit was prepared; re-read the file and retry, or retry this SAME call with precondition:"expected-hash" expectedSha=${shortSha(verification.currentContentSha)}`,
+            code: "hash-mismatch",
+            current_sha: shortSha(verification.currentContentSha),
+          };
+        }
+      }
+    } catch {
+      // Best-effort — see this block's doc comment above.
+    }
   }
 
   // Apply the search/replace edit.
@@ -266,13 +368,45 @@ export async function searchReplaceEdit(
   // Atomic write — preserves the original file's mode (see
   // writeExistingFileAtomic's doc comment; 2026-08-07 chmod-reset incident).
   try {
-    writeExistingFileAtomic(absPath, newContent, existingMode);
+    writeExistingFileAtomic(absPath, newContent, existingMode, { root: workspaceReal, relPath });
   } catch (err) {
     return {
       ok: false,
       error: `Cannot write file: ${(err as Error).message}`,
       code: "write-error",
     };
+  }
+
+  // -------------------------------------------------------------------
+  // V11-06 Known-Local Fast Path v2 — post-apply Focused Verification.
+  // Trace-only this wave (deviation E-8: no new wire fields) — see
+  // write/focusedVerification.ts's own header. Runs AFTER the write above
+  // has already succeeded, so any failure here is diagnostic, never a
+  // reason to change the response this call already earned.
+  // -------------------------------------------------------------------
+  if (fastPathV2Enabled()) {
+    try {
+      const anchorText = editResult.usedSearch ?? input.search;
+      const replacementText = editResult.usedReplace ?? input.replace;
+      const spanStart = existingContent.indexOf(anchorText);
+      const report = await runFocusedVerification({
+        path: relPath,
+        beforeText: existingContent,
+        afterText: newContent,
+        anchorText,
+        replacementText,
+        expectedReplacementCount: 1,
+        spanStart: spanStart >= 0 ? spanStart : 0,
+        spanEnd: spanStart >= 0 ? spanStart + anchorText.length : 0,
+      });
+      trace(
+        "fast_path_v2_focused_verification",
+        { path: relPath, all_passed: report.allPassed, checks: report.checks },
+        workspace,
+      );
+    } catch {
+      // Best-effort — see the pre-apply block's doc comment above.
+    }
   }
 
   // The reported line range/delta must describe the edit that ACTUALLY

@@ -16,6 +16,7 @@
 import { renameSync, unlinkSync, writeFileSync, chmodSync } from "fs";
 import { join, dirname, basename } from "path";
 import { randomBytes } from "crypto";
+import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 
 export class AtomicWriteError extends Error {
   constructor(
@@ -146,11 +147,21 @@ export function makeTmpPath(target: string): string {
  *
  * On any failure the temp file is removed and the error is rethrown; the
  * target itself is never touched (the rename hasn't happened yet).
+ *
+ * `indexInvalidation`, when given, invalidates the skeleton-engine in-process
+ * source-index memo for `root` (V10-10) once the rename above has actually
+ * succeeded — this function IS the write aggregation point named in its own
+ * doc comment above, so it is also the narrowest single seam every
+ * existing-file edit/rollback-restore funnels through. Best-effort: an
+ * index-cache problem must never fail a write that already landed on disk.
+ * Every production caller of this function passes it; only tests exercising
+ * this module in isolation omit it.
  */
 export function writeExistingFileAtomic(
   target: string,
   content: string,
-  originalMode: number | undefined
+  originalMode: number | undefined,
+  indexInvalidation?: { root: string; relPath: string }
 ): void {
   const tmpPath = makeTmpPath(target);
   try {
@@ -170,5 +181,12 @@ export function writeExistingFileAtomic(
       // best-effort cleanup
     }
     throw err;
+  }
+  if (indexInvalidation) {
+    try {
+      invalidateCachedWorkspaceFiles(indexInvalidation.root, [indexInvalidation.relPath]);
+    } catch {
+      // best-effort — see doc comment above
+    }
   }
 }

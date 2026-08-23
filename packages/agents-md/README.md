@@ -18,11 +18,9 @@ This package is part of the TokenLighten monorepo. Build it from source:
 ```bash
 git clone https://github.com/Takayuki-Ishimaru/tokenlighten.git
 cd tokenlighten
-npm ci
+npm install
 npm run build --workspace @tokenlighten/agents-md
 ```
-
-Use `npm install` instead only when intentionally changing dependencies and updating `package-lock.json`.
 
 ## Quickstart
 

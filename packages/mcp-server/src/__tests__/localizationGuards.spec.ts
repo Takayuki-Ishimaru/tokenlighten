@@ -65,11 +65,11 @@ function writeFile(dir: string, rel: string, content: string): void {
   fs.writeFileSync(abs, content, "utf8");
 }
 
-function startServer(opts: { cwd: string; args: string[] }): ServerHandle {
+function startServer(opts: { cwd: string; args: string[]; env?: Record<string, string> }): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
     [TSX_CLI, BIN_TS, ...opts.args],
-    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } },
+    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...(opts.env ?? {}) } },
   );
 
   let stdoutBuf = "";
@@ -164,12 +164,16 @@ function buildConcernFixture(): string {
 const GAIN_CONTROLLER_SRC =
   "// Integral term\nintegral += error * dt;\n// TODO: clamp the integral to avoid windup\noutput = integral;\n";
 
+function numberedHunk(lines: number, value: number, prefix = "local_slot"): string {
+  return Array.from({ length: lines }, (_, index) => `int ${prefix}_${index + 1} = ${value};`).join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Feature 1 — one-shot unread-sibling note on the session's first edit
 // ---------------------------------------------------------------------------
 
 describe("Feature 1 — unread-sibling note on the session's first edit_code", () => {
-  it("decoy edited, real sibling unread w/ 2 tokens -> first edit carries unread_note naming it", async () => {
+  it("small single-file decoy edit suppresses the lexical unread_note false-positive", async () => {
     const wsDir = mkDir("f1-basic");
     writeFile(wsDir, "src/math/pid.cpp", "int decoy_value = 1;\n");
     writeFile(wsDir, "src/control/gain_controller.cpp", GAIN_CONTROLLER_SRC);
@@ -197,20 +201,123 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     const data = parseToolResult(editRes);
     expect(editRes.result.isError).toBeFalsy();
     expect(data["kind"]).not.toBe("refusal");
-    const note = data["unread_note"];
-    expect(typeof note).toBe("string");
-    const noteStr = note as string;
-    expect(noteStr.length).toBeLessThanOrEqual(170);
-    expect(noteStr).toContain("gain_controller.cpp");
-    expect(noteStr).toMatch(/integral|clamp/);
+    // Rule C: this one-line, single-file hunk has no identifier in the
+    // otherwise token-matching sibling, so the old false-positive is silent.
+    expect(data["unread_note"]).toBeUndefined();
   }, 30000);
 
-  it("fires at most once per session: a second edit carries no unread_note", async () => {
+  it.each([
+    { lines: 39, expectsNote: false },
+    { lines: 40, expectsNote: false },
+    { lines: 41, expectsNote: true },
+  ])("single-file hunk boundary: $lines lines -> unread_note=$expectsNote", async ({ lines, expectsNote }) => {
+    const wsDir = mkDir(`f1-boundary-${lines}`);
+    const before = numberedHunk(lines, 1);
+    const after = numberedHunk(lines, 2);
+    writeFile(wsDir, "src/math/pid.cpp", before);
+    writeFile(wsDir, "src/control/gain_controller.cpp", GAIN_CONTROLLER_SRC);
+
+    const srv = startServer({ cwd: wsDir, args: [wsDir, "--allow-write"] });
+    servers.push(srv);
+    await srv.initialize();
+    await srv.rpc(2, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
+    });
+    const editRes = await srv.rpc(3, "tools/call", {
+      name: "edit_file",
+      arguments: { path: "src/math/pid.cpp", search: before, replace: after },
+    });
+    const data = parseToolResult(editRes);
+    expect(data["kind"]).not.toBe("refusal");
+    if (expectsNote) expect(typeof data["unread_note"]).toBe("string");
+    else expect(data["unread_note"]).toBeUndefined();
+  }, 30000);
+
+  it("TL_UNREAD_NOTE_MAX_HUNK_LINES overrides the default boundary", async () => {
+    const wsDir = mkDir("f1-threshold-override");
+    const before = numberedHunk(40, 1);
+    const after = numberedHunk(40, 2);
+    writeFile(wsDir, "src/math/pid.cpp", before);
+    writeFile(wsDir, "src/control/gain_controller.cpp", GAIN_CONTROLLER_SRC);
+    const srv = startServer({
+      cwd: wsDir,
+      args: [wsDir, "--allow-write"],
+      env: { TL_UNREAD_NOTE_MAX_HUNK_LINES: "39" },
+    });
+    servers.push(srv);
+    await srv.initialize();
+    await srv.rpc(2, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
+    });
+    const data = parseToolResult(await srv.rpc(3, "tools/call", {
+      name: "edit_file",
+      arguments: { path: "src/math/pid.cpp", search: before, replace: after },
+    }));
+    expect(typeof data["unread_note"]).toBe("string");
+  }, 30000);
+
+  it("rule B preserves a small-diff note when a hunk identifier hits the flagged sibling", async () => {
+    const wsDir = mkDir("f1-rule-b");
+    writeFile(wsDir, "src/math/pid.cpp", "int GAIN_CONTROLLER_MAGIC = 1;\n");
+    writeFile(wsDir, "src/control/gain_controller.cpp", `// GAIN_CONTROLLER_MAGIC\n${GAIN_CONTROLLER_SRC}`);
+    const srv = startServer({ cwd: wsDir, args: [wsDir, "--allow-write"] });
+    servers.push(srv);
+    await srv.initialize();
+    await srv.rpc(2, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
+    });
+    const data = parseToolResult(await srv.rpc(3, "tools/call", {
+      name: "edit_file",
+      arguments: {
+        path: "src/math/pid.cpp",
+        search: "GAIN_CONTROLLER_MAGIC = 1",
+        replace: "GAIN_CONTROLLER_MAGIC = 2",
+      },
+    }));
+    expect(typeof data["unread_note"]).toBe("string");
+    expect(String(data["unread_note"])).toContain("gain_controller.cpp");
+  }, 30000);
+
+  it("a large edits[] multi-file first edit keeps the genuine T13-style note", async () => {
+    const wsDir = mkDir("f1-multifile");
+    const beforeA = numberedHunk(21, 1, "multi_a");
+    const afterA = numberedHunk(21, 2, "multi_a");
+    const beforeB = numberedHunk(21, 1, "multi_b");
+    const afterB = numberedHunk(21, 2, "multi_b");
+    writeFile(wsDir, "src/math/a.cpp", beforeA);
+    writeFile(wsDir, "src/math/b.cpp", beforeB);
+    writeFile(wsDir, "src/control/gain_controller.cpp", GAIN_CONTROLLER_SRC);
+    const srv = startServer({ cwd: wsDir, args: [wsDir, "--allow-write"] });
+    servers.push(srv);
+    await srv.initialize();
+    await srv.rpc(2, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/a.cpp" },
+    });
+    const data = parseToolResult(await srv.rpc(3, "tools/call", {
+      name: "edit_file",
+      arguments: { edits: [
+        { path: "src/math/a.cpp", search: beforeA, replace: afterA },
+        { path: "src/math/b.cpp", search: beforeB, replace: afterB },
+      ] },
+    }));
+    expect(typeof data["unread_note"]).toBe("string");
+    expect(String(data["unread_note"])).toContain("gain_controller.cpp");
+  }, 30000);
+
+  it("TL_UNREAD_NOTE_SPECIFICITY=off preserves the legacy one-shot behavior", async () => {
     const wsDir = mkDir("f1-once");
     writeFile(wsDir, "src/math/pid.cpp", "int decoy_value = 1;\n");
     writeFile(wsDir, "src/control/gain_controller.cpp", GAIN_CONTROLLER_SRC);
 
-    const srv = startServer({ cwd: wsDir, args: [wsDir, "--allow-write"] });
+    const srv = startServer({
+      cwd: wsDir,
+      args: [wsDir, "--allow-write"],
+      env: { TL_UNREAD_NOTE_SPECIFICITY: "off" },
+    });
     servers.push(srv);
     await srv.initialize();
 

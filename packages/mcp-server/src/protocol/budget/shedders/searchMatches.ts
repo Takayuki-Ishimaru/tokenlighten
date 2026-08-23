@@ -5,9 +5,9 @@
 // DESIGN-v0.10-protocol-v1-contract-freeze.md A.5.8 (four forms), A.6.2,
 // A.8.1 E-7, A.13 ruling 1 ([R5-9]); erratum E1 (rung 6).
 //
-// LADDER: 1 (`note`, `hint`) -> 6 in three sub-steps, IN THIS ORDER:
-// `files[].snippets` -> `files[].lines` tail (keep the head) -> whole `files[]`
-// entries.
+// LADDER: 1 (`note`, `hint`) -> 3 (`term_results`) -> 6 in three sub-steps, IN
+// THIS ORDER: `files[].snippets` -> `files[].lines` tail (keep the head) ->
+// whole `files[]` entries.
 //
 // ------------------------ THE INVENTORY NEVER LIES --------------------------
 //
@@ -37,10 +37,7 @@
 // §12.7). Zero rungs beyond prose, which it does not have either.
 // ---------------------------------------------------------------------------
 
-import type { ToolCall } from "@tokenlighten/types";
-
-import { emittableToolCall } from "../../refusal.js";
-import { symbolsNext } from "../../searchFamily.js";
+import { findScopedNext, symbolsNext } from "../../searchFamily.js";
 import {
   arrayAt,
   dropInBlock,
@@ -55,6 +52,36 @@ import {
   type ShedPayload,
   type Shedder,
 } from "./registry.js";
+
+/**
+ * PI-06 beta.2 — `symbol_coverage` (when present) summarizes the SERVED
+ * page's parser-proven/fallback split. Unlike `total` (never touched by any
+ * rung — "the inventory never lies"), this field's whole point is to
+ * describe the page currently on the wire, so a rung-6 drop here must keep
+ * it honest rather than stale: decrement whichever bucket the dropped entry
+ * belonged to, and drop the field entirely once `fallback` reaches zero
+ * (matching `computeSymbolCoverage`'s own absence-means-fully-proven gate in
+ * searchSymbols.ts — never emit a `{fallback:0}` shape).
+ */
+function withDecrementedSymbolCoverage(
+  matches: Record<string, unknown>,
+  droppedEntry: unknown,
+): Record<string, unknown> {
+  const coverage = matches["symbol_coverage"];
+  if (!isRecord(coverage)) return matches;
+  const droppedWasFallback = isRecord(droppedEntry) && droppedEntry["source"] === "fallback";
+  if (droppedWasFallback) {
+    const fallback = typeof coverage["fallback"] === "number" ? coverage["fallback"] : 0;
+    const nextFallback = fallback - 1;
+    if (nextFallback <= 0) {
+      const stripped = withoutKeys(matches, ["symbol_coverage"]);
+      return stripped === undefined ? matches : stripped.next;
+    }
+    return withKey(matches, "symbol_coverage", { ...coverage, fallback: nextFallback });
+  }
+  const parserProven = typeof coverage["parser_proven"] === "number" ? coverage["parser_proven"] : 0;
+  return withKey(matches, "symbol_coverage", { ...coverage, parser_proven: Math.max(0, parserProven - 1) });
+}
 
 /**
  * Prose inside `matches`, cheapest-loss-first.
@@ -83,6 +110,31 @@ function shedMatchesProse(payload: ShedPayload): ShedOutcome | undefined {
     if (outcome !== undefined) return outcome;
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Rung 3 — `term_results` (PI-04's per-term absence evidence; PI-08 register)
+// ---------------------------------------------------------------------------
+
+/**
+ * `term_results` (searchFamily.ts's `FIND_FIELDS`) is additive, optional,
+ * per-ORIGINAL-query-term absence evidence — "advisory evidence, not control
+ * (never required-set)" in that file's own words. It survives rung 1's prose
+ * peel: a hint is a suggestion, `term_results` is a certificate a caller can
+ * act on without re-running anything, so it is not swept by
+ * `shedMatchesProse`. But it is not the match content `find` exists to
+ * deliver either, so it sheds BEFORE `files[]` starts losing snippets, lines
+ * or whole entries at rung 6 — one whole-block drop, not the incremental
+ * per-file cuts rung 6 makes.
+ *
+ * Rung 3's `RUNG_OMITTED_CLASS` is `"metadata"` — the same class rung 1
+ * carries — and E5 exempts both from a `limit`/continuation: a caller that
+ * still wants the per-term detail already holds the `queries[]` that produced
+ * it and can re-issue the same `find` to regenerate it, so dropping it here
+ * discloses nothing false and owes no recovery call.
+ */
+function shedTermResults(payload: ShedPayload): ShedOutcome | undefined {
+  return dropInBlock(payload, "matches", ["term_results"], 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +198,7 @@ function cutInLastFile(
     if (rewritten === undefined) continue;
     const path = str(entry["path"]);
     if (path === undefined) return undefined;
-    const continuation = findScopedTo(path, matches, context);
+    const continuation = findScopedNext(path, matches, { ...(context.args ?? {}) });
     if (continuation === undefined) return undefined;
 
     const nextFiles = [...files];
@@ -180,7 +232,7 @@ function shedFindFile(payload: ShedPayload, context: ShedContext): ShedOutcome |
 
   const path = isRecord(trimmed.dropped) ? str(trimmed.dropped["path"]) : undefined;
   if (path === undefined) return undefined;
-  const continuation = findScopedTo(path, matches, context);
+  const continuation = findScopedNext(path, matches, { ...(context.args ?? {}) });
   if (continuation === undefined) return undefined;
 
   return {
@@ -188,36 +240,6 @@ function shedFindFile(payload: ShedPayload, context: ShedContext): ShedOutcome |
     note: { rung: 6, refs: [path] },
     continuation,
   };
-}
-
-/**
- * The same search, scoped to one path.
- *
- * `queries[]` IS ECHOED FROM THE REQUEST, NEVER FROM `matches.query` — the
- * rendered body spells a `queries:["a","b"]` call as the single string
- * `"a OR b"`, and sending that back as `query` would run a DIFFERENT search
- * (class TC-2, §2.1.2, and the same rule `findNext` follows for the emitter's
- * own continuation). Where the request carried neither spelling, the step
- * declines rather than guess (E5).
- */
-function findScopedTo(
-  path: string,
-  matches: Record<string, unknown>,
-  context: ShedContext,
-): ToolCall | undefined {
-  const args = context.args ?? {};
-  const call: Record<string, unknown> = { action: "find", path };
-  const queries = args["queries"];
-  if (Array.isArray(queries) && queries.length > 0) call["queries"] = [...queries];
-  else {
-    const query = str(args["query"]) ?? str(matches["query"]);
-    if (query === undefined) return undefined;
-    call["query"] = query;
-  }
-  if (args["regex"] !== undefined) call["regex"] = args["regex"];
-  const cwd = str(args["cwd"]);
-  if (cwd !== undefined) call["cwd"] = cwd;
-  return emittableToolCall({ tool: "search_files", arguments: call });
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +268,8 @@ function shedSymbolLocation(payload: ShedPayload, context: ShedContext): ShedOut
   const trimmed = dropTrailingEntry(locations, 1);
   if (trimmed === undefined) return undefined;
 
-  const nextMatches = withKey(matches, "locations", trimmed.next);
+  const withoutDropped = withKey(matches, "locations", trimmed.next);
+  const nextMatches = withDecrementedSymbolCoverage(withoutDropped, trimmed.dropped);
   const continuation = symbolsNext(nextMatches, { ...(context.args ?? {}) });
   if (continuation === undefined) return undefined;
 
@@ -261,6 +284,7 @@ export const SEARCH_MATCHES_SHEDDER: Shedder = {
   kind: "search.matches",
   rungs: [
     { rung: 1, step: shedMatchesProse },
+    { rung: 3, step: shedTermResults },
     { rung: 6, step: shedFindSnippets },
     { rung: 6, step: shedFindLines },
     { rung: 6, step: shedFindFile },

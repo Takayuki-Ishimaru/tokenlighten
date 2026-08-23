@@ -6,12 +6,14 @@ import * as path from "node:path";
 import {
   buildTaskPack,
   concernAnchorTokens,
+  concernHarvestText,
+  filterConcernQueryEntries,
   resetPackDedupeCache,
   resetRoleInventoryCache,
 } from "../tools/readCodeTaskPack.js";
 import { callTool } from "../server.js";
 import { handleTable } from "../util/handles.js";
-import { resetAll as resetAllSessions } from "../util/session.js";
+import { getConcernTokens, resetAll as resetAllSessions } from "../util/session.js";
 
 const workspaces: string[] = [];
 
@@ -195,6 +197,158 @@ describe("task_pack — repository-grounded evidence relations", () => {
       "telemetry",
       "estimator",
     ]);
+  });
+
+  // W9 (2026-08-22 root-leak forensics): a workspace whose folder name reads
+  // as ordinary words when hyphen-split (e.g. "m365-drive-mount") must never
+  // leak that folder name into concern-anchor tokens — see
+  // concernHarvestText's module doc in readCodeTaskPack.ts.
+  describe("concernHarvestText / filterConcernQueryEntries (W9 root-leak fix)", () => {
+    const ROOT = "/private/tmp/whatever/m365-drive-mount";
+
+    function mkNamedWorkspace(name: string): string {
+      const parent = fs.mkdtempSync(path.join(os.tmpdir(), "tl-root-leak-"));
+      workspaces.push(parent);
+      const dir = path.join(parent, name);
+      fs.mkdirSync(dir, { recursive: true });
+      return dir;
+    }
+
+    it("strips the workspace root's own folder name before tokenization", () => {
+      const scrubbed = concernHarvestText(
+        ROOT,
+        "Fix the m365-drive-mount project TransferBuffer.Allocate bounds check",
+      );
+      expect(scrubbed).not.toMatch(/m365-drive-mount/i);
+      const tokens = concernAnchorTokens(scrubbed);
+      expect(tokens).not.toContain("m365");
+      expect(tokens).not.toContain("drive");
+      expect(tokens).not.toContain("mount");
+    });
+
+    it("leaves a standalone dictionary word alone when concernAnchorTokens is called with no workspace-root context", () => {
+      // concernAnchorTokens itself is root-agnostic — it takes no
+      // workspaceRoot parameter and applies no root-derived scrubbing.
+      // "mount"/"drive" are legitimate concern tokens in a mounting-project
+      // bug report; root-name-word scrubbing (rootBasenameVocabulary,
+      // F-R20) happens one layer up, in concernHarvestText, BEFORE text
+      // ever reaches this tokenizer — see the hyphenated-root tests below
+      // for that layer's own (narrower) behavior.
+      const tokens = concernAnchorTokens("check the drive mount health telemetry");
+      expect(tokens).toEqual(expect.arrayContaining(["drive", "mount"]));
+    });
+
+    it("drops path-shaped spans — absolute (root-prefixed) and relative, extension-terminated", () => {
+      const absolute = concernHarvestText(ROOT, `${ROOT}/tmp/Foo.cs bounds check`);
+      expect(absolute).not.toMatch(/m365-drive-mount/i);
+      expect(absolute).not.toMatch(/Foo\.cs/);
+
+      const relative = concernHarvestText(ROOT, "check src/Native/NativeMethods.cs for the bug");
+      expect(relative).not.toMatch(/NativeMethods\.cs/);
+      expect(concernAnchorTokens(relative)).not.toContain("nativemethods");
+    });
+
+    // F-R20 (2026-08-23): the precision guarantee above ("leaves ordinary
+    // prose unchanged") used to apply ONLY to a camelCase root — a
+    // hyphen/underscore/dot-segmented root like this one left "mount" and
+    // "drive" as "ordinary prose vocabulary" even though they name the
+    // project exactly as much as a camelCase fragment does. That is the
+    // NetResourceMountPoint false-fire class: a bare prose mention or
+    // queries[] entry of "mount" seeded a concern token that matched this
+    // project's own namespace everywhere. The tests below replace the old
+    // single-root-style pins with the new intent: a root's own name-words
+    // are never a discriminating concern, regardless of how the root is
+    // segmented, but a longer identifier that merely contains one of those
+    // words is untouched.
+    it("scrubs the root's own segmented name-words from prose even though they read as ordinary words", () => {
+      const prose = "the mount health check reports a drive fault";
+      const scrubbed = concernHarvestText(ROOT, prose);
+      expect(scrubbed).not.toBe(prose);
+      const tokens = concernAnchorTokens(scrubbed);
+      expect(tokens).not.toContain("mount");
+      expect(tokens).not.toContain("drive");
+    });
+
+    it("leaves prose unchanged when it names neither the root, any of its segmented words, nor a path", () => {
+      const prose = "the health check reports a system fault";
+      expect(concernHarvestText(ROOT, prose)).toBe(prose);
+    });
+
+    it("records no root name-word from a sentence that merely uses one in passing (hyphenated root)", () => {
+      const scrubbed = concernHarvestText(ROOT, "the mount fails during startup");
+      expect(concernAnchorTokens(scrubbed)).not.toContain("mount");
+    });
+
+    it("filterConcernQueryEntries drops a root-basename, a root name-word (any segmentation), or a path-separator entry from queries[] — but keeps a longer identifier that merely contains one", () => {
+      const kept = filterConcernQueryEntries(ROOT, [
+        "m365-drive-mount",
+        "M365-Drive-Mount",
+        "src/Native/NativeMethods.cs",
+        "NetResourceMountPoint",
+        "mount",
+      ]);
+      expect(kept).toEqual(["NetResourceMountPoint"]);
+    });
+
+    it("filterConcernQueryEntries drops every capitalization of a hyphenated root's name-words, keeping a longer identifier that merely contains one", () => {
+      const kept = filterConcernQueryEntries(ROOT, ["M365", "Drive", "Mount", "NetResourceMountPoint"]);
+      expect(kept).toEqual(["NetResourceMountPoint"]);
+    });
+
+    it("keeps a real identifier that merely begins with a root name-word (compound identifiers are kept whole; only the standalone root word itself is dropped)", () => {
+      const kept = filterConcernQueryEntries("/tmp/my-app", ["AppRouter", "app"]);
+      expect(kept).toEqual(["AppRouter"]);
+    });
+
+    it("a single-word root contributes no extra vocabulary beyond its own exact basename (unchanged by F-R20)", () => {
+      const root = "/tmp/parent/ledger";
+      expect(filterConcernQueryEntries(root, ["ledger", "Ledger", "ledgerEntry", "balance"]))
+        .toEqual(["ledgerEntry", "balance"]);
+      const prose = "check the balance reconciliation report";
+      expect(concernHarvestText(root, prose)).toBe(prose);
+    });
+
+    it("a task_pack query naming the workspace folder never harvests the folder name as a concern token", async () => {
+      const workspace = mkNamedWorkspace("m365-drive-mount");
+      writeFile(workspace, "TransferBuffer.cs", "// TransferBuffer.cs\nexport function Allocate() { return 1; }\n");
+
+      await buildTaskPack(
+        { query: "Fix the m365-drive-mount project TransferBuffer.Allocate bounds check" } as any,
+        workspace,
+      );
+
+      const tokens = getConcernTokens(workspace);
+      expect(tokens).not.toContain("m365");
+      expect(tokens).not.toContain("drive");
+      expect(tokens).not.toContain("mount");
+    });
+
+    it("a path-only task_pack call (no query/symbol) never harvests the path as a concern source", async () => {
+      const workspace = mkNamedWorkspace("m365-drive-mount");
+      writeFile(workspace, "TransferBuffer.cs", "// TransferBuffer.cs\nexport function Allocate() { return 1; }\n");
+
+      await buildTaskPack({ path: "TransferBuffer.cs" } as any, workspace);
+
+      expect(getConcernTokens(workspace)).toEqual([]);
+    });
+  });
+
+  it("preserves hyphenated compound concern identifiers as one token", () => {
+    const tokens = concernAnchorTokens("update M365-Drive-Mounter-Manager.ps1 and Mount-Drive");
+    expect(tokens).toContain("m365-drive-mounter-manager.ps1");
+    expect(tokens).toContain("mount-drive");
+    expect(tokens).not.toContain("m365");
+    expect(tokens).not.toContain("drive");
+    expect(tokens).not.toContain("mount");
+  });
+
+  it("filters camelCase root components and distinctive prefixes from query concerns", () => {
+    const root = "/tmp/M365DriveMounter-dev";
+    expect(filterConcernQueryEntries(root, ["M365", "Drive", "Mount", "Mounter", "NetResourceMountPoint", "mount-drive"]))
+      .toEqual(["NetResourceMountPoint", "mount-drive"]);
+    const scrubbed = concernHarvestText(root, "M365DriveMounter-dev has a Mount-Drive regression");
+    expect(scrubbed.toLowerCase()).not.toMatch(/\\bm365\\b|\\bdrive\\b|\\bmounter?\\b/);
+    expect(concernAnchorTokens(scrubbed)).toContain("mount-drive");
   });
 
   it("preserves the graph and obligations after every project/file/symbol rename", async () => {

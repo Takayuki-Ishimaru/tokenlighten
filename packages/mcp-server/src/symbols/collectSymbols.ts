@@ -446,13 +446,47 @@ function visitNode(
   }
 }
 
-export async function collectSymbols(
+/**
+ * PI-06 beta.2 (DESIGN-v0.10-expansion-plan-reconciliation.md §2 PI-06, §5
+ * D-5): the result of ATTEMPTING a real parse, distinct from its symbol
+ * count. `collectSymbols` below collapses three genuinely different outcomes
+ * to the same `[]`: (a) `language` has no collector at all, (b) the language
+ * IS collector-eligible but the tree-sitter grammar failed to load/parse at
+ * runtime (missing/corrupt WASM), and (c) the grammar loaded and parsed
+ * cleanly, and the file simply has zero top-level declarations. A caller
+ * that needs to tell "no real parse happened" (b, and a) apart from "a real
+ * parse happened and found nothing" (c) — e.g. to decide whether a
+ * same-file regex candidate may safely be promoted to parser-proven, or
+ * must fall back labeled — needs `parserAvailable`, not `symbols.length`.
+ */
+export interface CollectSymbolsAttempt {
+  symbols: CollectedSymbol[];
+  /**
+   * True iff `withTreeSitterRoot` actually produced a parsed root for
+   * `language` (grammar loaded, parse succeeded) — independent of how many
+   * declarations the walk then found. False for every language outside
+   * `COLLECTOR_LANGS` (case a) and for a COLLECTOR_LANGS language whose
+   * grammar failed to load or parse at runtime (case b). See the interface
+   * doc comment above for why this must not be inferred from `symbols`.
+   */
+  parserAvailable: boolean;
+}
+
+/**
+ * Attempt a real tree-sitter parse of `text` as `language` and report both
+ * the declarations found AND whether the parse itself succeeded. See
+ * `CollectSymbolsAttempt`'s doc comment for why the two are not the same
+ * question. `collectSymbols` below is a thin backward-compatible wrapper
+ * over this — every existing call site keeps its original `Promise<
+ * CollectedSymbol[]>` contract unchanged.
+ */
+export async function collectSymbolsChecked(
   text: string,
   language: string,
   paths: TreeSitterPaths = {},
-): Promise<CollectedSymbol[]> {
+): Promise<CollectSymbolsAttempt> {
   const normalized = language.toLowerCase();
-  if (!COLLECTOR_LANGS.has(normalized)) return [];
+  if (!COLLECTOR_LANGS.has(normalized)) return { symbols: [], parserAvailable: false };
 
   const lineStarts = computeLineStarts(text);
   const lines = splitLines(text);
@@ -464,5 +498,28 @@ export async function collectSymbols(
     return out;
   });
 
-  return (symbols ?? []).sort((a, b) => a.startIndex - b.startIndex || a.endIndex - b.endIndex);
+  return {
+    symbols: (symbols ?? []).sort((a, b) => a.startIndex - b.startIndex || a.endIndex - b.endIndex),
+    parserAvailable: symbols !== undefined,
+  };
+}
+
+/**
+ * Language-membership probe: true iff `collectSymbolsChecked`/`collectSymbols`
+ * will ATTEMPT a real tree-sitter parse for `language` (a WASM grammar can
+ * still fail to load at runtime — see `CollectSymbolsAttempt.parserAvailable`
+ * for that half). Exported so callers that route by "does a collector exist
+ * for this language" (PI-06's parser-fed `search_files action=symbols`
+ * integration) don't hand-duplicate `COLLECTOR_LANGS` and drift from it.
+ */
+export function symbolCollectorSupports(language: string): boolean {
+  return COLLECTOR_LANGS.has(language.toLowerCase());
+}
+
+export async function collectSymbols(
+  text: string,
+  language: string,
+  paths: TreeSitterPaths = {},
+): Promise<CollectedSymbol[]> {
+  return (await collectSymbolsChecked(text, language, paths)).symbols;
 }

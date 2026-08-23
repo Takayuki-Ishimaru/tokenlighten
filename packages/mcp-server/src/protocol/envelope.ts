@@ -109,6 +109,28 @@ export interface ProtocolCallContext {
    */
   workspace?: string;
   /**
+   * D1 (F-C2a): the workspace root read_file/search_files dispatch resolved
+   * against, published ONLY for protocol/codec/pipeline.ts's trace
+   * emissions (`wire_codec_shadow`/`wire_codec_v2_cell`) -- DELIBERATELY
+   * SEPARATE from `workspace` above.
+   *
+   * `workspace` cannot be reused for this: it is read by `emit.ts`'s
+   * served-range-ledger settling (`settleServedRanges`) AND by
+   * `readFamily.ts`'s `projectReadBody` (via the `workspace` this module
+   * passes it at line ~672) to decide whether a `read.receipt`'s
+   * continuation echoes `cwd` — both WIRE-AFFECTING, and both previously
+   * saw `undefined` on every read_file/search_files call because nothing
+   * but edit_file's finishEdit ever populated `workspace`. Populating
+   * `workspace` itself for read/search (an earlier version of this fix)
+   * changed a `read.receipt`'s `next.arguments` shape and broke
+   * wireBaselines.spec.ts's pinned bytes — exactly the regression D1's own
+   * "ZERO wire-byte change" requirement forbids. This field is read by
+   * NOTHING except pipeline.ts, so it cannot repeat that mistake.
+   *
+   * INTERNAL AND NON-WIRE, same posture as `emittedBytes` below.
+   */
+  codecTraceWorkspace?: string;
+  /**
    * P3a S1: body bytes this call's response measured at the ONE emission point
    * (`budget/measure.ts`, via `emit.ts`). Written by `noteEmission`, once, on
    * every funnel exit that carries a text body — including the three opaque
@@ -121,6 +143,13 @@ export interface ProtocolCallContext {
    * reserve assertion and S6's fence attach to it.
    */
   emittedBytes?: number;
+  /**
+   * V11-07: the resolved MCP client id, when reachable at codec time (see
+   * protocol/codec/clientProfile.ts's module header). `undefined` on every
+   * call today -- nothing sets it yet; `resolveClientProfile` treats that
+   * as the conservative "unknown" fallback.
+   */
+  clientId?: string;
 }
 
 const _protocolCall = new AsyncLocalStorage<ProtocolCallContext>();
@@ -162,6 +191,19 @@ export function declareKind(kind: Kind): void {
 export function noteWorkspaceRoot(root: string): void {
   const context = _protocolCall.getStore();
   if (context !== undefined && root !== "") context.workspace = root;
+}
+
+/**
+ * D1 (F-C2a): publish the workspace root read_file/search_files dispatch
+ * resolved against, for protocol/codec/pipeline.ts's trace emissions ONLY.
+ * See `ProtocolCallContext.codecTraceWorkspace`'s own doc comment for why
+ * this is a dedicated field/setter rather than reusing `noteWorkspaceRoot`
+ * above -- `workspace` is read by wire-affecting projectors this one must
+ * never touch.
+ */
+export function noteCodecTraceWorkspace(root: string): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && root !== "") context.codecTraceWorkspace = root;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +257,65 @@ function isReceiptBody(body: Record<string, unknown>): boolean {
   // its body is later shaped.
   if (body["query_mismatch"] === true) return false;
   return receiptOf(body) !== undefined;
+}
+
+/**
+ * A text serve with no fresh body is not `read.text`: every one of its windows
+ * is an already-served residency claim. Keep the producer's segment accounting
+ * long enough to derive the one code-unchanged receipt shape, including the
+ * exact unserved continuation a cap left behind.
+ */
+function priorOnlyTextReceipt(body: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (typeof body["receipt"] === "string") return undefined;
+  const segments = Array.isArray(body["segments"])
+    ? body["segments"]
+    : Array.isArray(body["windows"])
+      ? body["windows"]
+      : undefined;
+  if (segments === undefined || segments.length === 0) return undefined;
+
+  let handle = typeof body["handle"] === "string" ? body["handle"] : undefined;
+  let sha = typeof body["sha"] === "string" ? body["sha"] : undefined;
+  const servedBy: string[] = [];
+  const remember = (label: unknown): void => {
+    if (typeof label === "string" && label !== "" && !servedBy.includes(label)) servedBy.push(label);
+  };
+  remember(body["served_by"]);
+
+  for (const segment of segments) {
+    if (segment === null || typeof segment !== "object" || Array.isArray(segment)) return undefined;
+    const row = segment as Record<string, unknown>;
+    // `code`/`content`/`body` are the three live raw evidence spellings. An
+    // empty string is not fresh evidence, but it also cannot prove residency.
+    if ([row["code"], row["content"], row["body"]]
+      .some((value) => typeof value === "string" && value !== "")) return undefined;
+    if (row["code_unchanged"] !== true && typeof row["prior"] !== "string") return undefined;
+    const rowHandle = typeof row["handle"] === "string" ? row["handle"] : undefined;
+    const rowSha = typeof row["sha"] === "string" ? row["sha"] : undefined;
+    if (handle === undefined) handle = rowHandle;
+    else if (rowHandle !== undefined && rowHandle !== handle) return undefined;
+    if (sha === undefined) sha = rowSha;
+    else if (rowSha !== undefined && rowSha !== sha) return undefined;
+    remember(row["served_by"] ?? row["prior"]);
+  }
+  if (handle === undefined || sha === undefined) return undefined;
+
+  const remaining = Array.isArray(body["remaining_ranges"])
+    ? body["remaining_ranges"].filter((range): range is string => typeof range === "string" && range !== "")
+    : [];
+  return {
+    ...body,
+    handle,
+    sha,
+    receipt: "code-unchanged",
+    code_unchanged: true,
+    ...(servedBy.length > 0
+      ? { served_by: servedBy.length <= 2 ? servedBy.join(" + ") : `${servedBy[0]!} +${servedBy.length - 1} more` }
+      : {}),
+    ...(remaining.length > 0
+      ? { next: `read_file mode=slice handle=${handle} ranges=${JSON.stringify(remaining)}` }
+      : {}),
+  };
 }
 
 /**
@@ -430,6 +531,12 @@ export function finalizeProtocolResponse(
     return emitOpaqueText(result, context);
   }
 
+  // L3: receipt conversion happens before classification so an all-prior
+  // segment response cannot escape as `read.text` with zero fresh evidence.
+  if (context.tool === "read_file" && READ_TEXT_MODES.has(context.mode ?? "")) {
+    body = priorOnlyTextReceipt(body) ?? body;
+  }
+
   const kind = kindForCall(context, body, result.isError === true);
   // §4.2.1(1) SE-STABLE, STRUCTURAL. The three side-effect kinds are
   // refusal-conversion-FORBIDDEN. The enforcement lives in `kindForCall`'s
@@ -494,6 +601,33 @@ export function servedWindowsOf(payload: Record<string, unknown>): {
   unattributed: boolean;
   windows: Array<{ path: string; start: number; end: number }>;
 } {
+  // F-A1-6: a `refusal` payload is structurally evidence-free — `Refusal` /
+  // `RefusalCore` (types/mcp/protocol.ts:443) has no `body`/`content`/`path`
+  // field anywhere in it — but its REQUIRED `code: RefusalCode` (e.g.
+  // "cwd-required-for-edit") is a short non-empty string, which is exactly
+  // what the generic walk below treats as a served body when it finds no
+  // sibling `body`/`content`. A bare refusal has no enclosing `path` to
+  // attribute that string to either, so the unguarded walk reported
+  // `unattributed: true` for every refusal — which makes `settleServedRanges`
+  // (state/session.ts:4175) fail OPEN, so a call that provisionally booked a
+  // span and then got shed to refusal (unreachable at production budgets;
+  // reachable via `budgetOverrideBytes`, emit.ts's failClosed tail) never
+  // retracted it. A refusal carries zero served bytes by construction, so the
+  // honest projection is the same one any other body-less, evidence-free
+  // response gets: attributed (not `unattributed`), with an empty window
+  // list — `settleServedRanges` then retracts every pending span for this
+  // call, exactly as an ordinary refusal is meant to (emit.ts's own comment:
+  // "a refusal carries nothing, so a serve path that booked before refusing
+  // books nothing").
+  //
+  // Narrowest fix: gated on the payload's OWN `kind`, not on the presence of
+  // a `code` key, so a genuine evidence-embedded `code` field elsewhere on
+  // the protocol (the pre-v1 symbol-serve dialect — `{...symbolData, code:
+  // symbolCode, handle, sha}`, readFamily.ts:100/112, which always carries
+  // its own `path`) is completely untouched by this guard; the general walk
+  // below is unchanged for every non-refusal kind.
+  if (payload["kind"] === "refusal") return { unattributed: false, windows: [] };
+
   const windows: Array<{ path: string; start: number; end: number }> = [];
   let unattributed = false;
 

@@ -1,12 +1,4 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="media/brand/github-header-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="media/brand/github-header-light.png">
-  <img alt="TokenLighten MCP — ハチドリのロゴ" src="media/brand/github-header-light.png">
-</picture>
-
 # TokenLighten
-
-<p align="center"><strong>リポジトリ全体ではなく、エージェントが必要とする正確なコンテキストを。</strong></p>
 
 [English](README.md) | [日本語](README.ja.md)
 
@@ -14,23 +6,19 @@
 
 公開するツールは`read_file`、`search_files`、`edit_file`の3つです。
 
-## v0.9.1a Public Beta
+## v0.11.1 リリース
 
-TokenLighten v0.9.1aは初期の公開版です。フィードバックを反映する過程で、インターフェースや対応ワークフローが変更される場合があります。重要な作業はバックアップを取り、公開Issueには非公開のソースコード、認証情報、顧客データを含めないでください。
+**パブリックベータ更新版。** TokenLighten v0.11.1は最新のソースリリースです。フィードバックを反映する過程で、インターフェースや対応ワークフローが引き続き変更される場合があります。重要な作業はバックアップを取り、公開Issueには非公開のソースコード、認証情報、顧客データを含めないでください。
 
-このリリースには以下が含まれます。
+公開リリースには以下が含まれます。
 
 - TokenLighten CLIとMCPサーバー
-- 開発者向けのソースコードとパッケージテスト
+- 開発者向けのソースコードと公開パッケージテスト
 - 単体で動作するVSIX形式のVS Code拡張機能
 
-デスクトップアプリケーションはv0.9.1aに含まれません。
+v0.9.xと比べ、v0.11.1では再起動後も継続できるタスクハンドル、absence／scopeの正直な開示、コンテンツハッシュによるインデックス鮮度、最新MCP transport、検証情報付きの限定編集、任意で有効化するgraph／retrieval／packing／reasoning／wire実験、paired calibration、VS Code診断機能が追加されています。実験機能は、明示的に有効化しない限りデフォルトで無効です。
 
-## 実際の動作
-
-![VS Codeで動作するTokenLighten v0.9.1 Control Center](media/control-center.png)
-
-Control Centerでは、セットアップ、ワークスペースの状態、ローカル計測、有効／無効の切り替えを一か所で確認できます。
+公開リリースにはデスクトップアプリケーションと非公開ベンチハーネスを含めません。
 
 ## TokenLightenを使う理由
 
@@ -46,22 +34,25 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 
 シンボル検索と参照検索は、該当する定義や呼び出し箇所を直接返せます。文書リーダーは、スプレッドシートをはじめとする対応形式から、ファイル全体を読み込まずに構造化された内容を抽出できます。これにより、リポジトリや文書を横断する作業に必要なコンテキストを集める際、検索と再読込の繰り返しを減らせます。
 
-### 初期の開発者ベンチマーク結果
+### 開発者ベンチマークの観察結果
 
-複数パッケージを変更するコードタスクでは、共通の列挙型に値を追加し、その変更をフロントエンドコンポーネント、バックエンドの検証処理、カテゴリ別の集計ロジックへ一貫して反映しました。6回の反復ベンチマークでは、TokenLightenを使用した場合、同じエージェントがTokenLightenを使用しなかった場合と比べ、検証に合格したタスクのコストが約**56%**削減されました。
+最新の6タスクによる開発者向け決定ランでは、検証に合格した同条件の16ペア全体で、TokenLighten使用時の検証済みタスクコストがネイティブツールのみの場合より約**21%低く**なりました。
 
-文書を横断する実装タスクでは、スプレッドシートで管理された料率表と、別の文書に記載された計算手順を組み合わせ、両方の情報に整合する新しい料金計算モジュールを実装しました。6回の反復ベンチマークでは、TokenLightenによって検証に合格したタスクのコストが約**48%**削減されました。
+複数モジュールにまたがるテレメトリ配線タスクでは、estimatorのhealth判定を見つけ、送信側のsystem-status経路へ接続する必要がありました。検証に合格した3回の反復では、TokenLighten使用時のタスクコスト中央値が約**33%低く**なりました。
 
-初期結果から、効果が出にくい場面も分かっています。
+フライト制御、ミキサー、モード遷移にまたがる複数バグのオンコール対応タスクでは、両方の実行が検証に合格した2回の反復において、コスト中央値が約**29%低く**なりました。残る1回は両条件で検証結果が異なったため、このコスト比較には含めていません。
 
-- 単一の大規模なスプレッドシートを単独で分析し、ほかの情報源と組み合わせて新しいコードを作成しないタスクでは、明確な優位性は確認されませんでした。
-- 既知の値を既存コードの処理経路へ渡すだけで、リポジトリ全体を広く探索しない小規模な局所変更では、結果にばらつきがありました。このような場合、TokenLightenによるコンテキスト収集のオーバーヘッドが削減効果を上回ることがあります。
+今回の結果から、TokenLightenの効果が小さくなりやすい傾向も確認されています。
 
-これらは開発者が実施した初期ベンチマークの結果であり、削減効果を保証するものではありません。実際のトークン使用量とタスクコストは、リポジトリ、タスク、クライアント、モデルの動作、プロバイダーの料金によって異なります。
+- 対象範囲があらかじめ絞られた計算修正や、配置先が明確な文書起点の実装では、効果が限定的でした。
+- 両条件で検証結果が一致しないタスクでは結果のばらつきが大きく、その実行は上記の数値比較から除外しています。
+- 対象箇所が既知の小規模タスクでは、MCP schemaと管理ガイドの固定コストによりTokenLightenの方が高コストになる場合があります。
+
+これらは開発者が実施したベンチマークの観察結果であり、削減を保証するものではありません。v0.11.1の評価は公開済みのv0.9.xより広いタスク構成を使用しているため、両リリースの直接的なbefore/after比較ではありません。実際のコストはリポジトリ、タスク、クライアント、モデルの動作、料金によって異なり、ローカル推定値はプロバイダーの請求記録ではありません。詳しい解釈と注意事項は[v0.11.1リリース草案](release-docs/github-release-v0.11.1.md#benchmark-update)を参照してください。
 
 ## VS Code拡張機能をインストールする（ビルド不要）
 
-一般ユーザーは、v0.9.1a Public BetaのGitHub Releaseから[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
+v0.11.1公開後、[tokenlighten-vscode-extension-0.11.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.11.1/tokenlighten-vscode-extension-0.11.1.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
 
 インストール手順は次のとおりです。
 
@@ -72,23 +63,12 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 ターミナルからインストールすることもできます。
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.9.2.vsix
+code --install-extension tokenlighten-vscode-extension-0.11.1.vsix
 ```
 
 信頼済みのプロジェクトフォルダを開き、TokenLightenビューから**このワークスペースをセットアップ**を選択します。VSIXにはCLI、MCPサーバー、パーサー、必要なアセットが含まれるため、別途グローバルインストールする必要はありません。
 
 詳しくは[VS Code拡張機能](release-docs/vscode-extension.ja.md)を参照してください。
-
-## 対応クライアント
-
-| クライアント | 自動セットアップ | 手動設定 | v0.9.1での検証 |
-|---|---|---|---|
-| Codex CLI / VS Code版Codex | Yes | Yes | macOS上のCLI 0.148.0-alpha.9、VS Code拡張機能 26.810.52044 |
-| Claude Code / VS Code版Claude Code | Yes | Yes | macOS上のCLI 2.1.211、VS Code拡張機能 2.1.233 |
-| VS Code / GitHub Copilot | Yes | Yes | macOS上のVS Code 1.133.0で拡張機能とセットアップをスモークテスト。Copilotのバージョンは未記録 |
-| Cursor | Partial：管理対象の指示ファイルのみ | Yes：CursorのMCP設定を使用 | v0.9.1のリリース検証対象外 |
-
-上記のバージョンは、2026-08-16のv0.9.1スモークテストで使用したローカル環境の記録であり、最低対応バージョンを保証するものではありません。自動テストでは、Codex、Claude Code、VS Code、Copilot、Cursor向けの設定／指示ファイル生成も確認しています。CursorへのMCP登録は手動です。
 
 ## ソースからビルドする
 
@@ -128,8 +108,8 @@ tl mcp start --stdio --allow-write --workspace /path/to/project
 
 | ツール | 用途 |
 |---|---|
-| `read_file` | 対象を絞ったファイル内容、構造、シンボル、タスク向けコンテキストパックを返します。 |
-| `search_files` | 選択したワークスペース内のファイル、テキスト、シンボル、参照を検索します。 |
+| `read_file` | あらゆるタスクの最初の一手。対象箇所が不明な調査や複数ファイルにまたがる調査も含みます。対象を絞ったファイル内容、構造、シンボル、タスク向けコンテキストパックを返します。 |
+| `search_files` | 選択したワークスペース全体からファイル、テキスト、シンボル、参照をリポジトリ全体・`.gitignore`準拠で検索します。 |
 | `edit_file` | 事前の読み込みで確立したコンテキストに基づき、範囲を限定して編集します。`--allow-write`が必要です。 |
 
 動作と安全上の注意は[MCPツール](release-docs/mcp-tools.md)を参照してください。
@@ -173,7 +153,7 @@ npm run package -w tokenlighten-vscode-extension
 
 変更を送る前に[CONTRIBUTING.md](CONTRIBUTING.md)を確認してください。
 
-v0.9.1では、完全なパッケージテストをUbuntuとmacOSのCIゲートにしています。Windows CIでは、ソースのビルド、同梱CLI、依存関係のライセンスと通知、実行時依存関係の監査、診断を確認します。一部のテストfixtureがまだWindowsへ移植できていないため、完全なパッケージテストはWindowsのリリースゲートではありません。これはWindowsやVSIXのインストールが非対応であることを意味せず、Windows固有のテスト範囲は今後拡充します。
+v0.11.1では、完全なパッケージテストをUbuntuとmacOSのCIゲートにしています。Windows CIでは、ソースのビルド、同梱CLI、依存関係のライセンスと通知、実行時依存関係の監査、診断を確認します。一部のテストfixtureがまだWindowsへ移植できていないため、完全なパッケージテストはWindowsのリリースゲートではありません。これはWindowsやVSIXのインストールが非対応であることを意味せず、Windows固有のテスト範囲は今後拡充します。
 
 ## ドキュメント
 
@@ -184,15 +164,17 @@ v0.9.1では、完全なパッケージテストをUbuntuとmacOSのCIゲート�
 - [プライバシー、セキュリティ、サポート](release-docs/privacy-security-support.md)
 - [ライセンスと利用方針](release-docs/licensing.md)
 
+既存の`docs/`ディレクトリは開発履歴であり、公開するv0.11.1ソースリリースには含まれません。
+
 ## セキュリティとサポート
 
 ### 依存関係監査のスナップショット
 
-2026-08-16にTokenLighten v0.9.1の依存関係を監査した時点で、`npm audit --omit=dev`は、配布するVS Code拡張機能と通常の実行時に使用される依存関係について、**Critical 0件、High 0件、Moderate 2件**を報告しました。
+2026-08-23にv0.11.1ソースを監査した時点で、`npm audit --omit=dev`は通常のruntime dependency viewについて**Critical 0件、High 0件、Moderate 2件**を報告しました。
 
-v0.9.1で開発ツールチェーンを更新した後は、開発用依存関係を含む環境全体でも同じく**Critical 0件、High 0件、Moderate 2件**でした。
+開発用依存関係を含むソース開発環境全体では、**Critical 1件、High 1件、Moderate 5件**が報告されました。これらは通常のインストール済みVSIXのruntime view外です。コントリビューターは、信頼できないソースやコンテンツを開発ツールで処理する前に内容を確認してください。
 
-2件という表示は、`exceljs`経由の1件の`uuid`アドバイザリを依存パッケージ側でも数えているものです。TokenLightenのスプレッドシート処理は、問題のある`uuid` APIを使用していません。アドバイザリID、到達可能性、すぐ更新できない理由、更新予定は[依存関係のセキュリティ状況（英語）](release-docs/dependency-security.md)を参照してください。これは特定日時点の監査結果であり、脆弱性が存在しないことを保証するものではありません。
+これは特定日時点の依存関係監査であり、脆弱性が存在しないことを保証するものではありません。監査情報は公開後に変化する可能性があります。実行時依存関係には`npm audit --omit=dev`、開発環境全体には`npm audit`を再実行してください。
 
 サーバーは`--allow-write`を指定しない限り読み取り専用です。脆弱性を報告する前に[SECURITY.md](SECURITY.md)、ベストエフォートのサポート方針については[SUPPORT.md](SUPPORT.md)を確認してください。公開Issueには認証情報、非公開のソースコード、顧客データ、未加工のログを投稿しないでください。
 

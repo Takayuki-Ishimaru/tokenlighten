@@ -738,14 +738,28 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     // the pack (or silently treating qref as a new task).
     // v1 (A.4): the flat receipt fields collapse into ONE nested receipt
     // object; `decision_unchanged`/`new_content`/`retry_same_call` no longer
-    // exist — `receipt.receipt === "decision-unchanged"` (readFamily.ts's
-    // receiptOf normalizes BOTH the old "decision-unchanged" and
-    // "prepared-discovery-closed" tags onto this one v1 form) carries the same
-    // "nothing changed" fact, and the object's non-residency (no handle/sha)
-    // is what used to be spelled `new_content:false`.
+    // exist.
+    //
+    // MIGRATED 2026-08-21 (wave D / F-C1), decision-unchanged -> pack-unchanged.
+    // This assertion used to record the SIDE EFFECT of a defect, not a designed
+    // behavior: `canServeCachedTaskPackReceipt` ran on RAW pre-resolution args,
+    // so `args.query` was undefined for every wire qref replay, the exact-
+    // reissue fingerprint could never match, and the dispatcher fence fell back
+    // to the leaner decision-identity notice. With the preflight resolving the
+    // qref, this replay is recognized for what it is — a byte-identical
+    // re-issue of a pack whose every surface file is still unchanged — so it
+    // gets the RICHER exact-reissue form, which restates every held surface
+    // with the call that served it instead of only re-affirming the decision.
+    // Both forms say "nothing changed"; this one also says WHAT the caller
+    // holds. Still zero content re-served: `body`-less entries, no code.
     const repeatedReceipt = repeated["receipt"] as Record<string, unknown> | undefined;
-    expect(repeatedReceipt?.["receipt"]).toBe("decision-unchanged");
-    expect(repeatedReceipt?.["certificate"]).toBeDefined();
+    expect(repeatedReceipt?.["receipt"]).toBe("pack-unchanged");
+    const repeatedHeld = repeatedReceipt?.["evidence"] as Array<Record<string, unknown>> | undefined;
+    expect(repeatedHeld?.length ?? 0).toBeGreaterThan(0);
+    for (const entry of repeatedHeld ?? []) {
+      expect(entry["prior"]).toBeDefined();
+      expect(entry["body"]).toBeUndefined();
+    }
     expect(repeated["code_unchanged"]).toBeUndefined();
     expect(repeated["query_mismatch"]).toBeUndefined();
     const fullQueryArgsBytes = Buffer.byteLength(
@@ -995,10 +1009,21 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     });
     expect(res["kind"]).toBe("read.receipt");
     // v1 (A.4): see the (a) case above — the flat fields collapse into ONE
-    // nested receipt object; decision-identity, not content-identity.
+    // nested receipt object.
+    //
+    // MIGRATED 2026-08-21 (wave D / F-C1), decision-unchanged -> pack-unchanged,
+    // for the same reason as GROUP 6's qref case: `qref + the SAME paths[]` is
+    // an exact re-issue of the seed pack, and with the preflight resolving the
+    // qref the server can finally see that. "Stays closed" is still exactly
+    // what this pins — no new discovery, no re-served bodies — it is now said
+    // in the form that also names what the caller is holding.
     const closedReceipt = res["receipt"] as Record<string, unknown> | undefined;
-    expect(closedReceipt?.["receipt"]).toBe("decision-unchanged");
-    expect(closedReceipt?.["certificate"]).toBeDefined();
+    expect(closedReceipt?.["receipt"]).toBe("pack-unchanged");
+    const closedHeld = closedReceipt?.["evidence"] as Array<Record<string, unknown>> | undefined;
+    expect(closedHeld?.length ?? 0).toBeGreaterThan(0);
+    for (const entry of closedHeld ?? []) {
+      expect(entry["body"], "a closed re-issue must not re-serve bodies").toBeUndefined();
+    }
     expect(res["code_unchanged"]).toBeUndefined();
   }, 30000);
 });

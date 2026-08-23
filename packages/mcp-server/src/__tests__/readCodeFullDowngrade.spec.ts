@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { TINY_TASK_CAP, PER_TASK_FULL_CAP, GOVERNED_FULL_SERVE_BYTES } from "../util/fullGovernor.js";
+import { TINY_SKELETON_CAP, PER_TASK_FULL_CAP, GOVERNED_FULL_SERVE_BYTES } from "../util/fullGovernor.js";
 import { serveGovernedFullHead } from "../server.js";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -468,13 +468,13 @@ describe("readCodeFullDowngrade — per-task-cap overflow converts to skeleton+r
 });
 
 // ---------------------------------------------------------------------------
-// tiny-task-cap overflow via mode=full → serves content
+// tiny-skeleton-cap overflow via mode=full → map + remaining_ranges + next
 // ---------------------------------------------------------------------------
 
-describe("readCodeFullDowngrade — tiny-task-cap overflow serves content (W1)", () => {
-  it("the (TINY_TASK_CAP+1)th distinct tiny mode=full serves the whole tiny file, not an outline/skeleton", async () => {
+describe("readCodeFullDowngrade — tiny-skeleton-cap overflow (M1)", () => {
+  it("the (TINY_SKELETON_CAP+1)th distinct tiny mode=full uses the per-task map shape", async () => {
     const wsDir = mkDir("tiny-head");
-    for (let i = 0; i < TINY_TASK_CAP; i++) {
+    for (let i = 0; i < TINY_SKELETON_CAP; i++) {
       writeFile(wsDir, `src/tiny${i}.ts`, `export const t${i} = ${i};\n`);
     }
     writeFile(wsDir, "src/overflow.ts", "export const OVERFLOW = 42;\n");
@@ -483,22 +483,25 @@ describe("readCodeFullDowngrade — tiny-task-cap overflow serves content (W1)",
     servers.push(srv);
     await srv.initialize();
 
-    // Saturate the tiny budget with distinct tiny full reads.
-    for (let i = 0; i < TINY_TASK_CAP; i++) {
+    // Saturate the tiny shape budget with distinct tiny full reads.
+    for (let i = 0; i < TINY_SKELETON_CAP; i++) {
       const d = parseResult(await srv.rpc(2 + i, "tools/call", { name: "read_file", arguments: { mode: "full", path: `src/tiny${i}.ts` } }));
       expect(d["kind"]).toBe("read.text");
     }
 
-    // The (TINY_TASK_CAP+1)th tiny full-read → tiny-task-cap-reached, but W1
-    // serves the whole (tiny → fits the budget) body rather than withholding it.
-    const d = parseResult(await srv.rpc(2 + TINY_TASK_CAP, "tools/call", { name: "read_file", arguments: { mode: "full", path: "src/overflow.ts" } }));
-    expect(d["kind"]).toBe("read.text");
-    const evidence = (d["evidence"] as Array<Record<string, unknown>>)[0]!;
-    expect(String(evidence["body"])).toContain("OVERFLOW = 42");
-    // Rule T: nothing was withheld on this serve — absence of `limit` IS
-    // completeness (the old downgraded_from/reason/truncated:false trio
-    // disclosed nothing anyway, since truncated was already false).
-    expect(d["limit"]).toBeUndefined();
+    // The seventh tiny full-read is a structured map downgrade, never a
+    // governed head containing the whole tiny file.
+    const d = parseResult(await srv.rpc(2 + TINY_SKELETON_CAP, "tools/call", { name: "read_file", arguments: { mode: "full", path: "src/overflow.ts" } }));
+    expect(d["kind"]).toBe("read.map");
+    const outline = d["outline"] as Record<string, unknown>;
+    expect(outline["form"]).toBe("signatures");
+    expect(outline["path"]).toBe("src/overflow.ts");
+    expect(Array.isArray(outline["signatures"])).toBe(true);
+    expect(d["evidence"]).toBeUndefined();
+    const limit = d["limit"] as Record<string, unknown>;
+    const nextArgs = (limit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
+    expect(nextArgs["mode"]).toBe("slice");
+    expect(nextArgs["ranges"]).toEqual(["1-1"]);
   }, 60000);
 });
 

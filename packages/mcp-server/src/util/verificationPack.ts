@@ -175,6 +175,8 @@ export interface ToolchainInfo {
   cxx?: string;
   cc?: string;
   python3?: boolean;
+  /** go.mod projects: whether the Go test runner was found on PATH. */
+  go?: boolean;
   build_entry?: string;
   /**
    * Native edits with NO CMakeLists.txt/Makefile/meson.build anywhere up-tree.
@@ -281,6 +283,7 @@ const NATIVE_HEADER_EXTS = [".h", ".hpp", ".hh", ".hxx"];
 const NATIVE_EXTS = new Set([...NATIVE_SOURCE_EXTS, ...NATIVE_HEADER_EXTS]);
 const PYTHON_SURFACE_EXTS = new Set([".py", ".pyi"]);
 const NODE_SURFACE_EXTS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]);
+const GO_SURFACE_EXTS = new Set([".go"]);
 /** Directory names an `include/` mirror of a source tree is spelled with. */
 const SOURCE_DIR_NAMES = ["src", "source", "sources", "lib"];
 const HEADER_DIR_NAME = "include";
@@ -324,6 +327,8 @@ const SYNTH_BUILD_COMMAND_MAX_CHARS = 2048;
 const CXX_FAMILY_EXTS = new Set([".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"]);
 const BUILD_ENTRY_NAMES = ["CMakeLists.txt", "Makefile", "meson.build"];
 const PY_TEST_MARKER_NAMES = ["pytest.ini", "setup.cfg", "pyproject.toml"];
+const GO_TEST_MARKER_NAMES = ["go.mod"];
+const GO_CANDIDATES = ["go"];
 const CXX_CANDIDATES = ["clang++", "g++"];
 const CC_CANDIDATES = ["clang", "gcc", "cc"];
 const PYTHON3_CANDIDATES = ["python3"];
@@ -331,6 +336,15 @@ const ASSERTION_RE = /\b(?:assert|expect|require|check|verify)(?:[_A-Za-z0-9]*|\
 const CONTRACT_RE = /\b(?:must|shall|required|guarantee|contract)\b|(?:すること|必要|保証|契約)/i;
 const MOCK_CONTROL_RE = /^\s*#\s*(?:define|ifn?def)\s+([A-Z][A-Z0-9_]{2,})\b/;
 const BUILD_DEFINE_RE = /(?:^|\s)-D([A-Z][A-Z0-9_]{2,})(?:=\S+)?/g;
+
+function goPackageName(content: string): string | undefined {
+  return /^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)/m.exec(content)?.[1];
+}
+
+function isGoTestPath(relPath: string): boolean {
+  return GO_SURFACE_EXTS.has(path.posix.extname(relPath).toLowerCase())
+    && path.posix.basename(relPath).endsWith("_test.go");
+}
 
 function stemOf(relPath: string): string {
   const base = path.posix.basename(relPath);
@@ -360,7 +374,7 @@ const IDENTIFIER_STOPWORDS = new Set([
 ]);
 
 /** Identifier-shaped tokens in `content`, case-sensitive, stopwords dropped. */
-function identifierTokens(content: string): Set<string> {
+export function identifierTokens(content: string): Set<string> {
   const out = new Set<string>();
   for (const m of content.matchAll(IDENTIFIER_TOKEN_RE)) {
     if (!IDENTIFIER_STOPWORDS.has(m[0].toLowerCase())) out.add(m[0]);
@@ -936,7 +950,8 @@ function mockControlRefs(
 function findOnPath(candidates: readonly string[]): string | undefined {
   // path.delimiter is ";" on win32 and ":" elsewhere — a hardcoded ":" both
   // fails to split a win32 PATH and mis-splits inside each entry's drive
-  // letter ("C:\\...").
+  // letter ("C:\\..."); see core2/config.ts's TOKENLIGHTEN_ALLOWED_PARENTS
+  // parsing for the same pattern.
   const dirs = (process.env.PATH ?? "").split(path.delimiter);
   for (const dir of dirs) {
     if (dir.length === 0) continue;
@@ -971,6 +986,7 @@ export interface ToolchainProbe {
   /** First C compiler found on PATH. */
   cc?: string;
   python3: boolean;
+  go: boolean;
 }
 
 /**
@@ -987,11 +1003,12 @@ export function probeToolchain(lookup: PathLookup = pathLookupOverride ?? findOn
     ...(cxx !== undefined ? { cxx } : {}),
     ...(cc !== undefined ? { cc } : {}),
     python3: lookup(PYTHON3_CANDIDATES) !== undefined,
+    go: lookup(GO_CANDIDATES) !== undefined,
   };
 }
 
 /** Which toolchain a surface/edit set belongs to. */
-export type ToolchainDomain = "native" | "python" | "node" | "other";
+export type ToolchainDomain = "native" | "python" | "node" | "go" | "other";
 
 /**
  * Plurality vote over file extensions, ties broken native > python > node so
@@ -1002,17 +1019,20 @@ export function surfaceToolchainDomain(paths: readonly string[]): ToolchainDomai
   let native = 0;
   let python = 0;
   let node = 0;
+  let go = 0;
   for (const rel of paths) {
     const ext = path.posix.extname(rel).toLowerCase();
     if (NATIVE_EXTS.has(ext)) native += 1;
     else if (PYTHON_SURFACE_EXTS.has(ext)) python += 1;
     else if (NODE_SURFACE_EXTS.has(ext)) node += 1;
+    else if (GO_SURFACE_EXTS.has(ext)) go += 1;
   }
-  const top = Math.max(native, python, node);
+  const top = Math.max(native, python, node, go);
   if (top === 0) return "other";
   if (native === top) return "native";
   if (python === top) return "python";
-  return "node";
+  if (node === top) return "node";
+  return "go";
 }
 
 /** Nearest CMakeLists.txt/Makefile/meson.build walking up from `fromDir` to the workspace root ("" = root). */
@@ -1031,7 +1051,7 @@ export function findBuildEntry(workspace: string, fromDir: string): string | und
 
 /** What can actually be RUN to verify these edits, and whether it can run NOW. */
 interface TestEntryFact {
-  /** "npm test" | "pytest". */
+  /** "npm test" | "pytest" | "go test ./pkg/...". */
   command: string;
   /** node only: directory whose package.json declared scripts.test ("" = workspace root). */
   dir?: string;
@@ -1076,6 +1096,7 @@ function detectTestEntry(
   editedFiles: readonly string[],
 ): TestEntryFact | undefined {
   const editsNode = editedFiles.some((f) => NODE_SURFACE_EXTS.has(path.posix.extname(f).toLowerCase()));
+  const editsGo = editedFiles.some((f) => GO_SURFACE_EXTS.has(path.posix.extname(f).toLowerCase()));
   if (editsNode) {
     for (const root of roots) {
       const rel = root === "" ? "package.json" : `${root}/package.json`;
@@ -1096,6 +1117,27 @@ function detectTestEntry(
         // malformed/unreadable package.json — keep scanning other roots
       }
     }
+  }
+  if (editsGo) {
+    const editedGoFiles = editedFiles
+      .filter((rel) => GO_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()));
+    if (editedGoFiles.length > 0) {
+      const hasSamePackageTest = walkCodeFiles(workspace, {})
+        .filter((file) => isGoTestPath(file.relPath))
+        .some((file) => {
+          const root = projectRootOf(file.relPath, workspace);
+          if (!roots.includes(root)) return false;
+          const testPackage = goPackageName(readSmall(workspace, file.relPath) ?? "");
+          if (testPackage === undefined) return false;
+          return editedGoFiles.some((editedRel) =>
+            path.posix.dirname(editedRel) === path.posix.dirname(file.relPath)
+            && goPackageName(readSmall(workspace, editedRel) ?? "") === testPackage);
+        });
+      if (hasSamePackageTest && roots.some((root) => GO_TEST_MARKER_NAMES.some((name) => existsAtRoot(workspace, root, name)))) {
+        return { command: "go test ./pkg/...", deps_installed: (pathLookupOverride ?? findOnPath)(GO_CANDIDATES) !== undefined };
+      }
+    }
+    return undefined;
   }
   if (!editedFiles.some((f) => f.toLowerCase().endsWith(".py"))) return undefined;
   for (const root of roots) {
@@ -1447,13 +1489,26 @@ export function buildVerificationManifest(
     if (editedSet.has(file.rel)) continue;
     if (!editedRoots.has(projectRootOf(file.rel, workspace))) continue;
     const mock = isMockish(file.rel);
-    if (!mock && classifySurface(file.rel) !== "test") continue;
+    const goPairEdited = isGoTestPath(file.rel)
+      ? edited.filter((editedRel) => {
+        if (!GO_SURFACE_EXTS.has(path.posix.extname(editedRel).toLowerCase())) return false;
+        if (path.posix.dirname(editedRel) !== path.posix.dirname(file.rel)) return false;
+        const editedPackage = goPackageName(readSmall(workspace, editedRel) ?? "");
+        const testPackage = goPackageName(readSmall(workspace, file.rel) ?? "");
+        return editedPackage !== undefined && editedPackage === testPackage;
+      })
+      : [];
+    const goPair = goPairEdited.length > 0;
+    if (!mock && classifySurface(file.rel) !== "test" && !goPair) continue;
     if (file.bytes === 0 || file.bytes > SCAN_FILE_CAP_BYTES) continue;
     const content = readSmall(workspace, file.rel);
     if (content === undefined) continue;
     const lower = content.toLowerCase();
     const refs = new Set<string>();
     for (const [needle, rel] of needles) if (lower.includes(needle)) refs.add(rel);
+    if (goPair) {
+      for (const editedRel of goPairEdited) refs.add(editedRel);
+    }
     if (refs.size === 0) continue;
     // K2: overlap is 0 (never scanned) when the gate is inactive — a pure
     // no-op that leaves ranking/filtering exactly as before.
@@ -1689,26 +1744,17 @@ export function buildVerificationManifest(
         : {}),
     };
   });
-  // ---- toolchain: local compiler/build-entry/test-entry facts. Attached for
-  // native-relevant edits OR whenever a runnable test entry was detected at all
-  // — the old gate (compile facts / link set / native edits) meant node and
-  // python edits NEVER got one, so an agent learned "npm test exists but
-  // node_modules does not" through four native shell turns (2026-07-31).
-  // Each domain contributes only its OWN fields: a TypeScript edit must not pay
-  // for a C++ compiler probe it cannot use. ----
+  // ---- toolchain: local compiler/build-entry/test-entry facts.
   const testEntryRoots = [...new Set(editedRootsAll)];
   if (!testEntryRoots.includes("")) testEntryRoots.push("");
   const testEntry = detectTestEntry(workspace, testEntryRoots, edited);
   const nativeRelevant = compileFacts.length > 0 || linkSet.length > 0 || nativeEdited.length > 0;
   const pythonRelevant = edited.some((rel) => PYTHON_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()));
+  const goRelevant = edited.some((rel) => GO_SURFACE_EXTS.has(path.posix.extname(rel).toLowerCase()));
   let toolchain: ToolchainInfo | undefined;
   let buildEntryAbsent = false;
-  // `pythonRelevant` widens which FIELDS ride, never whether the section does:
-  // a .py edit with no discoverable runner still has nothing runnable to say.
   if (nativeRelevant || testEntry !== undefined) {
-    // Only the domains that can USE the PATH scan pay for it (explain/doc tasks
-    // still return before reaching here at all).
-    const probe = nativeRelevant || pythonRelevant ? probeToolchain() : undefined;
+    const probe = nativeRelevant || pythonRelevant || goRelevant ? probeToolchain() : undefined;
     let buildEntry: string | undefined;
     if (nativeEdited.length > 0) {
       const firstNativeDir = path.posix.dirname(nativeEdited[0]!);
@@ -1719,6 +1765,7 @@ export function buildVerificationManifest(
       ...(nativeRelevant && probe?.cxx !== undefined ? { cxx: probe.cxx } : {}),
       ...(nativeRelevant && probe?.cc !== undefined ? { cc: probe.cc } : {}),
       ...(pythonRelevant && probe?.python3 === true ? { python3: true } : {}),
+      ...(goRelevant && probe?.go === true ? { go: true } : {}),
       ...(buildEntry !== undefined ? { build_entry: buildEntry } : {}),
       ...(buildEntryAbsent ? { build_entry_absent: true } : {}),
       ...(testEntry !== undefined ? { test_entry: testEntry.command } : {}),

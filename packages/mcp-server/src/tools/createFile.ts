@@ -34,6 +34,7 @@ import * as path from "path";
 import { makeTmpPath } from "../write/atomicWrite.js";
 import { batchCheckpoint } from "../write/checkpoint.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
+import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -230,6 +231,18 @@ export async function createFile(
     batchCheckpoint(workspace, [relPath], sessionId);
   } catch {
     // Checkpoint failure is non-fatal — file is written, just not checkpointed.
+  }
+
+  // V10-10: a brand-new file cannot have a stale cached entry, but the
+  // WORKSPACE's memoized manifest (skeleton-engine's manifestMemo) may still
+  // certify "nothing changed" via its whole-directory stat fingerprint,
+  // which this new file would now be absent from — invalidate so the next
+  // read re-enumerates. Best-effort: an index-cache problem must never fail
+  // a write that already landed on disk.
+  try {
+    invalidateCachedWorkspaceFiles(workspace, [relPath]);
+  } catch {
+    // best-effort — see above
   }
 
   return { ok: true, path: relPath, bytes };

@@ -2,52 +2,60 @@
 
 [English](vscode-extension.md) | [日本語](vscode-extension.ja.md)
 
-The TokenLighten VS Code extension bundles the TokenLighten CLI, MCP server, parsers, and required assets in a VSIX. A separate `tl` installation is not required when you use the packaged extension.
+The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and required assets in one VSIX. A separate `tl` installation is not required.
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)** from the v0.9.1a Public Beta GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
-
-Install it from VS Code:
+After v0.11.1 is published, download **[tokenlighten-vscode-extension-0.11.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.11.1/tokenlighten-vscode-extension-0.11.1.vsix)**. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
-2. Select **Install from VSIX…** from the Extensions view menu.
-3. Choose the downloaded `.vsix` file.
+2. Select **Install from VSIX…**.
+3. Choose the downloaded file.
 4. Reload VS Code if prompted.
 
-You can also install it from the command line:
+~~~bash
+code --install-extension tokenlighten-vscode-extension-0.11.1.vsix
+~~~
 
-```bash
-code --install-extension tokenlighten-vscode-extension-<version>.vsix
-```
+To build from source:
 
-To build the VSIX from source:
-
-```bash
-npm ci
+~~~bash
+npm install
 npm run package -w tokenlighten-vscode-extension
-```
-
-Use `npm install` instead only when intentionally changing dependencies and updating the lockfile.
+~~~
 
 ## Set up a workspace
 
-Open a trusted project folder, then open the TokenLighten view from the Activity Bar and choose **Set up this workspace**. The setup flow configures supported clients and TokenLighten-managed AI instructions for that workspace.
+Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. Setup configures supported clients and TokenLighten-managed AI instructions while preserving content outside managed blocks.
 
-The extension supports a workspace switch to enable or disable TokenLighten. Re-running workspace setup enables it again. A session-level native-tools option is available when you need to temporarily bypass TokenLighten.
+The workspace switch enables or disables TokenLighten. Re-running setup enables it again, and the session-native command temporarily bypasses TokenLighten without changing the workspace's normal configuration.
+
+## Status bar and Diagnostics
+
+Click the TokenLighten status-bar item to open actions for Diagnostics, enable/disable/setup, opening the sidebar, and status. Diagnostics reports:
+
+- extension and TokenLighten versions plus exact `server_build`;
+- Node executable and resolved server launch command;
+- workspace root and effective write permission;
+- MCP/Codex registration files and installed vs bundled guide version; and
+- the last TokenLighten calls as tool/mode/kind/duration/error-code metadata.
+
+The diagnostics ring is local and excludes query text, paths, handles, and content. Setting `TOKENLIGHTEN_USAGE_LOG=off` disables both usage recording and this diagnostics ring.
+
+## Usage and calibration
+
+The sidebar distinguishes measured paired calibration from fallback estimates and shows progress toward medium (12 paired samples) and high (24) confidence. These figures are local estimates, not provider billing records.
 
 ## Privacy and scope
 
-Repository indexing and context selection run locally. The extension does not add a model or upload repository contents on its own. Your chosen coding agent remains responsible for any requests it sends to its model provider.
-
-Usage and saving figures shown by the extension are local estimates, not provider billing records. Workspace-changing operations require a trusted VS Code workspace.
+Repository indexing and context selection run locally. The extension does not add a model or upload repository contents on its own. Your coding agent remains responsible for requests to its model provider. Workspace-changing operations require a trusted VS Code workspace.
 
 ## Settings
 
 | Setting | Default | Description |
 |---|---:|---|
 | `tokenlighten.enabled` | `true` | Enables or disables TokenLighten for the current workspace. |
-| `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases, including Public Beta prereleases, for a newer VSIX when VS Code starts. |
-| `tokenlighten.language` | `auto` | Uses the VS Code display language automatically, or selects English or Japanese explicitly. |
+| `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases for a newer VSIX at startup; installation always requires user action. |
+| `tokenlighten.language` | `auto` | Uses the VS Code display language automatically or selects English/Japanese explicitly. |
 
-The desktop application is not included in this release.
+The desktop application is not included in the public v0.11.1 release.

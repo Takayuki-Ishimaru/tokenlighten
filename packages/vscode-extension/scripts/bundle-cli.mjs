@@ -86,9 +86,8 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-function pkgMetadata(pkgDir) {
-  const manifest = readJson(join(pkgDir, "package.json"));
-  return { version: manifest.version, license: manifest.license };
+function pkgVersion(pkgDir) {
+  return readJson(join(pkgDir, "package.json")).version;
 }
 
 const commonOpts = {
@@ -123,6 +122,59 @@ const commonOpts = {
   external: ["@aws-sdk/client-s3"],
 };
 
+// Public bundles must not carry the experimental Core 2 protocol behind the
+// normal server identity. Development builds still import the real module.
+const publicCore2ExclusionPlugin = {
+  name: "tokenlighten-public-core2-exclusion",
+  setup(buildContext) {
+    const serverEntry = join(REPO_ROOT, "packages/mcp-server/src/server.ts");
+    buildContext.onLoad({ filter: /\/server\.ts$/ }, (args) => {
+      if (args.path !== serverEntry) return undefined;
+      let contents = readFileSync(args.path, "utf8");
+      const replacements = [
+        [
+          /const core2Module = argv\.includes\("--core2"\)\n  \? await import\("\.\/core2\/index\.js"\)\n  : undefined;/,
+          "",
+        ],
+        [
+          /  if \(core2Module\) return core2Module\.core2Config\(fallbackRoot\)\.allowedParents;\n\n/,
+          "",
+        ],
+        [
+          /  \/\/ C2 prototype \(--core2\): same 3 tool names,[\s\S]*?  if \(core2Module\?\.core2Config\(activeRoot\)\.enabled\) \{[\s\S]*?\n  \}\n/,
+          "",
+        ],
+        [
+          /  \/\/ C2 prototype \(--core2\): the lean protocol owns the whole call[\s\S]*?  if \(c2\.enabled\) \{[\s\S]*?\n  \}\n\n/,
+          "",
+        ],
+        [
+          /\n  if \(core2Module\) \{\n    const c2 = core2Module\.core2Config\(activeRoot\);[\s\S]*?\n  \}\n\n  if \(KILL_SWITCH\)/,
+          "\n  if (KILL_SWITCH)",
+        ],
+      ];
+      const needsCore2Sanitization = /core\s*2|core2|--core2/i.test(contents);
+      for (const [pattern, next] of replacements) {
+        if (!pattern.test(contents)) {
+          if (!needsCore2Sanitization) continue;
+          throw new Error(`bundle-cli: public Core 2 exclusion pattern drifted: ${pattern}`);
+        }
+        contents = contents.replace(pattern, next);
+      }
+      const lingeringCore2 = contents.split("\n").filter((line) => /core\s*2|core2|--core2/i.test(line));
+      if (lingeringCore2.some((line) => !/^\s*(?:\/\/|\/\*|\*|\*\/)/.test(line))) {
+        throw new Error("bundle-cli: public Core 2 exclusion left a non-comment reference in server.ts");
+      }
+      contents = contents.split("\n").filter((line) => !/core\s*2|core2|--core2/i.test(line)).join("\n");
+      if (/core\s*2|core2|--core2/i.test(contents)) {
+        throw new Error("bundle-cli: public Core 2 exclusion left a reference in server.ts");
+      }
+      return { contents, loader: "ts", resolveDir: dirname(args.path) };
+    });
+
+  },
+};
+
 /** Bundle one package's entry to a single CJS file, with a minimal package.json shim next to it so `require.resolve("@tokenlighten/<name>")` succeeds from tl-cli.js's dist/node_modules layout. */
 async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [] }) {
   const pkgRoot = join(DIST, "node_modules", ...name.split("/"));
@@ -138,14 +190,12 @@ async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [] 
   });
 
   const realPkgDir = join(REPO_ROOT, "packages", name.replace("@tokenlighten/", ""));
-  const metadata = pkgMetadata(realPkgDir);
   writeFileSync(
     join(pkgRoot, "package.json"),
     JSON.stringify(
       {
         name,
-        version: metadata.version,
-        license: metadata.license,
+        version: pkgVersion(realPkgDir),
         type: "commonjs",
         main: `dist/${outBasename}`,
         exports: { ".": { default: `./dist/${outBasename}` } },
@@ -189,6 +239,7 @@ async function main() {
     name: "@tokenlighten/mcp-server",
     srcEntry: join(REPO_ROOT, "packages/mcp-server/src/bin.ts"),
     outBasename: "bin.js",
+    plugins: [publicCore2ExclusionPlugin],
   });
 
   // Archive support (tools/archive.ts) dynamic-imports
@@ -233,7 +284,8 @@ async function main() {
   );
 
   // Keep the generated third-party inventory with the runtime bundles shipped
-  // inside the VSIX. The project license is copied separately into the VSIX.
+  // inside the VSIX. The project LICENSE is added separately once its text is
+  // approved; do not inherit the private repository's legacy MIT file here.
   cpSync(
     join(REPO_ROOT, "THIRD_PARTY_NOTICES.md"),
     join(DIST, "THIRD_PARTY_NOTICES.md"),

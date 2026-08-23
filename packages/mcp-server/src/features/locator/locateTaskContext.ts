@@ -39,16 +39,27 @@ import { isSourceOnlyExcludedPath, walkCodeFiles, type FoundFile, type WalkOptio
 import { languageForPath, languageForPathWithContent } from "../../util/languages.js";
 import { classifySurface, deriveTokenVariants, coverage, surfaceInventory } from "../../util/impact.js";
 import { handleTable, type HandleKind } from "../../util/handles.js";
-import { graphIndexMode } from "../../util/flags.js";
-import { isEnumLikeQuery } from "../../util/queryShape.js";
+import {
+  graphIndexMode,
+  bm25fCandidateEnabled,
+  rrfFusionEnabled,
+  rrfProfilesEnabled,
+  graphEvidenceEnabled,
+  compoundRetrievalEnabled,
+} from "../../util/flags.js";
+import { fileNamesInPathSpans, isEnumLikeQuery, stripPathSpans } from "../../util/queryShape.js";
 import { tokenizeForEpoch } from "../../state/session.js";
 import { isNativeExtPath, widenNativeRange } from "../../util/nativeSymbolRange.js";
 import { dominantRoot } from "../../util/dominantRoot.js";
 import { buildRootResolver, inferClusterRoot, commonAncestorDir, type RootResolver } from "../../util/projectRoot.js";
+import { SENTINEL_START, SENTINEL_END } from "@tokenlighten/agents-md";
 import { classifyCommentLines, matchesAreCommentOnly } from "../../util/lineClassify.js";
 import { loadGraphIndex } from "../../graph/index.js";
 import { collectSymbols, type CollectedSymbol } from "../../symbols/collectSymbols.js";
 import { isMarkdownPath, parseMarkdownHeadings } from "../../util/markdownSections.js";
+import { trace } from "../../util/trace.js";
+import { applyHybridRetrieval } from "../retrieval/index.js";
+import { applyCompoundRetrieval } from "../compound/index.js";
 
 // ---------------------------------------------------------------------------
 // Constants (exported for budget tests)
@@ -356,6 +367,35 @@ export function isWithinRoleSearchScope(
  */
 const STYLE_FAMILY_WHY: ReadonlySet<string> = new Set(["family-stem", "presentation-family"]);
 
+/**
+ * `why` tags produced by generic full-text/co-occurrence layers (Layer 3's
+ * plain substring search, its variant/reference cousins) — never a targeted
+ * symbol- or name-level match. A path reachable ONLY through one of these
+ * cannot, on its own, seed `addSiblingValueStructuralCandidates`'s family
+ * scan: an incidental substring hit in an unrelated project's same-named
+ * file is otherwise indistinguishable from the real contract (R9,
+ * 2026-08-21).
+ */
+export const SIBLING_SEED_WEAK_WHY: ReadonlySet<string> = new Set([
+  "exact-text", "exact-text:distinctive", "variant-text", "reference", "family-stem",
+]);
+
+/**
+ * Common CSS property names that double as ordinary English words (R12,
+ * 2026-08-21). A query about "the cursor" or "an overlay's position" matches
+ * `cursor:`/`position:` in essentially every stylesheet in the walk — a
+ * coincidental vocabulary collision, not real relevance. Deliberately
+ * narrow: a QUERY-DISTINCTIVE word that happens to appear in a class name
+ * (e.g. "widget" in ".widget-card") is real signal and must keep matching;
+ * only the closed set of generic CSS property keywords is gated here.
+ */
+const CSS_PROPERTY_KEYWORDS: ReadonlySet<string> = new Set([
+  "cursor", "color", "background", "display", "position", "overflow", "float",
+  "clear", "content", "order", "resize", "appearance", "direction", "opacity",
+  "border", "margin", "padding", "width", "height", "font", "transform",
+  "transition", "animation", "outline", "filter", "gap", "flex", "grid",
+]);
+
 /** Direct (non-family-scan) candidate paths — the anchors a family scan is confined by. */
 function familyScanAnchorPaths(candidates: readonly Candidate[]): string[] {
   return candidates
@@ -423,9 +463,24 @@ export interface Candidate {
   /** Optional repeated-hit envelope that supersedes the default 20-line window. */
   range?: string;
   symbol?: string;
-  kind: "symbol" | "text" | "reference" | "path-token" | "structural";
+  // "bm25f": V10-08 Hybrid Retrieval v1 (features/retrieval/) — a candidate
+  // synthesized from an in-memory BM25F index unit (markdown section, config
+  // object, test case, file metadata, or a parser-proven symbol unit) that
+  // the existing layers above did not already surface. Only ever produced by
+  // features/retrieval/index.ts's applyHybridRetrieval, gated by
+  // TL_BM25F_CANDIDATE; see util/flags.ts.
+  kind: "symbol" | "text" | "reference" | "path-token" | "structural" | "bm25f";
   score: number;
   why: string;
+  /**
+   * Query identifier tokens this candidate is KNOWN to cover, recorded by the
+   * layer that produced it (the text/reference layers know exactly which token
+   * they searched for; the filename-match layer knows which basename tokens
+   * matched and which extra token its refined symbol carries). Path/symbol
+   * names are re-derived on demand, so a layer that leaves this undefined
+   * still gets its name-derived coverage — see coveredQueryTokens().
+   */
+  covers?: readonly string[];
   /**
    * DESIGN-v0.8 §A6 deliverable 1: force-admit this candidate as a REQUIRED
    * surface (ImpactCandidate.required) even when it lands in `related`
@@ -709,9 +764,21 @@ function computeDominantRoot(
   // the nested marker roots), and returning "" is exactly what lets the
   // out-of-root demotion sink candidates that live in the LOSING nested roots
   // (the honest root-miss case: a strong identifier whose only match sits in a
-  // nested root that did not win the vote).
+  // nested root that did not win the vote) — BUT only when the workspace root
+  // is itself a genuine project (resolver.workspaceRootIsProject). When it is
+  // not, "" is just the fallback sentinel for an incidental mix of
+  // manifest-less files (a scratch/ dir, a fixture/evidence dump, a held-out
+  // corpus, ...) that share no real project identity with each other — it
+  // must not be able to outvote a real marker root purely by accumulating
+  // enough same-token spray (R4). Zeroing its weight (rather than excluding
+  // those candidates outright) still lets them win on the RARE case where
+  // every OTHER root also nets to <= 0, and leaves them fully eligible as
+  // penalized out-of-root candidates either way.
   if (markerRoots.size > 1) {
-    const best = dominantRoot(candidates, (c) => rootByCandidate.get(c)!, (c) => c.score);
+    const weightOf: (c: Candidate) => number = resolver.workspaceRootIsProject
+      ? (c) => c.score
+      : (c) => (rootByCandidate.get(c) === "" ? 0 : c.score);
+    const best = dominantRoot(candidates, (c) => rootByCandidate.get(c)!, weightOf);
     if (best !== null) return finalize(best);
   }
 
@@ -1407,6 +1474,31 @@ const MARKDOWN_CONTRACT_MIN_BYTES = 4096;
  * most distinct term hits — i.e. the section that is actually ABOUT the
  * query, not merely a section that happens to mention one shared word.
  */
+/**
+ * Locate TL's own managed-instructions sentinel block
+ * (`<!-- tokenlighten:mcp-instructions:start -->` … `...:end -->`) by
+ * 0-based line index, if present. Reuses the canonical sentinel strings
+ * from @tokenlighten/agents-md (the package that owns injecting/rewriting
+ * this exact block into AGENTS.md/CLAUDE.md and the per-client stub
+ * mirrors) rather than re-deriving them, so a future sentinel-format change
+ * cannot silently desync the two packages.
+ *
+ * Fails open (returns null, i.e. "no block found") on an unterminated start
+ * sentinel — a malformed doc is not this scan's problem to diagnose; it
+ * should keep scanning the file as plain prose rather than guess a range.
+ */
+function findManagedBlockLineRange(lines: readonly string[]): { start: number; end: number } | null {
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.includes(SENTINEL_START)) { start = i; break; }
+  }
+  if (start < 0) return null;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i]!.includes(SENTINEL_END)) return { start, end: i };
+  }
+  return null;
+}
+
 function addMarkdownContractCandidates(
   _workspace: string,
   input: LocateInput,
@@ -1436,6 +1528,22 @@ function addMarkdownContractCandidates(
     const headings = parseMarkdownHeadings(raw);
     if (headings.length === 0) continue;
 
+    // Issue #4 (2026-08-21): TL's own managed guide block is dense with
+    // ordinary code-ish words ("server", "always", "edit", "handle", ...)
+    // because it IS a protocol description — so almost any two-word query
+    // shares enough vocabulary with it to win this scan's ">= 2 distinct
+    // terms" admission rule. That text is never task evidence: it is TL's
+    // own operating instructions, already delivered to the host verbatim
+    // (AGENTS.md/CLAUDE.md injection at session start, or read directly by
+    // an agent that opens one of the per-client stub mirrors). Exclude the
+    // sentinel-delimited block's own lines from the term-hit scan entirely
+    // — for a stub file whose content IS only the block (.clinerules/,
+    // .cursor/rules/, .continue/rules/, .github/copilot-instructions.md)
+    // this naturally leaves zero hits and the file mints no candidate at
+    // all; for AGENTS.md itself, its own non-block prose (repo table,
+    // conventions, …) remains eligible exactly as before.
+    const managedBlock = findManagedBlockLineRange(lines);
+
     // governingHeadingLine[i] = 1-based line number of the nearest heading
     // at/above line i (0 if none yet — e.g. before the first heading).
     const governingHeadingLine: number[] = new Array(lines.length).fill(0);
@@ -1452,6 +1560,7 @@ function addMarkdownContractCandidates(
     // Bucket distinct term hits per governing heading.
     const hitsByHeading = new Map<number, Set<string>>();
     for (let i = 0; i < lines.length; i++) {
+      if (managedBlock && i >= managedBlock.start && i <= managedBlock.end) continue;
       const heading = governingHeadingLine[i];
       if (heading === 0) continue; // no enclosing section yet
       const lower = lowerLines[i]!;
@@ -1672,9 +1781,26 @@ function addSiblingValueStructuralCandidates(
   context: QueryContext,
   walkCache: WalkCache,
 ): void {
+  // R9 (2026-08-21): a "contract" classification alone is not enough to seed
+  // a scan that force-admits OTHER files as REQUIRED — the seed itself must
+  // be reachable through a TARGETED match (an actual symbol/name lookup),
+  // not merely a generic full-text substring hit. Layer 3's plain
+  // `exact-text` search finds an unrelated benchmark fixture's own
+  // same-named contract file (e.g. an "errors" module in a project this
+  // query never mentions) just as readily as the real one; a `query-symbol`
+  // (or stronger) hit for the SAME path means the query actually named one
+  // of this file's own declared symbols, which a coincidental substring
+  // cannot fake.
+  const pathsWithTargetedMatch = new Set(
+    candidates
+      .filter((c) => !SIBLING_SEED_WEAK_WHY.has(c.why))
+      .map((c) => c.path),
+  );
   const contractPaths = new Set(
     candidates
-      .filter((c) => classifySurface(c.path, c.symbol) === "contract")
+      .filter((c) =>
+        pathsWithTargetedMatch.has(c.path) && classifySurface(c.path, c.symbol) === "contract"
+      )
       .map((c) => c.path),
   );
   if (contractPaths.size === 0) return;
@@ -1698,6 +1824,14 @@ function addSiblingValueStructuralCandidates(
   // still fans out. Fewer than 2 siblings means no family to enumerate.
   if (siblingTokens.size < 2) return;
 
+  // Family-scan anchor scope (shared by both scans below): confines the
+  // presentation and code-file scans to the root(s) the located contract
+  // candidate(s) actually live in. Without this, >= 2 generic member names
+  // (e.g. a benchmark fixture's own unrelated enum) co-occurring anywhere
+  // else in the workspace walk force-admit that file as REQUIRED regardless
+  // of project boundary (R9, 2026-08-21).
+  const siblingScanScope = roleSearchScopePrefixes(familyScanAnchorPaths(candidates));
+
   // ---- Presentation/style scan (only when the workspace has stylesheets) ----
   if (workspaceHasStyleFiles(walkCache)) {
     // Stems grouped BY MEMBER (not pooled) so admission requires the file to
@@ -1720,11 +1854,10 @@ function addSiblingValueStructuralCandidates(
       // so the DIRECT hits own its scope — otherwise an unrelated sibling
       // project's design-token file, which names the same generic member words,
       // is admitted on equal footing with the anchored one (T09).
-      const siblingStyleScope = roleSearchScopePrefixes(familyScanAnchorPaths(candidates));
       for (const f of walkCache.get({ extraExts: STYLE_EXTRA_EXTS })) {
         if (!STYLE_EXTS.has(f.ext)) continue;
         if (isExcluded(f.relPath, scope)) continue;
-        if (!isWithinRoleSearchScope(f.relPath, siblingStyleScope)) continue;
+        if (!isWithinRoleSearchScope(f.relPath, siblingScanScope)) continue;
         let raw: string;
         try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
         const lines = raw.split(/\r?\n/);
@@ -1773,6 +1906,7 @@ function addSiblingValueStructuralCandidates(
   for (const f of codeFiles) {
     if (emitted >= SIBLING_ENUM_MAX_CANDIDATES) break;
     if (isExcluded(f.relPath, scope)) continue;
+    if (!isWithinRoleSearchScope(f.relPath, siblingScanScope)) continue;
     // Skip the contract file(s) the members were extracted from — the family
     // definition is not itself the "other site" this scan is for (and it is
     // already a candidate). A DIFFERENT contract file that also lists the
@@ -2274,6 +2408,13 @@ function selectRelatedCandidates(raw: Candidate[], max: number): Candidate[] {
 // ---------------------------------------------------------------------------
 
 export async function locateTaskContext(workspace: string, input: LocateInput): Promise<LocateOutput> {
+  // V10-06 (beta.1): heavy-provider invocation signal, observability only —
+  // no-ops unless TL_TRACE=1 (see util/trace.ts's isTraceEnabled). This is
+  // the layered candidate-retrieval entry V10-04/V10-06 call the "heavy
+  // provider" (symbol/text/reference search fan-out, structural candidates,
+  // dominant-root scoring below) — a known-local fast-path call must never
+  // reach this function at all.
+  trace("heavy_provider_invoked", { provider: "locateTaskContext", query_chars: input.query.length }, workspace);
   // maxTokens kept for backward-compat but is a no-op in Phase 3 (location-only).
   void input.maxTokens;
   const limit = Math.min(input.limit ?? 3, 10);
@@ -2337,6 +2478,69 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   }
 
   // -------------------------------------------------------------------------
+  // Layer 1b (R5): dotted Class.method / Class#method resolution
+  // -------------------------------------------------------------------------
+  // A query naming "CommentService.create" means ONE concept: look INSIDE
+  // CommentService for its create method — not two unrelated tokens. Plain
+  // tokenization loses that structure (extractIdentifiers splits on "." into
+  // "CommentService" and "create"), and the bare method name routinely
+  // collides with TASK_MANAGEMENT_WORDS' generic-verb penalty meant for
+  // queries like "create a new field" (create/update/delete/... are ALSO
+  // common method names), burying the actual method Layer 2 would otherwise
+  // never surface. Resolve the class first (a name search on "CommentService"
+  // is not penalized — it is not a generic word), then anchor on the method
+  // inside that specific file via the same machinery Layer 2's filename-match
+  // refinement uses.
+  for (const { className, methodName } of extractClassMethodPairs(input.query)) {
+    const classResult = await searchSymbols(
+      {
+        query: className,
+        ...(input.lang ? { lang: input.lang } : {}),
+        ...(scope ? { path: scope } : {}),
+        limit: 10,
+      },
+      workspace,
+    );
+    const exactNameMatches = classResult.locations.filter(
+      (loc) => loc.symbol.toLowerCase() === className.toLowerCase(),
+    );
+    const classLoc = exactNameMatches.find((loc) => loc.kind === "class") ?? exactNameMatches[0];
+    if (!classLoc || isExcluded(classLoc.path, scope)) continue;
+    if (candidates.some((c) => c.path === classLoc.path && c.why === "class-method")) continue;
+    // Anchor on the method inside the class's own file. Not searchSymbols:
+    // its index only covers top-level declarations — a method nested
+    // inside a class (e.g. CommentService.create) never appears in it at
+    // all, scoped to the file or not (verified empirically). refineFilename
+    // MatchSymbol parses the file directly via tree-sitter and DOES see
+    // nested methods; its tie-break now also prefers an exact name match
+    // ("create") over a same-covering compound name ("CommentCreateInput")
+    // — see that function's isExactMatch tier.
+    const refined = await refineFilenameMatchSymbol(workspace, classLoc.path, [methodName]);
+    if (refined) {
+      candidates.push({
+        path: classLoc.path,
+        line: refined.line,
+        symbol: refined.symbol,
+        kind: "symbol",
+        score: applyPenalties(1.6, classLoc.path, scope, queryContext),
+        why: "class-method",
+      });
+    } else {
+      // The method wasn't found inside the class's own file; still anchor
+      // on the class declaration rather than dropping a strong, exact
+      // class-name match entirely.
+      candidates.push({
+        path: classLoc.path,
+        line: classLoc.line,
+        symbol: classLoc.symbol,
+        kind: "symbol",
+        score: applyPenalties(1.3, classLoc.path, scope, queryContext),
+        why: "class-method",
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Layer 2: Symbol search over query tokens (if no symbol provided or
   //           layer 1 found nothing distinctive)
   // -------------------------------------------------------------------------
@@ -2344,6 +2548,15 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     // Extract identifier-like tokens from the query.
     const tokens = extractIdentifiers(input.query)
       .filter((token) => !isProtocolSymbolSearchToken(token));
+    // R2: fetch a wider raw pool per token (20, not 5) and rank it locally
+    // before truncating back down to what actually becomes a candidate. A
+    // single common token (e.g. "codec") can match many symbols; deciding
+    // survivors purely by searchIndexSymbols' own internal order routinely
+    // buried the symbol that actually answers the query (applyResponseCodec)
+    // beneath same-token noise (codecId, CODEC_REGISTRY, ...) that never
+    // even reached this file's candidate pool at limit:5.
+    const SYMBOL_SEARCH_FETCH_LIMIT = 20;
+    const SYMBOL_SEARCH_KEEP_PER_TOKEN = 5;
     for (const token of tokens.slice(0, 3)) {
       // Symbol indexes expose language identifiers, so a query field such as
       // `content_sufficiency` should look for `contentSufficiency`. The exact
@@ -2355,11 +2568,32 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
           query: symbolQuery,
           ...(input.lang ? { lang: input.lang } : {}),
           ...(scope ? { path: scope } : {}),
-          limit: 5,
+          limit: SYMBOL_SEARCH_FETCH_LIMIT,
         },
         workspace,
       );
-      for (const loc of symResult.locations) {
+      // Rank this token's raw hits by kind-tier before truncating — see
+      // rankSymbolHitQuality's doc comment for the rationale (and why an
+      // other-token-coverage component was tried and then cut).
+      const ranked = symResult.locations
+        .map((loc, order) => ({ loc, order, quality: rankSymbolHitQuality(loc) }))
+        .sort((a, b) => b.quality - a.quality || a.order - b.order)
+        .slice(0, SYMBOL_SEARCH_KEEP_PER_TOKEN);
+      // R0: an exact-and-workspace-unique symbol-match score boost was
+      // TRIED here (raising this hit above the flat 0.6 when the query
+      // names this symbol precisely and it is the only one in the
+      // workspace by that name) and CUT. Even narrowed to unique+exact
+      // matches it regressed the sibling-member-recall corpus: boosting
+      // TicketPriority's own declaration to a high-confidence REQUIRED
+      // primary suppressed the sibling-enumeration mechanism that also
+      // needs to surface statsService.ts alongside it. The R0 bug this was
+      // meant to fix (buildInitializeInstructions/server.ts losing to
+      // serverInstructions.ts) is already resolved by the basename
+      // containment ratio-guard above matchBasenameTokens's qt.includes(nt)
+      // branch — server.ts now surfaces via Layer 3 (exact-text) instead;
+      // a Layer 2 precision improvement was a nice-to-have, not required,
+      // and not worth this corpus risk. See the wave report for detail.
+      for (const { loc } of ranked) {
         if (isExcluded(loc.path, scope)) continue;
         if (candidates.some((c) => c.path === loc.path && c.line === loc.line)) continue;
         candidates.push({
@@ -2399,6 +2633,11 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
         kind: "text",
         score: applyPenalties(1.2, m.path, scope, queryContext),
         why: isDistinctive ? "exact-text:distinctive" : "exact-text",
+        // This hit covers exactly ONE query token: the one searched for.
+        // Recorded so the coverage-dominance gate below can tell a file that
+        // merely contains one generic query word from one that is about
+        // several of them (see coveredQueryTokens).
+        ...(isAsciiQueryToken(tq) ? { covers: [tq.toLowerCase()] } : {}),
       });
     }
   }
@@ -2426,6 +2665,7 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
         kind: "reference",
         score: applyPenalties(0.5, ref.path, scope, queryContext),
         why: "reference",
+        ...(isAsciiQueryToken(token) ? { covers: [token.toLowerCase()] } : {}),
       });
     }
   }
@@ -2452,6 +2692,16 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     const isFamilyStem = isFamilyStemToken(vt);
     for (const m of findResult.matches) {
       if (isExcluded(m.path, scope)) continue;
+      // R12 (2026-08-21): a bare word that is ALSO a generic CSS property
+      // name (e.g. "cursor") matches nearly every stylesheet in the walk
+      // regardless of topic — unlike a query-distinctive word that merely
+      // happens to appear in a class name (e.g. "widget" in ".widget-card"),
+      // which IS real relevance signal and must keep working. Only the
+      // former needs gating: a style file may not enter through this
+      // generic variant scan on a bare CSS-property-keyword match; it can
+      // still enter via any OTHER token, via family-stem shape, or via the
+      // dedicated, properly root-scoped style scan below.
+      if (!isFamilyStem && CSS_PROPERTY_KEYWORDS.has(vt.toLowerCase()) && STYLE_EXTS.has(path.extname(m.path))) continue;
       if (candidates.some((c) => c.path === m.path && c.line === m.line)) continue;
       candidates.push({
         path: m.path,
@@ -2500,6 +2750,10 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // requested the identical (lang, subPath) option-set already populated it.
   // -------------------------------------------------------------------------
   const pathTokens = extractIdentifiers(input.query).map((t) => t.toLowerCase());
+  // Issue #2 (a): per filename-matched path, the symbol that answers the rest
+  // of the query. Consumed at the per-path collapse below, which is where a
+  // file's served LINE is decided.
+  const refinedByPath = new Map<string, NonNullable<Awaited<ReturnType<typeof refineFilenameMatchSymbol>>>>();
   const getCodeFiles = (): FoundFile[] =>
     walkCache.get({
       ...(input.lang ? { lang: input.lang } : {}),
@@ -2564,6 +2818,53 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
       }
     }
 
+    // R8: when >= 2 files share the SAME basename (a re-export barrel in
+    // one directory, the real implementation in another — e.g.
+    // tools/readCodeTaskPack.ts's `export * from
+    // "../features/task-pack/readCodeTaskPack.js"` beside the 21k-line
+    // features/task-pack/readCodeTaskPack.ts it re-exports), they get
+    // IDENTICAL matched sets and IDENTICAL baseScore below, so whichever the
+    // workspace walk happened to visit first silently won — routinely the
+    // tiny shim, not the file with the actual declarations a task needs.
+    // Only check content (isPureReexportBarrel) for genuine same-basename
+    // ties, keeping cost bounded — the vast majority of filename matches
+    // have no basename collision at all and never reach this loop body.
+    const barrelPaths = new Set<string>();
+    if (nameMatches.length > 1) {
+      const byBasename = new Map<string, string[]>();
+      for (const { relPath } of nameMatches) {
+        const base = path.basename(relPath);
+        const arr = byBasename.get(base);
+        if (arr) arr.push(relPath); else byBasename.set(base, [relPath]);
+      }
+      for (const paths of byBasename.values()) {
+        if (paths.length < 2) continue;
+        for (const p of paths) {
+          if (isPureReexportBarrel(workspace, p)) barrelPaths.add(p);
+        }
+      }
+    }
+
+    // Issue #2 (a): a basename match says which FILE is about a query token,
+    // never WHERE in it to look — the pool's line for such a file is whatever
+    // an earlier layer happened to surface, which for a name-driven symbol
+    // hit is just the file's first symbol. Ask the file itself which symbol
+    // covers the query tokens the NAME did not, so the served slice is the
+    // one that answers. Bounded: only when a query token is left outstanding,
+    // only the strongest FILENAME_SYMBOL_REFINE_LIMIT files, and only files
+    // small enough to parse cheaply.
+    const asciiPathTokens = pathTokens.filter(isAsciiQueryToken);
+    if (asciiPathTokens.length >= 2) {
+      const refineOrder = [...nameMatches]
+        .sort((a, b) => b.matched.size - a.matched.size)
+        .slice(0, FILENAME_SYMBOL_REFINE_LIMIT);
+      for (const { relPath, matched } of refineOrder) {
+        const remaining = asciiPathTokens.filter((t) => !matched.has(t));
+        const refined = await refineFilenameMatchSymbol(workspace, relPath, remaining);
+        if (refined !== null) refinedByPath.set(relPath, refined);
+      }
+    }
+
     for (const { relPath, matched } of nameMatches) {
       // A single-token match on a token already claimed by a >=2-token match
       // is redundant noise — score it BELOW the exact-text baseline (0.6) so
@@ -2573,11 +2874,17 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
       const soleClaimed =
         matched.size === 1 && claimedByMulti.has([...matched][0]!);
       const baseScore = soleClaimed ? 0.6 : basenameMatchScore(matched.size);
+      // R8: a pure re-export barrel sharing its basename with a real
+      // implementation (see barrelPaths above) is demoted below it — a
+      // basename match on its own says nothing about WHICH of several
+      // same-named files the query means, and a re-export shim is
+      // essentially never the file a task needs to look inside.
+      const barrelAdjustedScore = barrelPaths.has(relPath) ? baseScore - 0.5 : baseScore;
       // Score on the basename match's own merits: skip the scope-hint
       // boost/penalty (see applyPenalties) so a name-matched bug file under
       // control/ is not out-ranked by unrelated text hits under mode/ merely
       // because the query happened to contain the directory word "mode".
-      const nameScore = applyPenalties(baseScore, relPath, scope, queryContext, { skipScopeHint: true });
+      const nameScore = applyPenalties(barrelAdjustedScore, relPath, scope, queryContext, { skipScopeHint: true });
       filenameMatchPaths.add(relPath);
       if (matched.size === 1) singleTokenFilenameMatchPaths.add(relPath);
 
@@ -2594,15 +2901,35 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
             c.score = nameScore;
             c.why = "filename-match";
           }
+          // The basename layer KNOWS which query tokens it matched; recording
+          // them keeps the coverage bookkeeping from having to re-derive (and
+          // disagree with) that judgement.
+          c.covers = [...new Set([...(c.covers ?? []), ...matched])];
         }
       } else {
-        addCandidateOnce(candidates, {
-          path: relPath,
-          line: 1,
-          kind: "path-token",
-          score: nameScore,
-          why: "filename-match",
-        });
+        const refined = refinedByPath.get(relPath);
+        addCandidateOnce(candidates, refined === undefined
+          ? {
+              path: relPath,
+              line: 1,
+              kind: "path-token",
+              score: nameScore,
+              why: "filename-match",
+              covers: [...matched],
+            }
+          : {
+              // Nothing else surfaced this file, so the refinement is also the
+              // only line worth naming — better than the bare line 1 a pure
+              // name match used to fall back to.
+              path: relPath,
+              line: refined.line,
+              endLine: refined.endLine,
+              symbol: refined.symbol,
+              kind: "symbol",
+              score: nameScore,
+              why: "filename-match",
+              covers: [...new Set([...matched, ...refined.covered])],
+            });
       }
     }
   }
@@ -2820,7 +3147,30 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     const range = `${start}-${end}`;
     for (const candidate of cluster) candidate.range = range;
   }
-  filteredCandidates.sort((a, b) => b.score - a.score);
+  // V10-08 (beta.2, flag-gated): BM25F candidate generation + RRF fusion.
+  // Both OFF is byte-identical to the original single line below — the "on"
+  // branch is the ENTIRE new behavior surface, isolated to
+  // features/retrieval/ (see its own file docs for the ranker/floor design).
+  if (bm25fCandidateEnabled() || rrfFusionEnabled()) {
+    await applyHybridRetrieval(
+      {
+        workspace,
+        query: input.query,
+        ...(input.symbol ? { symbol: input.symbol } : {}),
+        codeFiles: getCodeFiles(),
+        walkCache,
+        // V11-02 (flag: TL_RRF_PROFILES): thread the caller's explicit scope
+        // as profile-inference context ONLY under the flag. index.ts's own
+        // profilesOn gate (TL_RRF_PROFILES && TL_RRF_FUSION) is the real
+        // safety backstop; this just avoids building an unused object on the
+        // hot path when the flag is off.
+        ...(rrfProfilesEnabled() ? { profileContext: { ...(requestedScope ? { explicitPath: requestedScope } : {}) } } : {}),
+      },
+      filteredCandidates,
+    );
+  } else {
+    filteredCandidates.sort((a, b) => b.score - a.score);
+  }
 
   // Collapse to the single highest-scored line per PATH before taking the top
   // N. `topN` feeds the ambiguous-path candidate list / candidateDetails and
@@ -2838,6 +3188,25 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     seenTopPath.add(c.path);
     return true;
   });
+  // Issue #2 (a): the collapse above decides which LINE of a file is served,
+  // and for a name-matched file that line is whatever a name-driven layer
+  // happened to emit first — routinely the file's first declaration, which is
+  // not what the query asked about. Re-anchor such a representative on the
+  // symbol that covers the rest of the query. Rank is untouched (the file
+  // keeps the score the pool gave it); only the anchor moves, and only for a
+  // representative that was itself chosen by NAME — a text or reference hit
+  // earned its line from content and keeps it.
+  for (const c of dedupedByPath) {
+    const refined = refinedByPath.get(c.path);
+    if (refined === undefined || c.line === refined.line) continue;
+    if (c.kind !== "symbol" && c.kind !== "path-token") continue;
+    c.kind = "symbol";
+    c.symbol = refined.symbol;
+    c.line = refined.line;
+    c.endLine = refined.endLine;
+    c.covers = [...new Set([...(c.covers ?? []), ...refined.covered])];
+    delete c.range;
+  }
   // Collapse each C/C++ module's header+source (both filename matches) into a
   // single ranking slot BEFORE taking the top N, preferring the source
   // (.cpp/.c). A two-file module otherwise consumes two of the (small) top-N
@@ -2882,7 +3251,22 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     }
   }
 
-  const shouldHit = uniqueExactSymbol || uniqueExactText || (largeMargin && top.score >= 0.8) || distinctivePrimary !== null;
+  // Coverage dominance (issue #2): on a query carrying several identifier
+  // concepts, a top candidate that covers STRICTLY MORE of them than every
+  // other survivor is not "ambiguous" — the runner-ups are about less of the
+  // question, however close their scores happen to land. Without this the
+  // >= 0.8 margin gate turns "the one file named for concept A whose exported
+  // symbol is concept B" into a candidate-list against its own siblings, each
+  // of which only carries B.
+  const asciiQueryTokensForGate = queryIdentTokens.filter(isAsciiQueryToken);
+  let coverageDominant = false;
+  if (asciiQueryTokensForGate.length >= 2 && topN.length > 1) {
+    const covers = topN.map((c) => coveredQueryTokens(c, asciiQueryTokensForGate).size);
+    coverageDominant = covers[0]! >= 2 && covers.slice(1).every((n) => n < covers[0]!);
+  }
+
+  const shouldHit = uniqueExactSymbol || uniqueExactText || (largeMargin && top.score >= 0.8) ||
+    distinctivePrimary !== null || (coverageDominant && top.score >= 0.8);
 
   if (!shouldHit) {
     // -----------------------------------------------------------------------
@@ -2912,7 +3296,11 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     // only and would already have cleared the largeMargin gate above if it
     // were truly unambiguous).
     // -----------------------------------------------------------------------
-    const isSingleTokenQuery = input.query.trim().split(/\s+/).filter((t) => t.length > 0).length === 1;
+    // Count REAL extracted identifier/CJK tokens, not whitespace-separated
+    // words: Japanese queries routinely carry zero ASCII whitespace, so a
+    // whitespace split always collapsed them to "1 word" regardless of how
+    // many distinct identifiers/JA segments they actually named (R1).
+    const isSingleTokenQuery = extractIdentifiers(input.query).length === 1;
     if (isSingleTokenQuery) {
       const filenameMatchCands = topN.filter((c) => c.why === "filename-match");
       const filenameMatchRoots = new Set(filenameMatchCands.map((c) => rootResolver.rootOf(c.path)));
@@ -2969,13 +3357,18 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // surface closure candidates when the query looks cross-cutting.
   const seenPathLine = new Set<string>([`${primary.path}:${primary.line}`]);
   const allowSameSurfaceRelated = looksLikeMultiSurface(input.query);
-  const relatedRaw = filteredCandidates
+  // Issue #2 (b): the definition the primary delegates to is part of the
+  // answer even though nothing in the query names it. Admitted BEFORE the
+  // filter below and exempt from its same-surface rule — a callee in the same
+  // architectural layer as its caller is the normal case, not a duplicate.
+  const importEdge = await importEdgeCandidates(workspace, primary, queryIdentTokens, getCodeFiles());
+  const relatedRaw = [...filteredCandidates, ...importEdge]
     .filter((c) => {
       const key = `${c.path}:${c.line}`;
       if (seenPathLine.has(key)) return false;
       const surf = classifySurface(c.path, c.symbol);
       if (surf === "unknown") return false;
-      if (surf === primarySurface && !allowSameSurfaceRelated) return false;
+      if (surf === primarySurface && !allowSameSurfaceRelated && c.why !== "import-edge") return false;
       seenPathLine.add(key);
       return true;
     });
@@ -3106,6 +3499,35 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
         };
         related.push(attachHandle(workspace, base));
       }
+
+      // -----------------------------------------------------------------------
+      // V11-05 (TL_COMPOUND_RETRIEVAL, composes with TL_GRAPH_EVIDENCE): a
+      // bounded read-only hop closure over graph evidence — definition ->
+      // references -> representative consumers -> tests/config, realized in
+      // ONE analyzeImpact call (features/compound/). Purely ADDITIVE to
+      // `related`, appended LAST: `primary` and every candidate already in
+      // `related` are never touched, reordered, or evicted by this block, and
+      // the LOCATE_SUCCESS_CAP byte trim below (which pops `related` from the
+      // END when oversized) always sacrifices these entries first — so an
+      // exact-path/required floor candidate can never be displaced by a
+      // compound addition. Reuses the graphIndex/rootPrefix this block already
+      // resolved rather than a second lookup. See features/compound/index.ts's
+      // applyCompoundRetrieval for the seed/decline/tier-mapping rules.
+      // -----------------------------------------------------------------------
+      if (compoundRetrievalEnabled() && graphEvidenceEnabled()) {
+        const compound = applyCompoundRetrieval({
+          workspace,
+          graphIndex,
+          rootPrefix,
+          files: walkCache.get().map((f) => f.relPath),
+          primary,
+          candidates: filteredCandidates,
+          ...(scope ? { scope } : {}),
+          seenPathLine: graphSeenPathLine,
+        });
+        for (const candidate of compound.related) related.push(attachHandle(workspace, candidate));
+        trace("compound_retrieval_applied", compound.trace, workspace);
+      }
     }
   }
 
@@ -3122,9 +3544,38 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // and, symmetrically, still lazy (never walked) for a non-C/C++ result,
   // since WalkCache.get() only walks on first access to a given option-set.
   const getWorkspaceFiles = (): FoundFile[] => walkCache.get();
+  // R0 (2026-08-21, W4-A pack-augmentation-pollution forensics): a
+  // header/source-pair or #include closure seed must itself be TRUSTWORTHY
+  // evidence for THIS task, not merely any file that happens to already sit
+  // in `related`. Before this fix, the loop below expanded EVERY entry in
+  // `related` unconditionally — including a `variant-text` hit (Layer 3/4's
+  // generic full-text scan) in a project root that has nothing to do with
+  // the primary's own root, already penalized to (near) zero by the
+  // out-of-root demotion pass above but never EXCLUDED by it. That
+  // near-zero-confidence seed still spawned a full, UNPENALIZED
+  // header/source + #include closure (addCppRelated's confidence is a flat
+  // 0.5/0.65, independent of the seed's own score), which then out-competed
+  // the query's own NAMED file for the surface budget downstream.
+  //
+  // Two independent conditions gate a seed, matching the two ways the
+  // pollution above was shown to enter: (1) `why` must NOT be one of
+  // SIBLING_SEED_WEAK_WHY — the same "not a targeted match" test R9 already
+  // applies to the sibling-value structural scan, reused here rather than
+  // re-invented; a plain text/variant/reference hit proves only "this token
+  // appears somewhere in this file", never "this file is the right one to
+  // expand". (2) the seed's path must be within the PRIMARY's own project
+  // root (roleSearchScopePrefixes/isWithinRoleSearchScope — the same
+  // dominant-root discipline the out-of-root demotion pass above already
+  // computes, applied here as a hard admission gate rather than a soft
+  // score penalty). `primary.path` itself is exempt from both checks: it is
+  // the locator's own resolved answer, the strongest evidence there is.
+  const closureRootPrefixes = roleSearchScopePrefixes([primary.path]);
+  const isTrustworthyClosureSeed = (c: ImpactCandidate): boolean =>
+    !SIBLING_SEED_WEAK_WHY.has(c.why) && isWithinRoleSearchScope(c.path, closureRootPrefixes);
   expandCppModuleClosure(workspace, primary.path, related, seenPathLine, getWorkspaceFiles);
   for (const candidate of [...related]) {
     if (related.length >= 12) break;
+    if (!isTrustworthyClosureSeed(candidate)) continue;
     expandCppModuleClosure(workspace, candidate.path, related, seenPathLine, getWorkspaceFiles);
   }
 
@@ -3729,6 +4180,40 @@ function splitBasenameTokens(basename: string): string[] {
 }
 
 /**
+ * Whether a query token matches a file's COMPACTED basename (separators
+ * removed) WITHOUT crossing one of that name's own word boundaries.
+ *
+ * The compacted form exists for two real cases: a short token living inside
+ * one name word ("repo" in `qkf-report`, "enum" in `enums` — below the
+ * per-token containment floor the caller applies) and a query token that
+ * spells a multi-word name with its separators dropped ("logrotator" for
+ * `log_rotator`). A bare `fullName.includes(qt)` covers both, but it ALSO
+ * admits a span that exists only because compaction removed a boundary:
+ * `readCodeCaps.spec.ts` compacts to "readcodecapsspec", which contains
+ * "codec" across the `code`|`caps` seam — so it name-matched, and outranked
+ * real hits on, every codec query. Issue #2 (c).
+ *
+ * So: admit a span that lies entirely INSIDE one name token, or one that is
+ * an exact join of CONSECUTIVE whole tokens. Never a partial span across a
+ * seam.
+ */
+function matchesCompactedBasename(fullName: string, nameTokens: readonly string[], qt: string): boolean {
+  if (fullName === qt) return true;
+  for (const nameToken of nameTokens) {
+    if (nameToken.includes(qt)) return true;
+  }
+  for (let i = 0; i < nameTokens.length; i++) {
+    let joined = "";
+    for (let j = i; j < nameTokens.length; j++) {
+      joined += nameTokens[j]!;
+      if (joined.length > qt.length) break;
+      if (joined === qt) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Decide whether a file's basename is a high-signal match for the query and,
  * if so, how strongly. Returns the set of DISTINCT query tokens matched by
  * the basename (or null when the match is too weak to admit).
@@ -3795,10 +4280,36 @@ function splitBasenameTokens(basename: string): string[] {
  * independently surface the same file regardless of whether this admission
  * rule fires.
  */
+/**
+ * R8: true when `relPath` is a pure re-export barrel — its only non-blank,
+ * non-comment lines are `export * from "..."` / `export { ... } from "..."`
+ * — with no declaration of its own. Used to demote a basename-match tie
+ * between a shim (e.g. tools/readCodeTaskPack.ts) and the real
+ * implementation it re-exports (features/task-pack/readCodeTaskPack.ts).
+ * Cheap by construction: a real barrel is always tiny, so the size guard
+ * below skips reading almost every candidate outright.
+ */
+function isPureReexportBarrel(workspace: string, relPath: string): boolean {
+  try {
+    const abs = path.join(workspace, relPath);
+    if (fs.statSync(abs).size > 2048) return false;
+    const text = fs.readFileSync(abs, "utf8");
+    const codeLines = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith("//") && !l.startsWith("*") && !l.startsWith("/*"));
+    if (codeLines.length === 0) return false;
+    return codeLines.every((l) => /^export\s+(\*|\{[^}]*\})\s+from\s+["'][^"']+["'];?$/.test(l));
+  } catch {
+    return false;
+  }
+}
+
 export function matchBasenameTokens(
   relPath: string,
   queryTokens: string[],
   frequency?: Map<string, number> | (() => Map<string, number>),
+  resolvedSymbolFiles?: ReadonlyMap<string, ReadonlySet<string>>,
 ): Set<string> | null {
   const base = path.basename(relPath, path.extname(relPath));
   const nameTokens = splitBasenameTokens(base);
@@ -3815,12 +4326,64 @@ export function matchBasenameTokens(
   // basename-side key per query token so the distinctiveness check below
   // looks up the identifier that actually exists in the frequency table.
   const freqKeyForToken = new Map<string, string>();
+  // R0 (attempted, then REVERTED — Issue #4, 2026-08-21): the query
+  // "buildInitializeInstructions" (a bare identifier, or embedded in a
+  // larger EN/JA sentence) falsely filename-matched serverInstructions.ts
+  // and serverBuild.spec.ts, because this loop's qt.includes(nt) direction
+  // admits a long query token merely CONTAINING a shorter basename word
+  // ("instructions", "build"), with no bound on how much of qt's own
+  // length/word-composition that fragment accounts for. Two length/ratio
+  // fixes were tried and both reverted:
+  //   - a per-nt length ratio (nt must cover >= half of qt): broke the
+  //     PRE-EXISTING "two-domain wiring" test, where query token
+  //     "computeEstimatorHealthScore" legitimately matches BOTH "estimator"
+  //     AND "health" (two DIFFERENT nameTokens, each individually under
+  //     half of qt's length, but together most of it) — a per-token bar
+  //     rejects each in isolation.
+  //   - a CUMULATIVE coverage ratio (sum matched-nt lengths >= half of qt):
+  //     fixed that, but the SAME "two-domain wiring" test also needs a
+  //     SINGLE-word match ("telemetry" alone, matching query token
+  //     "publishTelemetryHealthField") to admit — and by raw length,
+  //     "telemetry"/qt = 9/28 ≈ 32% coverage while the BAD
+  //     "instructions"/qt = 12/28 ≈ 43% — the bug case has HIGHER
+  //     fractional coverage than the legitimate case. No length- or
+  //     word-count-based ratio on the (qt, nt) pair alone can separate them.
+  //
+  // A THIRD attempt (`resolvedSymbolFiles`, threading through "Layer 2
+  // already has an exact, workspace-unique symbol match for qt in a
+  // DIFFERENT file") fixed the bug correctly in isolation, but wiring it
+  // into the LIVE Layer 5a call regressed the "two-domain wiring" test via
+  // an indirect path this file's own history had not mapped: that test's
+  // success gate (locateTaskContext's `coverageDominant`/`largeMargin`)
+  // depends on the exact matched-token COUNT this function returns, and the
+  // fragment credit the fix removes was — accidentally — load-bearing score
+  // mass for an UNRELATED tie-break, not evidence the admission rule itself
+  // needed. Reverted from the LIVE Layer 5a caller (which passes no 4th
+  // argument, so `resolvedSymbolFiles` is always undefined there and this
+  // function's behavior for every existing caller is UNCHANGED byte-for-
+  // byte) and re-applied instead as a POST-HOC surface filter in
+  // readCodeTaskPack.ts (buildTaskChangeContract's caller), which can see
+  // the FINAL surface list without perturbing the locator's internal
+  // scoring. That filter is the only caller that passes a defined
+  // `resolvedSymbolFiles` (activating `strict` below).
+  const strict = resolvedSymbolFiles !== undefined;
+  // Per-token match provenance for the `strict`-only generic-noun veto
+  // below: true when qt's ONLY admission came from a >= 5-char substring
+  // CONTAINMENT (either direction) rather than an exact nameToken match or
+  // an exact whole-compacted-name match. A generic word (see GENERIC_NOUNS)
+  // is trustworthy evidence when it names a file exactly (query "status"
+  // for a real status.ts) but not when it merely happens to be a substring
+  // of an unrelated longer word (query "issue" inside a file whose name is
+  // "cumulativeReissueReceipt" — "reissue", not "issue", is that file's
+  // actual subject).
+  const isFragmentMatch = new Map<string, boolean>();
   for (const qt of queryTokens) {
     if (qt.length < 3 || STOP_WORDS.has(qt)) continue;
     let hit = false;
     let freqKey = qt;
+    let fragment = false;
     for (const nt of nameTokens) {
-      if (nt === qt) { hit = true; freqKey = nt; break; }
+      if (nt === qt) { hit = true; freqKey = nt; fragment = false; break; }
       // Substring containment either direction, but only for reasonably long
       // overlaps: BOTH tokens must be >= 5 chars. The old guard checked only the
       // QUERY token length, so a long, distinctive-looking query word could be
@@ -3831,19 +4394,62 @@ export function matchBasenameTokens(
       // too weak to be high-signal (and worse, would inherit the distinctiveness
       // of the longer token in the admission rule below). Exact equality (above)
       // and whole-name matching (below) still match shorter tokens.
-      if (qt.length >= 5 && nt.length >= 5 && (nt.includes(qt) || qt.includes(nt))) { hit = true; freqKey = nt; break; }
+      //
+      // 2026-08-21 (W4-B, defect 2 / R11 pool entry): a fix restricting the
+      // `qt.includes(nt)` direction for compound (underscore/hyphen-joined)
+      // query tokens was ATTEMPTED and REVERTED here. It correctly stopped
+      // "search_files" (containing "search") from admitting
+      // searchReferences.ts on two distinct tokens
+      // ({"search_files","references"}) and demoting findReferences.ts's own
+      // exact "references" match — see the probe in the W4-B wave report —
+      // but it also blocks EVERY other underscore-joined query token from
+      // this containment path, including enum-member literals like
+      // "URGENT_PLUS" that legitimately need it: reverting restored
+      // replayCorpus.spec.ts's "turn-economy wave 3" tew3_2/tew3_3 cases
+      // (query: "add URGENT_PLUS to the Priority enum") to green. A correct
+      // fix needs to distinguish a compound MCP-tool-name token from a
+      // compound enum-member token specifically, not compound-ness alone;
+      // left as a residual per W3-A's prior basename-scoring findings (3
+      // earlier attempts at this same function also broke corpus cases).
+      if (qt.length >= 5 && nt.length >= 5 && (nt.includes(qt) || qt.includes(nt))) {
+        hit = true; freqKey = nt; fragment = true; break;
+      }
     }
     // Also allow a query token to match the whole compacted basename
     // (e.g. query "codec" -> file "codec", "logrotator" -> "log_rotator",
-    // or the enum/plural family case "enum" -> "enums").
-    if (!hit && qt.length >= 4 && (fullName === qt || fullName.includes(qt))) { hit = true; freqKey = fullName; }
+    // or the enum/plural family case "enum" -> "enums") — but only where the
+    // match respects the compacted name's OWN word boundaries; see
+    // matchesCompactedBasename for why a bare `includes` is not enough.
+    if (!hit && qt.length >= 4 && matchesCompactedBasename(fullName, nameTokens, qt)) {
+      hit = true; freqKey = fullName; fragment = fullName !== qt;
+    }
     if (hit) {
       matched.add(qt);
       freqKeyForToken.set(qt, freqKey);
+      isFragmentMatch.set(qt, fragment);
     }
   }
 
   if (matched.size === 0) return null;
+  // strict mode's fragment-of-a-resolved-elsewhere-identifier veto: only
+  // reachable here (not inline in the loop above) because it must know the
+  // FULL matched set — a qt that fragment-matched nt is still corroborating
+  // evidence when some OTHER qt in this same matched set independently
+  // resolves the file (e.g. a second, in-file-unique identifier), so this
+  // only strips a fragment hit when it is qt's ONLY admitted evidence AND
+  // qt itself already resolved to a different file entirely.
+  if (strict && resolvedSymbolFiles) {
+    for (const qt of [...matched]) {
+      if (!isFragmentMatch.get(qt)) continue;
+      const resolvedTo = resolvedSymbolFiles.get(qt);
+      if (resolvedTo !== undefined && !resolvedTo.has(relPath)) {
+        matched.delete(qt);
+        freqKeyForToken.delete(qt);
+        isFragmentMatch.delete(qt);
+      }
+    }
+    if (matched.size === 0) return null;
+  }
   // >= 2 distinct matched tokens already admits outright — do not resolve a
   // lazy `frequency` getter (i.e. do not trigger its workspace walk) when the
   // rarity check is not even going to be consulted.
@@ -3853,10 +4459,13 @@ export function matchBasenameTokens(
   const hasDistinctive = freqMap
     ? [...matched].some((t) => {
         if (STOP_WORDS.has(t)) return false;
+        if (strict && isFragmentMatch.get(t) && GENERIC_NOUNS.has(t)) return false;
         const key = freqKeyForToken.get(t) ?? t;
         return (freqMap.get(key) ?? Infinity) <= BASENAME_RARITY_THRESHOLD;
       })
-    : [...matched].some((t) => t.length >= 5 && !STOP_WORDS.has(t));
+    : [...matched].some((t) =>
+        t.length >= 5 && !STOP_WORDS.has(t) && !(strict && isFragmentMatch.get(t) && GENERIC_NOUNS.has(t)),
+      );
   if (hasDistinctive) return matched;
   return null;
 }
@@ -3915,6 +4524,400 @@ function basenameMatchScore(matchedCount: number): number {
     case 2: return 1.5;
     default: return 1.7; // 3+
   }
+}
+
+/**
+ * Does a query token match a NAME token? Equality, or a >= 5-char containment
+ * either way — deliberately the SAME rule matchBasenameTokens admits a
+ * basename on, so "this file's name is about token X" and "this candidate
+ * covers token X" can never disagree ("classified" matching the basename
+ * token "class" but then counting as zero coverage is exactly the kind of
+ * split that demoted a correct answer out of the pack).
+ */
+function queryTokenMatchesName(queryToken: string, nameToken: string): boolean {
+  if (queryToken === nameToken) return true;
+  return queryToken.length >= 5 && nameToken.length >= 5 &&
+    (nameToken.includes(queryToken) || queryToken.includes(nameToken));
+}
+
+/** The subset of `queryTokens` that some token of `nameTokens` matches. */
+function queryTokensCoveredByNames(queryTokens: readonly string[], nameTokens: Iterable<string>): string[] {
+  const names = [...nameTokens];
+  return queryTokens.filter((qt) => names.some((nt) => queryTokenMatchesName(qt, nt)));
+}
+
+/** An ASCII identifier token usable for coverage bookkeeping (CJK spans are not). */
+function isAsciiQueryToken(token: string): boolean {
+  return token.length >= 3 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(token);
+}
+
+/**
+ * The query identifier tokens a candidate demonstrably covers: whatever the
+ * producing layer recorded (`Candidate.covers`) plus everything derivable from
+ * its own NAMES — the file's basename tokens and, when it has one, its symbol
+ * name's tokens. Pure and cheap: no file read, no parse.
+ */
+function coveredQueryTokens(candidate: Candidate, asciiQueryTokens: readonly string[]): Set<string> {
+  const covered = new Set<string>();
+  for (const t of candidate.covers ?? []) covered.add(t);
+  const nameTokens = new Set<string>([
+    ...splitBasenameTokens(path.basename(candidate.path, path.extname(candidate.path))),
+    ...(candidate.symbol ? splitBasenameTokens(candidate.symbol) : []),
+  ]);
+  for (const t of queryTokensCoveredByNames(asciiQueryTokens, nameTokens)) covered.add(t);
+  return covered;
+}
+
+/**
+ * Lowercase word tokens of every ASCII identifier in a slice of source text
+ * (camelCase/snake_case decomposed, same splitter the basename rule uses), so
+ * "which query concepts does this code talk about" is one set-membership test.
+ */
+function identifierTokensIn(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
+    for (const t of splitBasenameTokens(raw)) out.add(t);
+  }
+  return out;
+}
+
+/** How many import-edge neighbours a primary may pull into `related`. */
+const IMPORT_EDGE_MAX = 2;
+/** Score for an import-edge neighbour: high enough to be kept, never to compete for `primary`. */
+const IMPORT_EDGE_SCORE = 0.9;
+/** ES/TS import statement: named bindings and/or a default binding, plus the module specifier. */
+const IMPORT_STATEMENT_RE =
+  /import\s+(?:type\s+)?(?:\{([^}]*)\}|([A-Za-z_$][\w$]*)\s*(?:,\s*\{([^}]*)\})?)\s*from\s*["']([^"']+)["']/g;
+/** Languages whose module graph IMPORT_STATEMENT_RE understands. */
+const IMPORT_EDGE_LANGS: ReadonlySet<string> = new Set(["typescript", "tsx", "javascript", "jsx"]);
+
+/** Resolve a RELATIVE ES module specifier to a workspace-relative file that actually exists. */
+function resolveRelativeModule(fromRelPath: string, spec: string, files: ReadonlySet<string>): string | undefined {
+  if (!spec.startsWith(".")) return undefined;
+  const joined = path.posix.normalize(path.posix.join(path.posix.dirname(fromRelPath), spec));
+  const stripped = joined.replace(/\.(js|mjs|cjs)$/, "");
+  for (const candidate of [
+    joined, `${stripped}.ts`, `${stripped}.tsx`, `${stripped}.mts`, `${stripped}.js`, `${stripped}.mjs`,
+    `${stripped}/index.ts`, `${stripped}/index.tsx`, `${stripped}/index.js`,
+  ]) {
+    if (files.has(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Issue #2 (b): pull the definition the primary DELEGATES TO into the frontier.
+ *
+ * "Which codec does the pipeline choose" is answered by two files: the one
+ * that runs the choice (`applyResponseCodec`) and the one that makes it
+ * (`selectForWire`). Nothing in the query names the second — no token matches
+ * `selectForWire` or `policy` — so every name/text/symbol layer above rates it
+ * an also-ran, and the same-surface `related` filter then drops it because it
+ * shares the primary's surface. The edge that DOES name it is structural: the
+ * primary's own file imports it, and the primary's own body calls it.
+ *
+ * So: of the workspace-local bindings the primary symbol's body actually
+ * references, admit the definitions of at most IMPORT_EDGE_MAX, preferring
+ * (1) a binding the body CALLS over one it only names in a type position,
+ * (2) a binding whose name carries a query token, (3) a target path that
+ * does, (4) the module the primary leans on most, (5) the one it reaches
+ * first. Within a target the substantive definition wins — the longest called
+ * one, i.e. the implementation rather than the predicate beside it.
+ */
+async function importEdgeCandidates(
+  workspace: string,
+  primary: Candidate,
+  queryTokens: readonly string[],
+  workspaceFiles: readonly FoundFile[],
+): Promise<Candidate[]> {
+  if (!primary.symbol) return [];
+  let text: string;
+  try {
+    const abs = path.join(workspace, primary.path);
+    if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return [];
+    text = fs.readFileSync(abs, "utf8");
+  } catch {
+    return [];
+  }
+  const lang = languageForPathWithContent(primary.path, text);
+  if (lang === undefined || !IMPORT_EDGE_LANGS.has(lang)) return [];
+
+  const lines = text.split(/\r?\n/);
+  const bodyEnd = findSymbolEnd(lines, primary.line, lang);
+  const bodyText = lines.slice(primary.line - 1, bodyEnd).join("\n");
+  if (bodyText === "") return [];
+
+  const fileSet = new Set(workspaceFiles.map((f) => f.relPath));
+  // binding name -> { target, order } for every workspace-local import.
+  const bindings = new Map<string, { target: string; order: number }>();
+  let order = 0;
+  IMPORT_STATEMENT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = IMPORT_STATEMENT_RE.exec(text)) !== null) {
+    const target = resolveRelativeModule(primary.path, m[4]!, fileSet);
+    if (target === undefined || target === primary.path) continue;
+    const names = [
+      ...(m[1] ?? "").split(","),
+      ...(m[2] !== undefined ? [m[2]] : []),
+      ...(m[3] ?? "").split(","),
+    ];
+    for (const raw of names) {
+      // `A as B` binds B; `type A` is still a binding for reference purposes.
+      const name = raw.replace(/\btype\b/g, " ").split(/\bas\b/).pop()?.trim() ?? "";
+      if (!/^[A-Za-z_$][\w$]*$/.test(name)) continue;
+      if (!bindings.has(name)) bindings.set(name, { target, order: order++ });
+    }
+  }
+  if (bindings.size === 0) return [];
+
+  // Which bindings does the primary's OWN body reference?
+  const byTarget = new Map<string, { names: string[]; firstOrder: number }>();
+  for (const [name, { target, order: ord }] of bindings) {
+    if (!new RegExp(`\\b${name}\\b`).test(bodyText)) continue;
+    const entry = byTarget.get(target);
+    if (entry === undefined) byTarget.set(target, { names: [name], firstOrder: ord });
+    else { entry.names.push(name); entry.firstOrder = Math.min(entry.firstOrder, ord); }
+  }
+  if (byTarget.size === 0) return [];
+
+  const picked: Array<{
+    candidate: Candidate; nameCover: number; pathCover: number; count: number; order: number; delegated: boolean;
+  }> = [];
+  for (const [target, { names, firstOrder }] of byTarget) {
+    let targetText: string;
+    try {
+      const abs = path.join(workspace, target);
+      if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) continue;
+      targetText = fs.readFileSync(abs, "utf8");
+    } catch {
+      continue;
+    }
+    const targetLang = languageForPathWithContent(target, targetText);
+    if (targetLang === undefined) continue;
+    let symbols: CollectedSymbol[];
+    try {
+      symbols = await collectSymbols(targetText, targetLang, {});
+    } catch {
+      continue;
+    }
+    // A binding the body CALLS is something the primary delegates to; one it
+    // only names in a type position is a shape it passes through. Prefer the
+    // former, and within either group the longest definition — the
+    // implementation rather than the predicate or alias beside it.
+    const called = new Set(names.filter((n) => new RegExp(`\\b${n}\\s*[(<]`).test(bodyText)));
+    const wanted = new Set(names);
+    let best: CollectedSymbol | undefined;
+    let bestCalled = false;
+    for (const sym of symbols) {
+      if (sym.enclosingSymbol !== undefined) continue;
+      if (!wanted.has(sym.name)) continue;
+      const isCalled = called.has(sym.name);
+      if (best === undefined || (isCalled && !bestCalled)) { best = sym; bestCalled = isCalled; continue; }
+      if (isCalled === bestCalled && sym.endLine - sym.startLine > best.endLine - best.startLine) {
+        best = sym;
+        bestCalled = isCalled;
+      }
+    }
+    if (best === undefined) continue;
+    const nameTokens = splitBasenameTokens(best.name);
+    const pathTokensOfTarget = target.toLowerCase().split(/[/.]/);
+    picked.push({
+      candidate: {
+        path: target,
+        line: best.signatureStartLine,
+        endLine: best.endLine,
+        symbol: best.name,
+        kind: "symbol",
+        score: IMPORT_EDGE_SCORE,
+        why: "import-edge",
+        required: true,
+      },
+      nameCover: queryTokensCoveredByNames(queryTokens, nameTokens).length,
+      pathCover: queryTokensCoveredByNames(queryTokens, pathTokensOfTarget).length,
+      count: called.size,
+      order: firstOrder,
+      delegated: bestCalled,
+    });
+  }
+
+  picked.sort((a, b) =>
+    Number(b.delegated) - Number(a.delegated) ||
+    b.nameCover - a.nameCover ||
+    b.pathCover - a.pathCover ||
+    b.count - a.count ||
+    a.order - b.order);
+  return picked.slice(0, IMPORT_EDGE_MAX).map((entry) => entry.candidate);
+}
+
+/** Cap on how many filename-matched files get a symbol-level refinement parse per locate() call. */
+const FILENAME_SYMBOL_REFINE_LIMIT = 10;
+/** Files larger than this are not parsed for filename-match symbol refinement. */
+const FILENAME_SYMBOL_REFINE_MAX_BYTES = 512 * 1024;
+
+/**
+ * Issue #2 (a): inside a filename-matched file, pick the symbol that answers
+ * the REST of the query.
+ *
+ * A basename match says "this FILE is about token X"; it says nothing about
+ * WHERE in the file to look. The pool's line for such a file is whatever an
+ * earlier layer happened to surface — for a symbol index that matched on the
+ * file's name, that is simply the file's FIRST symbol, which is routinely the
+ * wrong slice (pipeline.ts served `emitShadowTrace` for "which codec does the
+ * pipeline choose" while the answer, `applyResponseCodec`, sat further down
+ * and never entered the pool at all, because the per-token symbol search's
+ * own result cap had already truncated it away).
+ *
+ * So: parse the file and choose the symbol whose own NAME tokens cover the
+ * most query tokens the basename did NOT already cover, preferring a
+ * top-level symbol (no enclosing symbol) over a nested one — a local
+ * `const codecId` inside an unrelated function is not the answer to "which
+ * codec", the exported function whose name carries "Codec" is. Ties fall back
+ * to the existing rule, document order.
+ *
+ * Returns null when nothing in the file covers an outstanding token, in which
+ * case Layer 5a keeps its previous behaviour exactly.
+ */
+async function refineFilenameMatchSymbol(
+  workspace: string,
+  relPath: string,
+  remainingTokens: readonly string[],
+): Promise<{ symbol: string; line: number; endLine: number; covered: string[] } | null> {
+  let text: string;
+  try {
+    const abs = path.join(workspace, relPath);
+    if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return null;
+    text = fs.readFileSync(abs, "utf8");
+  } catch {
+    return null;
+  }
+  const lang = languageForPathWithContent(relPath, text);
+  if (!lang) return null;
+  let symbols: CollectedSymbol[];
+  try {
+    symbols = await collectSymbols(text, lang, {});
+  } catch {
+    return null;
+  }
+  const lines = text.split(/\r?\n/);
+
+  // R6: the basename covering EVERY query token leaves nothing outstanding
+  // to refine against (matchBasenameTokens already admitted the file on the
+  // name alone) — the file's FIRST declaration used to win by default
+  // (coveragePackerV2.ts's CoveragePackerV2Input interface, not its actual
+  // entry point packForCoverageV2). Fall back to a substantive-declaration
+  // preference keyed on the FILE'S OWN basename instead of an outstanding
+  // query token — see bestSubstantiveDeclaration.
+  if (remainingTokens.length === 0) {
+    return bestSubstantiveDeclaration(relPath, symbols, lines);
+  }
+
+  // Prose is not evidence: a doc comment above a declaration routinely names
+  // the neighbouring symbol ("forces the next `applyResponseCodec` call"),
+  // which would hand every declaration in the file the same body coverage.
+  const commentLine = classifyCommentLines(text, lang);
+  let best: {
+    symbol: CollectedSymbol; covered: string[]; body: number; topLevel: boolean; isExactMatch: boolean;
+  } | null = null;
+  for (const sym of symbols) {
+    const covered = queryTokensCoveredByNames(remainingTokens, splitBasenameTokens(sym.name));
+    if (covered.length === 0) continue;
+    // Secondary signal: how much of the outstanding query the symbol's OWN
+    // BODY talks about. Two declarations can carry the same token in their
+    // name (`applyResponseCodec` and `ApplyResponseCodecV2Overrides`); the
+    // one whose body is also about that concept is the implementation, not
+    // the incidental options bag beside it.
+    // Body = strictly what follows the signature. The declaration line
+    // repeats the symbol's own name, so including it would credit EVERY
+    // declaration carrying the token with body evidence for it.
+    const bodyTokens = identifierTokensIn(
+      lines.slice(sym.signatureEndLine, sym.endLine)
+        .filter((_line, i) => commentLine[sym.signatureEndLine + i] !== true)
+        .join("\n"),
+    );
+    const body = queryTokensCoveredByNames(remainingTokens, bodyTokens).length;
+    const topLevel = sym.enclosingSymbol === undefined;
+    // R5: an EXACT name match ("create" for outstanding token "create") is
+    // a strictly stronger signal than a compound name that merely CONTAINS
+    // the token as one of several words ("CommentCreateInput" also covers
+    // "create" via splitBasenameTokens, but names a different thing). Only
+    // breaks ties within the SAME covered count below — a compound name
+    // genuinely covering MORE outstanding tokens still wins on that alone.
+    const isExactMatch = remainingTokens.some((t) => t.toLowerCase() === sym.name.toLowerCase());
+    const cand = { symbol: sym, covered, body, topLevel, isExactMatch };
+    if (best === null) { best = cand; continue; }
+    if (covered.length !== best.covered.length) {
+      if (covered.length > best.covered.length) best = cand;
+      continue;
+    }
+    if (isExactMatch !== best.isExactMatch) {
+      if (isExactMatch) best = cand;
+      continue;
+    }
+    // A local `const codecId` buried in an unrelated function is not the
+    // answer to "which codec"; the exported declaration is.
+    if (topLevel !== best.topLevel) {
+      if (topLevel) best = cand;
+      continue;
+    }
+    if (body !== best.body) {
+      if (body > best.body) best = cand;
+      continue;
+    }
+    // Tie -> existing rule: document order.
+    if (sym.signatureStartLine < best.symbol.signatureStartLine) best = cand;
+  }
+  if (best === null) return null;
+  return {
+    symbol: best.symbol.name,
+    line: best.symbol.signatureStartLine,
+    endLine: best.symbol.endLine,
+    covered: best.covered,
+  };
+}
+
+/**
+ * R6: pick a file's own most substantive declaration when there is no
+ * outstanding query token left to refine against — matchBasenameTokens
+ * already admitted the file on its NAME alone (every query token was a
+ * basename word), so there is nothing left to check symbol-name coverage
+ * against. A top-level exported function/class/method beats a local, a
+ * const, a type alias, or an interface — those far more often describe the
+ * file's DATA SHAPE (CoveragePackerV2Input) than what a "what does X do"
+ * query is actually about (packForCoverageV2). Ties broken by how many of
+ * the FILE'S OWN basename words the declaration's name covers, then by
+ * document order (the pre-existing fallback this replaces).
+ */
+function bestSubstantiveDeclaration(
+  relPath: string,
+  symbols: readonly CollectedSymbol[],
+  lines: readonly string[],
+): { symbol: string; line: number; endLine: number; covered: string[] } | null {
+  const base = path.basename(relPath, path.extname(relPath));
+  const basenameWords = splitBasenameTokens(base);
+  let best: { symbol: CollectedSymbol; tier: number; nameCover: number } | null = null;
+  for (const sym of symbols) {
+    // A local buried inside an unrelated function is not what the FILE is
+    // about — restrict to top-level declarations, same bias the coverage-
+    // based path above applies via its own topLevel tie-break.
+    if (sym.enclosingSymbol !== undefined) continue;
+    const isSubstantiveKind = sym.kind === "function" || sym.kind === "method" || sym.kind === "class";
+    const declLine = lines[sym.signatureStartLine - 1] ?? "";
+    const isExported = /^\s*export\b/.test(declLine);
+    const tier = (isSubstantiveKind ? 2 : 0) + (isExported ? 1 : 0);
+    const nameCover = queryTokensCoveredByNames(basenameWords, splitBasenameTokens(sym.name)).length;
+    const cand = { symbol: sym, tier, nameCover };
+    if (best === null) { best = cand; continue; }
+    if (tier !== best.tier) { if (tier > best.tier) best = cand; continue; }
+    if (nameCover !== best.nameCover) { if (nameCover > best.nameCover) best = cand; continue; }
+    if (sym.signatureStartLine < best.symbol.signatureStartLine) best = cand;
+  }
+  if (best === null) return null;
+  return {
+    symbol: best.symbol.name,
+    line: best.symbol.signatureStartLine,
+    endLine: best.symbol.endLine,
+    covered: [],
+  };
 }
 
 /**
@@ -3987,6 +4990,42 @@ function buildVariantTokens(query: string, symbol?: string): string[] {
   return result;
 }
 
+/**
+ * R2: rank a Layer-2 per-token symbol-search hit by substantive declaration
+ * kind, tiered, so a common token (e.g. "codec") does not let same-token
+ * noise (consts, aliases, decoys) crowd out the declaration that actually
+ * answers the query before the per-token cap truncates. Higher is better.
+ *
+ * function/method carry the actual DECISION/behavior most "where is X
+ * handled" queries ask about; classes/interfaces are usually just a data
+ * shape sharing the token (e.g. a *Candidate/*Payload type beside the
+ * function that consumes it) — real, but a weaker signal within the same
+ * "substantive" tier. const/type get none — far more often an incidental
+ * field, alias, or local sharing the one common token.
+ *
+ * NOT scored: coverage of the query's OTHER tokens by the symbol's own
+ * name. An earlier version of this function added a point per other-token
+ * substring match, but that rewards purely INCIDENTAL vocabulary overlap
+ * as readily as genuine relevance — DESIGN-v0.8 §A5's regression corpus
+ * (readCodeTaskPack.spec.ts) caught a real case: query "fix muxer output:
+ * yaw sign is reversed..." let a `clampMuxerOutput` distractor (which only
+ * clamps a value's magnitude) outrank the real target `applyMuxer` (which
+ * actually applies the sign-bearing MOTOR_SIGN table) purely because
+ * "Output" appears in the distractor's name. Kind-tier alone already
+ * carries R2's live-probe and synthetic-decoy evidence; token coverage did
+ * not, so it was cut rather than tuned around this one counterexample.
+ *
+ * A standalone, exported function so this ranking is directly
+ * unit-testable — its end-to-end effect is easy to mask when an unrelated
+ * layer (e.g. variant-text search) also matches the same literal token
+ * across the same files.
+ */
+export function rankSymbolHitQuality(loc: { readonly symbol: string; readonly kind: string }): number {
+  if (loc.kind === "function" || loc.kind === "method") return 1.0;
+  if (loc.kind === "class") return 0.4;
+  return 0;
+}
+
 const TASK_MANAGEMENT_WORDS = new Set([
   "implement", "fix", "ensure", "update", "add", "remove", "change",
   "create", "delete", "modify", "refactor", "improve", "support",
@@ -4008,17 +5047,60 @@ function scoreQueryToken(token: string, query: string): number {
   // Lower value: task-management words
   if (TASK_MANAGEMENT_WORDS.has(token.toLowerCase())) score -= 1.5;
   // Lower value: very generic nouns
-  const genericNouns = new Set(["status", "issue", "health", "state", "value", "data", "info", "name", "code"]);
-  if (genericNouns.has(token.toLowerCase())) score -= 0.5;
+  if (GENERIC_NOUNS.has(token.toLowerCase())) score -= 0.5;
   return score;
 }
 
-/** Extract identifier-like tokens from a free-text query. */
-function extractIdentifiers(query: string): string[] {
+/**
+ * R5: extract Class.method / Class#method pairs from a free-text query. A
+ * dotted/hashed identifier pair whose first part looks like a class name
+ * (starts uppercase — the near-universal convention across every language
+ * this locator supports) names ONE concept, not two unrelated tokens: "look
+ * INSIDE X for Y". Plain identifier extraction loses this structure
+ * entirely — "CommentService.create" tokenizes to "CommentService" and
+ * "create" with no link between them, and a bare "create" collides with
+ * TASK_MANAGEMENT_WORDS' generic-verb penalty (meant for "create a new
+ * field"-style queries) even though here it names an actual method.
+ * Capped at 2 pairs — this is a targeted anchor, not a general scan.
+ */
+export function extractClassMethodPairs(query: string): Array<{ className: string; methodName: string }> {
+  const out: Array<{ className: string; methodName: string }> = [];
+  const re = /\b([A-Z][A-Za-z0-9_]*)[.#]([a-zA-Z_][A-Za-z0-9_]*)\b/g;
+  let m: RegExpExecArray | null;
+  while (out.length < 2 && (m = re.exec(query)) !== null) {
+    out.push({ className: m[1]!, methodName: m[2]! });
+  }
+  return out;
+}
+
+/**
+ * Extract identifier-like tokens from a free-text query.
+ *
+ * W9 (2026-08-22): `query` is scrubbed of generic path spans FIRST
+ * (stripPathSpans("", query) — see util/queryShape.ts) — a path SEGMENT
+ * ("takayuki", "packages") out of an absolute path mentioned in prose is not
+ * a repo identifier just because it matches this function's word-shape
+ * regex. Left unscrubbed, this fed both this module's own Layer-3 exact-text
+ * search AND `strongestIdentifierToken`'s not-found `search_files
+ * action=find` `next` (abstain()), which could hand back a `find` for a bare
+ * path segment. A bare file stem with no directory prefix (`policy.ts`) is
+ * unaffected — stripPathSpans only removes spans with a directory separator.
+ *
+ * The trailing FILENAME of a directory-qualified, extension-terminated
+ * mention ("docs/rate-table.xlsx") is re-added separately via
+ * `fileNamesInPathSpans` (its own basename only — "rate-table.xlsx", not
+ * "docs"). Confirmed live (replayCorpus L2): stripping the whole span left
+ * the locator with no token to recognize a query-named artifact BY, so
+ * `result.surfaces` never carried it — even though the independent artifact-
+ * prefetch path (readCodeTaskPack.ts) had already extracted its content —
+ * and the extraction was silently dropped for lack of a matching surface.
+ */
+export function extractIdentifiers(query: string): string[] {
+  const cleaned = [stripPathSpans("", query), ...fileNamesInPathSpans(query)].join(" ");
   // Also extract quoted strings literally.
   const tokens: string[] = [];
   // Grab camelCase, PascalCase, snake_case identifiers.
-  const matches = query.match(/\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b/g) ?? [];
+  const matches = cleaned.match(/\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b/g) ?? [];
   for (const m of matches) {
     // De-dupe and skip common English words.
     if (!STOP_WORDS.has(m.toLowerCase()) && !tokens.includes(m)) {
@@ -4027,15 +5109,53 @@ function extractIdentifiers(query: string): string[] {
   }
   // CJK spans are already script-split and stop-word filtered by the shared
   // deterministic tokenizer. They are exact repo-evidence probes, not translations.
-  for (const token of tokenizeForEpoch(query)) {
+  for (const token of tokenizeForEpoch(cleaned)) {
     if (/[^\x00-\x7f]/u.test(token) && !tokens.includes(token)) tokens.push(token);
   }
   // Score and sort: high-value tokens first
-  tokens.sort((a, b) => scoreQueryToken(b, query) - scoreQueryToken(a, query));
+  tokens.sort((a, b) => scoreQueryToken(b, cleaned) - scoreQueryToken(a, cleaned));
   return tokens;
 }
 
-/** Extract sub-queries suitable for exact text search. */
+/**
+ * R3 (2026-08-21, re-applied by W5-B falsification-scope-and-text-floor):
+ * generic 4-7 char programming nouns/verbs a SHORT-floor text search must
+ * not chase on their own — too common across an arbitrary repo to
+ * discriminate anything ("type", "list", "read", "call"...). Deliberately
+ * separate from the broader STOP_WORDS below (English-prose filtering for
+ * identifier EXTRACTION generally): this set exists only to gate the
+ * lowered length floor immediately below, and several of its entries
+ * (e.g. "class", "const", "this") are legitimate mid-length identifiers in
+ * OTHER contexts.
+ */
+const SHORT_TEXT_SEARCH_STOP_WORDS: ReadonlySet<string> = new Set([
+  "code", "file", "files", "test", "tests", "data", "type", "types", "name", "value",
+  "index", "main", "util", "utils", "user", "users", "item", "items", "list", "node",
+  "path", "text", "line", "lines", "read", "write", "call", "calls", "func", "function",
+  "class", "return", "const", "case", "like", "this", "that", "when", "what", "which",
+  "where", "there", "their", "into", "from", "with", "only", "also", "some", "more",
+  "most", "have", "been", "does", "done", "just", "need", "make", "made", "true", "false",
+  "null", "size", "time", "date", "info", "base", "core", "args", "opts", "self", "init",
+  "load", "save", "open", "close", "start", "stop", "run", "set", "get", "add", "new",
+  "old", "key", "keys", "map", "ref", "refs", "id", "ids",
+]);
+
+/**
+ * R3 (2026-08-21, re-applied by W5-B): first attempted earlier in this
+ * release-prep effort and reverted after two corpus regressions traced into
+ * readCodeTaskPack.ts's directory-seeded role-fill (buildSeededTaskPack's
+ * caller-supplied-dir augmentation) rather than into anything in this
+ * file's own candidate scoring — see readCodeTaskPack.ts's confined
+ * role-fill fix (W5-B, near dirCandidates/concernGroupMatchesSurfaces) for
+ * the actual regression fix, applied THERE instead of re-narrowing this
+ * floor. The bug this re-fixes: a short (4-7 char) discriminating ASCII
+ * identifier like "cursor" or "codec" never ran a Layer 3 text search at
+ * all (the flat 8-char floor), even inside a multi-identifier query where
+ * the surrounding tokens already prove it is not noise. Gated to
+ * MULTI-identifier queries only (>=2 extracted identifier tokens) so a
+ * single bare short word does not widen a query on its own, and excludes
+ * SHORT_TEXT_SEARCH_STOP_WORDS (generic short programming nouns/verbs).
+ */
 function extractTextSearchQueries(query: string): string[] {
   const results: string[] = [];
   // Quoted strings.
@@ -4046,7 +5166,13 @@ function extractTextSearchQueries(query: string): string[] {
   // Long ASCII identifiers and exact CJK script spans are suitable for
   // bounded literal search. The latter prevents Japanese requests from
   // collapsing to the broad-query refusal before repo evidence is consulted.
-  const ids = extractIdentifiers(query).filter((t) => t.length >= 8 || /[^\x00-\x7f]/u.test(t));
+  const allIdentifiers = extractIdentifiers(query);
+  const shortFloorEligible = allIdentifiers.length >= 2;
+  const ids = allIdentifiers.filter((t) =>
+    t.length >= 8
+    || /[^\x00-\x7f]/u.test(t)
+    || (shortFloorEligible && t.length >= 4 && !SHORT_TEXT_SEARCH_STOP_WORDS.has(t.toLowerCase()))
+  );
   for (const id of ids) if (!results.includes(id)) results.push(id);
   return results;
 }
@@ -4098,6 +5224,23 @@ function findSymbolEnd(lines: string[], startLine: number, lang: string): number
   }
   return Math.min(startLine + TEXT_WINDOW_LINES, lines.length);
 }
+
+/**
+ * Very generic nouns that scoreQueryToken already down-weights below (they
+ * routinely describe a task's SUBJECT, not a project-specific name — see
+ * that function). matchBasenameTokens' single-token distinctiveness check
+ * reuses the SAME list for the SAME reason: a query token like "issue"
+ * coincidentally matching a basename WORD that merely contains it as a
+ * substring (e.g. "reissue" in cumulativeReissueReceipt.spec.ts) is not
+ * meaningful evidence just because that basename's own word happens to be
+ * workspace-rare — the rarity of "reissue" says nothing about whether
+ * "issue" (a generic word, likely quoted literal content in the query
+ * rather than a description of what to find) is actually what the query is
+ * about. Not STOP_WORDS: these still count for the >= 2-distinct-token
+ * admission path and for exact/whole-name matches, both stronger signals
+ * than a single generic-word substring hit.
+ */
+const GENERIC_NOUNS = new Set(["status", "issue", "health", "state", "value", "data", "info", "name", "code"]);
 
 /** Common English stop words to skip in identifier extraction. */
 const STOP_WORDS = new Set([

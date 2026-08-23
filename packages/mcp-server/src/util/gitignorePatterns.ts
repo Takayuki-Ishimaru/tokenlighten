@@ -1,4 +1,5 @@
-// gitignorePatterns.ts — shared workspace .gitignore loader.
+// gitignorePatterns.ts — workspace .gitignore loader shared by the v0.9 walk
+// (tools/walkRepo.ts) and the C2 walk (core2/walk.ts).
 //
 // Reads the root .gitignore plus nested ones (bounded depth) and rewrites
 // nested patterns to workspace-relative form, matching git's per-directory

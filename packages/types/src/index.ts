@@ -262,3 +262,68 @@ export type {
   TokenLightenHostActivationInput,
   TokenLightenClientProfileResult,
 } from "./clients.js";
+
+// ---------------------------------------------------------------------------
+// v0.10 internal domain model — reducer/telemetry types, NOT the wire
+// protocol. See `./domain/index.ts`'s header and
+// DESIGN-v0.10-expansion-plan-reconciliation.md §3/§5 (D-1/D-2/D-4): the
+// wire contract stays exactly what `./mcp/` freezes above; nothing below
+// this comment is emitted on the wire in its own shape.
+// ---------------------------------------------------------------------------
+export type {
+  EvidenceId,
+  EvidenceRole,
+  EvidenceIdentity,
+  EvidenceUse,
+  DeliveryDisposition,
+  EmissionHistory,
+  EvidenceDelivery,
+  CoverageState,
+  ContinuationControl,
+  StateHandlePurpose,
+  DecodedStateHandle,
+  CommonStateInput,
+  TrustedClientContextMeta,
+  ClientContextAttestation,
+  ContextReceipt,
+  LocalTaskState,
+  ContextAttestationV1,
+  ContextAttestationRejection,
+  ContextAttestationVerdict,
+  ContextGenerationState,
+  TaskReasoningIR,
+  // V11-04 Task Reasoning IR v2 (additive; v1 above unchanged).
+  ValidityKey,
+  ObligationOrigin,
+  EvidencePredicate,
+  ObligationState,
+  ObligationNode,
+  TombstoneScope,
+  DirectAbsenceProof,
+  HypothesisTombstone,
+  ObligationPatch,
+  ReasoningDeltaOp,
+  ReasoningDelta,
+  TaskReasoningIRv2,
+  StopCertificateCandidate,
+  TermResult,
+  TreeScopeReport,
+  HostBudgetProfile,
+  EncodingDecision,
+  ContributionEstimate,
+} from "./domain/index.js";
+
+export {
+  EVIDENCE_ROLES,
+  isEvidenceRole,
+  DELIVERY_DISPOSITIONS,
+  isDeliveryDisposition,
+  STATE_HANDLE_PURPOSES,
+  isStateHandlePurpose,
+  HANDLE_WIRE_PREFIXES,
+  parseHandlePurposeFromPrefix,
+  HANDLE_WIRE_SIZE_TARGET_P95,
+  HANDLE_WIRE_SIZE_MAX,
+  CONTEXT_STATE_META_KEY,
+  CONTEXT_ATTESTATION_VERSION,
+} from "./domain/index.js";

@@ -29,6 +29,7 @@ import {
   type FindReferencesResult,
 } from "../tools/findReferences.js";
 import type { LangKey } from "../tools/walkRepo.js";
+import { TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "../tools/walkRepo.js";
 
 const tmpDirs: string[] = [];
 
@@ -538,9 +539,19 @@ describe("findReferences — L2 truncation_reason", () => {
     const inside = await findReferences({ symbol: "statelessTarget", cursor: insideCursor }, ws);
     expect(inside.files.map((g) => g.path)).toEqual(["src/f3.ts", "src/f4.ts", "src/f5.ts"]);
 
-    // Same call, same answer (deterministic for a fixed workspace).
+    // Same call, same answer (deterministic for a fixed workspace). Compared
+    // with `omitted` stripped from both sides: F-W2D-1 made this walk
+    // disclose WalkOmissions for the first time, and a workspace's
+    // first-ever findReferences call separately (pre-existing, unrelated to
+    // paging) lazily creates .tokenlighten/state/ — so `omitted.ignored` can
+    // legitimately differ between the FIRST call to touch a fresh workspace
+    // and every call after it. That one-time setup asymmetry is orthogonal
+    // to what this test is actually pinning: the cursor/paging response
+    // itself is identical byte-for-byte on repeat calls.
     const again = await findReferences({ symbol: "statelessTarget", cursor: midCursor }, ws);
-    expect(JSON.stringify(again)).toBe(JSON.stringify(cold));
+    const { omitted: _coldOmitted, ...coldRest } = cold;
+    const { omitted: _againOmitted, ...againRest } = again;
+    expect(JSON.stringify(againRest)).toBe(JSON.stringify(coldRest));
 
     // A cursor past the end is end-of-chain, not an error.
     const pastCursor = encodeReferencesCursor({ p: "src/zzz.ts", l: 1 });
@@ -732,6 +743,64 @@ describe("findReferences — L2 absence certificate", () => {
 
     expect(result.total).toBe(0);
     expect(result.absence).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-W2D-1 (2026-08-21, W2-D): search_files action=references silently
+// dropped a >1MB, <8MB hand-written source file from EVERY scan — this walk
+// tracked no WalkOmissions at all (unlike findText.ts's buildFindResponse),
+// so the file's disappearance was indistinguishable from "scanned and
+// clean". Field-reported live against this repo's own
+// readCodeTaskPack.ts (21,324 lines / ~1.03MB): `action=references` for a
+// symbol demonstrably defined and called inside it returned only two
+// IN-COMMENT hits from an unrelated spec file — a misleading near-absence.
+// ---------------------------------------------------------------------------
+describe("findReferences — F-W2D-1 oversize honesty and capability", () => {
+  it("a symbol defined only in a file BETWEEN the old 1MB default and TEXT_SCAN_MAX_FILE_SIZE_BYTES is found, not silently dropped", async () => {
+    const ws = mkWorkspace();
+    // A hand-written-scale file just over the OLD 1MB walkCodeFiles default
+    // but comfortably under references' own (raised) ceiling. Long lines
+    // (not 80k short ones) keep this fast: findReferences.ts's
+    // collectLexicalSegments tree-sitter-parses every walked file
+    // unconditionally, and cost tracks node/line count more than raw bytes.
+    const big = `// ${"x".repeat(97)}\n`.repeat(10_500) + "onlyInBigFileSymbol(1);\n";
+    expect(big.length).toBeGreaterThan(1_000_000);
+    expect(big.length).toBeLessThanOrEqual(TEXT_SCAN_MAX_FILE_SIZE_BYTES);
+    writeFile(ws, "src/big.ts", big);
+
+    const result = await findReferences({ symbol: "onlyInBigFileSymbol" }, ws);
+
+    expect(result.total).toBe(1);
+    expect(result.files.map((f) => f.path)).toEqual(["src/big.ts"]);
+    expect(result.omitted?.oversize ?? 0).toBe(0);
+  });
+
+  it("a genuinely oversize file (above TEXT_SCAN_MAX_FILE_SIZE_BYTES) is disclosed via omitted.oversize, and its absence is never falsely certified", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/huge.ts", `forcedOversizeReferenceToken(1);\n${"a".repeat(TEXT_SCAN_MAX_FILE_SIZE_BYTES + 1)}`);
+    writeFile(ws, "src/other.ts", "export const unrelated = 1;\n");
+
+    const result = await findReferences({ symbol: "forcedOversizeReferenceToken" }, ws);
+
+    expect(result.total).toBe(0);
+    // Same "unknown remainder" treatment as an unreadable directory — no
+    // certificate at all while the walk never opened a file that could hold
+    // the symbol (see withAbsence's oversizeOmitted gate).
+    expect(result.absence).toBeUndefined();
+    expect(result.omitted?.oversize).toBe(1);
+  });
+
+  it("the omitted disclosure also rides a response WITH real matches (not just the zero-match certificate path)", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/present.ts", "realHitAlongsideOversize(1);\n");
+    writeFile(ws, "src/huge.ts", "a".repeat(TEXT_SCAN_MAX_FILE_SIZE_BYTES + 1));
+
+    const result = await findReferences({ symbol: "realHitAlongsideOversize" }, ws);
+
+    expect(result.total).toBe(1);
+    expect(result.files.map((f) => f.path)).toEqual(["src/present.ts"]);
+    expect(result.omitted?.oversize).toBe(1);
   });
 });
 

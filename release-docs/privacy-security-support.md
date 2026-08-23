@@ -22,9 +22,9 @@ The VS Code extension and CLI can produce local usage and cost-savings estimates
 
 ## Dependency security status
 
-TokenLighten v0.9.1 dependencies were audited on 2026-08-16. `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the dependency set used for normal VS Code extension/runtime operation.
+The v0.11.1 source tree was audited on 2026-08-23. `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the runtime dependency view.
 
-After the v0.9.1 development-toolchain updates, the complete source-development installation reported the same **0 Critical, 0 High, and 2 Moderate** findings. The two scanner entries represent one transitive `uuid` advisory through `exceljs`; the affected API path is not used by TokenLighten. See [Dependency security status](dependency-security.md) for advisory-level details.
+The complete source-development installation reported **1 Critical, 1 High, and 5 Moderate** findings when development dependencies were included. These development-toolchain findings are outside the normal installed-VSIX runtime view. Developers should treat the development environment as a separate trust boundary and avoid running untrusted build scripts, tests, or development servers.
 
 Audit results can change as advisories are published or dependencies change. This dated snapshot is not a guarantee of zero risk. Run `npm audit --omit=dev` for the runtime view and `npm audit` for the full development view.
 

@@ -6,9 +6,9 @@ Security fixes are provided for the latest released version of TokenLighten. Old
 
 ## Dependency audit status
 
-For TokenLighten v0.9.1 dependencies audited on 2026-08-16, both `npm audit --omit=dev` and the full `npm audit` reported 0 Critical, 0 High, and 2 Moderate findings. The two scanner entries represent one transitive `uuid` advisory through `exceljs`; the affected API path is not used by TokenLighten.
+For the v0.11.1 source tree audited on 2026-08-23, `npm audit --omit=dev` reported 0 Critical, 0 High, and 2 Moderate findings in the runtime dependency view. The full source-development installation, including development dependencies, reported 1 Critical, 1 High, and 5 Moderate findings. The development-toolchain findings are outside the normal installed-VSIX runtime view.
 
-See [Dependency security status](release-docs/dependency-security.md) for advisory IDs, runtime/development classification, reachability, remediation constraints, and the update plan. These counts are a dated snapshot rather than a statement that TokenLighten is free of vulnerabilities.
+These counts are a dated snapshot rather than a statement that TokenLighten is free of vulnerabilities. Advisory data and dependency reachability can change. Users and contributors should rerun `npm audit --omit=dev` and, for source development, `npm audit` against the exact release or checkout they use.
 
 ## Reporting a vulnerability
 
@@ -20,4 +20,4 @@ Reports are reviewed on a best-effort basis. TokenLighten does not currently pro
 
 ## Scope
 
-Reports about TokenLighten's own CLI, MCP server, VS Code extension, file handling, or local data handling are in scope. Vulnerabilities in an AI provider, editor, operating system, or unrelated third-party service should be reported to that vendor.
+Reports about TokenLighten's own CLI, MCP server, VS Code extension, desktop application, file handling, or local data handling are in scope. Vulnerabilities in an AI provider, editor, operating system, or unrelated third-party service should be reported to that vendor.

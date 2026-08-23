@@ -8,15 +8,17 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StubTargetId } from "@tokenlighten/types";
 import { SENTINEL_START, SENTINEL_END, sha256hex } from "./sentinel.js";
+import { INSTRUCTIONS_VERSION } from "./version.js";
+
+// Re-exported unchanged for existing consumers (injectAll.ts, index.ts) —
+// version.ts is now the source of truth; see its header comment for why.
+export { INSTRUCTIONS_VERSION } from "./version.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /** Template directory (one level up from src/). */
 const TEMPLATE_DIR = join(__dirname, "..", "templates");
-
-/** Current version string. Bump when prose changes materially. */
-export const INSTRUCTIONS_VERSION = "2026-08-15-v67-protocol-v1-kinds";
 
 export type Locale = "en" | "jp";
 
@@ -127,12 +129,28 @@ export function renderTargetPreamble(target: StubTargetId | undefined): string {
  * @param locale  "en" (default) or "jp".
  * @param version Override version string (defaults to INSTRUCTIONS_VERSION).
  */
+export type GuideProfile = "full" | "medium";
+
+function loadMediumTemplate(): string {
+  return readFileSync(join(TEMPLATE_DIR, "medium.md.tmpl"), "utf8");
+}
+
+function loadTemplateForProfile(
+  target: StubTargetId | undefined,
+  locale: Locale,
+  profile: GuideProfile,
+): string {
+  if (target === "claude") return CLAUDE_IMPORT_TEMPLATE;
+  return profile === "medium" ? loadMediumTemplate() : loadTemplateForTarget(target, locale);
+}
+
 export function renderBlock(
   target: StubTargetId | undefined,
   locale: Locale = "en",
-  version: string = INSTRUCTIONS_VERSION
+  version: string = INSTRUCTIONS_VERSION,
+  profile: GuideProfile = "full",
 ): string {
-  const template = loadTemplateForTarget(target, locale);
+  const template = loadTemplateForProfile(target, locale, profile);
   const rendered = renderTemplate(template, version);
   return renderTargetPreamble(target) + rendered;
 }
@@ -142,9 +160,10 @@ export function renderBlock(
  */
 export function renderCanonicalBlock(
   locale: Locale = "en",
-  version: string = INSTRUCTIONS_VERSION
+  version: string = INSTRUCTIONS_VERSION,
+  profile: GuideProfile = "full",
 ): string {
-  return renderBlock(undefined, locale, version);
+  return renderBlock(undefined, locale, version, profile);
 }
 
 /**
@@ -155,11 +174,42 @@ export function blockSha256(
   locale: Locale = "en",
   version: string = INSTRUCTIONS_VERSION,
   target?: StubTargetId,
+  profile: GuideProfile = "full",
 ): string {
-  const template = loadTemplateForTarget(target, locale);
+  const template = loadTemplateForProfile(target, locale, profile);
   const withVersion = template
     .replace(/{{VERSION}}/g, version)
     .replace(/{{SHA256}}/g, "0".repeat(64));
   const bodyForHash = extractBodyForHash(withVersion);
   return sha256hex(bodyForHash);
+}
+
+/**
+ * Compact Bootstrap v1 (DESIGN-v0.10-expansion-plan-v1.3.md V10-07;
+ * reconciliation §5 D-7). A separate, hand-authored, English-only template
+ * carrying ONLY the always-on rules a caller cannot safely learn on-demand:
+ * the 3-tool routing rule, workspace-write safety (`cwd`/`lane`), the
+ * receipt-never-dead-ends rule, the unknown-`kind` safe-stop, and
+ * follow-every-`next`. Everything else the full block teaches (artifact/
+ * archive specifics, verification-kit detail, per-kind deep rules) is meant
+ * to arrive on-demand inside the response that needs it instead of paying a
+ * fixed per-session cost — see `templates/compact.md.tmpl`'s own header.
+ *
+ * NOT WIRED INTO ANY DISTRIBUTION THIS WAVE: no stub target renders this,
+ * `injectAll`/`injectForTarget` never call it, and no drift/sentinel
+ * machinery tracks it (no `{{SHA256}}` substitution — there is nothing to
+ * detect drift against yet). It exists as a rendered artifact plus
+ * `__tests__/compactBootstrap.spec.ts`'s size/content measurements so a
+ * later rc wave can decide whether/how to wire it in (client-profile
+ * selection, a `compact` stub-target flag, etc.) with real numbers in hand
+ * rather than guessing.
+ */
+export function renderMediumBlock(version: string = INSTRUCTIONS_VERSION): string {
+  return renderTemplate(loadMediumTemplate(), version);
+}
+
+export function renderCompactBlock(version: string = INSTRUCTIONS_VERSION): string {
+  const path = join(TEMPLATE_DIR, "compact.md.tmpl");
+  const template = readFileSync(path, "utf8");
+  return template.replace(/{{VERSION}}/g, version);
 }

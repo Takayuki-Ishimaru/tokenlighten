@@ -78,6 +78,7 @@ import {
   createUsageRecorder,
   exportUsageBundle,
   readAiUsageLogs,
+  readDiagRingFile,
   readUsageEvents,
   resetUsageWindow,
   summarizeUsage,
@@ -403,6 +404,8 @@ describe("privacy-preserving usage recording", () => {
     expect(summarizeUsage(events)).toMatchObject({
       measuredResponseTokens: 100,
       measuredBaselineTokens: 500,
+      measuredResponseBytes: 400,
+      measuredBaselineBytes: 2000,
       estimatedReductionPercent: 80,
       estimatedTokenReductionPercent: 80,
       estimatedBaselineCostUsd: 0.001,
@@ -1331,5 +1334,101 @@ describe("privacy-preserving usage recording", () => {
       })}\n`,
     );
     expect(readUsageEvents(directory)).toEqual([]);
+  });
+});
+
+describe("createUsageRecorder — diagnostics ring integration", () => {
+  it("mirrors kind/mode/errorCode into the ring file, keyed by workspace, without joining the NDJSON event schema", () => {
+    const workspaceRoot = tmpdir();
+    const directory = join(tmpdir(), `tokenlighten-diag-ndjson-${randomUUID()}`);
+    const diagDirectory = join(tmpdir(), `tokenlighten-diag-ring-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+    const previous = process.env["NODE_ENV"];
+    process.env["NODE_ENV"] = "development";
+    try {
+      const recorder = createUsageRecorder({
+        workspaceRoot,
+        client: "vscode",
+        directory,
+        diagDirectory,
+        sessionId: "diag-session",
+        serverVersion: "9.9.9-test",
+      });
+      recorder.record({
+        tool: "search_files",
+        outcome: "error",
+        durationMs: 7,
+        responseBytes: 0,
+        writeEnabled: false,
+        kind: "refusal",
+        mode: "tree",
+        errorCode: "cwd-required-for-edit",
+      });
+    } finally {
+      process.env["NODE_ENV"] = previous;
+    }
+
+    const events = readUsageEvents(directory);
+    expect(events).toHaveLength(1);
+    expect(events[0]).not.toHaveProperty("kind");
+    expect(events[0]).not.toHaveProperty("mode");
+    expect(events[0]).not.toHaveProperty("errorCode");
+
+    const ring = readDiagRingFile(workspaceRoot, diagDirectory);
+    expect(ring?.server_version).toBe("9.9.9-test");
+    expect(ring?.calls).toEqual([
+      expect.objectContaining({
+        tool: "search_files",
+        mode: "tree",
+        kind: "refusal",
+        ok: false,
+        error_code: "cwd-required-for-edit",
+      }),
+    ]);
+  });
+
+  it("skips the ring file under the same gate as the NDJSON recorder (NODE_ENV=test / TOKENLIGHTEN_USAGE_LOG=off)", () => {
+    const workspaceRoot = tmpdir();
+    const directory = join(tmpdir(), `tokenlighten-diag-off-ndjson-${randomUUID()}`);
+    const diagDirectory = join(tmpdir(), `tokenlighten-diag-off-ring-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+
+    // Gate 1: default test NODE_ENV (no override) disables the recorder entirely.
+    const testGated = createUsageRecorder({ workspaceRoot, directory, diagDirectory });
+    testGated.record({
+      tool: "read_file",
+      outcome: "ok",
+      durationMs: 1,
+      responseBytes: 1,
+      writeEnabled: false,
+      kind: "read.task_pack",
+      mode: "task_pack",
+    });
+    expect(readUsageEvents(directory)).toEqual([]);
+    expect(readDiagRingFile(workspaceRoot, diagDirectory)).toBeNull();
+
+    // Gate 2: NODE_ENV=development but TOKENLIGHTEN_USAGE_LOG=off — same result.
+    const previousNodeEnv = process.env["NODE_ENV"];
+    const previousUsageLog = process.env["TOKENLIGHTEN_USAGE_LOG"];
+    process.env["NODE_ENV"] = "development";
+    process.env["TOKENLIGHTEN_USAGE_LOG"] = "off";
+    try {
+      const envGated = createUsageRecorder({ workspaceRoot, directory, diagDirectory });
+      envGated.record({
+        tool: "read_file",
+        outcome: "ok",
+        durationMs: 1,
+        responseBytes: 1,
+        writeEnabled: false,
+        kind: "read.task_pack",
+        mode: "task_pack",
+      });
+    } finally {
+      process.env["NODE_ENV"] = previousNodeEnv;
+      if (previousUsageLog === undefined) delete process.env["TOKENLIGHTEN_USAGE_LOG"];
+      else process.env["TOKENLIGHTEN_USAGE_LOG"] = previousUsageLog;
+    }
+    expect(readUsageEvents(directory)).toEqual([]);
+    expect(readDiagRingFile(workspaceRoot, diagDirectory)).toBeNull();
   });
 });

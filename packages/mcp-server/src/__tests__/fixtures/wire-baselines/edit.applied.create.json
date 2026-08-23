@@ -26,6 +26,7 @@
       "handle": "$H1"
     }
   ],
+  "applied_note": "post-edit disk state is the content as sent (sha/bytes/total_lines) — no follow-up read needed",
   "path": "src/test_pricing_harness.py",
   "handle": "$H1",
   "sha": "$SHA2",
@@ -40,5 +41,9 @@
       "src/pricing_engine.py"
     ],
     "authorized_by": "explicit-cwd"
+  },
+  "verification": {
+    "status": "not-applicable",
+    "reason": "new file — no test/mock references it"
   }
 }

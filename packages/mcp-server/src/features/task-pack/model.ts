@@ -481,6 +481,8 @@ export interface TaskPackResult {
   };
   /** A conservative, server-proved shortcut for one exact existing-file replacement. */
   fast_path?: TaskPackSingleSiteUniqueMatchFastPath;
+  /** Additive provenance for a successful pathless locator scope retry. */
+  scope_inferred?: { path: string; reason: "pathless-locator-abstain" };
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +502,18 @@ export interface TaskPackArgs {
    * derived; internal only, never serialized or fingerprinted.
    */
   taskQueryRefReplay?: true;
+  /**
+   * PI-09 close-out: the caller sent `force_serve:true` — "my context was
+   * compacted, send the bodies again". Suppresses every BODY-WITHHOLDING pack
+   * receipt (exact-fingerprint dedup, semantic-duplicate dedup, subset
+   * receipt) so the response carries surfaces, not an acknowledgement.
+   *
+   * Server-derived from the request argument; internal only, and deliberately
+   * NOT part of `computePackFingerprint`/`computeExtraArgsKey` — a forced
+   * serve must answer the SAME question as the unforced one, and the record it
+   * captures must be reusable by the caller's next ordinary call.
+   */
+  forceServe?: boolean;
   /** Opaque reference safe to echo in follow-up call guidance. */
   credentialRef?: string;
   /** Resolved secret for in-process artifact extraction; never serialized. */

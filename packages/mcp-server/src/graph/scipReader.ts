@@ -361,6 +361,14 @@ function buildGraphIndex(documents: ScipDocument[]): GraphIndex {
     exportsOf(filePath: string): string[] {
       return exportsOfMap.get(filePath) ?? [];
     },
+    // V11-05: SCIP carries no content-addressed root/generation identity in
+    // this reader's minimal decode (no manifest/rootHash-equivalent field is
+    // read from the Index message) — always undefined, documented on
+    // GraphIndex.rootHash() itself. A consumer must treat this the same as
+    // "cannot prove freshness", never as "assume fresh".
+    rootHash(): string | undefined {
+      return undefined;
+    },
   };
 }
 

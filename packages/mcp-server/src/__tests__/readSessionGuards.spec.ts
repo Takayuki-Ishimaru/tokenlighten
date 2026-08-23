@@ -437,4 +437,124 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     expect(res.result.isError).toBeFalsy();
     expect(data["concern_note"]).toBeUndefined();
   });
+
+  // ---------------------------------------------------------------------
+  // W9 (2026-08-22 root-leak forensics): the workspace DIRECTORY NAME must
+  // never leak into concern-anchor tokens. A folder named "m365-drive-mount"
+  // reads as three ordinary words when hyphen-split, so a query or path that
+  // merely NAMES the project used to harvest "m365"/"drive"/"mount" as
+  // concern tokens, which then collided with unrelated identifiers on a
+  // later slice of a completely unrelated file. See concernHarvestText's
+  // module doc in readCodeTaskPack.ts.
+  // ---------------------------------------------------------------------
+  function buildNativeMethodsFixture(): string {
+    const lines: string[] = [];
+    lines.push("using System;");
+    lines.push("using System.Runtime.InteropServices;");
+    lines.push("");
+    lines.push("namespace Native {");
+    lines.push("  internal static class NativeMethods {");
+    for (let i = 1; i <= 150; i++) {
+      lines.push(`    private const int Filler${i} = ${i}; // unrelated P/Invoke plumbing`);
+    }
+    lines.push("    // Mount-point registry plumbing");
+    lines.push("    [DllImport(\"mpr.dll\")]");
+    lines.push("    internal static extern int NetResourceMountPoint(IntPtr netResource);");
+    lines.push("    internal const string M365DriveMountRegistryKey = @\"SOFTWARE\\Contoso\\M365DriveMount\";");
+    lines.push("    internal static string BuildM365MountPointName(string label) => label;");
+    for (let i = 151; i <= 170; i++) {
+      lines.push(`    private const int Tail${i} = ${i}; // unrelated line`);
+    }
+    lines.push("  }");
+    lines.push("}");
+    return lines.join("\n") + "\n";
+  }
+
+  function mkNamedDir(tag: string, leafName: string): string {
+    const parent = fs.mkdtempSync(path.join(HOME, `.tl-guards-${tag}-`));
+    tmpDirs.push(parent);
+    const dir = path.join(parent, leafName);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  it("W9: a query naming the workspace folder never taints an unrelated NativeMethods.cs read", async () => {
+    const wsDir = mkNamedDir("rootleak", "m365-drive-mount");
+    writeFile(wsDir, "NativeMethods.cs", buildNativeMethodsFixture());
+
+    const srv = startServer({ cwd: wsDir, args: [wsDir] });
+    servers.push(srv);
+    await srv.initialize();
+
+    // Prime via search_files find (not task_pack — see the "g2-miss" test
+    // above: a task_pack priming call can serve a small fixture in full,
+    // short-circuiting the follow-up slice to a code-unchanged receipt
+    // before it ever reaches buildConcernNote). This free-text query names
+    // the workspace's own folder — exactly the reported repro.
+    const findRes = await srv.rpc(2, "tools/call", {
+      name: "search_files",
+      arguments: {
+        action: "find",
+        query: "Fix the m365-drive-mount project TransferBuffer.Allocate bounds check",
+      },
+    });
+    expect(findRes.result.isError).toBeFalsy();
+
+    // Range 1-70 excludes the mount-point identifiers (lines 156-160).
+    const res = await srv.rpc(3, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "slice", path: "NativeMethods.cs", range: "1-70" },
+    });
+    const data = parseToolResult(res);
+    expect(res.result.isError).toBeFalsy();
+    expect(data["concern_note"]).toBeUndefined();
+  });
+
+  it("F-R20: bare prose naming a root name-word (not the joined root phrase, not a real identifier) never taints an unrelated read", async () => {
+    const wsDir = mkNamedDir("rootword", "m365-drive-mount");
+    writeFile(wsDir, "NativeMethods.cs", buildNativeMethodsFixture());
+
+    const srv = startServer({ cwd: wsDir, args: [wsDir] });
+    servers.push(srv);
+    await srv.initialize();
+
+    const findRes2 = await srv.rpc(2, "tools/call", {
+      name: "search_files",
+      arguments: { action: "find", query: "Investigate why the mount keeps failing under load" },
+    });
+    expect(findRes2.result.isError).toBeFalsy();
+
+    const res2 = await srv.rpc(3, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "slice", path: "NativeMethods.cs", range: "1-70" },
+    });
+    const data2 = parseToolResult(res2);
+    expect(res2.result.isError).toBeFalsy();
+    expect(data2["concern_note"]).toBeUndefined();
+  });
+
+  it("W9 positive control: a query naming a real identifier still fires the note when it sits outside the served range", async () => {
+    const wsDir = mkNamedDir("rootleak-pos", "m365-drive-mount");
+    writeFile(wsDir, "NativeMethods.cs", buildNativeMethodsFixture());
+
+    const srv = startServer({ cwd: wsDir, args: [wsDir] });
+    servers.push(srv);
+    await srv.initialize();
+
+    const findRes = await srv.rpc(2, "tools/call", {
+      name: "search_files",
+      arguments: { action: "find", query: "Check NetResourceMountPoint release semantics" },
+    });
+    expect(findRes.result.isError).toBeFalsy();
+
+    const res = await srv.rpc(3, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "slice", path: "NativeMethods.cs", range: "1-70" },
+    });
+    const data = parseToolResult(res);
+    expect(res.result.isError).toBeFalsy();
+    const note = data["concern_note"];
+    expect(typeof note).toBe("string");
+    expect((note as string).toLowerCase()).toContain("netresourcemountpoint");
+  });
 });

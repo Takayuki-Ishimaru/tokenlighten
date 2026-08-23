@@ -24,6 +24,7 @@ import { TINY_BYTES, TINY_LINES } from "../util/fullGovernor.js";
 import { elideDocCommentsForDisplay } from "../util/formatCompress.js";
 import { languageForPath } from "../util/languages.js";
 import { safeResolve, safeRealPath, resolveReal, isWithin, checkReadTarget } from "../util/safePath.js";
+import { isWorkspaceCandidateAccepted } from "../workspace/candidates.js";
 import { getFileSkeleton } from "./getFileSkeleton.js";
 import { countLines } from "../util/countLines.js";
 import { genericTextDiscoveryEnabled, walkCodeFiles } from "./walkRepo.js";
@@ -150,6 +151,21 @@ export interface SmallFileBuildOptions {
    * (false / omitted) DOES consult and enforce the cap.
    */
   governorExempt?: boolean;
+  /**
+   * PI-07 / F-A1-5 (2026-08-20): the server's configured `--allowed-parent`
+   * roots, threaded through to `requestedPathWorkspaceCandidates` so its
+   * git-probed candidates (git-worktree / requested-git-root) are validated
+   * through the SAME `isWorkspaceCandidateAccepted` check every other
+   * workspace-candidate producer uses, instead of only the weaker
+   * `isWithin(requestedAbs, root)` this module applied on its own. Defaults
+   * to `[]` when omitted — server.ts's two production call sites pass the
+   * real `configuredAllowedParents(workspace)`; readCodePack.ts's
+   * governor-exempt fast path over an already-vetted `paths[]` entry does
+   * not (its refusal branch is not reachable in practice for that caller),
+   * and an empty default only NARROWS which candidates validate, never
+   * widens it.
+   */
+  allowedParents?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +250,11 @@ function sameBasenameCandidates(
     .map((file) => file.relPath);
 }
 
-function requestedPathWorkspaceCandidates(workspace: string, requestedPath: string): CwdCandidate[] {
+function requestedPathWorkspaceCandidates(
+  workspace: string,
+  requestedPath: string,
+  allowedParents: readonly string[] = [],
+): CwdCandidate[] {
   const requestedAbs = resolveReal(path.resolve(workspace, requestedPath));
   const roots = new Map<string, CwdCandidate["source"]>();
   const workspaceReal = resolveReal(workspace);
@@ -259,15 +279,26 @@ function requestedPathWorkspaceCandidates(workspace: string, requestedPath: stri
     }
   }
 
+  // PI-07 / F-A1-5: both sources above were filtered ONLY by isWithin — a
+  // git worktree or a probed "requested-git-root" can legitimately exist
+  // without being a workspace this server's resolver would ever accept as a
+  // cwd override (a sibling checkout outside every allowed parent, for
+  // instance). Validate through the SAME check server.ts's checkCwdOrRefuse
+  // applies to a live call before this candidate is ever offered.
   return [...roots]
     .map(([cwd, source]) => ({ cwd, source }))
+    .filter((candidate) => isWorkspaceCandidateAccepted(candidate.cwd, workspaceReal, allowedParents))
     .sort((a, b) => b.cwd.length - a.cwd.length || Buffer.compare(Buffer.from(a.cwd), Buffer.from(b.cwd)))
     .slice(0, BASENAME_CANDIDATE_LIMIT);
 }
 
-function pathOutsideWorkspaceRefusal(workspace: string, requestedPath: string): SmallFileRefusal {
+function pathOutsideWorkspaceRefusal(
+  workspace: string,
+  requestedPath: string,
+  allowedParents: readonly string[] = [],
+): SmallFileRefusal {
   const workspaceReal = resolveReal(workspace);
-  const cwdCandidates = requestedPathWorkspaceCandidates(workspaceReal, requestedPath);
+  const cwdCandidates = requestedPathWorkspaceCandidates(workspaceReal, requestedPath, allowedParents);
   const didYouMean = sameBasenameCandidates(workspaceReal, requestedPath, cwdCandidates)[0];
   return {
     ok: false,
@@ -300,9 +331,9 @@ export async function buildSmallFile(
 ): Promise<SmallFileResult | SmallFileRefusal> {
   // Resolve the absolute path safely within the workspace.
   const abs = safeResolve(resolvedPath, workspace);
-  if (!abs) return pathOutsideWorkspaceRefusal(workspace, resolvedPath);
+  if (!abs) return pathOutsideWorkspaceRefusal(workspace, resolvedPath, options.allowedParents);
   const real = await safeRealPath(abs, resolveReal(workspace));
-  if (!real) return pathOutsideWorkspaceRefusal(workspace, resolvedPath);
+  if (!real) return pathOutsideWorkspaceRefusal(workspace, resolvedPath, options.allowedParents);
 
   // Read the file. This module resolves containment itself instead of going
   // through readBytesSafe (it needs to tell "outside workspace" apart from

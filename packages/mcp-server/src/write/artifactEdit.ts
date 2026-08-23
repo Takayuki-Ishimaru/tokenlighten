@@ -9,6 +9,7 @@ import { looksLikeSecretFile } from "./secretScan.js";
 import { makeTmpPath, retryRename } from "./atomicWrite.js";
 import { batchCheckpoint } from "./checkpoint.js";
 import type { GuardedWorkspaceRoot } from "./guardedWorkspace.js";
+import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 import { preflightZip, ZIP_LIMITS } from "../office/zipPreflight.js";
 
 const MAX_INPUT_BYTES = 25 * 1024 * 1024;
@@ -916,6 +917,10 @@ export async function editArtifact(
   const writeFailure = atomicWriteBinary(target.abs, output);
   if (writeFailure) return writeFailure;
   try { batchCheckpoint(workspace, [options.path], sessionId); } catch { /* non-fatal */ }
+  // V10-10: binary/artifact writes (zip/xlsx/pdf/office) go through
+  // atomicWriteBinary above, not writeExistingFileAtomic, so they are not
+  // covered by that function's own index-invalidation call.
+  try { invalidateCachedWorkspaceFiles(workspace, [options.path]); } catch { /* best-effort */ }
   return {
     ok: true,
     path: options.path,

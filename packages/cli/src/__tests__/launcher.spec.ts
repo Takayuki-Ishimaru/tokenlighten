@@ -14,7 +14,8 @@ import {
   resolveStableLauncher,
   writeManagedLauncher,
 } from "../launcher.js";
-import { setupWorkspace } from "../commands/workspace.js";
+import { setupWorkspace, verifyLauncherVersion } from "../commands/workspace.js";
+import { formatVersionWithBuild } from "../commands/version.js";
 
 function temporaryRoot(label: string): string {
   const root = join(tmpdir(), `tokenlighten-${label}-${randomUUID()}`);
@@ -52,6 +53,38 @@ describe("stable launcher", () => {
     expect(body).toContain('command -v tl');
     expect(body).toContain(electronPath);
     expect(body).toContain('ELECTRON_RUN_AS_NODE=1');
+    expect(body.indexOf("ELECTRON_RUN_AS_NODE=1 exec")).toBeLessThan(body.indexOf("TL_GLOBAL="));
+  });
+
+  it("formats and executes the launcher build self-check", () => {
+    expect(formatVersionWithBuild("0.11.1", "2026-08-22T08:54:46.000Z-6447649abcdef"))
+      .toBe("0.11.1+6447649a");
+    const root = temporaryRoot("launcher-version");
+    const script = join(root, "version.cjs");
+    writeFileSync(script, 'process.stdout.write("0.11.1+6447649a\\n");\n');
+    expect(verifyLauncherVersion({
+      command: process.execPath,
+      argsPrefix: [script],
+      env: {},
+    })).toBe("0.11.1+6447649a");
+  });
+
+  it("executes a managed Windows .cmd launcher build self-check", () => {
+    if (process.platform !== "win32") return;
+    const root = temporaryRoot("launcher-version-windows");
+    const script = join(root, "version.cjs");
+    const command = join(root, "tl.cmd");
+    writeFileSync(script, 'process.stdout.write("0.11.1+windows1\\n");\n');
+    writeFileSync(command, [
+      "@echo off",
+      `"${process.execPath}" "${script}" %*`,
+      "",
+    ].join("\r\n"));
+    expect(verifyLauncherVersion({
+      command,
+      argsPrefix: [],
+      env: {},
+    })).toBe("0.11.1+windows1");
   });
 
   it("falls back to an absolute npm-global executable if the shim path is unsafe", () => {

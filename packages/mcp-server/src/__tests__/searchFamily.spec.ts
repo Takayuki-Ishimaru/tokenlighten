@@ -28,6 +28,7 @@ import { callTool } from "../server.js";
 import { buildRefusal } from "../protocol/refusal.js";
 import { handleTable } from "../util/handles.js";
 import { resetAll as resetAllSessions } from "../util/session.js";
+import { TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "../tools/walkRepo.js";
 
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
 const tmpDirs: string[] = [];
@@ -107,6 +108,55 @@ describe("A.5.8 search.matches — Rule K's `matches:{form}` tag and [R4-4] per-
     // Rule T / E-4: absence of `limit` IS completeness.
     expect(body["limit"]).toBeUndefined();
     expect(matches["truncated"]).toBeUndefined();
+  });
+
+  it("find: the exact Windows PowerShell call shape never dead-ends on per-file snippet caps", async () => {
+    const psRoot = mkdir("powershell-next");
+    const functions = (prefix: string) => Array.from(
+      { length: 16 },
+      (_, index) => `function ${prefix}${index} { return ${index} }`,
+    ).join("\n") + "\n";
+    write(psRoot, "Mount-M365Drive.ps1", functions("Mount-M365Drive"));
+    write(psRoot, "Start-M365DriveMounter.ps1", functions("Start-M365DriveMounter"));
+
+    const request: Body = {
+      action: "find",
+      query: "^function\\s+[A-Za-z_][A-Za-z0-9_-]*",
+      path: ".",
+      regex: true,
+      limit: 400,
+      maxTokens: 50000,
+      cwd: psRoot,
+    };
+    const { body } = await call(request);
+    const matches = matchesOf(body, "find");
+    expect(matches["total_matches"]).toBe(32);
+
+    const limit = body["limit"] as Body;
+    expect(limit["cause"]).toBe("wire");
+    const next = limit["next"] as { tool: string; arguments: Body };
+    expect(next.tool).toBe("search_files");
+    expect(next.arguments).toMatchObject({
+      action: "find",
+      query: request["query"],
+      regex: true,
+      limit: 400,
+      maxTokens: 50000,
+      cwd: psRoot,
+    });
+
+    const narrowed = (await call(next.arguments)).body;
+    const narrowedNext = (narrowed["limit"] as Body)["next"] as {
+      tool: string;
+      arguments: Body;
+    };
+    expect(narrowedNext.tool).toBe("read_file");
+    expect(narrowedNext.arguments).toMatchObject({
+      mode: "full",
+      path: next.arguments["path"],
+      cwd: psRoot,
+      maxTokens: 50000,
+    });
   });
 
   it.skipIf(process.platform !== "win32")(
@@ -294,6 +344,31 @@ describe("A.5.9 search.references — [R4-7] cursor placement and row 19's cause
       page = (await call({ cwd: root, ...next.arguments })).body;
     }
     expect(seen.size).toBe(page["total"]);
+  });
+
+  // F-W2D-1 (2026-08-21, W2-D): `references`' emitter (FindReferencesResult)
+  // started computing `omitted` in this wave, but `projectReferences`'
+  // REFERENCES_FIELDS allowlist had no slot for it — every byte of the
+  // internal disclosure was silently stripped at exactly this wire boundary,
+  // so `findReferences.spec.ts`'s in-process unit tests (which call
+  // findReferences() directly) could not have caught it. This is the ONE
+  // wire-level pin for that gap: KEPT_ON_REFERENCES now carries "omitted"
+  // the same way it already carries "cursor_note".
+  it("F-W2D-1: `omitted` (per-layer walk-skip counts) reaches the wire, same name/shape as search.matches.find", async () => {
+    const root2 = mkdir("refs-oversize");
+    write(root2, "src/present.ts", "wireOmittedReferenceToken(1);\n");
+    // Genuinely oversize even under references' own raised ceiling.
+    write(root2, "src/huge.ts", "a".repeat(TEXT_SCAN_MAX_FILE_SIZE_BYTES + 1));
+
+    const { body } = await call({ cwd: root2, action: "references", query: "wireOmittedReferenceToken" });
+    expect(body["kind"]).toBe("search.references");
+    expect(body["total"]).toBe(1);
+    const omitted = body["omitted"] as Body | undefined;
+    expect(omitted, JSON.stringify(body).slice(0, 300)).toBeDefined();
+    expect(omitted!["oversize"]).toBe(1);
+    // Disjoint from `limit.omitted` (a three-value enum array) — this one is
+    // a count map, and no `limit` is owed on an untruncated response.
+    expect(body["limit"]).toBeUndefined();
   });
 });
 

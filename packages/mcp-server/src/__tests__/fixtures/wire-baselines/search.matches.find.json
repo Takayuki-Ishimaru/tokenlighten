@@ -644,7 +644,16 @@
     }
   },
   "limit": {
-    "cause": "capped",
+    "cause": "wire",
+    "next": {
+      "tool": "search_files",
+      "arguments": {
+        "action": "find",
+        "path": "src/m11/f.ts",
+        "query": "hotSym",
+        "cwd": "$WS"
+      }
+    },
     "omitted": [
       "results"
     ]

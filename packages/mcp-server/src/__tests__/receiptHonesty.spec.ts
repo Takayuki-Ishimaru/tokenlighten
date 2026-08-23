@@ -185,7 +185,7 @@ const lines = (n: number, tag: string): string =>
 // ---------------------------------------------------------------------------
 
 describe("[R5-10] F-1 — every emitted receipt carries an actionable continuation", () => {
-  it("a prepared-fence stop on an UNSERVED file yields a next that reaches that file's bytes", async () => {
+  it("2026-08-22 fence-serves-unserved-scope: a read on an UNSERVED file now serves it directly, no stop/next round trip", async () => {
     const { ws, srv } = await liveServer("f1");
     writeFile(ws, "src/alpha.ts", `export function alpha(): number {\n${lines(40, "  // a")}  return 1;\n}\n`);
     writeFile(ws, "src/beta.ts", `export function beta(): string {\n${lines(40, "  // b")}  return "BETA_MARKER";\n}\n`);
@@ -201,34 +201,19 @@ describe("[R5-10] F-1 — every emitted receipt carries an actionable continuati
     expect(pack["kind"]).toBe("read.task_pack");
     expect((pack["decision"] as Record<string, unknown>)["kind"]).toBe("act.answer");
 
-    // 2. Ask for a file the pack never served. The fence stops the read.
-    const stop = await srv.call({ mode: "slice", path: "src/beta.ts", range: "1-10", cwd: ws });
-
-    // THE ACCEPTANCE: a non-editing consumer can follow a decision. Either the
-    // response is not a receipt at all (a decision with an executable next), or
-    // the receipt itself carries one. Never the bare stop F-1 reproduced.
-    const receipt = receiptOf(stop);
-    const continuation = stop["kind"] === "read.receipt"
-      ? receipt?.["next"]
-      : (stop["decision"] as Record<string, unknown> | undefined)?.["next"] ?? stop["next"];
-    expect(
-      continuation,
-      `the stop must carry a continuation; got ${JSON.stringify(stop)}`,
-    ).toBeDefined();
-
-    const next = continuation as { tool: string; arguments: Record<string, unknown> };
-    expect(next.tool).toBe("read_file");
-    // §2.6: executable as written. A placeholder here is the class the funnel's
-    // own scrub deletes, which is how F-1 lost its next in the first place.
-    expect(JSON.stringify(next.arguments)).not.toMatch(/<[^<>]{3,}>/);
-    // The route is scoped to the file that was refused, not a generic escape.
-    expect(JSON.stringify(next.arguments)).toContain("src/beta.ts");
-
-    // 3. EXECUTE it verbatim. B's bytes must arrive.
-    const followed = await srv.call(next.arguments);
-    expect(followed["kind"]).not.toBe("refusal");
-    const served = bodiesOf(followed).join("\n");
-    expect(served).toContain("BETA_MARKER");
+    // 2. Ask for a file the pack never served.
+    //
+    // THE ACCEPTANCE, superseding F-1's original one: F-1 (2026-08-14) fixed
+    // a bare, unfollowable `decision-unchanged` stop by giving it a `next`.
+    // 2026-08-22 fence-serves-unserved-scope removes the stop itself for this
+    // call shape — a prepared certificate must not stonewall read-only
+    // discovery of scope it never served — so B's bytes now arrive directly,
+    // with no receipt/next round trip to follow at all.
+    const served = await srv.call({ mode: "full", path: "src/beta.ts", cwd: ws });
+    expect(served["kind"], `expected a direct serve; got ${JSON.stringify(served)}`).toBe("read.text");
+    expect(served["receipt"]).toBeUndefined();
+    const body = bodiesOf(served).join("\n");
+    expect(body).toContain("BETA_MARKER");
   }, 60000);
 
   it("an EDIT-terminal prepared stop is equally followable (the edit_file template is scrubbed too)", async () => {
@@ -343,6 +328,78 @@ describe("[R5-10] F-1c — ranges[] puts real bytes on the wire before it books 
     });
     expect(sections["kind"]).not.toBe("refusal");
     expect(bodiesOf(sections).join("\n")).toContain("BETA_SECTION_MARKER");
+  }, 60000);
+});
+
+// ---------------------------------------------------------------------------
+// W2A-1 (2026-08-21) — a re-ask wider than an already-clamped serve must not
+// collapse to a full-range receipt
+// ---------------------------------------------------------------------------
+//
+// Live repro (readCodeTaskPack.ts, 21,107 lines, real dist build):
+// `range=587-8119` served only 587-1104 (the per-call slice byte cap), with
+// `remaining:["1105-8119"]` honestly disclosed. The IDENTICAL 587-8119 re-ask
+// — same session, no new bytes needed for 587-1104 — collapsed to a bare
+// `code-unchanged` receipt for the caller's WHOLE 587-8119 ask: no body, no
+// `remaining`, no signal that 1105-8119 (92% of the request) was never put on
+// the wire. `addedLines === 0` only proves the CLAMPED prefix was already
+// held; it says nothing about whether that prefix was the caller's whole ask.
+// Both `servedContentReceipt` collapse guards in server.ts had this gap (the
+// single `range` form and the `ranges:[…]` batch form) and are pinned
+// separately below; `sliceData.remaining_ranges` / `batchData.truncated` are
+// the fields that already carried the missing signal.
+describe("[W2A-1] a wider re-ask than an already-clamped serve must not silently drop its tail", () => {
+  it("range='1-<total>' on a file wider than one slice's cap: the identical re-ask SERVES the tail, not a full-range receipt", async () => {
+    const { ws, srv } = await liveServer("w2a1range");
+    const total = 4000;
+    writeFile(
+      ws,
+      "src/wide.ts",
+      `export const WIDE_MARKER = 1;\n${lines(total, "// filler line with enough characters to force a slice byte cap")}`,
+    );
+    const whole = `1-${total + 1}`;
+
+    const first = await srv.call({ mode: "slice", path: "src/wide.ts", range: whole, cwd: ws });
+    expect(first["kind"]).toBe("read.text");
+    const firstEvidence = (first["evidence"] as Array<Record<string, unknown>>)[0]!;
+    expect(String(firstEvidence["range"]), "fixture did not trigger a clamp — widen it").not.toBe(whole);
+    expect(firstEvidence["remaining"], "the clamped first serve must disclose its own tail").toBeDefined();
+
+    // THE ACCEPTANCE: the identical wide re-ask, now that the clamped prefix
+    // is already held (addedLines===0 for it), must still put bytes on the
+    // wire and disclose the same undelivered tail — never a bare receipt for
+    // the whole nominal range.
+    const second = await srv.call({ mode: "slice", path: "src/wide.ts", range: whole, cwd: ws });
+    expect(
+      second["kind"],
+      `a wider re-ask than the held prefix must serve, not receipt; got ${JSON.stringify(second).slice(0, 300)}`,
+    ).toBe("read.text");
+    expect(bodiesOf(second).join("\n")).toContain("WIDE_MARKER");
+    const secondEvidence = (second["evidence"] as Array<Record<string, unknown>>)[0]!;
+    expect(secondEvidence["remaining"], "the re-ask must still disclose the undelivered tail").toBeDefined();
+  }, 60000);
+
+  it("ranges:['1-<total>'] (the batch form) on the same oversized file: the identical re-ask also SERVES, never a full-range receipt", async () => {
+    const { ws, srv } = await liveServer("w2a1ranges");
+    const total = 4000;
+    writeFile(
+      ws,
+      "src/wideb.ts",
+      `export const WIDE_BATCH_MARKER = 1;\n${lines(total, "// filler line with enough characters to force a slice byte cap")}`,
+    );
+    const whole = `1-${total + 1}`;
+
+    const first = await srv.call({ mode: "slice", path: "src/wideb.ts", ranges: [whole], cwd: ws });
+    expect(first["kind"]).toBe("read.text");
+    const firstEvidence = (first["evidence"] as Array<Record<string, unknown>>)[0]!;
+    expect(String(firstEvidence["range"]), "fixture did not trigger a clamp — widen it").not.toBe(whole);
+
+    const second = await srv.call({ mode: "slice", path: "src/wideb.ts", ranges: [whole], cwd: ws });
+    expect(
+      second["kind"],
+      `a wider re-ask than the held prefix must serve, not receipt; got ${JSON.stringify(second).slice(0, 300)}`,
+    ).toBe("read.text");
+    expect(bodiesOf(second).join("\n")).toContain("WIDE_BATCH_MARKER");
   }, 60000);
 });
 

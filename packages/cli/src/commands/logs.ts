@@ -88,17 +88,30 @@ export async function runLogs(args: string[]): Promise<void> {
   }
   const price = priceFrom(rest);
   const workspaceRoot = valueAfter(rest, "--workspace-root");
-  const workspaceId = workspaceRoot === undefined
-    ? undefined
-    : usageWorkspaceId(workspaceRoot);
   if (sub === "summary") {
-    const since = usageWindowStart();
-    // A null workspaceId means usage was never recorded on this machine (no
-    // privacy salt), so a workspace scope matches nothing rather than leaking
-    // machine-wide events under a workspace label.
-    const events = workspaceId === null
-      ? []
-      : readUsageEvents(undefined, since, workspaceId);
+    let since: string | null = null;
+    let workspaceId: string | null | undefined;
+    let events: ReturnType<typeof readUsageEvents> = [];
+    let measurementUnavailableReason: "log-dir-unavailable" | "scope-mismatch" | undefined;
+    try {
+      since = usageWindowStart();
+      workspaceId = workspaceRoot === undefined
+        ? undefined
+        : usageWorkspaceId(workspaceRoot);
+      // A null workspaceId means usage was never recorded on this machine.
+      events = workspaceId === null
+        ? []
+        : readUsageEvents(undefined, since, workspaceId);
+      if (
+        workspaceRoot !== undefined
+        && events.length === 0
+        && readUsageEvents(undefined, since).length > 0
+      ) {
+        measurementUnavailableReason = "scope-mismatch";
+      }
+    } catch {
+      measurementUnavailableReason = "log-dir-unavailable";
+    }
     const aiLogs = readAiUsageLogs({
       since,
       workspaceRoot: workspaceRoot ?? null,
@@ -106,7 +119,10 @@ export async function runLogs(args: string[]): Promise<void> {
     const scope = workspaceRoot === undefined
       ? { kind: "machine" } as const
       : { kind: "workspace", workspaceId: workspaceId ?? null } as const;
-    const summary = summarizeUsage(events, price, aiLogs, { scope });
+    const summary = {
+      ...summarizeUsage(events, price, aiLogs, { scope }),
+      ...(measurementUnavailableReason ? { measurementUnavailableReason } : {}),
+    };
     if (rest.includes("--json")) {
       process.stdout.write(`${JSON.stringify(summary)}\n`);
       return;
@@ -158,6 +174,9 @@ export async function runLogs(args: string[]): Promise<void> {
     return;
   }
   if (sub === "export") {
+    const workspaceId = workspaceRoot === undefined
+      ? undefined
+      : usageWorkspaceId(workspaceRoot);
     const outputPath = valueAfter(rest, "--output");
     if (!outputPath) throw new Error("tl logs export requires --output FILE");
     const exported = await exportUsageBundle({

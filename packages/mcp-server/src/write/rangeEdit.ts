@@ -118,9 +118,14 @@ function resolveExistingFile(relPath: string, workspace: string): { abs: string;
   return { abs, workspaceReal };
 }
 
-function writeExistingFile(abs: string, content: string, mode: number | undefined): RangeEditResult | null {
+function writeExistingFile(
+  abs: string,
+  content: string,
+  mode: number | undefined,
+  indexInvalidation: { root: string; relPath: string },
+): RangeEditResult | null {
   try {
-    writeExistingFileAtomic(abs, content, mode);
+    writeExistingFileAtomic(abs, content, mode, indexInvalidation);
     return null;
   } catch (err) {
     return { ok: false, error: `Cannot write file: ${(err as Error).message}`, code: "write-error" };
@@ -163,7 +168,10 @@ export function replaceRangeContent(
   const replacement = toLf(input.content ?? "");
   const next = normalized.slice(0, startIndex) + replacement + normalized.slice(endIndex);
   const restored = restoreLineEnding(next, lineEnding);
-  const writeError = writeExistingFile(resolved.abs, restored, stat.mode);
+  const writeError = writeExistingFile(resolved.abs, restored, stat.mode, {
+    root: resolved.workspaceReal,
+    relPath: input.path,
+  });
   if (writeError) return writeError;
 
   try { batchCheckpoint(workspace, [input.path], sessionId); } catch { /* non-fatal */ }
@@ -224,7 +232,10 @@ export function replaceAllInRange(
   const replaced = segment.split(search).join(replace);
   const next = normalized.slice(0, startIndex) + replaced + normalized.slice(endIndex);
   const restored = restoreLineEnding(next, lineEnding);
-  const writeError = writeExistingFile(resolved.abs, restored, stat.mode);
+  const writeError = writeExistingFile(resolved.abs, restored, stat.mode, {
+    root: resolved.workspaceReal,
+    relPath: input.path,
+  });
   if (writeError) return writeError;
 
   try { batchCheckpoint(workspace, [input.path], sessionId); } catch { /* non-fatal */ }

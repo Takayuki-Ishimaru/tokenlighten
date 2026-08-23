@@ -69,8 +69,10 @@ function extname(filePath: string): string {
  * SEGMENT, or a `.test.`/`.spec.` filename affix. Deliberately has no bare
  * `\btest` catch-all — that would sweep in `testbed/`, `latest/`, and similar.
  *
- * Exported for the evidence resolver so repository analysis uses one shared
- * test-path classifier instead of divergent subsystem-specific copies.
+ * Exported for the evidence resolver, which needs one shared classifier
+ * rather than a fifth divergent copy (impact.ts classifySurface,
+ * core2/search.ts TEST_PATH_RE and semanticWiringResolver.ts each carry
+ * their own, looser, notion).
  */
 export function isTestPath(path: string): boolean {
   return /(?:^|\/)(?:test|tests|__tests__|spec|__spec__)(?:\/|$)|(?:\.test\.|\.spec\.)/.test(path);

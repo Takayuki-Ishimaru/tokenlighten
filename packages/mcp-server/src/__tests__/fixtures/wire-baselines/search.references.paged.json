@@ -198,18 +198,6 @@
       "in_comment": [
         false
       ]
-    },
-    {
-      "path": "src/d2/f.ts",
-      "lines": [
-        1
-      ],
-      "snippets": [
-        "cursorTarget(2);"
-      ],
-      "in_comment": [
-        false
-      ]
     }
   ],
   "total": 40,
@@ -220,7 +208,7 @@
       "arguments": {
         "action": "references",
         "query": "cursorTarget",
-        "cursor": "eyJ2IjoxLCJwIjoic3JjL2QyL2YudHMiLCJsIjoxfQ"
+        "cursor": "$TH"
       }
     },
     "omitted": [

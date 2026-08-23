@@ -4,6 +4,7 @@
 
 import * as vscode from "vscode";
 import { spawnTl } from "./cli.js";
+import { showDiagnosticsPanel } from "./diagnosticsPanel.js";
 import {
   getDisplayLanguage,
   getTokenLightenConfiguration,
@@ -13,6 +14,7 @@ import type { StatusBarManager } from "./statusBar.js";
 import {
   setWorkspaceConfigured,
   workspaceActivationState,
+  workspaceMcpSettingsCached,
 } from "./workspaceState.js";
 import type { WorkspaceActivationState } from "./workspaceState.js";
 
@@ -80,10 +82,7 @@ export function registerCommands(
     context.subscriptions.push(vscode.commands.registerCommand(id, fn));
 
   reg("tokenlighten.status", () => {
-    void workspaceActivationState().then((state) => {
-      bar?.setActivationState(state);
-      void vscode.window.showInformationMessage(statusMessage(state));
-    });
+    void showStatusMenu(context, bar);
   });
   reg("tokenlighten.usage.show", () => { void showUsageDashboard(context); });
   reg("tokenlighten.logs.export", () => { void exportUsageLogs(); });
@@ -95,6 +94,98 @@ export async function enableWorkspace(): Promise<void> {
     true,
     getTokenLightenConfigurationTarget(),
   );
+}
+
+export async function disableWorkspace(): Promise<void> {
+  await getTokenLightenConfiguration().update(
+    "enabled",
+    false,
+    getTokenLightenConfigurationTarget(),
+  );
+}
+
+interface StatusMenuItem extends vscode.QuickPickItem {
+  action: "diagnostics" | "enable" | "disable" | "setup" | "sidebar" | "status";
+}
+
+/**
+ * tokenlighten.status now opens this menu instead of showing the old toast
+ * directly — "Status" below replays exactly that toast. Enable/Disable/Set up
+ * are mutually exclusive: only the one action that applies to the CURRENT
+ * WorkspaceActivationState is offered, reusing enableWorkspace/
+ * disableWorkspace/the existing tokenlighten.setup command rather than a new
+ * write path.
+ */
+export async function showStatusMenu(
+  context: vscode.ExtensionContext,
+  bar?: StatusBarManager,
+): Promise<void> {
+  const state = await workspaceActivationState();
+  bar?.setActivationState(state);
+
+  const items: StatusMenuItem[] = [
+    {
+      action: "diagnostics",
+      label: localized("Diagnostics", "診断"),
+      description: localized(
+        "Version, executable, write mode, registration, last call",
+        "バージョン、実行ファイル、書き込みモード、登録状況、最終呼び出し",
+      ),
+    },
+  ];
+  if (state === "ready") {
+    items.push({
+      action: "disable",
+      label: localized("Disable for This Workspace", "このワークスペースで無効化"),
+    });
+  } else if (state === "disabled") {
+    items.push({
+      action: "enable",
+      label: localized("Enable for This Workspace", "このワークスペースで有効化"),
+    });
+  } else if (state === "not-configured") {
+    items.push({
+      action: "setup",
+      label: localized("Set Up TokenLighten for This Workspace", "このワークスペースでTokenLightenをセットアップ"),
+    });
+  }
+  items.push({
+    action: "sidebar",
+    label: localized("Open TokenLighten Sidebar", "TokenLightenサイドバーを開く"),
+  });
+  items.push({
+    action: "status",
+    label: localized("Status", "ステータス"),
+    description: statusMessage(state),
+  });
+
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: "TokenLighten",
+  });
+  if (!picked) return;
+
+  switch (picked.action) {
+    case "diagnostics":
+      showDiagnosticsPanel(context);
+      return;
+    case "enable":
+      await enableWorkspace();
+      bar?.setActivationState(await workspaceActivationState());
+      return;
+    case "disable":
+      await disableWorkspace();
+      bar?.setActivationState(await workspaceActivationState());
+      return;
+    case "setup":
+      if (bar) await setupWorkspace(bar);
+      return;
+    case "sidebar":
+      await vscode.commands.executeCommand("workbench.view.extension.tokenlighten-sidebar");
+      return;
+    case "status":
+      void vscode.window.showInformationMessage(statusMessage(state));
+      return;
+  }
 }
 
 export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
@@ -153,6 +244,9 @@ export interface UsageSummary {
   failedCalls: number;
   estimatedResponseTokens: number;
   measuredBaselineCalls: number;
+  measuredResponseBytes?: number;
+  measuredBaselineBytes?: number;
+  measurementUnavailableReason?: "recorder-off" | "log-dir-unavailable" | "scope-mismatch";
   estimatedSavedTokens: number;
   estimatedSavedCostUsd: number | null;
   estimatedTokenReductionPercent: number | null;
@@ -164,6 +258,8 @@ export interface UsageSummary {
     costReductionPercent: number | null;
     matchedSessions: number;
     confidence: string;
+    calibration?: { sampleCount?: number };
+    warnings?: string[];
   };
 }
 
@@ -182,7 +278,11 @@ export async function loadUsageSummary(): Promise<UsageSummary> {
   if (result.code !== 0) {
     throw new Error(firstLine(result.stderr || result.stdout));
   }
-  return JSON.parse(result.stdout) as UsageSummary;
+  const summary = JSON.parse(result.stdout) as UsageSummary;
+  if (workspaceMcpSettingsCached()?.usageLoggingEnabled === false) {
+    summary.measurementUnavailableReason = "recorder-off";
+  }
+  return summary;
 }
 
 export async function showUsageDashboard(
@@ -220,11 +320,14 @@ export async function showUsageDashboard(
         measured: "Measured calls",
         export: "Export logs for this workspace",
       };
-  const matchedEstimate = summary.sessionEstimate?.status === "estimated";
-  const tokenReduction = matchedEstimate
+  const estimateStatus = summary.sessionEstimate?.status;
+  const estimateConfidence = summary.sessionEstimate?.confidence;
+  const publishableEstimate = estimateStatus === "estimated"
+    && (estimateConfidence === "medium" || estimateConfidence === "high");
+  const tokenReduction = publishableEstimate
     ? summary.sessionEstimate?.tokenReductionPercent ?? null
-    : summary.estimatedTokenReductionPercent;
-  const billingReduction = matchedEstimate
+    : null;
+  const billingReduction = publishableEstimate
     ? summary.sessionEstimate?.costReductionPercent ?? null
     : null;
   const tokenPercentage = tokenReduction === null
@@ -233,31 +336,56 @@ export async function showUsageDashboard(
   const billingPercentage = billingReduction === null
     ? "—"
     : `${billingReduction.toFixed(1)}%`;
-  const tokenLabel = matchedEstimate
-    ? localized(
-      "Estimated token reduction in this workspace (matched against local AI logs)",
-      "このワークスペースの推定トークン削減率（実測ログ照合）",
-    )
-    : localized("Measured per-call reduction", "計測済み呼び出しベースの削減率");
-  const billingLabel = matchedEstimate
-    ? localized(
-      "Estimated billing reduction in this workspace (matched against local AI logs)",
-      "このワークスペースの推定課金額削減率（実測ログ照合）",
-    )
-    : localized("Billing estimate", "課金額削減推定");
+  const tokenLabel = localized(
+    "Estimated token reduction in this workspace (matched against local AI logs)",
+    "このワークスペースの推定トークン削減率（実測ログ照合）",
+  );
+  const billingLabel = localized(
+    "Estimated billing reduction in this workspace (matched against local AI logs)",
+    "このワークスペースの推定課金額削減率（実測ログ照合）",
+  );
+  const calibrationSamples = summary.sessionEstimate?.calibration?.sampleCount ?? 0;
+  const calibrationTarget = 24;
+  const calibrationLine = estimateConfidence !== "high" && calibrationSamples < calibrationTarget
+    ? localized(`Calibrating: ${calibrationSamples}/${calibrationTarget} paired samples (medium 12 / high 24).`, `調整中: ペアサンプル ${calibrationSamples}/${calibrationTarget}（medium 12 / high 24）。`)
+    : null;
+  const responseBytes = summary.measuredResponseBytes ?? null;
+  const baselineBytes = summary.measuredBaselineBytes ?? null;
+  const measuredRatio = responseBytes !== null && baselineBytes !== null && baselineBytes > 0 ? responseBytes / baselineBytes : null;
+  const measuredLine = localized(
+    `Measured calls: ${summary.measuredBaselineCalls}; response bytes vs baseline: ${measuredRatio === null ? "unavailable" : `${(measuredRatio * 100).toFixed(1)}%`}.`,
+    `実測呼び出し: ${summary.measuredBaselineCalls}、応答バイト対ベースライン比: ${measuredRatio === null ? "利用不可" : `${(measuredRatio * 100).toFixed(1)}%`}。`,
+  );
+  const warnings = summary.sessionEstimate?.warnings ?? [];
+  const unavailableReason = summary.measurementUnavailableReason
+    ?? (warnings.includes("recorder-off") ? "recorder-off"
+      : warnings.includes("log-dir-unavailable") ? "log-dir-unavailable"
+        : warnings.includes("scope-mismatch") ? "scope-mismatch" : undefined);
+  const reason = unavailableReason === "recorder-off"
+    ? localized("Recorder is off.", "レコーダーが無効です。")
+    : unavailableReason === "log-dir-unavailable"
+      ? localized("Usage log directory is unavailable.", "使用状況ログのディレクトリに到達できません。")
+      : unavailableReason === "scope-mismatch"
+        ? localized("Usage logs do not match this workspace scope.", "使用状況ログのスコープがこのワークスペースと一致しません。")
+        : null;
   const metricNote = `${
-    matchedEstimate
+    publishableEstimate
       ? localized(
         "Estimates are matched against attributable local AI usage logs.",
         "この推定は帰属可能なローカルAI利用ログと照合しています。",
       )
-      : localized(
-        "Billing estimate unavailable: no attributable local AI logs for this workspace.",
-        "このワークスペースで照合可能なAIログがないため請求推定は利用できません。",
-      )
+      : estimateStatus === "estimated"
+        ? localized(
+          "Reduction estimates are hidden because confidence is low. Use paired billing evidence for decisions.",
+          "信頼度が低いため削減率を表示していません。判断にはペア課金の検証結果を使用してください。",
+        )
+        : localized(
+          "Token and billing reduction estimates are unavailable: no attributable local AI logs for this workspace.",
+          "このワークスペースで照合可能なAIログがないため、トークンと課金額の削減率は利用できません。",
+        )
   } ${localized(
-    `Confidence: ${summary.sessionEstimate?.confidence ?? "unavailable"}.`,
-    `信頼度: ${summary.sessionEstimate?.confidence ?? "unavailable"}。`,
+    `Confidence: ${estimateConfidence ?? "unavailable"}.`,
+    `信頼度: ${estimateConfidence ?? "unavailable"}。`,
   )}`;
   const active = await workspaceActivationState() === "ready";
   const panel = vscode.window.createWebviewPanel(
@@ -282,6 +410,9 @@ button{margin-top:20px;padding:8px 14px}
 <div class="card">${copy.status}<div class="value">${active ? copy.enabled : copy.disabled}</div></div>
 </div>
 <p class="note">${metricNote} ${copy.measured}: ${summary.measuredBaselineCalls}</p>
+${calibrationLine ? `<p class="note">${calibrationLine}</p>` : ""}
+<p class="note">${measuredLine}</p>
+${reason ? `<p class="note">${reason}</p>` : ""}
 <button id="export">${copy.export}</button>
 <script>
 const vscode = acquireVsCodeApi();

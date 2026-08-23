@@ -256,7 +256,7 @@ export async function applyRemoveDuplicateBranch(
   // Mode preservation: see writeExistingFileAtomic's doc comment
   // (2026-08-07 chmod-reset incident).
   try {
-    writeExistingFileAtomic(realPath, newContent, rawMode);
+    writeExistingFileAtomic(realPath, newContent, rawMode, { root: workspace, relPath });
   } catch (err) {
     return {
       ok: false,

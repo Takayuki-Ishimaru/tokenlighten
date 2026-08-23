@@ -81,6 +81,21 @@ export interface RootResolver {
    * pool resolves to "".
    */
   readonly markerRoots: ReadonlyArray<string>;
+  /**
+   * R4: true when the WORKSPACE ROOT ITSELF carries a recognized marker
+   * (the same test dirIsProjectRoot applies to any other candidate
+   * directory). `rootOf` returns "" for two structurally different
+   * situations that used to be indistinguishable to callers: (a) the
+   * workspace root genuinely IS a project (a flat, non-monorepo codebase,
+   * or the outer project of a parent/nested-subproject pair) and (b) the
+   * workspace root has NO manifest at all, so "" is just the fallback
+   * sentinel for an incidental mix of manifest-less files that share no
+   * real project identity (a scratch/ dir, a fixture/evidence dump, ...).
+   * Only (a) makes "" a legitimate competitor for the dominant-root vote
+   * against a real marker root — see computeDominantRoot in
+   * locateTaskContext.ts.
+   */
+  readonly workspaceRootIsProject: boolean;
 }
 
 /**
@@ -193,6 +208,10 @@ export function buildRootResolver(workspace: string, relPaths: ReadonlyArray<str
   }
   // Longest-first so `rootOf` picks the NEAREST enclosing marker root.
   const markerRoots = [...markerRootSet].sort((a, b) => b.length - a.length || (a < b ? -1 : 1));
+  // R4: same probe, applied to the workspace root itself (bypassing the
+  // "\"\" is never a nested root" skip above, which is about markerRoots
+  // membership, not about whether "" is itself a genuine project).
+  const workspaceRootIsProject = probe("");
 
   // Per-path resolution memo (a file's root is looked up repeatedly across
   // the scoring pipeline).
@@ -212,7 +231,7 @@ export function buildRootResolver(workspace: string, relPaths: ReadonlyArray<str
     return owner;
   };
 
-  return { rootOf, markerRoots };
+  return { rootOf, markerRoots, workspaceRootIsProject };
 }
 
 /**

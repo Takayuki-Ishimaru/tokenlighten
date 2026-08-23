@@ -4,7 +4,6 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { tsImport } from "tsx/esm/api";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BIN_JS = resolve(HERE, "..", "..", "dist", "bin.js");
@@ -143,13 +142,7 @@ describe("built MCP wiring integration", () => {
     expect(readFileSync(join(workspace, "src/packet_consumer.ts"), "utf8"))
       .toContain("encodeSignal(sampleSignal())");
 
-    // Execute the generated TypeScript through tsx rather than Vite's module
-    // graph. macOS resolves /var to /private/var, and Vite 6 correctly refuses
-    // an external temp-file import after that realpath transition.
-    const consumer = await tsImport(
-      pathToFileURL(join(workspace, "src/packet_consumer.ts")).href,
-      import.meta.url,
-    );
+    const consumer = await import(`${pathToFileURL(join(workspace, "src/packet_consumer.ts")).href}?v=${Date.now()}`);
     expect(consumer.transmitPacket()).toEqual({ healthBit: 0 });
   }, 60_000);
 });

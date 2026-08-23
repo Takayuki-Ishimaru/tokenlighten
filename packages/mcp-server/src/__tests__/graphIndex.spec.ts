@@ -196,6 +196,38 @@ describe("parseTlGraph — 2-symbol, 2-file fixture", () => {
     const index = parseTlGraph(JSON.stringify(fixture));
     expect(index.exportsOf("src/unknown.ts")).toEqual([]);
   });
+
+  it("rootHash() returns undefined when the fixture never carried one — the additive accessor never fabricates a value", () => {
+    const index = parseTlGraph(JSON.stringify(fixture));
+    expect(index.rootHash()).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseTlGraph: rootHash() accessor (V11-05 — additive GraphIndex accessor,
+// consumed by graph-evidence/adapters.ts's createTlGraphProviders instead of
+// the now-deleted readTlGraphGeneration head-byte probe).
+// ---------------------------------------------------------------------------
+
+describe("parseTlGraph — rootHash() accessor", () => {
+  it("returns the graph's own rootHash when present", () => {
+    const index = parseTlGraph(JSON.stringify({ version: 1, rootHash: "abc123", symbols: [], files: [] }));
+    expect(index.rootHash()).toBe("abc123");
+  });
+
+  it("returns undefined for a graph with no rootHash field — tolerant, not a parse error", () => {
+    const index = parseTlGraph(JSON.stringify({ version: 1, symbols: [], files: [] }));
+    expect(index.rootHash()).toBeUndefined();
+  });
+
+  it("returns undefined when rootHash is present but not a string — malformed, not fabricated", () => {
+    const index = parseTlGraph(JSON.stringify({ version: 1, rootHash: 12345, symbols: [], files: [] }));
+    expect(index.rootHash()).toBeUndefined();
+  });
+
+  it("does not throw when rootHash is absent (old/hand-built fixtures keep parsing)", () => {
+    expect(() => parseTlGraph(JSON.stringify({ version: 1, symbols: [], files: [] }))).not.toThrow();
+  });
 });
 
 describe("parseTlGraph — validation", () => {
@@ -255,6 +287,19 @@ describe("loadGraphIndex — tl-graph.json present", () => {
 
     const result = loadGraphIndex(ws);
     expect(result).toBeUndefined();
+  });
+
+  it("rootHash() end-to-end: loadGraphIndex surfaces the on-disk graph's rootHash (V11-05)", () => {
+    const ws = mkWorkspace();
+    writeFile(ws, ".tokenlighten/index/tl-graph.json", JSON.stringify({
+      version: 1,
+      rootHash: "end-to-end-root-hash",
+      symbols: [],
+      files: [],
+    }));
+
+    const index = loadGraphIndex(ws);
+    expect(index?.rootHash()).toBe("end-to-end-root-hash");
   });
 });
 
@@ -409,6 +454,12 @@ describe("parseScip — hand-encoded buffer", () => {
     expect(index.references("x")).toEqual([]);
     expect(index.importsOf("f")).toEqual([]);
     expect(index.exportsOf("f")).toEqual([]);
+  });
+
+  it("rootHash() is always undefined — SCIP carries no content-addressed root identity in this reader (V11-05, documented on GraphIndex.rootHash())", () => {
+    const buf = buildTestScipBuffer();
+    const index = parseScip(buf);
+    expect(index.rootHash()).toBeUndefined();
   });
 });
 

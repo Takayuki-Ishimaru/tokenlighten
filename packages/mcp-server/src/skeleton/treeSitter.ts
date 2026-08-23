@@ -173,8 +173,8 @@ let cachedParserCtor: any;
  * loadLanguage's catch — turning every skeleton request into the regex
  * fallback.) Resolving once and reusing the reference sidesteps that.
  *
- * Exported so bundled parser consumers can reuse this same resolved reference
- * instead of adding another
+ * Exported so ../core2/syntax.ts's Parser bootstrap can reuse this SAME
+ * resolved reference too, instead of adding another
  * `import("web-tree-sitter")` call site that would reproduce the exact
  * bundling risk described above (both files land in the same bundled
  * mcp-server bin.js — see bundle-cli.mjs).

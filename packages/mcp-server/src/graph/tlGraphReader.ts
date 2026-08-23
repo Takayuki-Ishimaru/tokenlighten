@@ -144,6 +144,13 @@ export function parseTlGraph(jsonText: string): GraphIndex {
     throw new Error(`tl-graph: unsupported version ${version} (expected 1)`);
   }
 
+  // V11-05: `rootHash` is read TOLERANTLY (present-but-wrong-type is treated
+  // as absent, not a parse error) — graphBuilder.ts's writer has stamped it
+  // since before this reader existed, but existing hand-built fixtures
+  // (tests, older on-disk graphs) never had to carry it, and it must stay
+  // that way: an old graph is a MISSING generation, not a corrupt one.
+  const rootHash = typeof obj["rootHash"] === "string" ? obj["rootHash"] : undefined;
+
   const rawSymbols: RawSymbol[] = [];
   if (obj["symbols"] !== undefined) {
     if (!Array.isArray(obj["symbols"])) {
@@ -195,6 +202,9 @@ export function parseTlGraph(jsonText: string): GraphIndex {
     },
     exportsOf(filePath: string): string[] {
       return exportsMap.get(filePath) ?? [];
+    },
+    rootHash(): string | undefined {
+      return rootHash;
     },
   };
 }

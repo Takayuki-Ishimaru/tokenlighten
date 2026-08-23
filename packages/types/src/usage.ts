@@ -111,6 +111,9 @@ export interface TokenLightenUsageSummary {
   measuredBaselineCalls: number;
   measuredResponseTokens: number;
   measuredBaselineTokens: number;
+  measuredResponseBytes: number;
+  measuredBaselineBytes: number;
+  measurementUnavailableReason?: "recorder-off" | "log-dir-unavailable" | "scope-mismatch";
   /** Net signed savings after subtracting calls where TL added tokens. */
   estimatedSavedTokens: number;
   /** @deprecated Use estimatedTokenReductionPercent. */

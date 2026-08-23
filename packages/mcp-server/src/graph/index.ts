@@ -28,6 +28,23 @@ export interface GraphIndex {
   references(symbol: string): GraphLocation[];
   importsOf(filePath: string): string[];
   exportsOf(filePath: string): string[];
+  /**
+   * V11-09/V11-05: the index's own content-addressed root/generation
+   * identity, when the backing format carries one. tl-graph.json stamps a
+   * `rootHash` (skeleton-engine/graphBuilder.ts) that changes exactly when
+   * the manifest it was built from changes; `parseTlGraph` surfaces it here
+   * so a consumer never has to re-open and re-parse the file's head bytes
+   * itself (the previous approach — see graph-evidence/adapters.ts's now-
+   * deleted `readTlGraphGeneration` probe — duplicated this read outside
+   * the reader that already owns the schema).
+   *
+   * Returns `undefined` when the backing format has no such identity (SCIP
+   * today — `parseScip`'s GraphIndex always returns undefined here) or when
+   * a tl-graph.json was read without one (an old/hand-built fixture). A
+   * consumer MUST treat `undefined` as "cannot prove freshness" and fail
+   * closed, never as "assume fresh".
+   */
+  rootHash(): string | undefined;
 }
 
 // ---------------------------------------------------------------------------

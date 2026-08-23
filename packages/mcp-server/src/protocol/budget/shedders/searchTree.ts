@@ -37,11 +37,32 @@
 // `archive.total_entries` IS NEVER TOUCHED. It is the same inventory invariant
 // §5.5 states for `search.matches` — the count is computed over the full
 // manifest and a shed does not reduce it.
+//
+// PI-08's `scope_report` (alpha.2) IS NEVER SHED, BY OMISSION FROM EVERY RUNG
+// BELOW — deliberate, not an oversight. It is a handful of small integers
+// plus a 2-value enum (DESIGN-v0.10-expansion-plan-v1.3.md:1683 "countは常時
+// ... short keysをsafe codec対象にする"), negligible next to `tree` itself, so
+// there is no meaningful budget to reclaim by peeling it. Both declared rungs
+// already target a field they own and nothing more (rung 1: `note` only;
+// rung 6: `tree`'s line list only) — neither is widened to also drop
+// scope_report, so the generic prose rung does not reach in and take a field
+// it was not written for. Shedding scope_report would also be backwards: it
+// is the caller's evidence about what the response is NOT showing, and that
+// evidence matters MOST exactly when the response is small enough to already
+// be under budget pressure. It therefore rides through every rung untouched,
+// same as `root`/`tree`/`depth`, unless the whole response converts to a
+// refusal (`refusalConvertible: true` below) because even the rung-6 floor
+// does not fit.
 // ---------------------------------------------------------------------------
 
 import type { ToolCall } from "@tokenlighten/types";
 
 import { emittableToolCall } from "../../refusal.js";
+// PI-05 generalization (beta.1+): the search family's shared hint/next
+// arbitration — see that module's header for the normative precedence
+// table shallowerTree now defers to (thin adapter over
+// sanctionSearchContinuation).
+import { NO_ABSENT_TERMS, sanctionSearchContinuation } from "../../../features/search/nextActionPolicy.js";
 import {
   peelOrdered,
   str,
@@ -105,7 +126,13 @@ function shallowerTree(payload: ShedPayload, context: ShedContext): ToolCall | u
   const call: Record<string, unknown> = { action: "tree", path: root, depth: depth - 1 };
   const cwd = str(args["cwd"]);
   if (cwd !== undefined) call["cwd"] = cwd;
-  return emittableToolCall({ tool: "search_files", arguments: call });
+  // `tree` has no absence concept and never carries `queries[]`; routed
+  // through the same shared gate every search-family continuation passes
+  // through (nextActionPolicy.ts) so the invariant is enforced by one
+  // implementation rather than re-derived per family.
+  const sanctioned = sanctionSearchContinuation(call, { absentTerms: NO_ABSENT_TERMS });
+  if (sanctioned === undefined) return undefined;
+  return emittableToolCall({ tool: "search_files", arguments: sanctioned });
 }
 
 export const SEARCH_TREE_SHEDDER: Shedder = {

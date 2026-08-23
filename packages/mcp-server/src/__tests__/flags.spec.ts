@@ -22,6 +22,18 @@ import {
   evidenceCompletionEnabled,
   writeCapabilityEnabled,
   decisionInvariantStrictEnabled,
+  bm25fCandidateEnabled,
+  rrfFusionEnabled,
+  rrfProfilesEnabled,
+  coveragePackerEnabled,
+  coveragePackerV2Enabled,
+  graphEvidenceEnabled,
+  responseFormatMode,
+  wireShadowEnabled,
+  wireBreakevenEnabled,
+  reasoningIrV2Enabled,
+  fastPathV2Enabled,
+  compoundRetrievalEnabled,
 } from "../util/flags.js";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +53,18 @@ const FLAG_KEYS = [
   "TL_EVIDENCE_COMPLETION",
   "TL_WRITE_CAPABILITY",
   "TL_DECISION_INVARIANT_STRICT",
+  "TL_BM25F_CANDIDATE",
+  "TL_RRF_FUSION",
+  "TL_RRF_PROFILES",
+  "TL_COVERAGE_PACKER",
+  "TL_COVERAGE_PACKER_V2",
+  "TL_GRAPH_EVIDENCE",
+  "TOKENLIGHTEN_RESPONSE_FORMAT",
+  "TL_WIRE_SHADOW",
+  "TL_WIRE_BREAKEVEN",
+  "TL_REASONING_IR_V2",
+  "TL_FAST_PATH_V2",
+  "TL_COMPOUND_RETRIEVAL",
 ] as const;
 
 /**
@@ -96,15 +120,48 @@ describe("D10 permanent-on freeze", () => {
   );
 
   it("exports ONLY the out-of-contract (B)/(C) readers", () => {
+    // V10-11 added responseFormatMode/wireShadowEnabled -- see util/flags.ts's
+    // "V10-11 addendum" doc block for why they belong in this same bucket:
+    // they select wire SERIALIZATION, never protocol v1's canonical shape.
+    // V10-02 added activeExperimentFlags -- an AGGREGATOR over the (B) flags
+    // (feeds util/trace.ts's envelope `flags_active`), not a new env reader:
+    // it introduces no new FLAG_KEYS entry, only a new name in this list.
+    //
+    // The v0.10 close-out added contextAttestationEnabled (PI-03). It is a
+    // class-(B) reader: default OFF, and both OFF and "ON but nothing
+    // verifies" are byte-identical to pre-PI-03 output -- see util/flags.ts's
+    // "PI-03 addendum".
+    //
+    // v0.11 wave B added coveragePackerV2Enabled (V11-03) -- see util/
+    // flags.ts's "V11-03 addendum": composes with coveragePackerEnabled, off
+    // by itself is a no-op (the seam it gates only runs when
+    // coveragePackerEnabled() is also true).
+    // V11-06 added fastPathV2Enabled (TL_FAST_PATH_V2). Class (B): default
+    // OFF, and — like graphEvidenceEnabled before it — an out-of-contract
+    // capability addition rather than a wire-shape change.
     expect(Object.keys(flags).sort()).toEqual([
+      "activeExperimentFlags",
       "adaptiveWholeFileEnabled",
+      "bm25fCandidateEnabled",
+      "compoundRetrievalEnabled",
+      "contextAttestationEnabled",
+      "coveragePackerEnabled",
+      "coveragePackerV2Enabled",
       "decisionInvariantStrictEnabled",
       "evidenceCompletionEnabled",
       "evidenceCompletionShadowEnabled",
+      "fastPathV2Enabled",
+      "graphEvidenceEnabled",
       "graphIndexMode",
       "hop1ClosureEnabled",
+      "reasoningIrV2Enabled",
+      "responseFormatMode",
+      "rrfFusionEnabled",
+      "rrfProfilesEnabled",
       "traceEnabled",
       "verificationRecipeEnabled",
+      "wireBreakevenEnabled",
+      "wireShadowEnabled",
       "writeCapabilityEnabled",
     ]);
   });
@@ -114,7 +171,17 @@ describe("D10 permanent-on freeze", () => {
     // former rollback value must not resolve to anything at all — there is no
     // accessor left to consult, which is what "the off-branch is deleted" means.
     for (const [env] of D10_PERMANENT_ON) process.env[env] = "0";
-    expect(Object.keys(flags)).toHaveLength(9);
+    // 21 env-backed readers + activeExperimentFlags (V10-02's aggregator,
+    // which reads no env var of its own — see the export-list test above).
+    // V11-01 added graphEvidenceEnabled (TL_GRAPH_EVIDENCE), class (B).
+    // V11-07 added wireBreakevenEnabled (TL_WIRE_BREAKEVEN), class (B).
+    // V11-02 added rrfProfilesEnabled (TL_RRF_PROFILES), class (B).
+    // V11-04 added reasoningIrV2Enabled (TL_REASONING_IR_V2), class (B): its
+    // one dispatch seam is advisory and trace-only, so OFF is byte-identical.
+    // V11-03 added coveragePackerV2Enabled (TL_COVERAGE_PACKER_V2), class (B).
+    // V11-06 added fastPathV2Enabled (TL_FAST_PATH_V2), class (B).
+    // V11-05 added compoundRetrievalEnabled (TL_COMPOUND_RETRIEVAL), class (B).
+    expect(Object.keys(flags)).toHaveLength(23);
   });
 });
 
@@ -138,10 +205,34 @@ describe("defaults when env is unset", () => {
     expect(evidenceCompletionShadowEnabled()).toBe(false);
     expect(evidenceCompletionEnabled()).toBe(false);
     expect(writeCapabilityEnabled()).toBe(false);
+    expect(bm25fCandidateEnabled()).toBe(false);
+    expect(rrfFusionEnabled()).toBe(false);
+    expect(rrfProfilesEnabled()).toBe(false);
+    expect(coveragePackerEnabled()).toBe(false);
+    expect(coveragePackerV2Enabled()).toBe(false);
+    expect(graphEvidenceEnabled()).toBe(false);
+    expect(fastPathV2Enabled()).toBe(false);
+    expect(compoundRetrievalEnabled()).toBe(false);
   });
 
   it("decisionInvariantStrictEnabled defaults to false", () => {
     expect(decisionInvariantStrictEnabled()).toBe(false);
+  });
+
+  it("responseFormatMode defaults to 'json'", () => {
+    expect(responseFormatMode()).toBe("json");
+  });
+
+  it("wireShadowEnabled defaults to false", () => {
+    expect(wireShadowEnabled()).toBe(false);
+  });
+
+  it("wireBreakevenEnabled defaults to false", () => {
+    expect(wireBreakevenEnabled()).toBe(false);
+  });
+
+  it("reasoningIrV2Enabled defaults to false", () => {
+    expect(reasoningIrV2Enabled()).toBe(false);
   });
 });
 
@@ -163,11 +254,29 @@ describe("enabling with truthy values", () => {
       process.env["TL_ADAPTIVE_WHOLE_FILE"] = val;
       process.env["TL_EVIDENCE_SHADOW"] = val;
       process.env["TL_WRITE_CAPABILITY"] = val;
+      process.env["TL_BM25F_CANDIDATE"] = val;
+      process.env["TL_RRF_FUSION"] = val;
+      process.env["TL_RRF_PROFILES"] = val;
+      process.env["TL_COVERAGE_PACKER"] = val;
+      process.env["TL_COVERAGE_PACKER_V2"] = val;
+      process.env["TL_GRAPH_EVIDENCE"] = val;
+      process.env["TL_REASONING_IR_V2"] = val;
+      process.env["TL_FAST_PATH_V2"] = val;
+      process.env["TL_COMPOUND_RETRIEVAL"] = val;
       expect(verificationRecipeEnabled()).toBe(true);
       expect(hop1ClosureEnabled()).toBe(true);
       expect(adaptiveWholeFileEnabled()).toBe(true);
       expect(evidenceCompletionShadowEnabled()).toBe(true);
       expect(writeCapabilityEnabled()).toBe(true);
+      expect(bm25fCandidateEnabled()).toBe(true);
+      expect(rrfFusionEnabled()).toBe(true);
+      expect(rrfProfilesEnabled()).toBe(true);
+      expect(coveragePackerEnabled()).toBe(true);
+      expect(coveragePackerV2Enabled()).toBe(true);
+      expect(graphEvidenceEnabled()).toBe(true);
+      expect(reasoningIrV2Enabled()).toBe(true);
+      expect(fastPathV2Enabled()).toBe(true);
+      expect(compoundRetrievalEnabled()).toBe(true);
     },
   );
 
@@ -241,5 +350,96 @@ describe("case insensitivity", () => {
   it("graphIndexMode is case-insensitive for 'OFF'", () => {
     process.env["TL_GRAPH_INDEX"] = "OFF";
     expect(graphIndexMode()).toBe("off");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V10-11: TOKENLIGHTEN_RESPONSE_FORMAT / TL_WIRE_SHADOW
+// ---------------------------------------------------------------------------
+
+describe("responseFormatMode", () => {
+  it.each(["auto", "compact", "debug"] as const)("responseFormatMode('%s') => '%s'", (val) => {
+    process.env["TOKENLIGHTEN_RESPONSE_FORMAT"] = val;
+    expect(responseFormatMode()).toBe(val);
+  });
+
+  it("responseFormatMode('json') => 'json'", () => {
+    process.env["TOKENLIGHTEN_RESPONSE_FORMAT"] = "json";
+    expect(responseFormatMode()).toBe("json");
+  });
+
+  it.each(["AUTO", "Compact", "bogus", ""])(
+    "an unrecognized or wrongly-cased value '%s' falls back to 'json' (never throws, never silently picks a compact mode)",
+    (val) => {
+      process.env["TOKENLIGHTEN_RESPONSE_FORMAT"] = val;
+      expect(responseFormatMode()).toBe("json");
+    },
+  );
+});
+
+describe("wireShadowEnabled", () => {
+  it.each(["1", "true", "yes", "on"])("wireShadowEnabled('%s') => true", (val) => {
+    process.env["TL_WIRE_SHADOW"] = val;
+    expect(wireShadowEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "no", "off", ""])("wireShadowEnabled('%s') => false", (val) => {
+    process.env["TL_WIRE_SHADOW"] = val;
+    expect(wireShadowEnabled()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V11-07: TL_WIRE_BREAKEVEN
+// ---------------------------------------------------------------------------
+
+describe("wireBreakevenEnabled", () => {
+  it.each(["1", "true", "yes", "on"])("wireBreakevenEnabled('%s') => true", (val) => {
+    process.env["TL_WIRE_BREAKEVEN"] = val;
+    expect(wireBreakevenEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "no", "off", ""])("wireBreakevenEnabled('%s') => false", (val) => {
+    process.env["TL_WIRE_BREAKEVEN"] = val;
+    expect(wireBreakevenEnabled()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V11-03: TL_COVERAGE_PACKER_V2
+// ---------------------------------------------------------------------------
+
+describe("coveragePackerV2Enabled", () => {
+  it.each(["1", "true", "yes", "on"])("coveragePackerV2Enabled('%s') => true", (val) => {
+    process.env["TL_COVERAGE_PACKER_V2"] = val;
+    expect(coveragePackerV2Enabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "no", "off", ""])("coveragePackerV2Enabled('%s') => false", (val) => {
+    process.env["TL_COVERAGE_PACKER_V2"] = val;
+    expect(coveragePackerV2Enabled()).toBe(false);
+  });
+
+  it("reads its own env var independently of TL_COVERAGE_PACKER (the seam enforces composition, not this reader)", () => {
+    delete process.env["TL_COVERAGE_PACKER"];
+    process.env["TL_COVERAGE_PACKER_V2"] = "1";
+    expect(coveragePackerEnabled()).toBe(false);
+    expect(coveragePackerV2Enabled()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V11-06: TL_FAST_PATH_V2
+// ---------------------------------------------------------------------------
+
+describe("fastPathV2Enabled", () => {
+  it.each(["1", "true", "yes", "on"])("fastPathV2Enabled('%s') => true", (val) => {
+    process.env["TL_FAST_PATH_V2"] = val;
+    expect(fastPathV2Enabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "no", "off", ""])("fastPathV2Enabled('%s') => false", (val) => {
+    process.env["TL_FAST_PATH_V2"] = val;
+    expect(fastPathV2Enabled()).toBe(false);
   });
 });

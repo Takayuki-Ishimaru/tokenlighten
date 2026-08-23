@@ -317,19 +317,13 @@ describe("B2d — a cap-clipped ranges[] slice spends its budget on UNSERVED win
       name: "read_file",
       arguments: { mode: "slice", path: "src/target.ts", range: String(served!["range"]) },
     }));
-    // Verified by probe: a single mode=slice re-read of a task_pack-served
-    // range does NOT collapse the whole response to kind:"read.receipt" here
-    // (unlike servedReceipts.spec.ts's mode=slice/symbol/full exact-re-serve
-    // cases, which route through servedContentReceipt() and DO collapse) —
-    // it stays kind:"read.text" with ONE evidence entry that carries `prior`
-    // instead of `body`. This still satisfies A.8's E-8 invariant
-    // (`!body` ⇒ `prior` or `remaining`) and is the honest content-equivalent
-    // claim; it is simply a different valid v1 shape than the full-collapse
-    // receipt.
-    expect(again["kind"], JSON.stringify(again).slice(0, 400)).toBe("read.text");
-    const againEvidence = (again["evidence"] as Array<Record<string, unknown>> | undefined)?.[0];
-    expect(againEvidence?.["prior"]).toBeDefined();
-    expect(againEvidence?.["body"]).toBeUndefined();
+    // W14 L3: text responses must never contain only prior evidence. The
+    // exact re-slice is a code-unchanged receipt with provenance instead.
+    expect(again["kind"], JSON.stringify(again).slice(0, 400)).toBe("read.receipt");
+    const receipt = again["receipt"] as Record<string, unknown>;
+    expect(receipt["receipt"]).toBe("code-unchanged");
+    expect(String(receipt["served_by"])).toContain("task_pack");
+    expect(again["evidence"]).toBeUndefined();
   }, 40000);
 });
 

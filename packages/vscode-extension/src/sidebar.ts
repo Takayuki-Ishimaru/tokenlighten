@@ -41,9 +41,8 @@ const COPY = {
     overview: "Workspace overview",
     tokenReduction: "Estimated token reduction in this workspace (matched against local AI logs)",
     billingReduction: "Estimated billing reduction in this workspace (matched against local AI logs)",
-    measuredReduction: "Measured per-call reduction",
-    billingEstimate: "Billing estimate",
-    billingUnavailable: "Billing estimate unavailable: no attributable local AI logs for this workspace.",
+    providerEstimateUnavailable: "Token and billing reduction estimates unavailable: no attributable local AI logs for this workspace.",
+    lowConfidenceUnavailable: "Reduction estimates are hidden because confidence is low. Use paired billing evidence for decisions.",
     tlStatus: "TL status",
     version: "Version",
     enabled: "Enabled",
@@ -75,9 +74,8 @@ const COPY = {
     overview: "このワークスペース",
     tokenReduction: "このワークスペースの推定トークン削減率（実測ログ照合）",
     billingReduction: "このワークスペースの推定課金額削減率（実測ログ照合）",
-    measuredReduction: "計測済み呼び出しベースの削減率",
-    billingEstimate: "課金額削減推定",
-    billingUnavailable: "このワークスペースで照合可能なAIログがないため請求推定は利用できません。",
+    providerEstimateUnavailable: "このワークスペースで照合可能なAIログがないため、トークンと課金額の削減率は利用できません。",
+    lowConfidenceUnavailable: "信頼度が低いため削減率を表示していません。判断にはペア課金の検証結果を使用してください。",
     tlStatus: "TLステータス",
     version: "バージョン",
     enabled: "有効",
@@ -286,27 +284,48 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
     let tokenReductionText = "—";
     let billingReductionText = "—";
     let billingReductionDetail = "";
+    let usageProgressLine = "";
+    let measuredFallbackLine = "";
+    let usageReasonLine = "";
     if (active) {
       try {
         const summary = await loadUsageSummary();
-        if (summary.sessionEstimate?.status === "estimated") {
+        const estimateStatus = summary.sessionEstimate?.status;
+        const estimateConfidence = summary.sessionEstimate?.confidence;
+        const calibrationSamples = summary.sessionEstimate?.calibration?.sampleCount ?? 0;
+        const calibrationTarget = 24;
+        usageProgressLine = estimateConfidence !== "high" && calibrationSamples < calibrationTarget
+          ? (getDisplayLanguage() === "ja" ? `調整中: ペアサンプル ${calibrationSamples}/${calibrationTarget}（medium 12 / high 24）` : `Calibrating: ${calibrationSamples}/${calibrationTarget} paired samples (medium 12 / high 24)`)
+          : "";
+        const measuredRatio = typeof summary.measuredResponseBytes === "number" && typeof summary.measuredBaselineBytes === "number" && summary.measuredBaselineBytes > 0
+          ? summary.measuredResponseBytes / summary.measuredBaselineBytes
+          : null;
+        measuredFallbackLine = getDisplayLanguage() === "ja"
+          ? `実測呼び出し: ${summary.measuredBaselineCalls}、応答バイト対ベースライン比: ${measuredRatio === null ? "利用不可" : `${(measuredRatio * 100).toFixed(1)}%`}`
+          : `Measured calls: ${summary.measuredBaselineCalls}; response bytes vs baseline: ${measuredRatio === null ? "unavailable" : `${(measuredRatio * 100).toFixed(1)}%`}`;
+        const warnings = summary.sessionEstimate?.warnings ?? [];
+        usageReasonLine = warnings.includes("recorder-off")
+          ? (getDisplayLanguage() === "ja" ? "レコーダーが無効です。" : "Recorder is off.")
+          : warnings.includes("log-dir-unavailable")
+            ? (getDisplayLanguage() === "ja" ? "使用状況ログのディレクトリに到達できません。" : "Usage log directory is unavailable.")
+            : warnings.includes("scope-mismatch")
+              ? (getDisplayLanguage() === "ja" ? "使用状況ログのスコープがこのワークスペースと一致しません。" : "Usage logs do not match this workspace scope.")
+              : "";
+        const publishableEstimate = estimateStatus === "estimated"
+          && (estimateConfidence === "medium" || estimateConfidence === "high");
+        if (publishableEstimate) {
           tokenReductionText =
-            typeof summary.sessionEstimate.tokenReductionPercent === "number"
+            typeof summary.sessionEstimate?.tokenReductionPercent === "number"
               ? `${summary.sessionEstimate.tokenReductionPercent.toFixed(1)}%`
               : copy.metricUnavailable;
           billingReductionText =
-            typeof summary.sessionEstimate.costReductionPercent === "number"
+            typeof summary.sessionEstimate?.costReductionPercent === "number"
               ? `${summary.sessionEstimate.costReductionPercent.toFixed(1)}%`
               : copy.metricUnavailable;
         } else {
-          tokenReductionLabel = copy.measuredReduction;
-          billingReductionLabel = copy.billingEstimate;
-          tokenReductionText =
-            typeof summary.estimatedTokenReductionPercent === "number"
-              ? `${summary.estimatedTokenReductionPercent.toFixed(1)}%`
-              : copy.metricUnavailable;
-          billingReductionText = "—";
-          billingReductionDetail = copy.billingUnavailable;
+          billingReductionDetail = estimateStatus === "estimated"
+            ? copy.lowConfidenceUnavailable
+            : copy.providerEstimateUnavailable;
         }
       } catch {
         tokenReductionText = copy.metricUnavailable;
@@ -583,6 +602,9 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
     <div class="metric"><span class="muted">${tokenReductionLabel}</span><strong class="metric-value">${tokenReductionText}</strong></div>
     <div class="metric"><span class="muted">${billingReductionLabel}</span><strong class="metric-value">${billingReductionText}</strong>${billingReductionDetail ? `<span class="muted">${billingReductionDetail}</span>` : ""}</div>
     <div class="metric ${statusClass}"><span class="muted">${copy.tlStatus}</span><strong class="metric-value">${escapeHtml(statusText)}</strong><span class="muted">${escapeHtml(statusDetail)}</span></div>
+    ${usageProgressLine ? `<div class="metric"><span class="muted">${escapeHtml(usageProgressLine)}</span></div>` : ""}
+    ${measuredFallbackLine ? `<div class="metric"><span class="muted">${escapeHtml(measuredFallbackLine)}</span></div>` : ""}
+    ${usageReasonLine ? `<div class="metric"><span class="muted">${escapeHtml(usageReasonLine)}</span></div>` : ""}
   </div>
 
   <h2>${copy.workspaceSetup}</h2>

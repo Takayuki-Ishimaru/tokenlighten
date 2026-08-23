@@ -72,6 +72,7 @@ import {
 import { buildRefusal } from "./refusal.js";
 import { settleServedRanges } from "../state/session.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
+import { applyResponseCodec } from "./codec/pipeline.js";
 
 /**
  * The funnel tail: take a FINAL, already-projected payload to bytes.
@@ -171,6 +172,15 @@ export function emitFinalizedPayload(
   }
 
   const shed = ladder.records;
+  // V10-11: choose the wire REPRESENTATION of the payload already finalized
+  // above -- a no-op unless TOKENLIGHTEN_RESPONSE_FORMAT/TL_WIRE_SHADOW is
+  // explicitly set (protocol/codec/pipeline.ts), which is what keeps this a
+  // byte-invisible refactor at default budgets, matching this file's own
+  // "REFACTOR AT DEFAULT BUDGETS" invariant above. Re-measured through the
+  // ONE sanctioned byte counter so `emittedBytes`/`used` describe what is
+  // actually on the wire.
+  text = applyResponseCodec(text, current, onWire, context, limit);
+  used = measureResponseBytes(text);
   noteEmission(context, { limit, used, ...(shed.length > 0 ? { shed } : {}) });
   context.shedRecords = shed;
 

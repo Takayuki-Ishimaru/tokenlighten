@@ -672,3 +672,111 @@ describe("MCP_LANG_EXTS contract drift — skeleton-engine graph.ts", () => {
     expect(langs.length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// extractSymbolsRegex — blank-line-before-declaration line/signature bug
+// ---------------------------------------------------------------------------
+//
+// Every LANG_PATTERNS entry is anchored `^\s*...` with the multiline flag.
+// `\s` matches newlines too, so when a declaration is preceded by one or
+// more blank lines, the greedy `\s*` swallows the blank line(s)' own
+// terminator(s) (and the declaration's leading indentation) as part of the
+// SAME match — the match starts on the blank line, not on the declaration.
+// Before the fix, extractSymbolsRegex used the raw match index for the
+// line number AND for slicing `signature` off `lines[line - 1]`, so the
+// reported line landed on the blank line (off by however many blank lines
+// were skipped) and `signature` came back empty (a blank line's own text,
+// trimmed, is still ""). Reproduction (PI-06 wave):
+//   extractSymbolsRegex("const x = 1;\n\nexport function widget() { return 1; }\n", "typescript")
+//   used to return widget as {name:"widget", line:2, endLine:3, signature:""}
+//   instead of the correct line 3 with a non-empty signature.
+
+describe("extractSymbolsRegex — blank line before declaration (line/signature bug)", () => {
+  it("TypeScript function after a blank line reports the function's own line and signature", () => {
+    const src = "const x = 1;\n\nexport function widget() { return 1; }\n";
+    const symbols = extractSymbolsRegex(src, "typescript");
+    const widget = symbols.find((s) => s.name === "widget");
+    expect(widget).toBeDefined();
+    expect(widget!.line).toBe(3);
+    expect(widget!.endLine).toBe(3);
+    expect(widget!.signature).toBe("export function widget() { return 1; }");
+  });
+
+  it("TypeScript const after a blank line reports the const's own line and signature", () => {
+    const src = "function helper() { return 0; }\n\nexport const answer = 42;\n";
+    const symbols = extractSymbolsRegex(src, "typescript");
+    const answer = symbols.find((s) => s.name === "answer");
+    expect(answer).toBeDefined();
+    expect(answer!.line).toBe(3);
+    expect(answer!.signature).toBe("export const answer = 42;");
+  });
+
+  it("Python def after a blank line reports the def's own line and signature", () => {
+    const src = "class Foo:\n    pass\n\ndef standalone():\n    return 1\n";
+    const symbols = extractSymbolsRegex(src, "python");
+    const standalone = symbols.find((s) => s.name === "standalone");
+    expect(standalone).toBeDefined();
+    expect(standalone!.line).toBe(4);
+    expect(standalone!.signature).toBe("def standalone():");
+  });
+
+  it("no regression: a declaration at the very start of the file still reports line 1", () => {
+    const src = "export function atStart() { return 1; }\n";
+    const symbols = extractSymbolsRegex(src, "typescript");
+    const atStart = symbols.find((s) => s.name === "atStart");
+    expect(atStart).toBeDefined();
+    expect(atStart!.line).toBe(1);
+    expect(atStart!.endLine).toBe(1);
+    expect(atStart!.signature).toBe("export function atStart() { return 1; }");
+  });
+
+  it("no regression: a declaration right after a (non-blank) line comment still reports its own line", () => {
+    const src = "// leading comment\nexport function afterComment() { return 1; }\n";
+    const symbols = extractSymbolsRegex(src, "typescript");
+    const afterComment = symbols.find((s) => s.name === "afterComment");
+    expect(afterComment).toBeDefined();
+    expect(afterComment!.line).toBe(2);
+    expect(afterComment!.signature).toBe("export function afterComment() { return 1; }");
+  });
+
+  it("CRLF line endings: a declaration after a blank CRLF line still reports its own line and signature", () => {
+    const src = "const x = 1;\r\n\r\nexport function widget() { return 1; }\r\n";
+    const symbols = extractSymbolsRegex(src, "typescript");
+    const widget = symbols.find((s) => s.name === "widget");
+    expect(widget).toBeDefined();
+    expect(widget!.line).toBe(3);
+    expect(widget!.endLine).toBe(3);
+    expect(widget!.signature).toBe("export function widget() { return 1; }");
+  });
+
+  it("multiple consecutive blank lines: reports the declaration's own line, not the first blank line", () => {
+    const src = "const a = 1;\n\n\n\nexport function multi() { return 1; }\n";
+    const symbols = extractSymbolsRegex(src, "typescript");
+    const multi = symbols.find((s) => s.name === "multi");
+    expect(multi).toBeDefined();
+    expect(multi!.line).toBe(5);
+    expect(multi!.endLine).toBe(5);
+    expect(multi!.signature).toBe("export function multi() { return 1; }");
+  });
+
+  it("a declaration after a blank line that immediately follows a CLOSED block comment is found (not suppressed) and reports its own line/signature", () => {
+    // Regression guard for the comment-state filter (F-A1-4): the
+    // suppressedLines lookup keys off the SAME `line` this fix corrects,
+    // so it must use the declaration's real line, not the blank line's.
+    const src = [
+      "/* comment",
+      "   still open",
+      "*/",
+      "",
+      "export function afterCommentAndBlank() { return 1; }",
+      "",
+    ].join("\n");
+    const symbols = extractSymbolsRegex(src, "typescript");
+    const names = symbols.map((s) => s.name);
+    expect(names).toContain("afterCommentAndBlank");
+    const hit = symbols.find((s) => s.name === "afterCommentAndBlank");
+    expect(hit).toBeDefined();
+    expect(hit!.line).toBe(5);
+    expect(hit!.signature).toBe("export function afterCommentAndBlank() { return 1; }");
+  });
+});

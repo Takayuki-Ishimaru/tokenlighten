@@ -41,6 +41,11 @@
 import type { Kind, Limit, OmittedClass, RefusalCode, ToolCall } from "@tokenlighten/types";
 
 import { emittableToolCall } from "./refusal.js";
+// PI-05 generalization (beta.1+): the search family's shared hint/next
+// arbitration — see that module's header for the normative precedence
+// table findScopedNext/symbolsNext now defer to (thin adapters over
+// absentTermsOf/sanctionSearchContinuation).
+import { absentTermsOf, NO_ABSENT_TERMS, sanctionSearchContinuation } from "../features/search/nextActionPolicy.js";
 
 type Body = Record<string, unknown>;
 
@@ -176,7 +181,14 @@ const FIND_FIELDS = [
   // tell a content hit from a filename guess, which is the exact distinction
   // the 2026-08-08 did_you_mean ranking fix exists to make.
   "did_you_mean_basis",
-  "hint", "note", "inventory", "absence", "member_sweep", "related_lookups",
+  "hint", "note", "inventory", "absence",
+  // PI-04 (F-A1-2/F-A1-3 register, alpha.2): additive optional, one entry per
+  // ORIGINAL query term — see findText.ts's FindTermResult. Advisory
+  // evidence, not control (never required-set): a `search.matches.find`
+  // body without it means "no per-term detail was owed this call", exactly
+  // like `absence`'s own optional-omission contract.
+  "term_results",
+  "member_sweep", "related_lookups",
   "hop1", "hop1_omitted",
   "partially_served", "partial_served_note",
   "all_served", "all_served_occurrence", "served_note",
@@ -221,6 +233,11 @@ function findArchiveBlock(body: Body): Body | undefined {
   return Object.keys(block).length > 0 ? block : undefined;
 }
 
+// `absentTermsOf` (PI-05 absence facts, read from `term_results`) now lives
+// in the shared NextActionPolicy arbiter — see
+// features/search/nextActionPolicy.ts's module header for the full
+// precedence table this module and the tree shed ladder both consume.
+
 /**
  * The continuation a truncated `find` can name.
  *
@@ -231,19 +248,22 @@ function findArchiveBlock(body: Body): Body | undefined {
  * 2026-08-08 forensics closed and §2.1.2 forbids), which is why an inventory
  * entry ALREADY present in `files[]` is skipped.
  *
- * `queries[]` is echoed from the REQUEST rather than from the body: the body's
- * `query` renders a multi-token call as `"a OR b"`, and sending that back as a
- * single `query` would run a different search.
+ * `queries[]` is echoed from the REQUEST rather than from the body — the
+ * body's `query` renders a multi-token call as `"a OR b"`, and sending that
+ * back as a single `query` would run a different search — but PI-05
+ * (F-A1-3) narrows that echo to terms this SAME response has not already
+ * proven absent (see `absentTermsOf`): re-issuing a proven-absent term would
+ * discard the evidence this exact response just established.
  */
 function findNext(body: Body, args: Body): ToolCall | undefined {
-  const inventory = body["inventory"];
-  if (!Array.isArray(inventory) || inventory.length === 0) return undefined;
+  const files = (Array.isArray(body["files"]) ? body["files"] : []).filter(isRecord);
   const served = new Set(
-    (Array.isArray(body["files"]) ? body["files"] : [])
-      .filter(isRecord)
+    files
       .map((file) => str(file["path"]))
       .filter((path): path is string => path !== undefined),
   );
+  const inventory = Array.isArray(body["inventory"]) ? body["inventory"] : [];
+
   let scope: string | undefined;
   for (const entry of inventory) {
     if (!isRecord(entry)) continue;
@@ -256,20 +276,73 @@ function findNext(body: Body, args: Body): ToolCall | undefined {
     const dir = str(entry["dir"]);
     if (dir !== undefined) { scope = dir; break; }
   }
+
+  // Inventory can be exhaustive while every matched file is represented by only
+  // its first eight snippets. Narrow to one such file; once already narrowed,
+  // leave the search family and read that file so the continuation progresses.
+  const partialScope = scope === undefined
+    ? files.find((file) => (num(file["more_lines"]) ?? 0) > 0)
+    : undefined;
+  if (partialScope !== undefined) scope = str(partialScope["path"]);
   if (scope === undefined) return undefined;
 
+  if (partialScope !== undefined && str(args["path"]) === scope) {
+    const readCall: Body = { mode: "full", path: scope };
+    for (const key of [
+      "cwd", "lane", "taskProfile", "taskEpoch", "credentialRef", "maxBytes", "maxTokens",
+    ] as const) {
+      if (args[key] !== undefined) readCall[key] = args[key];
+    }
+    return emittableToolCall({ tool: "read_file", arguments: readCall });
+  }
+
+  return findScopedNext(scope, body, args);
+}
+
+/**
+ * The `{action:"find", path, ...}` continuation for ONE resolved scope path —
+ * factored out of `findNext` above so it can be shared with the byte-shedder's
+ * rung-6 `find` steps (`budget/shedders/searchMatches.ts`'s
+ * `cutInLastFile`/`shedFindFile`, whose `scope` is the file entry the step
+ * just cut, not one `findNext` derives from `inventory`). ONE function means a
+ * shed continuation and the emitter's own continuation are the SAME call for
+ * the same `(scope, body, args)`, rather than two hand-rolled echoes that can
+ * drift — which is how the shedder's prior inline copy of this tail kept
+ * re-running a proven-absent term "as if unknown" under byte pressure even
+ * after PI-05 fixed that on the emitter side alone (PI-08 register).
+ *
+ * `queries[]` is echoed from `args`, never from `body.query` — the body's
+ * `query` renders a multi-token call as `"a OR b"`, and sending that back as a
+ * single `query` would run a different search (class TC-2, §2.1.2) — narrowed,
+ * as `findNext`'s own doc comment explains, to terms this SAME body has not
+ * already proven absent.
+ */
+export function findScopedNext(scope: string, body: Body, args: Body): ToolCall | undefined {
   const queries = args["queries"];
   const call: Body = { action: "find", path: scope };
-  if (Array.isArray(queries) && queries.length > 0) call["queries"] = queries;
-  else {
+  if (Array.isArray(queries) && queries.length > 0) {
+    call["queries"] = queries;
+  } else {
     const query = str(args["query"]) ?? str(body["query"]);
     if (query === undefined) return undefined;
     call["query"] = query;
   }
-  if (args["regex"] !== undefined) call["regex"] = args["regex"];
+  for (const key of [
+    "regex", "limit", "maxBytes", "maxTokens", "lang", "lane", "taskProfile",
+    "taskEpoch", "credentialRef",
+  ] as const) {
+    if (args[key] !== undefined) call[key] = args[key];
+  }
   const cwd = str(args["cwd"]);
   if (cwd !== undefined) call["cwd"] = cwd;
-  return emittableToolCall({ tool: "search_files", arguments: call });
+  // PI-05 rule 1 (nextActionPolicy.ts): never echo a term this SAME response
+  // already proved absent back into the continuation "as if unknown" —
+  // narrows `queries` to the still-open terms, or withholds the
+  // continuation entirely when nothing survives narrowing. A no-op for the
+  // plain `query` (single-string) branch above, which never sets `queries`.
+  const sanctioned = sanctionSearchContinuation(call, { absentTerms: absentTermsOf(body) });
+  if (sanctioned === undefined) return undefined;
+  return emittableToolCall({ tool: "search_files", arguments: sanctioned });
 }
 
 function projectFind(body: Body, args: Body): Body {
@@ -340,14 +413,25 @@ export function symbolsNext(body: Body, args: Body): ToolCall | undefined {
   const lang = str(args["lang"]);
   if (lang !== undefined) call["lang"] = lang;
   if (args["includeScores"] !== undefined) call["includeScores"] = args["includeScores"];
-  return emittableToolCall({ tool: "search_files", arguments: call });
+  // `symbols` has no absence concept and never carries `queries[]`, so this
+  // is a genuine pass-through — see sanctionSearchContinuation's doc for why
+  // that still makes this a thin adapter rather than a special case.
+  const sanctioned = sanctionSearchContinuation(call, { absentTerms: NO_ABSENT_TERMS });
+  if (sanctioned === undefined) return undefined;
+  return emittableToolCall({ tool: "search_files", arguments: sanctioned });
 }
 
 function projectSymbols(body: Body, args: Body): Body {
   const matches: Body = { form: "symbols" };
   matches["locations"] = Array.isArray(body["locations"]) ? body["locations"] : [];
   matches["total"] = num(body["total"]) ?? 0;
-  keep(matches, body, ["note"]);
+  // PI-06 beta.2 (DESIGN-v0.10-expansion-plan-reconciliation.md §5 D-5):
+  // `symbol_coverage` is additive-optional, kept via E-1's normal presence
+  // gate like `note` beside it — searchSymbols.ts only sets it on the body
+  // at all when at least one served location is a fallback candidate, so
+  // its absence here already means "fully parser-proven" without a
+  // separate check.
+  keep(matches, body, ["note", "symbol_coverage"]);
 
   const projected: Body = { matches };
   const next = symbolsNext(body, args);
@@ -435,17 +519,30 @@ function projectDiff(body: Body): Body {
 // ---------------------------------------------------------------------------
 
 /**
- * DISCLOSED DEVIATION on `search.references` (Revision-5 row): `cursor_note`.
+ * DISCLOSED DEVIATIONS on `search.references` (Revision-5 row): `cursor_note`,
+ * `omitted`.
  *
- * A.5.9 lists it among the fields "deleted into `limit` per Rule T", but it is
- * not a truncation dialect — it is the INVALID-CURSOR disclosure
- * (`findReferences.ts:363`), emitted when a caller's continuation token did not
- * decode and the page was therefore served FROM THE START. It can appear on a
- * response that withheld nothing, where there is no `limit` to carry it, and
- * deleting it there converts a caller error into a silent wrong answer: page 1
- * returned as if it were page N. Kept until A.5.9 names a carrier.
+ *  - `cursor_note` — A.5.9 lists it among the fields "deleted into `limit` per
+ *    Rule T", but it is not a truncation dialect — it is the INVALID-CURSOR
+ *    disclosure (`findReferences.ts:363`), emitted when a caller's
+ *    continuation token did not decode and the page was therefore served FROM
+ *    THE START. It can appear on a response that withheld nothing, where
+ *    there is no `limit` to carry it, and deleting it there converts a caller
+ *    error into a silent wrong answer: page 1 returned as if it were page N.
+ *    Kept until A.5.9 names a carrier.
+ *  - `omitted` (F-W2D-1) — the SAME per-layer walk-skip counts `find` already
+ *    discloses under this exact name (see `KEPT_ON_FIND`'s doc comment for
+ *    the full A.5.8/`Limit.omitted` disambiguation, which applies here
+ *    unchanged: this is a count map of paths that were never candidates, not
+ *    a delivery limit, so it is namespaced apart from `limit.omitted`'s
+ *    three-value enum array). `references` walks the SAME `walkCodeFiles`
+ *    primitive `find` does and can skip files for the same reasons (oversize
+ *    above all — see `TEXT_SCAN_MAX_FILE_SIZE_BYTES`, walkRepo.ts) but had no
+ *    slot on the wire for it before F-W2D-1 — the internal `FindReferencesResult.omitted`
+ *    field existed but every byte of it was silently stripped here, so a
+ *    real MCP client never saw the disclosure `findReferences.ts` computed.
  */
-const KEPT_ON_REFERENCES = ["cursor_note"] as const;
+const KEPT_ON_REFERENCES = ["cursor_note", "omitted"] as const;
 
 const REFERENCES_FIELDS = [
   "symbol", "references", "files", "total",
@@ -544,7 +641,14 @@ function projectTree(body: Body): Body {
       warnings: Array.isArray(body["warnings"]) ? body["warnings"] : [],
     };
   }
-  keep(projected, body, ["note"]);
+  // PI-08 (F-A1 register, alpha.2): additive optional, present iff the walk
+  // actually ran (see `CompactTree.scope_report`'s doc comment) — a compact
+  // {completeness, counts, excluded_by_reason} accounting of what the walk
+  // saw, same disclosed-not-required treatment `term_results` gets on
+  // `search.matches.find`. A body without it means "no scope accounting was
+  // owed this call" (the refused / not-found / not-a-directory arms), never
+  // "the walk was exhaustive".
+  keep(projected, body, ["note", "scope_report"]);
 
   const limit = foldLimit({
     withheld: body["truncated"] === true,

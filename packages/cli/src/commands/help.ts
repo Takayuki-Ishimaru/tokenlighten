@@ -48,7 +48,7 @@ Commands:
   logs summary             Show local token and cost-savings estimates
   logs export --output F   Export a privacy-reviewed local usage bundle
   doctor [--json]          Health checks: node version, config dir, tree-sitter, exceljs,
-                           license-checker, MCP dist freshness, client registration
+                           license-checker, MCP dist freshness, Core 2 exclusion, client registration
   install-hooks [--uninstall]
                            Add/remove 'tl skeleton check' pre-commit hook (opt-in)
   version                  Print CLI version

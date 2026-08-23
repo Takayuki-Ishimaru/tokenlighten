@@ -2,52 +2,60 @@
 
 [English](vscode-extension.md) | [日本語](vscode-extension.ja.md)
 
-TokenLightenのVS Code拡張機能は、TokenLighten CLI、MCPサーバー、パーサー、必要なアセットをVSIXに同梱しています。パッケージ済みの拡張機能を使用する場合、`tl`を別途インストールする必要はありません。
+TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、必要なアセットを1つのVSIXへ同梱します。別途`tl`をインストールする必要はありません。
 
 ## ビルドせずにインストールする
 
-v0.9.1a Public BetaのGitHub Releaseから[tokenlighten-vscode-extension-0.9.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.9.1a/tokenlighten-vscode-extension-0.9.2.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
-
-VS Codeからインストールする手順は次のとおりです。
+v0.11.1公開後、**[tokenlighten-vscode-extension-0.11.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.11.1/tokenlighten-vscode-extension-0.11.1.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
-2. 拡張機能ビューのメニューから**VSIXからのインストール…**を選びます。
-3. ダウンロードした`.vsix`ファイルを選びます。
+2. **VSIXからのインストール…**を選びます。
+3. ダウンロードしたファイルを選びます。
 4. 求められた場合はVS Codeを再読み込みします。
 
-コマンドラインからインストールすることもできます。
+~~~bash
+code --install-extension tokenlighten-vscode-extension-0.11.1.vsix
+~~~
 
-```bash
-code --install-extension tokenlighten-vscode-extension-<version>.vsix
-```
+ソースからビルドする場合:
 
-ソースからVSIXをビルドする場合は、次を実行します。
-
-```bash
-npm ci
+~~~bash
+npm install
 npm run package -w tokenlighten-vscode-extension
-```
-
-依存関係を意図的に変更してlockfileを更新する場合に限り、`npm install`を使用してください。
+~~~
 
 ## ワークスペースをセットアップする
 
-信頼済みのプロジェクトフォルダを開き、アクティビティバーからTokenLightenビューを開いて、**このワークスペースをセットアップ**を選択します。セットアップ処理は、そのワークスペースで対応クライアントとTokenLighten管理のAI向け指示を設定します。
+信頼済みのプロジェクトフォルダでTokenLightenビューを開き、**このワークスペースをセットアップ**を選択します。対応クライアントとTokenLighten管理のAI向け指示を設定し、管理ブロック外の内容は保持します。
 
-拡張機能には、ワークスペースごとにTokenLightenを有効または無効にするスイッチがあります。ワークスペースのセットアップを再実行すると、再び有効になります。一時的にTokenLightenを経由せず、ネイティブツールを使用するセッション単位のオプションもあります。
+ワークスペーススイッチでTokenLightenを有効／無効にできます。セットアップを再実行すると再び有効になり、セッション単位のnative commandを使うと通常設定を変えずに一時的にTokenLightenを迂回できます。
+
+## ステータスバーと診断
+
+TokenLightenのステータスバーをクリックすると、診断、有効化／無効化／セットアップ、サイドバーを開く操作、状態確認を選べます。診断画面には次を表示します。
+
+- 拡張機能とTokenLightenのバージョン、正確な`server_build`
+- Node実行ファイルと解決済みサーバー起動コマンド
+- ワークスペースルートと実効的な書き込み権限
+- MCP／Codex登録ファイル、インストール済みguideと同梱guideのバージョン
+- 直近のTokenLighten呼び出し（tool／mode／kind／所要時間／エラーコード）
+
+診断リングはローカルに保存され、query本文、パス、handle、ファイル内容を記録しません。`TOKENLIGHTEN_USAGE_LOG=off`を指定すると、usage記録と診断リングの両方が無効になります。
+
+## 使用量と校正
+
+サイドバーは、paired calibrationによる実測とフォールバック推定を区別し、medium（12 paired samples）／high（24）信頼度までの進捗を表示します。これらはローカル推定値であり、プロバイダーの請求記録ではありません。
 
 ## プライバシーと適用範囲
 
-リポジトリのインデックス作成とコンテキスト選択はローカルで実行されます。この拡張機能自体がモデルを追加したり、リポジトリの内容をアップロードしたりすることはありません。選択したコーディングエージェントは、自身がモデルプロバイダーへ送るリクエストについて引き続き責任を持ちます。
-
-拡張機能が表示する使用量と削減量はローカルな推定値であり、プロバイダーの請求記録ではありません。ワークスペースを変更する操作には、信頼済みのVS Codeワークスペースが必要です。
+リポジトリのインデックス作成とコンテキスト選択はローカルで実行されます。拡張機能自体がモデルを追加したり、内容をアップロードしたりすることはありません。モデルプロバイダーへのリクエストはコーディングエージェント側の責任です。ワークスペースを変更する操作には信頼済みワークスペースが必要です。
 
 ## 設定
 
 | 設定 | デフォルト | 説明 |
 |---|---:|---|
-| `tokenlighten.enabled` | `true` | 現在のワークスペースでTokenLightenを有効または無効にします。 |
-| `tokenlighten.updateCheck.enabled` | `true` | VS Codeの起動時に、Public Betaのプレリリースを含むGitHub Releasesで新しいVSIXを確認します。 |
-| `tokenlighten.language` | `auto` | VS Codeの表示言語を自動的に使用するか、英語または日本語を明示的に選択します。 |
+| `tokenlighten.enabled` | `true` | 現在のワークスペースでTokenLightenを有効／無効にします。 |
+| `tokenlighten.updateCheck.enabled` | `true` | 起動時に新しいVSIXの公開を確認します。インストールには常にユーザー操作が必要です。 |
+| `tokenlighten.language` | `auto` | VS Codeの表示言語を自動使用するか、英語／日本語を選択します。 |
 
-デスクトップアプリケーションはこのリリースに含まれません。
+デスクトップアプリケーションは公開v0.11.1リリースに含まれません。

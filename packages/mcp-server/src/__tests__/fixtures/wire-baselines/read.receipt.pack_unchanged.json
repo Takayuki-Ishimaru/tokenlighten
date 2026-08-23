@@ -2,7 +2,7 @@
   "v": 1,
   "kind": "read.task_pack",
   "task": {
-    "id": "task-3d178e5e58eaaab2",
+    "id": "$TH",
     "replay": "$QREF",
     "coverage": "partial",
     "coverage_reason": "candidate-list"

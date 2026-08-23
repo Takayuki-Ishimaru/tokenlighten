@@ -254,7 +254,7 @@ export async function renameSymbol(
       // Mode preservation: see writeExistingFileAtomic's doc comment
       // (2026-08-07 chmod-reset incident) — covers both this primary write
       // and the mid-batch rollback restore below.
-      writeExistingFileAtomic(item.abs, item.newContent, item.mode);
+      writeExistingFileAtomic(item.abs, item.newContent, item.mode, { root: workspace, relPath: item.rel });
       writtenRel.push(item.rel);
     } catch (err) {
       // CWE-755 (strategy §6.6): a rollback restore that ITSELF fails is
@@ -268,7 +268,7 @@ export async function renameSymbol(
       for (const [abs, orig] of originals.entries()) {
         if (abs === item.abs) continue;
         try {
-          writeExistingFileAtomic(abs, orig.content, orig.mode);
+          writeExistingFileAtomic(abs, orig.content, orig.mode, { root: workspace, relPath: orig.rel });
           rollback.push({ path: orig.rel, state: "rolled-back" });
         } catch (rollbackErr) {
           rollbackFailed = true;

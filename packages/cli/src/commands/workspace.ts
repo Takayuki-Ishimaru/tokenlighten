@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
+import crossSpawn from "cross-spawn";
 import { injectAll } from "@tokenlighten/agents-md";
 import type {
   TokenLightenSetupClient,
@@ -238,6 +239,26 @@ export interface SetupLauncher {
   command: string;
   argsPrefix: string[];
   env: Record<string, string>;
+}
+
+export function verifyLauncherVersion(launcher: SetupLauncher): string {
+  const result = crossSpawn.sync(
+    launcher.command,
+    [...launcher.argsPrefix, "--version"],
+    {
+      shell: false,
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { ...process.env, ...launcher.env },
+    },
+  );
+  const output = String(result.stdout ?? "") + "\n" + String(result.stderr ?? "");
+  const first = output.trim().split(/\r?\n/, 1)[0] ?? "";
+  if (result.error || result.status !== 0 || first === "") {
+    const detail = result.error?.message || first || ("exit " + String(result.status ?? "unknown"));
+    throw new Error("Configured TokenLighten launcher failed --version self-check: " + detail);
+  }
+  return first.replace(/^v/, "");
 }
 
 function parseWorkspaceSummary(value: unknown): TokenLightenWorkspaceSummary | null {
@@ -520,6 +541,7 @@ export interface WorkspaceSetupJsonWarning {
 export interface RunWorkspaceOptions {
   readonly registryPath?: string;
   readonly launcher?: SetupLauncher;
+  readonly versionCheck?: (launcher: SetupLauncher) => string;
 }
 
 function jsonWarnings(
@@ -587,12 +609,17 @@ export async function runWorkspace(
   const clients = rawClients
     ? rawClients.split(",").map((item) => item.trim()) as TokenLightenSetupClient[]
     : undefined;
+  const rulesOnly = rest.includes("--rules-only");
+  const launcher = options.launcher
+    ?? resolveStableLauncher({ allowBareFallback: true });
+  const serverBuild = rulesOnly
+    ? undefined
+    : (options.versionCheck ?? verifyLauncherVersion)(launcher);
   const result = await setupWorkspace({
     root: valueAfter(rest, "--root") ?? process.cwd(),
     ...(clients ? { clients } : {}),
-    launcher: options.launcher
-      ?? resolveStableLauncher({ allowBareFallback: true }),
-    rulesOnly: rest.includes("--rules-only"),
+    launcher,
+    rulesOnly,
   });
   const registryTarget = options.registryPath ?? configFilePath();
   let registryWarning: WorkspaceSetupJsonWarning | undefined;
@@ -611,6 +638,7 @@ export async function runWorkspace(
   if (rest.includes("--json")) {
     process.stdout.write(`${JSON.stringify({
       ...result,
+      ...(serverBuild !== undefined ? { server_build: serverBuild } : {}),
       warnings: jsonWarnings(result, registryWarning),
     })}\n`);
     return;
@@ -620,6 +648,7 @@ export async function runWorkspace(
       + `AI rules: ${result.rulesWritten.length} file(s)\n`
       + `MCP settings: ${result.configFilesWritten.length} file(s)\n`
       + "Write tools: enabled\n"
-      + "Usage log: local, content-free\n",
+      + "Usage log: local, content-free\n"
+      + (serverBuild !== undefined ? "server_build: " + serverBuild + "\n" : ""),
   );
 }

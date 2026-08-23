@@ -25,6 +25,8 @@ const BACKUP_DIR = ".tokenlighten/backups";
 export interface InjectAllConfig {
   /** Absolute path to the repo root. */
   repoRoot: string;
+  /** Guide profile to inject; full remains the compatibility default. */
+  profile?: "full" | "medium";
   /**
    * Drift mode.
    * - "auto-rewrite" (default): silently rewrite outdated blocks.
@@ -65,6 +67,7 @@ export interface InjectAllConfig {
 export async function injectAll(config: InjectAllConfig): Promise<GenerateResult> {
   const {
     repoRoot,
+    profile = "full",
     driftMode = "auto-rewrite",
     targets,
     locale = resolveLocale(config.locale),
@@ -72,20 +75,22 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
     force = false,
     clock = RealClock,
   } = config;
+  const profileRequested = config.profile !== undefined;
+  const profileSwitch = profileRequested && driftMode !== "fail-build";
 
   const result: GenerateResult = { wrote: [], skipped: [], drifted: [] };
 
-  const sha = blockSha256(locale, version);
+  const sha = blockSha256(locale, version, undefined, profile);
 
   // Process AGENTS.md (canonical primary block)
-  const agentsBlock = renderCanonicalBlock(locale, version);
+  const agentsBlock = renderCanonicalBlock(locale, version, profile);
   await processFile({
     repoRoot,
     relPath: "AGENTS.md",
     canonical: agentsBlock,
     version,
     sha,
-    driftMode: force ? "auto-rewrite" : driftMode,
+    driftMode: force || profileSwitch ? "auto-rewrite" : driftMode,
     result,
     clock,
   });
@@ -98,7 +103,7 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
       result.skipped.push({ path: id, reason: `unknown-target-id` });
       continue;
     }
-    const effectiveDriftMode = force ? "auto-rewrite" : driftMode;
+    const effectiveDriftMode = force || profileSwitch ? "auto-rewrite" : driftMode;
     const migration = migrateLegacyTargetPath({
       repoRoot,
       target: target.id,
@@ -112,8 +117,8 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
       }
       continue;
     }
-    const block = renderBlock(target.id, locale, version);
-    const targetSha = blockSha256(locale, version, target.id);
+    const block = renderBlock(target.id, locale, version, profile);
+    const targetSha = blockSha256(locale, version, target.id, profile);
     await processFile({
       repoRoot,
       relPath: target.file,

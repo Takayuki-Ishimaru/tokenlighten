@@ -27,7 +27,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { walkCodeFiles } from "./walkRepo.js";
+import { walkCodeFiles, createWalkOmissions, type WalkOmissions } from "./walkRepo.js";
 import { FIND_ACTION_EXTRA_BASENAMES, FIND_ACTION_EXTRA_EXTS } from "../features/search/find/findText.js";
 import { resolveReal, isWithin } from "../util/safePath.js";
 
@@ -211,6 +211,117 @@ export interface CompactTree {
    * where tree is also "" but for a different reason).
    */
   note?: string;
+  /**
+   * PI-08 (DESIGN-v0.10-expansion-plan-reconciliation.md §2 row PI-08 +
+   * DESIGN-v0.10-expansion-plan-v1.3.md:1610-1699): additive-optional
+   * per-response accounting of what the walk actually saw, so a caller
+   * cannot mistake a filtered/partial listing for a complete repository
+   * inventory the way a bare `tree` string invites. Present on every
+   * response that actually walked the filesystem (both non-empty and
+   * empty-after-filters trees); absent on the early refused / not-found /
+   * not-a-directory returns above, since those never walk at all — there is
+   * nothing to report scope over.
+   */
+  scope_report?: TreeScopeReport;
+}
+
+/** See `CompactTree.scope_report`. */
+export interface TreeScopeReport {
+  /**
+   * "complete": every walked entry landed in `returned`, `excluded`, or
+   * `errors`, AND the byte cap did not cut the rendered `tree`.
+   * "partial": the byte cap truncated the rendered listing (the sibling
+   * `truncated` flag) OR at least one subtree could not even be read
+   * (WalkOmissions.unreadable_dirs > 0) — either way this response is a
+   * SUBSET of what a full traversal would show, and a repository-wide
+   * absence claim built on it would be certifying over an unknown
+   * remainder (the same gate PI-04/F-A1-2 applies to `find`'s absence
+   * certificate).
+   */
+  completeness: "complete" | "partial";
+  counts: {
+    /** = returned + excluded + errors, BY CONSTRUCTION — see buildScopeReport. */
+    visited: number;
+    /** Files that made it into the rendered tree (walkCodeFiles' FoundFile[] count). */
+    returned: number;
+    /** Sum of `excluded_by_reason`'s 7 values. */
+    excluded: number;
+    /** Subtrees the walker could not even read (WalkOmissions.unreadable_dirs). */
+    errors: number;
+  };
+  /**
+   * One key per WalkOmissions EXCLUSION reason — 7 of its 8 fields. The 8th,
+   * `unreadable_dirs`, is an ERROR (nothing about that subtree was
+   * classified, so it is not a willful exclusion) and is folded into
+   * `counts.errors` instead — see buildScopeReport's doc comment. All 7 keys
+   * are always present, even at 0: an honest zero rather than an omitted
+   * key, so this object's own values always sum to exactly `counts.excluded`.
+   */
+  excluded_by_reason: {
+    ignored: number;
+    gitignored: number;
+    tokenlighten_ignored: number;
+    oversize: number;
+    symlinks: number;
+    non_text: number;
+    secrets: number;
+  };
+}
+
+/**
+ * Project a WalkOmissions collector (walkRepo.ts) plus the walk's own
+ * returned-file count into the lean `scope_report` PI-08 adds to
+ * `search.tree`. Keeps `errors` (WalkOmissions.unreadable_dirs) OUT of
+ * `excluded_by_reason` on purpose: a directory the walker could not even
+ * `readdir()` was never classified into an exclusion reason at all, so
+ * folding it into `excluded_by_reason` would make that object's own sum
+ * stop matching `counts.excluded` — the plan's own acceptance criterion
+ * ("excluded count and per-reason count sum must match",
+ * DESIGN-v0.10-expansion-plan-v1.3.md:1692).
+ *
+ * `counts.visited` is DERIVED as `returned + excluded + errors` rather than
+ * independently tracked, so the `visited = returned + excluded + errors`
+ * invariant holds BY CONSTRUCTION, not by hoping two separately-maintained
+ * counters stay in sync.
+ *
+ * ONE PRIMARY REASON PER ENTRY — verified directly against walkRepo.ts, not
+ * assumed: `classifyIgnored` returns at most one of
+ * ignored/gitignored/tokenlighten_ignored per entry (an `if (layer) { om[layer]
+ * += 1; continue/return; }` short-circuit); `oversize`/`secrets`/`non_text`
+ * are each gated on the entry having already survived every earlier check in
+ * the same `if`/`else if` chain, so at most one of them fires per file;
+ * `symlinks` fires only for `entry.isSymbolicLink()`, which is mutually
+ * exclusive with every file/directory branch; `unreadable_dirs` fires only
+ * on an early `return` from a `readdirSync` failure, before any child entry
+ * (and therefore any other counter) is ever touched. No entry can land under
+ * two reasons, so summing `excluded_by_reason`'s 7 values never double-counts.
+ */
+function buildScopeReport(
+  omissions: WalkOmissions,
+  returned: number,
+  truncated: boolean,
+): TreeScopeReport {
+  const excluded_by_reason = {
+    ignored: omissions.ignored,
+    gitignored: omissions.gitignored,
+    tokenlighten_ignored: omissions.tokenlighten_ignored,
+    oversize: omissions.oversize,
+    symlinks: omissions.symlinks,
+    non_text: omissions.non_text,
+    secrets: omissions.secrets,
+  };
+  const excluded =
+    excluded_by_reason.ignored +
+    excluded_by_reason.gitignored +
+    excluded_by_reason.tokenlighten_ignored +
+    excluded_by_reason.oversize +
+    excluded_by_reason.symlinks +
+    excluded_by_reason.non_text +
+    excluded_by_reason.secrets;
+  const errors = omissions.unreadable_dirs;
+  const visited = returned + excluded + errors;
+  const completeness: "complete" | "partial" = truncated || errors > 0 ? "partial" : "complete";
+  return { completeness, counts: { visited, returned, excluded, errors }, excluded_by_reason };
 }
 
 /** Cap on the number of child names listed in a not-found did_you_mean payload. */
@@ -374,11 +485,25 @@ export function buildCompactTree(
     return { root: normalizedSub || ".", depth: effectiveDepth, tree: "", truncated: false, refused: true };
   }
 
+  const omissions = createWalkOmissions();
   const files = walkCodeFiles(workspace, {
     ...(normalizedSub ? { subPath: normalizedSub } : {}),
     extraExts: FIND_ACTION_EXTRA_EXTS,
     extraBasenames: FIND_ACTION_EXTRA_BASENAMES,
     includeArtifacts: true,
+    // PI-08 (reconciliation doc §2 row PI-08 + F-A1 findings): honor
+    // .gitignore exactly like `find` already does — every one of
+    // findText.ts's walkCodeFiles call sites passes respectGitignore:true.
+    // Before this, the SAME workspace answered "what's here" differently
+    // depending which tool asked: a .gitignore-only-excluded path was
+    // invisible to `find` but still listed by `tree`. This is a DELIBERATE
+    // behavior change (recorded in the reconciliation doc, not an
+    // incidental side effect of the omissions plumbing below) — a
+    // .gitignore-only exclusion now counts under scope_report's
+    // `gitignored` reason, same vocabulary `find`'s own `omitted.gitignored`
+    // already uses.
+    respectGitignore: true,
+    omissions,
   });
   const treeRoot = buildTreeFromFiles(files, normalizedSub);
 
@@ -386,6 +511,7 @@ export function buildCompactTree(
   renderTreeLines(treeRoot, effectiveDepth, "", lines);
 
   const { tree, truncated } = accumulateUntilCap(lines, capBytes);
+  const scope_report = buildScopeReport(omissions, files.length, truncated);
 
   // Existing directory, but the rendered tree is empty. Two different causes
   // read very differently to an agent, so they get different notes:
@@ -394,12 +520,16 @@ export function buildCompactTree(
   //     (DEFAULT_IGNORE / .tokenlightenignore) -> a distinct note, since
   //     "empty directory" would misleadingly read as "nothing here" when
   //     content exists but is merely out of walk scope.
+  // scope_report is built from the SAME omissions/files/truncated triple as
+  // both branches below, so a fully-filtered tree's counts (returned:0,
+  // excluded>0) and its "empty after walk filters" note always agree — PI-08
+  // item 4.
   if (tree === "") {
     const note = directoryHasAnyEntry(containedAbs)
       ? "empty after walk filters (.tokenlightenignore, built-in defaults, or unsupported file types); read_file({path}) on a known path still works"
       : "empty directory";
-    return { root: normalizedSub || ".", depth: effectiveDepth, tree, truncated, note };
+    return { root: normalizedSub || ".", depth: effectiveDepth, tree, truncated, note, scope_report };
   }
 
-  return { root: normalizedSub || ".", depth: effectiveDepth, tree, truncated };
+  return { root: normalizedSub || ".", depth: effectiveDepth, tree, truncated, scope_report };
 }

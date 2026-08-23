@@ -905,6 +905,20 @@ export function buildRefusal(forTool: ToolName, body: Record<string, unknown>): 
   // C2-4 recorded as a measured capability loss with "no successor". It has
   // one: §1.3.1(4)'s `did_you_mean` is a declared, allowlisted STRING slot and
   // this value is a string. Never overwrites an emitter's own suggestion.
+  //
+  // PI-07 / F-A1-5 (2026-08-20): this used to be a VERBATIM, unrevalidated
+  // passthrough — `nearest_existing` was a raw filesystem ancestor walk that
+  // FOLLOWS symlinks, so a symlink whose realpath escaped every allowed
+  // parent could reach the wire as a write-path (edit_file) `did_you_mean`
+  // and draw the same refusal again on verbatim retry. The fix lives at the
+  // SOURCE, not here: `checkCwdOrRefuse` (server.ts) now computes
+  // `nearest_existing` via `workspace/candidates.ts`'s
+  // `nearestValidWorkspaceAncestor`, which validates every candidate ancestor
+  // through the same resolver policy a live call applies before returning
+  // it — so by the time this mapping runs, the value is already safe, on
+  // every tool's refusal, not just the read-path tools
+  // (`checkCwdWithCorrection`) that independently re-validate before
+  // silently adopting it.
   const nearestExisting = body["nearest_existing"];
   if (typeof nearestExisting === "string" && nearestExisting !== ""
     && typeof body["did_you_mean"] !== "string") {

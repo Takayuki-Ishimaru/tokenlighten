@@ -117,7 +117,7 @@ declare module "web-tree-sitter" {
 
 declare module "@modelcontextprotocol/sdk/server/index.js" {
   export class Server {
-    constructor(info: { name: string; version: string }, opts: { capabilities: Record<string, unknown> });
+    constructor(info: { name: string; version: string }, opts: { capabilities: Record<string, unknown>; instructions?: string });
     setRequestHandler(matcher: { method: string }, handler: (req: unknown) => Promise<unknown>): void;
     connect(transport: unknown): Promise<void>;
   }

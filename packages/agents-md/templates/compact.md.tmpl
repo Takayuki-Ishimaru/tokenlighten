@@ -1,0 +1,16 @@
+<!-- tl-compact-instructions-version: {{VERSION}} -->
+<!-- Compact Bootstrap v1 (DESIGN-v0.10-expansion-plan-v1.3.md V10-07):
+     always-on rules ONLY. Everything else the full guide teaches (artifact/
+     archive specifics, verification-kit detail, per-kind deep rules)
+     arrives on-demand inside the response that needs it instead of paying a
+     fixed per-session cost. Wired (rc.1 decision, 2026-08-20) as the OPT-IN
+     target-repo guide variant only: `tl agents update --for-target --guide
+     compact` / injectForTarget({guide:"compact"}). The default stays the full
+     stable-prefix guide; injectAll and the tl-agents CLI remain full-only. -->
+## TokenLighten MCP (compact)
+
+Three tools, nothing else: `read_file`, `edit_file`, `search_files`. Unknown file task (incl. unknown-location/multi-file discovery)=>`read_file mode=task_pack query="<verbatim request>"` before any Read/Grep/cat or Explore-style subagent; never truncate. Search: `action=find query=<one identifier>`; several=>ONE `queries=[…]`, never serial; set `path` to a known fixture/package subtree, repo-wide only if scope is unknown.
+Workspace write safety: pass your own `cwd` on EVERY call — an undeclared root=>`cwd-required-for-edit`, never assume one; shared workspace=>each agent's own fixed `lane`.
+An unrecognized `kind`=SAFE-STOP: report it, issue no edit, never infer from its fields.
+A `read.receipt` is never a dead end or a re-pack cue: follow its `next`. Every `next`/hint a response advertises is executable — run it verbatim; never invent or template-fill your own continuation.
+Everything else — artifact/archive specifics, verification-kit detail, per-kind deep rules — arrives on-demand inside the response that needs it; this is the complete ruleset only until one does.
