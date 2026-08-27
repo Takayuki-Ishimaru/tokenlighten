@@ -5,7 +5,7 @@ function splitLines(text: string): string[] {
 }
 
 function rtrim(s: string): string {
-  return s.replace(/\s+$/, "");
+  return s.trimEnd();
 }
 
 function indentText(text: string, n: number): string {
@@ -74,8 +74,9 @@ function renderBodySignature(text: string, lines: string[], symbol: CollectedSym
 
   const lastIdx = sigLines.length - 1;
   const last = sigLines[lastIdx]!;
-  if (last.includes("{")) {
-    sigLines[lastIdx] = last.replace(/\{\s*$/, "{ ... }").replace(/\{.*$/, "{ ... }");
+  const brace = last.indexOf("{");
+  if (brace >= 0) {
+    sigLines[lastIdx] = `${last.slice(0, brace)}{ ... }`;
     return sigLines.join("\n");
   }
 
@@ -102,8 +103,9 @@ function renderClassHeader(text: string, lines: string[], symbol: CollectedSymbo
 
   const lastIdx = sigLines.length - 1;
   const last = sigLines[lastIdx]!;
-  if (last.includes("{")) {
-    sigLines[lastIdx] = last.replace(/\{\s*$/, "{").replace(/\{.*$/, "{");
+  const brace = last.indexOf("{");
+  if (brace >= 0) {
+    sigLines[lastIdx] = `${last.slice(0, brace)}{`;
     return sigLines.join("\n");
   }
 
@@ -129,7 +131,8 @@ function renderContainerLike(lines: string[], symbol: CollectedSymbol, style: Re
   const first = firstSourceLine(lines, symbol);
   if (style === "colon") return first.endsWith(":") ? `${first} ...` : `${first}: ...`;
   if (style === "endkw") return `${first}\n  # ...\nend`;
-  if (first.includes("{")) return first.replace(/\{.*$/, "{ ... }");
+  const brace = first.indexOf("{");
+  if (brace >= 0) return `${first.slice(0, brace)}{ ... }`;
   return `${first} { ... }`;
 }
 
@@ -142,7 +145,8 @@ function renderVariable(lines: string[], symbol: CollectedSymbol): string {
   // longer answer correctly on its own once it may point at a doc comment.
   if (symbol.endLine <= symbol.signatureStartLine) return first;
   if (first.includes("[")) return `${first} ... ];`;
-  if (first.includes("{")) return `${first.replace(/\{.*$/, "{ ... }")};`;
+  const brace = first.indexOf("{");
+  if (brace >= 0) return `${first.slice(0, brace)}{ ... };`;
   if (/=\s*$/.test(first)) return `${first} ...;`;
   return `${first} ...;`;
 }

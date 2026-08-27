@@ -15,7 +15,7 @@ Include only the material required to build, test, and use the released source:
 - the public root files: `README.md` (after its public rewrite), `LICENSE`, `NOTICE` or third-party notices if supplied, `CHANGELOG.md` (publicly rewritten), a public-safe `package.json`, `package-lock.json`, TypeScript/Vitest configuration, and public GitHub workflow files. The public root scripts must build only included workspaces and the default test command must not reference the excluded benchmark harness;
 - build and release scripts required by the public commands, after reviewing their inputs and output paths;
 - the public portions of `packages/types/`, `packages/usage/`, `packages/skeleton-engine/`, `packages/agents-md/`, `packages/cli/`, `packages/mcp-server/`, and `packages/vscode-extension/`, including source, package metadata, and public package tests. Apply the file-level exclusions below rather than copying these directories wholesale;
-- a public, sanitized copy of these documents, including the reviewed v0.12.0 release note and its aggregate benchmark disclosure; and
+- a public, sanitized copy of these documents, including the reviewed v0.12.1 maintenance note and the unchanged v0.12.0 aggregate benchmark disclosure; and
 - public release assets such as the VSIX and its checksum.
 
 The `packages/agents-md/templates/` content is an explicit review gate. Do not copy a template that includes benchmark instructions, private repository guidance, or internal-only paths. Replace it with the approved public guidance before including it.

@@ -6,9 +6,9 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.12.0 release
+## v0.12.1 release
 
-**Public Beta update.** TokenLighten v0.12.0 is the latest source release. Interfaces and supported workflows may continue to change as feedback is incorporated. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+**Public Beta maintenance update.** TokenLighten v0.12.1 is the latest source release. Interfaces and supported workflows may continue to change as feedback is incorporated. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
 
 The public release includes:
 
@@ -16,7 +16,7 @@ The public release includes:
 - source code and public package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-Compared with v0.11.1, v0.12.0 adds lossless and monotone task continuation, Japanese retrieval, a guarded known-location edit fast path, bounded task-pack and batch responses, safer UTF-16/undecodable-file handling, exact 1–8 MiB identifier routing, compact edit proofs, clearer runtime diagnostics, and full/medium/compact managed-guide profiles in English and Japanese. Experimental retrieval, reasoning, fast-path, delta-context, and adaptive-wire capabilities remain off by default unless explicitly enabled.
+v0.12.1 carries forward the v0.12.0 feature set and resolves dependency, static-analysis, and source-quality findings without adding a new performance feature. It updates vulnerable dependencies, removes unused packaged dependencies, replaces superlinear parsing patterns with bounded scanners, and hardens configuration, identifier generation, document extraction, and generated-text escaping. Experimental retrieval, reasoning, fast-path, delta-context, and adaptive-wire capabilities remain off by default unless explicitly enabled.
 
 The public release does not include the desktop application or the private benchmark harness.
 
@@ -44,11 +44,11 @@ Among the clearer positive results, the artifact-driven rating-engine task showe
 
 The narrowly scoped calculation task was close to parity. Results were more variable when the two arms did not reach the same verification outcome, so those cases are excluded from the numeric comparisons. Small known-location tasks can also see less benefit because fixed MCP and guide overhead accounts for a larger share of the work.
 
-These are developer-run observations, not guaranteed savings. Actual cost varies by repository, task, client, model behavior, evaluation window, and provider pricing, and local estimates are not provider billing records. See the [v0.12.0 release draft](release-docs/github-release-v0.12.0.md#benchmark-update) for details.
+These are developer-run observations, not guaranteed savings. Actual cost varies by repository, task, client, model behavior, evaluation window, and provider pricing, and local estimates are not provider billing records. The v0.12.0 benchmark disclosure is unchanged; see the [v0.12.0 release notes](release-docs/github-release-v0.12.0.md#benchmark-update) for details.
 
 ## Install the VS Code extension (no build required)
 
-After v0.12.0 is published, download **[tokenlighten-vscode-extension-0.12.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.12.0/tokenlighten-vscode-extension-0.12.0.vsix)** from its GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.12.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.12.1/tokenlighten-vscode-extension-0.12.1.vsix)** from the v0.12.1 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 

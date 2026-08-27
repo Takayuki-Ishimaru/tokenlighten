@@ -113,6 +113,16 @@ export const HANDLE_ID_LENGTH = 1 + BASE36_ID_LENGTH;
  * ~51.7 bits of effective entropy (10 * log2(36)) from a 64-bit random draw.
  */
 const BASE36_ID_SPACE = 36n ** BigInt(BASE36_ID_LENGTH);
+const RANDOM_U64_SPACE = 1n << 64n;
+const UNBIASED_BASE36_LIMIT = RANDOM_U64_SPACE - (RANDOM_U64_SPACE % BASE36_ID_SPACE);
+
+function randomBase36HandleValue(): bigint {
+  let value: bigint;
+  do {
+    value = randomBytes(8).readBigUInt64BE();
+  } while (value >= UNBIASED_BASE36_LIMIT);
+  return value % BASE36_ID_SPACE;
+}
 
 // ---------------------------------------------------------------------------
 // Declared-workspace scope
@@ -261,7 +271,7 @@ export class HandleTable {
       // decimal suffix (20 chars total after `h`), which cost ~6-7 tokens per
       // echoed handle instead of ~1 and ate into the 32768-byte task-pack
       // transport ceiling on handle-heavy responses.
-      const value = randomBytes(8).readBigUInt64BE() % BASE36_ID_SPACE;
+      const value = randomBase36HandleValue();
       id = `h${value.toString(36).padStart(BASE36_ID_LENGTH, "0")}`;
     } while (this._entries.has(id));
     const full: HandleEntry = {
@@ -437,6 +447,8 @@ export const handleTable: HandleTable = new HandleTable();
 // ---------------------------------------------------------------------------
 
 export function shaOfText(text: string): string {
+  // Content-addressing wire contract, not password storage.
+  // codeql[js/insufficient-password-hash]
   const hex = createHash("sha256").update(text, "utf8").digest("hex");
   return `sha256:${hex}`;
 }
@@ -470,6 +482,8 @@ export function shaOfText(text: string): string {
  * previously-stored/hardcoded digest across process runs.
  */
 export function shaOfBytes(bytes: Uint8Array): string {
+  // Content-addressing wire contract, not password storage.
+  // codeql[js/insufficient-password-hash]
   const hex = createHash("sha256").update(Buffer.from(bytes)).digest("hex");
   return `sha256:${hex}`;
 }

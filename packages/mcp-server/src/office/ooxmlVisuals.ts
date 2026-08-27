@@ -123,10 +123,24 @@ function openTags(xml: string, localName: string): string[] {
   return [...xml.matchAll(new RegExp(`<${tag}\\b[^>]*\/?>`, "gi"))].map((match) => match[0]);
 }
 
+function xmlTextContent(value: string): string {
+  let text = "";
+  let inTag = false;
+  for (const ch of value) {
+    if (ch === "<") inTag = true;
+    else if (ch === ">" && inTag) inTag = false;
+    else if (!inTag) text += ch;
+  }
+  return decodeXml(text).replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** Test-only export for XML text-node sanitization regression coverage. */
+export const __testOnlyXmlTextContent = xmlTextContent;
+
 function textNodes(xml: string, localName: string): string[] {
   const tag = tagPattern(localName);
   return [...xml.matchAll(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}\\s*>`, "gi"))]
-    .map((match) => decodeXml((match[1] ?? "").replace(/<[^>]+>/g, "")).trim())
+    .map((match) => xmlTextContent(match[1] ?? "").trim())
     .filter(Boolean);
 }
 
@@ -151,7 +165,8 @@ function mediaKind(target: string, relationshipType = ""): "image" | "video" | u
 }
 
 function normalizePackagePart(value: string): string {
-  const normalized = path.posix.normalize(value.replace(/^\/+/, ""));
+  const relativePart = value.split("/").filter(Boolean).join("/");
+  const normalized = path.posix.normalize(relativePart);
   return normalized.startsWith("../") ? "" : normalized;
 }
 

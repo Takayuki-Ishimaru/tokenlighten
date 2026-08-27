@@ -19,16 +19,24 @@ export type DocxExtractResult =
 // ---------------------------------------------------------------------------
 
 function stripTags(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ");
+  const entities: Record<string, string> = { "&amp;": "&", "&lt;": "&lt;", "&gt;": "&gt;", "&quot;": "\"", "&#39;": "'", "&nbsp;": " " };
+  let output = "";
+  let inTag = false;
+  for (let index = 0; index < html.length;) {
+    const entity = !inTag && Object.keys(entities).find((candidate) => html.startsWith(candidate, index));
+    if (entity) { output += entities[entity]!; index += entity.length; }
+    else if (html[index] === "<") { inTag = true; index++; }
+    else if (html[index] === ">" && inTag) { inTag = false; index++; }
+    else { if (!inTag) output += html[index]!; index++; }
+  }
+  return output;
 }
 
+/** Test-only export for adversarial fallback-conversion regression coverage. */
+export const __testOnlyHtmlToMarkdown = htmlToMarkdown;
+
 function htmlToMarkdown(html: string): string {
-  return html
+  const markdown = html
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_m, t) => `\n# ${stripTags(t)}\n`)
     .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_m, t) => `\n## ${stripTags(t)}\n`)
     .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_m, t) => `\n### ${stripTags(t)}\n`)
@@ -46,16 +54,8 @@ function htmlToMarkdown(html: string): string {
       );
       return `| ${cells.join(" | ")} |\n`;
     })
-    .replace(/<\/?(table|thead|tbody|tfoot)[^>]*>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ")
-    .replace(/\r\n/g, "\n")
-    .trim();
+    .replace(/<\/?(table|thead|tbody|tfoot)[^>]*>/gi, "\n");
+  return stripTags(markdown).replace(/\r\n/g, "\n").trim();
 }
 
 // ---------------------------------------------------------------------------

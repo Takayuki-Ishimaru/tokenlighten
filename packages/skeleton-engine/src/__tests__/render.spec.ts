@@ -324,6 +324,24 @@ describe("renderSkeleton (edge cases)", () => {
     expect(match![1]).toHaveLength(32);
   });
 
+  it("escapes Unicode line separators in ranked, table, and module-map data", () => {
+    const skeleton = minimalSkeleton();
+    skeleton.topRanked[0]!.path = "src/ranked\u2028entry.ts";
+    skeleton.apiEndpoints[0]!.path = "/table\u2029entry";
+    skeleton.moduleMap = [{ path: "src/module\u2028entry.ts", children: [] }];
+
+    const md = renderSkeleton(skeleton);
+
+    expect(md).not.toContain("\u2028");
+    expect(md).not.toContain("\u2029");
+    expect(md).toContain("src/ranked\\u2028entry.ts");
+    expect(md).toContain("/table\\u2029entry");
+    expect(md).toContain("module\\u2028entry.ts");
+    const unicode = minimalSkeleton();
+    unicode.apiEndpoints[1]!.handlerSymbol = "café";
+    expect(renderSkeleton(unicode)).toContain("café");
+  });
+
   it("keeps repository-controlled markdown inside data boundaries", () => {
     const skeleton = minimalSkeleton();
     skeleton.commit = "abc -->\n# COMMIT-INJECTED";

@@ -260,11 +260,18 @@ function toPosix(p: string): string {
 }
 
 function sanitizeSingleLine(value: string): string {
-  return value
-    .replace(/[\r\n\t]/g, (ch) => ch === "\t" ? "\\t" : ch === "\r" ? "\\r" : "\\n")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, (ch) =>
-      `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`)
-    .replace(/`/g, "\\u0060");
+  return Array.from(value, (ch) => {
+    if (ch === "\t") return "\\t";
+    if (ch === "\r") return "\\r";
+    if (ch === "\n") return "\\n";
+    if (ch === "\u2028") return "\\u2028";
+    if (ch === "\u2029") return "\\u2029";
+    const code = ch.charCodeAt(0);
+    if ((code >= 0 && code <= 8) || code === 11 || code === 12 || (code >= 14 && code <= 31) || code === 127) {
+      return `\\u${code.toString(16).padStart(4, "0")}`;
+    }
+    return ch === "`" ? "\\u0060" : ch;
+  }).join("");
 }
 
 function escapeInlineCodeData(value: string): string {

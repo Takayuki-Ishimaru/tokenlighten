@@ -2,6 +2,50 @@
 
 All notable public changes to TokenLighten are documented here.
 
+## 0.12.1
+
+Maintenance and security-quality patch on top of v0.12.0. This release
+addresses the 12 Dependabot and 38 CodeQL Security and quality findings
+inventoried before release. It does not introduce a new performance feature
+or change the v0.12.0 benchmark interpretation.
+
+### Fixed
+
+- Updated or overrode vulnerable development and transitive dependencies,
+  including esbuild, Vite, Vitest, UUID, and unzipper; both the runtime and
+  full dependency audits now report zero vulnerabilities.
+- Replaced CodeQL-identified superlinear regular expressions with bounded
+  scanners or direct string operations across task routing, source fallback
+  parsing, Markdown handling, tokenization, path processing, and secret-path
+  checks.
+- Rejected `__proto__` segments in CLI dot-path configuration to prevent
+  prototype pollution while preserving legitimate `constructor` and
+  `prototype` keys.
+- Removed modulo bias from random handle generation using 64-bit rejection
+  sampling.
+- Hardened DOCX/OOXML text extraction, Markdown/table rendering, license
+  rendering, and generated preload code with single-pass or explicit
+  escaping paths.
+- Consolidated stable SHA-256 content identifiers behind shared helpers and
+  narrowly scoped static-analysis annotations without changing their wire
+  values.
+- Added regression coverage for the exact parser, sanitizer, configuration,
+  path, secret-scan, test-marker, content-hash, and handle-generation shapes
+  changed by this patch.
+
+### Dependency ownership
+
+- Removed the unused S3 bundler helper and unused public development
+  dependencies.
+- Declared `exceljs` directly in the CLI package that imports it.
+- Regenerated the private and public workspace lockfiles from the corrected
+  dependency graph.
+
+### Benchmark disclosure
+
+No new benchmark result or performance claim is introduced in v0.12.1. The
+reviewed v0.12.0 observations and caveats remain unchanged.
+
 ## 0.12.0
 
 Four implementation waves against `DESIGN-v0.12-plan.md`'s adjudicated

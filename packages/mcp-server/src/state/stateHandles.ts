@@ -29,7 +29,7 @@
  * string.
  */
 
-import { createHash } from "node:crypto";
+import { shaOfText } from "../util/handles.js";
 
 import type { HandleEntry } from "../util/handles.js";
 import { handleKeyRing } from "./handleKeys.js";
@@ -91,10 +91,8 @@ export type TaskHandleResolution =
  * of littering the store with one row per pack.
  */
 function taskPayloadRef(workspaceRoot: string, taskFingerprint: string, storeEpoch: string): Buffer {
-  return createHash("sha256")
-    .update(`task:${storeEpoch}:${workspaceRoot}:${taskFingerprint}`, "utf8")
-    .digest()
-    .subarray(0, 9);
+  const digest = shaOfText(`task:${storeEpoch}:${workspaceRoot}:${taskFingerprint}`);
+  return Buffer.from(digest.slice("sha256:".length), "hex").subarray(0, 9);
 }
 
 /**

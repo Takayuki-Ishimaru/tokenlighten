@@ -46,15 +46,16 @@ function isolatedEnvironment(root) {
   mkdirSync(configRoot, { recursive: true });
   writeFileSync(
     preload,
-    `require("node:os").homedir = () => ${JSON.stringify(userRoot)};\n`,
+    "require(\"node:os\").homedir = () => process.env.TOKENLIGHTEN_TEST_HOME;\n",
     "utf8",
   );
   const requirePreload = `--require ${JSON.stringify(preload)}`;
   return {
     ...process.env,
-    NODE_OPTIONS: [process.env.NODE_OPTIONS, requirePreload]
-      .filter(Boolean)
-      .join(" "),
+    // Do not inherit ambient NODE_OPTIONS into this child process: the only
+    // preload is the temporary file created above for this isolated test.
+    NODE_OPTIONS: requirePreload,
+    TOKENLIGHTEN_TEST_HOME: userRoot,
     APPDATA: configRoot,
     LOCALAPPDATA: configRoot,
     XDG_CONFIG_HOME: configRoot,

@@ -6,6 +6,18 @@
 import { describe, it, expect } from "vitest";
 import { decomposeIdentifier, isErrorCodeToken, tokenizeText, tokenizeQuery, normalizeQuery } from "../tokenize.js";
 
+describe("normalizeQuery — path span boundaries", () => {
+  it("keeps valid paths/files and rejects malformed spans", () => {
+    expect(normalizeQuery("src/lib/file.ts").pathTokens).toContain("src/lib/file.ts");
+    expect(normalizeQuery("ERR_NOT_FOUND plain-word").errorCodeTokens).toEqual(["err_not_found"]);
+    expect(normalizeQuery("-foo.ts .foo.ts").pathTokens).toEqual(["foo.ts"]);
+    expect(normalizeQuery("foo/bar").pathTokens).toContain("foo/bar");
+    for (const value of ["foo/", "foo//bar", "foo.123", "foo.", "foo.abcdefghijk"]) {
+      expect(normalizeQuery(value).pathTokens).not.toContain(value);
+    }
+  });
+});
+
 describe("decomposeIdentifier — camel/snake/kebab/acronym decomposition", () => {
   it("splits camelCase", () => {
     expect(decomposeIdentifier("contentSufficiency")).toEqual(["content", "sufficiency"]);

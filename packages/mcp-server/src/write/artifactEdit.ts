@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
 
 import JSZip from "jszip";
 
@@ -11,6 +10,7 @@ import { batchCheckpoint } from "./checkpoint.js";
 import type { GuardedWorkspaceRoot } from "./guardedWorkspace.js";
 import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 import { preflightZip, ZIP_LIMITS } from "../office/zipPreflight.js";
+import { shaOfBytes } from "../util/handles.js";
 
 const MAX_INPUT_BYTES = 25 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -259,7 +259,7 @@ function resolveBinaryTarget(relPath: string, workspace: string): BinaryTarget |
 }
 
 function sha256(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  return shaOfBytes(bytes);
 }
 
 function atomicWriteBinary(abs: string, bytes: Uint8Array): ArtifactEditResult | undefined {

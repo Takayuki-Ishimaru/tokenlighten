@@ -109,17 +109,6 @@ const commonOpts = {
   // still names the bundle's own on-disk location. See import-meta-url-shim.js.
   inject: [join(__dirname, "import-meta-url-shim.js")],
   define: { "import.meta.url": "import_meta_url" },
-  // unzipper's lib/Open/index.js (pulled in transitively via exceljs, inlined
-  // into the mcp-server bundle below) has an opt-in `Open.s3_v3()` helper
-  // that requires "@aws-sdk/client-s3" — a real dependency neither exceljs's
-  // xlsx.load()/writeBuffer() nor mcp-server's streaming reader ever calls,
-  // and not installed here (it's not one of unzipper's own declared deps).
-  // esbuild resolves every static require() it can see regardless of which
-  // branch actually runs, so without this it hard-fails at bundle time on a
-  // module that's genuinely unreachable at runtime. Marking it external
-  // leaves the require() call untouched in the output, matching source
-  // behavior exactly (still unreachable, still fine).
-  external: ["@aws-sdk/client-s3"],
 };
 
 // Public bundles must not carry the experimental Core 2 protocol behind the
@@ -218,7 +207,7 @@ async function main() {
     ...commonOpts,
     entryPoints: [join(REPO_ROOT, "packages/cli/src/index.ts")],
     outfile: join(DIST, "tl-cli.js"),
-    external: [...commonOpts.external, "@tokenlighten/agents-md"],
+    external: ["@tokenlighten/agents-md"],
   });
   // version.ts / help.ts read their own version via
   // require.resolve("@tokenlighten/cli/package.json") (not a hardcoded

@@ -1,17 +1,17 @@
 # Release checklist
 
-This checklist records the v0.12.0 public release described in
+This checklist records the v0.12.1 maintenance release described in
 [Public-source manifest](public-source-manifest.md). Publishing requires
-explicit maintainer approval; that approval was received on 2026-08-27.
+explicit maintainer approval; that approval was received on 2026-08-28.
 
 ## Current review status (2026-08-28)
 
-- [x] Product and public workspace manifests report 0.12.0.
-- [x] The v0.11.1 → v0.12.0 feature comparison and benchmark interpretation
-  are reflected in the release notes, changelog, and public README files.
-- [x] Runtime dependency audit: 0 Critical, 0 High, 2 Moderate.
-- [x] Full public-source staging audit: 1 Critical, 1 High, 5 Moderate.
-- [x] Public-source staging build and 260 test files passed: 3,839 tests
+- [x] Product and public workspace manifests report 0.12.1.
+- [x] The v0.12.0 benchmark interpretation remains unchanged; v0.12.1
+  introduces no new performance claim.
+- [x] Runtime dependency audit: 0 vulnerabilities.
+- [x] Full public-source staging audit: 0 vulnerabilities.
+- [x] Public-source staging build and 261 test files passed: 3,850 tests
   passed and 2 were skipped.
 - [x] Bundled CLI, dependency licenses, generated notices, public inventory,
   VSIX manifest, and packaged MCP smoke checks passed.
@@ -55,15 +55,14 @@ npm run doctor
 - [x] Run the build, package tests, bundled-CLI test, licenses, notices, and
   audits from a clean staged-public tree.
 - [x] Confirm the runtime audit remains free of Critical and High findings.
-- [x] Confirm the full `npm audit` disclosure remains 1 Critical, 1 High,
-  and 5 Moderate.
+- [x] Confirm the full `npm audit` reports 0 vulnerabilities.
 - [x] Ensure the staged public tests do not depend on the private benchmark
   harness.
 - [ ] Run Node.js 20 CI on macOS, Ubuntu, and Windows with platform scope
   documented in the README.
 - [x] Confirm generated output exposes no private benchmark command or Core 2
   implementation.
-- [x] Start the packaged MCP, confirm `initialize` reports v0.12.0, and
+- [x] Start the packaged MCP, confirm `initialize` reports v0.12.1, and
   confirm `tools/list` returns exactly `read_file`, `edit_file`, and
   `search_files`.
 - [x] Confirm all product-side `doctor` checks pass. The aggregate local
@@ -77,14 +76,14 @@ npm run doctor
 npm run package -w tokenlighten-vscode-extension
 ~~~
 
-- [x] Build `tokenlighten-vscode-extension-0.12.0.vsix` from staged public
+- [x] Build `tokenlighten-vscode-extension-0.12.1.vsix` from staged public
   source without a missing-license warning.
 - [x] Inspect the VSIX for the approved license, generated notices, bundled
-  CLI/server, version 0.12.0, and absence of private material.
+  CLI/server, version 0.12.1, and absence of private material.
 - [ ] Install it in a clean VS Code profile or test machine.
 - [x] Run automated setup, enable/disable, session-native bypass, status,
   Diagnostics, and update-check tests.
-- [x] Confirm the packaged manifest reports version 0.12.0.
+- [x] Confirm the packaged manifest reports version 0.12.1.
 
 ## 4. Benchmark disclosure gate
 
@@ -101,22 +100,22 @@ npm run package -w tokenlighten-vscode-extension
 
 - [x] Generate the checksum only after packaging gates pass.
 - [x] Record the checksum in
-  [the GitHub Release notes](github-release-v0.12.0.md).
+  [the GitHub Release notes](github-release-v0.12.1.md).
 - [x] Verify the artifact name, license, notices, version, and checksum.
 - [x] Preserve the VSIX and checksum as release assets.
 
 Verified VSIX SHA-256:
 
 ~~~text
-d1a2c4b844687c99a2d08880e559ebe9494a46bb30a7eb1116b5ec016c27b88c
+ffcc4a39c48f17f58c28461dc31fe1000bc53e0ef6aa11760cbabf7abd30c52e  tokenlighten-vscode-extension-0.12.1.vsix
 ~~~
 
 ## 6. GitHub release
 
-- [x] Receive explicit maintainer approval to publish v0.12.0.
+- [x] Receive explicit maintainer approval to publish v0.12.1.
 - [ ] Push and verify the reviewed public tree.
 - [ ] Confirm required GitHub Actions checks.
-- [ ] Create and push the approved `v0.12.0` tag.
+- [ ] Create and push the approved `v0.12.1` tag.
 - [ ] Attach the VSIX and checksum and publish the GitHub Release.
 
-The desktop application remains deferred from the public v0.12.0 release.
+The desktop application remains deferred from the public v0.12.1 release.

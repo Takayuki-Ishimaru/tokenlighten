@@ -5584,6 +5584,19 @@ const ANSWER_RECOVERY_SEMANTIC_TERMS = new Set([
  * locate. This prevents a high-scoring bench helper from project-root-locking
  * the candidate pool away from the named protocol implementation.
  */
+function isPascalCaseIdentifier(value: string): boolean {
+  if (value.length < 2 || value.charCodeAt(0) < 65 || value.charCodeAt(0) > 90) return false;
+  let hasLower = false;
+  let hasBoundary = false;
+  for (let i = 1; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 97 && code <= 122) hasLower = true;
+    if (code >= 65 && code <= 90) hasBoundary = true;
+    else if (!((code >= 48 && code <= 57) || (code >= 97 && code <= 122) || code === 95)) return false;
+  }
+  return hasLower && hasBoundary;
+}
+
 function answerRecoveryQuery(query: string): string | undefined {
   const tokens = query.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
   const seen = new Set<string>();
@@ -5596,7 +5609,7 @@ function answerRecoveryQuery(query: string): string | undefined {
     const codeShaped = token.includes("_")
       || token.includes("$")
       || /^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$/.test(token)
-      || /^[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+$/.test(token);
+      || isPascalCaseIdentifier(token);
     if (!protocol && !semantic && !codeShaped) continue;
     if (seen.has(lower)) continue;
     seen.add(lower);
@@ -5663,7 +5676,7 @@ function explicitCodeIdentifiers(query: string): string[] {
     const codeShaped = token.includes("_")
       || token.includes("$")
       || /^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$/.test(token)
-      || /^[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+$/.test(token)
+      || isPascalCaseIdentifier(token)
       || /^[A-Z][A-Z0-9_]{2,}$/.test(token)
       || backticked.has(key)
       || parenthesizedPascal.has(key);

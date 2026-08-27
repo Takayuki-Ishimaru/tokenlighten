@@ -101,7 +101,11 @@ export function canonicalWorkspacePath(path: string): string {
   } catch {
     // Preserve the resolved path when the target does not exist.
   }
-  if (canonical.length > 1) canonical = canonical.replace(/[\\/]+$/, "");
+  if (canonical.length > 1) {
+    let end = canonical.length;
+    while (end > 1 && (canonical[end - 1] === "/" || canonical[end - 1] === "\\")) end--;
+    canonical = canonical.slice(0, end);
+  }
   return canonical;
 }
 

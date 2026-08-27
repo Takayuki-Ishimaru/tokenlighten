@@ -131,10 +131,44 @@ export function tokenizeQuery(query: string): string[] {
  * this additive classification helper can never perturb tokenizeText's
  * byte-for-byte output by construction.
  */
-const WORD_SPAN_RE = /[A-Za-z][A-Za-z0-9_-]*/g;
+function extractWordSpans(text: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const first = text.charCodeAt(i);
+    if (!((first >= 65 && first <= 90) || (first >= 97 && first <= 122))) { i++; continue; }
+    const start = i++;
+    while (i < text.length) {
+      const code = text.charCodeAt(i);
+      if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || text[i] === "_" || text[i] === "-")) break;
+      i++;
+    }
+    out.push(text.slice(start, i));
+  }
+  return out;
+}
 
 /** A path-shaped span: 2+ "/"- or "\\"-separated segments, or a bare "name.ext" filename. Structural (shape-only), never a filesystem existence check. */
-const PATH_SPAN_RE = /[A-Za-z0-9_.-]+(?:[\/\\][A-Za-z0-9_.-]+)+|\b[A-Za-z0-9_-]+\.[A-Za-z]{1,10}\b/g;
+function extractPathSpans(text: string): string[] {
+  const out: string[] = [];
+  let start = -1;
+  for (let i = 0; i <= text.length; i++) {
+    const c = text[i] ?? " ";
+    const segmentChar = /[A-Za-z0-9_.-]/.test(c) && (start >= 0 || /[A-Za-z0-9_]/.test(c));
+    const allowed = segmentChar || (start >= 0 && (c === "/" || c === "\\") && /[A-Za-z0-9_.-]/.test(text[i + 1] ?? ""));
+    if (allowed && start < 0) start = i;
+    if (!allowed && start >= 0) {
+      const value = text.slice(start, i);
+      const hasSeparator = value.includes("/") || value.includes("\\");
+      const validSegments = hasSeparator && value.split(/[\\/]/).every((part) => part.length > 0 && /^[A-Za-z0-9_.-]+$/.test(part));
+      const dot = value.lastIndexOf(".");
+      const ext = dot > 0 && dot < value.length - 1 && /^[A-Za-z]{1,10}$/.test(value.slice(dot + 1)) && /^[A-Za-z0-9_-]+$/.test(value.slice(0, dot));
+      if (validSegments || (!hasSeparator && ext)) out.push(value);
+      start = -1;
+    }
+  }
+  return out;
+}
 
 export interface NormalizedQuery {
   /** Decomposed identifier sub-tokens, MINUS anything already claimed by a path or error-code span below — a clean "everything else" bucket for classification. */
@@ -184,9 +218,9 @@ const MAX_IDENTIFIER_SPANS = 24;
 export function normalizeQuery(query: string): NormalizedQuery {
   const allTokens = tokenizeQuery(query);
   const errorCodeTokens = [
-    ...new Set((query.match(WORD_SPAN_RE) ?? []).filter(isErrorCodeToken).map((t) => t.toLowerCase())),
+    ...new Set(extractWordSpans(query).filter(isErrorCodeToken).map((t) => t.toLowerCase())),
   ];
-  const pathTokens = [...new Set(query.match(PATH_SPAN_RE) ?? [])];
+  const pathTokens = [...new Set(extractPathSpans(query))];
   const claimed = new Set<string>([...errorCodeTokens, ...pathTokens.flatMap((p) => decomposeIdentifier(p))]);
   const identifierTokens = allTokens.filter((t) => !claimed.has(t));
   const identifierSpans = [...new Set(query.match(IDENTIFIER_SPAN_RE) ?? [])]

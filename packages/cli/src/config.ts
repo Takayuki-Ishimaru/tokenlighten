@@ -23,6 +23,12 @@ export type TomlValue =
 
 type TomlDocument = Record<string, TomlValue>;
 
+const UNSAFE_PATH_SEGMENTS = new Set(["__proto__"]);
+
+function hasUnsafePathSegment(parts: readonly string[]): boolean {
+  return parts.some((part) => UNSAFE_PATH_SEGMENTS.has(part));
+}
+
 /**
  * Read and parse a TOML config file.
  * Returns an empty object if the file does not exist.
@@ -62,6 +68,7 @@ export function getNestedKey(
   dotPath: string
 ): TomlValue | undefined {
   const parts = dotPath.split(".");
+  if (hasUnsafePathSegment(parts)) return undefined;
   let current: TomlValue = doc;
 
   for (const part of parts) {
@@ -91,6 +98,9 @@ export function setNestedKey(
   value: TomlValue
 ): TomlDocument {
   const parts = dotPath.split(".");
+  if (hasUnsafePathSegment(parts)) {
+    throw new Error("config key contains a reserved path segment");
+  }
   let current: TomlDocument = doc;
 
   for (let i = 0; i < parts.length - 1; i++) {

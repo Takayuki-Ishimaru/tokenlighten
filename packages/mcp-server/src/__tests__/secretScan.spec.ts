@@ -87,6 +87,11 @@ describe("secretScan — positive cases (should be rejected)", () => {
     expect(looksLikeSecretFile("mysecretfile.txt")).toBe(true);
   });
 
+  it("nested secret and credentials directories", () => {
+    expect(looksLikeSecretFile("secret-dir/config.json")).toBe(true);
+    expect(looksLikeSecretFile("credentials-dir/config.json")).toBe(true);
+  });
+
   it("service_account.json", () => {
     expect(looksLikeSecretFile("service_account.json")).toBe(true);
   });

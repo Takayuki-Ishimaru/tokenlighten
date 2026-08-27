@@ -586,7 +586,7 @@ async function extractSiblingSignatures(
     if (!m) continue;
     const name = m[1] ?? m[2];
     if (!name || name === targetName) continue;
-    siblings.push(line.replace(/\s+$/, ""));
+    siblings.push(line.trimEnd());
     if (siblings.length >= cap) break;
   }
   return siblings;

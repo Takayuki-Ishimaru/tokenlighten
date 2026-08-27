@@ -1250,10 +1250,19 @@ function applyPenalties(
 ): number {
   void scope;
   let s = score;
-  if (/\.(spec|test)\.[^/]+$/.test(relPath)) s -= 0.3;
+  const baseName = relPath.slice(relPath.lastIndexOf("/") + 1);
+  let isTestFile = false;
+  for (let i = 0; i + 6 < baseName.length; i++) {
+    const marker = baseName.slice(i, i + 6);
+    if ((marker === ".spec." || marker === ".test.") && i + 6 < baseName.length) {
+      isTestFile = true;
+      break;
+    }
+  }
+  if (isTestFile) s -= 0.3;
   if (relPath.includes("/dist/") || relPath.includes("/build/") || relPath.includes("/__pycache__/")) s -= 0.5;
   const lowerSegments = relPath.toLowerCase().split("/");
-  if (lowerSegments.some((seg) => TEST_DIR_SEGMENT_RE.test(seg)) && !/\.(spec|test)\.[^/]+$/.test(relPath)) {
+  if (lowerSegments.some((seg) => TEST_DIR_SEGMENT_RE.test(seg)) && !isTestFile) {
     s -= 0.3;
   }
   if (!opts?.skipScopeHint && context && context.scopeHints.size > 0) {

@@ -73,6 +73,14 @@ describe("writeConfig (atomic)", () => {
     );
   });
 
+  it("round-trips legitimate constructor and prototype TOML keys", () => {
+    const filePath = join(tmpDir, "config.toml");
+    writeConfig(filePath, { constructor: "allowed", prototype: { enabled: true } });
+    const doc = readConfig(filePath);
+    expect(doc["constructor"]).toBe("allowed");
+    expect((doc["prototype"] as Record<string, unknown>)?.["enabled"]).toBe(true);
+  });
+
   it("overwrites existing content atomically", () => {
     const filePath = join(tmpDir, "config.toml");
     writeConfig(filePath, { version: 1 });
@@ -169,6 +177,12 @@ describe("getNestedKey", () => {
   it("returns undefined for entirely missing key", () => {
     expect(getNestedKey(doc, "nonexistent")).toBeUndefined();
   });
+
+  it("rejects __proto__ path segments while allowing ordinary names", () => {
+    expect(getNestedKey(doc, "proxy.__proto__.polluted")).toBeUndefined();
+    expect(getNestedKey({ constructor: "allowed", prototype: "allowed" }, "constructor")).toBe("allowed");
+    expect(getNestedKey({ constructor: "allowed", prototype: "allowed" }, "prototype")).toBe("allowed");
+  });
 });
 
 describe("setNestedKey", () => {
@@ -194,6 +208,18 @@ describe("setNestedKey", () => {
     const doc = { proxy: { enabled: true, port: 4000 } };
     setNestedKey(doc, "proxy.enabled", false);
     expect(doc.proxy.port).toBe(4000);
+  });
+
+  it("rejects __proto__ path segments without mutating Object.prototype", () => {
+    const doc = {};
+    expect(() => setNestedKey(doc, "safe.__proto__.polluted", true)).toThrow(/reserved path segment/);
+    expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
+  });
+
+  it("allows constructor and prototype keys", () => {
+    const doc = {};
+    setNestedKey(doc, "constructor.prototype.enabled", true);
+    expect(doc).toEqual({ constructor: { prototype: { enabled: true } } });
   });
 });
 

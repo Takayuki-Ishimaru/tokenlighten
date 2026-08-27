@@ -1,6 +1,6 @@
 {
   "name": "@tokenlighten/cli",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/index.js",
@@ -34,13 +34,14 @@
     "@tokenlighten/skeleton-engine": "*",
     "@tokenlighten/usage": "*",
     "cross-spawn": "^7.0.6",
+    "exceljs": "^4.4.0",
     "smol-toml": "^1.3.1"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^20",
     "typescript": "^5.6.3",
-    "vitest": "^2.1"
+    "vitest": "^3.2.6"
   },
   "files": [
     "dist"

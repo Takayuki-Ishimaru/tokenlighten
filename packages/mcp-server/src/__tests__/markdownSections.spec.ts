@@ -8,6 +8,9 @@ import {
 } from "../util/markdownSections.js";
 
 describe("markdownSections", () => {
+  it("only strips closing hashes preceded by whitespace", () => {
+    expect(parseMarkdownHeadings("# C#\n### Heading ###\n").map((h) => h.text)).toEqual(["C#", "Heading"]);
+  });
   const document = [
     "# Guide",
     "Intro.",

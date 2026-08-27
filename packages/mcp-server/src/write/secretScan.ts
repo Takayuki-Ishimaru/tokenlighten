@@ -33,14 +33,10 @@ const PATH_PATTERNS: RegExp[] = [
   /(^|\/)\.kube\//,
   // SSH directory
   /(^|\/)\.ssh\//,
-  // credentials files (any name containing "credentials")
-  /(^|\/)(.*credentials.*)$/i,
   // PEM / key / p12 / pfx / keystore suffix
   /\.(pem|key|p12|pfx|keystore)$/i,
   // Google service account JSON (common naming pattern)
   /(^|\/)service[-_]?account.*\.json$/i,
-  // Generic "secret" in the filename
-  /(^|\/).*secret.*$/i,
   // Terraform variable files that often contain secrets
   /\.tfvars$/i,
   // Docker config (may contain registry credentials)
@@ -77,6 +73,11 @@ export function looksLikeSecretFile(filePath: string): boolean {
   ) {
     return false;
   }
+
+  // Check every path segment, retaining protection for nested secret dirs
+  // without using a wildcard regex.
+  const segments = normalized.toLowerCase().split("/");
+  if (segments.some((segment) => segment.includes("credentials") || segment.includes("secret"))) return true;
 
   for (const pattern of PATH_PATTERNS) {
     if (pattern.test(normalized)) return true;

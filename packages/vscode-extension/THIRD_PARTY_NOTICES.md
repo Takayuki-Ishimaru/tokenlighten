@@ -16,18 +16,16 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 |---|---|---|---|
 | @fast-csv/format@4.3.5 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
 | @fast-csv/parse@4.3.6 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
-| @hono/node-server@2.1.1 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
+| @hono/node-server@1.19.17 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
 | @libpdf/core@0.3.6 | MIT | Lucas Smith | https://github.com/LibPDF-js/core |
-| @modelcontextprotocol/core@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @modelcontextprotocol/sdk@1.30.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @modelcontextprotocol/server@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @noble/ciphers@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
+| @modelcontextprotocol/sdk@1.29.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @noble/ciphers@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
 | @noble/hashes@1.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
-| @noble/hashes@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
-| @scure/base@2.3.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
+| @noble/hashes@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
+| @scure/base@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
 | @types/node@14.18.63 | MIT |  | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @xmldom/xmldom@0.8.15 | MIT |  | https://github.com/xmldom/xmldom |
-| @zip.js/zip.js@2.8.60 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
+| @xmldom/xmldom@0.8.13 | MIT |  | https://github.com/xmldom/xmldom |
+| @zip.js/zip.js@2.8.34 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
 | accepts@2.0.0 | MIT |  | https://github.com/jshttp/accepts |
 | adler-32@1.3.1 | Apache-2.0 | sheetjs | https://github.com/SheetJS/js-adler32 |
 | ajv-formats@3.0.1 | MIT | Evgeny Poberezkin | https://github.com/ajv-validator/ajv-formats |
@@ -58,7 +56,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | concat-map@0.0.1 | MIT | James Halliday | https://github.com/substack/node-concat-map |
 | content-disposition@1.1.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-disposition |
 | content-type@1.0.5 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-type |
-| content-type@2.1.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-type |
+| content-type@2.0.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-type |
 | cookie-signature@1.2.2 | MIT | TJ Holowaychuk | https://github.com/visionmedia/node-cookie-signature |
 | cookie@0.7.2 | MIT | Roman Shtylman | https://github.com/jshttp/cookie |
 | core-util-is@1.0.3 | MIT | Isaac Z. Schlueter | https://github.com/isaacs/core-util-is |
@@ -67,7 +65,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | crc32-stream@4.0.3 | MIT | Chris Talkington | https://github.com/archiverjs/node-crc32-stream |
 | cross-spawn@7.0.6 | MIT | André Cruz | https://github.com/moxystudio/node-cross-spawn |
 | crypto-js@4.2.0 | MIT | Evan Vosberg | https://github.com/brix/crypto-js |
-| dayjs@1.11.23 | MIT | iamkun | https://github.com/iamkun/dayjs |
+| dayjs@1.11.21 | MIT | iamkun | https://github.com/iamkun/dayjs |
 | debug@4.4.3 | MIT | Josh Junon | https://github.com/debug-js/debug |
 | depd@2.0.0 | MIT | Douglas Christopher Wilson | https://github.com/dougwilson/nodejs-depd |
 | dingbat-to-unicode@1.0.1 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/dingbat-to-unicode |
@@ -82,14 +80,14 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | es-object-atoms@1.1.2 | MIT | Jordan Harband | https://github.com/ljharb/es-object-atoms |
 | escape-html@1.0.3 | MIT |  | https://github.com/component/escape-html |
 | etag@1.8.1 | MIT |  | https://github.com/jshttp/etag |
-| eventsource-parser@3.1.1 | MIT | Espen Hovlandsdal | https://github.com/rexxars/eventsource-parser |
+| eventsource-parser@3.1.0 | MIT | Espen Hovlandsdal | https://github.com/rexxars/eventsource-parser |
 | eventsource@3.0.7 | MIT | Espen Hovlandsdal | git://git@github.com/EventSource/eventsource |
 | exceljs@4.4.0 | MIT | Guyon Roche | https://github.com/exceljs/exceljs |
-| express-rate-limit@8.6.2 | MIT | Nathan Friedly | https://github.com/express-rate-limit/express-rate-limit |
+| express-rate-limit@8.5.2 | MIT | Nathan Friedly | https://github.com/express-rate-limit/express-rate-limit |
 | express@5.2.1 | MIT | TJ Holowaychuk | https://github.com/expressjs/express |
 | fast-csv@4.3.6 | MIT | Doug Martin | https://github.com/C2FO/fast-csv |
 | fast-deep-equal@3.1.3 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/fast-deep-equal |
-| fast-uri@3.1.6 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
+| fast-uri@3.1.5 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
 | finalhandler@2.1.1 | MIT | Douglas Christopher Wilson | https://github.com/pillarjs/finalhandler |
 | forwarded@0.2.0 | MIT |  | https://github.com/jshttp/forwarded |
 | fresh@2.0.0 | MIT | TJ Holowaychuk | https://github.com/jshttp/fresh |
@@ -104,9 +102,9 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | graceful-fs@4.2.11 | ISC |  | https://github.com/isaacs/node-graceful-fs |
 | has-symbols@1.1.0 | MIT | Jordan Harband | https://github.com/inspect-js/has-symbols |
 | hasown@2.0.4 | MIT | Jordan Harband | https://github.com/inspect-js/hasOwn |
-| hono@4.13.5 | MIT | Yusuke Wada | https://github.com/honojs/hono |
+| hono@4.13.2 | MIT | Yusuke Wada | https://github.com/honojs/hono |
 | http-errors@2.0.1 | MIT | Jonathan Ong | https://github.com/jshttp/http-errors |
-| iconv-lite@0.7.3 | MIT | Alexander Shtuchkin | https://github.com/pillarjs/iconv-lite |
+| iconv-lite@0.7.2 | MIT | Alexander Shtuchkin | https://github.com/pillarjs/iconv-lite |
 | ieee754@1.2.1 | BSD-3-Clause | Feross Aboukhadijeh | https://github.com/feross/ieee754 |
 | ignore@5.3.2 | MIT | kael | https://github.com/kaelzhang/node-ignore |
 | immediate@3.0.6 | MIT |  | https://github.com/calvinmetcalf/immediate |
@@ -117,7 +115,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | is-promise@4.0.0 | MIT | ForbesLindesay | https://github.com/then/is-promise |
 | isarray@1.0.0 | MIT | Julian Gruber | https://github.com/juliangruber/isarray |
 | isexe@2.0.0 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/isexe |
-| jose@6.2.10 | MIT | Filip Skokan | https://github.com/panva/jose |
+| jose@6.2.3 | MIT | Filip Skokan | https://github.com/panva/jose |
 | json-schema-traverse@1.0.0 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/json-schema-traverse |
 | json-schema-typed@8.0.2 | BSD-2-Clause | Remy Rylan | https://github.com/RemyRylan/json-schema-typed |
 | jsonfile@6.2.1 | MIT | JP Richardson | https://github.com/jprichardson/node-jsonfile |
@@ -140,16 +138,16 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | lodash.uniq@4.5.0 | MIT | John-David Dalton | https://github.com/lodash/lodash |
 | lop@0.4.2 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/lop |
 | lru-cache@11.5.2 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/node-lru-cache |
-| mammoth@1.12.1 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/mammoth.js |
+| mammoth@1.12.0 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/mammoth.js |
 | math-intrinsics@1.1.0 | MIT | Jordan Harband | https://github.com/es-shims/math-intrinsics |
-| media-typer@1.1.1 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/media-typer |
+| media-typer@1.1.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/media-typer |
 | merge-descriptors@2.0.0 | MIT |  | https://github.com/sindresorhus/merge-descriptors |
 | mime-db@1.54.0 | MIT |  | https://github.com/jshttp/mime-db |
 | mime-types@3.0.2 | MIT |  | https://github.com/jshttp/mime-types |
 | minimatch@3.1.5 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/minimatch |
 | minimatch@5.1.9 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/minimatch |
 | ms@2.1.3 | MIT |  | https://github.com/vercel/ms |
-| negotiator@1.1.0 | MIT |  | https://github.com/jshttp/negotiator |
+| negotiator@1.0.0 | MIT |  | https://github.com/jshttp/negotiator |
 | node-int64@0.4.0 | MIT | Robert Kieffer | https://github.com/broofa/node-int64 |
 | normalize-path@3.0.0 | MIT | Jon Schlinkert | https://github.com/jonschlinkert/normalize-path |
 | object-assign@4.1.1 | MIT | Sindre Sorhus | https://github.com/sindresorhus/object-assign |
@@ -170,9 +168,9 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | process-nextick-args@2.0.1 | MIT |  | https://github.com/calvinmetcalf/process-nextick-args |
 | proxy-addr@2.0.7 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/proxy-addr |
 | pvtsutils@1.3.6 | MIT | PeculiarVentures | https://github.com/PeculiarVentures/pvtsutils |
-| pvutils@1.2.0 | MIT | Yury Strozhevsky | https://github.com/PeculiarVentures/pvutils |
+| pvutils@1.1.5 | MIT | Yury Strozhevsky | https://github.com/PeculiarVentures/pvutils |
 | qs@6.15.3 | BSD-3-Clause |  | https://github.com/ljharb/qs |
-| range-parser@1.3.0 | MIT | TJ Holowaychuk | https://github.com/jshttp/range-parser |
+| range-parser@1.2.1 | MIT | TJ Holowaychuk | https://github.com/jshttp/range-parser |
 | raw-body@3.0.2 | MIT | Jonathan Ong | https://github.com/stream-utils/raw-body |
 | readable-stream@2.3.8 | MIT |  | https://github.com/nodejs/readable-stream |
 | readable-stream@3.6.2 | MIT |  | https://github.com/nodejs/readable-stream |
@@ -180,8 +178,9 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | require-from-string@2.0.2 | MIT | Vsevolod Strukchinsky | https://github.com/floatdrop/require-from-string |
 | router@2.2.0 | MIT | Douglas Christopher Wilson | https://github.com/pillarjs/router |
 | safe-buffer@5.1.2 | MIT | Feross Aboukhadijeh | https://github.com/feross/safe-buffer |
+| safe-buffer@5.2.1 | MIT | Feross Aboukhadijeh | https://github.com/feross/safe-buffer |
 | safer-buffer@2.1.2 | MIT | Nikita Skovoroda | https://github.com/ChALkeR/safer-buffer |
-| sax@1.6.1 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/sax-js |
+| sax@1.6.0 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/sax-js |
 | saxes@5.0.1 | ISC | Louis-Dominique Dubeau | https://github.com/lddubeau/saxes |
 | send@1.2.1 | MIT | TJ Holowaychuk | https://github.com/pillarjs/send |
 | serve-static@2.2.1 | MIT | Douglas Christopher Wilson | https://github.com/expressjs/serve-static |
@@ -193,10 +192,11 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | side-channel-map@1.0.1 | MIT | Jordan Harband | https://github.com/ljharb/side-channel-map |
 | side-channel-weakmap@1.0.2 | MIT | Jordan Harband | https://github.com/ljharb/side-channel-weakmap |
 | side-channel@1.1.1 | MIT | Jordan Harband | https://github.com/ljharb/side-channel |
-| smol-toml@1.8.0 | BSD-3-Clause | Cynthia Rey | https://github.com/squirrelchat/smol-toml |
+| smol-toml@1.7.0 | BSD-3-Clause | Cynthia Rey | https://github.com/squirrelchat/smol-toml |
 | sprintf-js@1.0.3 | BSD-3-Clause | Alexandru Marasteanu | https://github.com/alexei/sprintf.js |
 | statuses@2.0.2 | MIT |  | https://github.com/jshttp/statuses |
 | string_decoder@1.1.1 | MIT |  | https://github.com/nodejs/string_decoder |
+| string_decoder@1.3.0 | MIT |  | https://github.com/nodejs/string_decoder |
 | tar-stream@2.2.0 | MIT | Mathias Buus | https://github.com/mafintosh/tar-stream |
 | tmp@0.2.7 | MIT | KARASZI István | https://github.com/raszi/node-tmp |
 | toidentifier@1.0.1 | MIT | Douglas Christopher Wilson | https://github.com/component/toidentifier |
@@ -205,7 +205,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | type-is@2.1.0 | MIT |  | https://github.com/jshttp/type-is |
 | underscore@1.13.8 | MIT | Jeremy Ashkenas | https://github.com/jashkenas/underscore |
 | universalify@2.0.1 | MIT | Ryan Zimmerman | https://github.com/RyanZim/universalify |
-| unpdf@1.8.1 | MIT | Johann Schopplich | https://github.com/unjs/unpdf |
+| unpdf@1.6.2 | MIT | Johann Schopplich | https://github.com/unjs/unpdf |
 | unpipe@1.0.0 | MIT | Douglas Christopher Wilson | https://github.com/stream-utils/unpipe |
 | unzipper@0.12.5 | MIT | Ziggy Jonsson | https://github.com/ZJONSSON/node-unzipper |
 | util-deprecate@1.0.2 | MIT | Nathan Rajlich | https://github.com/TooTallNate/util-deprecate |
@@ -254,229 +254,6 @@ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
 WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
-```
-
-### MIT — SHA-256 0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a
-
-Applies to: `@modelcontextprotocol/core@2.0.0`, `@modelcontextprotocol/server@2.0.0`
-
-```text
-The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
-
-Contributions for which relicensing consent has been obtained are licensed under Apache-2.0. Contributions made by authors who originally licensed their work under the MIT License and who have not yet granted explicit permission to relicense remain licensed under the MIT License.
-
-No rights beyond those granted by the applicable original license are conveyed for such contributions.
-
----
-
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to the Licensor for inclusion in the Work by the copyright
-      owner or by an individual or Legal Entity authorized to submit on behalf
-      of the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
----
-
-MIT License
-
-Copyright (c) 2024-2025 Model Context Protocol a Series of LF Projects, LLC.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
----
-
-Creative Commons Attribution 4.0 International (CC-BY-4.0)
-
-Documentation in this project (excluding specifications) is licensed under
-CC-BY-4.0. See https://creativecommons.org/licenses/by/4.0/legalcode for
-the full license text.
 ```
 
 ### ISC — SHA-256 05dc4d785ac3a488676d3ed10e901b75ad89dafcc63f8e66610fd4a39cc5c7e8
@@ -586,7 +363,7 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEAL
 
 ### MIT — SHA-256 15c88630f1e778db64a446cb31b67362cc9eb7a048fdf5ac7ab51905b74464cd
 
-Applies to: `pvutils@1.2.0`
+Applies to: `pvutils@1.1.5`
 
 ```text
 MIT License
@@ -749,7 +526,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 1b7ebc8d7889ed25491484ab2b102370742ca6c0b26650a0c62cc2269b579b84
 
-Applies to: `@zip.js/zip.js@2.8.60`
+Applies to: `@zip.js/zip.js@2.8.34`
 
 ```text
 BSD 3-Clause License
@@ -896,7 +673,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 24d0608c3320a3e27ac35e1b36ee222b096e372ccd981351f4db7ff4c2b0bfd0
 
-Applies to: `@noble/ciphers@2.4.0`
+Applies to: `@noble/ciphers@2.2.0`
 
 ```text
 The MIT License (MIT)
@@ -1017,7 +794,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 257aed98914108e91a337912727b6a802eef218248507f74b76faffaff517a38
 
-Applies to: `content-type@1.0.5`, `content-type@2.1.0`
+Applies to: `content-type@1.0.5`, `content-type@2.0.0`
 
 ```text
 (The MIT License)
@@ -1284,7 +1061,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 3239e134eb6e6d64538ca76498c7fcb08a395249dd9d4af9927bf6d0169ee429
 
-Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.4.0`, `@scure/base@2.3.0`
+Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.2.0`, `@scure/base@2.2.0`
 
 ```text
 The MIT License (MIT)
@@ -1876,7 +1653,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### MIT — SHA-256 4a57080b8ecdb3a53ec678828121849ce5df877a99b1ad8d50e165d8a2aded1b
 
-Applies to: `unpdf@1.8.1`
+Applies to: `unpdf@1.6.2`
 
 ```text
 MIT License
@@ -1932,7 +1709,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 4da724fc305d81606b245b324d4d2586916b9d248b23d82183df753ace0fdf71
 
-Applies to: `@xmldom/xmldom@0.8.15`
+Applies to: `@xmldom/xmldom@0.8.13`
 
 ```text
 Copyright 2019 - present Christopher J. Brody and other contributors, as listed in: https://github.com/xmldom/xmldom/graphs/contributors
@@ -2054,7 +1831,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 553d4d20029a24e315b428a1a54a9e109eaa340f2e958a4f50a92362c2c4070b
 
-Applies to: `negotiator@1.1.0`
+Applies to: `negotiator@1.0.0`
 
 ```text
 (The MIT License)
@@ -2804,7 +2581,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 ### MIT — SHA-256 5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d
 
-Applies to: `@modelcontextprotocol/sdk@1.30.0`
+Applies to: `@modelcontextprotocol/sdk@1.29.0`
 
 ```text
 MIT License
@@ -2914,7 +2691,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 5faab7526d055651be3aab769d58897be6bd91f3d39d137f25f12dba1b31d5dc
 
-Applies to: `dayjs@1.11.23`
+Applies to: `dayjs@1.11.21`
 
 ```text
 MIT License
@@ -3028,7 +2805,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD* — SHA-256 6663bbd049205d38a496ccacb412a151980b444627d38de218b3b809aef330f1
 
-Applies to: `duck@0.1.12`, `lop@0.4.2`, `mammoth@1.12.1`, `option@0.2.4`
+Applies to: `duck@0.1.12`, `lop@0.4.2`, `mammoth@1.12.0`, `option@0.2.4`
 
 ```text
 Copyright (c) 2013, Michael Williamson
@@ -3057,7 +2834,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 6895190430d809c4c57a7582ecc2f99acbc2ea39a5dfad20262a41d5b3e91733
 
-Applies to: `@hono/node-server@2.1.1`
+Applies to: `@hono/node-server@1.19.17`
 
 ```text
 MIT License
@@ -3677,7 +3454,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 8078b0829d6c3e9ecde2f003e1966e4cad3efc6e7a640efbab0313cc166b1af1
 
-Applies to: `jose@6.2.10`
+Applies to: `jose@6.2.3`
 
 ```text
 The MIT License (MIT)
@@ -3848,7 +3625,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 835eb611a23301b27115ca1be9f754c876e643ceb7fe63049c6b50609a1cafeb
 
-Applies to: `eventsource-parser@3.1.1`
+Applies to: `eventsource-parser@3.1.0`
 
 ```text
 MIT License
@@ -3954,7 +3731,7 @@ THE SOFTWARE.
 
 ### BlueOak-1.0.0 — SHA-256 8a1af140fdfbf5afd3df27f7e662f989c5b963a300020dfafce42033cae9e004
 
-Applies to: `lru-cache@11.5.2`, `sax@1.6.1`
+Applies to: `lru-cache@11.5.2`, `sax@1.6.0`
 
 ```text
 # Blue Oak Model License
@@ -4855,7 +4632,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
 
-Applies to: `hono@4.13.5`
+Applies to: `hono@4.13.2`
 
 ```text
 MIT License
@@ -5377,7 +5154,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 bd47ce7b88c7759630d1e2b9fcfa170a0f1fde522be09e13fb1581a79d090400
 
-Applies to: `content-disposition@1.1.0`, `forwarded@0.2.0`, `media-typer@1.1.1`, `vary@1.1.2`
+Applies to: `content-disposition@1.1.0`, `forwarded@0.2.0`, `media-typer@1.1.0`, `vary@1.1.2`
 
 ```text
 (The MIT License)
@@ -5637,7 +5414,7 @@ OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHE
 
 ### MIT — SHA-256 c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac
 
-Applies to: `safe-buffer@5.1.2`
+Applies to: `safe-buffer@5.1.2`, `safe-buffer@5.2.1`
 
 ```text
 The MIT License (MIT)
@@ -5922,7 +5699,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 df66e8e76a2438780588c57d91c552ead3f7ed81730acaafc3a45dd3e8618843
 
-Applies to: `express-rate-limit@8.6.2`
+Applies to: `express-rate-limit@8.5.2`
 
 ```text
 # MIT License
@@ -5949,7 +5726,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
 
-Applies to: `fast-uri@3.1.6`
+Applies to: `fast-uri@3.1.5`
 
 ```text
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -6200,7 +5977,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 ec62dc96da0099b87f4511736c87309335527fb7031639493e06c95728dc8c54
 
-Applies to: `readable-stream@2.3.8`, `readable-stream@3.6.2`, `string_decoder@1.1.1`
+Applies to: `readable-stream@2.3.8`, `readable-stream@3.6.2`, `string_decoder@1.1.1`, `string_decoder@1.3.0`
 
 ```text
 Node.js is licensed for use as follows:
@@ -6344,7 +6121,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 f655e6291356ec0de7a8f0e69f294961a2cea86678ec94588be1e6a492e278ab
 
-Applies to: `range-parser@1.3.0`
+Applies to: `range-parser@1.2.1`
 
 ```text
 (The MIT License)
@@ -6482,7 +6259,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 f9c6da891840e8951696e472b3c7d6f6d3ab2c7325f1dd30c0813244c15b288c
 
-Applies to: `iconv-lite@0.7.3`
+Applies to: `iconv-lite@0.7.2`
 
 ```text
 Copyright (c) 2011 Alexander Shtuchkin
@@ -6509,7 +6286,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 fa5659948374d4f555594f47f6da073b40dc503e921aeeece30df4362b3051a5
 
-Applies to: `smol-toml@1.8.0`
+Applies to: `smol-toml@1.7.0`
 
 ```text
 Copyright (c) Squirrel Chat et al., All rights reserved.

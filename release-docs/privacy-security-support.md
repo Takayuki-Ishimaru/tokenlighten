@@ -22,9 +22,9 @@ The VS Code extension and CLI can produce local usage and cost-savings estimates
 
 ## Dependency security status
 
-The v0.12.0 public-source staging tree was audited on 2026-08-27. `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the runtime dependency view.
+The v0.12.1 release candidate was audited on 2026-08-28. Both `npm audit --omit=dev` and the complete `npm audit`, including development dependencies, reported **0 vulnerabilities**.
 
-The complete public-source staging installation reported **1 Critical, 1 High, and 5 Moderate** findings when development dependencies were included. These development-toolchain findings are outside the normal installed-VSIX runtime view. Developers should treat the development environment as a separate trust boundary and avoid running untrusted build scripts, tests, or development servers.
+Developers should continue to treat the development environment as a separate trust boundary and avoid running untrusted build scripts, tests, or development servers.
 
 Audit results can change as advisories are published or dependencies change. This dated snapshot is not a guarantee of zero risk. Run `npm audit --omit=dev` for the runtime view and `npm audit` for the full development view.
 

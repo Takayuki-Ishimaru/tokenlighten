@@ -12,6 +12,7 @@ import { dirname, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import crossSpawn from "cross-spawn";
+import { markdownCell } from "./licenses-format.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -58,13 +59,6 @@ function runtimePackageIds() {
     if (name) ids.add(`${name}@${info.version}`);
   }
   return ids;
-}
-
-function markdownCell(value) {
-  return String(value ?? "")
-    .replace(/\|/g, "\\|")
-    .replace(/[\r\n]+/g, " ")
-    .trim();
 }
 
 function isFirstParty(name) {

@@ -1,7 +1,7 @@
 # TokenLighten release documentation
 
 This directory contains the public documentation prepared for TokenLighten
-v0.12.0, separate from private design and benchmark history.
+v0.12.1, separate from private design and benchmark history.
 
 ## Start here
 
@@ -12,11 +12,11 @@ v0.12.0, separate from private design and benchmark history.
 - [Language support](language-support.md) — languages, formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
-- [GitHub Release v0.12.0 draft](github-release-v0.12.0.md) — feature
-  comparison and adjudicated benchmark disclosure. **Not published:** final
-  VSIX, public staging, and maintainer review remain pending.
-- [Historical GitHub Release v0.11.1](github-release-v0.11.1.md) — latest
-  published release until v0.12.0 is approved and published.
+- [GitHub Release v0.12.1](github-release-v0.12.1.md) — maintenance and
+  security-quality update; the v0.12.0 benchmark disclosure is unchanged.
+- [Historical GitHub Release v0.12.0](github-release-v0.12.0.md) — feature
+  comparison and adjudicated benchmark disclosure.
+- [Historical GitHub Release v0.11.1](github-release-v0.11.1.md).
 - [Historical GitHub Release v0.9.0](github-release-v0.9.0.md).
 - [Public-source manifest](public-source-manifest.md).
 - [Release checklist](release-checklist.md).
@@ -27,7 +27,7 @@ v0.12.0, separate from private design and benchmark history.
 
 ## Release scope
 
-The v0.12.0 public release includes the CLI, MCP server, selected developer
+The v0.12.1 public release includes the CLI, MCP server, selected developer
 source/tests, and VS Code extension. The desktop application and private
 benchmark harness are excluded.
 

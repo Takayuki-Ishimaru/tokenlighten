@@ -14,6 +14,16 @@ import { regexFallbackSkeleton, regexSignatureLines } from "../skeleton/regexFal
 const NOTE = "note: AST-fallback mode (no scope header); use get_file_skeleton instead for unsupported languages.";
 
 describe("regexFallbackSkeleton", () => {
+  it("handles hostile Java/C# whitespace in linear time and preserves controls", () => {
+    const hostile = `${" ".repeat(4000)}!`;
+    expect(regexSignatureLines(hostile, "java")).toEqual([]);
+    expect(regexSignatureLines(hostile, "csharp")).toEqual([]);
+    expect(regexSignatureLines("public class Widget {}\npublic void run() {}", "java")).toEqual(["public class Widget {}", "public void run() {}"]);
+    expect(regexSignatureLines("public class Widget {}\npublic void Run() {}", "csharp")).toEqual(["public class Widget {}", "public void Run() {}"]);
+    expect(regexSignatureLines("// class Fake {}\nString s = \"class Fake\";\nfoo();", "java")).toEqual([]);
+    expect(regexSignatureLines("return foo();\nnew Foo();\npublic List<String> get(int[] x) {}", "java")).toEqual(["public List<String> get(int[] x) {}"]);
+    expect(regexSignatureLines("public partial void Run() {}", "csharp")).toEqual(["public partial void Run() {}"]);
+  });
   it("appends a // -formed note for typescript (unchanged)", () => {
     const out = regexFallbackSkeleton("export function x() {}\n", "typescript");
     expect(out).toBe(`export function x() {}\n\n// ${NOTE}`);

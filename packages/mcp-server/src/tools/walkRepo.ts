@@ -403,7 +403,10 @@ function isExcludedBySourceOnlyRules(p: string, fullRecall = false): boolean {
 
 function isExplicitNoiseScope(scope: string | undefined): boolean {
   if (!scope) return false;
-  const s = normalizeRelPath(scope).replace(/\/+$/, "");
+  const normalized = normalizeRelPath(scope);
+  let end = normalized.length;
+  while (end > 0 && normalized[end - 1] === "/") end--;
+  const s = normalized.slice(0, end);
   return isExcludedBySourceOnlyRules(s) || isExcludedBySourceOnlyRules(`${s}/`);
 }
 
@@ -414,7 +417,10 @@ export function isSourceOnlyExcludedPath(
 ): boolean {
   const p = normalizeRelPath(relPath);
   if (!p) return false;
-  const scope = explicitSubPath ? normalizeRelPath(explicitSubPath).replace(/\/+$/, "") : "";
+  const rawScope = explicitSubPath ? normalizeRelPath(explicitSubPath) : "";
+  let scopeEnd = rawScope.length;
+  while (scopeEnd > 0 && rawScope[scopeEnd - 1] === "/") scopeEnd--;
+  const scope = rawScope.slice(0, scopeEnd);
   if (scope && isExplicitNoiseScope(scope) && (p === scope || p.startsWith(`${scope}/`))) {
     return false;
   }
@@ -501,7 +507,10 @@ function buildLayerMatchers(
 
   let liftScope = "";
   if (subPath) {
-    let scope = normalizeRelPath(subPath).replace(/\/+$/, "");
+    const normalizedScope = normalizeRelPath(subPath);
+    let scopeEnd = normalizedScope.length;
+    while (scopeEnd > 0 && normalizedScope[scopeEnd - 1] === "/") scopeEnd--;
+    let scope = normalizedScope.slice(0, scopeEnd);
     // "." (whole-workspace) and parent-escaping scopes are not liftable
     // targets, and the ignore matcher rejects them outright.
     if (scope === "." || scope === ".." || scope.startsWith("../")) scope = "";

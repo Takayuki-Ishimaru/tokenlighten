@@ -145,17 +145,28 @@ function stripImports(text: string): string {
  * and leading # doc lines (Python docstring-style leading comments).
  */
 function stripDocComments(text: string): string {
-  // Remove /** ... */ blocks (multiline Javadoc)
-  let result = text.replace(/\/\*\*[\s\S]*?\*\//g, "");
-  // Remove /// lines
-  result = result.replace(/^\s*\/\/\/.*$/gm, "");
-  // Remove leading # doc comment lines above def/class in Python
-  // (conservative: only lines that are purely # comment with no code on same line)
-  result = result.replace(/^\s*#[^!].*$/gm, (line) => {
-    // Keep shebang, keep lines that have actual code context
-    return line.trim().startsWith("#!") ? line : "";
-  });
-  return result;
+  const lines = text.split("\n");
+  let inDoc = false;
+  return lines.map((line) => {
+    let out = line;
+    if (inDoc) {
+      const close = out.indexOf("*/");
+      if (close < 0) return "";
+      out = out.slice(close + 2); inDoc = false;
+    }
+    let open = out.indexOf("/**");
+    while (open >= 0) {
+      const close = out.indexOf("*/", open + 3);
+      if (close >= 0) out = out.slice(0, open) + out.slice(close + 2);
+      else { out = out.slice(0, open); inDoc = true; }
+      if (inDoc) break;
+      open = out.indexOf("/**");
+    }
+    const trimmed = out.trim();
+    if (trimmed.startsWith("///")) return "";
+    if (trimmed.startsWith("#") && !trimmed.startsWith("#!")) return "";
+    return out;
+  }).join("\n");
 }
 
 /**

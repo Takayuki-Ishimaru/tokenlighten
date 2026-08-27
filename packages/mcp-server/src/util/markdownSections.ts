@@ -29,9 +29,12 @@ function sourceLines(text: string): string[] {
 function atxHeading(line: string): { level: number; text: string } | undefined {
   const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$/.exec(line);
   if (!match) return undefined;
-  const text = (match[2] ?? "")
-    .replace(/[ \t]+#+[ \t]*$/, "")
-    .trim();
+  let text = (match[2] ?? "").trim();
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "#") end--;
+  if (end < text.length && end > 0 && (text[end - 1] === " " || text[end - 1] === "\t")) {
+    text = text.slice(0, end).trimEnd();
+  }
   if (!text) return undefined;
   return { level: match[1]!.length, text };
 }
