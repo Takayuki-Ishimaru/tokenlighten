@@ -27,16 +27,24 @@ function sourceLines(text: string): string[] {
 }
 
 function atxHeading(line: string): { level: number; text: string } | undefined {
-  const match = /^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$/.exec(line);
-  if (!match) return undefined;
-  let text = (match[2] ?? "").trim();
+  let cursor = 0;
+  while (cursor < 3 && line[cursor] === " ") cursor++;
+
+  const hashStart = cursor;
+  while (line[cursor] === "#") cursor++;
+  const level = cursor - hashStart;
+  if (level < 1 || level > 6) return undefined;
+  if (cursor < line.length && line[cursor] !== " " && line[cursor] !== "\t") return undefined;
+
+  while (line[cursor] === " " || line[cursor] === "\t") cursor++;
+  let text = line.slice(cursor).trim();
   let end = text.length;
   while (end > 0 && text[end - 1] === "#") end--;
   if (end < text.length && end > 0 && (text[end - 1] === " " || text[end - 1] === "\t")) {
     text = text.slice(0, end).trimEnd();
   }
   if (!text) return undefined;
-  return { level: match[1]!.length, text };
+  return { level, text };
 }
 
 function setextLevel(line: string): number | undefined {

@@ -347,6 +347,7 @@ describe("renderSkeleton (edge cases)", () => {
     skeleton.commit = "abc -->\n# COMMIT-INJECTED";
     skeleton.topRanked[0]!.path = "src/evil`\n# PATH-INJECTED.ts";
     skeleton.apiEndpoints[0]!.path = "/health | injected";
+    skeleton.apiEndpoints[1]!.path = String.raw`/backslash\| injected`;
     skeleton.excluded = ["safe`\n# EXCLUDED-INJECTED"];
     const sigs = new Map([
       [skeleton.topRanked[0]!.path, "```\n# SIGNATURE-INJECTED\n```"],
@@ -358,6 +359,7 @@ describe("renderSkeleton (edge cases)", () => {
     expect(md).not.toContain("<!-- tokenlighten:skeleton version=1 commit=abc -->");
     expect(md).toContain("src/evil\\u0060\\n# PATH-INJECTED.ts");
     expect(md).toContain("/health \\| injected");
+    expect(md).toContain(String.raw`/backslash\\\| injected`);
     expect(md).toContain("safe\\u0060\\n# EXCLUDED-INJECTED");
     expect(md).toContain("````ts\n```\n# SIGNATURE-INJECTED\n```\n````");
   });

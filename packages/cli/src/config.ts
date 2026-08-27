@@ -29,6 +29,27 @@ function hasUnsafePathSegment(parts: readonly string[]): boolean {
   return parts.some((part) => UNSAFE_PATH_SEGMENTS.has(part));
 }
 
+function isTomlDocument(value: TomlValue | undefined): value is TomlDocument {
+  return value !== undefined
+    && value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && !(value instanceof Date);
+}
+
+function ownTomlValue(doc: TomlDocument, key: string): TomlValue | undefined {
+  return Object.getOwnPropertyDescriptor(doc, key)?.value as TomlValue | undefined;
+}
+
+function defineTomlValue(doc: TomlDocument, key: string, value: TomlValue): void {
+  Object.defineProperty(doc, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 /**
  * Read and parse a TOML config file.
  * Returns an empty object if the file does not exist.
@@ -72,17 +93,10 @@ export function getNestedKey(
   let current: TomlValue = doc;
 
   for (const part of parts) {
-    if (
-      current === null ||
-      typeof current !== "object" ||
-      Array.isArray(current)
-    ) {
-      return undefined;
-    }
-    current = (current as TomlDocument)[part] as TomlValue;
-    if (current === undefined) {
-      return undefined;
-    }
+    if (!isTomlDocument(current)) return undefined;
+    const next = ownTomlValue(current, part);
+    if (next === undefined) return undefined;
+    current = next;
   }
   return current;
 }
@@ -105,18 +119,18 @@ export function setNestedKey(
 
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i]!;
-    if (
-      current[part] === undefined ||
-      typeof current[part] !== "object" ||
-      Array.isArray(current[part])
-    ) {
-      current[part] = {};
+    const existing = ownTomlValue(current, part);
+    if (isTomlDocument(existing)) {
+      current = existing;
+      continue;
     }
-    current = current[part] as TomlDocument;
+    const created: TomlDocument = {};
+    defineTomlValue(current, part, created);
+    current = created;
   }
 
   const lastKey = parts[parts.length - 1]!;
-  current[lastKey] = value;
+  defineTomlValue(current, lastKey, value);
   return doc;
 }
 

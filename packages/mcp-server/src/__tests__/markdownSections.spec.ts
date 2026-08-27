@@ -11,6 +11,12 @@ describe("markdownSections", () => {
   it("only strips closing hashes preceded by whitespace", () => {
     expect(parseMarkdownHeadings("# C#\n### Heading ###\n").map((h) => h.text)).toEqual(["C#", "Heading"]);
   });
+
+  it("parses long ATX whitespace runs without backtracking", () => {
+    const padding = "\t".repeat(100_000);
+    expect(parseMarkdownHeadings(`###${padding}Heading\n`).map((h) => h.text)).toEqual(["Heading"]);
+    expect(parseMarkdownHeadings(`#######${padding}Not a heading\n`)).toEqual([]);
+  });
   const document = [
     "# Guide",
     "Intro.",

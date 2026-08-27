@@ -430,65 +430,181 @@ function findSymbolRegex(text: string, symbolName: string, lang: string): FoundS
 function extractUsedImports(text: string, lang: string, bodyText: string): string[] {
   const lines = splitLines(text);
   const importLines: string[] = [];
-
-  const importPat =
-    lang === "python"
-      ? /^\s*(import\s+\S+|from\s+\S+\s+import\s+.+)/
-      : lang === "ruby"
-        ? /^\s*require/
-        : /^\s*import\s+/;
+  const bodyIdentifiers = identifierSet(bodyText);
 
   for (const line of lines) {
-    if (importPat.test(line)) {
-      const identifiers = importedBindingNames(line, lang);
-      const bodyIdentifiers = new Set(bodyText.match(/\b[A-Za-z_$][\w$]*\b/g) ?? []);
-      const bodyRefersToImport = identifiers.some((id) => bodyIdentifiers.has(id));
-      if (bodyRefersToImport) importLines.push(line.replace(/\s+$/, ""));
+    const identifiers = importedBindingNames(line, lang);
+    if (identifiers.some((id) => bodyIdentifiers.has(id))) importLines.push(line.trimEnd());
+  }
+  return importLines;
+}
+
+function isIdentifierStart(ch: string | undefined): boolean {
+  if (ch === "_" || ch === "$") return true;
+  if (ch === undefined) return false;
+  const code = ch.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isIdentifierContinue(ch: string | undefined): boolean {
+  if (isIdentifierStart(ch)) return true;
+  if (ch === undefined) return false;
+  const code = ch.charCodeAt(0);
+  return code >= 48 && code <= 57;
+}
+
+function identifierSet(text: string): Set<string> {
+  const identifiers = new Set<string>();
+  for (let cursor = 0; cursor < text.length;) {
+    if (!isIdentifierStart(text[cursor])) {
+      cursor++;
+      continue;
+    }
+    const start = cursor++;
+    while (isIdentifierContinue(text[cursor])) cursor++;
+    identifiers.add(text.slice(start, cursor));
+  }
+  return identifiers;
+}
+
+function keywordRemainder(value: string, keyword: string): string | undefined {
+  const trimmed = value.trimStart();
+  if (!trimmed.startsWith(keyword)) return undefined;
+  const boundary = trimmed[keyword.length];
+  if (!isInlineWhitespace(boundary)) return undefined;
+  return trimmed.slice(keyword.length).trimStart();
+}
+
+function isInlineWhitespace(ch: string | undefined): boolean {
+  return ch !== undefined && ch.trim().length === 0;
+}
+
+function asciiWords(value: string): string[] {
+  const words: string[] = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    while (isInlineWhitespace(value[cursor])) cursor++;
+    const start = cursor;
+    while (cursor < value.length && !isInlineWhitespace(value[cursor])) cursor++;
+    if (cursor > start) words.push(value.slice(start, cursor));
+  }
+  return words;
+}
+
+function firstIdentifier(value: string): string | undefined {
+  const trimmed = value.trimStart();
+  if (!isIdentifierStart(trimmed[0])) return undefined;
+  let end = 1;
+  while (isIdentifierContinue(trimmed[end])) end++;
+  return trimmed.slice(0, end);
+}
+
+function pythonImportClause(line: string): string | undefined {
+  const direct = keywordRemainder(line, "import");
+  if (direct !== undefined) return direct;
+  const from = keywordRemainder(line, "from");
+  if (from === undefined) return undefined;
+  const module = asciiWords(from)[0];
+  return module ? keywordRemainder(from.slice(module.length), "import") : undefined;
+}
+
+function rubyRequiredBinding(line: string): string | undefined {
+  const remainder = keywordRemainder(line, "require_relative") ?? keywordRemainder(line, "require");
+  if (remainder === undefined || (remainder[0] !== "\"" && remainder[0] !== "'")) return undefined;
+  const quote = remainder[0]!;
+  const end = remainder.indexOf(quote, 1);
+  if (end < 0) return undefined;
+  const leaf = remainder.slice(1, end).split("/").at(-1) ?? "";
+  let binding = "";
+  let separating = false;
+  for (const ch of leaf) {
+    if (isIdentifierContinue(ch)) {
+      binding += ch;
+      separating = false;
+    } else if (!separating) {
+      binding += "_";
+      separating = true;
     }
   }
+  return binding || undefined;
+}
 
-  return importLines;
+function importClauseBeforeModule(line: string): string | undefined {
+  const remainder = keywordRemainder(line, "import");
+  if (remainder === undefined) return undefined;
+  for (let cursor = remainder.length - 4; cursor > 0; cursor--) {
+    if (remainder.slice(cursor, cursor + 4) !== "from") continue;
+    const before = remainder[cursor - 1];
+    const after = remainder[cursor + 4];
+    if (!isInlineWhitespace(before) || !isInlineWhitespace(after)) continue;
+    let moduleStart = cursor + 4;
+    while (isInlineWhitespace(remainder[moduleStart])) moduleStart++;
+    const quote = remainder[moduleStart];
+    if (quote !== "\"" && quote !== "'") continue;
+    if (remainder.indexOf(quote, moduleStart + 1) < 0) continue;
+    return remainder.slice(0, cursor).trim();
+  }
+  return undefined;
+}
+
+function qualifiedImportBinding(line: string): string | undefined {
+  const imported = keywordRemainder(line, "import");
+  if (imported === undefined) return undefined;
+  const withoutStatic = keywordRemainder(imported, "static") ?? imported;
+  const words = asciiWords(withoutStatic.trimEnd().replaceAll(";", ""));
+  const qualified = words[0];
+  if (!qualified || qualified.split(".").some((part) => !firstIdentifier(part) || firstIdentifier(part) !== part)) {
+    return undefined;
+  }
+  if (words.length >= 3 && words[1] === "as") return firstIdentifier(words[2]!);
+  const binding = qualified.split(".").at(-1);
+  return binding === "*" ? undefined : binding;
 }
 
 /** Extract only locally bound names; module-path words are not usable imports. */
 function importedBindingNames(line: string, lang: string): string[] {
   if (lang === "python") {
-    const from = /^\s*from\s+\S+\s+import\s+(.+)$/.exec(line);
-    const clause = from?.[1] ?? /^\s*import\s+(.+)$/.exec(line)?.[1];
+    const clause = pythonImportClause(line);
     if (!clause) return [];
     return clause.split(",").map((part) => {
-      const clean = part.trim().replace(/[()]/g, "");
-      const alias = /\s+as\s+(\w+)$/.exec(clean)?.[1];
-      return alias ?? clean.split(/[.\s]/)[0] ?? "";
-    }).filter(Boolean);
+      const words = asciiWords(part.trim().replaceAll("(", "").replaceAll(")", ""));
+      if (words.length >= 3 && words.at(-2) === "as") return firstIdentifier(words.at(-1)!);
+      const first = words[0]?.split(".")[0];
+      return first === undefined ? undefined : firstIdentifier(first);
+    }).filter((name): name is string => name !== undefined);
   }
   if (lang === "ruby") {
-    const value = /require(?:_relative)?\s+["']([^"']+)["']/.exec(line)?.[1];
-    return value ? [value.split("/").at(-1)!.replace(/\W+/g, "_")] : [];
+    const binding = rubyRequiredBinding(line);
+    return binding === undefined ? [] : [binding];
   }
 
-  const fromClause = /^\s*import\s+(.+?)\s+from\s+["'][^"']+["']/.exec(line)?.[1];
-  if (fromClause) {
+  const fromClause = importClauseBeforeModule(line);
+  if (fromClause !== undefined) {
     const names: string[] = [];
-    const namespace = /\*\s+as\s+(\w+)/.exec(fromClause)?.[1];
-    if (namespace) names.push(namespace);
-    const named = /\{([^}]+)\}/.exec(fromClause)?.[1];
-    if (named) {
-      for (const part of named.split(",")) {
-        const clean = part.trim().replace(/^type\s+/, "");
-        const alias = /\s+as\s+(\w+)$/.exec(clean)?.[1];
-        const original = /^([A-Za-z_$][\w$]*)/.exec(clean)?.[1];
+    const star = fromClause.indexOf("*");
+    if (star >= 0) {
+      const namespace = keywordRemainder(fromClause.slice(star + 1), "as");
+      const name = namespace === undefined ? undefined : firstIdentifier(namespace);
+      if (name) names.push(name);
+    }
+    const namedStart = fromClause.indexOf("{");
+    const namedEnd = namedStart < 0 ? -1 : fromClause.indexOf("}", namedStart + 1);
+    if (namedStart >= 0 && namedEnd > namedStart) {
+      for (const part of fromClause.slice(namedStart + 1, namedEnd).split(",")) {
+        const withoutType = keywordRemainder(part, "type") ?? part.trim();
+        const words = asciiWords(withoutType);
+        const alias = words.length >= 3 && words.at(-2) === "as" ? firstIdentifier(words.at(-1)!) : undefined;
+        const original = firstIdentifier(words[0] ?? "");
         if (alias ?? original) names.push((alias ?? original)!);
       }
     }
-    const defaultName = /^\s*([A-Za-z_$][\w$]*)/.exec(fromClause)?.[1];
+    const defaultName = firstIdentifier(fromClause);
     if (defaultName && defaultName !== "type") names.push(defaultName);
     return [...new Set(names)];
   }
 
-  const qualified = /^\s*import\s+(?:static\s+)?([\w.]+)(?:\s+as\s+(\w+))?\s*;?/.exec(line);
-  if (!qualified) return [];
-  return [qualified[2] ?? qualified[1]!.split(".").at(-1)!].filter((name) => name !== "*");
+  const qualified = qualifiedImportBinding(line);
+  return qualified === undefined ? [] : [qualified];
 }
 
 /**

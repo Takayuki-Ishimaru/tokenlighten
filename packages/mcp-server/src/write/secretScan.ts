@@ -35,8 +35,6 @@ const PATH_PATTERNS: RegExp[] = [
   /(^|\/)\.ssh\//,
   // PEM / key / p12 / pfx / keystore suffix
   /\.(pem|key|p12|pfx|keystore)$/i,
-  // Google service account JSON (common naming pattern)
-  /(^|\/)service[-_]?account.*\.json$/i,
   // Terraform variable files that often contain secrets
   /\.tfvars$/i,
   // Docker config (may contain registry credentials)
@@ -50,6 +48,14 @@ const PATH_PATTERNS: RegExp[] = [
   // Maven settings (may contain credentials)
   /(^|\/)\.m2\/settings\.xml$/,
 ];
+
+/** A Google service-account filename, matched without an unbounded regex. */
+function isServiceAccountJson(fileName: string): boolean {
+  if (!fileName.endsWith(".json")) return false;
+  return fileName.startsWith("serviceaccount")
+    || fileName.startsWith("service-account")
+    || fileName.startsWith("service_account");
+}
 
 /**
  * Returns true when the path looks like a secret or credential file.
@@ -78,6 +84,7 @@ export function looksLikeSecretFile(filePath: string): boolean {
   // without using a wildcard regex.
   const segments = normalized.toLowerCase().split("/");
   if (segments.some((segment) => segment.includes("credentials") || segment.includes("secret"))) return true;
+  if (isServiceAccountJson(b)) return true;
 
   for (const pattern of PATH_PATTERNS) {
     if (pattern.test(normalized)) return true;

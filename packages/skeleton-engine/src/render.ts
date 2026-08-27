@@ -279,7 +279,9 @@ function escapeInlineCodeData(value: string): string {
 }
 
 function escapeTableCell(value: string): string {
-  return sanitizeSingleLine(value).replace(/\|/g, "\\|");
+  // Escape repository-controlled backslashes before adding Markdown's pipe
+  // escape, otherwise an existing backslash can consume the added escape.
+  return sanitizeSingleLine(value.replaceAll("\\", "\\\\")).replaceAll("|", "\\|");
 }
 
 function escapeMetadataValue(value: string): string {

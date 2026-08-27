@@ -447,8 +447,9 @@ export const handleTable: HandleTable = new HandleTable();
 // ---------------------------------------------------------------------------
 
 export function shaOfText(text: string): string {
-  // Content-addressing wire contract, not password storage.
-  // codeql[js/insufficient-password-hash]
+  // SHA-256 is required by the content-addressing wire contract; this input
+  // is file content, never a password or authentication secret.
+  // lgtm[js/insufficient-password-hash]
   const hex = createHash("sha256").update(text, "utf8").digest("hex");
   return `sha256:${hex}`;
 }
@@ -482,8 +483,9 @@ export function shaOfText(text: string): string {
  * previously-stored/hardcoded digest across process runs.
  */
 export function shaOfBytes(bytes: Uint8Array): string {
-  // Content-addressing wire contract, not password storage.
-  // codeql[js/insufficient-password-hash]
+  // SHA-256 is required by the content-addressing wire contract; this input
+  // is artifact content, never a password or authentication secret.
+  // lgtm[js/insufficient-password-hash]
   const hex = createHash("sha256").update(Buffer.from(bytes)).digest("hex");
   return `sha256:${hex}`;
 }

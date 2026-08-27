@@ -95,6 +95,12 @@ describe("secretScan — positive cases (should be rejected)", () => {
   it("service_account.json", () => {
     expect(looksLikeSecretFile("service_account.json")).toBe(true);
   });
+
+  it("handles long service-account basenames without regex backtracking", () => {
+    const suffix = "x".repeat(100_000);
+    expect(looksLikeSecretFile(`nested/service-account${suffix}.json`)).toBe(true);
+    expect(looksLikeSecretFile(`nested/service-account${suffix}.txt`)).toBe(false);
+  });
 });
 
 describe("secretScan — negative cases (should be allowed)", () => {

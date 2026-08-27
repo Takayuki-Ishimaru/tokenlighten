@@ -178,6 +178,11 @@ describe("getNestedKey", () => {
     expect(getNestedKey(doc, "nonexistent")).toBeUndefined();
   });
 
+  it("does not read inherited properties", () => {
+    const inherited = Object.create({ hidden: "prototype value" }) as Parameters<typeof getNestedKey>[0];
+    expect(getNestedKey(inherited, "hidden")).toBeUndefined();
+  });
+
   it("rejects __proto__ path segments while allowing ordinary names", () => {
     expect(getNestedKey(doc, "proxy.__proto__.polluted")).toBeUndefined();
     expect(getNestedKey({ constructor: "allowed", prototype: "allowed" }, "constructor")).toBe("allowed");
@@ -220,6 +225,15 @@ describe("setNestedKey", () => {
     const doc = {};
     setNestedKey(doc, "constructor.prototype.enabled", true);
     expect(doc).toEqual({ constructor: { prototype: { enabled: true } } });
+  });
+
+  it("shadows inherited tables instead of mutating them", () => {
+    const parent = { inherited: { enabled: false } };
+    const doc = Object.create(parent) as Parameters<typeof setNestedKey>[0];
+    setNestedKey(doc, "inherited.enabled", true);
+    expect(parent.inherited.enabled).toBe(false);
+    expect(Object.hasOwn(doc, "inherited")).toBe(true);
+    expect(doc["inherited"]).toEqual({ enabled: true });
   });
 });
 
