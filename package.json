@@ -36,12 +36,12 @@
   "devDependencies": {
     "@types/node": "^20",
     "cross-spawn": "^7.0.6",
-    "esbuild": "^0.24",
+    "esbuild": "^0.28",
     "license-checker-rseidelsohn": "^4",
     "js-tiktoken": "^1.0.21",
     "tsx": "^4",
     "typescript": "^5.6.3",
-    "vitest": "^2.1",
+    "vitest": "^4.1",
     "jszip": "3.10.1"
   }
 }

@@ -40,7 +40,7 @@
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^20",
     "typescript": "^5.6.3",
-    "vitest": "^2.1"
+    "vitest": "^4.1"
   },
   "files": [
     "dist"
