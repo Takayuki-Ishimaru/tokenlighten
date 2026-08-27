@@ -16,16 +16,18 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 |---|---|---|---|
 | @fast-csv/format@4.3.5 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
 | @fast-csv/parse@4.3.6 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
-| @hono/node-server@1.19.17 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
+| @hono/node-server@2.1.1 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
 | @libpdf/core@0.3.6 | MIT | Lucas Smith | https://github.com/LibPDF-js/core |
-| @modelcontextprotocol/sdk@1.29.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @noble/ciphers@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
+| @modelcontextprotocol/core@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/sdk@1.30.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/server@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @noble/ciphers@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
 | @noble/hashes@1.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
-| @noble/hashes@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
-| @scure/base@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
+| @noble/hashes@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
+| @scure/base@2.3.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
 | @types/node@14.18.63 | MIT |  | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @xmldom/xmldom@0.8.13 | MIT |  | https://github.com/xmldom/xmldom |
-| @zip.js/zip.js@2.8.34 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
+| @xmldom/xmldom@0.8.15 | MIT |  | https://github.com/xmldom/xmldom |
+| @zip.js/zip.js@2.8.60 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
 | accepts@2.0.0 | MIT |  | https://github.com/jshttp/accepts |
 | adler-32@1.3.1 | Apache-2.0 | sheetjs | https://github.com/SheetJS/js-adler32 |
 | ajv-formats@3.0.1 | MIT | Evgeny Poberezkin | https://github.com/ajv-validator/ajv-formats |
@@ -38,25 +40,29 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | async@3.2.6 | MIT | Caolan McMahon | https://github.com/caolan/async |
 | balanced-match@1.0.2 | MIT | Julian Gruber | https://github.com/juliangruber/balanced-match |
 | base64-js@1.5.1 | MIT | T. Jameson Little | https://github.com/beatgammit/base64-js |
+| big-integer@1.6.52 | Unlicense | Peter Olson | https://github.com/peterolson/BigInteger.js |
+| binary@0.3.0 | MIT | James Halliday | https://github.com/substack/node-binary |
 | bl@4.1.0 | MIT |  | https://github.com/rvagg/bl |
 | bluebird@3.4.7 | MIT | Petka Antonov | https://github.com/petkaantonov/bluebird |
-| bluebird@3.7.2 | MIT | Petka Antonov | https://github.com/petkaantonov/bluebird |
 | body-parser@2.3.0 | MIT |  | https://github.com/expressjs/body-parser |
 | brace-expansion@1.1.18 | MIT | Julian Gruber | https://github.com/juliangruber/brace-expansion |
 | brace-expansion@2.1.4 | MIT | Julian Gruber | https://github.com/juliangruber/brace-expansion |
 | buffer-crc32@0.2.13 | MIT | Brian J. Brennan | https://github.com/brianloveswords/buffer-crc32 |
+| buffer-indexof-polyfill@1.0.2 | MIT | https://github.com/sarosia | https://github.com/sarosia/buffer-indexof-polyfill |
 | buffer@5.7.1 | MIT | Feross Aboukhadijeh | https://github.com/feross/buffer |
+| buffers@0.1.1 | UNKNOWN | James Halliday | https://github.com/substack/node-buffers |
 | bytes@3.1.2 | MIT | TJ Holowaychuk | https://github.com/visionmedia/bytes.js |
 | bytestreamjs@2.0.1 | BSD-3-Clause | Yury Strozhevsky | https://github.com/PeculiarVentures/ByteStream.js |
 | call-bind-apply-helpers@1.0.2 | MIT | Jordan Harband | https://github.com/ljharb/call-bind-apply-helpers |
 | call-bound@1.0.4 | MIT | Jordan Harband | https://github.com/ljharb/call-bound |
 | cfb@1.2.2 | Apache-2.0 | sheetjs | https://github.com/SheetJS/js-cfb |
+| chainsaw@0.1.0 | MIT* | James Halliday | https://github.com/substack/node-chainsaw |
 | comlink@4.4.2 | Apache-2.0 | Surma | https://github.com/GoogleChromeLabs/comlink |
 | compress-commons@4.1.2 | MIT | Chris Talkington | https://github.com/archiverjs/node-compress-commons |
 | concat-map@0.0.1 | MIT | James Halliday | https://github.com/substack/node-concat-map |
 | content-disposition@1.1.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-disposition |
 | content-type@1.0.5 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-type |
-| content-type@2.0.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-type |
+| content-type@2.1.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/content-type |
 | cookie-signature@1.2.2 | MIT | TJ Holowaychuk | https://github.com/visionmedia/node-cookie-signature |
 | cookie@0.7.2 | MIT | Roman Shtylman | https://github.com/jshttp/cookie |
 | core-util-is@1.0.3 | MIT | Isaac Z. Schlueter | https://github.com/isaacs/core-util-is |
@@ -65,7 +71,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | crc32-stream@4.0.3 | MIT | Chris Talkington | https://github.com/archiverjs/node-crc32-stream |
 | cross-spawn@7.0.6 | MIT | André Cruz | https://github.com/moxystudio/node-cross-spawn |
 | crypto-js@4.2.0 | MIT | Evan Vosberg | https://github.com/brix/crypto-js |
-| dayjs@1.11.21 | MIT | iamkun | https://github.com/iamkun/dayjs |
+| dayjs@1.11.23 | MIT | iamkun | https://github.com/iamkun/dayjs |
 | debug@4.4.3 | MIT | Josh Junon | https://github.com/debug-js/debug |
 | depd@2.0.0 | MIT | Douglas Christopher Wilson | https://github.com/dougwilson/nodejs-depd |
 | dingbat-to-unicode@1.0.1 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/dingbat-to-unicode |
@@ -80,20 +86,20 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | es-object-atoms@1.1.2 | MIT | Jordan Harband | https://github.com/ljharb/es-object-atoms |
 | escape-html@1.0.3 | MIT |  | https://github.com/component/escape-html |
 | etag@1.8.1 | MIT |  | https://github.com/jshttp/etag |
-| eventsource-parser@3.1.0 | MIT | Espen Hovlandsdal | https://github.com/rexxars/eventsource-parser |
+| eventsource-parser@3.1.1 | MIT | Espen Hovlandsdal | https://github.com/rexxars/eventsource-parser |
 | eventsource@3.0.7 | MIT | Espen Hovlandsdal | git://git@github.com/EventSource/eventsource |
 | exceljs@4.4.0 | MIT | Guyon Roche | https://github.com/exceljs/exceljs |
-| express-rate-limit@8.5.2 | MIT | Nathan Friedly | https://github.com/express-rate-limit/express-rate-limit |
+| express-rate-limit@8.6.2 | MIT | Nathan Friedly | https://github.com/express-rate-limit/express-rate-limit |
 | express@5.2.1 | MIT | TJ Holowaychuk | https://github.com/expressjs/express |
 | fast-csv@4.3.6 | MIT | Doug Martin | https://github.com/C2FO/fast-csv |
 | fast-deep-equal@3.1.3 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/fast-deep-equal |
-| fast-uri@3.1.5 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
+| fast-uri@3.1.6 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
 | finalhandler@2.1.1 | MIT | Douglas Christopher Wilson | https://github.com/pillarjs/finalhandler |
 | forwarded@0.2.0 | MIT |  | https://github.com/jshttp/forwarded |
 | fresh@2.0.0 | MIT | TJ Holowaychuk | https://github.com/jshttp/fresh |
 | fs-constants@1.0.0 | MIT | Mathias Buus | https://github.com/mafintosh/fs-constants |
-| fs-extra@11.3.1 | MIT | JP Richardson | https://github.com/jprichardson/node-fs-extra |
 | fs.realpath@1.0.0 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/fs.realpath |
+| fstream@1.0.12 | ISC | Isaac Z. Schlueter | https://github.com/npm/fstream |
 | function-bind@1.1.2 | MIT | Raynos | https://github.com/Raynos/function-bind |
 | get-intrinsic@1.3.0 | MIT | Jordan Harband | https://github.com/ljharb/get-intrinsic |
 | get-proto@1.0.1 | MIT | Jordan Harband | https://github.com/ljharb/get-proto |
@@ -102,9 +108,9 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | graceful-fs@4.2.11 | ISC |  | https://github.com/isaacs/node-graceful-fs |
 | has-symbols@1.1.0 | MIT | Jordan Harband | https://github.com/inspect-js/has-symbols |
 | hasown@2.0.4 | MIT | Jordan Harband | https://github.com/inspect-js/hasOwn |
-| hono@4.13.2 | MIT | Yusuke Wada | https://github.com/honojs/hono |
+| hono@4.13.5 | MIT | Yusuke Wada | https://github.com/honojs/hono |
 | http-errors@2.0.1 | MIT | Jonathan Ong | https://github.com/jshttp/http-errors |
-| iconv-lite@0.7.2 | MIT | Alexander Shtuchkin | https://github.com/pillarjs/iconv-lite |
+| iconv-lite@0.7.3 | MIT | Alexander Shtuchkin | https://github.com/pillarjs/iconv-lite |
 | ieee754@1.2.1 | BSD-3-Clause | Feross Aboukhadijeh | https://github.com/feross/ieee754 |
 | ignore@5.3.2 | MIT | kael | https://github.com/kaelzhang/node-ignore |
 | immediate@3.0.6 | MIT |  | https://github.com/calvinmetcalf/immediate |
@@ -115,14 +121,14 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | is-promise@4.0.0 | MIT | ForbesLindesay | https://github.com/then/is-promise |
 | isarray@1.0.0 | MIT | Julian Gruber | https://github.com/juliangruber/isarray |
 | isexe@2.0.0 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/isexe |
-| jose@6.2.3 | MIT | Filip Skokan | https://github.com/panva/jose |
+| jose@6.2.10 | MIT | Filip Skokan | https://github.com/panva/jose |
 | json-schema-traverse@1.0.0 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/json-schema-traverse |
 | json-schema-typed@8.0.2 | BSD-2-Clause | Remy Rylan | https://github.com/RemyRylan/json-schema-typed |
-| jsonfile@6.2.1 | MIT | JP Richardson | https://github.com/jprichardson/node-jsonfile |
 | jszip@3.10.1 | (MIT OR GPL-3.0-or-later) | Stuart Knightley | https://github.com/Stuk/jszip |
 | lazystream@1.0.1 | MIT | Jonas Pommerening | https://github.com/jpommerening/node-lazystream |
 | libarchive.js@2.0.2 | MIT | Nika Begiashvili | https://github.com/nika-begiashvili/libarchivejs |
 | lie@3.3.0 | MIT |  | https://github.com/calvinmetcalf/lie |
+| listenercount@1.0.1 | ISC | jden | https://github.com/jden/node-listenercount |
 | lodash.defaults@4.2.0 | MIT | John-David Dalton | https://github.com/lodash/lodash |
 | lodash.difference@4.5.0 | MIT | John-David Dalton | https://github.com/lodash/lodash |
 | lodash.escaperegexp@4.1.2 | MIT | John-David Dalton | https://github.com/lodash/lodash |
@@ -138,17 +144,18 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | lodash.uniq@4.5.0 | MIT | John-David Dalton | https://github.com/lodash/lodash |
 | lop@0.4.2 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/lop |
 | lru-cache@11.5.2 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/node-lru-cache |
-| mammoth@1.12.0 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/mammoth.js |
+| mammoth@1.12.1 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/mammoth.js |
 | math-intrinsics@1.1.0 | MIT | Jordan Harband | https://github.com/es-shims/math-intrinsics |
-| media-typer@1.1.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/media-typer |
+| media-typer@1.1.1 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/media-typer |
 | merge-descriptors@2.0.0 | MIT |  | https://github.com/sindresorhus/merge-descriptors |
 | mime-db@1.54.0 | MIT |  | https://github.com/jshttp/mime-db |
 | mime-types@3.0.2 | MIT |  | https://github.com/jshttp/mime-types |
 | minimatch@3.1.5 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/minimatch |
 | minimatch@5.1.9 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/minimatch |
+| minimist@1.2.8 | MIT | James Halliday | https://github.com/minimistjs/minimist |
+| mkdirp@0.5.6 | MIT | James Halliday | https://github.com/substack/node-mkdirp |
 | ms@2.1.3 | MIT |  | https://github.com/vercel/ms |
-| negotiator@1.0.0 | MIT |  | https://github.com/jshttp/negotiator |
-| node-int64@0.4.0 | MIT | Robert Kieffer | https://github.com/broofa/node-int64 |
+| negotiator@1.1.0 | MIT |  | https://github.com/jshttp/negotiator |
 | normalize-path@3.0.0 | MIT | Jon Schlinkert | https://github.com/jonschlinkert/normalize-path |
 | object-assign@4.1.1 | MIT | Sindre Sorhus | https://github.com/sindresorhus/object-assign |
 | object-inspect@1.13.4 | MIT | James Halliday | https://github.com/inspect-js/object-inspect |
@@ -168,19 +175,20 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | process-nextick-args@2.0.1 | MIT |  | https://github.com/calvinmetcalf/process-nextick-args |
 | proxy-addr@2.0.7 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/proxy-addr |
 | pvtsutils@1.3.6 | MIT | PeculiarVentures | https://github.com/PeculiarVentures/pvtsutils |
-| pvutils@1.1.5 | MIT | Yury Strozhevsky | https://github.com/PeculiarVentures/pvutils |
+| pvutils@1.2.0 | MIT | Yury Strozhevsky | https://github.com/PeculiarVentures/pvutils |
 | qs@6.15.3 | BSD-3-Clause |  | https://github.com/ljharb/qs |
-| range-parser@1.2.1 | MIT | TJ Holowaychuk | https://github.com/jshttp/range-parser |
+| range-parser@1.3.0 | MIT | TJ Holowaychuk | https://github.com/jshttp/range-parser |
 | raw-body@3.0.2 | MIT | Jonathan Ong | https://github.com/stream-utils/raw-body |
 | readable-stream@2.3.8 | MIT |  | https://github.com/nodejs/readable-stream |
 | readable-stream@3.6.2 | MIT |  | https://github.com/nodejs/readable-stream |
 | readdir-glob@1.1.3 | Apache-2.0 | Yann Armelin | https://github.com/Yqnn/node-readdir-glob |
 | require-from-string@2.0.2 | MIT | Vsevolod Strukchinsky | https://github.com/floatdrop/require-from-string |
+| rimraf@2.7.1 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/rimraf |
 | router@2.2.0 | MIT | Douglas Christopher Wilson | https://github.com/pillarjs/router |
 | safe-buffer@5.1.2 | MIT | Feross Aboukhadijeh | https://github.com/feross/safe-buffer |
 | safe-buffer@5.2.1 | MIT | Feross Aboukhadijeh | https://github.com/feross/safe-buffer |
 | safer-buffer@2.1.2 | MIT | Nikita Skovoroda | https://github.com/ChALkeR/safer-buffer |
-| sax@1.6.0 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/sax-js |
+| sax@1.6.1 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/sax-js |
 | saxes@5.0.1 | ISC | Louis-Dominique Dubeau | https://github.com/lddubeau/saxes |
 | send@1.2.1 | MIT | TJ Holowaychuk | https://github.com/pillarjs/send |
 | serve-static@2.2.1 | MIT | Douglas Christopher Wilson | https://github.com/expressjs/serve-static |
@@ -192,7 +200,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | side-channel-map@1.0.1 | MIT | Jordan Harband | https://github.com/ljharb/side-channel-map |
 | side-channel-weakmap@1.0.2 | MIT | Jordan Harband | https://github.com/ljharb/side-channel-weakmap |
 | side-channel@1.1.1 | MIT | Jordan Harband | https://github.com/ljharb/side-channel |
-| smol-toml@1.7.0 | BSD-3-Clause | Cynthia Rey | https://github.com/squirrelchat/smol-toml |
+| smol-toml@1.8.0 | BSD-3-Clause | Cynthia Rey | https://github.com/squirrelchat/smol-toml |
 | sprintf-js@1.0.3 | BSD-3-Clause | Alexandru Marasteanu | https://github.com/alexei/sprintf.js |
 | statuses@2.0.2 | MIT |  | https://github.com/jshttp/statuses |
 | string_decoder@1.1.1 | MIT |  | https://github.com/nodejs/string_decoder |
@@ -200,16 +208,16 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | tar-stream@2.2.0 | MIT | Mathias Buus | https://github.com/mafintosh/tar-stream |
 | tmp@0.2.7 | MIT | KARASZI István | https://github.com/raszi/node-tmp |
 | toidentifier@1.0.1 | MIT | Douglas Christopher Wilson | https://github.com/component/toidentifier |
+| traverse@0.3.9 | MIT* | James Halliday | https://github.com/substack/js-traverse |
 | tree-sitter-wasms@0.1.13 | Unlicense | Gregor | https://github.com/Gregoor/tree-sitter-wasms |
 | tslib@2.8.1 | 0BSD | Microsoft Corp. | https://github.com/Microsoft/tslib |
 | type-is@2.1.0 | MIT |  | https://github.com/jshttp/type-is |
 | underscore@1.13.8 | MIT | Jeremy Ashkenas | https://github.com/jashkenas/underscore |
-| universalify@2.0.1 | MIT | Ryan Zimmerman | https://github.com/RyanZim/universalify |
-| unpdf@1.6.2 | MIT | Johann Schopplich | https://github.com/unjs/unpdf |
+| unpdf@1.8.1 | MIT | Johann Schopplich | https://github.com/unjs/unpdf |
 | unpipe@1.0.0 | MIT | Douglas Christopher Wilson | https://github.com/stream-utils/unpipe |
-| unzipper@0.12.5 | MIT | Ziggy Jonsson | https://github.com/ZJONSSON/node-unzipper |
+| unzipper@0.10.11 | MIT | Evan Oxfeld | https://github.com/ZJONSSON/node-unzipper |
 | util-deprecate@1.0.2 | MIT | Nathan Rajlich | https://github.com/TooTallNate/util-deprecate |
-| uuid@8.3.2 | MIT |  | https://github.com/uuidjs/uuid |
+| uuid@11.1.1 | MIT |  | https://github.com/uuidjs/uuid |
 | vary@1.1.2 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/vary |
 | web-tree-sitter@0.23.2 | MIT | Max Brunsfeld | https://github.com/tree-sitter/tree-sitter |
 | which@2.0.2 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/node-which |
@@ -254,6 +262,257 @@ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
 WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### MIT — SHA-256 0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a
+
+Applies to: `@modelcontextprotocol/core@2.0.0`, `@modelcontextprotocol/server@2.0.0`
+
+```text
+The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
+
+Contributions for which relicensing consent has been obtained are licensed under Apache-2.0. Contributions made by authors who originally licensed their work under the MIT License and who have not yet granted explicit permission to relicense remain licensed under the MIT License.
+
+No rights beyond those granted by the applicable original license are conveyed for such contributions.
+
+---
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to the Licensor for inclusion in the Work by the copyright
+      owner or by an individual or Legal Entity authorized to submit on behalf
+      of the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+---
+
+MIT License
+
+Copyright (c) 2024-2025 Model Context Protocol a Series of LF Projects, LLC.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Creative Commons Attribution 4.0 International (CC-BY-4.0)
+
+Documentation in this project (excluding specifications) is licensed under
+CC-BY-4.0. See https://creativecommons.org/licenses/by/4.0/legalcode for
+the full license text.
+```
+
+### MIT — SHA-256 05991c2e8f070b69ec5b656c2c12fd07cd0153dd157d39b050b82af59b319a01
+
+Applies to: `mkdirp@0.5.6`
+
+```text
+Copyright 2010 James Halliday (mail@substack.net)
+
+This project is free software released under the MIT/X11 license:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### ISC — SHA-256 05dc4d785ac3a488676d3ed10e901b75ad89dafcc63f8e66610fd4a39cc5c7e8
@@ -363,7 +622,7 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEAL
 
 ### MIT — SHA-256 15c88630f1e778db64a446cb31b67362cc9eb7a048fdf5ac7ab51905b74464cd
 
-Applies to: `pvutils@1.1.5`
+Applies to: `pvutils@1.2.0`
 
 ```text
 MIT License
@@ -526,7 +785,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 1b7ebc8d7889ed25491484ab2b102370742ca6c0b26650a0c62cc2269b579b84
 
-Applies to: `@zip.js/zip.js@2.8.34`
+Applies to: `@zip.js/zip.js@2.8.60`
 
 ```text
 BSD 3-Clause License
@@ -673,7 +932,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 24d0608c3320a3e27ac35e1b36ee222b096e372ccd981351f4db7ff4c2b0bfd0
 
-Applies to: `@noble/ciphers@2.2.0`
+Applies to: `@noble/ciphers@2.4.0`
 
 ```text
 The MIT License (MIT)
@@ -794,7 +1053,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 257aed98914108e91a337912727b6a802eef218248507f74b76faffaff517a38
 
-Applies to: `content-type@1.0.5`, `content-type@2.0.0`
+Applies to: `content-type@1.0.5`, `content-type@2.1.0`
 
 ```text
 (The MIT License)
@@ -1030,6 +1289,37 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### MIT* — SHA-256 309dff61c243e706fac25101a9bdb585f7e2db45e32915b08cf47518d2075863
+
+Applies to: `traverse@0.3.9`
+
+```text
+Copyright 2010 James Halliday (mail@substack.net)
+
+This project is free software released under the MIT/X11 license:
+http://www.opensource.org/licenses/mit-license.php 
+
+Copyright 2010 James Halliday (mail@substack.net)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ### MIT — SHA-256 3198d359cda54bc0c27a5c1be063b96297190a7d08b31f9b628d351c229bb476
 
 Applies to: `statuses@2.0.2`
@@ -1061,7 +1351,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 3239e134eb6e6d64538ca76498c7fcb08a395249dd9d4af9927bf6d0169ee429
 
-Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.2.0`, `@scure/base@2.2.0`
+Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.4.0`, `@scure/base@2.3.0`
 
 ```text
 The MIT License (MIT)
@@ -1529,36 +1819,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ````
 
-### MIT — SHA-256 3fda5977c0904e226190b4e21d64340c1731e2142d6fe5f3dee0090a216b8b63
-
-Applies to: `universalify@2.0.1`
-
-```text
-(The MIT License)
-
-Copyright (c) 2017, Ryan Zimmerman <opensrc@ryanzim.com>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the 'Software'), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
 ### MIT — SHA-256 435a6722c786b0a56fbe7387028f1d9d3f3a2d0fb615bb8fee118727c3f59b7b
 
-Applies to: `concat-map@0.0.1`
+Applies to: `concat-map@0.0.1`, `minimist@1.2.8`
 
 ```text
 This software is released under the MIT license:
@@ -1653,7 +1916,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### MIT — SHA-256 4a57080b8ecdb3a53ec678828121849ce5df877a99b1ad8d50e165d8a2aded1b
 
-Applies to: `unpdf@1.6.2`
+Applies to: `unpdf@1.8.1`
 
 ```text
 MIT License
@@ -1709,7 +1972,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 4da724fc305d81606b245b324d4d2586916b9d248b23d82183df753ace0fdf71
 
-Applies to: `@xmldom/xmldom@0.8.13`
+Applies to: `@xmldom/xmldom@0.8.15`
 
 ```text
 Copyright 2019 - present Christopher J. Brody and other contributors, as listed in: https://github.com/xmldom/xmldom/graphs/contributors
@@ -1724,7 +1987,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### ISC — SHA-256 4ec3d4c66cd87f5c8d8ad911b10f99bf27cb00cdfcff82621956e379186b016b
 
-Applies to: `isexe@2.0.0`, `minimatch@3.1.5`, `once@1.4.0`, `which@2.0.2`, `wrappy@1.0.2`
+Applies to: `fstream@1.0.12`, `isexe@2.0.0`, `minimatch@3.1.5`, `once@1.4.0`, `rimraf@2.7.1`, `which@2.0.2`, `wrappy@1.0.2`
 
 ```text
 The ISC License
@@ -1831,7 +2094,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 553d4d20029a24e315b428a1a54a9e109eaa340f2e958a4f50a92362c2c4070b
 
-Applies to: `negotiator@1.0.0`
+Applies to: `negotiator@1.1.0`
 
 ```text
 (The MIT License)
@@ -2537,6 +2800,18 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
 
+### ISC — SHA-256 5a17e36da90d20347110f6fd5cfee1531e9c7e767f36966595c85f430be5f991
+
+Applies to: `listenercount@1.0.1`
+
+```text
+Copyright (c) MMXV jden <jason@denizac.org>
+
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
 ### MIT — SHA-256 5b37224c080cdcc97c871ada971c224e9926370fe74f11b539aa1cf9f3b1aca1
 
 Applies to: `base64-js@1.5.1`
@@ -2581,7 +2856,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 ### MIT — SHA-256 5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d
 
-Applies to: `@modelcontextprotocol/sdk@1.29.0`
+Applies to: `@modelcontextprotocol/sdk@1.30.0`
 
 ```text
 MIT License
@@ -2691,7 +2966,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 5faab7526d055651be3aab769d58897be6bd91f3d39d137f25f12dba1b31d5dc
 
-Applies to: `dayjs@1.11.21`
+Applies to: `dayjs@1.11.23`
 
 ```text
 MIT License
@@ -2805,7 +3080,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD* — SHA-256 6663bbd049205d38a496ccacb412a151980b444627d38de218b3b809aef330f1
 
-Applies to: `duck@0.1.12`, `lop@0.4.2`, `mammoth@1.12.0`, `option@0.2.4`
+Applies to: `duck@0.1.12`, `lop@0.4.2`, `mammoth@1.12.1`, `option@0.2.4`
 
 ```text
 Copyright (c) 2013, Michael Williamson
@@ -2834,7 +3109,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 6895190430d809c4c57a7582ecc2f99acbc2ea39a5dfad20262a41d5b3e91733
 
-Applies to: `@hono/node-server@1.19.17`
+Applies to: `@hono/node-server@2.1.1`
 
 ```text
 MIT License
@@ -3402,6 +3677,168 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### MIT* — SHA-256 7813503af621457f1effaa944128806eeda9310fdc1da4ce13433450f24ea601
+
+Applies to: `chainsaw@0.1.0`
+
+```text
+Chainsaw
+========
+
+Build chainable fluent interfaces the easy way in node.js.
+
+With this meta-module you can write modules with chainable interfaces.
+Chainsaw takes care of all of the boring details and makes nested flow control
+super simple too.
+
+Just call `Chainsaw` with a constructor function like in the examples below.
+In your methods, just do `saw.next()` to move along to the next event and
+`saw.nest()` to create a nested chain.
+
+Examples
+========
+
+add_do.js
+---------
+
+This silly example adds values with a chainsaw.
+
+    var Chainsaw = require('chainsaw');
+    
+    function AddDo (sum) {
+        return Chainsaw(function (saw) {
+            this.add = function (n) {
+                sum += n;
+                saw.next();
+            };
+             
+            this.do = function (cb) {
+                saw.nest(cb, sum);
+            };
+        });
+    }
+    
+    AddDo(0)
+        .add(5)
+        .add(10)
+        .do(function (sum) {
+            if (sum > 12) this.add(-10);
+        })
+        .do(function (sum) {
+            console.log('Sum: ' + sum);
+        })
+    ;
+
+Output:
+    Sum: 5
+
+prompt.js
+---------
+
+This example provides a wrapper on top of stdin with the help of
+[node-lazy](https://github.com/pkrumins/node-lazy) for line-processing.
+
+    var Chainsaw = require('chainsaw');
+    var Lazy = require('lazy');
+    
+    module.exports = Prompt;
+    function Prompt (stream) {
+        var waiting = [];
+        var lines = [];
+        var lazy = Lazy(stream).lines.map(String)
+            .forEach(function (line) {
+                if (waiting.length) {
+                    var w = waiting.shift();
+                    w(line);
+                }
+                else lines.push(line);
+            })
+        ;
+        
+        var vars = {};
+        return Chainsaw(function (saw) {
+            this.getline = function (f) {
+                var g = function (line) {
+                    saw.nest(f, line, vars);
+                };
+                
+                if (lines.length) g(lines.shift());
+                else waiting.push(g);
+            };
+            
+            this.do = function (cb) {
+                saw.nest(cb, vars);
+            };
+        });
+    }
+
+And now for the new Prompt() module in action:
+
+    var util = require('util');
+    var stdin = process.openStdin();
+     
+    Prompt(stdin)
+        .do(function () {
+            util.print('x = ');
+        })
+        .getline(function (line, vars) {
+            vars.x = parseInt(line, 10);
+        })
+        .do(function () {
+            util.print('y = ');
+        })
+        .getline(function (line, vars) {
+            vars.y = parseInt(line, 10);
+        })
+        .do(function (vars) {
+            if (vars.x + vars.y < 10) {
+                util.print('z = ');
+                this.getline(function (line) {
+                    vars.z = parseInt(line, 10);
+                })
+            }
+            else {
+                vars.z = 0;
+            }
+        })
+        .do(function (vars) {
+            console.log('x + y + z = ' + (vars.x + vars.y + vars.z));
+            process.exit();
+        })
+    ;
+
+Installation
+============
+
+With [npm](http://github.com/isaacs/npm), just do:
+    npm install chainsaw
+
+or clone this project on github:
+
+    git clone http://github.com/substack/node-chainsaw.git
+
+To run the tests with [expresso](http://github.com/visionmedia/expresso),
+just do:
+
+    expresso
+
+
+Light Mode vs Full Mode
+=======================
+
+`node-chainsaw` supports two different modes. In full mode, every
+action is recorded, which allows you to replay actions using the
+`jump()`, `trap()` and `down()` methods.
+
+However, if your chainsaws are long-lived, recording every action can
+consume a tremendous amount of memory, so we also offer a "light" mode
+where actions are not recorded and the aforementioned methods are
+disabled.
+
+To enable light mode simply use `Chainsaw.light()` to construct your
+saw, instead of `Chainsaw()`.
+```
+
 ### ISC — SHA-256 7beaa85b57d7211f6684af6c1d97e6d9ef7ec1851f779152043a47a8700306a9
 
 Applies to: `zod-to-json-schema@3.25.2`
@@ -3452,9 +3889,192 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### MIT — SHA-256 7ce7123e4403224f894668a1f62f2a671538a23383051a2c5a4971f54ab52a38
+
+Applies to: `binary@0.3.0`
+
+````text
+binary
+======
+
+Unpack multibyte binary values from buffers and streams.
+You can specify the endianness and signedness of the fields to be unpacked too.
+
+This module is a cleaner and more complete version of
+[bufferlist](https://github.com/substack/node-bufferlist)'s binary module that
+runs on pre-allocated buffers instead of a linked list.
+
+[![build status](https://secure.travis-ci.org/substack/node-binary.png)](http://travis-ci.org/substack/node-binary)
+
+examples
+========
+
+stream.js
+---------
+
+``` js
+var binary = require('binary');
+
+var ws = binary()
+    .word32lu('x')
+    .word16bs('y')
+    .word16bu('z')
+    .tap(function (vars) {
+        console.dir(vars);
+    })
+;
+process.stdin.pipe(ws);
+process.stdin.resume();
+```
+
+output:
+
+```
+$ node examples/stream.js
+abcdefgh
+{ x: 1684234849, y: 25958, z: 26472 }
+^D
+```
+
+parse.js
+--------
+
+``` js
+var buf = new Buffer([ 97, 98, 99, 100, 101, 102, 0 ]);
+
+var binary = require('binary');
+var vars = binary.parse(buf)
+    .word16ls('ab')
+    .word32bu('cf')
+    .word8('x')
+    .vars
+;
+console.dir(vars);
+```
+
+output:
+
+```
+{ ab: 25185, cf: 1667523942, x: 0 }
+```
+
+methods
+=======
+
+`var binary = require('binary')`
+
+var b = binary()
+----------------
+
+Return a new writable stream `b` that has the chainable methods documented below
+for buffering binary input.
+
+binary.parse(buf)
+-----------------
+
+Parse a static buffer in one pass. Returns a chainable interface with the
+methods below plus a `vars` field to get at the variable stash as the last item
+in a chain.
+
+In parse mode, methods will set their keys to `null` if the buffer isn't big
+enough except `buffer()` and `scan()` which read up up to the end of the buffer
+and stop.
+
+b.word{8,16,32,64}{l,b}{e,u,s}(key)
+-----------------------------------
+
+Parse bytes in the buffer or stream given:
+
+* number of bits
+* endianness ( l : little, b : big ),
+* signedness ( u and e : unsigned, s : signed )
+
+These functions won't start parsing until all previous parser functions have run
+and the data is available.
+
+The result of the parse goes into the variable stash at `key`.
+If `key` has dots (`.`s), it refers to a nested address. If parent container
+values don't exist they will be created automatically, so for instance you can
+assign into `dst.addr` and `dst.port` and the `dst` key in the variable stash
+will be `{ addr : x, port : y }` afterwards.
+
+b.buffer(key, size)
+-------------------
+
+Take `size` bytes directly off the buffer stream, putting the resulting buffer
+slice in the variable stash at `key`. If `size` is a string, use the value at
+`vars[size]`. The key follows the same dotted address rules as the word
+functions.
+
+b.scan(key, buffer)
+-------------------
+
+Search for `buffer` in the stream and store all the intervening data in the
+stash at at `key`, excluding the search buffer. If `buffer` passed as a string,
+it will be converted into a Buffer internally.
+
+For example, to read in a line you can just do:
+
+``` js
+var b = binary()
+    .scan('line', new Buffer('\r\n'))
+    .tap(function (vars) {
+        console.log(vars.line)
+    })
+;
+stream.pipe(b);
+```
+
+b.tap(cb)
+---------
+
+The callback `cb` is provided with the variable stash from all the previous
+actions once they've all finished.
+
+You can nest additional actions onto `this` inside the callback.
+
+b.into(key, cb)
+---------------
+
+Like `.tap()`, except all nested actions will assign into a `key` in the `vars`
+stash.
+
+b.loop(cb)
+----------
+
+Loop, each time calling `cb(end, vars)` for function `end` and the variable
+stash with `this` set to a new chain for nested parsing. The loop terminates
+once `end` is called.
+
+b.flush()
+---------
+
+Clear the variable stash entirely.
+
+installation
+============
+
+To install with [npm](http://github.com/isaacs/npm):
+
+```
+npm install binary
+```
+
+notes
+=====
+
+The word64 functions will only return approximations since javascript uses ieee
+floating point for all number types. Mind the loss of precision.
+
+license
+=======
+
+MIT
+````
+
 ### MIT — SHA-256 8078b0829d6c3e9ecde2f003e1966e4cad3efc6e7a640efbab0313cc166b1af1
 
-Applies to: `jose@6.2.3`
+Applies to: `jose@6.2.10`
 
 ```text
 The MIT License (MIT)
@@ -3625,7 +4245,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 835eb611a23301b27115ca1be9f754c876e643ceb7fe63049c6b50609a1cafeb
 
-Applies to: `eventsource-parser@3.1.0`
+Applies to: `eventsource-parser@3.1.1`
 
 ```text
 MIT License
@@ -3701,37 +4321,40 @@ the licensed code:
   DEALINGS IN THE SOFTWARE.
 ```
 
-### MIT — SHA-256 87092fe7ffd1e92eba5d1dd39b73a73fdb4fdd4df3474beacc3d9f6b08ece82c
+### Unlicense — SHA-256 88d9b4eb60579c191ec391ca04c16130572d7eedc4a86daa58bf28c6e14c9bcd
 
-Applies to: `bluebird@3.7.2`
+Applies to: `big-integer@1.6.52`
 
 ```text
-The MIT License (MIT)
+This is free and unencumbered software released into the public domain.
 
-Copyright (c) 2013-2018 Petka Antonov
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
 
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
+For more information, please refer to <http://unlicense.org>
 ```
 
 ### BlueOak-1.0.0 — SHA-256 8a1af140fdfbf5afd3df27f7e662f989c5b963a300020dfafce42033cae9e004
 
-Applies to: `lru-cache@11.5.2`, `sax@1.6.0`
+Applies to: `lru-cache@11.5.2`, `sax@1.6.1`
 
 ```text
 # Blue Oak Model License
@@ -3848,12 +4471,14 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### MIT — SHA-256 8f85aab053e268546014761da47630a09886626afbd0d8d440cb2c69611bb8d3
+### MIT — SHA-256 8f3ec19b6587f619f05419c19ff3cc16719b83a9dc5e3ebd9366d8b1a1fd0c6a
 
-Applies to: `node-int64@0.4.0`
+Applies to: `buffer-indexof-polyfill@1.0.2`
 
 ```text
-Copyright (c) 2014 Robert Kieffer
+The MIT License (MIT)
+
+Copyright (c) 2015 Sarosia
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -3862,16 +4487,16 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### MIT — SHA-256 90df9e2220f682e1f77e24b1c0f72d2de18b818096c957a65698e74c41a4826f
@@ -4217,6 +4842,135 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### UNKNOWN — SHA-256 99e8a68c4949c4cbe64b480c8717fb616d1d78ea7715c0e394a5186e6c3a5ace
+
+Applies to: `buffers@0.1.1`
+
+```text
+buffers
+=======
+
+Treat a collection of Buffers as a single contiguous partially mutable Buffer.
+
+Where possible, operations execute without creating a new Buffer and copying
+everything over.
+
+This is a cleaner more Buffery rehash of
+[bufferlist](http://github.com/substack/node-bufferlist).
+
+example
+=======
+
+slice
+-----
+
+    var Buffers = require('buffers');
+    var bufs = Buffers();
+    bufs.push(new Buffer([1,2,3]));
+    bufs.push(new Buffer([4,5,6,7]));
+    bufs.push(new Buffer([8,9,10]));
+    
+    console.dir(bufs.slice(2,8))
+
+output:
+
+    $ node examples/slice.js 
+    <Buffer 03 04 05 06 07 08>
+
+splice
+------
+
+    var Buffers = require('buffers');
+    var bufs = Buffers([
+        new Buffer([1,2,3]),
+        new Buffer([4,5,6,7]),
+        new Buffer([8,9,10]),
+    ]);
+    
+    var removed = bufs.splice(2, 4);
+    console.dir({
+        removed : removed.slice(),
+        bufs : bufs.slice(),
+    });
+    
+output:
+
+    $ node examples/splice.js
+    { removed: <Buffer 03 04 05 06>,
+      bufs: <Buffer 01 02 07 08 09 0a> }
+
+methods
+=======
+
+Buffers(buffers)
+----------------
+
+Create a Buffers with an array of `Buffer`s if specified, else `[]`.
+
+.push(buf1, buf2...)
+--------------------
+
+Push buffers onto the end. Just like `Array.prototype.push`.
+
+.unshift(buf1, buf2...)
+-----------------------
+
+Unshift buffers onto the head. Just like `Array.prototype.unshift`.
+
+.slice(i, j)
+------------
+
+Slice a range out of the buffer collection as if it were contiguous.
+Works just like the `Array.prototype.slice` version.
+
+.splice(i, howMany, replacements)
+---------------------------------
+
+Splice the buffer collection as if it were contiguous.
+Works just like `Array.prototype.splice`, even the replacement part!
+
+.copy(dst, dstStart, start, end)
+--------------------------------
+
+Copy the buffer collection as if it were contiguous to the `dst` Buffer with the
+specified bounds.
+Works just like `Buffer.prototype.copy`.
+
+.get(i)
+-------
+
+Get a single element at index `i`.
+
+.set(i, x)
+----------
+
+Set a single element's value at index `i`.
+
+.indexOf(needle, offset)
+----------
+
+Find a string or buffer `needle` inside the buffer collection. Returns
+the position of the search string or -1 if the search string was not
+found.
+
+Provide an `offset` to skip that number of characters at the beginning
+of the search. This can be used to find additional matches.
+
+This function will return the correct result even if the search string
+is spread out over multiple internal buffers.
+
+.toBuffer()
+-----------
+
+Convert the buffer collection to a single buffer, equivalent with `.slice(0, buffers.length)`;
+
+.toString(encoding, start, end)
+-----------
+
+Decodes and returns a string from the buffer collection.
+Works just like `Buffer.prototype.toString`
+```
+
 ### MIT — SHA-256 9b6a90e9be78799534e4030d71b6817271fb99aa10e261f9f9f6dec1cff4177a
 
 Applies to: `ajv@8.20.0`
@@ -4247,7 +5001,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 9dbe3e40f619223d2f1c9d6e09657e3182f616c9258b02081012c7d19f76601e
 
-Applies to: `unzipper@0.12.5`
+Applies to: `unzipper@0.10.11`
 
 ```text
 Copyright (c) 2012 - 2013 Near Infinity Corporation
@@ -4632,7 +5386,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
 
-Applies to: `hono@4.13.2`
+Applies to: `hono@4.13.5`
 
 ```text
 MIT License
@@ -4713,28 +5467,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```
-
-### MIT — SHA-256 a9801fb52ba22ef808682a094da8a7a480584b7ed0dfd0d888ab543616335031
-
-Applies to: `jsonfile@6.2.1`
-
-```text
-(The MIT License)
-
-Copyright (c) 2012-2015, JP Richardson <jprichardson@gmail.com>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
-(the 'Software'), to deal in the Software without restriction, including without limitation the rights to use, copy, modify,
- merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
-WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
-OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### MIT — SHA-256 aaa78451b6fecd1b9c4594c796c133c0e90cad100372ff8bc6de615e9ef9adf1
@@ -5154,7 +5886,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 bd47ce7b88c7759630d1e2b9fcfa170a0f1fde522be09e13fb1581a79d090400
 
-Applies to: `content-disposition@1.1.0`, `forwarded@0.2.0`, `media-typer@1.1.0`, `vary@1.1.2`
+Applies to: `content-disposition@1.1.0`, `forwarded@0.2.0`, `media-typer@1.1.1`, `vary@1.1.2`
 
 ```text
 (The MIT License)
@@ -5239,7 +5971,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 beaa6b04fb82e41dd2ad679e19e27953afb5999b1abbb455b6564e78ebfeb332
 
-Applies to: `uuid@8.3.2`
+Applies to: `uuid@11.1.1`
 
 ```text
 The MIT License (MIT)
@@ -5388,28 +6120,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```
-
-### MIT — SHA-256 c6a7de1428955aa5a692f4d3a3d3ede658d959616944713337cda296736442e1
-
-Applies to: `fs-extra@11.3.1`
-
-```text
-(The MIT License)
-
-Copyright (c) 2011-2024 JP Richardson
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
-(the 'Software'), to deal in the Software without restriction, including without limitation the rights to use, copy, modify,
- merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
-WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
-OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### MIT — SHA-256 c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac
@@ -5699,7 +6409,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 df66e8e76a2438780588c57d91c552ead3f7ed81730acaafc3a45dd3e8618843
 
-Applies to: `express-rate-limit@8.5.2`
+Applies to: `express-rate-limit@8.6.2`
 
 ```text
 # MIT License
@@ -5726,7 +6436,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
 
-Applies to: `fast-uri@3.1.5`
+Applies to: `fast-uri@3.1.6`
 
 ```text
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -6121,7 +6831,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 f655e6291356ec0de7a8f0e69f294961a2cea86678ec94588be1e6a492e278ab
 
-Applies to: `range-parser@1.2.1`
+Applies to: `range-parser@1.3.0`
 
 ```text
 (The MIT License)
@@ -6259,7 +6969,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 f9c6da891840e8951696e472b3c7d6f6d3ab2c7325f1dd30c0813244c15b288c
 
-Applies to: `iconv-lite@0.7.2`
+Applies to: `iconv-lite@0.7.3`
 
 ```text
 Copyright (c) 2011 Alexander Shtuchkin
@@ -6286,7 +6996,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 fa5659948374d4f555594f47f6da073b40dc503e921aeeece30df4362b3051a5
 
-Applies to: `smol-toml@1.7.0`
+Applies to: `smol-toml@1.8.0`
 
 ```text
 Copyright (c) Squirrel Chat et al., All rights reserved.
