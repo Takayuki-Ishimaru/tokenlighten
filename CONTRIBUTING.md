@@ -17,7 +17,7 @@ npm run doctor
 
 Run the narrowest relevant workspace test first while developing, then run the full public checks above before opening a pull request. Tests live alongside the TypeScript source under `packages/*/src/`.
 
-The complete package suite is a CI gate on Ubuntu and macOS. Windows CI verifies the build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. Some test fixtures are not yet portable to Windows, so the complete package suite is not a Windows release gate for v0.11.1. Windows developers can still build the source and run targeted tests; please identify the operating system in pull-request test notes.
+The complete package suite is a CI gate on Ubuntu and macOS. Windows CI verifies the build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. Some test fixtures are not yet portable to Windows, so the complete package suite is not a Windows release gate for v0.12.0. Windows developers can still build the source and run targeted tests; please identify the operating system in pull-request test notes.
 
 ## Pull requests
 

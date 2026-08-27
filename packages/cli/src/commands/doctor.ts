@@ -1,24 +1,55 @@
 /**
  * tl doctor — health checks for the TokenLighten environment
  *
+ * Runs in one of two modes (see DoctorResult.mode):
+ *   - "runtime" (default): what an ordinary installed CLI needs to work,
+ *     including a packaged install with no adjacent repo checkout and no
+ *     dev tooling (e.g. the VS Code extension's zero-install copy — see
+ *     packages/vscode-extension/scripts/bundle-cli.mjs). license_checker
+ *     and the python prereq are dev-only and never gate `ok` here; git
+ *     absence and an unresolvable MCP dist artifact degrade to warnings.
+ *   - "development" (--development): today's full contributor/CI
+ *     strictness — license_checker, the python prereq (used only by
+ *     `tl bench`), and the MCP dist checks all hard-fail as before.
+ *
  * Checks:
  *   1. Node.js version (>=20)
  *   2. Write access to config dir
- *   3. tree-sitter WASM importable (@tree-sitter/web)
- *   4. exceljs importable
- *   5. license-checker-rseidelsohn presence
- *   6. MCP dist build freshness (source newer than dist/bin.js)
- *   7. Public MCP artifact excludes Core 2 entry surfaces
+ *   3. tree-sitter WASM real capability probe: resolves web-tree-sitter's
+ *      package.json and confirms its .wasm asset is present, mirroring
+ *      treeSitter.ts's own resolution — NOT plain
+ *      require.resolve("web-tree-sitter"), which fails by design in the
+ *      packaged layout (see checkTreeSitter)
+ *   4. exceljs real capability probe: the same dynamic import the runtime
+ *      performs (see checkExcelJs)
+ *   5. license-checker-rseidelsohn presence (dev-tooling only; warns
+ *      instead of failing outside --development)
+ *   6. MCP dist build freshness (source newer than dist/bin.js; staleness
+ *      only hard-fails in --development, see checkMcpDistFresh)
+ *   7. Public MCP artifact excludes Core 2 entry surfaces (an unresolvable
+ *      artifact warns instead of failing outside --development)
  *   8. Per-client MCP registration status (evaluateDoctorAsync/runDoctor only)
+ *   + node/python/git prereq detection (evaluateDoctorAsync/runDoctor
+ *     only): python never gates `ok` outside --development; git never
+ *     gates `ok` in either mode (see isGatingPrereq)
  *
  * Flags:
- *   --json   Emit a JSON object instead of human-readable text
+ *   --json          Emit a JSON object instead of human-readable text
+ *   --development   Run today's full contributor/CI strictness (see above)
+ *
+ * DoctorOptions.mcpSourceDir / mcpDistBin — or the TL_MCP_SOURCE_DIR /
+ * TL_MCP_DIST_BIN env vars — override where the MCP dist artifact is
+ * looked for, for non-standard layouts auto-detection can't find.
  *
  * Exit 0 if all checks pass; exit 1 if any check fails.
  *
  * Exports:
- *   evaluateDoctor(opts?)      — pure, sync subset; returns DoctorResult, no side effects, no process.exit
- *   evaluateDoctorAsync(opts?) — pure; adds prereq detection + client registration checks
+ *   evaluateDoctor(opts?)      — checks-only subset (no prereq detection,
+ *                                no client registration I/O); async
+ *                                because the real capability probes are;
+ *                                returns DoctorResult, no process.exit
+ *   evaluateDoctorAsync(opts?) — adds prereq detection + client
+ *                                registration checks
  *   runDoctor(args)            — prints result, calls process.exit if !ok
  *
  * Output policy: plain data — no meta envelope.
@@ -29,7 +60,7 @@ import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileS
 import { dirname, join } from "path";
 import { createRequire } from "module";
 import { resolvePath } from "../paths.js";
-import { detectPrereqs, type PrereqStatus, type PrereqId } from "../prereqs.js";
+import { detectPrereqs, PREREQ_DOCTOR_MODE, type PrereqStatus, type PrereqId } from "../prereqs.js";
 import { resolveRepoRoot } from "../repoRoot.js";
 import { currentCliVersion, getClientStatuses } from "./clients.js";
 import type { TokenLightenClientRegistrationStatus } from "@tokenlighten/types";
@@ -41,8 +72,12 @@ export interface DoctorCheck {
   detail?: string;
 }
 
+export type DoctorMode = "runtime" | "development";
+
 export interface DoctorResult {
   ok: boolean;
+  /** Which strictness level produced this result — see DoctorOptions.development. */
+  mode: DoctorMode;
   checks: DoctorCheck[];
   prereqs: PrereqStatus[];
   missing: PrereqId[];
@@ -52,10 +87,41 @@ export interface DoctorResult {
 export interface DoctorOptions {
   /** If true, skip the config_dir_write probe (useful in unit tests that don't want FS side effects). */
   skipFsChecks?: boolean;
-  /** Override development paths when testing MCP artifact checks. */
+  /** Override development paths when testing MCP artifact checks. Falls back to the TL_MCP_SOURCE_DIR env var. */
   mcpSourceDir?: string;
-  /** Public MCP entry point; its containing dist directory is inspected recursively. */
+  /** Public MCP entry point; its containing dist directory is inspected recursively. Falls back to the TL_MCP_DIST_BIN env var. */
   mcpDistBin?: string;
+  /**
+   * Run today's full contributor/CI strictness: license_checker and the
+   * python prereq gate `ok`, and an unresolvable MCP dist artifact
+   * (mcp_dist_fresh staleness, mcp_core2_excluded's missing bin) hard-fails
+   * instead of warning. Defaults to false ("runtime" mode): checks only
+   * what an ordinary installed CLI needs to work, including a packaged
+   * install with no adjacent repo checkout and no dev tooling.
+   */
+  development?: boolean;
+}
+
+/** Prereqs whose absence is surfaced but never fails doctor, in either mode. */
+const NEVER_GATING_PREREQS: ReadonlySet<PrereqId> = new Set(["git"]);
+
+/**
+ * Whether a missing/too-old prereq should fail `ok` (vs. only warn). git
+ * backs the write path's shadow-checkpoint safety net (see
+ * packages/mcp-server/src/write/shadowGit.ts) but writes still work
+ * without it — checkpoints are just skipped — so it never gates. Prereqs
+ * classified "development" in prereqs.ts (currently just python, used only
+ * by `tl bench`) gate only in --development.
+ */
+function isGatingPrereq(id: PrereqId, development: boolean): boolean {
+  if (NEVER_GATING_PREREQS.has(id)) return false;
+  if (!development && PREREQ_DOCTOR_MODE[id] === "development") return false;
+  return true;
+}
+
+function envOverride(name: string): string | undefined {
+  const value = process.env[name];
+  return value && value.length > 0 ? value : undefined;
 }
 
 function checkNodeVersion(): DoctorCheck {
@@ -94,30 +160,104 @@ function checkImportable(pkg: string, displayName: string): DoctorCheck {
   }
 }
 
-function checkLicenseChecker(): DoctorCheck {
-  return checkImportable("license-checker-rseidelsohn", "license_checker");
-}
-
-function checkTreeSitter(): DoctorCheck {
-  // web-tree-sitter is the WASM runtime; also accept @tree-sitter/web
-  const require = createRequire(import.meta.url);
-  for (const pkg of ["web-tree-sitter", "@tree-sitter/web"]) {
-    try {
-      require.resolve(pkg);
-      return { name: "tree_sitter_wasm", ok: true, detail: pkg };
-    } catch {
-      // try next
-    }
-  }
+function checkLicenseChecker(development: boolean): DoctorCheck {
+  const check = checkImportable("license-checker-rseidelsohn", "license_checker");
+  if (check.ok || development) return check;
+  // Dev-tooling only: a monorepo-root devDependency used solely by
+  // `npm run licenses` CI. A packaged install (no repo checkout, no dev
+  // dependencies) never carries this — an expected, non-actionable absence
+  // outside --development, so warn instead of failing `ok`.
   return {
-    name: "tree_sitter_wasm",
-    ok: false,
-    detail: "Neither web-tree-sitter nor @tree-sitter/web found",
+    ...check,
+    ok: true,
+    warning: true,
+    detail: `${check.detail ?? "not resolvable"} (dev-tooling only — used by \`npm run licenses\`; ignored outside --development)`,
   };
 }
 
-function checkExcelJs(): DoctorCheck {
-  return checkImportable("exceljs", "exceljs");
+// Module-scoped and deliberately NOT named `require`: mirrors
+// packages/mcp-server/src/skeleton/treeSitter.ts's own `_require` pattern.
+// packages/vscode-extension/scripts/bundle-cli.mjs esbuild-bundles this
+// very file into dist/tl-cli.js; esbuild inlines/resolves the LITERAL
+// forms `require("x")` and `import("x")` at build time (this is how
+// mcp-server's own tree-sitter/exceljs imports end up inlined into ITS
+// bundle), but a method call on an arbitrarily-named local variable is
+// invisible to that analysis and stays a genuine runtime lookup even
+// after bundling. That's what checkTreeSitter below needs: proof that
+// THIS process, right now, can find the WASM asset on disk — not that it
+// existed on whatever machine built the bundle.
+const _require = createRequire(import.meta.url);
+
+/**
+ * Real capability probe for the tree-sitter WASM runtime.
+ *
+ * Does NOT use require.resolve("web-tree-sitter") (the old approach,
+ * equivalent to checkImportable): in the VS Code extension's zero-install
+ * layout, only web-tree-sitter's package.json and .wasm files are ever
+ * copied to disk — its JS entry point is inlined into mcp-server's own
+ * bundle and deliberately never copied (see bundle-cli.mjs) — so bare-name
+ * resolution fails BY DESIGN on every packaged install, regardless of
+ * whether tree-sitter actually works there. Instead this mirrors
+ * treeSitter.ts's OWN resolution exactly: resolve web-tree-sitter's
+ * package.json, then confirm the adjacent tree-sitter.wasm binary is
+ * actually present next to it — the precise precondition the real runtime
+ * depends on (see resolveRuntimeWasmDefault in treeSitter.ts).
+ *
+ * Deliberately does NOT add a fresh `import("web-tree-sitter")` call site
+ * to probe module shape: per getParserCtor()'s doc comment in
+ * treeSitter.ts, this codebase already hit a real, empirically-verified
+ * bug where a second independent `import("web-tree-sitter")` call site,
+ * once bundled, observed a corrupted pre-init module shape instead of the
+ * real Parser class. A doctor check isn't worth risking that again for.
+ */
+function checkTreeSitter(): DoctorCheck {
+  let pkgJson: string;
+  try {
+    pkgJson = _require.resolve("web-tree-sitter/package.json");
+  } catch (err) {
+    return {
+      name: "tree_sitter_wasm",
+      ok: false,
+      detail: `'web-tree-sitter/package.json' did not resolve: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const wasmPath = join(dirname(pkgJson), "tree-sitter.wasm");
+  if (!existsSync(wasmPath)) {
+    return {
+      name: "tree_sitter_wasm",
+      ok: false,
+      detail: `web-tree-sitter resolved but its runtime WASM asset is missing at ${wasmPath}`,
+    };
+  }
+  return { name: "tree_sitter_wasm", ok: true, detail: wasmPath };
+}
+
+/**
+ * Real capability probe for exceljs: attempts the same dynamic
+ * `import("exceljs")` the runtime performs (see mcp-server's office/*
+ * wrappers) instead of require.resolve("exceljs"). exceljs is pure JS with
+ * no separate asset to verify, and in the VS Code extension's zero-install
+ * layout it is inlined directly into mcp-server's bundle with no on-disk
+ * package of its own — so unlike tree-sitter there is no filesystem asset
+ * doctor could check independently of a build-time signal. A literal
+ * dynamic import here is bundled/inlined into tl-cli.js the same way
+ * mcp-server's own copy is, so this correctly reports "ok" for that
+ * channel (exceljs really is unconditionally available there once the
+ * extension built successfully); in an unbundled run — a dev checkout, or
+ * a plain `npm install` of @tokenlighten/cli — it remains a genuine
+ * resolution check against real node_modules.
+ */
+async function checkExcelJs(): Promise<DoctorCheck> {
+  try {
+    await import("exceljs");
+    return { name: "exceljs", ok: true };
+  } catch (err) {
+    return {
+      name: "exceljs",
+      ok: false,
+      detail: `dynamic import("exceljs") failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 function newestRuntimeSourceMtime(dir: string): number {
@@ -135,8 +275,9 @@ function newestRuntimeSourceMtime(dir: string): number {
 }
 
 export function checkMcpDistFresh(opts: DoctorOptions = {}): DoctorCheck {
-  let sourceDir = opts.mcpSourceDir;
-  let distBin = opts.mcpDistBin;
+  const development = opts.development === true;
+  let sourceDir = opts.mcpSourceDir ?? envOverride("TL_MCP_SOURCE_DIR");
+  let distBin = opts.mcpDistBin ?? envOverride("TL_MCP_DIST_BIN");
   if (sourceDir === undefined || distBin === undefined) {
     try {
       const repoRoot = resolveRepoRoot();
@@ -156,37 +297,41 @@ export function checkMcpDistFresh(opts: DoctorOptions = {}): DoctorCheck {
   if (!existsSync(sourceDir)) {
     return { name: "mcp_dist_fresh", ok: true, detail: "source checkout not present" };
   }
+
+  // A source checkout IS present from here on (dev/monorepo context; never
+  // true in a packaged install — see the packaged-safe branch above).
+  // Freshness strictness is dev-tooling behavior: only --development
+  // hard-fails a stale/missing dist build. Runtime mode still runs the
+  // check and surfaces the same detail, just as a warning.
+  const soften = (check: DoctorCheck): DoctorCheck =>
+    development || check.ok ? check : { ...check, ok: true, warning: true };
+
   if (!existsSync(distBin)) {
-    return { name: "mcp_dist_fresh", ok: false, detail: `${distBin} is missing; run npm run build` };
+    return soften({ name: "mcp_dist_fresh", ok: false, detail: `${distBin} is missing; run npm run build` });
   }
 
   try {
     const sourceMtime = newestRuntimeSourceMtime(sourceDir);
     const distMtime = statSync(distBin).mtimeMs;
     const ok = sourceMtime <= distMtime;
-    return {
+    return soften({
       name: "mcp_dist_fresh",
       ok,
       detail: ok ? distBin : `MCP source is newer than ${distBin}; run npm run build`,
-    };
+    });
   } catch (err) {
-    return {
+    return soften({
       name: "mcp_dist_fresh",
       ok: false,
       detail: err instanceof Error ? err.message : String(err),
-    };
+    });
   }
 }
 
-/**
- * Pure evaluation — runs all health checks and returns the result.
- * No stdout/stderr output. No process.exit. Safe to call from tests.
- *
- * Note: prereq detection is async; this sync overload returns empty prereqs
- * for backward compat. Use evaluateDoctorAsync for the full result.
- */
 function publicMcpDistBin(opts: DoctorOptions): string {
   if (opts.mcpDistBin !== undefined) return opts.mcpDistBin;
+  const envBin = envOverride("TL_MCP_DIST_BIN");
+  if (envBin !== undefined) return envBin;
   try {
     const require = createRequire(import.meta.url);
     const entry = require.resolve("@tokenlighten/mcp-server");
@@ -226,11 +371,15 @@ function runtimeJavaScriptFiles(root: string): string[] {
 export function checkMcpCore2Excluded(opts: DoctorOptions = {}): DoctorCheck {
   const distBin = publicMcpDistBin(opts);
   if (!existsSync(distBin)) {
-    return {
-      name: "mcp_core2_excluded",
-      ok: false,
-      detail: `${distBin} is missing; build the public MCP artifact before checking Core 2 exclusion`,
-    };
+    const detail = `${distBin} is missing; build the public MCP artifact before checking Core 2 exclusion (set mcpDistBin, or the TL_MCP_DIST_BIN env var, if this is a non-standard layout)`;
+    if (opts.development === true) {
+      return { name: "mcp_core2_excluded", ok: false, detail };
+    }
+    // Unresolvable in runtime mode is expected for a packaged install with
+    // no adjacent MCP dist build (see checkMcpDistFresh's packaged-safe
+    // branch) — warn instead of failing `ok`; --development keeps this a
+    // hard requirement since a contributor checkout should always resolve.
+    return { name: "mcp_core2_excluded", ok: true, warning: true, detail };
   }
 
   const distRoot = dirname(distBin);
@@ -310,31 +459,43 @@ export function checkClientRegistration(
   };
 }
 
-export function evaluateDoctor(opts: DoctorOptions = {}): DoctorResult {
+export async function evaluateDoctor(opts: DoctorOptions = {}): Promise<DoctorResult> {
+  const development = opts.development === true;
   const checks: DoctorCheck[] = [
     checkNodeVersion(),
     ...(opts.skipFsChecks ? [] : [checkConfigDirWrite()]),
     checkTreeSitter(),
-    checkExcelJs(),
-    checkLicenseChecker(),
+    await checkExcelJs(),
+    checkLicenseChecker(development),
     checkMcpDistFresh(opts),
     checkMcpCore2Excluded(opts),
   ];
 
   const ok = checks.every((c) => c.ok);
-  return { ok, checks, prereqs: [], missing: [], clientRegistrations: [] };
+  return {
+    ok,
+    mode: development ? "development" : "runtime",
+    checks,
+    prereqs: [],
+    missing: [],
+    clientRegistrations: [],
+  };
 }
 
 /**
- * Async variant that also runs prereq detection.
+ * Async variant that also runs prereq detection + client registration
+ * checks, and applies opts.development to gate ok/warning severity across
+ * license_checker, the python prereq, git, and the MCP dist checks (see
+ * isGatingPrereq, checkMcpDistFresh, checkMcpCore2Excluded).
  */
 export async function evaluateDoctorAsync(opts: DoctorOptions = {}): Promise<DoctorResult> {
+  const development = opts.development === true;
   const checks: DoctorCheck[] = [
     checkNodeVersion(),
     ...(opts.skipFsChecks ? [] : [checkConfigDirWrite()]),
     checkTreeSitter(),
-    checkExcelJs(),
-    checkLicenseChecker(),
+    await checkExcelJs(),
+    checkLicenseChecker(development),
     checkMcpDistFresh(opts),
     checkMcpCore2Excluded(opts),
   ];
@@ -352,10 +513,18 @@ export async function evaluateDoctorAsync(opts: DoctorOptions = {}): Promise<Doc
   }
 
   const checksOk = checks.every((c) => c.ok);
-  const prereqsOk = missing.length === 0;
+  const gatingMissing = missing.filter((id) => isGatingPrereq(id, development));
+  const prereqsOk = gatingMissing.length === 0;
   const ok = checksOk && prereqsOk;
 
-  return { ok, checks, prereqs, missing, clientRegistrations };
+  return {
+    ok,
+    mode: development ? "development" : "runtime",
+    checks,
+    prereqs,
+    missing,
+    clientRegistrations,
+  };
 }
 
 /**
@@ -363,7 +532,8 @@ export async function evaluateDoctorAsync(opts: DoctorOptions = {}): Promise<Doc
  */
 export async function runDoctor(args: string[]): Promise<void> {
   const jsonMode = args.includes("--json");
-  const result = await evaluateDoctorAsync();
+  const development = args.includes("--development");
+  const result = await evaluateDoctorAsync({ development });
 
   if (jsonMode) {
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
@@ -379,7 +549,8 @@ export async function runDoctor(args: string[]): Promise<void> {
       process.stderr.write("\nPrerequisites:\n");
       for (const p of result.prereqs) {
         const status = !p.found ? "MISSING" : !p.meetsMin ? "TOO OLD" : "OK";
-        const icon = status === "OK" ? "ok  " : "FAIL";
+        const gating = isGatingPrereq(p.id, development);
+        const icon = status === "OK" ? "ok  " : gating ? "FAIL" : "WARN";
         const ver = p.version ? ` (${p.version})` : "";
         process.stderr.write(`${icon}  ${p.label}${ver}  [required: ${p.required}]\n`);
         if (status !== "OK" && p.installCommand && p.installCommand.manager !== "unknown") {

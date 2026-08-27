@@ -20,6 +20,31 @@ import * as fs from "node:fs";
 export type PrereqId = "node" | "python" | "git";
 export type PmName = "winget" | "brew" | "apt" | "dnf" | "pacman" | "zypper";
 
+// ---------------------------------------------------------------------------
+// tl doctor classification (classification only — no detection behavior
+// here changes; see packages/cli/src/commands/doctor.ts)
+// ---------------------------------------------------------------------------
+
+/** Which `tl doctor` mode a prerequisite's absence should gate `ok` in. */
+export type PrereqDoctorMode = "runtime" | "development";
+
+/**
+ * "development": needed only for contributor / CI workflows — currently
+ * just python, consumed solely by `tl bench` (see commands/bench.ts) — and
+ * must never fail a packaged install's default `tl doctor` run.
+ * "runtime": relevant to ordinary end-user command execution. This only
+ * says which doctor *mode* a prereq belongs to; doctor.ts may still soften
+ * an individual runtime prereq further (e.g. it treats a missing git as a
+ * warning in both modes — see isGatingPrereq there). It does not change
+ * ensurePrereqs()/detectPrereqs() themselves: `tl bench` still hard-requires
+ * python regardless of how `tl doctor` classifies or reports it.
+ */
+export const PREREQ_DOCTOR_MODE: Record<PrereqId, PrereqDoctorMode> = {
+  node: "runtime",
+  git: "runtime",
+  python: "development",
+};
+
 export interface PrereqStatus {
   id: PrereqId;
   label: string;

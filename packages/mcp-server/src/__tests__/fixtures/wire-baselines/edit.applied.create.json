@@ -26,14 +26,14 @@
       "handle": "$H1"
     }
   ],
-  "applied_note": "post-edit disk state is the content as sent (sha/bytes/total_lines) — no follow-up read needed",
+  "applied_note": "post-edit disk state = content sent — no follow-up read needed",
   "path": "src/test_pricing_harness.py",
   "handle": "$H1",
   "sha": "$SHA2",
   "bytes": 79,
   "total_lines": 1,
   "read_back": {
-    "note": "a compiler/test error citing this file's line N is answered here — fill the range"
+    "note": "answers a cited line N — fill range"
   },
   "create_target": {
     "path": "src/test_pricing_harness.py",

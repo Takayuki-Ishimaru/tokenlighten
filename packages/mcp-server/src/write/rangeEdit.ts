@@ -12,6 +12,7 @@ import { batchCheckpoint } from "./checkpoint.js";
 import { looksLikeSecretFile } from "./secretScan.js";
 import { rangeMissForensics, type NearestMatchInfo } from "./editForensics.js";
 import { formatDelta, formatLines } from "../util/lineDelta.js";
+import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/textDecode.js";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
@@ -132,6 +133,22 @@ function writeExistingFile(
   }
 }
 
+/**
+ * 2026-08-27 (write-path fail-closed guard): read the target's raw bytes and
+ * refuse rather than proceed for a UTF-16-BOM or no-BOM NUL-riddled file — a
+ * naive decode-as-utf8 here, followed by writeExistingFile's write-as-utf8,
+ * would silently corrupt such a file (see util/textDecode.ts's doc comment).
+ * Full UTF-16 round-trip editing is out of scope; refusal is correct.
+ */
+function readExistingTextOrEncodingRefusal(abs: string, relPath: string): { text: string } | RangeEditResult {
+  const buf = fs.readFileSync(abs);
+  const risk = detectWriteEncodingRisk(buf);
+  if (risk) {
+    return { ok: false, error: writeEncodingRefusalMessage(relPath, risk), code: "unsupported-encoding" };
+  }
+  return { text: buf.toString("utf8") };
+}
+
 export function replaceRangeContent(
   input: RangeEditInput,
   workspace: string,
@@ -149,7 +166,9 @@ export function replaceRangeContent(
   const stat = fs.statSync(resolved.abs);
   if (stat.size > MAX_FILE_BYTES) return { ok: false, error: `File exceeds 5 MB limit (${stat.size} bytes): ${input.path}`, code: "file-too-large" };
 
-  const existing = fs.readFileSync(resolved.abs, "utf8");
+  const readResult = readExistingTextOrEncodingRefusal(resolved.abs, input.path);
+  if ("ok" in readResult) return readResult;
+  const existing = readResult.text;
   const lineEnding = detectLineEnding(existing);
   const normalized = toLf(existing);
   // Bounds check: lineStartIndex/lineEndWithNewlineIndex silently CLAMP an
@@ -204,7 +223,9 @@ export function replaceAllInRange(
   const stat = fs.statSync(resolved.abs);
   if (stat.size > MAX_FILE_BYTES) return { ok: false, error: `File exceeds 5 MB limit (${stat.size} bytes): ${input.path}`, code: "file-too-large" };
 
-  const existing = fs.readFileSync(resolved.abs, "utf8");
+  const readResult = readExistingTextOrEncodingRefusal(resolved.abs, input.path);
+  if ("ok" in readResult) return readResult;
+  const existing = readResult.text;
   const lineEnding = detectLineEnding(existing);
   const normalized = toLf(existing);
   // Bounds check — see the matching comment in replaceRangeContent above.

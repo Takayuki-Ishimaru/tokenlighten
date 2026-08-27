@@ -26,7 +26,7 @@ Do not label the repository as open source or OSS.
 
 Use `main` as the default branch. Protect it against force-push and deletion. Require the public three-operating-system CI workflow to pass before merging. A solo maintainer can keep the approval count at zero while still requiring the checks.
 
-Do not add release, registry, or cloud credentials until an automated publication design has been separately reviewed. The v0.11.1 tag and GitHub Release remain manual.
+Do not add release, registry, or cloud credentials until an automated publication design has been separately reviewed. The v0.12.0 tag and GitHub Release remain manual.
 
 ## Visibility sequence
 

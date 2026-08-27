@@ -31,11 +31,12 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { LocateInput, LocateOutput, ImpactCandidate, ImpactSurface, LocateCandidateDetail } from "@tokenlighten/types";
-import { findText } from "../search/find/findText.js";
+import { findText, scanLiteral, type TextMatch } from "../search/find/findText.js";
+import { decodeTextBuffer } from "../../util/textDecode.js";
 import { findReferences } from "../../tools/findReferences.js";
 import { searchSymbols } from "../../tools/searchSymbols.js";
 import { isProtocolSymbolSearchToken } from "../../tools/queryEvidence.js";
-import { isSourceOnlyExcludedPath, walkCodeFiles, type FoundFile, type WalkOptions } from "../../tools/walkRepo.js";
+import { isSourceOnlyExcludedPath, walkCodeFiles, TEXT_SCAN_MAX_FILE_SIZE_BYTES, type FoundFile, type WalkOptions } from "../../tools/walkRepo.js";
 import { languageForPath, languageForPathWithContent } from "../../util/languages.js";
 import { classifySurface, deriveTokenVariants, coverage, surfaceInventory } from "../../util/impact.js";
 import { handleTable, type HandleKind } from "../../util/handles.js";
@@ -48,6 +49,7 @@ import {
   compoundRetrievalEnabled,
 } from "../../util/flags.js";
 import { fileNamesInPathSpans, isEnumLikeQuery, stripPathSpans } from "../../util/queryShape.js";
+import { extractCjkTokens } from "../../util/cjkSpans.js";
 import { tokenizeForEpoch } from "../../state/session.js";
 import { isNativeExtPath, widenNativeRange } from "../../util/nativeSymbolRange.js";
 import { dominantRoot } from "../../util/dominantRoot.js";
@@ -101,6 +103,12 @@ function walkCacheKey(opts: WalkOptions): string {
     extraExts: opts.extraExts ? [...opts.extraExts].sort() : null,
     includeArtifacts: opts.includeArtifacts ?? false,
     fullRecall: opts.fullRecall ?? false,
+    // T3 (2026-08-27, v0.12 wave D2, DEFECT A): distinct from the default
+    // (undefined -> MAX_FILE_SIZE_BYTES) walk so a caller that explicitly
+    // asks for the wider TEXT_SCAN_MAX_FILE_SIZE_BYTES cap (see
+    // wideExactTextMatches below) never silently reuses -- or gets reused
+    // by -- a narrower-capped walk cached under the same lang/subPath.
+    sizeCapBytes: opts.sizeCapBytes ?? null,
   });
 }
 
@@ -124,6 +132,59 @@ class WalkCache {
     }
     return files;
   }
+}
+
+// Defensive cap on the SUPPLEMENTARY large-file scan below -- see its own
+// doc comment. Independent of findText.ts's own MAX_MATCHES (100): this is
+// strictly additive recall over files findText() could never have scanned,
+// so a much smaller cap is enough to protect against a pathological match
+// count in one huge file without meaningfully limiting genuine recall.
+const WIDE_TEXT_MATCH_CAP = 20;
+
+/**
+ * T3 (2026-08-27, v0.12 wave D2, DEFECT A -- field-eval report): findText()
+ * always walks with the DEFAULT walkCodeFiles size cap (1 MB,
+ * MAX_FILE_SIZE_BYTES) because it has no way to ask for a larger one and
+ * does its own internal walk whenever it is not handed a pre-walked `files`
+ * list. The exposed `search_files action=find` tool never hits this limit
+ * because ITS implementation (buildFindResponse) pre-walks with the wider
+ * TEXT_SCAN_MAX_FILE_SIZE_BYTES (8 MB) cap and hands scanLiteral() that
+ * walked list directly -- bypassing findText()'s narrower internal walk
+ * entirely. Layer 3 had no equivalent path, so a real source file between
+ * 1 MB and 8 MB (a ~12,000-line file crosses 1 MB easily) was invisible to
+ * it even though the exposed find tool sees it instantly: the exact
+ * external-eval symptom (search_files found a unique identifier at line
+ * 8766; task_pack never located it, served head-of-file, then steered to
+ * huge zoom ranges).
+ *
+ * This is deliberately ADDITIVE, not a replacement for the existing
+ * findText() call at each site: it only scans files strictly BETWEEN the
+ * two caps (the wide walk minus the narrow/default walk), so every file
+ * findText() already sees is completely unaffected -- zero change to
+ * today's ranking or scoring for anything already within the 1 MB cap.
+ */
+function wideExactTextMatches(
+  query: string,
+  workspace: string,
+  opts: { lang?: WalkOptions["lang"]; path?: string },
+  walkCache: WalkCache,
+): TextMatch[] {
+  const walkOpts = {
+    ...(opts.lang ? { lang: opts.lang } : {}),
+    ...(opts.path ? { subPath: opts.path } : {}),
+  };
+  const wide = walkCache.get({ ...walkOpts, sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES });
+  const narrow = walkCache.get(walkOpts);
+  const narrowPaths = new Set(narrow.map((f) => f.relPath));
+  const largeOnly = wide.filter((f) => !narrowPaths.has(f.relPath));
+  if (largeOnly.length === 0) return [];
+  // Mirrors findText()'s own default caseInsensitive heuristic
+  // (!input.regex && isSingleToken(query)) for the single-token queries
+  // every Layer 3 call site here actually passes.
+  return scanLiteral(query, workspace, {
+    caseInsensitive: !/\s/u.test(query),
+    files: largeOnly,
+  }).slice(0, WIDE_TEXT_MATCH_CAP);
 }
 
 export interface ArtifactDiscoveryInput {
@@ -493,6 +554,16 @@ export interface Candidate {
    * unchanged).
    */
   required?: boolean;
+  /**
+   * Field-eval fix (2026-08-27): set by applyCommentOnlyPenalty when this
+   * candidate's file was judged comment-only noise for the query (every
+   * query-token match in that file lands on a comment line) and its score
+   * took the full COMMENT_ONLY_PENALTY. selectRelatedCandidates's role-
+   * diversity guarantee must never force-include a penalized candidate just
+   * because it happens to be the sole representative of its classifySurface
+   * role — that resurrects exactly the noise the penalty exists to sink.
+   */
+  commentOnlyPenalized?: boolean;
 }
 
 interface QueryContext {
@@ -973,7 +1044,9 @@ function applyCommentOnlyPenalty(
     let raw: string;
     try {
       if (fs.statSync(abs).size > COMMENT_SCAN_MAX_FILE_BYTES) continue;
-      raw = fs.readFileSync(abs, "utf8");
+      const decoded = decodeTextBuffer(fs.readFileSync(abs));
+      if (decoded === null) continue;
+      raw = decoded;
     } catch {
       continue;
     }
@@ -1018,7 +1091,11 @@ function applyCommentOnlyPenalty(
     try { size = fs.statSync(abs).size; } catch { continue; }
     if (size > COMMENT_SCAN_MAX_FILE_BYTES) continue;
     let raw: string;
-    try { raw = fs.readFileSync(abs, "utf8"); } catch { continue; }
+    try {
+      const decoded = decodeTextBuffer(fs.readFileSync(abs));
+      if (decoded === null) continue;
+      raw = decoded;
+    } catch { continue; }
     const language = languageForPath(relPath) ?? "default";
     const commentFlags = classifyCommentLines(raw, language);
     const lines = raw.split(/\r?\n/);
@@ -1033,6 +1110,7 @@ function applyCommentOnlyPenalty(
   for (const c of candidates) {
     if (TEXTUAL_KINDS.has(c.kind) && commentOnlyFiles.has(c.path)) {
       c.score -= COMMENT_ONLY_PENALTY;
+      c.commentOnlyPenalized = true;
     }
   }
 }
@@ -1520,7 +1598,11 @@ function addMarkdownContractCandidates(
   for (const f of files) {
     if (isExcluded(f.relPath, scope)) continue;
     let raw: string;
-    try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
+    try {
+      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      if (decoded === null) continue;
+      raw = decoded;
+    } catch { continue; }
     if (Buffer.byteLength(raw, "utf8") < MARKDOWN_CONTRACT_MIN_BYTES) continue;
 
     const lines = raw.split(/\r?\n/);
@@ -1625,7 +1707,11 @@ function addStructuralCandidates(
 
     for (const f of files) {
       let raw: string;
-      try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
+      try {
+        const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+        if (decoded === null) continue;
+        raw = decoded;
+      } catch { continue; }
       const lines = raw.split(/\r?\n/);
       for (const p of patterns) {
         let lineNo = 0;
@@ -1812,7 +1898,11 @@ function addSiblingValueStructuralCandidates(
   const siblingTokens = new Set<string>();
   for (const relPath of contractPaths) {
     let raw: string;
-    try { raw = fs.readFileSync(path.join(workspace, relPath), "utf8"); } catch { continue; }
+    try {
+      const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+      if (decoded === null) continue;
+      raw = decoded;
+    } catch { continue; }
     for (const m of extractMemberIdentifiers(raw)) siblingTokens.add(m);
   }
   // >= 2 ALL_CAPS siblings from a located contract IS the gate (the structural
@@ -1859,7 +1949,11 @@ function addSiblingValueStructuralCandidates(
         if (isExcluded(f.relPath, scope)) continue;
         if (!isWithinRoleSearchScope(f.relPath, siblingScanScope)) continue;
         let raw: string;
-        try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
+        try {
+          const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+          if (decoded === null) continue;
+          raw = decoded;
+        } catch { continue; }
         const lines = raw.split(/\r?\n/);
         let distinctMembers = 0;
         let firstLine = 0;
@@ -1916,7 +2010,11 @@ function addSiblingValueStructuralCandidates(
     try { size = fs.statSync(f.absPath).size; } catch { continue; }
     if (size > SIBLING_ENUM_SCAN_MAX_FILE_BYTES) continue;
     let raw: string;
-    try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
+    try {
+      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      if (decoded === null) continue;
+      raw = decoded;
+    } catch { continue; }
     const lines = raw.split(/\r?\n/);
 
     // Sliding ~40-line window (step 20 → overlapping, so a site straddling a
@@ -2024,7 +2122,9 @@ async function extractEnumMembersFromSymbolRange(
 ): Promise<Set<string> | null> {
   let text: string;
   try {
-    text = fs.readFileSync(path.join(workspace, relPath), "utf8");
+    const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+    if (decoded === null) return null;
+    text = decoded;
   } catch {
     return null;
   }
@@ -2177,7 +2277,11 @@ async function addSiblingValueInitializerCandidates(
     if (scoped) {
       for (const m of scoped) siblingMembers.add(m);
     } else {
-      try { raw = fs.readFileSync(path.join(workspace, relPath), "utf8"); } catch { continue; }
+      try {
+        const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+        if (decoded === null) continue;
+        raw = decoded;
+      } catch { continue; }
       for (const m of extractMemberIdentifiers(raw)) siblingMembers.add(m);
     }
     // Enum/const/type declaration NAMES near the query's own identifier
@@ -2188,7 +2292,11 @@ async function addSiblingValueInitializerCandidates(
     // does its own independent read inside extractEnumMembersFromSymbolRange,
     // which cannot be shared here without changing that function's contract).
     if (raw === null) {
-      try { raw = fs.readFileSync(path.join(workspace, relPath), "utf8"); } catch { continue; }
+      try {
+        const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+        if (decoded === null) continue;
+        raw = decoded;
+      } catch { continue; }
     }
     nameRe.lastIndex = 0;
     let nm: RegExpExecArray | null;
@@ -2230,7 +2338,11 @@ async function addSiblingValueInitializerCandidates(
     if (size > INITIALIZER_SCAN_MAX_FILE_BYTES) continue;
 
     let raw: string;
-    try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
+    try {
+      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      if (decoded === null) continue;
+      raw = decoded;
+    } catch { continue; }
     const lines = raw.split(/\r?\n/);
 
     // DESIGN-v0.8 §A6 fix: SLIDING window (step
@@ -2391,11 +2503,23 @@ function selectRelatedCandidates(raw: Candidate[], max: number): Candidate[] {
     selectedSurfaces.add(classifySurface(c.path, c.symbol));
   }
 
-  for (const c of sorted) {
+  // Field-eval fix (2026-08-27): the role-diversity pass below force-adds
+  // the top-ranked candidate for every DISTINCT role even when its score is
+  // otherwise too low to earn a slot -- that IS the point of the guarantee
+  // -- and the general fill pass after it has no score floor of its own
+  // either (it just drains `sorted` in score order until `max` fills up).
+  // Neither pass may draw from a candidate applyCommentOnlyPenalty already
+  // sank as comment-only noise: excluding it from `sorted` up front (rather
+  // than only from the first, role-diversity pass) means a role represented
+  // ONLY by penalized candidates goes unfilled exactly as if that role had
+  // no candidates at all, AND the general fill cannot quietly readmit the
+  // same noise through the back door just because the pool is small.
+  const eligible = sorted.filter((c) => c.commentOnlyPenalized !== true);
+  for (const c of eligible) {
     const surface = classifySurface(c.path, c.symbol);
     if (!selectedSurfaces.has(surface)) add(c);
   }
-  for (const c of sorted) {
+  for (const c of eligible) {
     if (selected.length >= max) break;
     add(c);
   }
@@ -2624,7 +2748,12 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
       },
       workspace,
     );
-    for (const m of findResult.matches) {
+    // T3 DEFECT A: supplement with whatever findText()'s own 1 MB-capped
+    // internal walk could never have seen (see wideExactTextMatches).
+    const wideMatches = wideExactTextMatches(
+      tq, workspace, { ...(input.lang ? { lang: input.lang } : {}), ...(scope ? { path: scope } : {}) }, walkCache,
+    );
+    for (const m of [...findResult.matches, ...wideMatches]) {
       if (isExcluded(m.path, scope)) continue;
       if (candidates.some((c) => c.path === m.path && c.line === m.line)) continue;
       candidates.push({
@@ -2689,8 +2818,13 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
       },
       workspace,
     );
+    // T3 DEFECT A: same 1 MB walk blind spot as Layer 3 above (see
+    // wideExactTextMatches's doc comment).
+    const wideVariantMatches = wideExactTextMatches(
+      vt, workspace, { ...(input.lang ? { lang: input.lang } : {}), ...(scope ? { path: scope } : {}) }, walkCache,
+    );
     const isFamilyStem = isFamilyStemToken(vt);
-    for (const m of findResult.matches) {
+    for (const m of [...findResult.matches, ...wideVariantMatches]) {
       if (isExcluded(m.path, scope)) continue;
       // R12 (2026-08-21): a bare word that is ALSO a generic CSS property
       // name (e.g. "cursor") matches nearly every stylesheet in the walk
@@ -3853,7 +3987,9 @@ function expandCppModuleClosure(
 
   let raw: string;
   try {
-    raw = fs.readFileSync(path.join(workspace, relPath), "utf8");
+    const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+    if (decoded === null) return;
+    raw = decoded;
   } catch {
     return;
   }
@@ -3898,8 +4034,9 @@ async function rangeForCandidate(workspace: string, candidate: Candidate): Promi
     const absPath = path.join(workspace, candidate.path);
     let fileLines: string[] = [];
     try {
-      const content = fs.readFileSync(absPath, "utf8");
-      fileLines = content.split(/\r?\n/);
+      const decoded = decodeTextBuffer(fs.readFileSync(absPath));
+      // Undecodable is the same fallback as any other read failure here.
+      if (decoded !== null) fileLines = decoded.split(/\r?\n/);
     } catch {
       // Fall back to centered window bounds.
     }
@@ -4143,7 +4280,11 @@ function scanStyleFiles(files: ReadonlyArray<FoundFile>, stems: string[], cb: (r
   for (const f of files) {
     if (!STYLE_EXTS.has(f.ext)) continue;
     let raw: string;
-    try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
+    try {
+      const decoded = decodeTextBuffer(fs.readFileSync(f.absPath));
+      if (decoded === null) continue;
+      raw = decoded;
+    } catch { continue; }
     const lines = raw.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
@@ -4293,7 +4434,8 @@ function isPureReexportBarrel(workspace: string, relPath: string): boolean {
   try {
     const abs = path.join(workspace, relPath);
     if (fs.statSync(abs).size > 2048) return false;
-    const text = fs.readFileSync(abs, "utf8");
+    const text = decodeTextBuffer(fs.readFileSync(abs));
+    if (text === null) return false;
     const codeLines = text
       .split(/\r?\n/)
       .map((l) => l.trim())
@@ -4378,7 +4520,15 @@ export function matchBasenameTokens(
   // actual subject).
   const isFragmentMatch = new Map<string, boolean>();
   for (const qt of queryTokens) {
-    if (qt.length < 3 || STOP_WORDS.has(qt)) continue;
+    // CJK (field-report fix, 2026-08-27): the ASCII-tuned length-3 floor
+    // below exists to drop noisy short ASCII words; a 2-character Japanese
+    // compound (処理/設定/状態/認証…) is frequently a complete, meaningful
+    // technical term, so it gets its own (still deliberately conservative)
+    // floor of 2 instead. ASCII tokens are entirely unaffected — isCjk is
+    // false for every one of them, so this reduces to the ORIGINAL `< 3`
+    // check byte-for-byte.
+    const isCjk = /[^\x00-\x7f]/u.test(qt);
+    if (qt.length < (isCjk ? 2 : 3) || STOP_WORDS.has(qt)) continue;
     let hit = false;
     let freqKey = qt;
     let fragment = false;
@@ -4578,6 +4728,17 @@ function identifierTokensIn(text: string): Set<string> {
   for (const raw of text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
     for (const t of splitBasenameTokens(raw)) out.add(t);
   }
+  // CJK (field-report fix, 2026-08-27): the ASCII-only regex above never
+  // matches a Han/Hiragana/Katakana character, so Japanese comments/strings
+  // inside a symbol's body contributed NOTHING to this coverage check —
+  // refineFilenameMatchSymbol (this function's only caller) could never
+  // credit a declaration whose BODY discusses the query's Japanese concept,
+  // only one whose body happens to reuse an ASCII identifier verbatim.
+  // extractCjkTokens's runs/bigrams/Han-unigrams are already whole,
+  // meaningful units (see util/cjkSpans.ts) added directly — routing them
+  // through splitBasenameTokens (an ASCII camelCase/snake_case splitter)
+  // would be a no-op at best.
+  for (const t of extractCjkTokens(text)) out.add(t);
   return out;
 }
 
@@ -4635,7 +4796,9 @@ async function importEdgeCandidates(
   try {
     const abs = path.join(workspace, primary.path);
     if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return [];
-    text = fs.readFileSync(abs, "utf8");
+    const decoded = decodeTextBuffer(fs.readFileSync(abs));
+    if (decoded === null) return [];
+    text = decoded;
   } catch {
     return [];
   }
@@ -4688,7 +4851,9 @@ async function importEdgeCandidates(
     try {
       const abs = path.join(workspace, target);
       if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) continue;
-      targetText = fs.readFileSync(abs, "utf8");
+      const decoded = decodeTextBuffer(fs.readFileSync(abs));
+      if (decoded === null) continue;
+      targetText = decoded;
     } catch {
       continue;
     }
@@ -4786,7 +4951,9 @@ async function refineFilenameMatchSymbol(
   try {
     const abs = path.join(workspace, relPath);
     if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return null;
-    text = fs.readFileSync(abs, "utf8");
+    const decoded = decodeTextBuffer(fs.readFileSync(abs));
+    if (decoded === null) return null;
+    text = decoded;
   } catch {
     return null;
   }

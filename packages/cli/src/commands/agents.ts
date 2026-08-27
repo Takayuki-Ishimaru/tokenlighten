@@ -9,6 +9,7 @@
  */
 
 import { createRequire } from "module";
+import { wantsHelp } from "../util/helpFlag.js";
 
 const AGENTS_USAGE = `\
 Usage: tl agents <subcommand>
@@ -26,7 +27,7 @@ Subcommands:
   update [--targets <id,...>]   Alias: tl agents-md write
          [--root <dir>]         Targets: claude, copilot, cursor, cline, continue
          [--locale en|jp]       (windsurf and roo read AGENTS.md natively — no stub needed)
-         [--profile full|medium] Guide profile (default: full)
+         [--profile full|medium|compact] Guide profile (default: full)
          [--force] [--check]    --root: repo root to inject into (default: cwd)
                                  --locale: template language (default: en)
                                  --force: overwrite even if manual edits detected
@@ -45,7 +46,7 @@ function valueAfter(args: readonly string[], flag: string): string | undefined {
 export async function runAgents(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
 
-  if (!sub || sub === "--help" || sub === "-h") {
+  if (!sub || wantsHelp(args)) {
     process.stdout.write(AGENTS_USAGE);
     return;
   }
@@ -183,11 +184,11 @@ export async function runAgents(args: string[]): Promise<void> {
 
     // Parse --targets flag
     const profileIdx = rest.indexOf("--profile");
-    let profile: "full" | "medium" | undefined;
+    let profile: "full" | "medium" | "compact" | undefined;
     if (profileIdx !== -1) {
       const value = rest[profileIdx + 1];
-      if (value !== "full" && value !== "medium") {
-        process.stderr.write(`tl agents: --profile expects "full" or "medium", got "${value ?? ""}".\n`);
+      if (value !== "full" && value !== "medium" && value !== "compact") {
+        process.stderr.write(`tl agents: --profile expects "full", "medium", or "compact", got "${value ?? ""}".\n`);
         process.exit(1);
       }
       profile = value;

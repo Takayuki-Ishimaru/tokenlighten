@@ -39,8 +39,8 @@ const OUTER_END = "<!-- tokenlighten:target-agents:end -->";
 const SKELETON_BEGIN = "<!-- tokenlighten:skeleton:begin -->";
 const SKELETON_END = "<!-- tokenlighten:skeleton:end -->";
 
-/** Marker line rendered by renderCompactBlock() — guide-variant detection anchor. */
-const COMPACT_MARKER = "<!-- tl-compact-instructions-version:";
+/** Compact-profile heading rendered by renderCompactBlock() — guide-variant detection anchor. */
+const COMPACT_MARKER = "## TokenLighten MCP (compact)";
 
 /* Compact-variant target template (V10-07 rc.1 wiring): same outer/inner
  * sentinel structure as target-repo.md.tmpl so skeleton refresh and the merge

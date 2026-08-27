@@ -68,6 +68,46 @@ export const SLICE_RANGES_TOTAL_CAP_BYTES = 24576;
 export const MAX_SLICE_RANGES = 12;
 
 // ---------------------------------------------------------------------------
+// T1/T2 size governance (2026-08-27 field-eval)
+//
+// Shared by readCodeTaskPack.ts's capForResult (task_pack) and server.ts's
+// handles=[]/paths=[] batch loops -- ONE place resolving "did the caller ask
+// for a smaller response than the default", so the two call sites cannot
+// silently diverge. See clientProfile.ts's resolveDefaultResponseByteCeiling
+// for the sibling env/client-profile precedence that feeds `defaultCeiling`
+// below when the caller supplied neither maxBytes nor maxTokens.
+// ---------------------------------------------------------------------------
+
+/** Never trim a task_pack response smaller than this, however small the resolved ceiling -- "never refuse" stays true at every cap. */
+export const DEFAULT_RESPONSE_BYTE_FLOOR = 4096;
+
+const BYTES_PER_TOKEN_ESTIMATE = 4;
+
+/**
+ * The byte ceiling the CALLER's own arguments impose, or `defaultCeiling`
+ * when the caller supplied neither. Never widens `defaultCeiling`: an
+ * explicit maxBytes/maxTokens can only ask for LESS than the default,
+ * matching every other cap in this server ("never loosen honesty") -- a
+ * generous value here is simply ignored in favor of whatever tighter,
+ * type-specific bound the response family already enforces.
+ */
+export function resolveCallerByteCeiling(
+  explicitMaxBytes: number | undefined,
+  explicitMaxTokens: number | undefined,
+  defaultCeiling: number | undefined,
+): number | undefined {
+  const candidates: number[] = [];
+  if (typeof explicitMaxBytes === "number" && Number.isFinite(explicitMaxBytes) && explicitMaxBytes > 0) {
+    candidates.push(Math.floor(explicitMaxBytes));
+  }
+  if (typeof explicitMaxTokens === "number" && Number.isFinite(explicitMaxTokens) && explicitMaxTokens > 0) {
+    candidates.push(Math.floor(explicitMaxTokens * BYTES_PER_TOKEN_ESTIMATE));
+  }
+  if (candidates.length > 0) return Math.min(...candidates);
+  return defaultCeiling;
+}
+
+// ---------------------------------------------------------------------------
 // Per-language import-line regexes (best-effort, first N lines).
 // ---------------------------------------------------------------------------
 

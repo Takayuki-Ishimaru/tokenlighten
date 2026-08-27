@@ -10,6 +10,7 @@ import {
   usageWindowStart,
   usageWorkspaceId,
 } from "@tokenlighten/usage";
+import { wantsHelp } from "../util/helpFlag.js";
 
 // Same derivation as commands/version.ts and commands/help.ts: read the
 // CLI's own version from its package.json via require.resolve (not a
@@ -67,7 +68,7 @@ function priceFrom(args: readonly string[]): number | null {
 
 export async function runLogs(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
-  if (!sub || sub === "--help" || sub === "-h") {
+  if (!sub || wantsHelp(args)) {
     process.stdout.write(LOGS_USAGE);
     return;
   }
@@ -119,8 +120,18 @@ export async function runLogs(args: string[]): Promise<void> {
     const scope = workspaceRoot === undefined
       ? { kind: "machine" } as const
       : { kind: "workspace", workspaceId: workspaceId ?? null } as const;
+    // Always-derivable measured side (call count, response bytes, a bytes/4
+    // token estimate, per-tool breakdown): computed straight from the local
+    // usage events, independent of whether a native-baseline comparison is
+    // available. Kept separate from summarizeUsage()'s baseline/savings
+    // fields so the fail-closed "unavailable" wording there never changes.
+    const totalResponseBytes = events.reduce(
+      (sum, entry) => sum + entry.responseBytes,
+      0,
+    );
     const summary = {
       ...summarizeUsage(events, price, aiLogs, { scope }),
+      totalResponseBytes,
       ...(measurementUnavailableReason ? { measurementUnavailableReason } : {}),
     };
     if (rest.includes("--json")) {
@@ -162,6 +173,11 @@ export async function runLogs(args: string[]): Promise<void> {
     process.stdout.write(
       `Scope: ${summary.scope.kind}\n`
         + `MCP calls: ${summary.eventCount}\n`
+        + `TL response bytes: ${summary.totalResponseBytes}\n`
+        + `TL response tokens: ~${summary.estimatedResponseTokens} (est.)\n`
+        + `By tool: read_file ${summary.byTool.read_file}, `
+        + `search_files ${summary.byTool.search_files}, `
+        + `edit_file ${summary.byTool.edit_file}\n`
         + `Matched AI sessions: ${session.matchedSessions}\n`
         + `Observed full-session tokens: ${session.actualTotalTokens ?? "unavailable"}\n`
         + `Predicted no-TL tokens: ${session.predictedWithoutTlTokens ?? "unavailable"}\n`

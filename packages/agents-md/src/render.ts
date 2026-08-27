@@ -129,10 +129,16 @@ export function renderTargetPreamble(target: StubTargetId | undefined): string {
  * @param locale  "en" (default) or "jp".
  * @param version Override version string (defaults to INSTRUCTIONS_VERSION).
  */
-export type GuideProfile = "full" | "medium";
+export type GuideProfile = "full" | "medium" | "compact";
 
-function loadMediumTemplate(): string {
-  return readFileSync(join(TEMPLATE_DIR, "medium.md.tmpl"), "utf8");
+function loadMediumTemplate(locale: Locale): string {
+  const suffix = locale === "jp" ? ".jp.tmpl" : ".tmpl";
+  return readFileSync(join(TEMPLATE_DIR, `medium.md${suffix}`), "utf8");
+}
+
+function loadCompactTemplate(locale: Locale): string {
+  const suffix = locale === "jp" ? ".jp.tmpl" : ".tmpl";
+  return readFileSync(join(TEMPLATE_DIR, `compact.md${suffix}`), "utf8");
 }
 
 function loadTemplateForProfile(
@@ -141,7 +147,9 @@ function loadTemplateForProfile(
   profile: GuideProfile,
 ): string {
   if (target === "claude") return CLAUDE_IMPORT_TEMPLATE;
-  return profile === "medium" ? loadMediumTemplate() : loadTemplateForTarget(target, locale);
+  if (profile === "medium") return loadMediumTemplate(locale);
+  if (profile === "compact") return loadCompactTemplate(locale);
+  return loadTemplateForTarget(target, locale);
 }
 
 export function renderBlock(
@@ -185,31 +193,38 @@ export function blockSha256(
 }
 
 /**
- * Compact Bootstrap v1 (DESIGN-v0.10-expansion-plan-v1.3.md V10-07;
- * reconciliation §5 D-7). A separate, hand-authored, English-only template
- * carrying ONLY the always-on rules a caller cannot safely learn on-demand:
- * the 3-tool routing rule, workspace-write safety (`cwd`/`lane`), the
- * receipt-never-dead-ends rule, the unknown-`kind` safe-stop, and
- * follow-every-`next`. Everything else the full block teaches (artifact/
- * archive specifics, verification-kit detail, per-kind deep rules) is meant
- * to arrive on-demand inside the response that needs it instead of paying a
- * fixed per-session cost — see `templates/compact.md.tmpl`'s own header.
- *
- * NOT WIRED INTO ANY DISTRIBUTION THIS WAVE: no stub target renders this,
- * `injectAll`/`injectForTarget` never call it, and no drift/sentinel
- * machinery tracks it (no `{{SHA256}}` substitution — there is nothing to
- * detect drift against yet). It exists as a rendered artifact plus
- * `__tests__/compactBootstrap.spec.ts`'s size/content measurements so a
- * later rc wave can decide whether/how to wire it in (client-profile
- * selection, a `compact` stub-target flag, etc.) with real numbers in hand
- * rather than guessing.
+ * Medium guide profile (E8). A shorter, hand-authored EN/JP template that
+ * keeps the exercised decision-tree rules (task_pack, decision.kind, refusal/
+ * retry, edits[], verification kit, receipts) at roughly a quarter of the
+ * full block's bytes. Wired as a first-class `GuideProfile`: `injectAll`,
+ * the `tl-agents` CLI (`--profile medium`), and `renderBlock`/
+ * `renderCanonicalBlock`/`blockSha256` all accept `"medium"` and apply the
+ * same `{{VERSION}}`/`{{SHA256}}` substitution as `"full"`.
  */
-export function renderMediumBlock(version: string = INSTRUCTIONS_VERSION): string {
-  return renderTemplate(loadMediumTemplate(), version);
+export function renderMediumBlock(locale: Locale = "en", version: string = INSTRUCTIONS_VERSION): string {
+  return renderTemplate(loadMediumTemplate(locale), version);
 }
 
-export function renderCompactBlock(version: string = INSTRUCTIONS_VERSION): string {
-  const path = join(TEMPLATE_DIR, "compact.md.tmpl");
-  const template = readFileSync(path, "utf8");
-  return template.replace(/{{VERSION}}/g, version);
+/**
+ * Compact Bootstrap v1 (DESIGN-v0.10-expansion-plan-v1.3.md V10-07;
+ * reconciliation §5 D-7). A separate, hand-authored EN/JP template carrying
+ * ONLY the always-on rules a caller cannot safely learn on-demand: the
+ * 3-tool routing rule, workspace-write safety (`cwd`/`lane`), the
+ * receipt-never-dead-ends rule, the unknown-`kind` safe-stop, and
+ * follow-every-`next`. Everything else the full block teaches (artifact/
+ * archive specifics, verification-kit detail, per-kind deep rules) arrives
+ * on-demand inside the response that needs it instead of paying a fixed
+ * per-session cost — see `templates/compact.md.tmpl`'s own body.
+ *
+ * Wired two ways: (1) directly, as `injectForTarget`'s opt-in
+ * `guide: "compact"` target-repo variant (V10-07 rc.1 decision,
+ * 2026-08-20; unchanged by this wave); and (2) since this wave, as a
+ * first-class `GuideProfile` alongside `"full"`/`"medium"` — `injectAll`
+ * and the `tl-agents` CLI (`--profile compact`) can now write it to every
+ * stub target with the same `{{VERSION}}`/`{{SHA256}}` substitution and
+ * sentinel-based drift detection the other profiles get. The default
+ * guide for both paths remains `"full"`; nothing here changes that.
+ */
+export function renderCompactBlock(locale: Locale = "en", version: string = INSTRUCTIONS_VERSION): string {
+  return renderTemplate(loadCompactTemplate(locale), version);
 }

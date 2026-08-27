@@ -12,7 +12,7 @@ import { rewrite, DriftMode, restoreEol } from "./inject.js";
 import { detectEol, stripBom, sha256hex } from "./sentinel.js";
 import type { Clock } from "./clock.js";
 import { RealClock } from "./clock.js";
-import type { Locale } from "./render.js";
+import type { GuideProfile, Locale } from "./render.js";
 import { migrateLegacyTargetPath } from "./migrateLegacyTarget.js";
 import { assertSafeWriteTarget, ensureSafeWriteParent } from "./safeWritePath.js";
 
@@ -25,8 +25,8 @@ const BACKUP_DIR = ".tokenlighten/backups";
 export interface InjectAllConfig {
   /** Absolute path to the repo root. */
   repoRoot: string;
-  /** Guide profile to inject; full remains the compatibility default. */
-  profile?: "full" | "medium";
+  /** Guide profile to inject: "full" (default) | "medium" | "compact". */
+  profile?: GuideProfile;
   /**
    * Drift mode.
    * - "auto-rewrite" (default): silently rewrite outdated blocks.

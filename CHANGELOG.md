@@ -2,7 +2,287 @@
 
 All notable public changes to TokenLighten are documented here.
 
+## 0.12.0
+
+Four implementation waves against `DESIGN-v0.12-plan.md`'s adjudicated
+scope: serving/contract correctness fixes, response compaction, one new
+default-OFF byte-economy flag, an advisory extension to Task Reasoning IR
+v2, and delivery/distribution updates. Three v0.11 experimental
+read-economy flags are retired at default OFF. The final pre-release wave
+was driven by an external v0.11.1 real-device evaluation and two VS Code
+field reports.
+
+The retained v0.12 decision run is now adjudicated. Across 16 matched
+verified pairs, aggregate verified task cost with TokenLighten was
+approximately 28% lower than with native tools only, compared with
+approximately 21% lower in the retained v0.11.1 run. See **Release
+benchmark summary** below for representative results and caveats.
+
+### Added
+
+- Small known-location fast path: a query naming one existing path plus
+  an identifier and its value change — in natural phrasing, including
+  arrows (`X 0.12→0.15`), "set X to B", and Japanese 「XをAからBに」 —
+  short-circuits candidate collection and returns a single
+  identifier-centered `act.edit` pack with a ready `fast_path` (~3.9 KB
+  measured on dense code).
+- `read_file` honors `maxBytes`/`maxTokens` for `mode=task_pack`,
+  `handles=[...]` batches, and `mode=full paths=[...]` batches, so a
+  caller can keep any single response under its host's tool-result
+  ceiling. Precedence: explicit argument >
+  `TOKENLIGHTEN_TASK_PACK_MAX_BYTES` > client-profile default > type
+  default. VS Code-identified clients (via the `initialize` handshake's
+  `clientInfo.name`) get a conservative 14,336 B default task-pack
+  ceiling, below the ~16 KB threshold at which VS Code spills tool
+  results to a file.
+- Machine-readable replay: an `edit_file` retry under the same
+  `operation_id` returns `replayed: true` on the replayed `edit.applied`;
+  fresh applies omit the field.
+- A `queries[]`-over-5 refusal carries `remaining_queries` (the tail
+  terms, verbatim) alongside the first-five `next`; handles-batch entries
+  served from a bare file handle carry `synthesized_range: true` to
+  distinguish a whole-file default from a caller-sliced range.
+- `tl doctor` runs runtime-capability checks by default and moves
+  development-only concerns (license tooling, the bench-only python
+  prerequisite, dist-staleness strictness) behind `tl doctor
+  --development`; parser/exceljs checks probe the runtime's actual import
+  mechanism instead of `require.resolve`, so packaged (VSIX) installs no
+  longer false-fail, and a missing `git` degrades to a warning naming the
+  shadow-checkpoint feature it affects.
+- `tl logs summary` always shows the measured side — TL call count, total
+  response bytes, estimated response tokens (bytes/4, labeled), and a
+  per-tool breakdown — while baseline/savings lines stay fail-closed
+  ("unavailable") exactly as before.
+- Guide: `compact` is a first-class profile (413/409 est. tokens en/jp)
+  alongside `full`/`medium`, with new Japanese variants for medium and
+  compact, budget-guard specs, and `--profile compact` accepted by both
+  `tl-agents` and `tl agents update`. The default profile is unchanged
+  (`full`).
+- Japanese-language retrieval: the query tokenizers (BM25F, query-shape,
+  and the locator's candidate heuristics) extract Han/kana runs and
+  bigrams via a shared `cjkSpans` module, so Japanese prose queries rank
+  candidates instead of being invisible; concern anchoring deliberately
+  stays identifier-grounded (`isConcernAnchorable`), so CJK prose can
+  satisfy but never veto coverage.
+- Field-eval regression fixtures: `fieldEvalFixtures.spec.ts` pins the
+  cross-cutting false-complete gate, absence stability, new-task
+  recognition without `taskEpoch:"new"`, and single-mutation replay; the
+  replay corpus gains five `qc` cases for lossless continuation and
+  epoch-requirement monotonicity.
+- `TL_DELTA_CONTEXT` (new flag, default OFF): carries the served-range
+  ledger across the server's own edits. A read that follows one of the
+  server's own writes now serves only the file's unheld byte ranges as a
+  full body, with already-held ranges carried as `prior` — instead of
+  re-serving the whole file — using prefix/suffix hunk geometry (not a
+  diff) to compute the post-edit ranges. A base-content mismatch,
+  `force_serve:true`, or a delta larger than the plain content all fall
+  back to a full serve. Measured on a representative case, the post-edit
+  re-read shrank from 6214 B to 415 B (-93.3%).
+- Task Reasoning IR v2 (`TL_REASONING_IR_V2`, still default OFF, still
+  advisory/trace-only) can now close an obligation from the server's own
+  proof that an edit succeeded, so its trace-only Shadow Stop candidates
+  become reachable on change tasks, not only read-only answer tasks. Wire
+  behavior is unchanged and the flag's OFF path stays byte-identical. A
+  companion change forwards the flag and tracing through the bench
+  harness so live engagement data can be collected across every bench arm
+  at no extra run cost, feeding the Stop/Replan enforcement decision.
+- `tl workspace status` reports whether the managed TokenLighten guide
+  block is present among a workspace's onboarding files.
+
+### Changed
+
+- Tool schemas: shared task-state property descriptions and the largest
+  single descriptions were shortened without removing or hiding any
+  capability — `tools/list` shrinks 8,905→8,532 B minified (spec ceiling
+  lowered to 8,597 B).
+- Managed guide v78 ("wire-facts") teaches the wave's nine new wire facts
+  (lossless continuations, requirement monotonicity, per-item edit
+  targets, `remaining_queries`, `replayed:true`, `maxBytes` bounding,
+  `synthesized_range`, natural fast-path phrasings, bounded
+  `remaining_ranges`) while the full profile got smaller in both locales
+  (en 9,988→9,979 B; jp 9,885→9,884 B).
+- `edit.applied` responses are more compact: the top-level `applied_note`
+  shrinks from 238 B to 49 B, the create note from 96 B to 64 B, and the
+  read-back note from 83 B to 37 B, and a per-file `head` from 3 lines to
+  1 — while remaining semantically equivalent, since `slice_sha`, `range`,
+  and `enclosing_symbol` still prove the rest. Measured median across 5
+  representative scenarios: -19.9% response bytes (the create scenario
+  alone: -10.2%). Rolled-back and state-unknown responses are
+  deliberately left uncompacted (byte-parity pinned at 398 B / 693 B
+  respectively), since those are exactly the outcomes where a caller most
+  needs the full picture. In the ongoing Phase-3a protocol-v1-candidate-
+  vs-frozen-baseline wire-byte report (tracking migration cost
+  neutrality, not a decision-run result), this change alone re-pins the
+  shared `edit.applied.create` shape from 934 B / 240 o200k-tokens to
+  856 B / 221 o200k-tokens, flipping that report's frequency-weighted
+  total across its 11 shared shapes from +834 o200k-tokens (candidate
+  costlier than the frozen baseline) to -306 o200k-tokens (candidate now
+  cheaper).
+- Natural-autoload delivery — the managed guide plus workspace MCP
+  configuration, without manual prompt injection — is documented as the
+  production setup path. `getting-started.md` and the README (EN/JA) carry
+  the delivery-parity evidence and the controlled no-guide regression
+  caveat.
+- `SERVER_INSTRUCTIONS` (the MCP `initialize` instructions text — the
+  only channel that reaches a host with no managed guide file) gains four
+  stop-discipline sentences: stop after verification passes instead of a
+  ceremonial re-read or diff sweep; a non-direct-proof verification gap
+  does not close by re-running the entry it is attached to; a
+  `receipt`/`prior` body is already held and should not be re-fetched;
+  and a prepared certificate means discovery is closed and independent
+  edits should batch into one `edits[]` call. Tool schemas are
+  byte-unchanged; the instructions body grows from 753 B to 1,134 B
+  (+80 o200k-tokens), a deliberate one-time investment in the one channel
+  that reaches a guide-less host.
+- Guide v77 (EN/JA) documents the compact `edit.applied` shape above
+  (1-line `head`; `slice_sha`+`range`+`enclosing_symbol` prove the rest; a
+  create's `applied_note` reads "=content sent"; read-back is a ready
+  slice template) and the verification-honesty wording below (a
+  per-target unproven gap, and a non-direct-proof label that never closes
+  the task on its own). EN grows by 431 B / 111 tokens and JA by 408 B /
+  123 tokens, an increase kept after auditing for a same-message cut
+  elsewhere; the compact profile is effectively unchanged (-1 B net,
+  after also removing some leftover pre-v75 wording).
+- `AGENTS.md`'s non-managed contributor sections (repository table,
+  verification, conventions, bench-archive safety) were reconciled
+  against current behavior and tightened for length with no normative
+  content lost — the archive-safety section alone shrinks by 135 B / 17
+  tokens across 13 audited wording spots — and two accuracy fixes: the
+  "Active designs" list now names `DESIGN-v0.12-plan.md` as the active
+  plan of record, and the decision-run rep count now cites the v0.12
+  figure (5, up from 3).
+
+### Fixed
+
+- The false-complete defect family reported by the external v0.11.1
+  field evaluation: task-continuation `next` hints no longer truncate the
+  query mid-word (all five `slice(0,60-80)` sites removed — a
+  continuation carries the whole query, or a `qref` that restores it);
+  the requirement model (surface roles and concern tokens) persists per
+  task epoch in `taskContractStore` and is monotone until
+  `taskEpoch:"new"`, so a narrowed same-epoch re-pack can no longer
+  certify `complete` against the shrunken query; the primary
+  certificate's action frontier incorporates same-epoch
+  previously-served evidence; and `priorPackStore` now actually resets on
+  `taskEpoch:"new"`.
+- Stale-task bleed: the prepared-fence same-task test accepted ANY single
+  shared token (protocol vocabulary included), so a substantively
+  different follow-up could receive the previous task's certificate as a
+  `decision-unchanged` receipt with no recovery call. The test now
+  requires shared content tokens (≥2 and ≥0.5 of the smaller set), a
+  shared signature token (identifier/path/quoted span), or a cross-form
+  phrase match; projected receipts always retain an executable recovery
+  `next_call`.
+- False absence proofs on non-UTF-8 text: `find`/`queries[]`/`tree`/
+  `references` sniff UTF-16/UTF-8 BOMs and exclude undecodable
+  (NUL-riddled) files from scanned coverage, disclosing them via
+  `omitted.undecodable` and withholding absence certificates over them —
+  a UTF-16LE `.ps1`'s functions are now found where they were previously
+  certified absent.
+- Write-path corruption is structurally impossible for UTF-16/undecodable
+  files: range edits, search/replace, multi-edit batches, read-and-edit,
+  and rename refuse with `unsupported-encoding` (rename skips per file),
+  and `writeExistingFileAtomic` refuses raw-NUL content as a last-resort
+  backstop; specs prove refused files stay byte-identical on disk.
+- `tl <command> <sub> --help` executed the real action in nine CLI
+  commands (`workspace setup` performed a full setup, `setup` launched
+  the interactive OS-package installer, `mcp start` started a real
+  server, `logs reset` cleared usage state, `install-hooks` wrote git
+  hooks, plus `agents update`, `skeleton build`, `clients activate`,
+  `config`). A shared guard now prints usage on `--help`/`-h` anywhere in
+  the argument vector, before any side effect.
+- Verification kits no longer attach cross-language mock headers: the
+  `mock_headers` candidate scan is gated on the edit itself being native
+  C/C++, closing the reported case of a ~10 KB firmware HAL mock riding
+  pure-TypeScript edits.
+- Large-file exact routing: task_pack's internal text scan walked files
+  only up to 1 MB while `search_files` scanned up to 8 MB, so a unique
+  identifier deep in a large file was found by search but not by
+  task_pack (which then served the file head). The locator now runs an
+  additive wide scan for the 1-8 MB band, and `remaining_ranges` chunks
+  are bounded (≤200 lines per side) so a `next` never names a
+  7,000-line zoom.
+- `classifySurface` recognizes top-level `shared/`, `types/`,
+  `schema(s)/`, `openapi/`, and `proto/` directories as contract surfaces
+  (previously only nested forms matched); the locator's role-diversity
+  fill no longer resurrects comment-only-penalized candidates.
+- Batch read projection keeps `note`, `concern_note`, `synthesized_range`
+  and — for non-downgraded truncated slices — `remaining_ranges` and
+  `next` on handles-batch entries; the wire allowlist silently dropped
+  them.
+- A construction-hub edit pack now serves the exact byte region a caller
+  is expected to land a replacement in, verbatim, whenever the pack's
+  already-served evidence doesn't cover it — instead of leaving the
+  caller to copy an anchor from nearby text that could carry an elision
+  marker and trip the write guard's `elided-content` refusal. The added
+  window is small, capped, and unflagged; a representative case needed
+  627 extra bytes to remove a 3-attempt recovery loop.
+- Verification recipes now name, per edit target, an action with no
+  workspace-proven syntax check, and label an entry that is not a direct
+  proof of what it's attached to — using the existing `recipe.gaps`
+  vocabulary — instead of silently implying every target and every listed
+  check carries the same proof weight.
+- A large Markdown file's `mode=skeleton` request no longer returns an
+  empty "(no signatures detected)" dead end: it now serves a headings
+  outline (up to 300 entries / 6000 B, with honest truncation) the same
+  way a Markdown slice response already does.
+- `search_files` (`find`/`tree`/`references`/`symbols`) no longer returns
+  a fabricated empty/absent result for a path-scoped search made while a
+  prepared answer or edit certificate is active. The certificate's
+  read-residency receipt was intercepting these calls ahead of the
+  existing certificate-bypass path and returning a receipt shape
+  `search_files` doesn't speak, which a downstream step then read as "0
+  matches."
+- A `task_pack` call in the same session as an earlier prepared
+  certificate now re-checks that certificate against obligations
+  disclosed by a prior pack before treating it as still valid, and
+  demotes a stale one instead of reusing it. The decision logic was not
+  consulting the marker that records an obligation as unserved.
+
+### Defaults
+
+Every new v0.12 capability ships default OFF, matching v0.11:
+`TL_DELTA_CONTEXT` is a class-(B) experiment flag in `util/flags.ts`, the
+same posture as the rest of that class. Following a dedicated
+live-engagement measurement probe, three v0.11 experimental read-economy
+flags — `TL_POST_READY_TRIM`, `TL_OVERLAP_TRIM`, and
+`TL_INTERFACE_AUTHORITY` (all already default OFF) — are retired: each
+measurement round showed either the targeted solver shape not occurring
+in the tested distribution, or no measurable live contribution once
+ordinary packs already served the same evidence. Code and integration
+tests for all three are kept as regression assets; none is an active
+investigation line going forward.
+
+### Release benchmark summary
+
+The retained six-task decision archive produced 16 matched pairs in which
+both arms passed verification (17 of 18 scheduled repetitions verified in
+each arm). Aggregate verified task cost with TokenLighten was approximately
+**28% lower** than with native tools only.
+
+For comparison, the retained v0.11.1 run showed an approximately **21%**
+lower aggregate cost, also across 16 matched verified pairs. The observed
+reduction therefore widened by about 7 percentage points. The two runs used
+the same six task classes, but different source revisions and evaluation
+windows, so this is a descriptive release comparison rather than a causal
+before/after experiment.
+
+Among the clearer positive results, the artifact-driven rating-engine task
+showed an approximately **57% lower** median cost and the multi-bug on-call
+task showed an approximately **30% lower** median cost, across three verified
+pairs each.
+
+The narrowly scoped calculation task was close to parity. Results were more
+variable when the two arms did not reach the same verification outcome, so
+those cases are excluded from the numeric comparisons. Small known-location
+tasks can also see less benefit because fixed MCP and guide overhead accounts
+for a larger share of the work. These developer-run observations are not
+guaranteed savings; results vary by repository, task, client, model behavior,
+evaluation window, and provider pricing, and local estimates are not provider
+billing records.
+
 ## 0.11.1
+
 
 Two v0.12 pull-forward fixes on top of 0.11.0 (wave D), plus the v0.11
 release-prep wave (reported issues #1-#4: task-profile binding, first-pack

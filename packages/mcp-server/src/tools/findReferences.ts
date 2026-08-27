@@ -104,7 +104,8 @@ import { looksLikeStateHandle } from "../state/handleCodec.js";
 import { mintContinuationHandle, resolveContinuationHandle } from "../state/stateHandles.js";
 import type { LangKey, WalkOmissions } from "./walkRepo.js";
 import { walkCodeFiles, createWalkOmissions, TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "./walkRepo.js";
-import { escapeRegExp, trimMatchText, buildOmittedExtra } from "../features/search/find/findText.js";
+import { escapeRegExp, trimMatchText, buildOmittedExtra, createScanCoverage } from "../features/search/find/findText.js";
+import { decodeTextBuffer } from "../util/textDecode.js";
 import { collectLexicalSegments, segmentKindAt } from "./lexicalRanges.js";
 import {
   computeMemberSweep,
@@ -238,7 +239,7 @@ export interface FindReferencesResult {
    * include it. Was silently missing before F-W2D-1: this walk tracked no
    * omissions at all, so an oversize file's absence from every field above
    * was indistinguishable from "scanned and clean". */
-  omitted?: Partial<WalkOmissions>;
+  omitted?: Partial<WalkOmissions> & { undecodable?: number };
   /** L2 (2026-08-01 references-contract): file groups with NOTHING served on
    * this page — by the byte fit OR by the caller's `limit`
    * (`truncation_reason` says which). Per-PAGE number: groups served by
@@ -466,7 +467,7 @@ function continuationNextCall(
  */
 function withAbsence(
   result: FindReferencesResult,
-  args: { symbol: string; scannedFiles: number; unreadableFiles: number; oversizeOmitted: number; subPath?: string },
+  args: { symbol: string; scannedFiles: number; unreadableFiles: number; oversizeOmitted: number; undecodableFiles: number; subPath?: string },
 ): FindReferencesResult {
   // "Read nothing" must never render as "it isn't there" — no scan, no
   // certificate (same gate as findText's buildAbsenceExtra).
@@ -477,6 +478,12 @@ function withAbsence(
   // no certificate, not even a caveated one, while any are outstanding. The
   // caller still sees the exclusion via `result.omitted.oversize`.
   if (args.oversizeOmitted > 0) return result;
+  // 2026-08-27 (encoding-honesty): a file the walk opened and read, but
+  // whose bytes could not be decoded with confidence (see
+  // util/textDecode.ts's decodeTextBuffer), is the SAME unknown remainder as
+  // an oversize file — content nobody actually read cannot be ruled out.
+  // The caller still sees the exclusion via `result.omitted.undecodable`.
+  if (args.undecodableFiles > 0) return result;
   const scope = args.subPath ? ` under '${args.subPath}'` : "";
   const base: ReferenceAbsence = {
     scanned_files: args.scannedFiles,
@@ -530,11 +537,28 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // anything" — count both outcomes as the walk goes.
   let scannedFiles = 0;
   let unreadableFiles = 0;
+  // 2026-08-27 (encoding-honesty): a ScanCoverage, reused purely for its
+  // `.undecodable` Set — findReferences has no walk-time WalkOmissions slot
+  // for this (it is discovered at scan time, not walk time), same reasoning
+  // as findText.ts's own ScanCoverage.undecodable. `.scanned`/`.unscanned`
+  // stay empty and unused here.
+  const scanCoverage = createScanCoverage();
 
   for (const f of files) {
     let raw: string;
     try {
-      raw = fs.readFileSync(f.absPath, "utf8");
+      const buf = fs.readFileSync(f.absPath);
+      const decoded = decodeTextBuffer(buf);
+      if (decoded === null) {
+        // Walked and opened, but the bytes could not be verified as text —
+        // never folded into "scanned" (that would certify absence over
+        // content nobody actually read), nor into "unreadable" (an fs-level
+        // error the caller can act on directly — this is a stronger,
+        // hard-gating exclusion, same as findText.ts's buildAbsenceExtra).
+        scanCoverage.undecodable.add(f.relPath);
+        continue;
+      }
+      raw = decoded;
     } catch {
       unreadableFiles++;
       continue;
@@ -631,12 +655,13 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // candidates), so this is also the cheap path.
   if (all.length === 0) {
     return withAbsence(
-      { symbol, references: peekProbe, files: [], truncated: false, total: 0, ...buildOmittedExtra(walkOmissions) },
+      { symbol, references: peekProbe, files: [], truncated: false, total: 0, ...buildOmittedExtra(walkOmissions, scanCoverage) },
       {
         symbol,
         scannedFiles,
         unreadableFiles,
         oversizeOmitted: walkOmissions.oversize,
+        undecodableFiles: scanCoverage.undecodable.size,
         ...(input.path ? { subPath: input.path } : {}),
       },
     );
@@ -658,7 +683,7 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // after the fit picked `files` (the L2 rule this file's other disclosure
   // fields already follow).
   const extra: Record<string, unknown> = {
-    ...buildOmittedExtra(walkOmissions),
+    ...buildOmittedExtra(walkOmissions, scanCoverage),
     ...(memberSweep ? { member_sweep: memberSweep, hint: MEMBER_SWEEP_HINT_TEXT } : {}),
   };
 

@@ -17,6 +17,7 @@ import {
   traceEnabled,
   verificationRecipeEnabled,
   hop1ClosureEnabled,
+  interfaceAuthorityEnabled,
   adaptiveWholeFileEnabled,
   evidenceCompletionShadowEnabled,
   evidenceCompletionEnabled,
@@ -33,6 +34,10 @@ import {
   wireBreakevenEnabled,
   reasoningIrV2Enabled,
   fastPathV2Enabled,
+  postReadyTrimEnabled,
+  postReadyTrimThreshold,
+  overlapTrimEnabled,
+  deltaContextEnabled,
   compoundRetrievalEnabled,
 } from "../util/flags.js";
 
@@ -48,6 +53,7 @@ const FLAG_KEYS = [
   "TL_TRACE",
   "TL_VERIFICATION_RECIPE",
   "TL_HOP1_CLOSURE",
+  "TL_INTERFACE_AUTHORITY",
   "TL_ADAPTIVE_WHOLE_FILE",
   "TL_EVIDENCE_SHADOW",
   "TL_EVIDENCE_COMPLETION",
@@ -64,6 +70,10 @@ const FLAG_KEYS = [
   "TL_WIRE_BREAKEVEN",
   "TL_REASONING_IR_V2",
   "TL_FAST_PATH_V2",
+  "TL_POST_READY_TRIM",
+  "TL_POST_READY_TRIM_N",
+  "TL_OVERLAP_TRIM",
+  "TL_DELTA_CONTEXT",
   "TL_COMPOUND_RETRIEVAL",
 ] as const;
 
@@ -148,12 +158,17 @@ describe("D10 permanent-on freeze", () => {
       "coveragePackerEnabled",
       "coveragePackerV2Enabled",
       "decisionInvariantStrictEnabled",
+      "deltaContextEnabled",
       "evidenceCompletionEnabled",
       "evidenceCompletionShadowEnabled",
       "fastPathV2Enabled",
       "graphEvidenceEnabled",
       "graphIndexMode",
       "hop1ClosureEnabled",
+      "interfaceAuthorityEnabled",
+      "overlapTrimEnabled",
+      "postReadyTrimEnabled",
+      "postReadyTrimThreshold",
       "reasoningIrV2Enabled",
       "responseFormatMode",
       "rrfFusionEnabled",
@@ -181,7 +196,11 @@ describe("D10 permanent-on freeze", () => {
     // V11-03 added coveragePackerV2Enabled (TL_COVERAGE_PACKER_V2), class (B).
     // V11-06 added fastPathV2Enabled (TL_FAST_PATH_V2), class (B).
     // V11-05 added compoundRetrievalEnabled (TL_COMPOUND_RETRIEVAL), class (B).
-    expect(Object.keys(flags)).toHaveLength(23);
+    // V12-02/B2 added deltaContextEnabled (TL_DELTA_CONTEXT), class (B): the
+    // ONLY writer of a carried ledger entry's `deltaFromSha`, which every
+    // delta-serving branch then gates on — so OFF leaves those branches
+    // unreachable and the wire unchanged (deltaContextDispatch.spec.ts cell a).
+    expect(Object.keys(flags)).toHaveLength(28);
   });
 });
 
@@ -201,6 +220,7 @@ describe("defaults when env is unset", () => {
   it("D10 (B) out-of-contract experiments all default to false", () => {
     expect(verificationRecipeEnabled()).toBe(false);
     expect(hop1ClosureEnabled()).toBe(false);
+    expect(interfaceAuthorityEnabled()).toBe(false);
     expect(adaptiveWholeFileEnabled()).toBe(false);
     expect(evidenceCompletionShadowEnabled()).toBe(false);
     expect(evidenceCompletionEnabled()).toBe(false);
@@ -251,6 +271,7 @@ describe("enabling with truthy values", () => {
     (val) => {
       process.env["TL_VERIFICATION_RECIPE"] = val;
       process.env["TL_HOP1_CLOSURE"] = val;
+      process.env["TL_INTERFACE_AUTHORITY"] = val;
       process.env["TL_ADAPTIVE_WHOLE_FILE"] = val;
       process.env["TL_EVIDENCE_SHADOW"] = val;
       process.env["TL_WRITE_CAPABILITY"] = val;
@@ -265,6 +286,7 @@ describe("enabling with truthy values", () => {
       process.env["TL_COMPOUND_RETRIEVAL"] = val;
       expect(verificationRecipeEnabled()).toBe(true);
       expect(hop1ClosureEnabled()).toBe(true);
+      expect(interfaceAuthorityEnabled()).toBe(true);
       expect(adaptiveWholeFileEnabled()).toBe(true);
       expect(evidenceCompletionShadowEnabled()).toBe(true);
       expect(writeCapabilityEnabled()).toBe(true);
@@ -441,5 +463,88 @@ describe("fastPathV2Enabled", () => {
   it.each(["0", "false", "no", "off", ""])("fastPathV2Enabled('%s') => false", (val) => {
     process.env["TL_FAST_PATH_V2"] = val;
     expect(fastPathV2Enabled()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W5: TL_POST_READY_TRIM
+// ---------------------------------------------------------------------------
+
+describe("overlapTrimEnabled", () => {
+  it.each(["1", "true", "yes", "on"])("overlapTrimEnabled(\'%s\') => true", (val) => {
+    process.env["TL_OVERLAP_TRIM"] = val;
+    expect(overlapTrimEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "no", "off", ""])("overlapTrimEnabled(\'%s\') => false", (val) => {
+    process.env["TL_OVERLAP_TRIM"] = val;
+    expect(overlapTrimEnabled()).toBe(false);
+  });
+
+  it("defaults to false", () => {
+    expect(overlapTrimEnabled()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B2 / V12-02: TL_DELTA_CONTEXT
+// ---------------------------------------------------------------------------
+
+describe("deltaContextEnabled", () => {
+  it.each(["1", "true", "yes", "on"])("deltaContextEnabled('%s') => true", (val) => {
+    process.env["TL_DELTA_CONTEXT"] = val;
+    expect(deltaContextEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "no", "off", ""])("deltaContextEnabled('%s') => false", (val) => {
+    process.env["TL_DELTA_CONTEXT"] = val;
+    expect(deltaContextEnabled()).toBe(false);
+  });
+
+  it("defaults to false", () => {
+    expect(deltaContextEnabled()).toBe(false);
+  });
+
+  it("is INDEPENDENT of TL_OVERLAP_TRIM in both directions", () => {
+    // The two levers reuse the same `segments[]` projection but answer
+    // different questions (a partially overlapping read of an UNCHANGED file
+    // vs. a ledger carried ACROSS a change). Neither may imply the other, or
+    // the retired W7 lever would come back on with this one.
+    process.env["TL_OVERLAP_TRIM"] = "1";
+    expect(deltaContextEnabled()).toBe(false);
+    delete process.env["TL_OVERLAP_TRIM"];
+    process.env["TL_DELTA_CONTEXT"] = "1";
+    expect(overlapTrimEnabled()).toBe(false);
+  });
+
+  it("names itself in activeExperimentFlags only while it is on", () => {
+    expect(flags.activeExperimentFlags()).not.toContain("TL_DELTA_CONTEXT");
+    process.env["TL_DELTA_CONTEXT"] = "1";
+    expect(flags.activeExperimentFlags()).toContain("TL_DELTA_CONTEXT");
+  });
+});
+
+describe("postReadyTrim", () => {
+  it.each(["1", "true", "yes", "on"])("postReadyTrimEnabled('%s') => true", (val) => {
+    process.env["TL_POST_READY_TRIM"] = val;
+    expect(postReadyTrimEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "no", "off", ""])("postReadyTrimEnabled('%s') => false", (val) => {
+    process.env["TL_POST_READY_TRIM"] = val;
+    expect(postReadyTrimEnabled()).toBe(false);
+  });
+
+  it("uses N=6 by default and fails closed for invalid bounds", () => {
+    expect(postReadyTrimThreshold()).toBe(6);
+    for (const value of ["0", "-1", "33", "bogus"]) {
+      process.env["TL_POST_READY_TRIM_N"] = value;
+      expect(postReadyTrimThreshold()).toBe(6);
+    }
+  });
+
+  it("accepts a bounded configurable N", () => {
+    process.env["TL_POST_READY_TRIM_N"] = "7";
+    expect(postReadyTrimThreshold()).toBe(7);
   });
 });

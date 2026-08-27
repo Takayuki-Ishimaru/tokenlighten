@@ -35,4 +35,33 @@ describe("medium guide profile (E8)", () => {
     expect(renderCanonicalBlock()).toBe(renderCanonicalBlock("en", INSTRUCTIONS_VERSION, "full"));
     expect(renderCanonicalBlock("en", INSTRUCTIONS_VERSION, "medium")).toBe(renderMediumBlock());
   });
+
+  it("JP: uses the shared version and mirrors the EN half-of-full budget check", () => {
+    const mediumJp = renderMediumBlock("jp");
+    const fullJp = renderCanonicalBlock("jp");
+    expect(mediumJp).toContain(INSTRUCTIONS_VERSION);
+    expect(Buffer.byteLength(mediumJp, "utf8")).toBeLessThanOrEqual(
+      Buffer.byteLength(fullJp, "utf8") * 0.5,
+    );
+  });
+
+  it("JP: keeps the same protocol-directive vocabulary as EN medium (translation parity, not identical text)", () => {
+    const mediumJp = renderMediumBlock("jp");
+    for (const rule of [
+      "mode=task_pack",
+      "decision.kind",
+      "next",
+      "cwd",
+      "SAFE-STOP",
+      "edits[]",
+    ]) {
+      expect(mediumJp, rule).toContain(rule);
+    }
+  });
+
+  it("does not change the EN default when JP is requested, and both locales route through renderBlock identically", () => {
+    expect(renderMediumBlock("en")).toBe(renderMediumBlock());
+    expect(renderCanonicalBlock("en", INSTRUCTIONS_VERSION, "medium")).toBe(renderMediumBlock("en"));
+    expect(renderCanonicalBlock("jp", INSTRUCTIONS_VERSION, "medium")).toBe(renderMediumBlock("jp"));
+  });
 });

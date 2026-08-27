@@ -18,6 +18,7 @@
 import { AsyncLocalStorage } from "async_hooks";
 import { createHash } from "crypto";
 import type { TaskExecutionContract } from "@tokenlighten/types";
+import { postReadyTrimEnabled, postReadyTrimThreshold } from "../util/flags.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -54,6 +55,20 @@ export interface ServedRangeLedgerState {
    * for the first and true for the second.
    */
   totalLines: number;
+  /**
+   * B2 / V12-02 (2026-08-27 delta context, TL_DELTA_CONTEXT): the sha this
+   * entry described BEFORE `transformServedRangesAcrossServerEdit` re-projected
+   * its spans through an edit this server applied. Present only on an entry the
+   * transformation touched, and it is the ONLY thing every delta-serving branch
+   * is gated on — with the flag off nothing ever writes it, so those branches
+   * are unreachable and the pre-B2 wire is preserved exactly.
+   *
+   * INTERNAL STATE, NEVER WIRE. Protocol v1 is frozen; delta serving is
+   * expressed entirely in the existing `segments[]`/`code_unchanged` +
+   * evidence `body`/`prior`/`remaining` vocabulary. This field only decides
+   * WHICH already-shipped projection runs.
+   */
+  deltaFromSha?: string;
 }
 
 /** One contiguous run of file lines one call actually served, plus its provenance. */
@@ -359,6 +374,8 @@ export interface ExecutionFenceState {
    * introduced the very symbol that was missing.
    */
   zeroByteSignatures: Set<string>;
+  /** W5: post-ready read/search calls seen before the first successful edit. */
+  postReadyDiscoveryCalls: number;
   /**
    * Discovery this pack's OWN response advertised as still available, and the
    * one budget that governs it.
@@ -433,6 +450,8 @@ export type ExecutionGuardDecision =
       allowed: true;
       challenged?: true;
       resetForNewTask?: true;
+      /** W5: dispatch an honest existing-wire downgrade for a post-ready full read. */
+      postReadyTrim?: true;
       reclassified?: ExecutionReclassification;
       createAuthorization?: ExecutionCreateAuthorization;
     }
@@ -671,6 +690,14 @@ export interface WorkspaceSession {
    * (_clearAdmissibleEditUnion); it is edit-scoped, not read/search state.
    */
   recentEditRefusalSignatures: string[];
+
+  /**
+   * W6 (2026-08-24): refusal-shape ledger for edit_file.  This deliberately
+   * keeps the request identity separate from the older compact-response ring:
+   * the former explains an unchanged retry, while the latter only controls
+   * payload size.  Entries are FIFO and are reset at taskEpoch:new.
+   */
+  refusedEditShapes: Array<{ key: string; detail: string; count: number }>;
 
   /** Workspace-relative paths successfully written by edit_code this session. */
   editedPaths: Set<string>;
@@ -954,6 +981,206 @@ function _tokensOverlap(a: readonly string[], b: readonly string[]): boolean {
   return b.some((t) => set.has(t));
 }
 
+// ---------------------------------------------------------------------------
+// [T1] Same-task threshold (2026-08-27 prepared-fence P0).
+//
+// `_tokensOverlap` alone is too permissive a same-task test for
+// `newTaskQueryMismatch`: two task_pack queries about UNRELATED subjects
+// routinely share at least one token of pure protocol/request vocabulary
+// ("query", "coverage", "read", "path", etc.), which `_tokensOverlap` treated
+// as proof of a same-task restatement - collapsing a genuine topic change
+// into "decision unchanged" and serving the WRONG certified frontier back to
+// the caller. (Contrast the pack-cache dedup bar this module does not own -
+// readCodeTaskPack.ts's SEMANTIC_DUP_OVERLAP_RATIO=0.8 plus equal requested-
+// path/role sets - which was already ratio-based; this one was still
+// any-shared-token.)
+//
+// `_sameTaskQuery` below is the raised bar. It is satisfied by EITHER of two
+// independent paths - deliberately not one blended score, so each threshold
+// can be reasoned about (and re-tuned) on its own:
+//
+//   (A) CONTENT-TOKEN BREADTH. Filter both `tokenizeForEpoch` outputs to
+//       CONTENT tokens (drop `_PROTOCOL_VOCAB_STOPWORDS`, on top of
+//       `tokenizeForEpoch`'s own general stopwords), then require BOTH >= 2
+//       shared content tokens AND a shared/smaller-side ratio >= 0.5. The
+//       count floor stops one coincidental content word (both queries happen
+//       to say "timeout") from passing at a trivially small denominator; the
+//       ratio floor stops a long query from dragging in an unrelated short
+//       one just by containing it as a small slice of its vocabulary. This is
+//       the path an ordinary same-task restatement (reworded, still about the
+//       same feature) clears.
+//
+//   (B) SIGNATURE-TOKEN AGREEMENT. Extract identifier-shaped spans from the
+//       RAW query text (`_extractSignatureTokens`: camelCase/snake_case
+//       originals, path segments, quoted phrases) and require ANY shared one
+//       - reusing `_tokensOverlap`'s existing any-overlap primitive, just
+//       over a much higher-precision token set. Two queries that name the
+//       same function or file are the same task even when the surrounding
+//       prose barely overlaps at all; signature tokens are exactly what
+//       `tokenizeForEpoch`'s lowercase-and-split step (needed for (A)'s
+//       general matching) erases.
+//
+// Neither path is satisfiable by protocol vocabulary alone: (A) excludes it
+// by construction, and (B)'s shapes (case transition / underscore / path
+// separator / quoting) never match a bare protocol noun like "query" or
+// "receipt". `tokenizeForEpoch` and `_tokensOverlap` are UNCHANGED by this -
+// the new logic is layered on top, so `recordPackChecks`'s own
+// `_tokensOverlap` call (a lower-stakes check-record MERGE decision, not an
+// execution-fence gate) keeps its existing cheap, eager behavior.
+//
+// Thresholds tuned against `sameTaskThreshold.spec.ts`'s pairs; revisit both
+// together if either drifts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Generic MCP/protocol-surface nouns: present in nearly every task_pack-
+ * shaped query regardless of subject, so they carry no same-task signal for
+ * path (A). `task`/`file`/`code` are already excluded by `tokenizeForEpoch`'s
+ * own `_EPOCH_STOPWORDS`.
+ */
+const _PROTOCOL_VOCAB_STOPWORDS: ReadonlySet<string> = new Set([
+  "query", "queries", "coverage", "read", "edit", "edits", "editing",
+  "search", "mode", "path", "paths", "pack", "handle", "handles",
+  "call", "calls", "tool", "tools", "request", "response", "receipt",
+  "certificate", "certified", "evidence", "decision", "next", "action",
+  "actions", "args", "argument", "arguments", "cwd", "lane", "profile",
+  "epoch",
+]);
+
+/** Path (A) floor: fewer shared content tokens than this can be pure coincidence regardless of ratio. */
+const _MIN_SHARED_CONTENT_TOKENS = 2;
+/** Path (A) floor: shared content tokens must also be a majority of the SMALLER side's content vocabulary. */
+const _MIN_CONTENT_OVERLAP_RATIO = 0.5;
+
+/** `tokens` (already `tokenizeForEpoch`'d) with protocol/request vocabulary removed - what is left could actually identify a subject. */
+function _contentTokens(tokens: readonly string[]): string[] {
+  return tokens.filter((t) => !_PROTOCOL_VOCAB_STOPWORDS.has(t));
+}
+
+/** Path (A): the count-and-ratio bar over CONTENT tokens - see the constraint comment above `_PROTOCOL_VOCAB_STOPWORDS`. */
+function _contentOverlapMeetsBar(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  const setA = new Set(a);
+  const sharedCount = b.reduce((n, t) => n + (setA.has(t) ? 1 : 0), 0);
+  if (sharedCount < _MIN_SHARED_CONTENT_TOKENS) return false;
+  return sharedCount / Math.min(a.length, b.length) >= _MIN_CONTENT_OVERLAP_RATIO;
+}
+
+/** Longest quoted span or identifier/path run `_extractSignatureTokens` inspects; caps pathological input, not ordinary queries. */
+const _MAX_SIGNATURE_SCAN_TOKENS = 128;
+
+/**
+ * Path (B): SIGNATURE tokens extracted from RAW query text - substrings
+ * shaped like a code identifier, file path, or quoted phrase. Deliberately
+ * NOT run through `tokenizeForEpoch`: its lowercase-and-split step is exactly
+ * what would destroy the camelCase/snake_case boundary this function keys off
+ * of, and it has no notion of "identifier-shaped" for CJK text - CJK
+ * same-task matching goes through `_contentOverlapMeetsBar` instead, since a
+ * `tokenizeForEpoch` script-run token IS already a content token there.
+ *
+ *  - quoted/backtick spans (double quote, single quote, or backtick, 2-80
+ *    chars): an exact phrase the caller deliberately set off.
+ *  - runs containing '/' or ending in a short extension (".ts", ".py", etc.):
+ *    path-shaped ("session.ts", "packages/mcp-server/...").
+ *  - runs with an internal lower/digit->upper transition or an underscore,
+ *    >= 4 letters total: camelCase/PascalCase/snake_case identifiers
+ *    ("tokenizeForEpoch", "task_epoch"). A bare capitalized word ("Ticket")
+ *    or a very short snake token ("is_ok") is common English-adjacent prose
+ *    and is left to path (A) instead.
+ *
+ * Known imprecision (accepted, see [T1] final report): a hyphen/slash used as
+ * plain prose punctuation ("either/or", "same-task") can occasionally look
+ * path-shaped. The failure mode is two UNRELATED queries coincidentally
+ * matching on that one shared idiom - rare, and no worse than any other
+ * single-token heuristic false positive.
+ */
+function _extractSignatureTokens(query: string): string[] {
+  const out = new Set<string>();
+  const QUOTED = /"([^"\n]{2,80})"|'([^'\n]{2,80})'|`([^`\n]{2,80})`/g;
+  for (const match of query.matchAll(QUOTED)) {
+    if (out.size >= _MAX_SIGNATURE_SCAN_TOKENS) break;
+    const span = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    if (span.length >= 2) out.add(span.toLowerCase());
+  }
+  const RUN = /[A-Za-z_][A-Za-z0-9_./-]{2,}/g;
+  for (const raw of query.match(RUN) ?? []) {
+    if (out.size >= _MAX_SIGNATURE_SCAN_TOKENS) break;
+    const trimmed = raw.replace(/^[./-]+|[./-]+$/g, "");
+    if (trimmed.length < 4) continue;
+    const isPath = trimmed.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(trimmed);
+    const isCamel = /[a-z0-9][A-Z]/.test(trimmed);
+    const isSnake = trimmed.includes("_") && trimmed.replace(/_/g, "").length >= 4;
+    if (isPath || isCamel || isSnake) out.add(trimmed.toLowerCase());
+  }
+  return [...out];
+}
+
+/**
+ * True when `phraseTokens` (>= 2 words, from decomposing ONE side's
+ * signature token) appear ADJACENTLY, in order, inside `query`'s tokenized
+ * text. Path (C)'s primitive: a snake_case/camelCase identifier and its
+ * natural-language spelled-out form are the SAME referent, just cased
+ * differently, and `tokenizeForEpoch` already normalizes case/segmentation
+ * on both sides — so the phrase need only appear as a contiguous run of
+ * `tokenizeForEpoch(query)`'s own tokens, not as a raw substring (which
+ * would be thrown off by punctuation/hyphenation between the words).
+ */
+function _phraseAppearsInQuery(phraseTokens: readonly string[], query: string): boolean {
+  if (phraseTokens.length < 2) return false;
+  const haystack = tokenizeForEpoch(query);
+  if (haystack.length < phraseTokens.length) return false;
+  for (let start = 0; start <= haystack.length - phraseTokens.length; start += 1) {
+    let matched = true;
+    for (let i = 0; i < phraseTokens.length; i += 1) {
+      if (haystack[start + i] !== phraseTokens[i]) { matched = false; break; }
+    }
+    if (matched) return true;
+  }
+  return false;
+}
+
+/**
+ * The raised same-task bar `newTaskQueryMismatch` gates on: `incomingQuery`
+ * (raw) is the SAME task as `fenceQuery` (raw, `fence.epochQuery`) when ANY
+ * of three paths is satisfied - see the constraint comment above
+ * `_PROTOCOL_VOCAB_STOPWORDS` for (A) and (B)'s full rationale.
+ *
+ * (C) CROSS-FORM PHRASE MATCH (2026-08-27, afg2_pack_answer_subquery
+ * regression: "increase the premium multiplier rounding in the rating
+ * engine" then the answer-profile sub-read "what does premium_multiplier
+ * return for a given risk tier" — a real corpus pair, not a hypothetical).
+ * Neither (A) nor (B) covers it: content overlap is 2 tokens
+ * ("premium"/"multiplier") out of 6, a 0.33 ratio below (A)'s 0.5 floor, and
+ * (B) requires a signature token on EACH side, but the FIRST query spells
+ * the phrase out in plain prose ("premium multiplier", two words - no case
+ * transition, no underscore) while only the SECOND uses the snake_case
+ * identifier. Same referent, asymmetric casing convention. (C) catches
+ * this: decompose each side's signature tokens back into words
+ * (`tokenizeForEpoch` undoes the casing exactly the way it was applied) and
+ * check whether that >= 2-word phrase appears, in order, in the OTHER
+ * query's own tokens. A coincidental multi-word phrase match across two
+ * UNRELATED queries is far less likely than a single-token or ratio
+ * coincidence, so this path stays a same-task signal on its own, not
+ * something that needs (A)/(B)'s count-and-ratio hedge.
+ */
+function _sameTaskQuery(
+  incomingQuery: string,
+  incomingTokens: readonly string[],
+  fenceQuery: string,
+  fenceTokens: readonly string[],
+): boolean {
+  const incomingSignature = _extractSignatureTokens(incomingQuery);
+  const fenceSignature = _extractSignatureTokens(fenceQuery);
+  if (_tokensOverlap(incomingSignature, fenceSignature)) return true;
+  if (
+    incomingSignature.some((t) => _phraseAppearsInQuery(tokenizeForEpoch(t), fenceQuery))
+    || fenceSignature.some((t) => _phraseAppearsInQuery(tokenizeForEpoch(t), incomingQuery))
+  ) {
+    return true;
+  }
+  return _contentOverlapMeetsBar(_contentTokens(incomingTokens), _contentTokens(fenceTokens));
+}
+
 /**
  * Cap on the accumulated epoch token union (F6). Without it, epochTokens grew
  * O(session length): every same-task pack that MERGEs unions in its fresh
@@ -1161,6 +1388,7 @@ function _emptySession(): WorkspaceSession {
     admissibleEditPaths: [],
     admissibleEditTargetPairs: [],
     recentEditRefusalSignatures: [],
+    refusedEditShapes: [],
     editedPaths: new Set(),
     singleEditCompletions: 0,
     usedEditsBatch: false,
@@ -1238,6 +1466,55 @@ const FRONTIER_HANDLE_CAP = 32;
 const FRONTIER_PATH_CAP = 16;
 const NEXT_CALL_EDIT_CAP = 8;
 const EDIT_REFUSAL_SIGNATURE_HISTORY = 8;
+/** W6: bounded per-task refusal-shape history. */
+const EDIT_REFUSAL_SHAPE_LEDGER_CAP = 32;
+
+/** Stable JSON for the W6 shape ledger; object-key order is not meaningful. */
+function canonicalEditShape(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalEditShape).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      // `operation_id` is idempotency metadata, and a challenge is the
+      // protocol-sanctioned state transition.  Every other argument remains
+      // identity-bearing, including cwd/lane/path/search.
+      .filter((key) => key !== "operation_id" && key !== "challenge")
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalEditShape(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function noteRefusedEditShape(
+  session: WorkspaceSession,
+  args: Record<string, unknown> | undefined,
+  detail: string,
+): { count: number; firstDetail: string } | undefined {
+  if (args === undefined || args["challenge"] !== undefined) return undefined;
+  const key = canonicalEditShape(args);
+  const prior = session.refusedEditShapes.find((entry) => entry.key === key);
+  if (prior !== undefined) {
+    prior.count += 1;
+    return { count: prior.count, firstDetail: prior.detail };
+  }
+  session.refusedEditShapes.push({ key, detail, count: 1 });
+  if (session.refusedEditShapes.length > EDIT_REFUSAL_SHAPE_LEDGER_CAP) {
+    session.refusedEditShapes.shift();
+  }
+  return undefined;
+}
+
+/** W6 advisory for edit refusals emitted before the execution-typestate guard. */
+export function repeatedEditRefusalAdvisory(
+  workspaceRoot: string,
+  args: Record<string, unknown>,
+  correction: string,
+): string | undefined {
+  const repeated = noteRefusedEditShape(getSession(workspaceRoot), args, correction);
+  if (repeated === undefined) return undefined;
+  return `This edit_file shape was already refused in this task (attempt ${repeated.count}); retrying it unchanged cannot change the result. First correction: ${repeated.firstDetail}`;
+}
 
 /**
  * Hard ceiling on the advertised-zoom budget a single pack can install
@@ -2163,6 +2440,16 @@ function refuseExecutionEdit(
     ...(resolveHandlePath !== undefined ? { resolveHandlePath } : {}),
     ...(knownOutsideRepack !== undefined ? { knownOutsideRepack } : {}),
   });
+  // W6: do not alter the refusal verdict or sanctioned transition.  A
+  // byte-identical retry is useful only insofar as it repeats the concrete
+  // correction the first refusal named, so attach that as advisory prose.
+  const repeatedShape = noteRefusedEditShape(session, editArgs, detail);
+  if (repeatedShape !== undefined && full.allowed === false) {
+    const currentDetail = typeof full.refusal["detail"] === "string"
+      ? `${full.refusal["detail"]} `
+      : "";
+    full.refusal["detail"] = `${currentDetail}This edit_file shape was already refused in this task (attempt ${repeatedShape.count}); retrying it unchanged cannot change the result. First correction: ${repeatedShape.firstDetail}`;
+  }
   // C2: a terminal refusal is already minimal and byte-idempotent — compacting
   // it would strip the very `unlock` it exists to advertise, which is the
   // mechanism that hid the escape from rep0 in the first place. The signature
@@ -2178,7 +2465,11 @@ function refuseExecutionEdit(
     const delta = demand !== undefined && demand.satisfiedPaths.length > 0 && remainingPaths.length > 0
       ? { paths: remainingPaths, handles: [] as string[] }
       : undefined;
-    return { allowed: false, refusal: compactEditRefusal(full.refusal, delta) };
+    const compact = compactEditRefusal(full.refusal, delta);
+    // compactEditRefusal intentionally drops most prose. W6's escalation is
+    // the exception: it is advisory-only but must survive the compact path.
+    if (repeatedShape !== undefined) compact["detail"] = full.refusal["detail"];
+    return { allowed: false, refusal: compact };
   }
   session.recentEditRefusalSignatures.push(editSignature);
   if (session.recentEditRefusalSignatures.length > EDIT_REFUSAL_SIGNATURE_HISTORY) {
@@ -2298,6 +2589,7 @@ function _clearAdmissibleEditUnion(session: WorkspaceSession): void {
   session.admissibleEditPaths = [];
   session.admissibleEditTargetPairs = [];
   session.recentEditRefusalSignatures = [];
+  session.refusedEditShapes = [];
 }
 
 /**
@@ -2529,6 +2821,7 @@ export function recordExecutionContract(
     challengeCount: 0,
     discoverySignatures: new Map(),
     zeroByteSignatures: new Set(),
+    postReadyDiscoveryCalls: 0,
     // ONE accounting home for every sanctioned post-prepared discovery call,
     // so an advertised zoom is never a new uncounted class next to the exact
     // signature follow-up.
@@ -3041,7 +3334,11 @@ function newTaskQueryMismatch(
   if (query.trim() === "") return undefined;
   const incoming = tokenizeForEpoch(query);
   if (incoming.length === 0 || fence.epochTokens.length === 0) return undefined;
-  return _tokensOverlap(incoming, fence.epochTokens) ? undefined : query;
+  // [T1] Raised same-task bar - see the constraint comment above
+  // `_PROTOCOL_VOCAB_STOPWORDS`. `_sameTaskQuery` true => same task => no
+  // mismatch (undefined); false => this query names a NEW task, so the
+  // caller re-packs into a fresh epoch (return the verbatim query).
+  return _sameTaskQuery(query, incoming, fence.epochQuery, fence.epochTokens) ? undefined : query;
 }
 
 function heldSelfMaterialReceipt(
@@ -3091,6 +3388,13 @@ function heldSelfMaterialReceipt(
     if (unservedServedRanges(state.ranges, state.totalLines).length > 0) return undefined;
   }
   if (windows.length === 0) {
+    // A partial range-ledger hit is not a whole-file residency proof. For a
+    // broad full request, leave the guard open when any complement remains so
+    // the normal full dispatcher can serve the fresh ranges (W14 L1/L3).
+    const unserved = unservedServedRanges(state.ranges, state.totalLines);
+    if (fence.phase === "prepared" && args["mode"] === "full" && unserved.length > 0) {
+      return undefined;
+    }
     // No explicit window — a whole-handle/whole-file repeat (the observed 3rd
     // `mode=full`). The ledger's own clusters ARE what those calls served.
     for (const [start, end] of covered.slice(0, SELF_MATERIAL_RECEIPT_WINDOW_CAP)) {
@@ -3260,6 +3564,7 @@ export function guardExecutionDiscovery(
     session.candidatePackPending = false;
     session.candidatePackFullReads = 0;
     session.revokedCertificateIds.clear();
+    session.refusedEditShapes = [];
     // A served-find escalation is a per-task loop ledger. Byte provenance
     // survives the epoch, but a new declared task must not inherit its
     // predecessor's occurrence count or terminal escalation.
@@ -3280,6 +3585,7 @@ export function guardExecutionDiscovery(
     }
     session.executionFence = undefined;
     _clearAdmissibleEditUnion(session);
+    session.refusedEditShapes = [];
     return { allowed: true, resetForNewTask: true };
   }
   if (fence === undefined || fence.phase === "revoked" || fence.phase === "done") return { allowed: true };
@@ -3299,6 +3605,39 @@ export function guardExecutionDiscovery(
   // explicit taskEpoch:"new" (handled before the fence lookup).  A capability
   // gap must therefore remain a discovery contract and never reach this fence.
   if (fence.phase === "prepared") {
+    // W5b: a prepared edit certificate trims the first broad full read.
+    // A concrete decision-changing challenge above revokes the fence and is
+    // the explicit escape hatch; force_serve remains unconditional recovery.
+    if (
+      fence.terminalAction === "edit"
+      && tool === "read_file"
+      && args["mode"] === "full"
+      && args["force_serve"] !== true
+    ) {
+      return { allowed: true, postReadyTrim: true };
+    }
+
+    // W5: after a ready edit decision, trim only the pre-edit discovery tail.
+    // A newly requested target has not been served, so it MUST reach the
+    // ordinary dispatcher: a prepared receipt would falsely claim unchanged
+    // content. For full reads the dispatcher converts this marker into its
+    // existing skeleton downgrade, including truthful coverage and a zoom;
+    // search/slice/symbol calls serve their ordinary real payload. force_serve
+    // remains an unconditional compaction recovery.
+    // task_pack is NOT trimmed discovery: a repeat must keep reaching the
+    // pack_unchanged receipt below, and a FRESH pack must keep taking the
+    // prepared-discovery receipt at the bottom of this phase — short-circuiting
+    // it to `allowed` would let a re-pack mint a new certificate mid-trim.
+    if (
+      postReadyTrimEnabled()
+      && args["force_serve"] !== true
+      && !(tool === "read_file" && args["mode"] === "task_pack")
+    ) {
+      fence.postReadyDiscoveryCalls += 1;
+      if (fence.postReadyDiscoveryCalls >= postReadyTrimThreshold()) {
+        return { allowed: true, postReadyTrim: true };
+      }
+    }
     // A verified cache hit is an idempotent receipt, not discovery: let it
     // reach task_pack's existing pack_unchanged encoder. The dispatcher
     // proves the hit up front, so a stale or changed pack cannot use this
@@ -3329,9 +3668,42 @@ export function guardExecutionDiscovery(
     if (consumeSanctionedZoom(fence, tool, args)) {
       return { allowed: true };
     }
+    // F-V12-1 (2026-08-27, D1-b): `search_files` bypasses the read-side
+    // residency receipt below UNCONDITIONALLY, ahead of it rather than after.
+    // heldSelfMaterialReceipt answers "do I already hold these EXACT BYTES" —
+    // a question `find`/`tree`/`references`/`symbols` never asks (they ask
+    // "where are the matches", a different question over possibly the SAME
+    // path). Its receipt shape (`{ok, reason:"already-served", windows, ...}`)
+    // has no field the search wire vocabulary renders: this dispatcher had
+    // already committed the response to `search.matches` (noteResolvedAction),
+    // so addressing that receipt through the search projector silently
+    // defaulted every search field to empty — `query:"", total_files:0,
+    // total_matches:0, files:[]` — a FABRICATED absence certificate for a
+    // token provably present in a file this session holds, indistinguishable
+    // on the wire from a genuine scope-complete zero-match. Measured: a
+    // `search_files action=find path=<file>` (any query text, regex/literal/
+    // queries[] alike) reproducibly returns this false-empty response, but
+    // ONLY while an active `prepared` certificate's evidence/edit material
+    // includes that exact path — the same signature reissued after
+    // `taskEpoch:"new"`, or in a fresh session, or from a `discover`-phase
+    // session, searches for real. Root cause: this call reached
+    // heldSelfMaterialReceipt BEFORE the tool==="search_files" bypass a few
+    // lines below, which the 2026-08-22 fence-serves-unserved-scope wave
+    // already states as this fence's intent ("`search_files` (any action)...
+    // now reach the ordinary...path below this guard") — that wave's own
+    // regression spec (fenceServesUnservedScope.rc.spec.ts) never drove a
+    // find scoped to the certificate's OWN evidence path, so the ordering gap
+    // survived. The search-appropriate "you already hold this" answer already
+    // exists downstream, correctly worded and line-accurate:
+    // applyServedFindProtocol/servedFindEscalation.ts's `all_served`/
+    // escalation, which this bypass now reaches unconditionally instead.
+    if (tool === "search_files") {
+      return { allowed: true };
+    }
     // A residency proof over the fence's OWN evidence/edit material: "content
     // the caller already has" (required semantics #1(b)) — keeps its receipt
-    // unconditionally, including past the change below.
+    // unconditionally, including past the change below. `read_file` only —
+    // `search_files` is bypassed above (F-V12-1).
     const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
     if (receipt !== undefined) {
       return { allowed: false, servedReceipt: receipt };
@@ -3341,18 +3713,19 @@ export function guardExecutionDiscovery(
     // arm-wide; v0.10 had the same loop on T07/T13). A prepared certificate is
     // a terminal verdict about the ANSWER/EDIT decision, not a lock on
     // further READ-ONLY discovery of scope this session has not proven itself
-    // to hold. `search_files` (any action) and `read_file` in any mode OTHER
-    // than `task_pack` now reach the ordinary, fence-INDEPENDENT serve/dedup
-    // path below this guard — the same one that runs when no fence exists at
-    // all, and the one `servedReceipts.spec.ts` / `receiptHonesty.spec.ts`
-    // already hold to "an already-served re-ask receipts, everything else
-    // serves real bytes" (servedContentReceipt's own code-unchanged tag).
-    // Only `task_pack` stays gated here: a fresh pack mints a NEW certificate,
+    // to hold. `read_file` in any mode OTHER than `task_pack` reaches the
+    // ordinary, fence-INDEPENDENT serve/dedup path below this guard — the same
+    // one that runs when no fence exists at all, and the one
+    // `servedReceipts.spec.ts` / `receiptHonesty.spec.ts` already hold to "an
+    // already-served re-ask receipts, everything else serves real bytes"
+    // (servedContentReceipt's own code-unchanged tag). `search_files` no
+    // longer needs naming here — it already returned above (F-V12-1). Only
+    // `task_pack` stays gated here: a fresh pack mints a NEW certificate,
     // which is exactly the transition the epoch boundary (`taskEpoch:"new"`,
     // or the qref/cache-hit shortcut above) exists to make deliberate rather
     // than incidental — see `preparedDiscoveryReceipt` and `readFamily.ts`'s
     // `receiptHasContinuation` for what still happens to that narrower class.
-    if (tool === "search_files" || (tool === "read_file" && args["mode"] !== "task_pack")) {
+    if (tool === "read_file" && args["mode"] !== "task_pack") {
       return { allowed: true };
     }
     return {
@@ -4338,6 +4711,243 @@ export function settleServedRanges(
     state.spans = kept;
     materializeServedRanges(state);
   }
+}
+
+// ---------------------------------------------------------------------------
+// B2 / V12-02 — DELTA CONTEXT (TL_DELTA_CONTEXT, default OFF)
+// ---------------------------------------------------------------------------
+
+/**
+ * The one hunk an edit this server applied actually produced, in PRE-edit file
+ * line coordinates. Derived from the before/after BYTES by
+ * `write/deltaContext.ts`'s `computeEditHunkGeometry` — never from replaying
+ * the caller's `search`/`replace` strings, which recover across escaping and
+ * indentation drift and therefore do not name the lines that changed.
+ */
+export interface ServedRangeEditHunk {
+  /**
+   * First PRE-edit line NOT covered by the common prefix (1-based). Every line
+   * strictly below it is byte-identical in the post-edit file AT THE SAME
+   * INDEX — that identity is what makes a surviving span honest.
+   */
+  preStart: number;
+  /**
+   * Last PRE-edit line NOT covered by the common suffix (1-based). Every line
+   * strictly above it is byte-identical in the post-edit file at index+`delta`.
+   * `preEnd === preStart - 1` denotes a PURE INSERTION (nothing was replaced).
+   */
+  preEnd: number;
+  /** postLineCount - preLineCount. */
+  delta: number;
+}
+
+/** One surviving piece of a span, after the hunk is applied to it. */
+interface TransformedPiece {
+  start: number;
+  end: number;
+}
+
+/**
+ * Project one PRE-edit span through `hunk`, returning the pieces whose bytes
+ * are PROVABLY unchanged and where they now live.
+ *
+ * THE WHOLE SAFETY ARGUMENT, IN THREE LINES:
+ *   - lines `< hunk.preStart` are the common PREFIX: identical, same index;
+ *   - lines `> hunk.preEnd` are the common SUFFIX: identical, index + delta;
+ *   - everything between is the change itself, and is DROPPED.
+ * Nothing else is claimed. A span straddling the hunk is TRUNCATED to its
+ * surviving head/tail rather than kept whole (which would claim changed bytes)
+ * or dropped whole (which would throw away the head of a fully-read file — the
+ * case the lever exists for). Truncation cannot mis-map: the two facts above
+ * are byte identities established by `computeEditHunkGeometry` from the actual
+ * texts, so a kept piece names bytes the caller demonstrably still holds.
+ *
+ * SYMBOL/SECTION INTEGRITY. Spans are FILE-LINE claims, not symbol claims —
+ * mode=symbol's assembled view is already modelled back into file lines at its
+ * recording site — so a truncated span never splits a symbol "ambiguously": it
+ * names fewer lines, each still byte-exact. Where a piece would be empty or
+ * inverted it is simply not emitted, which is the invalidation this contract
+ * prefers over any inferred mapping.
+ */
+function transformSpanAcrossHunk(
+  start: number,
+  end: number,
+  hunk: ServedRangeEditHunk,
+): TransformedPiece[] {
+  const pieces: TransformedPiece[] = [];
+  // Head: the part of the span strictly below the change — unmoved.
+  const headEnd = Math.min(end, hunk.preStart - 1);
+  if (start <= headEnd) pieces.push({ start, end: headEnd });
+  // Tail: the part strictly above the change — shifted by the net line delta.
+  const tailStart = Math.max(start, hunk.preEnd + 1);
+  if (tailStart <= end) {
+    pieces.push({ start: tailStart + hunk.delta, end: end + hunk.delta });
+  }
+  return pieces;
+}
+
+/**
+ * B2 / V12-02: re-project the served-range ledger entry for `relPath` across an
+ * edit THIS SERVER just applied, so a post-edit re-read serves only what
+ * actually changed.
+ *
+ * Returns a summary when it transformed an entry, `undefined` when it did not
+ * (no entry, or the entry describes a different sha than the bytes that were
+ * replaced). `beforeSha` is a PRECONDITION, not a hint: the entry is touched
+ * only when it demonstrably describes the exact pre-edit content, which is what
+ * makes this safe to call from the write seam without knowing which read path
+ * booked the spans.
+ *
+ * ONLY SERVER-APPLIED HUNKS REACH HERE. The single caller is
+ * `write/atomicWrite.ts`'s `writeExistingFileAtomic`, AFTER its rename has
+ * succeeded — the narrowest seam every existing-file edit, intent and
+ * rollback-restore funnels through. A write that threw never transforms
+ * (the old bytes are still on disk and the old entry still describes them); an
+ * EXTERNAL write never transforms (nothing calls this), and the sha it leaves
+ * behind no longer matches the entry, so the ordinary sha-mismatch fallback
+ * serves the full body.
+ *
+ * A rollback-restore is itself a write through the same seam, so it transforms
+ * in reverse and the ledger tracks the bytes on disk either way; because the
+ * changed region is dropped in BOTH directions, the composition is always a
+ * subset of what is honestly held, never a superset.
+ */
+export function transformServedRangesAcrossServerEdit(
+  workspaceRoot: string,
+  relPath: string,
+  beforeSha: string,
+  afterSha: string,
+  afterTotalLines: number,
+  hunk: ServedRangeEditHunk,
+): { kept: number; dropped: number; shifted: number; heldLines: number } | undefined {
+  const session = getSession(workspaceRoot);
+  const state = session.servedRangeLedger.get(relPath);
+  if (state === undefined || state.fileSha !== beforeSha) return undefined;
+
+  // A PRE-EDIT BOOKING CANNOT BE ADJUDICATED BY A POST-EDIT RESPONSE.
+  //
+  // `settleServedRanges` is contracted to run once per response against that
+  // response's own windows, but `emitFinalizedPayload` only invokes it when
+  // `context.workspace` is set — which today is the EDIT path (`finishEdit`'s
+  // `noteWorkspaceRoot`). A read's provisional spans therefore stay pending and
+  // are settled against the NEXT EDIT's payload, and an `edit.applied` declares
+  // no addressed body window at all (`applied[].head` is a string ARRAY, so
+  // `servedWindowsOf` books nothing). The result is that the read's span — for
+  // bytes that response demonstrably carried — is retracted by an unrelated
+  // later response, which silently deleted the head of every carried ledger
+  // here (reproduced 2026-08-27; reported as an independent defect, since with
+  // the sha reset it is otherwise invisible).
+  //
+  // Retracting THIS path's pending spans is not something this function can
+  // decide honestly, and neither is confirming them; what it can say is that
+  // pre-edit coordinates no longer describe the file. So they are DISCHARGED:
+  // removed from the pending list without touching the spans they refer to,
+  // which are re-projected below on their own merits. Flag-gated by the sole
+  // caller, so nothing changes while TL_DELTA_CONTEXT is off.
+  if (session.pendingServeSpans.length > 0) {
+    session.pendingServeSpans = session.pendingServeSpans
+      .filter((span) => !_servePathsMatch(span.path, relPath));
+  }
+
+  let dropped = 0;
+  let shifted = 0;
+  const kept: ServedRangeSpan[] = [];
+  for (const span of state.spans) {
+    const pieces = afterTotalLines >= 1
+      ? transformSpanAcrossHunk(span.start, span.end, hunk)
+      : [];
+    if (pieces.length === 0) {
+      dropped += 1;
+      continue;
+    }
+    if (pieces.length > 1 || pieces[0]!.start !== span.start || pieces[0]!.end !== span.end) {
+      shifted += 1;
+    }
+    pieces.forEach((piece, index) => {
+      // Clamp defensively against the POST-edit file. The identities above
+      // already keep every piece in range; a clamp costs nothing and makes a
+      // future geometry bug an under-claim rather than a receipt for lines the
+      // file does not have.
+      const pieceStart = Math.max(1, Math.min(afterTotalLines, piece.start));
+      const pieceEnd = Math.max(pieceStart, Math.min(afterTotalLines, piece.end));
+      kept.push({
+        start: pieceStart,
+        end: pieceEnd,
+        // The provenance label names the CALL that put these bytes on the wire
+        // and the window it was asked for. Both remain true — the bytes are the
+        // same bytes — so the label rides through verbatim rather than being
+        // rewritten with post-edit coordinates it never described.
+        by: span.by,
+        // [R5-10] identity must stay UNIQUE: a straddling span splits into two
+        // pieces, and reusing one id for both would let a single retraction
+        // delete a piece the response did corroborate. The head keeps the
+        // original id (so a retraction still pending from this call finds it);
+        // each further piece mints its own.
+        id: index === 0 ? span.id : (session.serveSpanSerial += 1),
+      });
+    });
+  }
+
+  if (kept.length === 0) {
+    // Same reasoning as settleServedRanges': an emptied state would pin a sha
+    // and make the next serve look like a reset instead of the first serve of
+    // this content that it is.
+    session.servedRangeLedger.delete(relPath);
+    return { kept: 0, dropped, shifted, heldLines: 0 };
+  }
+
+  state.fileSha = afterSha;
+  state.totalLines = afterTotalLines;
+  state.deltaFromSha = beforeSha;
+  state.spans = kept;
+  materializeServedRanges(state);
+  const heldLines = state.ranges.reduce((sum, [start, end]) => sum + (end - start + 1), 0);
+  return { kept: state.spans.length, dropped, shifted, heldLines };
+}
+
+/**
+ * B2 / V12-02: does this session hold ANY served-range claim for `relPath`?
+ *
+ * The write seam's arming check. It is deliberately sha-BLIND: the seam asks
+ * before the write, when it is about to decide whether reading the pre-edit
+ * bytes is worth a syscall, and `transformServedRangesAcrossServerEdit` does
+ * the authoritative sha check afterwards.
+ */
+export function hasServedRangeLedgerEntry(workspaceRoot: string, relPath: string): boolean {
+  return getSession(workspaceRoot).servedRangeLedger.has(relPath);
+}
+
+/**
+ * B2 / V12-02: what a read should do about this path's delta-derived ledger
+ * entry, given the sha of the bytes ACTUALLY on disk right now.
+ *
+ *   `"carried"` — the entry survived a server edit and still describes the disk
+ *                 (`ServedRangeLedgerState.deltaFromSha` present, shas agree).
+ *                 This is the ONLY value any delta-serving branch acts on, so
+ *                 no branch can fire on an entry the transformation never
+ *                 touched — which is what keeps TL_DELTA_CONTEXT from widening
+ *                 TL_OVERLAP_TRIM's scope, or vice versa.
+ *   `"dropped"` — THE BASE-MISMATCH FALLBACK: something outside this server
+ *                 wrote the file after the transformation, so the entry is
+ *                 deleted here and the caller serves the full body.
+ *                 `servedRangeCoverage` would already answer "no claim" on the
+ *                 sha mismatch; deleting makes it final, so a later revert to
+ *                 the same bytes cannot resurrect a projection whose provenance
+ *                 chain now has a hole in it.
+ *   `undefined` — nothing delta-derived here; the caller's ordinary
+ *                 (TL_OVERLAP_TRIM / receipt / full-serve) logic decides.
+ */
+export function deltaLedgerStatus(
+  workspaceRoot: string,
+  relPath: string,
+  diskSha: string,
+): "carried" | "dropped" | undefined {
+  const session = getSession(workspaceRoot);
+  const state = session.servedRangeLedger.get(relPath);
+  if (state === undefined || state.deltaFromSha === undefined) return undefined;
+  if (state.fileSha === diskSha) return "carried";
+  session.servedRangeLedger.delete(relPath);
+  return "dropped";
 }
 
 /**

@@ -262,6 +262,31 @@ describe("workspace setup", () => {
     });
   });
 
+  it("reports whether the CLAUDE.md managed guide block is present", async () => {
+    const registryRoot = join(
+      tmpdir(),
+      `tokenlighten-workspace-guide-${randomUUID()}`,
+    );
+    const registryPath = join(registryRoot, "config.toml");
+    const root = join(registryRoot, "workspace");
+    mkdirSync(root, { recursive: true });
+    const setup = await setupWorkspace({ root, clients: ["vscode"] });
+    recordWorkspaceSetup(setup, registryPath);
+
+    expect(workspaceStatus(root, registryPath)).toMatchObject({
+      configured: true,
+      reason: "ready",
+      guidePresent: true,
+    });
+
+    writeFileSync(join(root, "CLAUDE.md"), "# No managed guide here\n");
+    expect(workspaceStatus(root, registryPath)).toMatchObject({
+      configured: true,
+      reason: "ready",
+      guidePresent: false,
+    });
+  });
+
   it("compares canonical Windows workspace paths case-insensitively", () => {
     expect(workspacePathsEqual(
       "C:\\Users\\Example\\Workspace",

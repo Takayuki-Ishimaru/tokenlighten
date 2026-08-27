@@ -241,7 +241,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     process.exit(0);
   } else if (args.command === "--version" || args.command === "-v") {
     // Hardcoded literal — bump by hand alongside package.json's "version".
-    process.stdout.write("tl-skeleton 0.11.1\n");
+    process.stdout.write("tl-skeleton 0.12.0\n");
   } else {
     die(`Unknown command '${args.command}'. Run 'tl-skeleton --help' for usage.`);
   }

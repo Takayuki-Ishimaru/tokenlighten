@@ -118,6 +118,84 @@ function hasCertificateForTerminal(contract: TaskExecutionContract): boolean {
     && (contract.next_action === "answer" || contract.next_action === "edit");
 }
 
+// F-B3 (2026-08-27, v0.12 wave B3, DESIGN-v0.12-plan.md §2 柱B row B3).
+//
+// readCodeTaskPack.ts's `dedupeTrimAndPersist` ("V11-03 SECOND SEAM") can
+// append an `unserved-obligation:<path> (...)` entry to `result.missing`
+// AFTER `execution_contract` was already built and certified — the seam's
+// own doc comment records this as deliberate: re-running
+// `buildTaskExecutionContract`/its `capability_gaps` computation sits in
+// "the receipt/certificate territory this workstream does not touch", and a
+// fully re-certified in-pack reconciliation was judged to need pipeline
+// restructuring (recorded as finding F-B3 instead of attempted inline).
+//
+// Matches ONLY the exact marker the seam writes (obligations threaded from
+// priorPackStore.ts's `PriorObligationRecord`s via `queryPriorPackObligations`)
+// — a narrow, same-call staleness detector, not a general "does this pack
+// have any missing entry" check.
+const UNSERVED_PRIOR_PACK_OBLIGATION_RE = /^unserved-obligation:(.+?) \(/;
+
+function unservedPriorPackObligationZoom(result: TaskPackResult): ContinuationCall | undefined {
+  if (!Array.isArray(result.missing)) return undefined;
+  for (const entry of result.missing) {
+    if (typeof entry !== "string") continue;
+    const match = UNSERVED_PRIOR_PACK_OBLIGATION_RE.exec(entry);
+    const obligationPath = match?.[1];
+    if (obligationPath !== undefined && obligationPath.length > 0) {
+      return { tool: "read_file", arguments: { path: obligationPath } };
+    }
+  }
+  return undefined;
+}
+
+function hasUnservedPriorPackObligation(result: TaskPackResult): boolean {
+  return unservedPriorPackObligationZoom(result) !== undefined;
+}
+
+// P0 defect 2/3 (2026-08-27) — F-B3's family, widened from SAME-CALL to
+// SAME-EPOCH-AGAINST-PERSISTED-CONTRACT.
+//
+// F-B3's own comment named its limit: "a narrow, same-call staleness detector,
+// not a general 'does this pack have any missing entry' check", with the
+// general fix "judged to need pipeline restructuring". readCodeTaskPack.ts's
+// `reconcileEpochTaskContract` supplies the missing half — a task contract
+// (required roles + concern tokens + source query) persisted at the first pack
+// of an epoch in `taskContractStore.ts` — and discloses what a NARROWED
+// continuation left unserved against it. This is the matching demotion: a
+// certificate may not stand while the epoch's own standing requirements are
+// open, exactly as it may not stand over a stale prior-pack obligation.
+//
+// Matches ONLY the two exact markers that reconciliation writes; every other
+// `missing[]` entry (role names, byte-budget notes, unreadable caller paths)
+// is untouched, so this stays as narrow as the detector it extends.
+const UNSERVED_EPOCH_ROLE_RE = /^unserved-required-role:([^ ]+) \(.*query="(.*)" surfaceRoles=\["([^"]+)"\]\)$/;
+const UNCOVERED_EPOCH_CONCERN_RE = /^uncovered-concern:([^ ]+) \(/;
+
+function unservedEpochContractZoom(result: TaskPackResult): ContinuationCall | undefined {
+  if (!Array.isArray(result.missing)) return undefined;
+  for (const entry of result.missing) {
+    if (typeof entry !== "string") continue;
+    const role = UNSERVED_EPOCH_ROLE_RE.exec(entry);
+    if (role !== null) {
+      // The epoch's SOURCE query, restored from the marker — never this
+      // narrowed call's own text, which is what let the universe shrink.
+      return {
+        tool: "read_file",
+        arguments: { mode: "task_pack", query: role[2]!, surfaceRoles: [role[3]!] },
+      };
+    }
+    const concern = UNCOVERED_EPOCH_CONCERN_RE.exec(entry);
+    if (concern !== null) {
+      return { tool: "search_files", arguments: { action: "find", query: concern[1]! } };
+    }
+  }
+  return undefined;
+}
+
+function hasUnservedEpochContract(result: TaskPackResult): boolean {
+  return unservedEpochContractZoom(result) !== undefined;
+}
+
 /**
  * A ready answer may name extra code affordances, but only an explicit
  * answer-route Markdown remainder is mandatory answer evidence. Keep this
@@ -202,6 +280,50 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
       kind: "discover",
       next_call: requiredZoom,
       reason: "answer evidence is partial; zoom the served document before answering",
+    };
+  }
+
+  // F-B3: the same staleness `unservedPriorPackObligationZoom`'s doc comment
+  // explains — a same-call reconciliation disclosure must demote THIS
+  // response's own certificate, not just the next pack's. Scoped to
+  // `phase === "prepared"` (a certificate exists to demote) and checked
+  // BEFORE the certificate gate below, the same position
+  // `requiredAnswerDocumentZoom` uses for the same reason: a stale ready
+  // certificate must not hide evidence this same response already disclosed
+  // as unserved.
+  const staleObligationZoom = contract.typestate.phase === "prepared"
+    ? unservedPriorPackObligationZoom(result)
+    : undefined;
+  if (staleObligationZoom !== undefined) {
+    return {
+      kind: "discover",
+      next_call: staleObligationZoom,
+      reason: "an earlier pack in this task recorded an edit obligation this response's own reconciliation just found unserved; re-fetch it before treating this certificate as authoritative",
+    };
+  }
+
+  // P0 defect 2/3: same position, same reason, one axis out — a certificate
+  // certifies against THIS call's query, and this response has just disclosed
+  // that the TASK still requires something no served evidence covers.
+  //
+  // Gated on a certificate BINDING rather than on `phase === "prepared"`
+  // (F-B3's gate) because the terminal gate below is `hasCertificateForTerminal`,
+  // which reads `state`/`discovery_complete`/binding and never reads the phase.
+  // Gated on SOMETHING, though, and deliberately: a pack with no certificate is
+  // already non-terminal, and hijacking its own evidence-grounded next_call for
+  // a requirement this workspace may be unable to satisfy would trade a false
+  // certification for a dead-end loop. Demoting only a certificate-bearing pack
+  // costs exactly one turn in the worst case — the re-pack it names is either
+  // satisfied or comes back uncertified, and an uncertified pack is not
+  // demoted again.
+  const epochContractZoom = hasCertificateBinding(contract)
+    ? unservedEpochContractZoom(result)
+    : undefined;
+  if (epochContractZoom !== undefined) {
+    return {
+      kind: "discover",
+      next_call: epochContractZoom,
+      reason: "an earlier pack in this task established a requirement no served evidence covers; close it against the task's own query before certifying this narrowed pack",
     };
   }
 
@@ -525,6 +647,29 @@ function repairCompleteCoverageWithGaps(
     // normally carry one) is left untouched rather than cleared.
     result.coverage = "partial";
   }
+  // F-B3: same coverage-honesty repair, keyed off the stale prior-pack
+  // obligation `deriveCanonicalTaskDecision` demoted to `discover` above,
+  // instead of `capability_gaps` — V11-03's seam never touches
+  // capability_gaps, only `result.missing` and priorPackStore's own state
+  // (see the seam's doc comment in dedupeTrimAndPersist).
+  if (
+    result.coverage === "complete"
+    && decision.kind === "discover"
+    && hasUnservedPriorPackObligation(result)
+  ) {
+    result.coverage = "partial";
+  }
+  // P0 defect 2/3: the same repair for the epoch-contract disclosure.
+  // `reconcileEpochTaskContract` already lowers coverage where it runs; this
+  // keeps the invariant true for any OTHER path that reaches the exit carrying
+  // the marker (a receipt/fallback envelope rebuilt after that reconciliation).
+  if (
+    result.coverage === "complete"
+    && decision.kind === "discover"
+    && hasUnservedEpochContract(result)
+  ) {
+    result.coverage = "partial";
+  }
 }
 
 /** Apply the canonical decision at the shared task-pack exit. */
@@ -731,6 +876,36 @@ export function canonicalTaskDecisionInvariantViolations(result: TaskPackResult)
     && deriveCanonicalTaskDecision(result)?.kind === "discover"
   ) {
     violations.push("complete-coverage-forbids-discover-gaps");
+  }
+  // F-B3 (2026-08-27): the mirror of the check just above, for the OTHER
+  // route to the same contradiction — a `prepared` certificate (not yet
+  // re-derived) beside a same-call reconciliation that just disclosed an
+  // unserved prior-pack edit obligation. `deriveCanonicalTaskDecision`
+  // already demotes this shape to `discover` (see
+  // `unservedPriorPackObligationZoom`'s call site above); this is the
+  // matching oracle entry so `needsRepair` actually observes the
+  // contradiction and `applyCanonicalTaskDecision` applies the demotion,
+  // instead of silently deriving a corrected `decision` that nothing acts on
+  // (`needsRepair` gates every mutation below on a violation existing here).
+  if (
+    phase === "prepared"
+    && hasUnservedPriorPackObligation(result)
+    && deriveCanonicalTaskDecision(result)?.kind === "discover"
+  ) {
+    violations.push("prepared-certificate-forbids-unserved-obligation");
+  }
+  // P0 defect 2/3: the same oracle entry for the epoch-contract disclosure, so
+  // `needsRepair` observes the contradiction and `applyCanonicalTaskDecision`
+  // actually applies the demotion rather than deriving a corrected decision
+  // nothing acts on. Keyed on the certificate binding the demotion itself is
+  // keyed on, not on the phase, so the two cannot disagree about which shapes
+  // are demotable.
+  if (
+    hasCertificateBinding(contract)
+    && hasUnservedEpochContract(result)
+    && deriveCanonicalTaskDecision(result)?.kind === "discover"
+  ) {
+    violations.push("certificate-forbids-unserved-epoch-contract");
   }
   return violations;
 }

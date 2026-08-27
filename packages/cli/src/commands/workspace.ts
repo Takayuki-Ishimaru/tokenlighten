@@ -10,7 +10,7 @@ import {
 import { dirname, join, relative, resolve, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
 import crossSpawn from "cross-spawn";
-import { injectAll } from "@tokenlighten/agents-md";
+import { injectAll, parseSentinelBlock } from "@tokenlighten/agents-md";
 import type {
   TokenLightenSetupClient,
   TokenLightenWorkspaceListResult,
@@ -25,6 +25,7 @@ import {
 } from "../config.js";
 import { resolveStableLauncher } from "../launcher.js";
 import { configFilePath } from "../paths.js";
+import { wantsHelp } from "../util/helpFlag.js";
 
 const CLIENTS = new Set<TokenLightenSetupClient>([
   "vscode",
@@ -317,6 +318,14 @@ export interface WorkspaceStatusResult {
   reason: WorkspaceStatusReason;
   writeEnabled?: boolean;
   usageLoggingEnabled?: boolean;
+  /**
+   * Whether CLAUDE.md at the workspace root currently contains a
+   * TokenLighten-managed guide block. Natural delivery (AGENTS.md/CLAUDE.md
+   * autoload) depends on this block; losing it is the largest measured cost
+   * regression observed to date (see release-docs/getting-started.md).
+   * Present whenever the workspace root itself could be resolved.
+   */
+  guidePresent?: boolean;
 }
 
 export function workspacePathsEqual(
@@ -399,6 +408,18 @@ function hasValidVsCodeServer(
   }
 }
 
+function hasManagedGuideBlock(root: string): boolean {
+  const target = join(root, "CLAUDE.md");
+  try {
+    if (!existsSync(target) || lstatSync(target).isSymbolicLink()) {
+      return false;
+    }
+    return parseSentinelBlock(readFileSync(target, "utf8")).block !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 export function workspaceStatus(
   requestedRoot: string,
   registryPath = configFilePath(),
@@ -413,6 +434,7 @@ export function workspaceStatus(
     };
   }
   const root = realpathSync(fallbackRoot);
+  const guidePresent = hasManagedGuideBlock(root);
   let registry: TokenLightenWorkspaceListResult;
   try {
     registry = listWorkspaces(registryPath);
@@ -422,6 +444,7 @@ export function workspaceStatus(
       workspaceRoot: root,
       configured: false,
       reason: "registry-unavailable",
+      guidePresent,
     };
   }
   const entry = registry.workspaces.find(
@@ -433,6 +456,7 @@ export function workspaceStatus(
       workspaceRoot: root,
       configured: false,
       reason: "not-registered",
+      guidePresent,
     };
   }
   if (!entry.clients.includes("vscode")) {
@@ -441,6 +465,7 @@ export function workspaceStatus(
       workspaceRoot: root,
       configured: false,
       reason: "vscode-not-registered",
+      guidePresent,
     };
   }
   if (
@@ -451,6 +476,7 @@ export function workspaceStatus(
       workspaceRoot: root,
       configured: false,
       reason: "vscode-config-invalid",
+      guidePresent,
     };
   }
   return {
@@ -460,6 +486,7 @@ export function workspaceStatus(
     reason: "ready",
     writeEnabled: entry.writeEnabled,
     usageLoggingEnabled: entry.usageLoggingEnabled,
+    guidePresent,
   };
 }
 
@@ -564,7 +591,7 @@ export async function runWorkspace(
   options: RunWorkspaceOptions = {},
 ): Promise<void> {
   const [sub, ...rest] = args;
-  if (!sub || sub === "--help" || sub === "-h") {
+  if (!sub || wantsHelp(args)) {
     process.stdout.write(WORKSPACE_USAGE);
     return;
   }
@@ -581,6 +608,14 @@ export async function runWorkspace(
         ? `TokenLighten is configured for ${result.workspaceRoot}.\n`
         : `TokenLighten is not configured for ${result.workspaceRoot} (${result.reason}).\n`,
     );
+    if (result.guidePresent === false) {
+      process.stdout.write(
+        "warning: no TokenLighten-managed guide block found in CLAUDE.md. "
+          + "Natural delivery depends on this block; removing it is the "
+          + "largest measured cost regression observed to date. Run "
+          + "'tl workspace setup' to restore it.\n",
+      );
+    }
     return;
   }
   if (sub === "list") {

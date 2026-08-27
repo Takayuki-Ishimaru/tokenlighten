@@ -26,6 +26,7 @@ import { evaluateImpactGuard, isFastPathEligible } from "../write/impactGuard.js
 import { selectEditRepresentation } from "../write/editSelector.js";
 import { verifyTargetFingerprint } from "../write/targetFingerprint.js";
 import { runFocusedVerification } from "../write/focusedVerification.js";
+import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/textDecode.js";
 
 /**
  * Resolve the realpath of an existing file (or its first existing ancestor for
@@ -189,7 +190,19 @@ export async function searchReplaceEdit(
         code: "file-too-large",
       };
     }
-    existingContent = fs.readFileSync(absPath, "utf8");
+    // 2026-08-27 (write-path fail-closed guard): sniff BEFORE trusting a
+    // plain UTF-8 decode — see util/textDecode.ts's doc comment. Full
+    // UTF-16 round-trip editing is out of scope; refusal is correct.
+    const buf = fs.readFileSync(absPath);
+    const encodingRisk = detectWriteEncodingRisk(buf);
+    if (encodingRisk) {
+      return {
+        ok: false,
+        error: writeEncodingRefusalMessage(relPath, encodingRisk),
+        code: "unsupported-encoding",
+      };
+    }
+    existingContent = buf.toString("utf8");
     existingMode = stat.mode;
     fileExists = true;
   } catch (err) {

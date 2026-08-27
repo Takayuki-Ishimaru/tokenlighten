@@ -16,13 +16,18 @@ import * as os from "os";
 import * as path from "path";
 import type { TaskPackResult } from "../features/task-pack/model.js";
 import {
+  deriveEditClosureOps,
   deriveProjectionOps,
   emptyIrV2State,
   projectTaskReasoningIrV2,
   IRV2_GOAL_MAX_CHARS,
   IRV2_OBLIGATIONS_MAX,
 } from "../task-state/reasoningIrV2.js";
-import { deriveIrTaskRef, recordReasoningIrV2FromPack } from "../task-state/irDispatchSeam.js";
+import {
+  deriveIrTaskRef,
+  recordReasoningIrV2ClosureFromEdit,
+  recordReasoningIrV2FromPack,
+} from "../task-state/irDispatchSeam.js";
 import { irStateKey, loadIrState } from "../task-state/irStore.js";
 import { applyReasoningDelta, buildReasoningDelta, computeTaskStateHash } from "../task-state/reasoningDelta.js";
 import { resetStateStoresForTests } from "../state/stateStore.js";
@@ -295,6 +300,99 @@ describe("V11-04 projection — cumulative merge and delta derivation", () => {
   });
 });
 
+describe("V11-04 projection — deriveEditClosureOps (A1-pre edit-driven closure)", () => {
+  it("closes an open, non-advisory obligation whose grounding evidence path was just edited", () => {
+    const projected = projectTaskReasoningIrV2({
+      result: pack({ change_contract: contract([obligation("o1", "h1")]) }),
+      taskId: "t",
+    });
+    expect(projected.obligations[0]).toMatchObject({ id: "pack:o1", state: "open" });
+
+    const ops = deriveEditClosureOps(projected, ["src/a.ts"]);
+    expect(ops).toEqual([{ op: "close", target: "obligation", id: "pack:o1" }]);
+  });
+
+  it("emits NOTHING for an edited path that grounds no obligation", () => {
+    const projected = projectTaskReasoningIrV2({
+      result: pack({ change_contract: contract([obligation("o1", "h1")]) }),
+      taskId: "t",
+    });
+    expect(deriveEditClosureOps(projected, ["src/unrelated.ts"])).toEqual([]);
+  });
+
+  it("never closes a node canClose rejects — a still-open dependency blocks it despite the edit (false-satisfied guard)", () => {
+    const projected = projectTaskReasoningIrV2({
+      result: pack({
+        change_contract: contract([
+          obligation("o1", "h1"), // path defaults to src/a.ts — NOT edited below
+          obligation("o2", "h2", { path: "src/b.ts", depends_on: ["o1"] }),
+        ]),
+      }),
+      taskId: "t",
+    });
+    expect(projected.obligations.find((o) => o.id === "pack:o2")).toMatchObject({ state: "open", blockedBy: ["pack:o1"] });
+
+    // o2's own evidence path (src/b.ts) WAS edited, but o1 never was — canClose
+    // must still refuse o2, so no op is emitted for it.
+    const ops = deriveEditClosureOps(projected, ["src/b.ts"]);
+    expect(ops).toEqual([]);
+  });
+
+  it("never closes an ADVISORY (heuristic) node, even one that happens to share a grounding path", () => {
+    const projected = projectTaskReasoningIrV2({
+      result: pack({
+        execution_contract: {
+          typestate: { phase: "discovering" },
+          reason: "the intent is ambiguous",
+          capability_gaps: [{ kind: "semantic", reason: "the intent is ambiguous" }],
+        } as never,
+      }),
+      taskId: "t",
+    });
+    const gap = projected.obligations.find((o) => o.id.startsWith("gap:"))!;
+    expect(gap).toMatchObject({ advisory: true, state: "open" });
+    // A heuristic gap carries no evidenceRefs, so it can never be a candidate —
+    // proving both the advisory filter and the grounding filter reject it.
+    expect(deriveEditClosureOps(projected, ["src/a.ts", "src/b.ts", "src/c.test.ts"])).toEqual([]);
+  });
+
+  it("closes a dependent obligation in the SAME edit event once its dependency closes first (fixed-point, not one pass)", () => {
+    const projected = projectTaskReasoningIrV2({
+      result: pack({
+        change_contract: contract([
+          obligation("o1", "h1"), // src/a.ts
+          obligation("o2", "h2", { path: "src/b.ts", depends_on: ["o1"] }),
+        ]),
+      }),
+      taskId: "t",
+    });
+    // A single batched edits[] call landed BOTH files in one edit_file success.
+    const ops = deriveEditClosureOps(projected, ["src/a.ts", "src/b.ts"]);
+    expect(new Set(ops.map((op) => (op as { id: string }).id))).toEqual(new Set(["pack:o1", "pack:o2"]));
+  });
+
+  it("is pure: does not mutate the state it is handed", () => {
+    const projected = projectTaskReasoningIrV2({
+      result: pack({ change_contract: contract([obligation("o1", "h1")]) }),
+      taskId: "t",
+    });
+    const before = JSON.stringify(projected);
+    deriveEditClosureOps(projected, ["src/a.ts"]);
+    expect(JSON.stringify(projected)).toBe(before);
+  });
+
+  it("returns no ops with nothing to close: no edited paths, or no obligations at all", () => {
+    const withObligation = projectTaskReasoningIrV2({
+      result: pack({ change_contract: contract([obligation("o1", "h1")]) }),
+      taskId: "t",
+    });
+    expect(deriveEditClosureOps(withObligation, [])).toEqual([]);
+
+    const noObligations = projectTaskReasoningIrV2({ result: pack(), taskId: "t" });
+    expect(deriveEditClosureOps(noObligations, ["src/a.ts"])).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The dispatch seam
 // ---------------------------------------------------------------------------
@@ -463,5 +561,60 @@ describe("V11-04 dispatch seam — flags-off wire byte identity", () => {
     // a statement about the SEAM, not about a branch that never ran.
     const taskRef = deriveIrTaskRef({ query: args.query });
     expect(loadIrState(ws, irStateKey({ workspaceRef: ws, taskRef, lane: "" })).ok).toBe(true);
+  });
+});
+
+describe("V11-04 dispatch seam — recordReasoningIrV2ClosureFromEdit (A1-pre)", () => {
+  it("task_pack opens an obligation (no candidate) → edit closes it → the NEXT task_pack evaluation emits the shadow candidate", () => {
+    const ws = mkWs("editclosure");
+    setTraceEnabledForTest(true);
+    process.env["TL_REASONING_IR_V2"] = "1";
+    const key = irStateKey({ workspaceRef: ws, taskRef: "q-1", lane: "" });
+    const openPack = (): TaskPackResult =>
+      pack({ coverage: "complete", change_contract: contract([obligation("o1", "h1")]) });
+
+    // 1) task_pack: a real, non-advisory obligation on src/a.ts, still open.
+    recordReasoningIrV2FromPack({ result: openPack(), workspaceRoot: ws, lane: "", query: "do it" });
+    expect(traceEvents(ws).filter((e) => e === "shadow_stop_candidate")).toEqual([]);
+    const loadedAfterPack = loadIrState(ws, key);
+    expect(loadedAfterPack.ok).toBe(true);
+    if (!loadedAfterPack.ok) return;
+    expect(loadedAfterPack.state.obligations[0]).toMatchObject({ id: "pack:o1", state: "open" });
+
+    // 2) edit_file: the certificate's own path (src/a.ts) lands.
+    recordReasoningIrV2ClosureFromEdit({ workspaceRoot: ws, lane: "", taskId: "q-1", editedPaths: ["src/a.ts"] });
+    expect(traceEvents(ws)).toContain("reasoning_ir_v2_edit_closure");
+    const loadedAfterEdit = loadIrState(ws, key);
+    expect(loadedAfterEdit.ok).toBe(true);
+    if (!loadedAfterEdit.ok) return;
+    expect(loadedAfterEdit.state.obligations[0]).toMatchObject({ id: "pack:o1", state: "satisfied" });
+    // An edit call never runs evaluateShadowStop itself — no candidate yet.
+    expect(traceEvents(ws).filter((e) => e === "shadow_stop_candidate")).toEqual([]);
+
+    // 3) the NEXT task_pack call for the SAME task: mergeWithPrior only ever
+    // ADDS, so the persisted "satisfied" o1 survives the fresh (open) re-
+    // projection unchanged, and THIS call's own evaluateShadowStop sees a
+    // fully-closed state against its fresh, complete coverage.
+    recordReasoningIrV2FromPack({ result: openPack(), workspaceRoot: ws, lane: "", query: "do it" });
+    expect(traceEvents(ws)).toContain("shadow_stop_candidate");
+  });
+
+  it("a taskId with no prior IR state is a no-op — it never conjures a task into existence", () => {
+    const ws = mkWs("editclosure-noprior");
+    setTraceEnabledForTest(true);
+    process.env["TL_REASONING_IR_V2"] = "1";
+    recordReasoningIrV2ClosureFromEdit({ workspaceRoot: ws, lane: "", taskId: "q-ghost", editedPaths: ["src/a.ts"] });
+    expect(traceEvents(ws).filter((e) => e.startsWith("reasoning_ir"))).toEqual([]);
+    expect(loadIrState(ws, irStateKey({ workspaceRef: ws, taskRef: "q-ghost", lane: "" })))
+      .toMatchObject({ ok: false, reason: "absent" });
+  });
+
+  it("is unreachable with the flag off", () => {
+    const ws = mkWs("editclosure-off");
+    setTraceEnabledForTest(true);
+    delete process.env["TL_REASONING_IR_V2"];
+    recordReasoningIrV2FromPack({ result: pack(), workspaceRoot: ws, lane: "", query: "do it" });
+    recordReasoningIrV2ClosureFromEdit({ workspaceRoot: ws, lane: "", taskId: "q-1", editedPaths: ["src/a.ts"] });
+    expect(traceEvents(ws).filter((e) => e.startsWith("reasoning_ir"))).toEqual([]);
   });
 });

@@ -6,7 +6,7 @@ Security fixes are provided for the latest released version of TokenLighten. Old
 
 ## Dependency audit status
 
-For the v0.11.1 source tree audited on 2026-08-23, `npm audit --omit=dev` reported 0 Critical, 0 High, and 2 Moderate findings in the runtime dependency view. The full source-development installation, including development dependencies, reported 1 Critical, 1 High, and 5 Moderate findings. The development-toolchain findings are outside the normal installed-VSIX runtime view.
+For the v0.12.0 public-source staging tree audited on 2026-08-27, `npm audit --omit=dev` reported 0 Critical, 0 High, and 2 Moderate findings in the runtime dependency view. The full public-source staging installation, including development dependencies, reported 1 Critical, 1 High, and 5 Moderate findings. The development-toolchain findings are outside the normal installed-VSIX runtime view.
 
 These counts are a dated snapshot rather than a statement that TokenLighten is free of vulnerabilities. Advisory data and dependency reachability can change. Users and contributors should rerun `npm audit --omit=dev` and, for source development, `npm audit` against the exact release or checkout they use.
 

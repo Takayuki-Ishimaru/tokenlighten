@@ -34,6 +34,7 @@ import {
   recordIrDelta,
 } from "./irStore.js";
 import {
+  deriveEditClosureOps,
   deriveProjectionOps,
   projectTaskReasoningIrV2,
   staleTombstoneOps,
@@ -133,6 +134,103 @@ export function recordReasoningIrV2FromPack(input: ReasoningIrSeamInput): void {
   } catch (err) {
     try {
       trace("reasoning_ir_error", { message: err instanceof Error ? err.message : String(err) }, workspaceRoot);
+    } catch {
+      /* the trace channel is best-effort; an IR defect never reaches the caller */
+    }
+  }
+}
+
+export interface ReasoningIrEditClosureInput {
+  workspaceRoot: string;
+  /** The caller's session lane; "" is the shared default lane. */
+  lane: string;
+  /**
+   * The taskRef this edit correlates to — the SAME identity `deriveIrTaskRef`
+   * produced for the task_pack call that opened the certificate this edit
+   * discharges. That call's own seam site (server.ts, the task_pack branch)
+   * never passes an explicit `taskId`, and `buildTaskPack`'s own result never
+   * sets `.qref` itself (only server.ts's post-seam `supplied.qref`
+   * reassignment does, AFTER the seam already ran), so `deriveIrTaskRef` fell
+   * through to hashing the query alone. server.ts's edit call site
+   * recomputes it the SAME way — `deriveIrTaskRef({ query: fence.epochQuery })`
+   * — never `taskQueryRef` (that produces a DIFFERENT, workspace-bound
+   * identity used only for the wire `qref` field, which is unrelated to this
+   * store's key). Absent or "" means "no provable correlation": the caller
+   * must not guess one.
+   */
+  taskId?: string;
+  /** Workspace-relative paths the edit ACTUALLY wrote (`editedPathsOf`'s own accounting — never a claim). */
+  editedPaths: readonly string[];
+}
+
+/**
+ * A1-pre — the edit-side half of the V11-04 obligation-closure gap
+ * (DESIGN-v0.12-plan.md §2 row A1-pre; see `deriveEditClosureOps`'s own doc
+ * comment for the closure rule itself). Same three-sentence contract as
+ * `recordReasoningIrV2FromPack` above: never touches the response, never
+ * throws past this function, never runs with the flag off (checked here AND
+ * at the server.ts call site).
+ *
+ * Deliberately does NOT run `evaluateShadowStop` here: that needs a coverage
+ * claim, and an edit call has none to offer honestly. The closure this
+ * persists is picked up by the NEXT task_pack call for this (task, lane) —
+ * `mergeWithPrior`/`deriveProjectionOps` already carry a prior "satisfied"
+ * obligation forward unchanged (they only ever ADD), so that call's own
+ * (pre-existing, unchanged) `evaluateShadowStop` invocation sees the closed
+ * obligation against ITS fresh coverage.
+ */
+export function recordReasoningIrV2ClosureFromEdit(input: ReasoningIrEditClosureInput): void {
+  if (!reasoningIrV2Enabled()) return;
+  const { workspaceRoot, lane, taskId, editedPaths } = input;
+  if (taskId === undefined || taskId === "" || editedPaths.length === 0) return;
+  try {
+    const key = irStateKey({ workspaceRef: workspaceRoot, taskRef: taskId, lane });
+    const loaded = loadIrState(workspaceRoot, key);
+    if (!loaded.ok) {
+      // "absent": no task_pack ever ran for this (task, lane) — nothing to
+      // close. "corrupt": fail closed exactly like the pack seam does, and
+      // say so; there is no snapshot here to recover FROM.
+      if (loaded.reason === "corrupt") {
+        trace("reasoning_ir_recovery", { reason: loaded.reason, detail: loaded.detail ?? "", seam: "edit" }, workspaceRoot);
+      }
+      return;
+    }
+
+    const ops = deriveEditClosureOps(loaded.state, editedPaths);
+    if (ops.length === 0) return;
+
+    const built = buildReasoningDelta(loaded.state, ops);
+    if (!built.ok) {
+      // Unreachable in practice — `deriveEditClosureOps` only emits a `close`
+      // op for an id its OWN canClose check already accepted against this
+      // exact state, and `buildReasoningDelta`'s only failure mode is that
+      // same check. Traced, not thrown: an IR defect degrades to a trace
+      // line everywhere else in this module too.
+      trace("reasoning_ir_delta_refused", { reason: built.reason, detail: built.detail, seam: "edit" }, workspaceRoot);
+      return;
+    }
+
+    const write = recordIrDelta(workspaceRoot, key, built.delta, built.state, loaded.recordVersion);
+    if (!write.ok) {
+      trace("reasoning_ir_write_skipped", { reason: write.reason, detail: write.detail ?? "", seam: "edit" }, workspaceRoot);
+      return;
+    }
+
+    trace(
+      "reasoning_ir_v2_edit_closure",
+      {
+        task_ref_ir: built.state.taskRef,
+        lane,
+        state_version: built.state.stateVersion,
+        state_hash: built.state.stateHash,
+        closed: ops.length,
+        edited_paths: editedPaths.length,
+      },
+      workspaceRoot,
+    );
+  } catch (err) {
+    try {
+      trace("reasoning_ir_error", { message: err instanceof Error ? err.message : String(err), seam: "edit" }, workspaceRoot);
     } catch {
       /* the trace channel is best-effort; an IR defect never reaches the caller */
     }

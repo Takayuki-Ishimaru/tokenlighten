@@ -20,6 +20,7 @@ import { trace } from "../util/trace.js";
 import { attemptGraphImpactProbe, evaluateImpactGuard, isFastPathEligible } from "../write/impactGuard.js";
 import { selectEditRepresentation } from "../write/editSelector.js";
 import { verifyTargetFingerprint } from "../write/targetFingerprint.js";
+import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/textDecode.js";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
@@ -100,7 +101,14 @@ export async function readAndEdit(
     if (stat.size > MAX_FILE_BYTES) {
       return { ok: false, error: `File exceeds 5 MB limit`, code: "file-too-large" };
     }
-    existingContent = fs.readFileSync(absPath, "utf8");
+    // 2026-08-27 (write-path fail-closed guard): sniff BEFORE trusting a
+    // plain UTF-8 decode — see util/textDecode.ts's doc comment.
+    const buf = fs.readFileSync(absPath);
+    const encodingRisk = detectWriteEncodingRisk(buf);
+    if (encodingRisk) {
+      return { ok: false, error: writeEncodingRefusalMessage(relPath, encodingRisk), code: "unsupported-encoding" };
+    }
+    existingContent = buf.toString("utf8");
     existingMode = stat.mode;
   } catch (err) {
     const errCode = (err as NodeJS.ErrnoException).code;

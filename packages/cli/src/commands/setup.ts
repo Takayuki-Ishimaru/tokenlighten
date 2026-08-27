@@ -31,6 +31,20 @@ import {
   type PrereqId,
   type PrereqStatus,
 } from "../prereqs.js";
+import { wantsHelp } from "../util/helpFlag.js";
+
+const SETUP_USAGE = `\
+Usage: tl setup [--check]
+
+Detects the OS, shell, and package manager, then reports whether node,
+python, and git meet the minimum version requirements. In an interactive
+terminal, offers to install any missing prerequisites via the detected
+package manager (prompts before running anything). In a non-interactive
+shell, prints the install commands instead of running them.
+
+  --check   Report prerequisite status as JSON and exit (alias for
+            'tl doctor --json'); never prompts or installs anything.
+`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -157,7 +171,12 @@ export async function runSetupNonInteractive(
 // runSetup
 // ---------------------------------------------------------------------------
 
-export async function runSetup(_args: string[]): Promise<void> {
+export async function runSetup(args: string[]): Promise<void> {
+  if (wantsHelp(args)) {
+    process.stdout.write(SETUP_USAGE);
+    return;
+  }
+
   // --check is handled in index.ts as alias for doctor --json prereq subset
   // but if somehow passed here, just fall through to detection.
 

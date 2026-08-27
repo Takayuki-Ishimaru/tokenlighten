@@ -21,6 +21,7 @@ import {
   type StableLauncher,
   type StableLauncherOptions,
 } from "../launcher.js";
+import { wantsHelp } from "../util/helpFlag.js";
 
 const SERVER_ID = "tokenlighten";
 const CLIENTS = ["claude-code", "codex"] as const;
@@ -882,7 +883,7 @@ function writeHuman(result: TokenLightenClientsResult | ClientProfileResult): vo
 
 export async function runClients(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args;
-  if (!subcommand || subcommand === "--help" || subcommand === "-h") {
+  if (!subcommand || wantsHelp(args)) {
     process.stdout.write(CLIENTS_USAGE);
     return;
   }

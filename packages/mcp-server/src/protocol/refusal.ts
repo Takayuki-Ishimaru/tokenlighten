@@ -825,6 +825,18 @@ export const REFUSAL_ADVISORY_KEYS: readonly string[] = [
   // that no structured field states, e.g. that `edits[]` items do NOT inherit
   // the top-level handle's path.
   "note",
+  // `remaining_queries` — FIELD DEFECT (2026-08-27 field-eval T2). A
+  // `search_files find queries[]` call over the 5-entry cap named the
+  // dropped COUNT in `hint`'s prose but never the tokens themselves, so
+  // recovery meant hand-slicing the caller's OWN original array. This is the
+  // structured tail, in `next`'s stringified form, so the follow-up call
+  // needs no slicing. Deliberately NOT spelled `remaining` — A.5.15 fixes
+  // that slot's type as a STRING (`remainingOf` above), and this is an
+  // array; a second, differently-shaped producer of the same key would make
+  // `Refusal.remaining` ambiguous on the wire. Same removability contract as
+  // every other entry in this flat list: advisory, no consumer branch
+  // required, removable under §1.5.
+  "remaining_queries",
 ];
 
 // The call-scoped WORKSPACE DISCLOSURES are a DIFFERENT CLASS from the advisory

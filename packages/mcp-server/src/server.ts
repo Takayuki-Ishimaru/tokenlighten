@@ -94,7 +94,8 @@ import {
   type VerifiedContextAttestation,
 } from "./state/contextAttestation.js";
 import { CONTEXT_STATE_META_KEY } from "@tokenlighten/types";
-import { resolveMap, resolveDigest, resolveSlice, resolveSliceRanges, extractSymbolsFromFile, READ_SYMBOL_CAP_BYTES } from "./tools/readCodeModes.js";
+import { resolveMap, resolveDigest, resolveSlice, resolveSliceRanges, extractSymbolsFromFile, READ_SYMBOL_CAP_BYTES, resolveCallerByteCeiling } from "./tools/readCodeModes.js";
+import { resolveClientProfile, resolveDefaultResponseByteCeiling } from "./protocol/codec/clientProfile.js";
 // office/csv.ts is pure and dependency-free (unlike office/xlsx.ts, which is
 // dynamic-imported to defer exceljs), so a static import here costs nothing at
 // cold start and lets the csv artifact/auto helpers below call it directly.
@@ -102,13 +103,17 @@ import { csvTable, type CsvTableResult } from "./office/csv.js";
 import { prepareOfficeDocument } from "./office/decrypt.js";
 import { resolveCredentialRef } from "./security/credentials.js";
 import { editArtifact } from "./write/artifactEdit.js";
-import { adaptiveWholeFileEnabled, decisionInvariantStrictEnabled, reasoningIrV2Enabled } from "./util/flags.js";
+import { adaptiveWholeFileEnabled, decisionInvariantStrictEnabled, deltaContextEnabled, overlapTrimEnabled, postReadyTrimEnabled, reasoningIrV2Enabled } from "./util/flags.js";
 // V11-04: the ONE advisory Task Reasoning IR v2 seam (trace-only; see its module header).
-import { recordReasoningIrV2FromPack } from "./task-state/irDispatchSeam.js";
+// A1-pre (2026-08-27): recordReasoningIrV2ClosureFromEdit is the edit-side
+// half (DESIGN-v0.12-plan.md §2) — see its call site in augmentEdit, below.
+// `deriveIrTaskRef` recomputes the SAME taskRef identity the pack seam used —
+// see that call site's comment for why this, and not `taskQueryRef`, is correct.
+import { deriveIrTaskRef, recordReasoningIrV2ClosureFromEdit, recordReasoningIrV2FromPack } from "./task-state/irDispatchSeam.js";
 import { deriveCanonicalTaskDecision, enforceCanonicalTaskDecisionAtExit } from "./features/task-pack/canonicalDecision.js";
 import type { TaskPackResult } from "./features/task-pack/model.js";
 import { projectLeanExecutionContract } from "./util/leanExecutionContract.js";
-import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, type ServedRangeLedgerReceipt } from "./state/session.js";
+import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, type ServedRangeLedgerReceipt } from "./state/session.js";
 import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, type BodyMarker } from "./util/verificationPack.js";
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
 import { getFunctionalValidationObligation, clearFunctionalValidationObligation, recordExecutedLocate } from "./util/packServeLog.js";
@@ -172,6 +177,7 @@ import {
   runWithProtocolCall,
 } from "./protocol/envelope.js";
 import { setEmittedToolCallValidator } from "./protocol/refusal.js";
+import { markReplayed } from "./protocol/editFamily.js";
 // issue #4 (host routing/discovery): the server-level `instructions` string
 // announced on every `initialize` result across all three transport legs.
 // Re-exported so the hand-rolled leg's own tests can import it from here.
@@ -540,7 +546,7 @@ const TASK_STATE_PROPS = {
   // instructs must not be one the schema hides" (the 2026-08-01 surfaceRoles
   // defect, the same reasoning that re-advertised `qref`). A schema-validating
   // client would otherwise drop the argument and silently start a fresh task.
-  task_handle: { type: "string", description: "opaque task-state handle: replay a prior task_pack's task.id to continue that task" },
+  task_handle: { type: "string", description: "opaque handle: replay a prior task_pack's task.id to continue that task" },
   // §1.3.1(3), C-6: the challenge shape is declared IN FULL, on every tool
   // that accepts it. This is not an ergonomic extra — §2.6 abolishes
   // placeholder-bearing `next_call` templates on the ground that "a challenge
@@ -573,7 +579,7 @@ const TASK_STATE_PROPS = {
   // fences/receipts with no way to tell actors apart; `lane` is the explicit
   // cooperative partition. Advertised on all three tools so schema-validating
   // clients never drop it (the B1e surfaceRoles lesson).
-  lane: { type: "string", description: "isolation key: concurrent agents on one workspace each pass their own fixed value" },
+  lane: { type: "string", description: "isolation key: concurrent agents on one workspace each pass their own value" },
   // PI-09 close-out (v0.10 deferred cell): the two remaining explicit-state
   // REQUEST arguments the reconciliation's §6 table lists beside `task_handle`
   // (`expected_state_version` / `force_serve`; `operation_id` is edit-only and
@@ -589,13 +595,13 @@ const TASK_STATE_PROPS = {
   // `expected_state_version` is a CAS GUARD, meaningful only beside
   // `task_handle`: sent alone it is refused rather than ignored, because an
   // ignored precondition is a precondition that did not hold.
-  expected_state_version: { type: "number", description: "CAS guard for task_handle: refuse rather than act if the task state moved past this version" },
+  expected_state_version: { type: "number", description: "CAS guard for task_handle: refuse if task state moved past this version" },
   // `force_serve` is the SAFE direction (more bytes, never fewer): a caller
   // whose context was compacted asks for the bodies again, past this session's
   // served-content receipts. Unconditional — no flag — because withholding
   // bytes from a caller that says it lost them is the failure this exists to
   // remove.
-  force_serve: { type: "boolean", description: "context lost: re-serve full bodies, bypassing this session's already-served receipts" },
+  force_serve: { type: "boolean", description: "context lost: re-serve full bodies, bypassing already-served receipts" },
 } as const;
 
 /**
@@ -773,7 +779,7 @@ export const ALL_TOOLS: ToolEntry[] = [
     enabled: !KILL_SWITCH,
     definition: {
       name: "read_file",
-      description: "First stop for code/doc tasks incl. unknown-location/multi-file: mode=task_pack query=<request> serves slices+handles.",
+      description: "Read via task_pack or handles. After act.answer/act.edit, act immediately; skip pre-edit discovery.",
       // anthropic/alwaysLoad: clients that defer MCP tool schemas (Claude Code
       // tool search) load these at turn 0 instead of mid-session, which would
       // invalidate the prompt cache. All 3 schemas total ~0.7K tokens.
@@ -830,7 +836,7 @@ export const ALL_TOOLS: ToolEntry[] = [
             },
           },
           query: { type: "string" },
-          qref: { type: "string", description: "replay token from a prior task_pack; re-pack with qref instead of repeating query" },
+          qref: { type: "string", description: "replay token from a prior task_pack; re-pack with qref, not the query" },
           taskProfile: { type: "string" },
           lang: { type: "string" },
           maxTokens: { type: "number" },
@@ -895,7 +901,7 @@ export const ALL_TOOLS: ToolEntry[] = [
     enabled: !KILL_SWITCH,
     definition: {
       name: "edit_file",
-      description: "Edit via prior-read handle (from read_file), exact search/replace, create, rename; batch multi-file edits[] one call.",
+      description: "Edit by handle/search or create. Batch independent edits in one edits[] call.",
       _meta: { "anthropic/alwaysLoad": true },
       inputSchema: {
         type: "object",
@@ -928,7 +934,7 @@ export const ALL_TOOLS: ToolEntry[] = [
           content: { type: "string" },
           create: { type: "boolean" },
           from: { type: "string" },
-          intent: { type: "string", description: "Handle intent: remove-duplicate-branch|append-union-member|append-enum-member|rename-symbol-references; not with edits[]." },
+          intent: { type: "string", description: "Intent: remove-duplicate-branch|append-union-member|append-enum-member|rename-symbol-references; not with edits[]." },
           symbol: { type: "string", description: "Symbol name used by an edit intent." },
           lang: { type: "string", description: "Language hint used by an edit intent or rename." },
           mode: { type: "string", enum: ["rename"], description: "Special edit mode; currently rename only." },
@@ -946,7 +952,7 @@ export const ALL_TOOLS: ToolEntry[] = [
           // strict recursive `unknown-arguments` fence, with `keys` naming the
           // advertised set — never accepted-and-ignored, because a silently
           // dropped idempotency key is a key the caller believes protected it.
-          operation_id: { type: "string", description: "idempotency key: a repeat of the same id replays the recorded outcome, never a second apply" },
+          operation_id: { type: "string", description: "idempotency key: a repeat replays the recorded outcome, never a second apply" },
           edits: {
             type: "array",
             items: {
@@ -1025,7 +1031,7 @@ export const ALL_TOOLS: ToolEntry[] = [
     enabled: !KILL_SWITCH,
     definition: {
       name: "search_files",
-      description: "locate/find/symbols/references/diff/tree over code+docs (repo-wide, .gitignore-aware); hits carry path+line+snippet.",
+      description: "Find files/code. If task_pack returns act.*, act instead of further discovery.",
       _meta: { "anthropic/alwaysLoad": true },
       annotations: { readOnlyHint: true },
       inputSchema: {
@@ -1041,14 +1047,14 @@ export const ALL_TOOLS: ToolEntry[] = [
           // record: a capability the server implements and the guide teaches,
           // invisible in the one place a schema-reading client looks.
           query: { type: "string", description: "one identifier token for find; batch several with `queries`." },
-          queries: { type: "array", items: { type: "string" }, description: "find: batch several identifiers in ONE call; each term reports matched|absent|unknown (absent = scope-complete, no re-grep)." },
+          queries: { type: "array", items: { type: "string" }, description: "find: batch several identifiers in ONE call; each reports matched|absent|unknown (absent=scope-complete, no re-grep)." },
           path: { type: "string" },
           credentialRef: { type: "string" },
           ...ARCHIVE_PROP,
           depth: { type: "number" },
           lang: { type: "string" },
           limit: { type: "number" },
-          cursor: { type: "string", description: "Opaque references continuation token from a prior next_call; server-issued — do not construct." },
+          cursor: { type: "string", description: "Opaque continuation token from a prior next_call; server-issued, do not construct." },
           includeClosure: { type: "boolean", description: "true: action=locate returns a task_pack closure response." },
           surfaceRoles: { type: "array", items: { type: "string" }, description: "Preferred surface roles for closure." },
           // C-6 (§1.3.1(2)) advertise-or-delete. Note that four of these six
@@ -2729,6 +2735,8 @@ async function buildFullDowngradePayload(args: {
    */
   alternatives?: unknown[];
   hint?: string;
+  /** Internal W5 selector; keeps the existing skeleton wire shape. */
+  skeletonOnly?: boolean;
 }): Promise<Record<string, unknown>> {
   const { workspace, filePath, content, handleId, sha, bytes, reason, allowFullWouldHelp } = args;
 
@@ -2816,7 +2824,7 @@ async function buildFullDowngradePayload(args: {
   // T05c recovery depended on that path still serving content. Tiny files are
   // the exception because their governed head would resend the whole body.
   const tinyShapeDowngrade = bytes <= TINY_BYTES && countLines(content) <= TINY_LINES;
-  if (reason === "per-task-cap-reached" || reason === "tiny-skeleton-cap-reached" || tinyShapeDowngrade) {
+  if (args.skeletonOnly === true || reason === "per-task-cap-reached" || reason === "tiny-skeleton-cap-reached" || tinyShapeDowngrade) {
     const totalLines = countLines(content);
     // F1 wave 2 note: with honest recording, `unserved` can now include a gap
     // that is purely an elided comment block. Naming it is not wrong — those
@@ -2859,8 +2867,10 @@ async function buildFullDowngradePayload(args: {
       ...(largestUnserved !== undefined
         ? { next: `read_file mode=slice handle=${handleId} ranges=${JSON.stringify([largestUnserved])}` }
         : {}),
-      note: "per-task whole-file budget spent on other files; zoom this handle by range"
-        + " (the pre-filled `next` names the largest span you have not been served)",
+      note: args.skeletonOnly === true
+        ? "post-ready discovery trimmed; zoom this handle by range (the pre-filled `next` names the largest span you have not been served)"
+        : "per-task whole-file budget spent on other files; zoom this handle by range"
+          + " (the pre-filled `next` names the largest span you have not been served)",
     };
   }
 
@@ -3189,7 +3199,9 @@ function buildLedgerDifferenceFullPayload(args: {
   handleId: string;
   sha: string;
   keepComments: boolean;
-  mode: "full" | "auto";
+  mode: "full" | "auto" | "symbol";
+  /** Optional requested file-line window; omitted means the whole file. */
+  range?: readonly [number, number];
   /** Coverage observed before a helper resolves a full expansion. */
   priorCoverage?: ReturnType<typeof servedRangeCoverage>;
 }): Record<string, unknown> | undefined {
@@ -3197,6 +3209,8 @@ function buildLedgerDifferenceFullPayload(args: {
   const coverage = args.priorCoverage ?? servedRangeCoverage(args.workspace, args.filePath, args.sha, totalLines);
   if (coverage === undefined || coverage.complete) return undefined;
 
+  const requestedStart = args.range?.[0] ?? 1;
+  const requestedEnd = args.range?.[1] ?? totalLines;
   const lines = args.content.split(/\r?\n/);
   const segments: Array<Record<string, unknown>> = [];
   const notes: string[] = [];
@@ -3222,25 +3236,29 @@ function buildLedgerDifferenceFullPayload(args: {
     }
   };
 
-  let cursor = 1;
-  for (const [start, end] of coverage.served) {
-    if (cursor < start) appendFresh(cursor, start - 1);
+  let cursor = requestedStart;
+  for (const [servedStartRaw, servedEndRaw] of coverage.served) {
+    const servedStart = Math.max(requestedStart, servedStartRaw);
+    const servedEnd = Math.min(requestedEnd, servedEndRaw);
+    if (servedEnd < cursor || servedStart > requestedEnd) continue;
+    if (cursor < servedStart) appendFresh(cursor, servedStart - 1);
+    const priorStart = Math.max(cursor, servedStart);
     const receipt = servedRangeReceipt(
       args.workspace,
       args.filePath,
       args.sha,
-      start,
-      end,
+      priorStart,
+      servedEnd,
       totalLines,
     );
     segments.push({
-      range: `${start}-${end}`,
+      range: `${priorStart}-${servedEnd}`,
       code_unchanged: true,
       ...(receipt?.served_by !== undefined ? { served_by: receipt.served_by } : {}),
     });
-    cursor = end + 1;
+    cursor = servedEnd + 1;
   }
-  if (cursor <= totalLines) appendFresh(cursor, totalLines);
+  if (cursor <= requestedEnd) appendFresh(cursor, requestedEnd);
 
   if (!segments.some((segment) => typeof segment["code"] === "string")) return undefined;
   return {
@@ -3252,6 +3270,128 @@ function buildLedgerDifferenceFullPayload(args: {
     segments,
     ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// B2 / V12-02 — delta context: the READ side (TL_DELTA_CONTEXT, default OFF)
+// ---------------------------------------------------------------------------
+
+/**
+ * Bytes a `prior` segment costs once `readFamily.ts`'s `textEvidence` has
+ * projected it: `{"handle":…,"path":…,"range":"120-480","prior":"slice 1-500
+ * (call #2)"}`. Deliberately GENEROUS — the size guard's job is to prefer the
+ * plain body whenever the delta win is marginal, so over-estimating the
+ * projection's own overhead fails in the safe direction.
+ */
+const DELTA_PRIOR_SEGMENT_BYTES = 140;
+/** Extra bytes a fresh segment costs over the single-body serve it replaces. */
+const DELTA_FRESH_SEGMENT_BYTES = 90;
+
+/** Raw byte size of file lines [start,end] of `lines` (newlines included). */
+function lineWindowBytes(lines: readonly string[], start: number, end: number): number {
+  let bytes = 0;
+  for (let i = start; i <= end && i <= lines.length; i += 1) {
+    bytes += Buffer.byteLength(lines[i - 1] ?? "", "utf8") + 1;
+  }
+  return bytes;
+}
+
+/**
+ * B2 / V12-02: should this read serve a delta projection instead of the plain
+ * body, and is the ledger entry behind it still valid?
+ *
+ * THREE GATES, IN ORDER, ALL OF WHICH MUST PASS:
+ *  1. `TL_DELTA_CONTEXT` is on. Off, this returns `undefined` before touching
+ *     any state, which is what makes an edit-then-read sequence byte-identical
+ *     to the pre-B2 tree.
+ *  2. `deltaLedgerStatus` says `"carried"` — the entry survived an edit THIS
+ *     server applied AND still describes the bytes on disk. A `"dropped"`
+ *     answer is the base-mismatch fallback (an external write): the entry is
+ *     gone and the caller serves the full body.
+ *  3. THE SIZE GUARD (plan acceptance "delta>full なら自動 full"): the held
+ *     windows must be worth more than the per-segment overhead they cost.
+ *     Measured on the RAW line bytes of both sides — the elider shrinks held
+ *     and fresh windows alike, so comparing pre-elision bytes keeps the
+ *     decision monotone without running the elider twice.
+ *
+ * SIDE-EFFECT FREE ON A LOSS. It never builds the projection, so nothing is
+ * booked into the served-range ledger for a delta the caller does not receive
+ * — `buildLedgerDifferenceFullPayload` records as it goes, and calling it
+ * speculatively would claim bytes that never reached the wire.
+ */
+function deltaContextDecision(args: {
+  workspace: string;
+  filePath: string;
+  content: string;
+  sha: string;
+  totalLines: number;
+  /** Requested file-line window; omitted means the whole file. */
+  range?: readonly [number, number];
+}):
+  | { decision: "delta"; coverage: NonNullable<ReturnType<typeof servedRangeCoverage>> }
+  | { decision: "full" }
+  | undefined {
+  if (!deltaContextEnabled()) return undefined;
+  const status = deltaLedgerStatus(args.workspace, args.filePath, args.sha);
+  if (status === undefined) return undefined;
+  // The entry was delta-derived and an external write invalidated it: the
+  // caller must serve the plain body, and must NOT fall through to a coverage
+  // check that a differently-shaped stale entry could still satisfy.
+  if (status === "dropped") {
+    trace("delta_context", {
+      phase: "base-mismatch",
+      path: args.filePath,
+      outcome: "full-fallback",
+    }, args.workspace);
+    return { decision: "full" };
+  }
+  const coverage = servedRangeCoverage(args.workspace, args.filePath, args.sha, args.totalLines);
+  if (coverage === undefined || coverage.complete) return undefined;
+
+  const requestedStart = args.range?.[0] ?? 1;
+  const requestedEnd = args.range?.[1] ?? args.totalLines;
+  const lines = args.content.split(/\r?\n/);
+  let heldBytes = 0;
+  let priorSegments = 0;
+  let freshSegments = 0;
+  let cursor = requestedStart;
+  for (const [servedStartRaw, servedEndRaw] of coverage.served) {
+    const servedStart = Math.max(requestedStart, servedStartRaw);
+    const servedEnd = Math.min(requestedEnd, servedEndRaw);
+    if (servedEnd < cursor || servedStart > requestedEnd) continue;
+    if (cursor < servedStart) freshSegments += 1;
+    const priorStart = Math.max(cursor, servedStart);
+    heldBytes += lineWindowBytes(lines, priorStart, servedEnd);
+    priorSegments += 1;
+    cursor = servedEnd + 1;
+  }
+  if (cursor <= requestedEnd) freshSegments += 1;
+  // Nothing of this request is held: there is no delta to serve, and no reason
+  // to override whatever the caller's ordinary path would have done.
+  if (priorSegments === 0) return undefined;
+
+  const projectionOverhead = priorSegments * DELTA_PRIOR_SEGMENT_BYTES
+    + freshSegments * DELTA_FRESH_SEGMENT_BYTES;
+  if (heldBytes <= projectionOverhead) {
+    trace("delta_context", {
+      phase: "guard",
+      path: args.filePath,
+      outcome: "full-cheaper",
+      held_bytes: heldBytes,
+      projection_overhead: projectionOverhead,
+    }, args.workspace);
+    return { decision: "full" };
+  }
+  trace("delta_context", {
+    phase: "serve",
+    path: args.filePath,
+    range: `${requestedStart}-${requestedEnd}`,
+    prior_segments: priorSegments,
+    fresh_segments: freshSegments,
+    held_bytes: heldBytes,
+    projection_overhead: projectionOverhead,
+  }, args.workspace);
+  return { decision: "delta", coverage };
 }
 
 /**
@@ -3274,6 +3414,8 @@ async function resolveFullReadForPath(
     credentialRef?: string;
     credentialPassword?: string;
     forceServe?: boolean;
+    /** W5: make this post-ready full read an honest skeleton downgrade. */
+    postReadyTrim?: boolean;
   } = {},
 ): Promise<FullReadResolution> {
   const ext = (filePath.toLowerCase().match(/\.([^.\\/]+)$/)?.[1]) ?? "";
@@ -3361,6 +3503,46 @@ async function resolveFullReadForPath(
   // (unchanged behavior); allowFull:true raises it to the higher
   // READ_FULL_CAP_BYTES_ALLOW_FULL bound.
   const effectiveCapBytes = allowFullRequested ? READ_FULL_CAP_BYTES_ALLOW_FULL : READ_FULL_CAP_BYTES;
+
+  // W5: a post-ready full read is still a NEW request. Reuse the established
+  // full-read skeleton downgrade instead of fabricating a code-unchanged or
+  // decision-unchanged receipt. The payload names every unserved range and a
+  // same-handle slice continuation; no new wire kind or field is introduced.
+  if (officeOpts.postReadyTrim === true && officeOpts.forceServe !== true) {
+    // Tiny files are already cheaper to serve whole than to project into a
+    // skeleton. Returning the full body here keeps the trim marker honest: no
+    // discovery was actually trimmed when the tiny exception applies.
+    if (fullBytes <= TINY_BYTES && fullLineCount <= TINY_LINES) {
+      return {
+        ok: true,
+        data: buildFullServePayload({
+          workspace,
+          filePath,
+          content,
+          handleId: govHEntry.id,
+          sha: fullSha,
+          keepComments,
+          allowFull: allowFullRequested,
+        }),
+      };
+    }
+    return {
+      ok: true,
+      data: await buildFullDowngradePayload({
+        workspace,
+        filePath,
+        content,
+        handleId: govHEntry.id,
+        sha: fullSha,
+        bytes: fullBytes,
+        maxBytes: effectiveCapBytes,
+        reason: "full-downgraded",
+        allowFullWouldHelp: false,
+        skeletonOnly: true,
+        hint: "Post-ready discovery is trimmed; zoom this honest skeleton by range.",
+      }),
+    };
+  }
   if (fullBytes > effectiveCapBytes) {
     const allowFullWouldHelp = !allowFullRequested && fullBytes <= READ_FULL_CAP_BYTES_ALLOW_FULL;
 
@@ -4859,9 +5041,15 @@ async function attachAppliedReadback(
     return {
       ...result,
       applied,
+      // B1 (v0.12, compact edit receipt): shortened to a minimal honest
+      // pointer — the mechanics these used to spell out (context-window
+      // choice, brace_delta/enclosing_symbol interpretation) move to the
+      // guide (residency amplification 8.578x makes every response byte
+      // expensive across the rest of the session). Emission condition and
+      // field identity are unchanged; only the prose shrank.
       applied_note: wholeFileEntries === applied.length
-        ? "post-edit disk state is the content as sent (sha/bytes/total_lines) — no follow-up read needed"
-        : "post-edit disk state (whole enclosing symbol when it fits, else ±8 lines) — no follow-up read needed; brace_delta 0 = hunk preserves brace balance; enclosing_symbol names the full construct when larger — one handle re-slice serves it",
+        ? "post-edit disk state = content sent — no follow-up read needed"
+        : "post-edit disk state — no follow-up read needed",
     };
   } catch {
     return result;
@@ -5271,7 +5459,17 @@ async function runEditWithOperationId(
     const replay = parseRecordedOperation(recorded);
     if (replay !== undefined) {
       // THE IDEMPOTENT REPLAY. No dispatch, so no second disk apply.
-      return { content: [{ type: "text", text: replay.text }], ...(replay.isError === true ? { isError: true as const } : {}) };
+      //
+      // T4 (2026-08-27 field-eval; protocol v1's kind set stays frozen — this
+      // is an additive optional FIELD, not a new member). `replay.text` is the
+      // FINAL wire text `run()` already produced and projected on the FIRST
+      // apply — dispatch never runs a second time, so editFamily.ts's
+      // projectors never run again either, and this is the one place a
+      // replayed response is distinguishable from a fresh one at all.
+      // `markReplayed` stamps the tell (top-level `replayed:true`) on THIS
+      // copy only; the stored record and the original apply's own response
+      // stay exactly as they were — a fresh apply never carries the field.
+      return { content: [{ type: "text", text: markReplayed(replay.text) }], ...(replay.isError === true ? { isError: true as const } : {}) };
     }
     // An unreadable record is treated as absent: the alternative is refusing a
     // write forever because one journal line got mangled.
@@ -5383,6 +5581,18 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
   const normalized = normalizeWireArgs(canonical, rawArgs);
   if ("refusal" in normalized) return toolStructuredError(normalized.refusal);
   const args = normalized.args;
+  // T1/T2/T3 (2026-08-27 field-eval): resolve the DEFAULT response byte
+  // ceiling once per dispatch -- explicit per-call maxBytes/maxTokens (read
+  // at each serve site below) always override this; this is only the
+  // fallback consulted when the caller supplies neither. Cheap (an env read
+  // plus a Map lookup) and harmless to compute unconditionally even for a
+  // tool call that never consults it (edit_file, mode=slice, ...). See
+  // clientProfile.ts's resolveDefaultResponseByteCeiling for the
+  // env/profile precedence.
+  const defaultResponseByteCeiling = resolveDefaultResponseByteCeiling(
+    resolveClientProfile(resolvedClientId()),
+    process.env["TOKENLIGHTEN_TASK_PACK_MAX_BYTES"],
+  );
   switch (canonical) {
     case "read_file": {
       // P1 / D2 / ORCHESTRATOR CONDITION ② (§1.3.1(1)): strict recursive NAME
@@ -5480,10 +5690,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // audit exists to prevent). `ranges` is a SIBLING of `range`, never a
       // superset: supplying both is a genuine ambiguity the caller should see.
       // -----------------------------------------------------------------------
-      const rangesArg = Array.isArray(args["ranges"])
+      let rangesArg: string[] = Array.isArray(args["ranges"])
         ? (args["ranges"] as unknown[]).map((entry) => String(entry).trim()).filter((entry) => entry.length > 0)
-        : undefined;
-      const hasRangesBatch = rangesArg !== undefined && rangesArg.length > 0;
+        : [];
+      let hasRangesBatch = rangesArg.length > 0;
       if (hasRangesBatch && callerSuppliedRange) {
         return toolStructuredError({
           ok: false,
@@ -5671,7 +5881,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // dispatcher. The prepared-task fence can withhold a repeated slice, but
       // it cannot decide a whole-file complement (or a force_serve recovery)
       // without consulting the served-range ledger there.
-      const executionGuard = mode === "full" || forceContentServe
+      const executionGuard = args["force_serve"] === true
+        || (mode !== "full" && forceContentServe && !postReadyTrimEnabled())
         ? { allowed: true as const }
         : guardExecutionDiscovery(
             workspace,
@@ -5793,7 +6004,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         }
 
         recordReadMode(workspace, "handles");
-        const items: Array<{ handle: string; path: string; range: string; content: string; truncated: boolean; sha: string; note?: string; concern_note?: string; downgraded_from?: "symbol"; remaining_ranges?: string[]; next?: string }> = [];
+        const items: Array<{ handle: string; path: string; range: string; content: string; truncated: boolean; sha: string; note?: string; concern_note?: string; downgraded_from?: "symbol"; remaining_ranges?: string[]; next?: string; synthesized_range?: boolean }> = [];
         // D1: reason stays the stable enum every existing caller matches on;
         // code/candidates/skeleton are additive fields carried ONLY for a
         // symbol-not-found miss from resolveSlice, so unrelated omitted
@@ -5809,7 +6020,33 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           total_lines?: number;
         }> = [];
 
+        // T2 (2026-08-27 field-eval): bound the AGGREGATE serve, not just
+        // each item's own per-item cap (resolveSlice's own
+        // sliceResult.capExceeded below, unchanged). A first-party report the
+        // same day: a 6-handle batch produced a ~126KB single response that
+        // overflowed the CALLING agent's own tool-result limit -- every item
+        // individually fit resolveSlice's per-item cap, but nothing bounded
+        // their sum. `undefined` (no explicit maxBytes/maxTokens and no
+        // client-profile ceiling) keeps this branch byte-identical to today:
+        // handlesBatchCapHit never flips, so every existing corpus/replay
+        // call is unaffected. Whole-entry granularity is preserved -- the
+        // item that CROSSES the ceiling is still served in full (never
+        // split), and at least one item always gets through regardless of
+        // how small the ceiling is, so the batch can never starve to zero
+        // progress the way a bare refusal would.
+        const handlesBatchCeiling = resolveCallerByteCeiling(
+          typeof args["maxBytes"] === "number" ? args["maxBytes"] : undefined,
+          typeof args["maxTokens"] === "number" ? args["maxTokens"] : undefined,
+          defaultResponseByteCeiling,
+        );
+        let handlesBatchBytesSoFar = 0;
+        let handlesBatchCapHit = false;
+
         for (const hId of requested) {
+          if (handlesBatchCapHit) {
+            omitted.push({ handle: hId, reason: "cap-exceeded" });
+            continue;
+          }
           const hEntry = handleTable.get(hId);
           if (!hEntry) {
             omitted.push({ handle: hId, reason: "handle-unknown" });
@@ -5858,6 +6095,16 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // file instead, which is what "fetch this body" means; the range
           // branch still truncates-and-continues (remaining_ranges + next) for
           // anything over the serve cap, so this cannot blow the response.
+          // T3 (2026-08-27 field-eval): mark whenever THIS branch synthesizes
+          // the "1-N" window from a bare file-kind handle (no stored range, no
+          // symbol) rather than serving a range the caller/mint-time actually
+          // asked for — see the 2026-07-31 verify-kit-gap comment above for
+          // why the synthesis itself exists. Independent of `truncated`: a
+          // small whole file served complete THIS way is still a default, not
+          // a real narrow-range serve, so an agent expecting "my sliced range"
+          // can tell the two apart. Absence stays the norm on every item with
+          // a genuine range (real ranged handles, symbol-branch handles).
+          const isSynthesizedFileRange = hEntry.range === undefined && hEntry.symbol === undefined;
           const hRange = hEntry.range
             ?? (hEntry.symbol === undefined ? `1-${Math.max(1, countLines(hContent))}` : undefined);
           const sliceResult = await resolveSlice(workspace, hPath, hContent, hEntry.symbol, hRange);
@@ -5956,7 +6203,15 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             ...(sliceResult.data.downgraded_from ? { downgraded_from: sliceResult.data.downgraded_from } : {}),
             ...(sliceResult.data.remaining_ranges ? { remaining_ranges: sliceResult.data.remaining_ranges } : {}),
             ...(sliceResult.data.next ? { next: sliceResult.data.next } : {}),
+            ...(isSynthesizedFileRange ? { synthesized_range: true } : {}),
           });
+          // T2: account AFTER commit, never before -- an item that itself
+          // crosses the ceiling still ships whole (see the doc comment above
+          // handlesBatchCeiling); only ITEMS AFTER IT are deferred.
+          if (handlesBatchCeiling !== undefined) {
+            handlesBatchBytesSoFar += Buffer.byteLength(itemDisplay.content, "utf8");
+            if (handlesBatchBytesSoFar > handlesBatchCeiling) handlesBatchCapHit = true;
+          }
         }
 
         const completeness = omitted.length === 0 ? "complete" : items.length === 0 ? "empty" : "partial";
@@ -6270,6 +6525,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(typeof args["limit"] === "number" ? { limit: args["limit"] } : {}),
               ...(Array.isArray(args["surfaceRoles"]) ? { surfaceRoles: (args["surfaceRoles"] as unknown[]).map(String) } : {}),
               ...(hasPathList ? { paths: mapTaskPackPaths(args["paths"] as unknown[]) } : {}),
+              ...(typeof args["maxBytes"] === "number" ? { maxBytes: args["maxBytes"] } : {}),
+              ...(typeof args["maxTokens"] === "number" ? { maxTokens: args["maxTokens"] } : {}),
+              ...(defaultResponseByteCeiling !== undefined ? { clientDefaultByteCeilingHint: defaultResponseByteCeiling } : {}),
             },
             workspace,
           );
@@ -6357,6 +6615,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               : tpZoomPaths !== undefined
                 ? { paths: tpZoomPaths }
                 : {}),
+            ...(typeof args["maxBytes"] === "number" ? { maxBytes: args["maxBytes"] } : {}),
+            ...(typeof args["maxTokens"] === "number" ? { maxTokens: args["maxTokens"] } : {}),
+            ...(defaultResponseByteCeiling !== undefined ? { clientDefaultByteCeilingHint: defaultResponseByteCeiling } : {}),
           },
           workspace,
         );
@@ -6904,9 +7165,104 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // -----------------------------------------------------------------------
       if (mode === "slice") {
         const slicePath = resolvedPath ?? "";
-        if (!slicePath) return toolError("path (or handle) is required for mode=slice", { code: "invalid-input" });
+        if (!slicePath) {
+          // FIELD DEFECT (2026-08-27 field-eval T1): explicit mode="slice"
+          // with paths=[...] (no singular path/handle) used to fall straight
+          // to the bare "path (or handle) is required" refusal below with no
+          // `next` at all — the pathless-promotion net a few hundred lines up
+          // (`promotionEligible`) only fires when mode is unspecified/"auto",
+          // so an EXPLICIT slice bypasses it entirely and a caller reaching
+          // for the batched-read idiom every other mode accepts got no
+          // guidance back to the one form slice actually takes.
+          const rawPaths = args["paths"];
+          if (Array.isArray(rawPaths) && rawPaths.length > 0) {
+            const pathList = rawPaths.map((entry) => String(entry));
+            const preserved = hasRangesBatch
+              ? ` ranges=${JSON.stringify(rangesArg)}`
+              : resolvedRange !== undefined
+                ? ` range=${JSON.stringify(resolvedRange)}`
+                : "";
+            if (pathList.length === 1) {
+              return toolError(
+                "mode=slice takes a singular path, not paths[] — did you mean the single path below?",
+                {
+                  code: "invalid-input",
+                  next: `read_file mode=slice path=${JSON.stringify(pathList[0])}${preserved}`,
+                  hint: "slice reads exactly one file; ranges[] windows several spans of THAT file, not several files",
+                },
+              );
+            }
+            // NOTE: `normalizeWireArgs` (this file, ~L5545) already intercepts
+            // mode=slice + paths.length>1 EARLIER in the pipeline, before this
+            // deep-dispatch branch runs, with its own next:"mode=task_pack"
+            // recovery ("mode=slice accepts one path; multiple paths are
+            // discovery scope") — so in practice this arm is defense-in-depth
+            // for any call shape that reaches dispatch without going through
+            // that normalizer. Matches its next verbatim (task_pack, not
+            // mode=full) so the two producers of the same refusal never teach
+            // a caller two different recoveries for one situation.
+            return toolError(
+              `mode=slice takes a singular path, not paths[] (got ${pathList.length})`,
+              {
+                code: "invalid-input",
+                next: `read_file mode=task_pack paths=${JSON.stringify(pathList)}`,
+                hint: "slice is single-file; multiple paths[] is discovery scope, not a bigger slice — task_pack handles a large set too",
+              },
+            );
+          }
+          return toolError("path (or handle) is required for mode=slice", { code: "invalid-input" });
+        }
         const content = await readFileSafe(slicePath, workspace);
         if (content === null) return toolError(`File not found or outside workspace: ${slicePath}`, { code: "not-found" });
+
+        // W7: when explicitly enabled, split a partially-held single range
+        // into alternating held/new windows and reuse the established ranges[]
+        // path. Its projector already renders held windows as `prior` and only
+        // puts residual windows on the wire. Fully-held asks keep the ordinary
+        // code-unchanged receipt below; force_serve bypasses this partition.
+        if (
+          overlapTrimEnabled()
+          && !forceContentServe
+          && !hasRangesBatch
+          && resolvedRange !== undefined
+        ) {
+          const requested = resolvedRange.trim().match(/^L?(\d+)\s*-\s*L?(\d+)$/i);
+          if (requested !== null) {
+            const totalLines = countLines(content);
+            const start = Math.max(1, Math.min(totalLines, Number.parseInt(requested[1]!, 10)));
+            const end = Math.max(start, Math.min(totalLines, Number.parseInt(requested[2]!, 10)));
+            const coverage = servedRangeCoverage(workspace, slicePath, shaOfText(content), totalLines);
+            if (coverage !== undefined) {
+              const parts: string[] = [];
+              let cursor = start;
+              let hasPrior = false;
+              let hasResidual = false;
+              for (const [servedStartRaw, servedEndRaw] of coverage.served) {
+                const servedStart = Math.max(start, servedStartRaw);
+                const servedEnd = Math.min(end, servedEndRaw);
+                if (servedEnd < cursor || servedStart > end) continue;
+                if (servedStart > cursor) {
+                  parts.push(`${cursor}-${servedStart - 1}`);
+                  hasResidual = true;
+                }
+                const priorStart = Math.max(cursor, servedStart);
+                if (priorStart <= servedEnd) {
+                  parts.push(`${priorStart}-${servedEnd}`);
+                  hasPrior = true;
+                  cursor = servedEnd + 1;
+                }
+              }
+              if (cursor <= end) {
+                parts.push(`${cursor}-${end}`);
+                hasResidual = true;
+              }
+              if (hasPrior && hasResidual) {
+                rangesArg = parts;
+                hasRangesBatch = true;
+              }
+            }
+          }
+        }
 
         // ---------------------------------------------------------------------
         // A2 ranges[] batching: serve every requested window of THIS file in one
@@ -7503,6 +7859,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               slicePath,
               false,
               keepComments,
+              { postReadyTrim: executionGuard.postReadyTrim === true },
             );
             if (
               expanded.ok
@@ -7662,6 +8019,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(resolvedPath ? { path: resolvedPath } : {}),
               ...(resolvedSymbol ? { symbol: resolvedSymbol } : {}),
               ...(promoteLang ? { lang: promoteLang } : {}),
+              ...(typeof args["maxBytes"] === "number" ? { maxBytes: args["maxBytes"] } : {}),
+              ...(typeof args["maxTokens"] === "number" ? { maxTokens: args["maxTokens"] } : {}),
+              ...(defaultResponseByteCeiling !== undefined ? { clientDefaultByteCeilingHint: defaultResponseByteCeiling } : {}),
             },
             workspace,
           );
@@ -8147,13 +8507,35 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           ...(args["maxBytes"] !== undefined ? { maxBytes: Number(args["maxBytes"]) } : {}),
           ...(args["maxTokens"] !== undefined ? { maxTokens: Number(args["maxTokens"]) } : {}),
           forceServe: args["force_serve"] === true,
+          postReadyTrim: executionGuard.postReadyTrim === true,
         };
 
         const items: Record<string, unknown>[] = [];
         const omitted: Array<{ path: string; reason: string }> = [];
+        // T2 (2026-08-27 field-eval): the same aggregate-byte backstop the
+        // handles=[] batch just above got, applied here too -- T2 asks for it
+        // "if the same plumbing reaches it", and it does, via the same
+        // resolveCallerByteCeiling. `undefined` keeps this branch
+        // byte-identical to today for every existing corpus/replay call (no
+        // explicit maxBytes/maxTokens, no client-profile ceiling). Whole-entry
+        // granularity: a path already through resolveFullReadForPath (whether
+        // served or governor-downgraded) always ships in full; only paths NOT
+        // YET resolved once the ceiling is crossed are deferred, so no
+        // wasted governor-state-mutating read happens for them.
+        const fullBatchCeiling = resolveCallerByteCeiling(
+          typeof args["maxBytes"] === "number" ? args["maxBytes"] : undefined,
+          typeof args["maxTokens"] === "number" ? args["maxTokens"] : undefined,
+          defaultResponseByteCeiling,
+        );
+        let fullBatchBytesSoFar = 0;
+        let fullBatchCapHit = false;
         for (const p of requestedPaths) {
           if (!p) {
             omitted.push({ path: p, reason: "path is required" });
+            continue;
+          }
+          if (fullBatchCapHit) {
+            omitted.push({ path: p, reason: "aggregate response byte cap reached" });
             continue;
           }
           const fr = await resolveFullReadForPath(workspace, p, allowFullRequested, keepComments, officeOpts);
@@ -8163,6 +8545,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             // a downgraded skeleton/artifact-redirect shape carrying its own
             // path/reason/handle) — request order preserved.
             items.push({ path: p, ...fr.data });
+            if (fullBatchCeiling !== undefined) {
+              fullBatchBytesSoFar += Buffer.byteLength(JSON.stringify(fr.data), "utf8");
+              if (fullBatchBytesSoFar > fullBatchCeiling) fullBatchCapHit = true;
+            }
           } else {
             // A per-path hard failure (not found, escapes workspace, doc
             // extraction disabled) folds into omitted instead of aborting the
@@ -8220,6 +8606,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             ...(args["maxBytes"] !== undefined ? { maxBytes: Number(args["maxBytes"]) } : {}),
             ...(args["maxTokens"] !== undefined ? { maxTokens: Number(args["maxTokens"]) } : {}),
             forceServe: args["force_serve"] === true,
+            postReadyTrim: executionGuard.postReadyTrim === true,
           });
           // A.5.5 (C2-3 gap, closed in P2): the `allowFull:true` arm of that
           // helper does NOT serve file bytes — it runs `extractOfficeText` and
@@ -8635,6 +9022,52 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           });
         }
 
+        // B2 / V12-02: a symbol read of a file whose ledger survived a server
+        // edit takes the SAME already-shipped difference projection W7 uses.
+        // The two levers stay independent by construction: W7's branch reads
+        // its own flag and any coverage, the delta branch requires a
+        // `deltaFromSha`-marked entry (`deltaContextDecision`) that only a
+        // server-applied edit can mint, and force_serve bypasses both.
+        const symbolDelta = forceContentServe || !deltaContextEnabled()
+          ? undefined
+          : deltaContextDecision({
+              workspace,
+              filePath,
+              content,
+              sha: shaOfText(content),
+              totalLines: symbolFileLineCount,
+              range: [result.data.range.start, result.data.range.end],
+            });
+        if (
+          (overlapTrimEnabled() || symbolDelta?.decision === "delta")
+          && symbolDelta?.decision !== "full"
+          && !forceContentServe
+        ) {
+          const symbolFileSha = shaOfText(content);
+          const symbolCoverage = symbolDelta?.coverage ?? servedRangeCoverage(
+            workspace, filePath, symbolFileSha, symbolFileLineCount,
+          );
+          if (symbolCoverage !== undefined && !symbolCoverage.complete) {
+            const difference = buildLedgerDifferenceFullPayload({
+              workspace,
+              filePath,
+              content,
+              handleId: hEntry.id,
+              sha: symbolFileSha,
+              keepComments,
+              mode: "symbol",
+              range: [result.data.range.start, result.data.range.end],
+              priorCoverage: symbolCoverage,
+            });
+            if (difference !== undefined
+              && (difference["segments"] as Array<Record<string, unknown>>)
+                .some((segment) => segment["code_unchanged"] === true)) {
+              recordReadPath(workspace, filePath);
+              return toolOk(attachSupply({ ...difference, symbol: symbolArg }, workspace));
+            }
+          }
+        }
+
         // Feature 1 (2026-07-12b2): successful standalone mode=symbol serve.
         recordReadPath(workspace, filePath);
         // W1: the symbol's file lines are now resident — record them so a later
@@ -8719,18 +9152,34 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // cannot see: full coverage assembled from cumulative SLICE/SYMBOL
         // serves that never went through a tracked mode=full expansion.
         const fullSha = shaOfText(content);
+        // B2 / V12-02: this partial-coverage difference branch is UNFLAGGED —
+        // it already serves prior+residual for coverage assembled from earlier
+        // slices, and once a ledger entry survives an edit it would serve the
+        // post-edit delta with no further wiring. What the delta decision adds
+        // is the two rules that branch has no way to know about: the
+        // base-mismatch drop (an external write after the transformation) and
+        // the size guard (a projection that would cost more than the body).
+        // Both answer `"full"`, which SUPPRESSES the difference; `undefined`
+        // (flag off, or an entry no edit ever carried) leaves it exactly as it
+        // was.
+        const fullDelta = forceContentServe || !deltaContextEnabled()
+          ? undefined
+          : deltaContextDecision({
+              workspace, filePath, content, sha: fullSha, totalLines: countLines(content),
+            });
         if (
           !forceContentServe
           && !wasFullyServed(workspace, filePath, fullSha)
         ) {
           const fullTotalLines = countLines(content);
           const fullCoverage = servedRangeCoverage(workspace, filePath, fullSha, fullTotalLines);
-          if (fullCoverage !== undefined && !fullCoverage.complete) {
+          if (fullCoverage !== undefined && !fullCoverage.complete && fullDelta?.decision !== "full") {
             const partial = await resolveFullReadForPath(
               workspace,
               filePath,
               args["allowFull"] === true,
               keepComments,
+              { postReadyTrim: executionGuard.postReadyTrim === true },
             );
             if (!partial.ok) return fullReadRefusal(partial);
             const partialHandle = partial.data["handle"];
@@ -8781,7 +9230,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           filePath,
           args["allowFull"] === true,
           keepComments,
-          { forceServe: args["force_serve"] === true },
+          {
+            forceServe: args["force_serve"] === true,
+            postReadyTrim: executionGuard.postReadyTrim === true,
+          },
         );
         if (!fr.ok) return fullReadRefusal(fr);
         // A COMPLETE full serve makes every line resident — record it so a
@@ -8856,7 +9308,16 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             languageForPath(filePath),
             keepComments,
           );
-          const difference = !forceContentServe
+          // B2 / V12-02: same suppression rule as the mode=full branch above —
+          // this difference projection is unflagged, so the delta decision only
+          // ADDS the base-mismatch drop and the size guard. `undefined` (flag
+          // off, or an entry no server edit carried) leaves it untouched.
+          const autoDelta = forceContentServe || !deltaContextEnabled()
+            ? undefined
+            : deltaContextDecision({
+                workspace, filePath, content, sha, totalLines: autoLineCount,
+              });
+          const difference = !forceContentServe && autoDelta?.decision !== "full"
             ? buildLedgerDifferenceFullPayload({
                 workspace,
                 filePath,
@@ -9046,7 +9507,23 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // credential resolution or session-state mutation — see
       // editFileUnknownArgumentRefusal's doc comment for the measured incident.
       const unknownArgsRefusalEdit = editFileUnknownArgumentRefusal(args);
-      if (unknownArgsRefusalEdit !== null) return toolStructuredError(unknownArgsRefusalEdit);
+      if (unknownArgsRefusalEdit !== null) {
+        const correction = typeof unknownArgsRefusalEdit["next"] === "string"
+          ? unknownArgsRefusalEdit["next"] as string
+          : typeof unknownArgsRefusalEdit["error"] === "string"
+            ? unknownArgsRefusalEdit["error"] as string
+            : `remove or correct ${String(unknownArgsRefusalEdit["field"] ?? "the unadvertised argument")}`;
+        // This is only a refusal-ledger namespace, not an authorized workspace
+        // resolution. Keep unknown-argument precedence and the write guard order
+        // intact while isolating an explicitly named alternate worktree.
+        const refusalWorkspace = typeof args["cwd"] === "string"
+          ? path.resolve(activeRoot, args["cwd"])
+          : activeRoot;
+        const advisory = repeatedEditRefusalAdvisory(refusalWorkspace, args, correction);
+        return toolStructuredError(advisory === undefined
+          ? unknownArgsRefusalEdit
+          : { ...unknownArgsRefusalEdit, detail: advisory });
+      }
       // B5.1: fail loud on an invalid/nonexistent cwd instead of silently
       // resolving against the pinned root (see checkCwdOrRefuse doc comment).
       // Stage 1 of the guard stack (write/guardedWorkspace.ts): its pass token
@@ -9646,6 +10123,38 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // unread-sibling note below.
         const editedNow = editOk ? editedPathsOf(resolved, effectivePath) : [];
         recordExecutionEditResult(workspace, editOk, editedNow, pendingReclassification);
+
+        // A1-pre (TL_REASONING_IR_V2, class (B), default OFF): the edit-side
+        // half of the V11-04 obligation-closure gap (DESIGN-v0.12-plan.md §2
+        // row A1-pre). The task_pack seam only ever ADDS obligations — a
+        // re-served surface is not proof anything changed — so nothing on the
+        // read side may transition one to "satisfied". `editedNow` above is
+        // the one thing the server can actually prove: paths edit_file just
+        // wrote. `fence.epochQuery` recomputes the SAME taskRef the task_pack
+        // call that opened this certificate used: that call's own seam site
+        // (above, in the task_pack branch) never passes an explicit `taskId`,
+        // and `buildTaskPack`'s own result never sets `.qref` itself (only
+        // server.ts's post-seam `supplied.qref` reassignment does, AFTER the
+        // seam already ran) — so `deriveIrTaskRef` fell through to hashing
+        // the query alone. Recomputing with `taskQueryRef` here (workspace-
+        // bound, dash-prefixed) would silently mismatch that and land on an
+        // empty/foreign IR record; `deriveIrTaskRef({ query })` is the exact
+        // same function call the pack seam made, so it reproduces the SAME
+        // identity by construction rather than by coincidence. No fence, or
+        // an empty epochQuery, means no provable correlation and the seam is
+        // skipped entirely. No wire field, no new kind, same total try/catch
+        // posture as the pack seam.
+        if (reasoningIrV2Enabled() && editOk && editedNow.length > 0) {
+          const epochQuery = getExecutionFence(workspace)?.epochQuery;
+          if (epochQuery !== undefined && epochQuery !== "") {
+            recordReasoningIrV2ClosureFromEdit({
+              workspaceRoot: workspace,
+              lane: sessionLaneOf(args as Record<string, unknown>),
+              taskId: deriveIrTaskRef({ query: epochQuery }),
+              editedPaths: editedNow,
+            });
+          }
+        }
 
         // Feature 1 (2026-07-12b2): one-shot unread-sibling note, checked on
         // the session's FIRST successful edit (editedPaths transitioning
@@ -10530,7 +11039,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             sha: shortSha(createdSha),
             total_lines: countLines(createBody),
             read_back: {
-              note: "a compiler/test error citing this file's line N is answered here — fill the range",
+              // B1 (v0.12): shortened — same pointer, teaching moved to guide.
+              note: "answers a cited line N — fill range",
               next_call_is_template: true,
               next_call: {
                 tool: "read_file",
@@ -11127,11 +11637,27 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             // misroute this to task_pack; the correct remedy is splitting the
             // SAME find into <=5-entry calls, so name it explicitly (an
             // explicit `next` wins over the derived default).
+            //
+            // FIELD DEFECT (2026-08-27 field-eval T2): `next` only ever named
+            // the FIRST 5 tokens — the remaining tail was named solely in
+            // `hint`'s prose (a COUNT, not the tokens themselves), so a caller
+            // had to hand-slice its own original `queries[]` to build the
+            // second call. `remaining_queries` carries the exact tail, in the
+            // same stringified form `next`'s `head` uses, so the follow-up
+            // call needs no slicing. Named distinctly from the top-level
+            // `Refusal.remaining` STRING slot (A.5.15, protocol/refusal.ts's
+            // `remainingOf`) it rides beside — that slot drops array values,
+            // so this is a separate advisory key, allowlisted in
+            // protocol/refusal.ts's `REFUSAL_ADVISORY_KEYS`.
             const head = (rawQueries as unknown[]).slice(0, 5).map(String);
-            return toolError(`queries accepts at most 5 entries, got ${rawQueries.length}`, {
+            const remainingQueries = (rawQueries as unknown[]).slice(5).map(String);
+            return toolStructuredError({
+              ok: false,
               code: "invalid-input",
+              error: `queries accepts at most 5 entries, got ${rawQueries.length}`,
               next: `search_files action=find queries=${JSON.stringify(head)}`,
               hint: `queries is OR-matched and capped at 5 per call — run the suggested call, then a second find for the remaining ${rawQueries.length - 5} token(s)`,
+              remaining_queries: remainingQueries,
             });
           }
           if (!rawQueries.every((q) => typeof q === "string" && q.length > 0)) {
@@ -11308,6 +11834,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(lang ? { lang } : {}),
               ...(typeof args["limit"] === "number" ? { limit: args["limit"] } : {}),
               ...(Array.isArray(args["surfaceRoles"]) ? { surfaceRoles: (args["surfaceRoles"] as unknown[]).map(String) } : {}),
+              ...(typeof args["maxBytes"] === "number" ? { maxBytes: args["maxBytes"] } : {}),
+              ...(typeof args["maxTokens"] === "number" ? { maxTokens: args["maxTokens"] } : {}),
+              ...(defaultResponseByteCeiling !== undefined ? { clientDefaultByteCeilingHint: defaultResponseByteCeiling } : {}),
             },
             workspace,
           );

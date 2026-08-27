@@ -39,8 +39,39 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
     expect(SERVER_INSTRUCTIONS).toContain("unknown-location and multi-file discovery");
     expect(SERVER_INSTRUCTIONS).toContain("read_file mode=task_pack query=<request verbatim>");
     expect(SERVER_INSTRUCTIONS).toContain("search_files action=tree|find|references");
+    expect(SERVER_INSTRUCTIONS).toContain("After task_pack returns act.answer or act.edit, discovery is closed");
     expect(SERVER_INSTRUCTIONS).toContain("Fall back to native Read/Grep/Explore only after TL reports a non-complete scope or a verified absence.");
     expect(SERVER_INSTRUCTIONS).toContain("the TokenLighten guide block in AGENTS.md/CLAUDE.md.");
+  });
+
+  // v0.12 C2 (W4 channel v2): guide-less stop discipline, grounded in the T13
+  // anatomy residual (ceremonial post-edit re-reads/diff sweeps) and the
+  // Probe-2 finding (solvers distrust served evidence). These four sentences
+  // are the ONLY textual explanation a guide-less caller ever gets for this
+  // behavior, so each is pinned by name rather than folded into the sweep
+  // above.
+  it("closes discovery and requires batching independent edits into one edits[] call", () => {
+    expect(SERVER_INSTRUCTIONS).toContain(
+      "After task_pack returns act.answer or act.edit, discovery is closed — act immediately from the served content and batch independent edits in one edits[] call.",
+    );
+  });
+
+  it("tells a caller never to re-fetch bytes a receipt or a prior-tagged evidence item already served", () => {
+    expect(SERVER_INSTRUCTIONS).toContain(
+      "A receipt, or any evidence item marked prior, means those bytes are already in hand — never re-fetch on it.",
+    );
+  });
+
+  it("tells a caller a not-a-direct-proof gap is not closed by that entry passing", () => {
+    expect(SERVER_INSTRUCTIONS).toContain(
+      "A gap naming an entry as not a direct proof is not closed by that entry passing — verify via the contract's per-target actions instead.",
+    );
+  });
+
+  it("tells a caller to stop after a successful edit and a passing relevant verification, with no ceremonial re-reads/diff sweeps", () => {
+    expect(SERVER_INSTRUCTIONS).toContain(
+      "Once an edit applies and a relevant verification passes, stop: no ceremonial re-reads or diff sweeps.",
+    );
   });
 });
 

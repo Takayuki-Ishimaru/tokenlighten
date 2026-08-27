@@ -6,9 +6,9 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.11.1 release
+## v0.12.0 release
 
-**Public Beta update.** TokenLighten v0.11.1 is the latest source release. Interfaces and supported workflows may continue to change as feedback is incorporated. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+**Public Beta update.** TokenLighten v0.12.0 is the latest source release. Interfaces and supported workflows may continue to change as feedback is incorporated. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
 
 The public release includes:
 
@@ -16,7 +16,7 @@ The public release includes:
 - source code and public package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-Compared with v0.9.x, v0.11.1 adds restart-safe task handles, stronger absence and scope disclosures, content-hash index freshness, modern MCP transport support, verification-aware bounded edits, optional graph/retrieval/packing/reasoning/wire experiments, paired attribution and calibration, and expanded VS Code diagnostics. Experimental cores remain off by default unless explicitly enabled.
+Compared with v0.11.1, v0.12.0 adds lossless and monotone task continuation, Japanese retrieval, a guarded known-location edit fast path, bounded task-pack and batch responses, safer UTF-16/undecodable-file handling, exact 1–8 MiB identifier routing, compact edit proofs, clearer runtime diagnostics, and full/medium/compact managed-guide profiles in English and Japanese. Experimental retrieval, reasoning, fast-path, delta-context, and adaptive-wire capabilities remain off by default unless explicitly enabled.
 
 The public release does not include the desktop application or the private benchmark harness.
 
@@ -36,23 +36,19 @@ Symbol and reference search can return relevant definitions and call sites direc
 
 ### Developer benchmark observations
 
-Across 16 matched, verified task pairs in the latest six-task developer decision run, using TokenLighten reduced aggregate verified task cost by approximately **21%** compared with the same agent using native tools only.
+Across 16 matched verified pairs in the retained six-task v0.12 decision run, aggregate verified task cost with TokenLighten was approximately **28% lower** than with native tools only.
 
-In a cross-module telemetry-wiring task, the agent had to locate the estimator health decision and connect it to the outbound system-status path. Across three verified repetitions, the median task cost with TokenLighten was approximately **33% lower**.
+For comparison, the retained v0.11.1 run showed an approximately **21% lower** aggregate cost, also across 16 matched verified pairs. The observed reduction widened by about **7 percentage points**. The task classes match, but source revisions and evaluation windows differ, so this is a descriptive rather than causal comparison.
 
-In a multi-bug on-call task spanning flight control, mixer behavior, and mode transitions, the median cost among the two matched verified repetitions was approximately **29% lower**. A third repetition had different verification outcomes between the two arms and is not included in that cost comparison.
+Among the clearer positive results, the artifact-driven rating-engine task showed an approximately **57% lower** median cost and the multi-bug on-call task showed an approximately **30% lower** median cost, with three verified pairs each.
 
-The current results also show where TokenLighten may help less:
+The narrowly scoped calculation task was close to parity. Results were more variable when the two arms did not reach the same verification outcome, so those cases are excluded from the numeric comparisons. Small known-location tasks can also see less benefit because fixed MCP and guide overhead accounts for a larger share of the work.
 
-- Benefits were modest for narrowly scoped calculation fixes and artifact-driven implementations whose target package was already constrained.
-- Results were more variable when a task had mixed verification outcomes; those outcomes are excluded from the numeric comparisons above.
-- Small known-location tasks can still cost more because the MCP schema and managed guide add fixed overhead.
-
-These are developer-run benchmark observations, not guaranteed savings. The v0.11.1 suite is broader than the published v0.9.x evaluation, so the two releases are not a direct before/after experiment. Actual cost varies by repository, task, client, model behavior, and provider pricing, and local estimates are not provider billing records. See the [v0.11.1 release draft](release-docs/github-release-v0.11.1.md#benchmark-update) for the interpretation and caveats.
+These are developer-run observations, not guaranteed savings. Actual cost varies by repository, task, client, model behavior, evaluation window, and provider pricing, and local estimates are not provider billing records. See the [v0.12.0 release draft](release-docs/github-release-v0.12.0.md#benchmark-update) for details.
 
 ## Install the VS Code extension (no build required)
 
-After v0.11.1 is published, download **[tokenlighten-vscode-extension-0.11.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.11.1/tokenlighten-vscode-extension-0.11.1.vsix)** from its GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+After v0.12.0 is published, download **[tokenlighten-vscode-extension-0.12.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.12.0/tokenlighten-vscode-extension-0.12.0.vsix)** from its GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -63,7 +59,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.11.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.12.0.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required.
@@ -94,6 +90,8 @@ Set up TokenLighten in another workspace:
 cd /path/to/project
 tl workspace setup
 ```
+
+This natural-autoload setup — the managed AGENTS.md/CLAUDE.md guide block plus workspace MCP configuration — is the canonical way to run TokenLighten in production. Paired delivery-parity runs found its cost within noise of manually injecting the same guide text (cost ratio 1.038–1.074 across two runs; both 95% CIs straddle parity). Do not remove the managed guide block afterward: a controlled isolation run found that dropping it costs far more than keeping it (1.254x vs 1.059x) — the largest measured cost regression found to date. See [Getting started](release-docs/getting-started.md#set-up-a-workspace) for the run references and for `tl clients activate` (machine-wide registration with Claude Code and Codex).
 
 The MCP server is read-only by default. Enable writes only when you intend to allow workspace changes:
 
@@ -153,7 +151,7 @@ npm run package -w tokenlighten-vscode-extension
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
-For v0.11.1, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
+For v0.12.0, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
 
 ## Documentation
 
@@ -164,15 +162,15 @@ For v0.11.1, the complete package test suite is a CI gate on Ubuntu and macOS. W
 - [Privacy, security, and support](release-docs/privacy-security-support.md)
 - [Licensing and use policy](release-docs/licensing.md)
 
-The existing `docs/` directory is development history and is not part of the public v0.11.1 source release.
+The existing `docs/` directory is development history and is not part of the public v0.12.0 source release.
 
 ## Security and support
 
 ### Dependency audit snapshot
 
-For the v0.11.1 source tree audited on 2026-08-23, `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the normal runtime dependency view.
+For the v0.12.0 public-source staging tree audited on 2026-08-27, `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the normal runtime dependency view.
 
-A full source-development installation, including development dependencies, reported **1 Critical, 1 High, and 5 Moderate** findings. These development-toolchain findings are outside the normal installed-VSIX runtime view. Contributors should review them before running development tools on untrusted source or content.
+A full public-source staging installation, including development dependencies, reported **1 Critical, 1 High, and 5 Moderate** findings. These development-toolchain findings are outside the normal installed-VSIX runtime view. Contributors should review them before running development tools on untrusted source or content.
 
 This is a dated dependency-audit snapshot, not a guarantee that the software has no vulnerabilities. Audit data can change after publication; rerun `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation.
 

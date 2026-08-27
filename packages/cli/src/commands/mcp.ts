@@ -35,6 +35,17 @@ import {
   isPidAlive,
   stopMcp,
 } from "../process.js";
+import { wantsHelp } from "../util/helpFlag.js";
+
+const MCP_USAGE = `\
+Usage: tl mcp <start|stop|status>
+
+  start [--stdio] [--allow-write] [--workspace DIR]
+        [--allowed-parent DIR]... [--no-prereq-check]
+                    Start the MCP server (used by generated client configs).
+  stop              Stop a running background MCP server.
+  status            Report whether a background MCP server is running.
+`;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -244,6 +255,10 @@ function runMcpStatus(): void {
 // ---------------------------------------------------------------------------
 
 export async function runMcp(args: string[]): Promise<void> {
+  if (wantsHelp(args)) {
+    process.stdout.write(MCP_USAGE);
+    return;
+  }
   const [subcommand, ...rest] = args;
 
   switch (subcommand) {

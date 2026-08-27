@@ -1027,3 +1027,201 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     expect(res["code_unchanged"]).toBeUndefined();
   }, 30000);
 });
+
+// =============================================================================
+// GROUP 8 (FIXED, field-eval wave 2026-08-27): three field defects found in a
+// pre-release manual pass, each confirmed live before the fix and pinned here
+// after it. See server.ts's inline "field-eval T1/T2/T3" comments at the
+// fixed sites for the full incident narrative.
+// =============================================================================
+
+describe("argMatrix — field-eval T1: mode=slice + paths[] guides instead of a bare dead-end", () => {
+  it("paths=[one path]: refusal names the single path as an executable next, preserving range", async () => {
+    const { ws, srv } = await newServer("t1-slice-paths-one");
+    writeFile(ws, "src/one.ts", "export const ONE = 1;\nexport const TWO = 2;\n");
+    const res = await srv.call("read_file", { mode: "slice", paths: ["src/one.ts"], range: "1-1" });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    // `next` is a structured ToolCall ({tool, arguments}), like every other
+    // refusal `next` in this protocol (§2.6) — parsed from the prose call the
+    // fix emits, not shipped as raw prose itself.
+    const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool).toBe("read_file");
+    expect(next?.arguments?.["mode"]).toBe("slice");
+    expect(next?.arguments?.["path"]).toBe("src/one.ts");
+    // The caller's own range must survive into the corrected call, not be
+    // silently dropped along with the path/paths[] confusion.
+    expect(next?.arguments?.["range"]).toBe("1-1");
+  }, 30000);
+
+  it("paths=[two paths]: refusal offers the mode=task_pack discovery form, not a re-slice of one file", async () => {
+    const { ws, srv } = await newServer("t1-slice-paths-two");
+    writeFile(ws, "src/a.ts", "export const A = 1;\n");
+    writeFile(ws, "src/b.ts", "export const B = 1;\n");
+    const res = await srv.call("read_file", { mode: "slice", paths: ["src/a.ts", "src/b.ts"] });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    // This exact shape is actually caught by `normalizeWireArgs` EARLIER than
+    // the T1 fix site (server.ts's own dead-code note explains why) — both
+    // producers agree on mode=task_pack, so the caller sees one consistent
+    // recovery regardless of which one fired.
+    const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool).toBe("read_file");
+    expect(next?.arguments?.["mode"]).toBe("task_pack");
+    expect(next?.arguments?.["paths"]).toEqual(["src/a.ts", "src/b.ts"]);
+  }, 30000);
+
+  it("a genuinely pathless slice (no path, no paths[], no handle) keeps the original bare refusal", async () => {
+    const { srv } = await newServer("t1-slice-truly-pathless");
+    const res = await srv.call("read_file", { mode: "slice" });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    expect(String(res["detail"])).toContain("path (or handle) is required for mode=slice");
+  }, 30000);
+});
+
+describe("argMatrix — field-eval T2: search_files queries[] > 5 names the remaining tokens structurally", () => {
+  it("queries=6: next carries the first 5, remaining_queries carries the 6th verbatim", async () => {
+    const { srv } = await newServer("t2-queries-six");
+    const res = await srv.call("search_files", {
+      action: "find",
+      queries: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"],
+    });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool).toBe("search_files");
+    expect(next?.arguments?.["queries"]).toEqual(["alpha", "beta", "gamma", "delta", "epsilon"]);
+    expect(res["remaining_queries"]).toEqual(["zeta"]);
+  }, 30000);
+
+  it("queries=7: remaining_queries carries both tail tokens, in order, without hand-slicing", async () => {
+    const { srv } = await newServer("t2-queries-seven");
+    const res = await srv.call("search_files", {
+      action: "find",
+      queries: ["a1", "a2", "a3", "a4", "a5", "a6", "a7"],
+    });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["remaining_queries"]).toEqual(["a6", "a7"]);
+  }, 30000);
+});
+
+describe("argMatrix — field-eval T3: mode=handles labels a bare file-handle's synthesized whole-file range", () => {
+  it("a bare file-kind handle (minted by mode=full) forwards its server-computed synthesized_range onto the wire", async () => {
+    const { ws, srv } = await newServer("t3-handles-bare-file");
+    writeFile(ws, "src/whole.ts", "export const WHOLE = 1;\nexport const SECOND = 2;\n");
+    const full = await srv.call("read_file", { mode: "full", path: "src/whole.ts" });
+    const bareHandle = String(full["handle"]);
+    expect(bareHandle).toMatch(/^h/);
+
+    const res = await srv.call("read_file", { mode: "handles", handles: [bareHandle] });
+    expect(res["kind"]).toBe("read.batch");
+    // readFamily.ts's projectBatch renames the internal `items[]` to the v1
+    // wire field `entries[]` (Rule K) — assert the WIRE shape, not the
+    // dispatch-internal one.
+    const entries = res["entries"] as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!["range"]).toBe("1-2");
+    // Fixed 2026-08-27 (field-eval T3, cross-file boundary): batchEntry()'s
+    // `handle !== undefined && range !== undefined` branch now keeps
+    // "synthesized_range" (plus "note"/"concern_note", the same pre-existing
+    // class of gap) alongside "content"/"sha".
+    expect(entries[0]!["synthesized_range"]).toBe(true);
+  }, 30000);
+
+  it("a real ranged handle (minted by mode=slice range=...) carries NO synthesized_range marker", async () => {
+    const { ws, srv } = await newServer("t3-handles-real-range");
+    writeFile(ws, "src/ranged.ts", "line one\nline two\nline three\n");
+    const sliced = await srv.call("read_file", { mode: "slice", path: "src/ranged.ts", range: "1-2" });
+    const rangedHandle = String(sliced["handle"]);
+
+    const res = await srv.call("read_file", { mode: "handles", handles: [rangedHandle] });
+    const entries = res["entries"] as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!["range"]).toBe("1-2");
+    expect(entries[0]!["synthesized_range"]).toBeUndefined();
+  }, 30000);
+});
+
+describe("argMatrix — field-eval integration T2: a truncated handles-batch entry is never a dead end", () => {
+  /**
+   * The residue the T3 keep-list fix left behind, closed 2026-08-27.
+   *
+   * `server.ts`'s handles-batch loop attaches `remaining_ranges` and `next` to
+   * the SAME item shape T3 fixed — fed by `readCodeModes.ts`'s ordinary
+   * range-slice byte-cap branch (READ_SYMBOL_CAP_BYTES = 24 KiB), which sets
+   * both WITHOUT `downgraded_from`. `readFamily.ts`'s `batchEntry()` routed a
+   * `downgraded_from` item to the `file-downgraded` form, whose
+   * DOWNGRADE_FIELDS already kept both — so ONLY the non-downgraded truncation
+   * lost them, which is why the gap survived T3. A wire entry with
+   * `truncated:true` and no `next` contradicts the protocol's standing promise
+   * that a recoverable truncation always carries an executable continuation.
+   *
+   * Fixture sizing is load-bearing: the file must exceed the 24 KiB SLICE cap
+   * (so the batch serve truncates) while staying under the 80 KiB
+   * READ_FULL_CAP_BYTES (so `mode=full` serves it whole and mints the bare
+   * file-kind handle whose synthesized range is the WHOLE file).
+   */
+  const BIG_LINE = "export const PADDING_CONSTANT_FOR_BYTE_CAP_COVERAGE = 1234567890;";
+
+  it("forwards remaining_ranges + an executable next onto the wire entry", async () => {
+    const { ws, srv } = await newServer("t2-handles-truncated");
+    const lines: string[] = [];
+    for (let i = 0; i < 600; i += 1) lines.push(`${BIG_LINE} // line ${i}`);
+    const body = `${lines.join("\n")}\n`;
+    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(24576);
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThan(81920);
+    writeFile(ws, "src/wide.ts", body);
+
+    const full = await srv.call("read_file", { mode: "full", path: "src/wide.ts" });
+    const bareHandle = String(full["handle"]);
+    expect(bareHandle).toMatch(/^h/);
+
+    const res = await srv.call("read_file", { mode: "handles", handles: [bareHandle] });
+    expect(res["kind"]).toBe("read.batch");
+    const entries = res["entries"] as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    // Pre-condition: this IS the non-downgraded truncation branch.
+    expect(entry["truncated"]).toBe(true);
+    expect(entry["downgraded_from"]).toBeUndefined();
+    // The fix: both continuation fields survive the projection.
+    expect(Array.isArray(entry["remaining_ranges"])).toBe(true);
+    expect((entry["remaining_ranges"] as string[])[0]).toMatch(/^\d+-\d+$/);
+    expect(typeof entry["next"]).toBe("string");
+    // Executable, not prose. The handle it names is the RESUME handle the
+    // truncation minted, not necessarily the one this call passed in — the
+    // 2026-08-01 truncated-mint consistency rule narrows a truncated serve's
+    // recorded range/sha to the bytes actually served, so the continuation
+    // rides a handle whose range/sha agree with each other.
+    const remaining = (entry["remaining_ranges"] as string[])[0]!;
+    const parsed = /^read_file mode=slice handle=(h\S+) range=(\S+)$/.exec(String(entry["next"]));
+    expect(parsed, `next must be an executable slice call, got: ${String(entry["next"])}`).not.toBeNull();
+    expect(parsed![2]).toBe(remaining);
+
+    // Running it VERBATIM actually advances — the whole point of the promise.
+    const resumed = await srv.call("read_file", {
+      mode: "slice",
+      handle: parsed![1]!,
+      range: parsed![2]!,
+    });
+    expect(resumed["kind"]).toBe("read.text");
+    // §3.3: served bytes ride `evidence[].body`, not a top-level `content`.
+    const resumedBody = (resumed["evidence"] as Array<Record<string, unknown>>)
+      .map((row) => String(row["body"] ?? ""))
+      .join("");
+    expect(resumedBody).not.toBe("");
+    expect(resumedBody).toContain("PADDING_CONSTANT_FOR_BYTE_CAP_COVERAGE");
+  }, 30000);
+
+  it("an UNtruncated batch entry pays nothing for the two added keys (E-1)", async () => {
+    const { ws, srv } = await newServer("t2-handles-small");
+    writeFile(ws, "src/small.ts", "export const SMALL = 1;\n");
+    const full = await srv.call("read_file", { mode: "full", path: "src/small.ts" });
+    const res = await srv.call("read_file", { mode: "handles", handles: [String(full["handle"])] });
+    const entry = (res["entries"] as Array<Record<string, unknown>>)[0]!;
+    expect(entry["truncated"]).toBe(false);
+    expect(entry["remaining_ranges"]).toBeUndefined();
+    expect(entry["next"]).toBeUndefined();
+  }, 30000);
+});

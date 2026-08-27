@@ -1,0 +1,11 @@
+<!-- tokenlighten:mcp-instructions:start -->
+<!-- tl-instructions-version: {{VERSION}} -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+## TokenLighten MCP (compact)
+
+3ツールのみ: `read_file`, `edit_file`, `search_files`. 所在不明・複数file横断調査を含む未知file作業=>Read/Grep/catやExplore系subagentより先に`read_file mode=task_pack query="<依頼全文>"`; 切詰め禁止. 同一task内の絞ったre-packは正直にincomplete足り得る—不具合ではない. Search: `action=find query=<識別子1語>`; 複数=>ONE `queries=[…]`、逐次禁止; 既知のpackage/moduleは`path`でsubtree指定、scope不明時のみrepo全体.
+Workspace書込安全性: 全callに自分の`cwd`を渡す — 無宣言rootは`cwd-required-for-edit`、勝手に仮定しない; 共有workspaceでは各agent固定の`lane`. path+識別子+変更が平易なら単一値editは高速close; それ以外は`edit_file`の`edits[]`でbatchし、各itemが自前の対象を持つ(非継承).
+未知の`kind`=SAFE-STOP: 報告のみでeditを発行せず、fieldからの推測禁止.
+`read.receipt`は行き止まりでもre-packの合図でもない: その`next`を実行. 応答が示す`next`/hintは常に実行可能 — 逐語実行し、自作の続きは禁止. 読みは`maxBytes`/`maxTokens`でも応答上限可.
+それ以外 — artifact/archive詳細、verification-kit詳細、kind別詳細規則 — は必要な応答内でon-demand配信; 配信されるまでがこの完全ルール.
+<!-- tokenlighten:mcp-instructions:end -->

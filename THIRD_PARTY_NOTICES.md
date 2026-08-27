@@ -21,13 +21,13 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | @modelcontextprotocol/core@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
 | @modelcontextprotocol/sdk@1.30.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
 | @modelcontextprotocol/server@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @noble/ciphers@2.3.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
+| @noble/ciphers@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
 | @noble/hashes@1.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
-| @noble/hashes@2.3.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
+| @noble/hashes@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
 | @scure/base@2.3.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
 | @types/node@14.18.63 | MIT |  | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @xmldom/xmldom@0.8.15 | MIT |  | https://github.com/xmldom/xmldom |
-| @zip.js/zip.js@2.8.57 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
+| @zip.js/zip.js@2.8.60 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
 | accepts@2.0.0 | MIT |  | https://github.com/jshttp/accepts |
 | adler-32@1.3.1 | Apache-2.0 | sheetjs | https://github.com/SheetJS/js-adler32 |
 | ajv-formats@3.0.1 | MIT | Evgeny Poberezkin | https://github.com/ajv-validator/ajv-formats |
@@ -104,7 +104,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | graceful-fs@4.2.11 | ISC |  | https://github.com/isaacs/node-graceful-fs |
 | has-symbols@1.1.0 | MIT | Jordan Harband | https://github.com/inspect-js/has-symbols |
 | hasown@2.0.4 | MIT | Jordan Harband | https://github.com/inspect-js/hasOwn |
-| hono@4.13.3 | MIT | Yusuke Wada | https://github.com/honojs/hono |
+| hono@4.13.5 | MIT | Yusuke Wada | https://github.com/honojs/hono |
 | http-errors@2.0.1 | MIT | Jonathan Ong | https://github.com/jshttp/http-errors |
 | iconv-lite@0.7.3 | MIT | Alexander Shtuchkin | https://github.com/pillarjs/iconv-lite |
 | ieee754@1.2.1 | BSD-3-Clause | Feross Aboukhadijeh | https://github.com/feross/ieee754 |
@@ -749,7 +749,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 1b7ebc8d7889ed25491484ab2b102370742ca6c0b26650a0c62cc2269b579b84
 
-Applies to: `@zip.js/zip.js@2.8.57`
+Applies to: `@zip.js/zip.js@2.8.60`
 
 ```text
 BSD 3-Clause License
@@ -896,7 +896,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 24d0608c3320a3e27ac35e1b36ee222b096e372ccd981351f4db7ff4c2b0bfd0
 
-Applies to: `@noble/ciphers@2.3.0`
+Applies to: `@noble/ciphers@2.4.0`
 
 ```text
 The MIT License (MIT)
@@ -1284,7 +1284,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 3239e134eb6e6d64538ca76498c7fcb08a395249dd9d4af9927bf6d0169ee429
 
-Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.3.0`, `@scure/base@2.3.0`
+Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.4.0`, `@scure/base@2.3.0`
 
 ```text
 The MIT License (MIT)
@@ -4855,7 +4855,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
 
-Applies to: `hono@4.13.3`
+Applies to: `hono@4.13.5`
 
 ```text
 MIT License

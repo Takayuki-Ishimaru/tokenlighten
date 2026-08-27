@@ -9,6 +9,7 @@
  * locateTaskContext.ts's own splitBasenameTokens already uses for basenames,
  * generalized to kebab-case and consecutive-caps acronyms.
  */
+import { extractCjkTokens, MAX_CJK_TOKENS } from "../../util/cjkSpans.js";
 
 /**
  * Small stop-word list — filtered out of DECOMPOSED sub-tokens only, never
@@ -53,20 +54,24 @@ export function decomposeIdentifier(raw: string): string[] {
 }
 
 /**
- * Tokenize free text (doc/body/signature fields and query text): words and
+ * The pre-CJK tokenizeText, unchanged in behavior, renamed: words and
  * identifier-shaped runs are decomposed; quoted-string contents recurse
  * (kept AND decomposed, since a queried string literal must match both as a
  * phrase and by its component words); error-code-shaped tokens are kept
- * whole (lowercased) in addition to their decomposed parts.
+ * whole (lowercased) in addition to their decomposed parts. ASCII-only by
+ * construction (every pattern below is [A-Za-z0-9_-]-shaped) — a CJK
+ * character simply never matches any alternative here, which is exactly
+ * what keeps this helper byte-identical before and after the CJK addition
+ * below.
  */
-export function tokenizeText(text: string, opts: { keepStopWords?: boolean } = {}): string[] {
+function tokenizeAsciiWords(text: string, opts: { keepStopWords?: boolean }): string[] {
   const out: string[] = [];
   const wordPattern = /"([^"]{1,80})"|'([^']{1,80})'|[A-Za-z][A-Za-z0-9_-]*|\d+/g;
   let m: RegExpExecArray | null;
   while ((m = wordPattern.exec(text)) !== null) {
     const quoted = m[1] ?? m[2];
     if (quoted !== undefined) {
-      out.push(...tokenizeText(quoted, opts));
+      out.push(...tokenizeAsciiWords(quoted, opts));
       continue;
     }
     const word = m[0];
@@ -77,6 +82,33 @@ export function tokenizeText(text: string, opts: { keepStopWords?: boolean } = {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// CJK (Han/Hiragana/Katakana) span extraction now lives in the shared
+// util/cjkSpans.ts (imported above) — factored out so util/queryShape.ts's
+// tokenizeIdentifierMode/tokenizeSimpleMode and
+// features/locator/locateTaskContext.ts's identifierTokensIn get the
+// IDENTICAL CJK treatment instead of a second, independently-drifting
+// partial reimplementation. See that module's own comment for the full
+// design rationale (script-separated runs, bigrams, Han unigrams, the JA
+// stopword set, the token cap) — this file's own tokenizeText behavior is
+// UNCHANGED by the move. MAX_CJK_TOKENS is re-exported below so existing
+// importers of tokenize.js's own MAX_CJK_TOKENS are unaffected.
+// ---------------------------------------------------------------------------
+
+export { MAX_CJK_TOKENS };
+
+/**
+ * Tokenize free text (doc/body/signature fields and query text): ASCII
+ * words/identifiers/quoted-strings/error-codes (tokenizeAsciiWords), THEN
+ * any CJK (Han/Hiragana/Katakana) runs found anywhere in `text`
+ * (extractCjkTokens) — see each function's own comment above. Pure-ASCII
+ * input is byte-identical to the pre-CJK tokenizer: extractCjkTokens
+ * matches nothing and appends zero tokens.
+ */
+export function tokenizeText(text: string, opts: { keepStopWords?: boolean } = {}): string[] {
+  return [...tokenizeAsciiWords(text, opts), ...extractCjkTokens(text, opts)];
 }
 
 /** Dedup'd query tokenization — the term set a ranker matches units against. */

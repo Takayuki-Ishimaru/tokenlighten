@@ -17,6 +17,7 @@ import { compressFormat } from "../util/formatCompress.js";
 import { collectSymbols, type CollectedSymbol } from "../symbols/collectSymbols.js";
 import { renderSymbolDocMap, renderSymbolSkeleton } from "../symbols/renderSymbolSkeleton.js";
 import { commentNote, isTokenlightenSentinelLine } from "../util/sentinelComment.js";
+import { parseMarkdownHeadings, buildMarkdownHeadingIndex } from "../util/markdownSections.js";
 
 // ---------------------------------------------------------------------------
 // D8: `GetFileSkeletonInput` / `GetFileSkeletonOutput` used to live in
@@ -255,6 +256,45 @@ export function applyProfile(
 }
 
 // ---------------------------------------------------------------------------
+// Markdown skeleton — headings outline (D1, 2026-08-27 defect fix)
+// ---------------------------------------------------------------------------
+
+/**
+ * Markdown has no functions/classes for tree-sitter or regexFallback.ts's
+ * LANG_PATTERNS to find, so mode=skeleton on a markdown file used to render
+ * regexFallbackSkeleton's "(no signatures detected)" placeholder plus an
+ * AST-fallback notice — a dead end, even though mode=slice's own headings
+ * index for the SAME file already carries a rich outline (parseMarkdownHeadings
+ * / buildMarkdownHeadingIndex — see docSliver.ts's `headings`/`sections_hint`)
+ * that the skeleton route simply never consulted. This reuses that exact
+ * machinery to render the outline as the skeleton body instead.
+ *
+ * The index IS the entire skeleton body here (no sibling content sliver
+ * sharing the budget, unlike docSliver.ts's tighter
+ * DOC_SLIVER_HEADINGS_CAP_ENTRIES/_BYTES), so it gets a larger share of
+ * MAX_RESPONSE_BYTES than that use — still comfortably under it, leaving
+ * headroom for the header/notice lines and the generic byte-cap truncation
+ * net (below) that still applies as a backstop.
+ */
+const MARKDOWN_SKELETON_HEADINGS_CAP_ENTRIES = 300;
+const MARKDOWN_SKELETON_HEADINGS_CAP_BYTES = 6000;
+
+function buildMarkdownSkeletonOutline(fileContent: string): string {
+  const headings = parseMarkdownHeadings(fileContent);
+  if (headings.length === 0) return "(no headings detected)";
+  const index = buildMarkdownHeadingIndex(headings, {
+    maxEntries: MARKDOWN_SKELETON_HEADINGS_CAP_ENTRIES,
+    maxBytes: MARKDOWN_SKELETON_HEADINGS_CAP_BYTES,
+  });
+  const lines = index.headings.map((heading) => {
+    const indent = "  ".repeat(Math.max(0, heading.level - 1));
+    return `L${heading.range}: ${indent}${heading.text}`;
+  });
+  if (index.truncated && index.note) lines.push("", `// ${index.note}`);
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -341,28 +381,36 @@ export async function getFileSkeleton(
   let collectedSymbols: CollectedSymbol[] | undefined;
   let usedFallback = false;
 
-  // Try tree-sitter first.
-  if (treeSitterSupports(language)) {
-    try {
-      if (language !== "html") {
-        const symbols = await collectSymbols(fileContent, language, opts.treeSitterPaths ?? {});
-        if (symbols.length > 0) {
-          collectedSymbols = symbols;
-          skeletonText = renderSymbolSkeleton(fileContent, symbols, language);
+  if (language === "markdown") {
+    // Headings outline instead of the AST/regex-signature pipeline below —
+    // see buildMarkdownSkeletonOutline's doc comment. Not a "fallback": no
+    // degradedNotice, since this is the CORRECT rendering for markdown, not
+    // a degraded one.
+    skeletonText = buildMarkdownSkeletonOutline(fileContent);
+  } else {
+    // Try tree-sitter first.
+    if (treeSitterSupports(language)) {
+      try {
+        if (language !== "html") {
+          const symbols = await collectSymbols(fileContent, language, opts.treeSitterPaths ?? {});
+          if (symbols.length > 0) {
+            collectedSymbols = symbols;
+            skeletonText = renderSymbolSkeleton(fileContent, symbols, language);
+          }
         }
+        if (!skeletonText) {
+          skeletonText = await treeSitterSkeleton(fileContent, language, opts.treeSitterPaths ?? {});
+        }
+      } catch {
+        // Fall through to regex fallback.
       }
-      if (!skeletonText) {
-        skeletonText = await treeSitterSkeleton(fileContent, language, opts.treeSitterPaths ?? {});
-      }
-    } catch {
-      // Fall through to regex fallback.
     }
-  }
 
-  // Fall back to regex if tree-sitter failed or produced nothing.
-  if (!skeletonText || skeletonText.trim().length === 0) {
-    skeletonText = regexFallbackSkeleton(fileContent, language);
-    usedFallback = true;
+    // Fall back to regex if tree-sitter failed or produced nothing.
+    if (!skeletonText || skeletonText.trim().length === 0) {
+      skeletonText = regexFallbackSkeleton(fileContent, language);
+      usedFallback = true;
+    }
   }
 
   const isCode = CODE_LANGUAGES.has(language);

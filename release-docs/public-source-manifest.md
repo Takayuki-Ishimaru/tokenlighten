@@ -15,7 +15,7 @@ Include only the material required to build, test, and use the released source:
 - the public root files: `README.md` (after its public rewrite), `LICENSE`, `NOTICE` or third-party notices if supplied, `CHANGELOG.md` (publicly rewritten), a public-safe `package.json`, `package-lock.json`, TypeScript/Vitest configuration, and public GitHub workflow files. The public root scripts must build only included workspaces and the default test command must not reference the excluded benchmark harness;
 - build and release scripts required by the public commands, after reviewing their inputs and output paths;
 - the public portions of `packages/types/`, `packages/usage/`, `packages/skeleton-engine/`, `packages/agents-md/`, `packages/cli/`, `packages/mcp-server/`, and `packages/vscode-extension/`, including source, package metadata, and public package tests. Apply the file-level exclusions below rather than copying these directories wholesale;
-- a public, sanitized copy of these documents, including the reviewed v0.11.1 release note and its aggregate benchmark disclosure; and
+- a public, sanitized copy of these documents, including the reviewed v0.12.0 release note and its aggregate benchmark disclosure; and
 - public release assets such as the VSIX and its checksum.
 
 The `packages/agents-md/templates/` content is an explicit review gate. Do not copy a template that includes benchmark instructions, private repository guidance, or internal-only paths. Replace it with the approved public guidance before including it.
@@ -33,7 +33,7 @@ Exclude the following from the new public repository:
 - `TL-CORE2-EVIDENCE/` and other rehearsal, adjudication, or evidence material;
 - desktop application source and build outputs for this release;
 - local editor/agent configuration, credentials, environment files, caches, build outputs, and all Git metadata; and
-- any file that references an internal path, an undisclosed security issue, an unreviewed benchmark claim or raw benchmark data, customer data, or a private service. Only the reviewed aggregate summaries in the public `README.md`, public `CHANGELOG.md`, and `release-docs/github-release-v0.11.1.md` are allowlisted benchmark disclosures for this release.
+- any file that references an internal path, an undisclosed security issue, an unreviewed benchmark claim or raw benchmark data, customer data, or a private service. Only the reviewed aggregate summaries in the public `README.md`, public `CHANGELOG.md`, and `release-docs/github-release-v0.12.0.md` are allowlisted benchmark disclosures for this release.
 
 When in doubt, leave it out and add it later through a reviewed public-repository commit.
 

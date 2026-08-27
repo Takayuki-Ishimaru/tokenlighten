@@ -13,10 +13,11 @@
  * Output policy: plain data — no meta envelope.
  */
 
-import { renameSync, unlinkSync, writeFileSync, chmodSync } from "fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync, chmodSync } from "fs";
 import { join, dirname, basename } from "path";
 import { randomBytes } from "crypto";
 import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
+import { carryServedRangesAcrossEdit, deltaContextArmed } from "./deltaContext.js";
 
 export class AtomicWriteError extends Error {
   constructor(
@@ -156,6 +157,14 @@ export function makeTmpPath(target: string): string {
  * index-cache problem must never fail a write that already landed on disk.
  * Every production caller of this function passes it; only tests exercising
  * this module in isolation omit it.
+ *
+ * B2 / V12-02 (TL_DELTA_CONTEXT, default OFF) rides that SAME argument for the
+ * same reason: `{root, relPath}` is what names this write to the workspace
+ * session, and the sentence above — the narrowest seam every existing-file
+ * edit/rollback-restore funnels through — is exactly the safety floor a ledger
+ * transformation needs, namely hunks THIS server applied and nothing else. See
+ * `write/deltaContext.ts`; a caller that omits `indexInvalidation` opts out of
+ * both, which is why only tests do.
  */
 export function writeExistingFileAtomic(
   target: string,
@@ -163,6 +172,39 @@ export function writeExistingFileAtomic(
   originalMode: number | undefined,
   indexInvalidation?: { root: string; relPath: string }
 ): void {
+  // B2 / V12-02 (TL_DELTA_CONTEXT, default OFF): capture the bytes this write
+  // is about to replace, but ONLY for a path this session has actually served
+  // ranges for — `deltaContextArmed` is false for every other write, including
+  // every write at all while the flag is off, so no read happens.
+  //
+  // Taken BEFORE the rename (the target still holds the pre-edit bytes) and
+  // consumed only AFTER it succeeds: a write that throws leaves the old bytes
+  // AND the old ledger entry describing them, which is already correct.
+  const deltaBefore = indexInvalidation !== undefined
+    && deltaContextArmed(indexInvalidation.root, indexInvalidation.relPath)
+    ? readPreEditText(target)
+    : undefined;
+  // 2026-08-27 (write-path fail-closed guard, last-resort backstop): every
+  // production caller now sniffs the target's encoding BEFORE reading its
+  // content for edit computation (util/textDecode.ts's detectWriteEncodingRisk)
+  // and refuses rather than proceeding for a UTF-16-BOM or NUL-riddled file —
+  // see rangeEdit.ts/searchReplaceEdit.ts/applyEditsMulti.ts/readAndEdit.ts/
+  // renameSymbol.ts. This is the belt to that suspenders: a naive UTF-16-as-
+  // UTF-8 read-modify-write bakes lossy REPLACEMENT CHARACTER (U+FFFD)
+  // substitutions into `content` wherever the original bytes did not form
+  // valid UTF-8 — but a UTF-16 file's ASCII-range characters interleave a
+  // raw NUL between every code unit, and NUL survives that lossy decode
+  // untouched. A raw NUL in content about to be written is therefore the
+  // cheapest, most reliable post-hoc signature of exactly this corruption —
+  // refuse here too, for any caller (present or future) that reaches this
+  // function without its own upstream guard, rather than writing it.
+  // (String.fromCharCode(0), not a literal escape, keeps this source file's
+  // own bytes plain ASCII.)
+  if (content.includes(String.fromCharCode(0))) {
+    throw new AtomicWriteError(
+      `refusing to write ${target}: content contains a raw NUL character, the signature of a UTF-16 (or otherwise non-UTF-8) file misread as UTF-8 upstream — this write was blocked to avoid corrupting the file`,
+    );
+  }
   const tmpPath = makeTmpPath(target);
   try {
     writeFileSync(tmpPath, content, "utf8");
@@ -188,5 +230,30 @@ export function writeExistingFileAtomic(
     } catch {
       // best-effort — see doc comment above
     }
+    if (deltaBefore !== undefined) {
+      try {
+        carryServedRangesAcrossEdit(
+          indexInvalidation.root, indexInvalidation.relPath, deltaBefore, content,
+        );
+      } catch {
+        // best-effort, same rule as the index invalidation above: a ledger
+        // projection problem must never fail a write that already landed. The
+        // untransformed entry then fails the next read's sha check and the
+        // full body is served — the pre-B2 behaviour.
+      }
+    }
+  }
+}
+
+/**
+ * B2 / V12-02: the target's current bytes, or `undefined` when they cannot be
+ * read as text. Never throws — a delta projection is an optimization, and a
+ * missing/binary/unreadable pre-image simply means there is nothing to carry.
+ */
+function readPreEditText(target: string): string | undefined {
+  try {
+    return readFileSync(target, "utf8");
+  } catch {
+    return undefined;
   }
 }

@@ -14,15 +14,18 @@ TokenLighten exposes exactly three MCP tools over stdio JSON-RPC:
 
 The tools work with normal source files and supported text files. They can also inspect selected document and archive formats; see [Language support](language-support.md).
 
-## v0.11.1 workflow additions
+## v0.12.0 workflow additions
 
-- Pass `task_handle` to continue a task across a server restart; invalid, expired, or wrong-purpose handles fail closed with recovery.
-- Batch several identifiers with `search_files queries=[…]` and batch known skeleton reads with `read_file mode=skeleton paths=[…]`.
-- Task packs can return explicit answer/edit decisions, create targets, served-range provenance, and compact receipts for unchanged replays.
-- Successful edits can include verification kits; successful creates include terminal SHA/byte/line proof so clients do not need a read-back.
-- MCP `initialize` announces first-stop instructions, and diagnostics expose the exact `server_build` without recording source content.
+- Same-epoch continuation preserves the complete query and monotone task requirements; stale or unrelated decisions are demoted with executable recovery.
+- Japanese prose participates in ranking through shared Han/kana spans and bigrams.
+- Guarded known-location value changes can return a compact ready edit pack.
+- `maxBytes`/`maxTokens` bound task packs and batch reads; VS Code clients use a conservative 14,336-byte task-pack default.
+- Edit retries report `replayed:true`, oversized query batches return `remaining_queries`, and whole-file handle batches disclose synthesized ranges.
+- UTF-16 search avoids false absence certificates; unsupported-encoding edits fail closed.
+- Large Markdown skeletons return heading outlines and exact identifier routing covers 1–8 MiB.
+- Compact edit proofs, optional delta-context rereads, clearer doctor/log summaries, and English/Japanese compact guides reduce overhead.
 
-Experimental graph, retrieval, coverage-packer, reasoning, fast-path, and adaptive-wire cores remain disabled by default unless explicitly enabled.
+Experimental graph, retrieval, coverage-packer, reasoning, fast-path, delta-context, and adaptive-wire cores remain disabled by default unless explicitly enabled.
 
 ## Editing
 
@@ -48,9 +51,9 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. For setup and operational notes, see [Getting started](getting-started.md).
 
-## Known limitations (0.11.1)
+## Known limitations (0.12.0)
 
-- Source files larger than 1 MB are not included in the task-pack location index that `read_file mode=task_pack` uses to find relevant files by query; a pack that names such a file may resolve to a re-export file with the same name instead, or find nothing. The file is still readable directly by path/range, and `search_files find`/`references` still scan it (their own limit is 8 MiB). Workaround: pass the file explicitly in `paths`, or read it by path.
+- The pathless task-pack locator's primary index covers files through 1 MiB. Exact identifier routing adds a wide scan for the 1–8 MiB band; larger files remain readable by explicit path/range.
 - On very large repositories, the on-disk source-index cache is capped at 32 MiB; once a repository's index would exceed that, it is not persisted, so every new server process rebuilds it from scratch — the first call of a session can take 10-25 seconds. Later calls in that same process stay fast.
 - In an `edit_file` response, `core.counts` counts edited files, not edited items — a single batched edit touching 3 places in 1 file reports a count of 1, not 3.
 - The `TL_INDEX_CONSISTENCY_SCAN` index-freshness check is on by default; set it to `0` to disable. Other experimental flags (see `packages/mcp-server/src/util/flags.ts`) remain off by default.

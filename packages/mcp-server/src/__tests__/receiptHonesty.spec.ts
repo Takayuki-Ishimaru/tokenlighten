@@ -75,11 +75,11 @@ function writeFile(dir: string, rel: string, content: string): void {
   fs.writeFileSync(abs, content, "utf8");
 }
 
-function startServer(cwd: string): ServerHandle {
+function startServer(cwd: string, env?: Record<string, string>): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
     [TSX_CLI, BIN_TS, cwd],
-    { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } },
+    { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...(env ?? {}) } },
   );
 
   let stdoutBuf = "";
@@ -146,9 +146,9 @@ afterEach(() => {
   resetAll();
 });
 
-async function liveServer(tag: string): Promise<{ ws: string; srv: ServerHandle }> {
+async function liveServer(tag: string, env?: Record<string, string>): Promise<{ ws: string; srv: ServerHandle }> {
   const ws = mkDir(tag);
-  const srv = startServer(ws);
+  const srv = startServer(ws, env);
   servers.push(srv);
   await srv.initialize();
   return { ws, srv };
@@ -239,6 +239,73 @@ describe("[R5-10] F-1 — every emitted receipt carries an actionable continuati
       // Served outright (the fence let it through) — also a followable outcome.
       expect(bodiesOf(stop).length).toBeGreaterThan(0);
     }
+  }, 60000);
+});
+
+// ---------------------------------------------------------------------------
+// W5 — post-ready trim preserves serving honesty
+// ---------------------------------------------------------------------------
+
+describe("[W5] post-ready trim serves an existing-wire skeleton, never a fake receipt", () => {
+  it("T13-shaped N=6 full read serves a truthful skeleton; OFF and force_serve retain normal full content", async () => {
+    const { ws, srv } = await liveServer("w5-honest", { TL_POST_READY_TRIM: "1", TL_POST_READY_TRIM_N: "6" });
+    writeFile(ws, "src/alpha.ts", `export function alpha(): number { return 1; }\n`);
+    writeFile(ws, "src/beta.ts", `export function beta(): string {\n  return "W5_BETA_MARKER";\n}\n${lines(80, "// beta")}`);
+
+    const pack = await srv.call({
+      mode: "task_pack",
+      query: "what does alpha() return in src/alpha.ts",
+      paths: ["src/alpha.ts"],
+      taskProfile: "answer",
+      cwd: ws,
+    });
+    expect(pack["kind"]).toBe("read.task_pack");
+    // Five ordinary pre-edit reads establish the T13-shaped tail. The
+    // fixture's pack already served alpha, so these are honest cache receipts;
+    // they still count as read/search calls for the post-ready threshold.
+    for (let call = 1; call < 6; call++) {
+      const read = await srv.call({ mode: "slice", path: "src/alpha.ts", range: "1-1", cwd: ws });
+      expect(["read.text", "read.receipt"]).toContain(read["kind"]);
+    }
+
+    // Keep this W5 fixture above the tiny-file honesty exception: the
+    // separate dispatcher integration test pins that tiny files stay full.
+    fs.appendFileSync(
+      path.join(ws, "src/beta.ts"),
+      "/* " + "post-ready trim non-tiny fixture ".repeat(400) + " */",
+      "utf8",
+    );
+    const trimmed = await srv.call({ mode: "full", path: "src/beta.ts", cwd: ws });
+    // Skeletons project through the established read.map member, not a new
+    // W5-specific wire kind.
+    expect(trimmed["kind"]).toBe("read.map");
+    expect(trimmed["receipt"]).toBeUndefined();
+    // The frozen v1 projector expresses an honest skeleton as read.map:
+    // signatures are the served content and limit.next names the unserved
+    // range on the minted handle. No W5-only field is introduced.
+    expect(trimmed).toMatchObject({
+      outline: { path: "src/beta.ts", signatures: [expect.objectContaining({ name: "beta" })] },
+      limit: { next: { tool: "read_file", arguments: { mode: "slice" } } },
+    });
+    expect(JSON.stringify(trimmed)).toMatch(/"1-\d+"/);
+
+    const forced = await srv.call({ mode: "full", path: "src/beta.ts", force_serve: true, cwd: ws });
+    expect(forced["kind"]).toBe("read.text");
+    expect(bodiesOf(forced).join("\n")).toContain("W5_BETA_MARKER");
+  }, 60000);
+
+  it("is inert while TL_POST_READY_TRIM is off", async () => {
+    const { ws, srv } = await liveServer("w5-off", { TL_POST_READY_TRIM: "0", TL_POST_READY_TRIM_N: "6" });
+    writeFile(ws, "src/alpha.ts", `export function alpha(): number { return 1; }\n`);
+    writeFile(ws, "src/beta.ts", `export const W5_OFF_MARKER = true;\n`);
+    await srv.call({ mode: "task_pack", query: "what does alpha() return in src/alpha.ts", paths: ["src/alpha.ts"], taskProfile: "answer", cwd: ws });
+    for (let call = 1; call <= 6; call++) {
+      await srv.call({ mode: "slice", path: "src/alpha.ts", range: "1-1", cwd: ws });
+    }
+    const full = await srv.call({ mode: "full", path: "src/beta.ts", cwd: ws });
+    expect(full["kind"]).toBe("read.text");
+    expect(JSON.stringify(full)).not.toContain("post-ready discovery trimmed");
+    expect(bodiesOf(full).join("\n")).toContain("W5_OFF_MARKER");
   }, 60000);
 });
 
@@ -406,6 +473,76 @@ describe("[W2A-1] a wider re-ask than an already-clamped serve must not silently
 // ---------------------------------------------------------------------------
 // The mechanism — booking is provisional until the payload corroborates it
 // ---------------------------------------------------------------------------
+
+describe("W7 TL_OVERLAP_TRIM reuses the served-range ledger", () => {
+  const overlapFixture = (): string => Array.from(
+    { length: 12 },
+    (_, index) => `export const LINE_${String(index + 1).padStart(2, "0")} = ${index + 1};`,
+  ).join("\n") + "\n";
+
+  it("projects the held overlap as prior, serves only the residual, receipts full coverage, and lets force_serve bypass", async () => {
+    const { ws, srv } = await liveServer("w7-on", { TL_OVERLAP_TRIM: "1" });
+    writeFile(ws, "src/overlap.ts", overlapFixture());
+
+    const first = await srv.call({ mode: "slice", path: "src/overlap.ts", range: "1-6", cwd: ws });
+    expect(bodiesOf(first).join("\n")).toContain("LINE_04");
+
+    const partial = await srv.call({ mode: "slice", path: "src/overlap.ts", range: "4-10", cwd: ws });
+    expect(partial["kind"]).toBe("read.text");
+    const partialBodies = bodiesOf(partial).join("\n");
+    expect(partialBodies).toContain("LINE_07");
+    expect(partialBodies).toContain("LINE_10");
+    expect(partialBodies).not.toContain("LINE_04");
+    expect(JSON.stringify(partial)).toContain("\"prior\"");
+    expect(JSON.stringify(partial)).toContain("\"range\":\"4-6\"");
+
+    const covered = await srv.call({ mode: "slice", path: "src/overlap.ts", range: "1-6", cwd: ws });
+    expect(covered["kind"]).toBe("read.receipt");
+    expect(receiptOf(covered)?.["receipt"]).toBe("code-unchanged");
+
+    const forced = await srv.call({ mode: "slice", path: "src/overlap.ts", range: "4-10", force_serve: true, cwd: ws });
+    const forcedBodies = bodiesOf(forced).join("\n");
+    expect(forcedBodies).toContain("LINE_04");
+    expect(forcedBodies).toContain("LINE_10");
+    expect(JSON.stringify(forced)).not.toContain("\"prior\"");
+
+    writeFile(ws, "src/full-overlap.ts", overlapFixture());
+    await srv.call({ mode: "slice", path: "src/full-overlap.ts", range: "1-4", cwd: ws });
+    const full = await srv.call({ mode: "full", path: "src/full-overlap.ts", cwd: ws });
+    expect(bodiesOf(full).join("\n")).not.toContain("LINE_02");
+    expect(bodiesOf(full).join("\n")).toContain("LINE_12");
+    expect(JSON.stringify(full)).toContain("\"prior\"");
+
+    writeFile(ws, "src/symbol-overlap.ts", [
+      "export function overlapSymbol(): number {",
+      "  const SYMBOL_LINE_02 = 2;",
+      "  const SYMBOL_LINE_03 = 3;",
+      "  const SYMBOL_LINE_04 = 4;",
+      "  const SYMBOL_LINE_05 = 5;",
+      "  const SYMBOL_LINE_06 = 6;",
+      "  return SYMBOL_LINE_02 + SYMBOL_LINE_03 + SYMBOL_LINE_04 + SYMBOL_LINE_05 + SYMBOL_LINE_06;",
+      "}",
+      "",
+    ].join("\n"));
+    await srv.call({ mode: "slice", path: "src/symbol-overlap.ts", range: "1-4", cwd: ws });
+    const symbol = await srv.call({ mode: "symbol", path: "src/symbol-overlap.ts", symbol: "overlapSymbol", cwd: ws });
+    const symbolBodies = bodiesOf(symbol).join("\n");
+    expect(symbolBodies).not.toContain("SYMBOL_LINE_02 = 2");
+    expect(symbolBodies).toContain("SYMBOL_LINE_05 = 5");
+    expect(JSON.stringify(symbol)).toContain("\"prior\"");
+  }, 60000);
+
+  it("keeps the pre-W7 full-body behavior when the flag is off", async () => {
+    const { ws, srv } = await liveServer("w7-off", { TL_OVERLAP_TRIM: "0" });
+    writeFile(ws, "src/overlap-off.ts", overlapFixture());
+    await srv.call({ mode: "slice", path: "src/overlap-off.ts", range: "1-6", cwd: ws });
+    const partial = await srv.call({ mode: "slice", path: "src/overlap-off.ts", range: "4-10", cwd: ws });
+    const body = bodiesOf(partial).join("\n");
+    expect(body).toContain("LINE_04");
+    expect(body).toContain("LINE_10");
+    expect(JSON.stringify(partial)).not.toContain("\"prior\"");
+  }, 60000);
+});
 
 describe("[R5-10] the served-range ledger books what the wire carried", () => {
   const WS = "/tmp/tl-r510-ledger";

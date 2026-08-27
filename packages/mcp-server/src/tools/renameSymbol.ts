@@ -33,6 +33,7 @@ import {
   type RollbackFileState,
 } from "./applyEditsMulti.js";
 import { nestedWorkspaceCrossing } from "../write/workspaceBoundary.js";
+import { detectWriteEncodingRisk } from "../util/textDecode.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -184,7 +185,20 @@ export async function renameSymbol(
       continue;
     }
     let raw: string;
-    try { raw = fs.readFileSync(f.absPath, "utf8"); } catch { continue; }
+    try {
+      const buf = fs.readFileSync(f.absPath);
+      const encodingRisk = detectWriteEncodingRisk(buf);
+      if (encodingRisk) {
+        // 2026-08-27 (write-path fail-closed guard): skip this ONE file
+        // (disclosed, like the secret-file/file-too-large/other-workspace
+        // skips just above) rather than decode-as-utf8 and risk corrupting
+        // it on write — see util/textDecode.ts's doc comment. The rest of
+        // the workspace-wide rename proceeds normally.
+        skipped.push({ path: f.relPath, reason: "unsupported-encoding" });
+        continue;
+      }
+      raw = buf.toString("utf8");
+    } catch { continue; }
     if (!probe.test(raw)) continue;
 
     const lexicalSegments = await collectLexicalSegments(raw, f.language);

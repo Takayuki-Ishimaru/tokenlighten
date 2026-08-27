@@ -260,9 +260,36 @@ describe("escape-layer honesty — payload channels write the bytes JSON deliver
     expect(readFile(ws, "c.ts")).not.toContain(NUL);
   });
 
-  it("a raw NUL payload is applied, not normalized away, on the batch channel", async () => {
+  // RE-POINTED 2026-08-27 (pre-release field-eval wave, write-path fail-closed
+  // guard). This case used to assert that a raw NUL payload REACHES DISK. The
+  // wave added `writeExistingFileAtomic`'s last-resort backstop
+  // (write/atomicWrite.ts): content containing a raw NUL is refused, because a
+  // raw NUL is the reliable post-hoc signature of a UTF-16 file misread as
+  // UTF-8 upstream — the lossy decode replaces invalid sequences with U+FFFD
+  // but leaves the interleaved NULs untouched, so writing that content back
+  // corrupts the file. Every production caller now sniffs encoding first
+  // (util/textDecode.ts's detectWriteEncodingRisk); this is the belt to those
+  // suspenders.
+  //
+  // THIS FILE'S INVARIANT IS UNCHANGED, and is what the re-pointed assertions
+  // below still measure. The invariant is "JSON is the ONLY escape layer" —
+  // no SECOND unescape layer may silently rewrite payload bytes between the
+  // caller and disk. A loud, explanatory refusal is not a second escape layer:
+  // nothing was normalized, nothing was mangled, and the file is left exactly
+  // as it was. What changed is only the DISPOSITION of one payload the wave
+  // now classifies as corruption evidence rather than content. The two
+  // assertions that carry the original guarantee — no silent normalization,
+  // and no half-written/mangled file — are strengthened here, not dropped:
+  // the pre-edit bytes must survive byte-for-byte, and the refusal must NAME
+  // the NUL rather than failing generically.
+  //
+  // The `\uXXXX`-escape channels above are untouched: they never produce a raw
+  // NUL in `content`, so they still write their payload verbatim, which is the
+  // channel the 2026-08-07 incident actually concerned.
+  it("a raw NUL payload is refused at the write boundary, never silently normalized", async () => {
     const ws = mkWorkspace();
-    writeFile(ws, "n.ts", 'const M = "PLACEHOLDER";' + REAL_NL);
+    const before = 'const M = "PLACEHOLDER";' + REAL_NL;
+    writeFile(ws, "n.ts", before);
 
     const r = await applyEditsMulti(
       { edits: [{ path: "n.ts", search: "PLACEHOLDER", replace: NUL + "lane:" }] },
@@ -271,10 +298,16 @@ describe("escape-layer honesty — payload channels write the bytes JSON deliver
       SESSION,
     );
 
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    // The refusal must be about the NUL specifically — a generic failure would
+    // leave a caller unable to tell corruption evidence from an ordinary miss.
+    if (!r.ok) expect(String(r.error ?? "")).toMatch(/NUL/i);
+
+    // The original guarantee, now stated at its strongest: no second layer
+    // touched these bytes. Not normalized, not partially applied, not mangled.
     const after = readFile(ws, "n.ts");
-    expect(after).toBe('const M = "' + NUL + 'lane:";' + REAL_NL);
-    expect(codes(after).filter((c) => c === 0).length).toBe(1);
+    expect(after).toBe(before);
+    expect(codes(after).filter((c) => c === 0).length).toBe(0);
   });
 });
 

@@ -196,6 +196,21 @@ describe("2026-08-22 fence-serves-unserved-scope — T09 rep1 call-shape reprodu
     const servedRange = String(pricingEvidence!["range"]);
     expect(servedRange, "fixture must serve a real range to slice back").toMatch(/^\d+-\d+$/);
 
+    // Broad full reads after prepared act.edit use the existing skeleton
+    // downgrade and executable handle/slice continuation immediately.
+    const broadFull = bodyOf(await server.rpc(2.5, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "full", path: "src/pricing.ts", cwd: ws },
+    }));
+    // A served pack range may validly produce the existing code-unchanged
+    // receipt; an unserved large file takes the skeleton continuation path.
+    if (broadFull.kind === "read.receipt") {
+      expect(broadFull.receipt).toMatchObject({ receipt: "code-unchanged" });
+    } else {
+      expect(broadFull.mode, JSON.stringify(broadFull).slice(0, 800)).toBe("skeleton");
+      expect(String(broadFull.next), JSON.stringify(broadFull).slice(0, 800)).toContain("mode=slice handle=");
+    }
+
     // 2. search_files find with a query the pack never saw. REQUIRED
     // SEMANTICS #1: this must be SERVED (search.matches), never stonewalled
     // into a decision-unchanged receipt.

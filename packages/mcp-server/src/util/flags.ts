@@ -35,6 +35,8 @@
  *       TL_ADAPTIVE_WHOLE_FILE=1 demonstrably fails the recorded corpus, which
  *       is why these were NOT permanent-on'd:
  *       TL_VERIFICATION_RECIPE, TL_HOP1_CLOSURE, TL_ADAPTIVE_WHOLE_FILE,
+ *       TL_POST_READY_TRIM (threshold: TL_POST_READY_TRIM_N), TL_OVERLAP_TRIM,
+ *       TL_INTERFACE_AUTHORITY, TL_DELTA_CONTEXT,
  *       TL_EVIDENCE_SHADOW, TL_EVIDENCE_COMPLETION, TL_WRITE_CAPABILITY,
  *       TL_BM25F_CANDIDATE, TL_RRF_FUSION (v0.10 beta.2, V10-08 Hybrid
  *       Retrieval v1 — see features/retrieval/; candidate-generation-stage
@@ -407,6 +409,11 @@ export function hop1ClosureEnabled(): boolean {
   return parseBool(process.env["TL_HOP1_CLOSURE"], false);
 }
 
+/** T-L1: direct C/C++ interface-authority evidence; default OFF. */
+export function interfaceAuthorityEnabled(): boolean {
+  return parseBool(process.env["TL_INTERFACE_AUTHORITY"], false);
+}
+
 /**
  * Escalate repeated non-contiguous slices to one governed whole-file serve.
  *
@@ -606,6 +613,7 @@ export function activeExperimentFlags(): readonly string[] {
   const active: string[] = [];
   if (verificationRecipeEnabled()) active.push("TL_VERIFICATION_RECIPE");
   if (hop1ClosureEnabled()) active.push("TL_HOP1_CLOSURE");
+  if (interfaceAuthorityEnabled()) active.push("TL_INTERFACE_AUTHORITY");
   if (adaptiveWholeFileEnabled()) active.push("TL_ADAPTIVE_WHOLE_FILE");
   if (evidenceCompletionShadowEnabled()) active.push("TL_EVIDENCE_SHADOW");
   if (evidenceCompletionEnabled()) active.push("TL_EVIDENCE_COMPLETION");
@@ -617,6 +625,9 @@ export function activeExperimentFlags(): readonly string[] {
   if (coveragePackerV2Enabled()) active.push("TL_COVERAGE_PACKER_V2");
   if (graphEvidenceEnabled()) active.push("TL_GRAPH_EVIDENCE");
   if (fastPathV2Enabled()) active.push("TL_FAST_PATH_V2");
+  if (postReadyTrimEnabled()) active.push("TL_POST_READY_TRIM");
+  if (overlapTrimEnabled()) active.push("TL_OVERLAP_TRIM");
+  if (deltaContextEnabled()) active.push("TL_DELTA_CONTEXT");
   if (compoundRetrievalEnabled()) active.push("TL_COMPOUND_RETRIEVAL");
   return active;
 }
@@ -657,6 +668,54 @@ export function reasoningIrV2Enabled(): boolean {
 /** V11-06 addendum above (this file's top doc comment) explains this flag's scope. */
 export function fastPathV2Enabled(): boolean {
   return parseBool(process.env["TL_FAST_PATH_V2"], false);
+}
+
+/** W5: reduce pre-edit discovery only when explicitly enabled. */
+export function postReadyTrimEnabled(): boolean {
+  return parseBool(process.env["TL_POST_READY_TRIM"], false);
+}
+
+/** W5: configurable first trimmed post-ready read/search ordinal; invalid values fail closed to 6. */
+export function postReadyTrimThreshold(): number {
+  const value = Number.parseInt(process.env["TL_POST_READY_TRIM_N"] ?? "6", 10);
+  return Number.isSafeInteger(value) && value >= 1 && value <= 32 ? value : 6;
+}
+
+/** W7: avoid re-sending the held portion of a partially overlapping read. */
+export function overlapTrimEnabled(): boolean {
+  return parseBool(process.env["TL_OVERLAP_TRIM"], false);
+}
+
+/**
+ * B2 / V12-02 (2026-08-27): DELTA CONTEXT — carry the served-range ledger
+ * ACROSS this server's own edits.
+ *
+ * WHAT OFF GUARANTEES. The served-range ledger is keyed by content sha
+ * (`ServedRangeLedgerState.fileSha`), so a write of any kind invalidates every
+ * entry for that path: the next read of the edited file re-serves the whole
+ * body even though only a few lines moved. OFF keeps exactly that — the ledger
+ * transformation at the `writeExistingFileAtomic` seam is the ONLY writer of
+ * `deltaFromSha`, and every delta-serving branch is additionally gated on that
+ * marker being present. No transformation, no marker, no branch: a full
+ * edit-then-read sequence is byte-identical to the pre-B2 tree
+ * (`deltaContextDispatch.spec.ts`'s parity cell pins this on the wire).
+ *
+ * WHAT ON CHANGES. After an edit THIS SERVER applied, the ledger's spans are
+ * re-projected through the hunk actually written (derived from the before/after
+ * BYTES, never from replaying the caller's search strings): spans above the
+ * change keep their lines, spans below shift by the line delta, and the changed
+ * region itself is dropped. A later read of the same file then serves only the
+ * residual windows as bodies and names the rest `prior` — the same
+ * `segments[]`/`code_unchanged` projection TL_OVERLAP_TRIM already uses, which
+ * this flag reuses without altering it.
+ *
+ * Deliberately SEPARATE from TL_OVERLAP_TRIM (retired default-OFF, Probe-2):
+ * that lever trims a partially overlapping read of an UNCHANGED file; this one
+ * makes the ledger survive a change. Neither implies the other, and no branch
+ * added here fires on TL_OVERLAP_TRIM alone.
+ */
+export function deltaContextEnabled(): boolean {
+  return parseBool(process.env["TL_DELTA_CONTEXT"], false);
 }
 
 /**

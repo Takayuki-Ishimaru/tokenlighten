@@ -218,7 +218,7 @@ async function main() {
     ...commonOpts,
     entryPoints: [join(REPO_ROOT, "packages/cli/src/index.ts")],
     outfile: join(DIST, "tl-cli.js"),
-    external: ["@tokenlighten/agents-md"],
+    external: [...commonOpts.external, "@tokenlighten/agents-md"],
   });
   // version.ts / help.ts read their own version via
   // require.resolve("@tokenlighten/cli/package.json") (not a hardcoded

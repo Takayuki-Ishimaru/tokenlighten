@@ -13,11 +13,7 @@
 
 import { injectAll } from "./injectAll.js";
 import type { DriftMode } from "./inject.js";
-import type { StubTargetId } from "@tokenlighten/types";
-import type { Locale } from "./render.js";
-
-const VALID_TARGETS: StubTargetId[] = ["claude", "copilot", "cursor", "cline", "continue"];
-const VALID_LOCALES: Locale[] = ["en", "jp"];
+import { parseArgs, CliArgError, VALID_TARGETS, VALID_LOCALES, VALID_PROFILES } from "./cliArgs.js";
 
 function printHelp(): void {
   process.stdout.write(`tl-agents — TokenLighten AGENTS.md injector
@@ -31,8 +27,8 @@ OPTIONS (for update)
   --targets <ids>    Comma-separated subset of targets to process.
                      Valid values: ${VALID_TARGETS.join(", ")}
                      Default: all 5 targets
-  --locale <locale>  Template language: en (default) or jp
-  --profile <profile> Guide profile: full (default) or medium
+  --locale <locale>  Template language: ${VALID_LOCALES.join(" (default) or ")}
+  --profile <profile> Guide profile: ${VALID_PROFILES.join(", ")} (default: full)
   --force            Overwrite even when manual edits detected inside the block
   --check            Use fail-build drift mode (same as \`tl-agents check\`)
 
@@ -40,69 +36,24 @@ EXAMPLES
   tl-agents update
   tl-agents update --targets claude,cursor
   tl-agents update --locale jp
+  tl-agents update --profile compact
   tl-agents check
   tl-agents update --force
 `);
 }
 
-function parseArgs(args: string[]): {
-  command: string;
-  targets?: StubTargetId[];
-  locale?: Locale;
-  profile?: "full" | "medium";
-  force: boolean;
-  check: boolean;
-} {
-  const [, , cmdRaw = "help", ...rest] = args;
-  const command = cmdRaw.startsWith("--") ? "update" : cmdRaw;
-
-  // Treat bare flags before the command as part of "update"
-  const allArgs = cmdRaw.startsWith("--") ? [cmdRaw, ...rest] : rest;
-
-  let targets: StubTargetId[] | undefined;
-  let locale: Locale | undefined;
-  let profile: "full" | "medium" | undefined;
-  let force = false;
-  let check = false;
-
-  for (let i = 0; i < allArgs.length; i++) {
-    const arg = allArgs[i];
-    if (arg === "--force") {
-      force = true;
-    } else if (arg === "--check") {
-      check = true;
-    } else if (arg === "--targets" && allArgs[i + 1]) {
-      const raw = allArgs[++i]!;
-      const parsed = raw.split(",").map((s) => s.trim()) as StubTargetId[];
-      for (const t of parsed) {
-        if (!VALID_TARGETS.includes(t)) {
-          process.stderr.write(`[tl-agents] ERROR: unknown target "${t}". Valid: ${VALID_TARGETS.join(", ")}\n`);
-          process.exit(1);
-        }
-      }
-      targets = parsed;
-    } else if (arg === "--profile" && allArgs[i + 1]) {
-      const raw = allArgs[++i];
-      if (raw !== "full" && raw !== "medium") {
-        process.stderr.write(`[tl-agents] ERROR: unknown profile "${raw}". Valid: full, medium\n`);
-        process.exit(1);
-      }
-      profile = raw;
-    } else if (arg === "--locale" && allArgs[i + 1]) {
-      const raw = allArgs[++i]! as Locale;
-      if (!VALID_LOCALES.includes(raw)) {
-        process.stderr.write(`[tl-agents] ERROR: unknown locale "${raw}". Valid: ${VALID_LOCALES.join(", ")}\n`);
-        process.exit(1);
-      }
-      locale = raw;
-    }
-  }
-
-  return { command, targets, locale, profile, force, check };
-}
-
 async function main(): Promise<void> {
-  const { command, targets, locale, profile, force, check } = parseArgs(process.argv);
+  let parsed: ReturnType<typeof parseArgs>;
+  try {
+    parsed = parseArgs(process.argv);
+  } catch (err: unknown) {
+    if (err instanceof CliArgError) {
+      process.stderr.write(`[tl-agents] ERROR: ${err.message}\n`);
+      process.exit(1);
+    }
+    throw err;
+  }
+  const { command, targets, locale, profile, force, check } = parsed;
 
   if (command === "help" || command === "--help" || command === "-h") {
     printHelp();

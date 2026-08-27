@@ -345,11 +345,16 @@ function addAppliedReadback(
   braceDelta: number | undefined,
 ): void {
   if (code === undefined) return;
-  // The digest covers exactly the post-edit slice represented by range; the
-  // first three lines provide a compact proof. Full code is retained only
-  // for explicit review or the safety-triggered exceptions above.
+  // The digest covers exactly the post-edit slice represented by range; one
+  // line is a compact anchor on top of it — `slice_sha` + `range` (+
+  // `enclosing_symbol` when the caller needs to re-slice a larger construct)
+  // already anchor the post-edit state, so `head` no longer needs 3 lines of
+  // redundant preview to do that job (B1, v0.12: value-level only — same
+  // field, same string[] type, same emission condition as before). Full code
+  // is retained only for explicit review or the safety-triggered exceptions
+  // above.
   entry.slice_sha = shaOfText(code);
-  entry.head = code.split(/\r?\n/).slice(0, 3);
+  entry.head = code.split(/\r?\n/).slice(0, 1);
   if (fullAppliedEchoRequested(body, braceDelta)) entry.code = code;
   if (braceDelta !== undefined) entry.brace_delta = braceDelta;
 }
@@ -695,4 +700,37 @@ export function projectEditBody(kind: Kind, body: Body, root: string | undefined
   } catch {
     return body;
   }
+}
+
+// ---------------------------------------------------------------------------
+// OPERATION REPLAY MARKER (2026-08-27 field-eval T4)
+// ---------------------------------------------------------------------------
+
+/**
+ * `edit_file`'s `operation_id` replay (server.ts, beside `state/stateStore.ts`'s
+ * operation ledger) returns the FINAL, already-`projectEditBody`-projected wire
+ * text verbatim on a repeat call — byte-identical to the first apply's
+ * response, by design, because dispatch (and this module's own projectors)
+ * never run a second time. That leaves the caller with no way to tell a
+ * replay from an independent second apply without re-deriving it from
+ * `operation_id` bookkeeping it may not have kept.
+ *
+ * `markReplayed` is the single place that adds the tell: an additive,
+ * optional, top-level `replayed: true`, injected ONLY into the replayed copy.
+ * It operates on the already-SERIALIZED text — the replay path has no `Body`
+ * to hand `projectEditBody` a second time, only the stored string — and fails
+ * open exactly like `projectEditBody`: an unparsable or non-object payload, or
+ * one that already carries the key, rides through byte-for-byte unchanged
+ * rather than throwing into the JSON-RPC catch or overwriting an existing
+ * value.
+ */
+export function markReplayed(finalText: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(finalText);
+  } catch {
+    return finalText;
+  }
+  if (!isRecord(parsed) || parsed["replayed"] !== undefined) return finalText;
+  return JSON.stringify({ ...parsed, replayed: true });
 }

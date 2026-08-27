@@ -23,6 +23,7 @@ import * as path from "path";
 import type { FoundFile, LangKey } from "../../../tools/walkRepo.js";
 import { walkCodeFiles, createWalkOmissions, anyWalkOmission, genericTextDiscoveryEnabled, TEXT_SCAN_MAX_FILE_SIZE_BYTES, type WalkOmissions } from "../../../tools/walkRepo.js";
 import { deriveTokenVariants } from "../../../util/impact.js";
+import { decodeTextBuffer } from "../../../util/textDecode.js";
 import { tokenizeQuery as tokenizeQueryShared } from "../../../util/queryShape.js";
 import { regexSignatureLines } from "../../../skeleton/regexFallback.js";
 import { languageForPath } from "../../../util/languages.js";
@@ -379,7 +380,7 @@ export function trimMatchText(line: string, matchStart?: number): string {
 
 /** Bounded per-response file-content cache: one read per file per response. */
 export interface ScanContentCache {
-  lines: Map<string, string[] | null>;
+  lines: Map<string, string[] | null | "undecodable">;
   bytes: number;
 }
 
@@ -406,29 +407,47 @@ export interface ScanCoverage {
   scanned: Set<string>;
   /** Walked paths skipped WITHOUT a content scan (unreadable / filename-only). */
   unscanned: Set<string>;
+  /**
+   * Walked and opened, but the bytes could not be decoded as text with any
+   * confidence: no recognized BOM, and the leading bytes are NUL-riddled —
+   * typically a UTF-16 file saved without a BOM (the common Windows default
+   * for .ps1/.bat). Tracked apart from `unscanned`: the walk DID enumerate
+   * and open these files, but their content is unverifiable, so they must
+   * gate absence certification exactly like the involuntary oversize /
+   * unreadable_dirs remainders in buildAbsenceExtra — never folded into
+   * `scanned` (that would certify absence over content nobody actually
+   * read) or into `unscanned` (that would understate the risk with a
+   * caveat instead of withholding the certificate outright).
+   */
+  undecodable: Set<string>;
 }
 
 export function createScanCoverage(): ScanCoverage {
-  return { scanned: new Set(), unscanned: new Set() };
+  return { scanned: new Set(), unscanned: new Set(), undecodable: new Set() };
 }
 
 /** Total bytes retained per response; larger corpora fall back to read-through. */
 const SCAN_CONTENT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
-function readLinesCached(absPath: string, cache: ScanContentCache | undefined): string[] | null {
+function readLinesCached(absPath: string, cache: ScanContentCache | undefined): string[] | null | "undecodable" {
   const hit = cache?.lines.get(absPath);
   if (hit !== undefined) return hit;
-  let raw: string;
+  let buf: Buffer;
   try {
-    raw = fs.readFileSync(absPath, "utf8");
+    buf = fs.readFileSync(absPath);
   } catch {
     cache?.lines.set(absPath, null);
     return null;
   }
-  const lines = raw.split(/\r?\n/);
-  if (cache && cache.bytes + raw.length <= SCAN_CONTENT_CACHE_MAX_BYTES) {
+  const text = decodeTextBuffer(buf);
+  if (text === null) {
+    cache?.lines.set(absPath, "undecodable");
+    return "undecodable";
+  }
+  const lines = text.split(/\r?\n/);
+  if (cache && cache.bytes + buf.length <= SCAN_CONTENT_CACHE_MAX_BYTES) {
     cache.lines.set(absPath, lines);
-    cache.bytes += raw.length;
+    cache.bytes += buf.length;
   }
   return lines;
 }
@@ -517,6 +536,13 @@ export function scanLiteral(
     const lines = readLinesCached(f.absPath, opts.contentCache);
     if (lines === null) {
       coverage?.unscanned.add(f.relPath);
+      continue;
+    }
+    if (lines === "undecodable") {
+      // Walked and opened, but the bytes could not be verified as text (see
+      // decodeTextBuffer) — never folded into "scanned": that would certify
+      // absence over content nobody actually read.
+      coverage?.undecodable.add(f.relPath);
       continue;
     }
     coverage?.scanned.add(f.relPath);
@@ -675,7 +701,7 @@ export interface FindResponse {
    */
   matched_terms?: string[];
   /** Per-layer walk skip counts (present only when non-zero; never silent). */
-  omitted?: Partial<WalkOmissions>;
+  omitted?: Partial<WalkOmissions> & { undecodable?: number };
   /**
    * Present when the results came from the identifier-VARIANT fallback stage
    * (a naming-convention reconstruction of the query, e.g. an affix-stripped
@@ -1315,6 +1341,16 @@ function buildAbsenceExtra(args: {
   // scan (TEXT_SCAN_MAX_FILE_SIZE_BYTES), so this gate should fire only for
   // genuinely huge files, not the common case.
   if (args.omissions.oversize > 0) return {};
+  // 2026-08-27 (encoding-honesty): a file the walk opened and read, but
+  // whose bytes could not be decoded with confidence (no recognized BOM,
+  // NUL-riddled leading bytes — typically a UTF-16-without-BOM save, the
+  // common Windows default for .ps1/.bat), is the SAME kind of unknown
+  // remainder as an oversize file: content nobody actually read cannot be
+  // ruled out. Mirrors the oversize gate exactly — no certificate, not
+  // even a caveated one, is issued while any are outstanding; the caller
+  // sees the exclusion via `omitted.undecodable` (buildOmittedExtra) and
+  // must re-scope directly at it.
+  if (args.coverage.undecodable.size > 0) return {};
   const scanned_files = args.coverage.scanned.size;
   if (scanned_files === 0) return {};
   const tokens = dedupeAbsenceTokens(args.tokens);
@@ -1362,12 +1398,17 @@ function buildAbsenceExtra(args: {
   return { absence, note: ABSENCE_NOTE };
 }
 
-export function buildOmittedExtra(om: WalkOmissions): Record<string, unknown> {
-  if (!anyWalkOmission(om)) return {};
-  const pruned: Partial<WalkOmissions> = {};
+export function buildOmittedExtra(om: WalkOmissions, coverage?: ScanCoverage): Record<string, unknown> {
+  const pruned: Partial<WalkOmissions> & { undecodable?: number } = {};
   for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "oversize", "symlinks", "non_text", "secrets", "unreadable_dirs"] as const) {
     if (om[key] > 0) pruned[key] = om[key];
   }
+  // Undecodable text (see decodeTextBuffer/readLinesCached) is scan-time,
+  // not walk-time — it lives on ScanCoverage, not WalkOmissions — but must
+  // surface through the SAME `omitted` disclosure oversize uses, since it
+  // gates buildAbsenceExtra's certificate exactly like oversize does.
+  if (coverage && coverage.undecodable.size > 0) pruned.undecodable = coverage.undecodable.size;
+  if (Object.keys(pruned).length === 0) return {};
   return { omitted: pruned };
 }
 
@@ -2413,7 +2454,7 @@ export function buildFindResponse(
     coverage,
   });
 
-  let omittedExtra = buildOmittedExtra(walkOmissions);
+  let omittedExtra = buildOmittedExtra(walkOmissions, coverage);
   // The generic lane executes only after every existing public-find fallback
   // has missed. It therefore cannot perturb a semantic, variant, or tokenized
   // hit; it is the last chance before the historical empty response.
@@ -2447,7 +2488,7 @@ export function buildFindResponse(
     walkOmissions.oversize += genericOmissions.oversize;
     walkOmissions.non_text += genericOmissions.non_text;
     walkOmissions.secrets += genericOmissions.secrets;
-    omittedExtra = buildOmittedExtra(walkOmissions);
+    omittedExtra = buildOmittedExtra(walkOmissions, coverage);
     if (genericMatches.length === 0) return null;
     const source = input.regex || matchedVariant ? genericMatches : withSiblingStemMatches(query, genericMatches, workspace, { contentCache });
     const grouped = groupByFile(source);
@@ -2458,7 +2499,7 @@ export function buildFindResponse(
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
     const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
     const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
-    return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions));
+    return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   };
 
   if (literalMatches.length >= MIN_LITERAL_MATCHES_BEFORE_FALLBACK) {
@@ -2480,7 +2521,7 @@ export function buildFindResponse(
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
     const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
     const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
-    return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions));
+    return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   }
 
   // ---- Pass 1.5: identifier-VARIANT fallback (before the loose tokenized
@@ -2511,7 +2552,7 @@ export function buildFindResponse(
       const grouped = groupByFile(variantHit.matches);
       const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
       const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
-      return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions));
+      return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
     }
   }
 
@@ -2682,7 +2723,7 @@ export function buildFindResponse(
   const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
   const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
 
-  return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions));
+  return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2848,7 +2889,7 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
     walkOmissions.non_text += genericOmissions.non_text;
     walkOmissions.secrets += genericOmissions.secrets;
   }
-  const omittedExtra = buildOmittedExtra(walkOmissions);
+  const omittedExtra = buildOmittedExtra(walkOmissions, coverage);
 
   if (mergedMatches.length === 0) {
     const missHint = input.regex
@@ -2928,5 +2969,5 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
   const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
   const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
 
-  return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions));
+  return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
 }

@@ -18,6 +18,7 @@ import {
   setNestedKey,
   parseValue,
 } from "../config.js";
+import { wantsHelp } from "../util/helpFlag.js";
 
 const CONFIG_USAGE = `\
 Usage: tl config <subcommand>
@@ -31,7 +32,7 @@ Subcommands:
 export function runConfig(args: string[]): void {
   const [sub, ...rest] = args;
 
-  if (!sub || sub === "--help" || sub === "-h") {
+  if (!sub || wantsHelp(args)) {
     process.stdout.write(CONFIG_USAGE);
     return;
   }

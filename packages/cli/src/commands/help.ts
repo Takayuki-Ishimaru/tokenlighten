@@ -47,8 +47,10 @@ Commands:
   clients unregister       Remove managed global registrations via vendor CLIs
   logs summary             Show local token and cost-savings estimates
   logs export --output F   Export a privacy-reviewed local usage bundle
-  doctor [--json]          Health checks: node version, config dir, tree-sitter, exceljs,
-                           license-checker, MCP dist freshness, Core 2 exclusion, client registration
+  doctor [--json] [--development]
+                           Runtime health checks (node version, config dir, parser, exceljs,
+                           MCP dist, client registration); --development adds license-checker,
+                           python, and dist-freshness strictness
   install-hooks [--uninstall]
                            Add/remove 'tl skeleton check' pre-commit hook (opt-in)
   version                  Print CLI version

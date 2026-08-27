@@ -111,7 +111,10 @@ export type AppliedEntry = {
   range: string;
   /** SHA-256 of the compact post-edit slice represented by range. */
   slice_sha?: string;
-  /** First three lines of the post-edit slice; full code is exception-only. */
+  /** First line of the post-edit slice (B1, v0.12: capped from 3 -> 1 —
+   *  `slice_sha`/`range`/`enclosing_symbol` already anchor the post-edit
+   *  state, so `head` is a compact anchor, not a preview). Full code is
+   *  exception-only. */
   head?: string[];
   /** Full post-edit disk bytes, retained only for explicit/safety-triggered echo. */
   code?: string;
@@ -181,6 +184,15 @@ export type EditApplied = {
   kind: "edit.applied";
   core: SideEffectCore;
   applied: AppliedEntry[];
+  /**
+   * OPERATION REPLAY MARKER (2026-08-27 field-eval T4, additive/optional —
+   * protocol v1's frozen kind set is unaffected, this is a field, not a new
+   * member). `true` iff this exact response is a BYTE-IDENTICAL replay of an
+   * earlier `operation_id` apply (`state/stateStore.ts`'s operation ledger;
+   * see `editFamily.ts`'s `markReplayed`) rather than a fresh dispatch.
+   * Absent on every fresh apply — never emitted as `false`.
+   */
+  replayed?: boolean;
   normalization?: NormalizationReceipt;
   /** A.5.12 as a receipt (ruling 2). Emitted iff the execution fence re-typed
    *  this call from `answer` to `edit` before it wrote. */

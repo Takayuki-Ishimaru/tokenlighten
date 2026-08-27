@@ -42,6 +42,17 @@ function captureStdout(): { lines: string[]; restore: () => void } {
   return { lines, restore: () => { process.stdout.write = orig; } };
 }
 
+// Capture process.stderr.write calls without actually writing
+function captureStderr(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    lines.push(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  return { lines, restore: () => { process.stderr.write = orig; } };
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 describe("tl agents update (bare path -> injectAll)", () => {
@@ -212,6 +223,39 @@ describe("tl agents update (bare path -> injectAll)", () => {
     const full = readFileSync(join(sandbox, "AGENTS.md"), "utf8");
     expect(full).not.toContain("TokenLighten MCP (medium)");
     expect(full).toContain("TokenLighten (TL) returns exact slices");
+  });
+
+  it("--profile compact is accepted (widened alongside agents-md's compact GuideProfile)", async () => {
+    const { runAgents } = await import("../commands/agents.js");
+    const cap = captureStdout();
+    try {
+      await runAgents(["update", "--profile", "compact", "--targets", "claude"]);
+    } finally {
+      cap.restore();
+    }
+    // Ownership boundary: agents.ts's own --profile parser accepting "compact"
+    // and forwarding it to injectAll is what this fix covers; the resulting
+    // template content is @tokenlighten/agents-md's (sibling-owned) concern.
+    expect(exitCode).toBeUndefined();
+    expect(existsSync(join(sandbox, "AGENTS.md"))).toBe(true);
+  });
+
+  it("rejects an unknown --profile value, listing all three valid options", async () => {
+    const { runAgents } = await import("../commands/agents.js");
+    const stderr = captureStderr();
+    try {
+      await runAgents(["update", "--profile", "bogus"]);
+    } catch {
+      /* swallow process.exit stub throw */
+    } finally {
+      stderr.restore();
+    }
+    expect(exitCode).toBe(1);
+    expect(existsSync(join(sandbox, "AGENTS.md"))).toBe(false);
+    const message = stderr.lines.join("");
+    expect(message).toContain('"full"');
+    expect(message).toContain('"medium"');
+    expect(message).toContain('"compact"');
   });
 
   it("rejects an unknown --locale value", async () => {

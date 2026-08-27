@@ -8,6 +8,7 @@
  */
 
 import { basename } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   artifactQueryTokenVariants,
   buildBasenameFrequency,
@@ -33,6 +34,7 @@ import { getCurrentDiff } from "../../tools/getCurrentDiff.js";
 import { handleTable, shaOfBytes, shaOfText } from "../../util/handles.js";
 import { classifySurface, surfaceInventory, deriveTokenVariants } from "../../util/impact.js";
 import { readFileSafe, safeResolve, isWithin, resolveReal, statReadTargetSync } from "../../util/safePath.js";
+import { decodeTextBuffer } from "../../util/textDecode.js";
 import { languageForPath } from "../../util/languages.js";
 import { elideDocComments } from "../../util/formatCompress.js";
 import {
@@ -46,7 +48,7 @@ import {
   escapeRegExp,
   scanLiteral,
 } from "../search/find/findText.js";
-import { extractSymbolsFromFile } from "../../tools/readCodeModes.js";
+import { extractSymbolsFromFile, resolveCallerByteCeiling, DEFAULT_RESPONSE_BYTE_FLOOR } from "../../tools/readCodeModes.js";
 import { queryRequestsTestEvidence, selectQueryEvidence } from "../../tools/queryEvidence.js";
 import { resolveSemanticWiring, type SemanticWiringResolution } from "../../tools/semanticWiringResolver.js";
 import {
@@ -109,14 +111,26 @@ import {
 } from "../../util/packServeLog.js";
 import { computeClosureStateSafe } from "../../util/closureTracking.js";
 import { mustFetchPackCap } from "../../util/mustFetch.js";
-import { verificationRecipeEnabled, coveragePackerEnabled, coveragePackerV2Enabled } from "../../util/flags.js";
+import {
+  coveragePackerEnabled,
+  coveragePackerV2Enabled,
+  interfaceAuthorityEnabled,
+} from "../../util/flags.js";
 import { selectCoverageOrderedEntries, estimateBodyBytes } from "./coveragePacker.js";
+import { buildInterfaceAuthoritySurfaces } from "./interfaceAuthority.js";
 import { selectCoverageOrderedEntriesV2, type CoverageObligationV2 } from "./coveragePackerV2.js";
 import {
+  clearPriorPackObligations,
   queryPriorPackObligations,
   recordPriorPackObligations,
   type PriorObligationRecord,
 } from "./priorPackStore.js";
+import {
+  clearTaskContract,
+  queryTaskContract,
+  recordTaskContract,
+  resetTaskContractStoreForTest,
+} from "./taskContractStore.js";
 import { trace } from "../../util/trace.js";
 import { xlsxRoster, xlsxTable } from "../../office/xlsx.js";
 import { docxSections } from "../../office/docx.js";
@@ -287,8 +301,71 @@ const WIRING_COMPLETE_SURFACE_LINES = 4096;
  */
 const CONSTRUCT_COMPLETE_EXTRA_BUDGET = 10240;
 
+/**
+ * A2 (v0.12, DESIGN-v0.12-plan.md §2 柱A) — EDIT-HUNK FRONTIER.
+ *
+ * Anchored-window budget of a construction-hub excerpt. Extracted verbatim from
+ * the literal `6 * 1024` the Wave-4 ladder used, so the radius the ladder picks
+ * is bit-for-bit the one it picked before A2.
+ */
+const HUB_EXCERPT_BUDGET_BYTES = 6 * 1024;
+/**
+ * A2: bytes the VERBATIM (comment-preserving) landing-region window may add on
+ * top of HUB_EXCERPT_BUDGET_BYTES.
+ *
+ * WHY 4096: `buildSemanticTaskWiringProfile` already spends exactly 4096 bytes
+ * per REVIEW surface on this same construct-receiver path (`reviewEvidenceBytes`).
+ * The edit-hunk window is therefore capped at one review surface's worth of
+ * bytes — an existing evidence cap on this exact code path, not a new budget
+ * concept. It is enforced TWICE: on the DELTA over the plain excerpt (the hunk
+ * can never cost more than one review surface) and on the absolute total, and
+ * only ever at the radius whose plain build already fit — so A2 can never
+ * displace or shrink other frontier evidence beyond what the pre-A2 cap logic
+ * already did.
+ */
+const HUB_EDIT_HUNK_MAX_BYTES = 4096;
+/**
+ * A2: landing-window radii tried widest-first until the window's VERBATIM text
+ * fits HUB_EDIT_HUNK_MAX_BYTES. No radius fitting means no hunk, i.e. today's
+ * behavior — the excerpt is never widened on a guess.
+ */
+const HUB_EDIT_HUNK_RADII = [24, 16, 10, 6] as const;
+
 /** Multiple independently required Office inputs may share one bounded pack. */
 const MAX_TASK_PACK_BYTES_ARTIFACT_BUNDLE = 32768;
+
+// ---------------------------------------------------------------------------
+// T1 (2026-08-27 field-eval): caller/env/client-profile byte governance.
+//
+// AsyncLocalStorage (not a bare module `let`): buildTaskPack is async and
+// awaits real file I/O between minting this value and capForResult's read of
+// it (the artifact prefetch phase runs before buildTaskPackCore even starts;
+// trimToCap's own shedding loop runs deep inside buildTaskPackCore). A bare
+// variable set at entry and cleared at exit would leak across two
+// buildTaskPack calls for DIFFERENT workspaces/clients that happen to
+// interleave on the event loop while each awaits its own I/O --
+// mcp/transport/modernHttp.ts's HTTP leg can hold more than one call open at
+// once. ALS gives every buildTaskPack invocation its own isolated view, with
+// no ceiling parameter threaded through fitsInCap's internal call sites or
+// capForResult's other callers (attachPrefetchedArtifactSections,
+// applyDocSliverHonesty, the packCapBytes diagnostics in
+// dedupeTrimAndPersist) -- every one of them keeps calling capForResult(x)
+// exactly as before; only capForResult's OWN body changed (see
+// rawCapForResult below).
+// ---------------------------------------------------------------------------
+const packByteCeilingStorage = new AsyncLocalStorage<number | undefined>();
+
+/** The active caller/env/profile byte ceiling for the buildTaskPack() call in progress, or undefined outside one (or when nothing constrained it) -- see packByteCeilingStorage's doc comment. */
+function activePackByteCeiling(): number | undefined {
+  return packByteCeilingStorage.getStore();
+}
+
+/** rawCapForResult's type-specific tier, narrowed (never widened) to whatever byte ceiling is active -- see packByteCeilingStorage's doc comment. The identity function when no ceiling is active, which is every call today's replay corpus makes. */
+function clampToActiveCeiling(typeSpecificCap: number): number {
+  const ceiling = activePackByteCeiling();
+  if (ceiling === undefined) return typeSpecificCap;
+  return Math.max(DEFAULT_RESPONSE_BYTE_FLOOR, Math.min(typeSpecificCap, ceiling));
+}
 
 /**
  * A1 (2026-07-30) — inline budget for the artifact SURFACES of a pack that is
@@ -377,13 +454,14 @@ class FileReadCache {
   private readonly content = new Map<string, string | typeof READ_FAILED>();
   private readonly symbols = new Map<string, ParsedSymbols | null>();
 
-  /** Read `relPath` under `workspace` once; subsequent calls return the memo. Returns undefined on any I/O error (cached as a failure so it is not retried). */
+  /** Read `relPath` under `workspace` once; subsequent calls return the memo. Returns undefined on any I/O error OR undecodable content (P3, 2026-08-27: BOM-sniffed/NUL-probed via decodeTextBuffer, never a raw utf8 mis-decode); cached as a failure so it is not retried. */
   read(workspace: string, relPath: string): string | undefined {
     const hit = this.content.get(relPath);
     if (hit !== undefined) return hit === READ_FAILED ? undefined : hit;
     let raw: string | typeof READ_FAILED;
     try {
-      raw = fs.readFileSync(path.join(workspace, relPath), "utf8");
+      const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
+      raw = decoded === null ? READ_FAILED : decoded;
     } catch {
       raw = READ_FAILED;
     }
@@ -411,11 +489,11 @@ class FileReadCache {
   }
 }
 
-/** Read `relPath` under `workspace`, using `cache` when supplied. Returns undefined on I/O error. */
+/** Read `relPath` under `workspace`, using `cache` when supplied. Returns undefined on I/O error or undecodable content (P3, 2026-08-27). */
 function readCached(workspace: string, relPath: string, cache?: FileReadCache): string | undefined {
   if (cache) return cache.read(workspace, relPath);
   try {
-    return fs.readFileSync(path.join(workspace, relPath), "utf8");
+    return decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath))) ?? undefined;
   } catch {
     return undefined;
   }
@@ -585,6 +663,12 @@ function elideCausalLineCommentRuns(source: string, startLine: number): string {
   return out.join("\n");
 }
 
+// T3 (2026-08-27, v0.12 wave D2, DEFECT B): max width of one side of the
+// `remaining_ranges` disclosure centeredSliceForCap emits when the served
+// window does not reach a file boundary. See the fix's own doc comment at
+// the emission site for why this must never be the raw, unbounded leftover.
+const MAX_REMAINING_RANGE_CHUNK_LINES = 200;
+
 /**
  * DESIGN-v0.9 §4.1 cliff fix: return a match-CENTERED, symbol-boundary-aware
  * trimmed chunk for an oversize `range` instead of `undefined` — a relevant
@@ -687,8 +771,26 @@ export function centeredSliceForCap(
 
   const windowText = fileLines.slice(winStart - 1, winEnd).join("\n");
   const remaining: string[] = [];
-  if (winStart > start) remaining.push(`${start}-${winStart - 1}`);
-  if (winEnd < end) remaining.push(`${winEnd + 1}-${end}`);
+  // T3 (2026-08-27, v0.12 wave D2, DEFECT B -- field-eval report): a leftover
+  // span reported verbatim can be thousands of lines wide on a huge file
+  // (observed: a 23k-line file's discover-next named mode=slice range=1-7032
+  // -- not an actionable zoom, and the exact non-actionable-next symptom
+  // AGENTS.md's own protocol text warns every caller to expect a SMALL
+  // slice, never a re-fetch-most-of-the-file range). Cap each side to the
+  // chunk NEAREST the just-served window -- the part a caller asking to
+  // "see more" almost always means -- rather than the raw remainder; a
+  // caller that genuinely needs the far end can always re-slice again from
+  // there. Both canonicalDecision.ts's servedDocumentZoom (the discover-next
+  // builder) and every other remaining_ranges reader take this verbatim, so
+  // capping it here is sufficient without touching any downstream consumer.
+  if (winStart > start) {
+    const chunkStart = Math.max(start, winStart - MAX_REMAINING_RANGE_CHUNK_LINES);
+    remaining.push(`${chunkStart}-${winStart - 1}`);
+  }
+  if (winEnd < end) {
+    const chunkEnd = Math.min(end, winEnd + MAX_REMAINING_RANGE_CHUNK_LINES);
+    remaining.push(`${winEnd + 1}-${chunkEnd}`);
+  }
   return { code: elideDocComments(windowText, lang, winStart), remaining_ranges: remaining };
 }
 
@@ -1488,18 +1590,160 @@ export async function buildTaskPack(
   workspace: string,
 ): Promise<TaskPackResult> {
   artifactSectionPrefetch.delete(workspace);
+  // T1: resolve the effective byte ceiling ONCE per call and hold it for the
+  // entire async lifetime of this call (prefetch AND core) -- see
+  // packByteCeilingStorage's doc comment above for why this is an ALS run()
+  // rather than a plain local variable capForResult could not see anyway.
+  const byteCeiling = resolveCallerByteCeiling(
+    args.maxBytes,
+    args.maxTokens,
+    args.clientDefaultByteCeilingHint,
+  );
+  return packByteCeilingStorage.run(byteCeiling, async () => {
+    try {
+      await prefetchArtifactSurfaceSections(args, workspace);
+    } catch {
+      // A failed prefetch must never fail the pack — it degrades to the
+      // pre-A1 behavior (artifact stubs + the `extract` call).
+      artifactSectionPrefetch.delete(workspace);
+    }
+    try {
+      return await buildTaskPackCore(args, workspace);
+    } finally {
+      artifactSectionPrefetch.delete(workspace);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// T2 (2026-08-27, v0.12 wave D2): pre-pipeline single-site short circuit.
+//
+// A natural-language generic edit query often already names an exact
+// workspace file inline ("packages/backend/src/telemetry/estimator.ts の
+// PACKET_LOSS_FAILURE を 0.12->0.15") without using the structured `paths`
+// argument. Before this, such a query fell all the way through to the
+// pathless multi-layer locator (locateTaskContext) -- the same expensive,
+// whole-repository candidate search a completely unscoped query pays for --
+// even though the ONE relevant file and the ONE relevant identifier are both
+// already unambiguously named. When that identifier/literal resolves to
+// exactly one occurrence in that one file, singleSiteShortCircuitSeed hands
+// buildSeededTaskPack an EXPLICIT, identifier-centered range (never the whole
+// file, never a caller-inferred anchor-focus window), so the served pack
+// stays small end-to-end while still running through the exact same
+// certificate/obligation/canonical-decision machinery every other seeded
+// pack does. This is deliberately the "narrow the pipeline's evidence"
+// design, not a hand-rolled execution_contract: buildTaskExecutionContract's
+// obligation/falsification/risk/certificate chain is reused unmodified via
+// the shared dedupeTrimAndPersist exit, so every canonicalDecision invariant
+// is satisfied by construction rather than re-approximated here.
+//
+// Fails OPEN (returns undefined -> the normal profile routing below runs
+// unchanged) on any ambiguity: more or fewer than one existing path named in
+// the query, more or fewer than one occurrence of the bound literal/
+// identifier in that file, or a query shaped like a batch/independent-
+// concern/rename request. The batch/rename exclusion signals are exactly the
+// ones attachSingleSiteUniqueMatchFastPath already trusts for the identical
+// safety reason: such a request must never be approximated as a single-site
+// edit, however cleanly a path happens to parse out of its text.
+// Byte, not line, budget for the identifier-centered slice -- see the
+// centeredSliceForCap call below for why (dense vs. sparse real code lines).
+const SINGLE_SITE_SHORT_CIRCUIT_MAX_CODE_BYTES = 700;
+const SINGLE_SITE_SHORT_CIRCUIT_PATH_RE = /(?:[A-Za-z]:)?(?:[\w.-]+[/\\])+[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,9}\b/g;
+
+function singleSiteShortCircuitSeed(
+  query: string,
+  workspace: string,
+): TaskPackPathEntry | undefined {
+  if (query.trim().length === 0) return undefined;
+  if (hasIndependentEditConcernClauses(query) || hasExplicitIndependentConcernMarker(query)) return undefined;
+  if (/(?:,|;|\n)\s*(?:and\s+)?(?:also\s+)?(?:fix|add|implement|change|replace|rename|refactor|wire|connect|update|create)\b/iu.test(query)
+    || /(?:、|。|\n)\s*(?:さらに|加えて)?[^\n]{0,80}(?:修正|追加|実装|変更|置換|改名|接続|作成)/u.test(query)) return undefined;
+  if (/\b(?:rename|renamed|renaming)\b/iu.test(query) || /(?:改名|リネーム)/u.test(query)) return undefined;
+
+  const candidates: Array<{ relPath: string; real: string }> = [];
+  const seenRelPaths = new Set<string>();
+  for (const match of query.matchAll(SINGLE_SITE_SHORT_CIRCUIT_PATH_RE)) {
+    const relPath = match[0]!.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (seenRelPaths.has(relPath)) continue;
+    seenRelPaths.add(relPath);
+    const abs = safeResolve(relPath, workspace);
+    if (abs === undefined) continue;
+    try {
+      const real = fs.realpathSync(abs);
+      if (!isWithin(real, resolveReal(workspace)) || !fs.statSync(real).isFile()) continue;
+      candidates.push({ relPath, real });
+    } catch {
+      continue;
+    }
+    if (candidates.length > 1) break;
+  }
+  if (candidates.length !== 1) return undefined;
+  const { relPath, real } = candidates[0]!;
+
+  let buf: Buffer;
   try {
-    await prefetchArtifactSurfaceSections(args, workspace);
+    buf = fs.readFileSync(real);
   } catch {
-    // A failed prefetch must never fail the pack — it degrades to the
-    // pre-A1 behavior (artifact stubs + the `extract` call).
-    artifactSectionPrefetch.delete(workspace);
+    return undefined;
   }
-  try {
-    return await buildTaskPackCore(args, workspace);
-  } finally {
-    artifactSectionPrefetch.delete(workspace);
+  const content = decodeTextBuffer(buf);
+  if (content === null) return undefined;
+
+  // Bind to a literal already provable inside this exact file: the parsed
+  // replacement's search text when T1 recognized one, else the strongest
+  // explicit identifier the query names. Neither is inferred from prose --
+  // both come from the same conservative extractors the rest of this file
+  // already trusts.
+  const parsedReplacement = exactReplacementFromQuery(query);
+  const needle = parsedReplacement === undefined
+    ? undefined
+    : "identifierOldValue" in parsedReplacement
+      ? parsedReplacement.identifierOldValue
+      : parsedReplacement.search;
+  const identifierCandidates = needle !== undefined ? [needle] : explicitCodeIdentifiers(query);
+  if (identifierCandidates.length === 0) return undefined;
+
+  let matchLine: number | undefined;
+  for (const identifier of identifierCandidates) {
+    if (identifier.length === 0) continue;
+    if (content.split(identifier).length - 1 !== 1) continue;
+    const offset = content.indexOf(identifier);
+    matchLine = content.slice(0, offset).split(/\r?\n/).length;
+    break;
   }
+  if (matchLine === undefined) return undefined;
+
+  // Byte-budgeted, not line-budgeted: dense real code (long lines) and
+  // sparse code (short lines) both land under the same response-size target
+  // this way, reusing the exact growth algorithm every other slice in this
+  // file already goes through (centeredSliceForCap) rather than a second,
+  // hand-rolled approximation of it. Seed a throwaway cache with the buffer
+  // already decoded above so this does not re-read the file from disk.
+  const totalLines = content.split(/\r?\n/).length;
+  const sliceCache = new FileReadCache();
+  sliceCache.seed(relPath, content);
+  const slice = centeredSliceForCap(
+    workspace, relPath, `1-${totalLines}`, sliceCache, matchLine, SINGLE_SITE_SHORT_CIRCUIT_MAX_CODE_BYTES,
+  );
+  if (slice === undefined) return undefined;
+  // Recover the served bounds from centeredSliceForCap's remaining_ranges
+  // by POSITION relative to matchLine, not by boundary VALUE: T3's own
+  // DEFECT B fix (2026-08-27) caps each side's disclosed width, so a
+  // "before" entry's start is no longer guaranteed to be exactly 1 (nor an
+  // "after" entry's end exactly totalLines) once the true leftover exceeds
+  // that cap -- matching on those exact values silently produced the
+  // WRONG served range (falling back to the whole-file default) the
+  // moment a real target file was large enough to trigger the cap.
+  let start = 1;
+  let end = totalLines;
+  for (const remaining of slice.remaining_ranges) {
+    const bounds = /^(\d+)-(\d+)$/.exec(remaining);
+    if (bounds === null) continue;
+    const [, remStart, remEnd] = bounds.map(Number) as [number, number, number];
+    if (remEnd < matchLine) start = remEnd + 1;
+    else if (remStart > matchLine) end = remStart - 1;
+  }
+  return { path: relPath, range: `${start}-${end}` };
 }
 
 async function buildTaskPackCore(
@@ -1731,6 +1975,23 @@ async function buildTaskPackCore(
     }
   }
 
+  // T2: scoped to the exact shape attachSingleSiteUniqueMatchFastPath already
+  // trusts (a plain, non-specialized generic edit request naming no
+  // structured path) so every other profile's routing below is completely
+  // unaffected, and placed before it so a real hit never pays for the
+  // multi_concern/wiring/artifact_build/answer builders' own discovery cost.
+  if (
+    initialProfile === "generic"
+    && !args.path
+    && !args.symbol
+    && !(args.paths?.length)
+  ) {
+    const shortCircuitSeed = singleSiteShortCircuitSeed(query, workspace);
+    if (shortCircuitSeed !== undefined) {
+      return buildSeededTaskPack({ ...args, paths: [shortCircuitSeed] }, query, workspace);
+    }
+  }
+
   // A multi-concern request must keep its concern boundaries when the caller
   // narrows a follow-up with paths=[...]. Generic seeded routing discards the
   // per-concern contract and can collapse several independent defects into one
@@ -1939,10 +2200,10 @@ async function buildTaskPackCore(
     // same pathless locate, which would just return the same junk.
     const fallbackQuery = (genericFallback.probe ?? query).replace(/\"/g, "").slice(0, 80);
     const next = locateResult.rootSuggestion
-      ? `re-scope to ${locateResult.rootSuggestion} (cwd or paths=[...]) then read_file mode=task_pack query="${query.slice(0, 60)}"`
+      ? `re-scope to ${locateResult.rootSuggestion} (cwd or paths=[...]) then read_file mode=task_pack query="${continuationQuery(query)}"`
       : genericFallback.attempted
         ? `search_files action=find query="${fallbackQuery}"`
-        : `search_files action=locate query="${query.slice(0, 80)}"`;
+        : `search_files action=locate query="${continuationQuery(query)}"`;
     const base: TaskPackResult = {
       mode: "task_pack",
       coverage: "partial",
@@ -6095,7 +6356,12 @@ function rootMarkdownTitleMatch(workspace: string, query: string): string | unde
       try {
         const abs = path.join(workspace, entry.name);
         statReadTargetSync(abs, workspace);
-        title = fs.readFileSync(abs, "utf8").split(/\r?\n/, 1)[0] ?? "";
+        // P3 (2026-08-27): decode via BOM/NUL-aware decodeTextBuffer, never a
+        // raw utf8 read — an undecodable file is skipped like any other probe
+        // failure, never served as garbled title text.
+        const decoded = decodeTextBuffer(fs.readFileSync(abs));
+        if (decoded === null) return undefined;
+        title = decoded.split(/\r?\n/, 1)[0] ?? "";
       } catch {
         return undefined;
       }
@@ -6548,7 +6814,7 @@ async function buildPartialPack(
   // exists at all.
   const next = nextHintForCoverage(
     surfaces, coverageStr, coverageReason, query, missingRequired, unmatchedConcern,
-  ) ?? `search_files action=locate query="${query.slice(0, 80)}"`;
+  ) ?? `search_files action=locate query="${continuationQuery(query)}"`;
   // blocking_next_steps was previously ALWAYS dropped here (item 3): route
   // honesty (A4) now populates it, but ONLY when the route actually flipped
   // to locate_missing_surfaces AND there is real per-token content (the
@@ -7012,7 +7278,18 @@ function requiredSurfacesForTask(
   explicit?: string[],
   candidatePaths?: ReadonlyArray<string>,
 ): string[] {
-  if (explicit && explicit.length > 0) return mergeUnique(explicit.map(String), []);
+  // P0 defect 2 (requirement model shrinks with the query). Requirements are
+  // MONOTONE within a task epoch: every role an EARLIER pack of this same task
+  // already required stays required, so a narrowed continuation cannot certify
+  // `coverage:"complete"` against a universe that shrank along with its own
+  // query text. Union-only — this can add a requirement, never drop one — and
+  // fail-closed: with no stored contract (cold store, queryless pack, restart)
+  // `carried` is empty and the two exits below are exactly today's behavior.
+  // Applied to the caller-supplied `explicit` branch too: a continuation that
+  // forwards `surfaceRoles=["api"]` is narrowing the ASK, not retracting what
+  // the epoch already established.
+  const carried = queryTaskContract(workspace, tokenizeForEpoch(query))?.requiredRoles ?? [];
+  if (explicit && explicit.length > 0) return mergeUnique(explicit.map(String), [...carried]);
 
   const required = new Set<ImpactSurface>();
 
@@ -7050,6 +7327,11 @@ function requiredSurfacesForTask(
     required.add("api");
     required.add("test");
   }
+
+  // The monotone carry-forward (see `carried` above) joins the per-call
+  // inference here, before the shared priority ordering, so a carried role is
+  // indistinguishable downstream from one this call inferred itself.
+  for (const role of carried) required.add(role as ImpactSurface);
 
   return [...required].sort(
     (a, b) => (SURFACE_ROLE_PRIORITY[a] ?? 9) - (SURFACE_ROLE_PRIORITY[b] ?? 9)
@@ -7340,6 +7622,54 @@ export function filterConcernQueryEntries(workspaceRoot: string, queries: readon
   });
 }
 
+/** Han / Hiragana / Katakana. */
+const CJK_ANCHOR_CHAR_RE = /[぀-ヿ㐀-䶿一-鿿]/u;
+
+/**
+ * Is this token usable as a CONCERN ANCHOR — a claim that the repository must
+ * contain something matching it?
+ *
+ * 2026-08-27 (field-eval integration). `util/queryShape.ts` began routing
+ * `extractCjkTokens` into BOTH of its shared tokenizers, so a CJK-bearing
+ * query now contributes CJK runs AND their 2-character bigrams
+ * (`センサー` -> also `セン`, `ンサ`) to every consumer of
+ * `concreteIdentifierTokens` / `significantQueryTokens`. For RETRIEVAL that is
+ * the point and it stays: a Japanese query could previously match nothing at
+ * all, and find/locate recall is exactly what those fragments are for.
+ *
+ * Concern anchoring is a different axis with the opposite polarity. An anchor
+ * is not a search term — it is an OBLIGATION: `concernTokenMatchesSurfaces`
+ * must find it in a served surface's path, symbol, or body, or the concern
+ * stays uncovered and the pack is demoted. This function's own FIX-A rule
+ * already states the standard ("a clause whose only unmatched wording is
+ * free-text prose ... contributes NOTHING here"), and a symptom description in
+ * Japanese prose — still less a sub-word kana bigram — is exactly that prose,
+ * not an identifier the repository ever promised to contain.
+ *
+ * Measured on the aeroctl three-symptom fixture: the CJK fragments crowded the
+ * real ASCII identifiers out of this function's `limit`-capped output, so
+ * `augmentConcernGroupSurfaces` stopped resolving the mixer and mode-transition
+ * clusters, two of three concerns went permanently uncovered, and a pack that
+ * had certified `complete` fell to `awaiting-input` / choose-candidate. That is
+ * an obligation nothing in an ASCII codebase can ever discharge.
+ *
+ * Scoped to the anchor axis ONLY — this changes no tokenizer and removes
+ * nothing from retrieval, so it restores pre-wave parity here while leaving the
+ * CJK recall win intact everywhere else.
+ *
+ * DELIBERATE NON-GOAL: a codebase whose identifiers or comments are themselves
+ * CJK could in principle ground a CJK anchor (`concernTokenMatchesSurface`
+ * substring-matches surface bodies). Admitting those would need a grounding
+ * test — membership in the located candidates' own vocabulary, the
+ * `knownIdentifiers` allowance `identifierShapedConcernSet` already takes —
+ * not a shape test, because CJK has no case/underscore/dot shape signal to
+ * separate an identifier from a noun. Until that evidence is plumbed here,
+ * refusing to mint the obligation is the honest side to fail on.
+ */
+function isConcernAnchorable(token: string): boolean {
+  return !CJK_ANCHOR_CHAR_RE.test(token);
+}
+
 export function concernAnchorTokens(text: string, limit = 6): string[] {
   // W9: strip generic path spans ONCE, up front — concreteIdentifierTokens
   // and significantQueryTokens already strip internally (for their OTHER
@@ -7363,7 +7693,9 @@ export function concernAnchorTokens(text: string, limit = 6): string[] {
   // Query-derived only. Repository vocabulary grounding happens after the
   // walk/symbol evidence is available; production code carries no benchmark-
   // or domain-specific translation table here.
-  return orderedUniqueTokens([...compounds, ...concrete, ...simple, ...compactCodeTerms]).slice(0, limit);
+  return orderedUniqueTokens([...compounds, ...concrete, ...simple, ...compactCodeTerms])
+    .filter(isConcernAnchorable)
+    .slice(0, limit);
 }
 
 function concernGroupsForQuery(query: string): ConcernGroup[] {
@@ -7444,7 +7776,13 @@ function concernTokenMatchesSurfaces(token: string, surfaces: TaskPackSurface[])
 }
 
 function concernGroupMatchesSurfaces(group: ConcernGroup, surfaces: TaskPackSurface[]): boolean {
-  const identifiers = concreteIdentifierTokens(group.query);
+  // Same rule as `isConcernAnchorable`, applied to this gate's own reader of
+  // `concreteIdentifierTokens` (2026-08-27). This clause is a VETO: "the clause
+  // named concrete identifiers and none of them are here, so it is uncovered".
+  // A CJK prose token must not be able to cast that veto for the reason the
+  // helper's doc gives — it was never an identifier claim. It can still SATISFY
+  // the gate if some other, ASCII identifier in the clause matches.
+  const identifiers = concreteIdentifierTokens(group.query).filter(isConcernAnchorable);
   if (identifiers.length > 0 &&
       !identifiers.some((t) => concernTokenMatchesSurfaces(t.toLowerCase(), surfaces))) {
     return false;
@@ -8745,6 +9083,40 @@ function wiringConsumerNext(query: string, surfaces: TaskPackSurface[]): string 
  *   - concerns-uncovered: an `explore action=find` on the ONE top unmatched
  *     token (find rejects multi-token sentences, so only the first is used).
  */
+/**
+ * The task query as it may appear inside a `next` hint: LOSSLESS.
+ *
+ * Every `next` string is contractually EXECUTABLE — AGENTS.md tells the agent
+ * to run it verbatim — so whatever query it carries BECOMES the next task
+ * query. Five builders used to embed `query.slice(0, 60)` / `.slice(0, 80)`,
+ * which cuts mid-word and silently drops the intent-bearing tail: the caller
+ * then re-packs a DIFFERENT, truncated task and the original request is
+ * unrecoverable. session.ts's own continuation builder already states the
+ * rule this restores — "Verbatim, never an excerpt: this call must be
+ * EXECUTABLE, and a truncated query is a different task."
+ *
+ * Two normalizations, neither of which drops a word:
+ *   - whitespace collapses to single spaces (a `next` is one line, and a
+ *     multi-line query would otherwise break the string it lives in);
+ *   - `"` is stripped, the same scrub the sibling `fallbackQuery` already
+ *     applies, because the surrounding `query="..."` encoding has no escape
+ *     and `nextStringToCall` performs no unescaping.
+ *
+ * Deliberately NOT a `qref` hint, though the protocol prefers one: the four
+ * shapes above must stay parseable by `nextStringToCall`, whose grammar has
+ * no `qref` form, and `buildTaskExecutionContract` feeds the PARSED call into
+ * `next_call` — the field the wire decision actually projects. Emitting an
+ * unparseable qref form would delete the hint from the decision instead of
+ * improving it. (The rootSuggestion re-scope hint additionally CANNOT use a
+ * qref: a qref is bound to the workspace root it was minted under, and that
+ * hint's whole point is moving to a different one.)
+ */
+// Exported for queryContinuity.spec.ts — the losslessness property is easier
+// to pin directly than through the five packs that reach the five call sites.
+export function continuationQuery(query: string): string {
+  return query.replace(/\s+/gu, " ").replace(/"/g, "").trim();
+}
+
 function nextHintForCoverage(
   surfaces: TaskPackSurface[],
   coverage: "complete" | "focused" | "partial",
@@ -8821,7 +9193,7 @@ function nextHintForCoverage(
 
   if (reason === "missing-roles" && missingRoles.length > 0) {
     const roles = missingRoles.map((r) => `"${r}"`).join(",");
-    return `read_file mode=task_pack query="${query.slice(0, 80)}" surfaceRoles=[${roles}]`;
+    return `read_file mode=task_pack query="${continuationQuery(query)}" surfaceRoles=[${roles}]`;
   }
   if (reason === "concerns-uncovered" && unmatchedTokens.length > 0) {
     return `search_files action=find query=${unmatchedTokens[0]}`;
@@ -13148,11 +13520,164 @@ function semanticTokenForPath(resolution: SemanticWiringResolution, relPath: str
   return path.basename(relPath).replace(/\.[^.]+$/, "");
 }
 
-function semanticConstructionHubExcerpt(
+/** A 1-based inclusive line window inside a construction hub. */
+interface HubLineRange {
+  start: number;
+  end: number;
+}
+
+/** Sort + coalesce touching/overlapping windows into ascending disjoint ranges. */
+function mergeHubLineRanges(ranges: readonly HubLineRange[]): HubLineRange[] {
+  const merged: HubLineRange[] = [];
+  for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end + 1) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
+/**
+ * A2: the bounded LANDING REGION of a construct-receiver hub — one ±radius
+ * window per WIRING ANCHOR (the hub lines `connections[0].required_action`'s
+ * replacement has to land on: the producer entry, its publish site, and the
+ * insertion site), merged, with the radius shrunk until the windows' VERBATIM
+ * text fits HUB_EDIT_HUNK_MAX_BYTES.
+ *
+ * Every input is a signal the pack already resolved (`resolution.insertion.line`
+ * / `resolution.host.producerEntryLine` / `producerPublishLine`), so "cheaply
+ * locatable" is a property of the resolution, not of a search. Returns undefined
+ * — meaning "keep today's behavior" — when no anchor is a real line of this file
+ * or even the tightest radius does not fit. Nothing is ever inferred, widened on
+ * a guess, or synthesized: the window is only ever real file lines.
+ */
+function hubEditHunkRanges(
+  lines: readonly string[],
+  anchorLines: readonly number[],
+): HubLineRange[] | undefined {
+  const anchors = anchorLines.filter((line, index, all) =>
+    Number.isInteger(line) && line >= 1 && line <= lines.length && all.indexOf(line) === index
+  );
+  if (anchors.length === 0) return undefined;
+  for (const radius of HUB_EDIT_HUNK_RADII) {
+    const merged = mergeHubLineRanges(anchors.map((anchor) => ({
+      start: Math.max(1, anchor - radius),
+      end: Math.min(lines.length, anchor + radius),
+    })));
+    const bytes = merged.reduce(
+      (total, range) => total + Buffer.byteLength(lines.slice(range.start - 1, range.end).join("\n"), "utf8"),
+      0,
+    );
+    if (bytes <= HUB_EDIT_HUNK_MAX_BYTES) return merged;
+  }
+  return undefined;
+}
+
+/**
+ * A2: does comment elision MUTILATE the landing region? True means the bytes a
+ * solver would copy out of the served body are a `/* doc elided L<a>-<b> *\/`
+ * placeholder rather than file text — which `edit_file`'s write guard refuses as
+ * `elided-content`, forcing the same-handle re-slice measured 3× on T13.
+ */
+function hubLandingRegionIsElided(
+  lines: readonly string[],
+  lang: string | undefined,
+  hunks: readonly HubLineRange[],
+): boolean {
+  return hunks.some((range) => {
+    const text = lines.slice(range.start - 1, range.end).join("\n");
+    return elideDocComments(text, lang, range.start) !== text;
+  });
+}
+
+/**
+ * A2: render ONE served window with its landing-region sub-spans kept verbatim
+ * and every other sub-span elided exactly as before.
+ *
+ * The single renderer both hub branches share, so "what is served verbatim" has
+ * one definition. The verbatim span is the HUNK, never the whole window that
+ * carries it: a window that merged with an anchored excerpt window still elides
+ * its own doc comments outside the landing region.
+ *
+ * Splitting an elided segment at a hunk boundary is safe by construction —
+ * formatCompress leaves an unclosed comment region "exactly as found", so a
+ * doc comment straddling the boundary degrades to NOT being elided, never to
+ * corrupted text.
+ */
+function renderHubWindow(
+  lines: readonly string[],
+  lang: string | undefined,
+  window: HubLineRange,
+  hunks: readonly HubLineRange[] | undefined,
+): string {
+  const textOf = (start: number, end: number): string => lines.slice(start - 1, end).join("\n");
+  const elided = (start: number, end: number): string =>
+    start > end ? "" : elideDocComments(textOf(start, end), lang, start);
+  const covering = (hunks ?? [])
+    .filter((hunk) => hunk.start <= window.end && hunk.end >= window.start)
+    .map((hunk) => ({ start: Math.max(hunk.start, window.start), end: Math.min(hunk.end, window.end) }))
+    .sort((left, right) => left.start - right.start);
+  if (covering.length === 0) return elided(window.start, window.end);
+  const parts: string[] = [];
+  let cursor = window.start;
+  for (const hunk of covering) {
+    if (hunk.start > cursor) parts.push(elided(cursor, hunk.start - 1));
+    parts.push(textOf(Math.max(hunk.start, cursor), hunk.end));
+    cursor = hunk.end + 1;
+  }
+  if (cursor <= window.end) parts.push(elided(cursor, window.end));
+  return parts.filter((part) => part.length > 0).join("\n");
+}
+
+/**
+ * A2: re-emit a WHOLE-file construct-receiver hub body with the landing region
+ * kept verbatim and every other segment elided exactly as before.
+ *
+ * The sibling of the excerpt path: a hub small enough for the completeness bar
+ * is served whole, but `centeredSliceForCap` still elides its doc comments, so
+ * an anchor over the wiring site is the same unusable placeholder. Same rule,
+ * same renderer, same cap; one contiguous window instead of anchored ones.
+ *
+ * Returns undefined when nothing would change or the rebuild costs more than
+ * HUB_EDIT_HUNK_MAX_BYTES over the elided body — the caller then keeps today's
+ * body untouched.
+ */
+function wholeHubWithVerbatimLanding(
+  text: string,
+  relPath: string,
+  elidedCode: string,
+  hunks: readonly HubLineRange[],
+): string | undefined {
+  const lines = text.split(/\r?\n/);
+  const lang = languageForPath(relPath);
+  if (!hubLandingRegionIsElided(lines, lang, hunks)) return undefined;
+  const rebuilt = renderHubWindow(lines, lang, { start: 1, end: lines.length }, mergeHubLineRanges(hunks));
+  if (rebuilt.length === 0 || rebuilt === elidedCode) return undefined;
+  const delta = Buffer.byteLength(rebuilt, "utf8") - Buffer.byteLength(elidedCode, "utf8");
+  if (delta > HUB_EDIT_HUNK_MAX_BYTES) return undefined;
+  return rebuilt;
+}
+
+/**
+ * Build a construction-hub excerpt.
+ *
+ * A2 (v0.12): `edit_hunk_ranges` is present ONLY when the landing-region hunk
+ * fired. It is SERVER-INTERNAL — the caller reads it to emit one trace line and
+ * never copies it onto a surface, so it costs zero wire bytes. Its absence means
+ * the excerpt is byte-for-byte the pre-A2 build.
+ *
+ * Exported for editHunkFrontier.spec.ts, which pins the A2 trigger and its
+ * OFF-parity property (a non-matching hub keeps the pre-A2 body) without having
+ * to reconstruct a whole semantic workspace for every cell.
+ */
+export function semanticConstructionHubExcerpt(
   source: string,
   relPath: string,
   anchorLines: readonly number[],
-): { code: string; remaining_ranges: string[] } | undefined {
+): { code: string; remaining_ranges: string[]; edit_hunk_ranges?: string[] } | undefined {
   const lines = source.split(/\r?\n/);
   if (lines.length === 0) return undefined;
   // Wave 4 (2026-07-24 T13 forensics): the globals center matched the FIRST
@@ -13183,29 +13708,34 @@ function semanticConstructionHubExcerpt(
   );
   if (centers.length === 0) return undefined;
 
-  const build = (radius: number): { code: string; merged: Array<{ start: number; end: number }> } => {
-    const ranges = centers
-      .map((center) => ({
+  const lang = languageForPath(relPath);
+  // A2: the landing region, and whether comment elision would MUTILATE it. A
+  // solver anchors its `search` on the bytes we served; when those bytes carry a
+  // `/* doc elided L<a>-<b> */` marker the resulting edit is refused
+  // `elided-content` and the only recovery is a same-handle re-slice (measured
+  // 3× on T13, 2026-08-26). Serving the landing region VERBATIM removes the
+  // refusal at its source instead of paying for the recovery.
+  const editHunks = hubEditHunkRanges(lines, anchorLines);
+  const hunkElided = editHunks !== undefined && hubLandingRegionIsElided(lines, lang, editHunks);
+
+  const build = (
+    radius: number,
+    hunks?: readonly HubLineRange[],
+  ): { code: string; merged: HubLineRange[] } => {
+    const merged = mergeHubLineRanges([
+      ...centers.map((center) => ({
         start: Math.max(1, center - radius),
         end: Math.min(lines.length, center + radius),
-      }))
-      .sort((a, b) => a.start - b.start);
-    const merged: Array<{ start: number; end: number }> = [];
-    for (const range of ranges) {
-      const previous = merged.at(-1);
-      if (previous && range.start <= previous.end + 1) {
-        previous.end = Math.max(previous.end, range.end);
-      } else {
-        merged.push({ ...range });
-      }
-    }
-    const lang = languageForPath(relPath);
+      })),
+      ...(hunks ?? []),
+    ]);
     const code = merged.map((range, index) => {
-      const selected = lines.slice(range.start - 1, range.end).join("\n");
       const prefix = index === 0
         ? "// TL hub excerpt; omitted ranges listed in remaining_ranges (zoom: ONE read_file mode=full of this handle beats repeated re-slices when you need most of the file)\n"
         : `// TL omitted lines before L${range.start}\n`;
-      return prefix + elideDocComments(selected, lang, range.start);
+      // A2: only the LANDING-REGION sub-span of a window is served verbatim —
+      // the rest of that window keeps the elided representation it always had.
+      return prefix + renderHubWindow(lines, lang, range, hunks);
     }).join("\n");
     return { code, merged };
   };
@@ -13217,24 +13747,55 @@ function semanticConstructionHubExcerpt(
   // (ekf.hpp) that carry unique files. With remaining_ranges now disclosed and
   // re-slice sanctioned, a leaner anchored excerpt plus zoom-on-demand beats a
   // fatter excerpt that evicts other evidence. Radius shrinks until it fits.
-  for (const radius of [32, 24, 18]) {
-    const { code, merged } = build(radius);
-    if (Buffer.byteLength(code, "utf8") <= 6 * 1024) {
-      // Wave 4 (2026-07-24 T13 forensics): the excerpt used to claim
-      // remaining_ranges:[] ("graph-proved anchors, must not reopen"), hiding
-      // the truncation — the model's actual edit landed OUTSIDE the excerpt
-      // windows and it escaped to a native full-file Read to recover. Disclose
-      // the true complement instead; a re-slice of this same handle is the
-      // sanctioned (and far cheaper) recovery path.
-      const remaining: string[] = [];
-      let cursor = 1;
-      for (const range of merged) {
-        if (range.start > cursor) remaining.push(`${cursor}-${range.start - 1}`);
-        cursor = range.end + 1;
-      }
-      if (cursor <= lines.length) remaining.push(`${cursor}-${lines.length}`);
-      return { code, remaining_ranges: remaining };
+  // Wave 4 (2026-07-24 T13 forensics): the excerpt used to claim
+  // remaining_ranges:[] ("graph-proved anchors, must not reopen"), hiding
+  // the truncation — the model's actual edit landed OUTSIDE the excerpt
+  // windows and it escaped to a native full-file Read to recover. Disclose
+  // the true complement instead; a re-slice of this same handle is the
+  // sanctioned (and far cheaper) recovery path.
+  const finish = (
+    built: { code: string; merged: HubLineRange[] },
+    hunks?: readonly HubLineRange[],
+  ): { code: string; remaining_ranges: string[]; edit_hunk_ranges?: string[] } => {
+    const remaining: string[] = [];
+    let cursor = 1;
+    for (const range of built.merged) {
+      if (range.start > cursor) remaining.push(`${cursor}-${range.start - 1}`);
+      cursor = range.end + 1;
     }
+    if (cursor <= lines.length) remaining.push(`${cursor}-${lines.length}`);
+    return {
+      code: built.code,
+      remaining_ranges: remaining,
+      ...(hunks !== undefined ? { edit_hunk_ranges: hunks.map((hunk) => `${hunk.start}-${hunk.end}`) } : {}),
+    };
+  };
+
+  for (const radius of [32, 24, 18]) {
+    const plain = build(radius);
+    const plainBytes = Buffer.byteLength(plain.code, "utf8");
+    // The radius ladder is UNCHANGED by A2: a radius whose plain build does not
+    // fit is still skipped, so A2 never trades a tighter radius for a hunk.
+    if (plainBytes > HUB_EXCERPT_BUDGET_BYTES) continue;
+    // A2 TRIGGER (strict). The served evidence fails to cover the landing region
+    // when the anchored windows do not CONTAIN it, or when what they contain is
+    // not the file's own bytes (comment elision). Neither true ⇒ the pre-A2
+    // build is returned unchanged, byte for byte.
+    const uncovered = editHunks !== undefined
+      && !editHunks.every((hunk) => plain.merged.some((range) => range.start <= hunk.start && range.end >= hunk.end));
+    if (editHunks === undefined || (!hunkElided && !uncovered)) return finish(plain);
+    const withHunk = build(radius, editHunks);
+    const withHunkBytes = Buffer.byteLength(withHunk.code, "utf8");
+    if (
+      withHunkBytes - plainBytes <= HUB_EDIT_HUNK_MAX_BYTES
+      && withHunkBytes <= HUB_EXCERPT_BUDGET_BYTES + HUB_EDIT_HUNK_MAX_BYTES
+    ) {
+      return finish(withHunk, editHunks);
+    }
+    // The landing region does not fit its cap here: keep the pre-A2 body rather
+    // than widen the pack. The disclosed remaining_ranges + same-handle re-slice
+    // stay the recovery path they have always been.
+    return finish(plain);
   }
   return undefined;
 }
@@ -13513,7 +14074,8 @@ function buildSemanticTaskWiringProfile(
         WIRING_COMPLETE_SURFACE_BYTES,
       )
     : undefined;
-  const insertionCode = insertionWhole !== undefined && insertionWhole.remaining_ranges.length === 0
+  const insertionCode: { code: string; remaining_ranges: string[]; edit_hunk_ranges?: string[] } | undefined
+    = insertionWhole !== undefined && insertionWhole.remaining_ranges.length === 0
     ? insertionWhole
     : resolution.connectionMode === "construct-receiver"
     ? semanticConstructionHubExcerpt(
@@ -13534,6 +14096,25 @@ function buildSemanticTaskWiringProfile(
   // bail was dead code while the excerpt hard-claimed remaining_ranges:[] and
   // would otherwise discard the entire wiring pack over honest disclosure.
   if (insertionCode === undefined) return undefined;
+  // A2 (v0.12): the whole-file sibling of the excerpt path. A hub inside the
+  // completeness bar is served entire, but still comment-elided — so the exact
+  // anchor over the wiring site can be the same `elided-content` placeholder.
+  // Re-emit that one bounded landing window verbatim; everything outside it,
+  // and every non-construct-receiver hub, is untouched.
+  if (
+    isConstructReceiver
+    && insertionWhole !== undefined
+    && insertionCode === insertionWhole
+  ) {
+    const wholeHunks = hubEditHunkRanges(insertionText.split(/\r?\n/), insertionLines);
+    const rebuilt = wholeHunks === undefined
+      ? undefined
+      : wholeHubWithVerbatimLanding(insertionText, insertionSurface.path, insertionCode.code, wholeHunks);
+    if (rebuilt !== undefined && wholeHunks !== undefined) {
+      insertionCode.code = rebuilt;
+      insertionCode.edit_hunk_ranges = wholeHunks.map((hunk) => `${hunk.start}-${hunk.end}`);
+    }
+  }
   insertionSurface.range = insertionRange;
   insertionSurface.handle = handleTable.upsert({
     kind: "range",
@@ -13545,6 +14126,24 @@ function buildSemanticTaskWiringProfile(
   insertionSurface.symbol = unqualifiedCallable(resolution.insertion.symbol);
   if (resolution.connectionMode === "construct-receiver") {
     insertionSurface.why = "semantic wiring receiver-construction hub; obey wiring.connections[0].required_action";
+  }
+  // A2 live engagement counter (trace-only, zero wire bytes). One line per FIRE,
+  // so a probe can preregister `edit_hunk_frontier` occurrences per cell as the
+  // discriminating signature instead of inferring engagement from cost.
+  if (insertionCode.edit_hunk_ranges !== undefined && insertionCode.edit_hunk_ranges.length > 0) {
+    trace(
+      "edit_hunk_frontier",
+      {
+        path: insertionSurface.path,
+        mode: resolution.connectionMode,
+        hunks: insertionCode.edit_hunk_ranges.length,
+        hunk_ranges: insertionCode.edit_hunk_ranges,
+        anchor_lines: insertionLines,
+        hub_bytes: insertionBytes,
+        served_bytes: Buffer.byteLength(insertionCode.code, "utf8"),
+      },
+      workspace,
+    );
   }
   if (insertionCode.remaining_ranges.length > 0) {
     if (resolution.connectionMode === "construct-receiver") {
@@ -13599,17 +14198,20 @@ function buildSemanticTaskWiringProfile(
   // edited-file-content proxy inside collectChangedIdentifiers covers the
   // rest; threading a second identifier list would add plumbing, not
   // precision.
-  const completionManifest = resolution.connectionMode === "construct-receiver"
-    ? buildVerificationManifest(workspace, resolution.editPaths, {
-      forceRecipe: verificationRecipeEnabled(),
-      behaviorAnchors: [
-        unqualifiedCallable(resolution.producer.symbol),
-        unqualifiedCallable(resolution.adapter.symbol),
-      ],
-    })
-    : undefined;
+  // A semantic wiring frontier is actionable only when every edit site has
+  // been resolved, regardless of whether its receiver already exists or must
+  // be constructed. This compact, server-internal completion contract needs
+  // recipe discovery even when the experimental response-wide recipe flag is
+  // off; only a recipe with a workspace-proven entry reaches the wire below.
+  const completionManifest = buildVerificationManifest(workspace, resolution.editPaths, {
+    forceRecipe: true,
+    behaviorAnchors: [
+      unqualifiedCallable(resolution.producer.symbol),
+      unqualifiedCallable(resolution.adapter.symbol),
+    ],
+  });
   const completionRecipeRaw = completionManifest?.recipe;
-  const completionRecipe = completionRecipeRaw === undefined
+  const completionRecipe = completionRecipeRaw?.entry === undefined
     ? undefined
     : {
       ...completionRecipeRaw,
@@ -13634,8 +14236,8 @@ function buildSemanticTaskWiringProfile(
         : {}),
     };
   // required_action tells clients to execute completion_proof.verification.entry;
-  // with recipe enrichment off that field never existed, so the demand was
-  // unsatisfiable. When the manifest proved a runnable entry, carry just that.
+  // only a manifest with a workspace-proven runnable entry can satisfy that
+  // demand, so a recipe containing only gaps never reaches this contract.
   const completionVerification = completionRecipe ?? harnessEntryRecipe(completionManifest, resolution.editPaths);
   const structuralChecks = resolution.structuralChecks?.map((check) => ({
     id: check.id,
@@ -13670,9 +14272,13 @@ function buildSemanticTaskWiringProfile(
           symbol: `${resolution.consumer.owner}::${resolution.consumer.constructionSymbol!}`,
         },
       } : {}),
-      ...(structuralChecks !== undefined ? {
+      // Existing-receiver routes need not add receiver-construction checks,
+      // but an independently discovered executable verification recipe is
+      // still an actionable completion contract. Keep the required structural
+      // checks carrier explicit (empty when none applies).
+      ...(structuralChecks !== undefined || completionVerification !== undefined ? {
         completion_proof: {
-          structural_checks: structuralChecks,
+          structural_checks: structuralChecks ?? [],
           ...(completionVerification !== undefined ? { verification: completionVerification } : {}),
         },
       } : {}),
@@ -14216,7 +14822,9 @@ function probeFileText(workspace: string, filePath: string): string | undefined 
     if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return undefined;
     const stat = fs.statSync(real);
     if (!stat.isFile() || stat.size > READINESS_PROBE_MAX_BYTES) return undefined;
-    return fs.readFileSync(real, "utf8");
+    // P3 (2026-08-27): decodeTextBuffer, not a raw utf8 read — undecodable
+    // content probes as unavailable, same as any other probe failure here.
+    return decodeTextBuffer(fs.readFileSync(real)) ?? undefined;
   } catch {
     return undefined;
   }
@@ -15213,7 +15821,9 @@ export function runRecursiveReadOnlyClosure(
       operations += runCandidateInlinePass(result, profile, query, workspace, receipt, cache);
       break;
     }
-    const contract = buildTaskExecutionContract(result, profile, query);
+    const contract = buildTaskExecutionContract(
+      result, profile, query, buildTaskWorkspaceState(result), workspace,
+    );
     if (
       contract.typestate.phase !== "discovery"
       || contract.call_budget?.discovery_allowed !== true
@@ -15724,13 +16334,47 @@ function buildReadinessObligations(
   return obligations.slice(0, 12);
 }
 
+/**
+ * P0 defect 3: same-epoch evidence the caller ALREADY holds, as certificate
+ * frontier entries — served-surface handles plus the still-open edit
+ * obligations an earlier pack of this task recorded.
+ *
+ * Not a widening of write permission: `recordServedEditAdmissibility` already
+ * admits every content-bearing serve for the rest of the epoch, and
+ * priorPackStore's entries are obligations this server itself published. What
+ * this closes is the DISAGREEMENT — the primary certificate named only the
+ * current call's frontier, so the three existing nets (session's admissible
+ * union via the mid-fence receipt, the qref-replay carry-forward, F-B3) were
+ * the only things that remembered pack 1, and none of them reaches this path.
+ *
+ * Bounded at FRONTIER_HANDLE_CAP parity (32) before the certificate applies
+ * its own 12-entry cap; current-call entries always sort first, so prior
+ * evidence can only fill slots the current call left empty.
+ */
+const PRIOR_EPOCH_FRONTIER_CAP = 32;
+
+function priorEpochActionFrontier(workspace: string, query: string): string[] {
+  const epochTokens = tokenizeForEpoch(query);
+  if (epochTokens.length === 0) return [];
+  const handles = queryServedSurfaces(workspace, workspace, { epochTokens })
+    .map((entry) => entry.handle)
+    .filter((handle): handle is string => typeof handle === "string" && handle.length > 0);
+  const obligationPaths = queryPriorPackObligations(workspace, epochTokens)
+    .filter((obligation) => obligation.open && obligation.action === "edit")
+    .map((obligation) => obligation.path);
+  return [...new Set([...handles, ...obligationPaths])].slice(0, PRIOR_EPOCH_FRONTIER_CAP);
+}
+
 function actionFrontierForCertificate(
   result: TaskPackResult,
   profile: TaskProfile,
   obligations: readonly TaskReadinessObligation[],
+  priorEpoch: readonly string[] = [],
 ): string[] {
   if (profile === "answer") return [];
   if (profile === "wiring") {
+    // A wiring certificate's writable set is its edit_frontier ALONE (the
+    // wiring write protocol), so prior-epoch evidence is deliberately excluded.
     return [...new Set(result.wiring?.edit_frontier ?? [])].slice(0, 12);
   }
   const fromWiring = result.wiring?.edit_frontier ?? [];
@@ -15744,7 +16388,11 @@ function actionFrontierForCertificate(
   // Create-only context surfaces are read-only imitation evidence, not edit targets.
   // Mixed create+edit requests retain independent wiring/change obligations.
   if (createTarget.length > 0 && fromWiring.length === 0 && fromChange.length === 0) return [];
-  return [...new Set([...createTarget, ...fromWiring, ...fromChange, ...provedImplementation])].slice(0, 12);
+  return [...new Set([
+    ...createTarget, ...fromWiring, ...fromChange, ...provedImplementation,
+    // Last, so the cap can only ever evict prior-epoch entries.
+    ...priorEpoch,
+  ])].slice(0, 12);
 }
 
 const MAX_WORKSPACE_STATE_INVENTORY_FILES = 10_000;
@@ -16383,6 +17031,8 @@ export function buildTaskExecutionContract(
   profile: TaskProfile,
   query: string,
   workspaceState: TaskWorkspaceState = buildTaskWorkspaceState(result),
+  /** P0 defect 3: the workspace root, so the certificate can name same-epoch evidence the caller already holds. Optional — the readiness specs build contracts from synthetic results with no workspace, and omitting it is exactly the pre-defect-3 frontier. */
+  workspace?: string,
 ): TaskExecutionContract {
   const obligations = buildReadinessObligations(result, profile, query);
   const falsification = buildFalsificationReport(result, profile, obligations);
@@ -16623,7 +17273,12 @@ export function buildTaskExecutionContract(
   // not authorization — its route already sanctions a bounded follow-up, so it
   // is not a dead end.
   const grantServedTerminal = requiredServed && readiness === "needs-followup" && !humanChoicePending;
-  const actionFrontier = actionFrontierForCertificate(result, profile, obligations);
+  const actionFrontier = actionFrontierForCertificate(
+    result,
+    profile,
+    obligations,
+    workspace !== undefined ? priorEpochActionFrontier(workspace, query) : [],
+  );
   const certificate = accepted
     ? deterministicCertificate(query, profile, obligations, falsification, risk, actionFrontier, workspaceState)
     : undefined;
@@ -17498,7 +18153,12 @@ function findNearestNpmScripts(workspace: string, rel: string): { dir: string; p
     if (hasProjectBoundaryMarker(workspace, dir)) return null;
     const pkgPath = path.join(workspace, dir, "package.json");
     try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
+      // P3 (2026-08-27): decodeTextBuffer, not a raw utf8 read; an
+      // undecodable package.json is treated the same as an absent/unparsable
+      // one — keep walking upward, never crash and never JSON.parse garbage.
+      const decoded = decodeTextBuffer(fs.readFileSync(pkgPath));
+      if (decoded === null) continue;
+      const pkg = JSON.parse(decoded) as { scripts?: Record<string, string> };
       return { dir, pkg };
     } catch {
       // keep walking upward
@@ -18079,7 +18739,7 @@ function isModuleClosureSurface(s: TaskPackSurface): boolean {
   return s.why !== undefined && MODULE_CLOSURE_WHY_MARKERS.has(s.why);
 }
 
-function capForResult(result: TaskPackResult): number {
+function rawCapForResult(result: TaskPackResult): number {
   if (result.wiring?.strategy === "semantic-multihop") {
     if ((result.wiring.connections[0]?.completion_proof?.structural_checks.length ?? 0) > 0) {
       return MAX_TASK_PACK_BYTES_CONSTRUCT_PROOF;
@@ -18148,6 +18808,20 @@ function capForResult(result: TaskPackResult): number {
   return base;
 }
 
+/**
+ * T1 (2026-08-27 field-eval): the byte budget actually enforced for `result`
+ * -- rawCapForResult's type-specific tier, clamped down (never up) to
+ * whatever byte ceiling is active for the buildTaskPack() call in progress
+ * (see packByteCeilingStorage above). Every existing caller of the old
+ * capForResult name is unaffected when no ceiling is active (the ordinary
+ * case: today's corpus calls pass neither maxBytes/maxTokens nor a
+ * clientInfo the vscode profile matches), since clampToActiveCeiling is then
+ * the identity function.
+ */
+function capForResult(result: TaskPackResult): number {
+  return clampToActiveCeiling(rawCapForResult(result));
+}
+
 // ---------------------------------------------------------------------------
 // DESIGN-v0.8 §C2 item 2: pack-level code-block dedupe.
 //
@@ -18213,6 +18887,10 @@ export function resetPackDedupeCache(): void {
   // C2: the retained certificate is per-workspace serve state of exactly the
   // same kind, so every suite that resets the dedupe cache gets isolation here.
   certifiedWorkingSets.clear();
+  // P0 defect 2/3: so is the epoch requirement contract — and it is the one
+  // piece of per-workspace state that can make a LATER, unrelated case
+  // uncertifiable, so every suite already resetting here gets it for free.
+  resetTaskContractStoreForTest();
 }
 
 /**
@@ -18243,6 +18921,29 @@ export function clearPackDedupeForWorkspace(workspace: string): void {
   lastPackBlocksByWorkspace.delete(key);
   servedPacksByWorkspace.delete(key);
   certifiedWorkingSets.delete(key);
+  // P0 defect 2 (2026-08-27): the epoch requirement contract is the same class
+  // of workspace-keyed, task-scoped state, and `taskEpoch:"new"` is exactly
+  // the boundary at which it must go. Doing it HERE rather than in server.ts's
+  // `taskEpoch:"new"` branch keeps that branch's call list unchanged: the
+  // branch already calls this function for the identical reason (see the doc
+  // comment above), so the epoch reset the guide promises stays one edit.
+  // Both spellings: the store keys on the string its writers pass, and those
+  // writers take `workspace` verbatim while this function's own siblings key
+  // on the resolved path.
+  clearTaskContract(workspace);
+  clearTaskContract(key);
+  // Same incident class, one store over (2026-08-27 field-eval follow-up).
+  // `priorPackStore` shipped `clearPriorPackObligations` as its declared epoch
+  // boundary and then never called it from production — so an explicit
+  // `taskEpoch:"new"` left a prior task's open, required, action:"edit"
+  // obligations standing on a workspace path a later task reuses. The next
+  // pack of that unrelated task then either packs against them (SEAM 1's
+  // `queryPriorPackObligations` read) or has its OWN certificate demoted by
+  // F-B3's `unserved-obligation:` disclosure — the exact "a later, logically
+  // independent task inherits the earlier one's state" failure this function's
+  // doc comment above describes for the dedupe maps.
+  clearPriorPackObligations(workspace);
+  clearPriorPackObligations(key);
 }
 
 // ---------------------------------------------------------------------------
@@ -19405,6 +20106,169 @@ function reconcileMissingRolesContract(result: TaskPackResult): void {
   delete result.coverage_reason;
 }
 
+// ---------------------------------------------------------------------------
+// P0 defects 2 + 3 — the task epoch's PERSISTED requirement contract.
+//
+// `requiredSurfacesForTask` already carries the ROLE axis forward at inference
+// time (its `carried` block), which is enough while the ordinary pipeline runs.
+// It is NOT enough at the exit: `refreshAfterRecursiveClosure`'s wiring branch
+// clears `missing` outright, `reconcileMissingRolesContract` can drop a label
+// that no longer names anything, and the CONCERN axis never had any
+// carry-forward at all. This is the fail-closed backstop for both axes at the
+// one shared exit every flow passes through, so a NARROWED continuation cannot
+// leave with `coverage:"complete"` — or a terminal certificate — while the
+// epoch's own standing requirements are still unserved.
+//
+// The vocabulary is deliberately the existing one: coverage "partial",
+// coverage_reason "missing-roles"/"concerns-uncovered", `missing[]`,
+// `missing_required_surfaces[]`. The two markers below are disclosure NOTES in
+// `missing[]` — the same shape (and same reason) as F-B3's
+// `unserved-obligation:` note: a bare role name says nothing about WHERE the
+// requirement came from, and canonicalDecision.ts needs an exact, narrow
+// marker to demote THIS response's own certificate on.
+// ---------------------------------------------------------------------------
+
+/** Marker: a role an EARLIER pack of this epoch required and no served evidence covers. Parsed by canonicalDecision.ts's `unservedEpochContractZoom` — keep the two in sync. */
+const UNSERVED_EPOCH_ROLE_PREFIX = "unserved-required-role:";
+/** Marker: a concern token an EARLIER pack of this epoch named and no served evidence matches. Same parser. */
+const UNCOVERED_EPOCH_CONCERN_PREFIX = "uncovered-concern:";
+/** Bound on epoch-contract disclosures per axis — sized like unmatchedConcernTokens' own 4-token cap, with which it shares the W2 guidance-metadata budget. */
+const MAX_EPOCH_CONTRACT_DISCLOSURES = 4;
+
+/**
+ * This pack's contribution to the epoch's standing concern universe: the
+ * concerns IT PUBLISHED as uncovered, and nothing else.
+ *
+ * Deliberately not "every identifier-shaped token in the query". A query names
+ * tokens that no repository evidence can ever match — the classic one is the
+ * value being ADDED ("add STALLED status to the status enum"), which is a
+ * requirement on the EDIT, not on the evidence. Harvesting those made the
+ * epoch permanently uncertifiable: pack 1 correctly shipped `complete`, and
+ * every later pack of the same task was then demoted for failing to "cover" a
+ * token that does not exist yet. Storing only what a pack itself declared
+ * uncovered keeps the store's claim exactly as strong as the pack's own.
+ */
+function epochConcernTokensFor(result: TaskPackResult, query: string): string[] {
+  if (result.coverage_reason !== "concerns-uncovered") return [];
+  return unmatchedConcernTokens(query, codeTaskPackSurfaces(result.surfaces));
+}
+
+/**
+ * The evidence the CALLER holds for this epoch: this pack's own surfaces plus
+ * every same-epoch surface an earlier pack served. The second half is not
+ * generosity — `recordServedEditAdmissibility`'s serve-time rule already makes
+ * any content-bearing serve edit-admissible for the rest of the epoch, so a
+ * requirement an earlier pack served is genuinely discharged. Prior entries
+ * carry no body, so they can only match on path/role identity: the strict
+ * direction.
+ */
+function epochServedEvidence(
+  workspace: string,
+  result: TaskPackResult,
+  epochTokens: readonly string[],
+): TaskPackSurface[] {
+  return [
+    ...codeTaskPackSurfaces(result.surfaces),
+    ...queryServedSurfaces(workspace, workspace, { epochTokens }).map((entry) => ({
+      role: entry.role,
+      handle: entry.handle ?? "",
+      path: entry.path,
+      range: "",
+    })),
+  ];
+}
+
+/**
+ * Demote a pack that would certify against a universe smaller than the one its
+ * own task epoch already established. Strictly tightening: it can only lower
+ * `coverage` and add disclosures, never raise or remove either.
+ */
+function reconcileEpochTaskContract(
+  workspace: string,
+  result: TaskPackResult,
+  query: string,
+): void {
+  const epochTokens = tokenizeForEpoch(query);
+  const stored = queryTaskContract(workspace, epochTokens);
+  if (stored === undefined) return;
+  const evidence = epochServedEvidence(workspace, result, epochTokens);
+  const covered = new Set([...stored.servedRoles, ...evidence.map((surface) => surface.role)]);
+  // A BACKSTOP, not a second narrator. When this pack already names the gap in
+  // the ordinary vocabulary — which is the normal case now that
+  // `requiredSurfacesForTask` carries roles forward at inference time — there
+  // is nothing left to repair, and restating it would only churn the response
+  // bytes (declining the subset receipt whose whole claim is that nothing
+  // changed). What survives this filter is exactly the wiped case: a branch
+  // that cleared `missing` after the requirement was established.
+  const alreadyDisclosed = [
+    ...result.missing,
+    ...(result.missing_required_surfaces ?? []),
+    ...(result.blocking_next_steps ?? []),
+    ...(result.checks ?? []),
+  ].join("\n").toLowerCase();
+  const unservedRoles = stored.requiredRoles
+    .filter((role) => !covered.has(role) && !alreadyDisclosed.includes(role.toLowerCase()))
+    .slice(0, MAX_EPOCH_CONTRACT_DISCLOSURES);
+  const coveredConcerns = new Set(stored.coveredConcernTokens);
+  const uncoveredConcerns = stored.concernTokens
+    .filter((token) =>
+      !coveredConcerns.has(token)
+      && !alreadyDisclosed.includes(token.toLowerCase())
+      && !concernTokenMatchesSurfaces(token, evidence))
+    .slice(0, MAX_EPOCH_CONTRACT_DISCLOSURES);
+  if (unservedRoles.length === 0 && uncoveredConcerns.length === 0) return;
+
+  // The epoch's SOURCE query, not this narrowed call's — a continuation that
+  // re-asks with the truncated text is the defect one file over.
+  const sourceQuery = continuationQuery(stored.query !== "" ? stored.query : query);
+  result.missing = [...new Set([
+    ...result.missing,
+    ...unservedRoles.map((role) =>
+      `${UNSERVED_EPOCH_ROLE_PREFIX}${role} (required by an earlier pack in this task;`
+      + ` re-request via read_file mode=task_pack query="${sourceQuery}" surfaceRoles=["${role}"])`),
+    ...uncoveredConcerns.map((token) =>
+      `${UNCOVERED_EPOCH_CONCERN_PREFIX}${token} (named by an earlier pack in this task;`
+      + ` re-request via search_files action=find query=${token})`),
+  ])];
+  if (unservedRoles.length > 0) {
+    // These ARE roles, so they belong in the role fields too — that is what
+    // makes the route/next machinery name them instead of guessing.
+    result.required_surfaces = mergeUnique(result.required_surfaces ?? [], unservedRoles);
+    result.missing_required_surfaces = mergeUnique(result.missing_required_surfaces ?? [], unservedRoles);
+  }
+  result.coverage = "partial";
+  if (result.coverage_reason === undefined) {
+    result.coverage_reason = unservedRoles.length > 0 ? "missing-roles" : "concerns-uncovered";
+  }
+}
+
+/**
+ * Fold THIS pack into the epoch's standing contract: what it required, what it
+ * named as a concern, and what it actually served. Runs AFTER the
+ * reconciliation above, so a pack is never measured against its own record.
+ */
+function recordEpochTaskContract(
+  workspace: string,
+  result: TaskPackResult,
+  query: string,
+): void {
+  const epochTokens = tokenizeForEpoch(query);
+  if (epochTokens.length === 0) return;
+  const served = codeTaskPackSurfaces(result.surfaces).filter(hasServedCode);
+  // The satisfied half is harvested from the WHOLE query, not just the
+  // published gap: a token this pack's evidence matches is discharged for the
+  // epoch even though it was never a published requirement.
+  const shaped = identifierShapedConcernSet(query);
+  const queryTokens = concernAnchorTokens(query, 8).filter((token) => shaped.has(token.toLowerCase()));
+  recordTaskContract(workspace, epochTokens, {
+    query,
+    requiredRoles: result.required_surfaces ?? [],
+    concernTokens: epochConcernTokensFor(result, query),
+    servedRoles: served.map((surface) => surface.role),
+    coveredConcernTokens: queryTokens.filter((token) => concernTokenMatchesSurfaces(token, served)),
+  });
+}
+
 /** Cap on how many unserved caller paths are disclosed (they share the W2 guidance-metadata budget). */
 const MAX_UNSERVED_CALLER_PATHS = 6;
 
@@ -19441,7 +20305,7 @@ export function attachCandidateListRecovery(
     .filter((rel) => !served.has(rel));
   if (unresolved.length === 0) return;
   const paths = [...new Set([...unresolved, ...served])].slice(0, MAX_BATCH_NEXT_HANDLES);
-  result.next = `read_file mode=task_pack query="${query.slice(0, 80)}" paths=${JSON.stringify(paths)}`;
+  result.next = `read_file mode=task_pack query="${continuationQuery(query)}" paths=${JSON.stringify(paths)}`;
 }
 
 /**
@@ -21324,26 +22188,108 @@ function annotateBatchEditFrontier(result: TaskPackResult): void {
   };
 }
 
-type ExactReplacement = { search: string; replace: string };
+type ExactReplacement =
+  | { search: string; replace: string }
+  | { identifierOldValue: string; replace: string };
+
+// T1 (2026-08-27, v0.12 wave D2): a code-shaped identifier token adjacent to
+// the literal(s) IN THE SAME MATCH, verified against explicitCodeIdentifiers'
+// own "looks like code, not prose" heuristic (has `_`, camelCase, PascalCase,
+// or ALL_CAPS) — never a plain English word. Values are restricted to
+// numeric/boolean/sentinel literals (never a bare word), so an actual rename
+// request ("X from oldName to newName") cannot be mistaken for a value edit.
+// Every parse still dies safely downstream: attachSingleSiteUniqueMatchFastPath
+// re-verifies the resolved search text against the served file and requires a
+// single unique occurrence before ever proposing an edit.
+const EXACT_REPLACEMENT_IDENT_SRC = "[A-Za-z_$][A-Za-z0-9_$]*";
+const EXACT_REPLACEMENT_VALUE_SRC =
+  "(?:[+-]?(?:\\d+\\.\\d+|\\d+)%?|true|false|null|undefined|on|off|enabled|disabled)";
+
+/**
+ * T1: resolve IDENT's current literal value from an "IDENT: value" / "IDENT =
+ * value" assignment-shaped span inside already-served surface code, for a
+ * query that named only the NEW value ("set PACKET_LOSS_FAILURE to 0.15").
+ * Requires the identifier to be assigned in EXACTLY one place in the served
+ * text — assigned more than once, or not found at all, is not a safe
+ * single-site rewrite, so this returns undefined rather than guess.
+ */
+function resolveOldValueReplacement(
+  code: string,
+  identifier: string,
+  newValue: string,
+): { search: string; replace: string } | undefined {
+  const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `\\b${escaped}\\b(\\s*[:=]\\s*)(${EXACT_REPLACEMENT_VALUE_SRC})\\b`,
+    "g",
+  );
+  const matches = [...code.matchAll(re)];
+  if (matches.length !== 1) return undefined;
+  const [wholeMatch, separator, oldValue] = matches[0]!;
+  if (oldValue === newValue) return undefined;
+  return { search: wholeMatch!, replace: `${identifier}${separator}${newValue}` };
+}
 
 /** Parse only user-authored, unambiguous replacement notation; never infer an edit from prose. */
 function exactReplacementFromQuery(query: string): ExactReplacement | undefined {
-  const found: ExactReplacement[] = [];
-  const add = (search: string | undefined, replace: string | undefined): void => {
+  const found: Array<{ search?: string; replace: string; identifierOldValue?: string; selfEvidentMutation?: boolean }> = [];
+  const add = (search: string | undefined, replace: string | undefined, selfEvidentMutation?: boolean): void => {
     if (search === undefined || replace === undefined || search.length === 0 || search === replace) return;
     if (Buffer.byteLength(search, "utf8") > 8192 || Buffer.byteLength(replace, "utf8") > 8192) return;
-    found.push({ search, replace });
+    found.push({ search, replace, selfEvidentMutation });
+  };
+  const addUnresolved = (identifierOldValue: string, replace: string): void => {
+    if (identifierOldValue.length === 0 || replace.length === 0) return;
+    if (Buffer.byteLength(replace, "utf8") > 8192) return;
+    found.push({ identifierOldValue, replace, selfEvidentMutation: true });
   };
   for (const match of query.matchAll(/\breplace\s+`([^`\n]+)`\s+with\s+`([^`\n]+)`/giu)) add(match[1], match[2]);
   for (const match of query.matchAll(/\breplace\s+"([^"\n]+)"\s+with\s+"([^"\n]+)"/giu)) add(match[1], match[2]);
   for (const match of query.matchAll(/\breplace\s+'([^'\n]+)'\s+with\s+'([^'\n]+)'/giu)) add(match[1], match[2]);
   for (const match of query.matchAll(/「([^」\n]+)」(?:を)?「([^」\n]+)」(?:に)?(?:置換|変更|修正)/gu)) add(match[1], match[2]);
   for (const match of query.matchAll(/^(?!-{3})-([^\n]+)\n^(?!\+{3})\+([^\n]+)$/gmu)) add(match[1], match[2]);
+
+  const codeShapedTokens = new Set(explicitCodeIdentifiers(query).map((token) => normIdent(token)));
+  const isBoundIdentifier = (token: string): boolean => codeShapedTokens.has(normIdent(token));
+  const IDENT = EXACT_REPLACEMENT_IDENT_SRC;
+  const VALUE = EXACT_REPLACEMENT_VALUE_SRC;
+
+  // Arrow form: `IDENT[:=|を] OLD (→|->|=>) NEW` — e.g. "PACKET_LOSS_FAILURE
+  // を 0.12→0.15" or "TIMEOUT_MS: 30 -> 60".
+  for (const match of query.matchAll(new RegExp(`\\b(${IDENT})\\s*(?:[:=]|を)?\\s*(${VALUE})\\s*(?:→|->|=>)\\s*(${VALUE})\\b`, "gu"))) {
+    if (isBoundIdentifier(match[1]!)) add(match[2], match[3], true);
+  }
+  // "change|set|update IDENT from OLD to NEW" / bare "IDENT from OLD to NEW".
+  // Excluded outright when the query separately reads as a rename request —
+  // "from X to Y" is also how a caller phrases renaming an identifier, and a
+  // rename is a multi-site concern this fast path must never approximate.
+  if (!/\b(?:rename|renamed|renaming)\b/iu.test(query) && !/(?:改名|リネーム)/u.test(query)) {
+    for (const match of query.matchAll(new RegExp(`\\b(?:change|set|update)?\\s*(${IDENT})\\s+from\\s+(${VALUE})\\s+to\\s+(${VALUE})\\b`, "giu"))) {
+      if (isBoundIdentifier(match[1]!)) add(match[2], match[3], true);
+    }
+  }
+  // JA "IDENTをOLDからNEWに/へ".
+  for (const match of query.matchAll(new RegExp(`(${IDENT})を(${VALUE})から(${VALUE})(?:に|へ)`, "gu"))) {
+    if (isBoundIdentifier(match[1]!)) add(match[2], match[3], true);
+  }
+  // "set IDENT to NEW" / JA "IDENTをNEWに" — old value is not stated in the
+  // query; resolved later against the actually-served file.
+  for (const match of query.matchAll(new RegExp(`\\bset\\s+(${IDENT})\\s+to\\s+(${VALUE})\\b`, "giu"))) {
+    if (isBoundIdentifier(match[1]!)) addUnresolved(match[1]!, match[2]!);
+  }
+  for (const match of query.matchAll(new RegExp(`(${IDENT})を(${VALUE})に`, "gu"))) {
+    if (isBoundIdentifier(match[1]!)) addUnresolved(match[1]!, match[2]!);
+  }
+
   if (found.length !== 1) return undefined;
   const replacement = found[0]!;
-  const explicitMutation = /\b(?:apply|replace|change|update|fix)\b/iu.test(query)
+  const explicitMutation = replacement.selfEvidentMutation === true
+    || /\b(?:apply|replace|change|update|fix)\b/iu.test(query)
     || /(?:適用|置換|変更|修正)/u.test(query);
-  return explicitMutation ? replacement : undefined;
+  if (!explicitMutation) return undefined;
+  return replacement.identifierOldValue !== undefined
+    ? { identifierOldValue: replacement.identifierOldValue, replace: replacement.replace }
+    : { search: replacement.search!, replace: replacement.replace };
 }
 
 function attachSingleSiteUniqueMatchFastPath(
@@ -21358,19 +22304,28 @@ function attachSingleSiteUniqueMatchFastPath(
   if (result.coverage !== "focused" && result.coverage !== "complete") return;
   if (result.missing.length !== 0 || result.concern_ambiguities?.length) return;
   if (hasIndependentEditConcernClauses(query) || hasExplicitIndependentConcernMarker(query)) return;
-  if (/(?:,|;|\n)\s*(?:and\s+)?(?:fix|add|implement|change|replace|rename|refactor|wire|connect|update|create)\b/iu.test(query)
+  // Field-eval fix (2026-08-27, v0.12 wave D2): "X, and ALSO refactor Y" used
+  // to slip past this fence -- the optional connector only ever recognized a
+  // bare "and", so an interposed filler word left the verb unreached. Found
+  // via T2's own fail-open test, which reuses this exact fence.
+  if (/(?:,|;|\n)\s*(?:and\s+)?(?:also\s+)?(?:fix|add|implement|change|replace|rename|refactor|wire|connect|update|create)\b/iu.test(query)
     || /(?:、|。|\n)\s*(?:さらに|加えて)?[^\n]{0,80}(?:修正|追加|実装|変更|置換|改名|接続|作成)/u.test(query)) return;
   const contract = result.execution_contract;
   if (contract?.typestate.phase !== "prepared" || !contract.typestate.allowed_actions.includes("edit")) return;
-  const replacement = exactReplacementFromQuery(query);
+  const parsed = exactReplacementFromQuery(query);
+  if (parsed === undefined) return;
+  const surfaces = codeTaskPackSurfaces(result.surfaces);
+  if (surfaces.length !== 1 || result.surfaces.length !== 1) return;
+  const surface = surfaces[0]!;
+  if (surface.required === false || surface.code === undefined) return;
+  const replacement = "identifierOldValue" in parsed
+    ? resolveOldValueReplacement(surface.code, parsed.identifierOldValue, parsed.replace)
+    : parsed;
   // A fast-path receipt repeats both payloads; keep it genuinely small even
   // where the surrounding pack has headroom. Large replacements retain the
   // normal handle-first path and cannot create a post-trim cap inversion.
   if (replacement === undefined || Buffer.byteLength(replacement.search, "utf8") + Buffer.byteLength(replacement.replace, "utf8") > 4096) return;
-  const surfaces = codeTaskPackSurfaces(result.surfaces);
-  if (surfaces.length !== 1 || result.surfaces.length !== 1) return;
-  const surface = surfaces[0]!;
-  if (surface.required === false || surface.code === undefined || !surface.code.includes(replacement.search)) return;
+  if (!surface.code.includes(replacement.search)) return;
   const resolved = safeResolve(surface.path, workspace);
   if (resolved === undefined) return;
   let real: string;
@@ -21973,6 +22928,27 @@ function dedupeTrimAndPersist(
   if (semanticCheckRecords.length > 0) {
     result.checks = semanticCheckRecords.map((check) => check.desc);
   }
+  // T-L1: for change tasks only, enrich the already-selected C/C++ frontier
+  // with declaration authority from direct project-local includes. This runs
+  // before serve-state persistence and trimming so complete bodies are booked
+  // normally, while over-budget handle-only tails remain honestly unserved.
+  if (
+    interfaceAuthorityEnabled()
+    && profile !== "answer"
+    && result.route?.action !== "answer_from_handles"
+  ) {
+    const currentSurfaces = codeTaskPackSurfaces(result.surfaces);
+    const knownSurfaceKeys = new Set(
+      currentSurfaces.map((surface) => JSON.stringify([surface.path, surface.range ?? ""])),
+    );
+    const authoritySurfaces = buildInterfaceAuthoritySurfaces({
+      workspace,
+      frontier: currentSurfaces,
+    }).filter((surface) => !knownSurfaceKeys.has(JSON.stringify([surface.path, surface.range ?? ""])));
+    if (authoritySurfaces.length > 0) {
+      result.surfaces = [...result.surfaces, ...authoritySurfaces];
+    }
+  }
   const cumulativeComplete = finalizePackServeState(workspace, result, effectiveQuery, profile);
   // IMPROVEMENT D: honest, machine-readable verification runnability verdict.
   attachVerificationVerdict(workspace, result);
@@ -21983,6 +22959,7 @@ function dedupeTrimAndPersist(
       cumulativeComplete ? "generic" : profile,
       effectiveQuery,
       buildTaskWorkspaceState(result, workspace, workspaceInventory),
+      workspace,
     ),
   );
   // IMPROVEMENT A part 4: a prepared edit pack with >=2 known edit sites should
@@ -22152,6 +23129,7 @@ function dedupeTrimAndPersist(
     cumulativeComplete && trimmed.coverage_basis === "cumulative" ? "generic" : profile,
     effectiveQuery,
     buildTaskWorkspaceState(trimmed, workspace, workspaceInventory),
+    workspace,
   );
   reconcileTaskPackExecutionContract(trimmed);
   if (
@@ -22297,6 +23275,7 @@ function dedupeTrimAndPersist(
       profile,
       effectiveQuery,
       buildTaskWorkspaceState(fallback, workspace, workspaceInventory),
+      workspace,
     );
     // P0a §6.1: this envelope returns BEFORE the shared exit below, so it must
     // run the same canonical projection itself — otherwise the last envelope
@@ -22509,6 +23488,16 @@ function dedupeTrimAndPersist(
       recordPriorPackObligations(workspace, obligationEpochTokens, currentObligations);
     }
   }
+  // P0 defects 2 + 3: the epoch requirement contract, in the ONE order that is
+  // sound — measure this pack against what the epoch ALREADY established, then
+  // fold this pack in. Reversing it would let every pack certify against its
+  // own record. Deliberately outside the coverage-packer flag above: a false
+  // "complete" is a serve-honesty defect, not a packer optimization.
+  // Positioned with the seam, BEFORE `returned` is derived, for the same
+  // reason its doc comment gives — a `trimmed.missing` mutation applied after
+  // that point never reaches the wire.
+  reconcileEpochTaskContract(workspace, trimmed, effectiveQuery);
+  recordEpochTaskContract(workspace, trimmed, effectiveQuery);
   // iter-2 W4 (awaiting-input idempotency) + W1 (subset receipt): consult the
   // session state BEFORE capturing this pack, so neither can match the current
   // pack against itself. W4 first: a still-unresolved proof re-grants the SAME

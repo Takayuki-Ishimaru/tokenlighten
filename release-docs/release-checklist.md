@@ -1,32 +1,45 @@
 # Release checklist
 
-This checklist is for the v0.11.1 public repository described in [Public-source manifest](public-source-manifest.md). Do not publish, push, tag, or change repository visibility automatically.
+This checklist records the v0.12.0 public release described in
+[Public-source manifest](public-source-manifest.md). Publishing requires
+explicit maintainer approval; that approval was received on 2026-08-27.
 
-## Current review status (2026-08-23)
+## Current review status (2026-08-28)
 
-- [x] Product and workspace manifests report 0.11.1.
-- [x] The v0.9 → v0.11.1 feature comparison and benchmark interpretation are reflected in the public release draft.
-- [x] The benchmark follows the v0.9.x README format: selected verified positive results are numeric, weaker task classes are described qualitatively, and no guaranteed-savings claim is made.
+- [x] Product and public workspace manifests report 0.12.0.
+- [x] The v0.11.1 → v0.12.0 feature comparison and benchmark interpretation
+  are reflected in the release notes, changelog, and public README files.
 - [x] Runtime dependency audit: 0 Critical, 0 High, 2 Moderate.
-- [x] Full public-source development audit: 1 Critical, 1 High, 5 Moderate.
-- [x] The approved TokenLighten Source-Available License Version 0.9 is packaged in the VSIX without a missing-license warning.
-- [x] The final VSIX was rebuilt and its SHA-256 is `b983df44abc3871c97baaf87b03b63cfb88c4bb15a962e6f295bd810233fb081`.
-- [x] Public-staging build, tests, notices, inventory validation, and VSIX manifest review completed.
+- [x] Full public-source staging audit: 1 Critical, 1 High, 5 Moderate.
+- [x] Public-source staging build and 260 test files passed: 3,839 tests
+  passed and 2 were skipped.
+- [x] Bundled CLI, dependency licenses, generated notices, public inventory,
+  VSIX manifest, and packaged MCP smoke checks passed.
+- [x] The final VSIX contains the approved license and generated notices.
+- [x] The final VSIX and checksum were generated and inspected.
+- [ ] Confirm the pushed public commit with GitHub Actions on Node.js 20.
+- [ ] Install the VSIX in a clean VS Code profile or test machine. The local
+  release host did not expose the `code` command-line launcher.
 
 ## 1. Content and legal gate
 
-- [ ] Build the new repository from the allowlist, with a fresh root commit and no imported Git history.
-- [ ] Confirm that `bench/`, the CLI benchmark command/tests, MCP Core 2 source/tests, the Core 2 agent template, historical private docs, `proto/`, `TL-*`, `DESIGN-*`, private reports, and desktop source are absent.
-- [ ] Check every public document and package README for unreviewed benchmark claims, private paths, internal design links, and stale proxy references.
-- [ ] Confirm the public benchmark text contains only reviewed positive aggregate or representative-task figures, qualitative descriptions of weaker task classes, and the required comparison caveats; do not publish full numeric result tables, raw prompts, fixtures, transcripts, billing, or run archives.
-- [ ] Obtain appropriate legal review of the maintainer license draft kept outside the public staging tree, then use only the approved text as the release's `LICENSE`.
-- [ ] Confirm the public root `LICENSE` contains the approved source-available terms, every public package metadata license field says `SEE LICENSE IN LICENSE`, and no public TokenLighten package retains a legacy MIT label.
-- [ ] Run the third-party dependency license check and publish the required notices.
-- [ ] Include the approved license text in the VSIX and confirm the packaging command emits no missing-license warning.
+- [x] Rebuild the public tree from the allowlist without importing private
+  repository history.
+- [x] Confirm private benchmark, Core 2, design/history, proto, report, and
+  desktop-source material is absent.
+- [x] Check public documents for unreviewed claims, private paths, internal
+  design links, and stale version references.
+- [x] Publish only reviewed aggregate or representative-task figures, never
+  raw prompts, fixtures, transcripts, billing, tables, or run archives.
+- [x] State that savings are not guaranteed and that the v0.11.1 comparison
+  is descriptive rather than causal.
+- [x] Confirm the approved license and package metadata; run dependency
+  license checks and generate required notices.
+- [x] Include the approved license and notices in the VSIX.
 
 ## 2. Source build and developer-test gate
 
-The public source must support building and testing without the private benchmark harness.
+The public source must build and test without the private benchmark harness.
 
 ~~~bash
 npm install
@@ -35,19 +48,28 @@ npm run test:packages
 npm run test:bundle-cli
 npm run licenses
 npm run licenses:notices
-git diff --exit-code -- THIRD_PARTY_NOTICES.md
 npm audit --omit=dev --audit-level=high
 npm run doctor
 ~~~
 
-- [ ] Run the commands above from a clean clone of the staged public repository.
-- [ ] Confirm the runtime audit remains free of Critical and High findings. This is the v0.11.1 runtime dependency gate.
-- [ ] Run a separate full `npm audit` and update the dated development-toolchain disclosure if it differs from 1 Critical, 1 High, and 5 Moderate.
-- [ ] Ensure the public root `npm test` runs only included package and VSIX tests and does not reference the private benchmark harness.
-- [ ] Configure GitHub Actions for Node.js 20 on macOS, Ubuntu, and Windows. Run the complete package suite on Ubuntu and macOS; on Windows, gate the build, bundled CLI, dependency licenses/notices, runtime audit, and diagnostics while the remaining non-portable fixtures stay disclosed.
-- [ ] Confirm `tl help` contains no private benchmark command, `tl bench` returns the ordinary unknown-command error, and generated output contains no private benchmark or Core 2 implementation.
-- [ ] Confirm generated package output and tests do not depend on excluded files.
-- [ ] Install the packed CLI/MCP packages in a clean temporary consumer and confirm module import plus MCP `initialize` and `tools/list` succeed with exactly three tools.
+- [x] Run the build, package tests, bundled-CLI test, licenses, notices, and
+  audits from a clean staged-public tree.
+- [x] Confirm the runtime audit remains free of Critical and High findings.
+- [x] Confirm the full `npm audit` disclosure remains 1 Critical, 1 High,
+  and 5 Moderate.
+- [x] Ensure the staged public tests do not depend on the private benchmark
+  harness.
+- [ ] Run Node.js 20 CI on macOS, Ubuntu, and Windows with platform scope
+  documented in the README.
+- [x] Confirm generated output exposes no private benchmark command or Core 2
+  implementation.
+- [x] Start the packaged MCP, confirm `initialize` reports v0.12.0, and
+  confirm `tools/list` returns exactly `read_file`, `edit_file`, and
+  `search_files`.
+- [x] Confirm all product-side `doctor` checks pass. The aggregate local
+  command exited nonzero only because the host's managed Claude registration
+  still records TokenLighten v0.11.1; the release did not mutate user
+  registration as part of source verification.
 
 ## 3. VS Code extension gate
 
@@ -55,37 +77,46 @@ npm run doctor
 npm run package -w tokenlighten-vscode-extension
 ~~~
 
-- [ ] Build `tokenlighten-vscode-extension-0.11.1.vsix` from the public repository without a missing-license warning.
-- [ ] Inspect the VSIX contents for the approved license, third-party notices, bundled CLI/server, and absence of private benchmark material.
-- [ ] Install the VSIX in a clean VS Code profile or test machine.
-- [ ] Open a trusted sample workspace and run **Set up this workspace**.
-- [ ] Confirm enable/disable, session-native bypass, status-bar QuickPick, Diagnostics, and update checks.
-- [ ] Confirm Diagnostics reports version 0.11.1 and the expected `server_build`.
+- [x] Build `tokenlighten-vscode-extension-0.12.0.vsix` from staged public
+  source without a missing-license warning.
+- [x] Inspect the VSIX for the approved license, generated notices, bundled
+  CLI/server, version 0.12.0, and absence of private material.
+- [ ] Install it in a clean VS Code profile or test machine.
+- [x] Run automated setup, enable/disable, session-native bypass, status,
+  Diagnostics, and update-check tests.
+- [x] Confirm the packaged manifest reports version 0.12.0.
 
 ## 4. Benchmark disclosure gate
 
-- [ ] Re-run the snapshot-aware aggregate command against the exact retained v0.11.1 decision archive.
-- [ ] Confirm each selected positive figure matches the retained archive and that weaker task classes remain qualitative rather than a numeric ranking.
-- [ ] Do not claim guaranteed savings.
-- [ ] Keep the v0.9 comparison labeled non-causal and non-direct because the task suite and window changed.
+- [x] Re-aggregate the exact retained v0.12 archive snapshot.
+- [x] Confirm the approximately 28% aggregate result from 16 matched pairs.
+- [x] Confirm the approximately 57% and 30% positive representative medians,
+  with three verified pairs each.
+- [x] Describe narrowly scoped and mixed-verification task tendencies
+  qualitatively rather than as a numeric ranking.
+- [x] Compare the approximately 21% v0.11.1 aggregate result descriptively.
+- [x] Exclude mixed-verification outcomes and avoid guaranteed-savings claims.
 
 ## 5. Artifact integrity gate
 
-~~~bash
-shasum -a 256 tokenlighten-vscode-extension-0.11.1.vsix > tokenlighten-vscode-extension-0.11.1.vsix.sha256
+- [x] Generate the checksum only after packaging gates pass.
+- [x] Record the checksum in
+  [the GitHub Release notes](github-release-v0.12.0.md).
+- [x] Verify the artifact name, license, notices, version, and checksum.
+- [x] Preserve the VSIX and checksum as release assets.
+
+Verified VSIX SHA-256:
+
+~~~text
+d1a2c4b844687c99a2d08880e559ebe9494a46bb30a7eb1116b5ec016c27b88c
 ~~~
 
-- [ ] Generate the checksum only after every packaging gate passes.
-- [ ] Replace the checksum placeholder in [the GitHub Release draft](github-release-v0.11.1.md).
-- [ ] Verify the checksum file names the exact artifact to upload.
-- [ ] Preserve the VSIX and checksum as release assets.
-- [ ] Verify the source commit SHA that produced the VSIX.
+## 6. GitHub release
 
-## 6. Manual GitHub release
+- [x] Receive explicit maintainer approval to publish v0.12.0.
+- [ ] Push and verify the reviewed public tree.
+- [ ] Confirm required GitHub Actions checks.
+- [ ] Create and push the approved `v0.12.0` tag.
+- [ ] Attach the VSIX and checksum and publish the GitHub Release.
 
-- [ ] Review the final public repository tree, fresh root commit, CI results, release-note copy, and artifact contents.
-- [ ] Create and push the approved `v0.11.1` tag manually from the reviewed public commit.
-- [ ] Attach the VSIX and its checksum file.
-- [ ] Publish the GitHub Release only after a final maintainer review.
-
-The desktop application remains deferred from the public v0.11.1 release.
+The desktop application remains deferred from the public v0.12.0 release.

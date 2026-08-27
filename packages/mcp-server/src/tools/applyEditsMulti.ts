@@ -30,6 +30,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
+import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/textDecode.js";
 import {
   applySingleEdit,
   findUniqueIndentationEquivalent,
@@ -765,7 +766,15 @@ export async function applyEditsMulti(
       if (stat.size > MAX_FILE_BYTES) {
         return { ok: false, error: `File exceeds 5 MB limit (${stat.size} bytes)`, code: "file-too-large", path: rel };
       }
-      existingContent = fs.readFileSync(abs, "utf8");
+      // 2026-08-27 (write-path fail-closed guard): sniff BEFORE trusting a
+      // plain UTF-8 decode — see util/textDecode.ts's doc comment. All-or-
+      // nothing: this is Phase 1 validation, so no file has been written yet.
+      const buf = fs.readFileSync(abs);
+      const encodingRisk = detectWriteEncodingRisk(buf);
+      if (encodingRisk) {
+        return { ok: false, error: writeEncodingRefusalMessage(rel, encodingRisk), code: "unsupported-encoding", path: rel };
+      }
+      existingContent = buf.toString("utf8");
       existingMode = stat.mode;
     } catch (err) {
       const errCode = (err as NodeJS.ErrnoException).code;

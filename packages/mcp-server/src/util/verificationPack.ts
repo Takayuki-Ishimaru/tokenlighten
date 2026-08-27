@@ -1664,7 +1664,24 @@ export function buildVerificationManifest(
       break;
     }
   }
-  const mockHeaderCandidates = walked
+  // Cross-family guard (2026-08-27 field-eval defect): mock_headers is a
+  // NATIVE-only kit family by contract — MockHeaderEntry's own doc says so
+  // ("Native mock headers (.h/.hpp/.hh/.hxx)") — but this filter chain only
+  // ever checked the CANDIDATE header's own extension, its project root, and
+  // a path-pattern name match; it never checked whether the EDIT itself was
+  // native. Two independent first-party reports measured a pure-TypeScript
+  // edit's kit carry a ~10KB unrelated C aerospace-firmware HAL mock header
+  // (shared project root, "mock" in the path, zero relation to the edit) —
+  // the kit contract requires tests/mocks REFERENCING the edit, and a C
+  // header cannot reference a TypeScript change by construction.
+  // `nativeEdited` — computed above from the SAME NATIVE_EXTS family map
+  // this function already uses throughout, never a parallel scheme — makes
+  // cross-family admission structurally IMPOSSIBLE rather than merely
+  // unlikely: a non-native edit can never reach the candidate scan below at
+  // all, no matter how project-root or name-pattern coincidence lines up. A
+  // native edit's own candidate set (and a same-family C-tree's mocks) is
+  // completely unaffected.
+  const mockHeaderCandidates = nativeEdited.length === 0 ? [] : walked
     .filter((f) => !editedSet.has(f.rel))
     .filter((f) => isMockish(f.rel))
     .filter((f) => NATIVE_HEADER_EXTS.includes(path.posix.extname(f.rel).toLowerCase()))
@@ -1864,6 +1881,40 @@ export function buildVerificationManifest(
       && nativeEdited.some((edited) => !buildCommand.text.includes(path.posix.basename(edited)))
     ) {
       gaps.push("executable entry does not compile every edited implementation target");
+    }
+    // A3 (2026-08-27, T03/T13 frontier-full-guard follow-up): the aggregate
+    // gap above names THAT some edited target is uncovered, never WHICH —
+    // measured residual (bench/workflows/experiments/2026-08-26-t03-t13-
+    // frontier-full-guard-results.md): a 6-target C++ edit still let solvers
+    // treat one mined entry as if it proved every target. Name each
+    // uncovered native target individually and honestly, from the SAME
+    // buildCommand.text membership check just above — a covered target
+    // needs no new line, its proof is already `entry`/`cwd`, grounded in
+    // `buildCommand.source`. No command is ever invented for an uncovered
+    // target; only multi-target edits are enumerated (a single target is
+    // already fully named by the aggregate gap above).
+    if (buildCommand !== undefined && nativeEdited.length > 1) {
+      for (const rel of nativeEdited) {
+        if (!buildCommand.text.includes(path.posix.basename(rel))) {
+          gaps.push(
+            `no workspace-proven syntax/compile action for edited target ${rel} `
+            + `(only ${buildCommand.source}'s entry is workspace-proven)`,
+          );
+        }
+      }
+    }
+    // A3: a defined entry can still fail to be proof of THIS change —
+    // assertionRefs already requires every named behavior anchor to appear
+    // near an assertion line, so assertions.length === 0 alongside a
+    // defined, anchor-scoped entry means precisely that: a real, runnable
+    // entry exists but does not assert the edited behavior. The T13
+    // follow-up measured solvers running exactly such an entry (a MAVLink
+    // test) and treating its pass as proof of unrelated edited health
+    // wiring; name the anchors so the entry can never be mistaken for
+    // behavior proof.
+    const anchors = options.behaviorAnchors;
+    if (entry !== undefined && assertions.length === 0 && anchors !== undefined && anchors.length > 0) {
+      gaps.push(`executable entry is not a direct proof of ${[...new Set(anchors)].join(" and ")}`);
     }
     const confidence = assertions.length > 0 && entry !== undefined
       ? undefined

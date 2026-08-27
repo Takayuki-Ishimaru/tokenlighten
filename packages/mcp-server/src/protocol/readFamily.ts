@@ -414,11 +414,23 @@ function epochResetCall(context: ReadProjectionContext | undefined): ToolCall | 
     if (entry !== "" && !targets.includes(entry)) targets.push(entry);
   }
   const workspace = context?.workspace;
+  // [T2] (2026-08-27) The same "echo what the caller actually asked for"
+  // principle extends to `query`: when the call that reached this floor was
+  // ITSELF a `mode:"task_pack"` request, its own `query` is the caller's
+  // actual (possibly brand-new-task) question, and forwarding it verbatim -
+  // never an excerpt, the same convention `state/session.ts`'s
+  // `preparedDiscoveryReceipt` uses for its own mismatch `next_call` - turns
+  // a QUERY-ONLY call (see the comment on `targets` below) from "start over,
+  // blind" into "here is your question, freshly scoped". A call in any OTHER
+  // mode, or a `search_files` call (no `mode` at all), has no comparable
+  // free-text field to echo, so `query` is simply absent there (E-1).
+  const query = str(args["mode"]) === "task_pack" ? str(args["query"]) : undefined;
   return emittableToolCall({
     tool: "read_file",
     arguments: {
       mode: "task_pack",
       taskEpoch: "new",
+      ...(query !== undefined ? { query } : {}),
       // Handle-addressed and query-only calls leave no path to name; the
       // unscoped re-pack is still executable and still clears the fence.
       ...(targets.length > 0 ? { paths: targets.slice(0, EPOCH_RESET_PATH_CAP) } : {}),
@@ -466,8 +478,9 @@ function receiptHasContinuation(receipt: Receipt): boolean {
   // (`state/session.ts`'s `guardExecutionDiscovery` now serves it directly);
   // what remains is a `task_pack` re-ask a live certificate declined for
   // cause (partial surface, changed file) — a query MISMATCH is its own
-  // `refusal` with `retry:"new-task"`, never this receipt (see server.ts's
-  // conversion) — and the epoch-reset floor was never a fit for that shape
+  // `refusal` with `retry:"new-task"`, never this receipt (see envelope.ts's
+  // `isReceiptBody`, confirmed live by [T2]'s own investigation) — and the
+  // epoch-reset floor was never a fit for that shape
   // either, since `context.args` is scoped to THIS call, not to the task the
   // certificate holds.
   if (receipt.receipt === "decision-unchanged") return true;
@@ -664,6 +677,37 @@ export function receiptOf(body: Body): Receipt | undefined {
  */
 const KEPT_ON_RECEIPT = ["verification", "concern_note"] as const;
 
+/**
+ * [T2] (2026-08-27, prepared-fence P0) Structural backstop, not the primary
+ * fix. `protocol/envelope.ts`'s `isReceiptBody` already refuses to classify
+ * ANY body with `query_mismatch: true` as a receipt at all - it is routed to
+ * `kind:"refusal"` before `receiptOf`/`projectReceipt` ever run, and
+ * `protocol/refusal.ts`'s `retryOf` gives that refusal `retry:"new-task"`
+ * plus its own executable `next`. Confirmed live, not just by reading both
+ * files: a `read_file mode=task_pack` call whose query trips
+ * `state/session.ts`'s `newTaskQueryMismatch` comes back as `kind:"refusal"`
+ * with a followable `next`, never as a bare `read.receipt`. So a
+ * `decision-unchanged` RECEIPT carrying `required_action:"re-pack-new-epoch"`
+ * should never actually reach this projector today.
+ *
+ * This check exists anyway because `receiptHasContinuation`'s blanket `true`
+ * for `decision-unchanged` (2026-08-22 fence-serves-unserved-scope, above) is
+ * a property of the RECEIPT TAG alone. It has no way to know whether
+ * `envelope.ts`'s routing in front of it covers every one of the read
+ * family's ~40 emit sites today, or will keep covering all of them after the
+ * next change to either module. If a `required_action:"re-pack-new-epoch"`
+ * body ever DOES reach here, the blanket rule would ship a receipt that both
+ * misdescribes a stale certificate as sufficient and gives no way back -
+ * exactly the dead end [R5-10] exists to close. Holding the invariant at the
+ * projection layer itself is cheap insurance against depending entirely on a
+ * sibling module's routing staying exhaustive.
+ */
+function decisionUnchangedNeedsForcedFloor(body: Body, receipt: Receipt): boolean {
+  if (receipt.receipt !== "decision-unchanged") return false;
+  if (receipt.next !== undefined) return false;
+  return body["required_action"] === "re-pack-new-epoch";
+}
+
 function projectReceipt(
   body: Body,
   receipt: Receipt,
@@ -677,7 +721,12 @@ function projectReceipt(
   // strictly better than dropping the response — but that path is unreachable
   // in the server process, where `setEmittedToolCallValidator` is always
   // installed, and `receiptHonesty.spec.ts` pins the reachable one.
-  const discharged = receiptHasContinuation(receipt)
+  //
+  // [T2] `forcedFloor` narrows `receiptHasContinuation`'s blanket
+  // `decision-unchanged` pass for the one shape it should never have covered
+  // - see `decisionUnchangedNeedsForcedFloor`'s comment just above.
+  const forcedFloor = decisionUnchangedNeedsForcedFloor(body, receipt);
+  const discharged = receiptHasContinuation(receipt) && !forcedFloor
     ? receipt
     : (() => {
         const reset = epochResetCall(context);
@@ -685,6 +734,14 @@ function projectReceipt(
       })();
   const projected: Body = { receipt: discharged };
   keep(projected, body, KEPT_ON_RECEIPT);
+  // [T2] Only when the forced floor actually fired: `required_action` is the
+  // one piece of the discarded internal body that tells the caller WHY the
+  // certificate restatement was not enough on its own - "re-pack-new-epoch".
+  // Scoped to this branch rather than added to KEPT_ON_RECEIPT, so the
+  // ordinary decision-unchanged stop (which always has an internal
+  // `required_action`, just never a recovery need) stays exactly as compact
+  // as the wire-baseline fixtures pin it.
+  if (forcedFloor) keep(projected, body, ["required_action"]);
   return projected;
 }
 
@@ -1046,7 +1103,32 @@ function batchEntry(raw: Body): Body | undefined {
 
   if (handle !== undefined && range !== undefined) {
     const entry: Body = { form: "handle", handle, path: path ?? "", range, truncated: raw["truncated"] === true };
-    keep(entry, raw, ["content", "sha"]);
+    // server.ts's handles-batch loop (C10.2 completion / D2, Guard 2
+    // 2026-07-12b) builds `note`/`concern_note` onto exactly this item shape
+    // with the explicit comment that the single-handle mode=slice path
+    // already forwards them and "this batch item shape had dropped it" --
+    // but this allowlist dropped them AGAIN, one layer later. `synthesized_range`
+    // (the DESIGN-v0.9 SS4.2-adjacent single-file-range marker) is the same
+    // shape of gap. All three are E-1 (emitted iff present), so an ordinary
+    // item that never set them pays nothing extra on the wire.
+    //
+    // 2026-08-27 (field-eval integration, T2): `remaining_ranges` and `next`
+    // close the same gap for the one case that MATTERS most — a DEAD END.
+    // `server.ts`'s handles-batch loop attaches both to this exact item shape
+    // (`...(sliceResult.data.remaining_ranges ...)`, `...(sliceResult.data.next
+    // ...)`), fed by `readCodeModes.ts`'s ordinary range-slice byte-cap branch,
+    // which sets them WITHOUT `downgraded_from`. The symbol-cap downgrade sets
+    // `downgraded_from` and so takes the `file-downgraded` branch above, whose
+    // `DOWNGRADE_FIELDS` already keeps both — which is precisely why the gap
+    // went unnoticed: only the NON-downgraded truncation lost them. The result
+    // was a wire entry carrying `truncated:true` and no way to resume, against
+    // the protocol's standing promise that a recoverable truncation ALWAYS
+    // carries an executable `next`. E-1 like the rest: an untruncated item
+    // pays nothing.
+    keep(entry, raw, [
+      "content", "sha", "note", "concern_note", "synthesized_range",
+      "remaining_ranges", "next",
+    ]);
     return entry;
   }
 

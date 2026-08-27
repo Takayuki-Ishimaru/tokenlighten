@@ -526,6 +526,23 @@ export interface TaskPackArgs {
   limit?: number;
   surfaceRoles?: string[];
   /**
+   * T1 (2026-08-27 field-eval): explicit caller byte ceiling for this pack --
+   * forwarded from read_file's advertised maxBytes argument. Effective
+   * target = min(type-specific default, maxBytes, maxTokens*4), floored at
+   * DEFAULT_RESPONSE_BYTE_FLOOR -- see readCodeTaskPack.ts's capForResult and
+   * readCodeModes.ts's resolveCallerByteCeiling. Absent for ordinary calls,
+   * which keeps their behavior byte-identical.
+   */
+  maxBytes?: number;
+  /** Sibling of maxBytes, converted to bytes at 4 chars/token before the min(). */
+  maxTokens?: number;
+  /**
+   * Server-derived, internal only: the env/client-profile-resolved default
+   * byte ceiling, consulted ONLY when the caller supplies neither maxBytes
+   * nor maxTokens above. Never serialized or fingerprinted.
+   */
+  clientDefaultByteCeilingHint?: number;
+  /**
    * A1: caller-supplied exact file paths to seed as surfaces directly,
    * bypassing the pathless locator for those files. When present and
    * non-empty, buildTaskPack seeds a surface for every entry (never drops

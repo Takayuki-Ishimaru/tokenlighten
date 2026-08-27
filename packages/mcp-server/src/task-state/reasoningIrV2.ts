@@ -46,9 +46,11 @@ import type { TaskPackResult, TaskPackSurface } from "../features/task-pack/mode
 import { deriveCanonicalTaskDecision } from "../features/task-pack/canonicalDecision.js";
 import {
   buildObligationDag,
+  canClose,
   deriveDagEnabled,
   isLocalTaskShape,
   OBLIGATION_DEPENDENCIES_MAX,
+  type ObligationClosureState,
 } from "./obligationDag.js";
 import { computeTaskStateHash, REASONING_DELTA_OPS_MAX } from "./reasoningDelta.js";
 import { sweepStaleTombstones } from "./tombstone.js";
@@ -422,6 +424,72 @@ export function staleTombstoneOps(
     id: entry.id,
     reason: `${entry.cause}:${entry.key.type}`,
   }));
+}
+
+/**
+ * A1-pre (DESIGN-v0.12-plan.md §2, 柱A row A1-pre). The ONE producer of
+ * `close` ops anywhere in v2: `deriveProjectionOps` above never emits one — a
+ * re-served surface is not proof anything changed, so a pack re-read must
+ * never promote an obligation. `editedPaths` is the opposite kind of fact: it
+ * names paths the server ITSELF just wrote (edit_file's own `editedPathsOf`
+ * accounting, threaded in by the caller), so this is the only producer
+ * allowed to ask `canClose` on `prior`'s behalf.
+ *
+ * canClose is STILL the only gate. This function decides WHICH nodes get
+ * asked — open, non-advisory, and grounded in evidence whose source URI is
+ * one of `editedPaths` — never whether the answer is yes: a node `canClose`
+ * rejects (an unmet dependency, a `manual` predicate, an invalidated node)
+ * stays open, exactly as if nothing had asked. "False satisfied 0" is
+ * therefore a property of `canClose` alone, inherited unchanged; this
+ * function cannot weaken it, only choose not to ask.
+ *
+ * FIXED-POINT, not one pass: closing one obligation can unblock a dependent
+ * in the SAME edit (a batch `edits[]` call landing both stages of a two-file
+ * change at once), so candidates are re-tried against the just-updated draft
+ * until a full pass closes nothing new. Bounded by `IRV2_OBLIGATIONS_MAX`, so
+ * the loop is not an unbounded-growth risk.
+ */
+export function deriveEditClosureOps(
+  prior: TaskReasoningIRv2,
+  editedPaths: readonly string[],
+): ReasoningDeltaOp[] {
+  if (editedPaths.length === 0 || prior.obligations.length === 0) return [];
+  const editedSet = new Set(editedPaths);
+  const uriOf = new Map(prior.evidenceCatalog.map((e) => [e.evidenceId, e.source.uri] as const));
+
+  const touchesAnEditedPath = (o: ObligationNode): boolean =>
+    o.evidenceRefs.some((ref) => {
+      const uri = uriOf.get(ref);
+      return uri !== undefined && editedSet.has(uri);
+    });
+
+  const candidateIds = new Set(
+    prior.obligations
+      .filter((o) => !o.advisory && o.state === "open" && touchesAnEditedPath(o))
+      .map((o) => o.id),
+  );
+  if (candidateIds.size === 0) return [];
+
+  // A private draft, mutated in place as candidates close — never `prior`
+  // itself (this module never mutates its input, matching every other
+  // exported function here).
+  const draft = prior.obligations.map((o) => ({ ...o, evidenceRefs: [...o.evidenceRefs], blockedBy: [...o.blockedBy] }));
+  const view: ObligationClosureState = { obligations: draft, evidenceCatalog: prior.evidenceCatalog };
+  const closedIds: string[] = [];
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const id of candidateIds) {
+      const node = draft.find((o) => o.id === id);
+      if (node === undefined || node.state !== "open") continue;
+      if (canClose(id, view).ok) {
+        node.state = "satisfied";
+        closedIds.push(id);
+        progressed = true;
+      }
+    }
+  }
+  return closedIds.map((id) => ({ op: "close" as const, target: "obligation" as const, id }));
 }
 
 // ---------------------------------------------------------------------------

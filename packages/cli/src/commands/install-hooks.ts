@@ -20,6 +20,18 @@ import {
 } from "fs";
 import { randomBytes } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import { wantsHelp } from "../util/helpFlag.js";
+
+const INSTALL_HOOKS_USAGE = `\
+Usage: tl install-hooks [--uninstall]
+
+Opt-in: installs a pre-commit hook that runs 'tl skeleton check' so AGENTS.md
+never drifts from the actual code structure. Detects husky, lefthook, or
+falls back to a plain .git/hooks/pre-commit script. Off by default -- run
+this command explicitly to enable it.
+
+  --uninstall   Remove the hook (or print manual removal steps for lefthook).
+`;
 
 const TL_LINE = "tl skeleton check";
 const SHEBANG = "#!/bin/sh\n";
@@ -174,6 +186,10 @@ async function uninstallPlain(repoRoot: string): Promise<void> {
 }
 
 export async function runInstallHooks(args: string[]): Promise<void> {
+  if (wantsHelp(args)) {
+    process.stdout.write(INSTALL_HOOKS_USAGE);
+    return;
+  }
   const uninstall = args.includes("--uninstall");
   const repoRoot = process.cwd();
 

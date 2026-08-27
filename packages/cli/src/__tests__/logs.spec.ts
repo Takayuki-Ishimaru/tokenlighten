@@ -65,11 +65,41 @@ describe("tl logs summary scoping", () => {
     writeEnabled: true,
   });
 
+  // Same event shape, but with a caller-chosen tool and responseBytes and no
+  // per-call baseline -- used to exercise the always-on "measured" block
+  // (call count, total bytes, bytes/4 token estimate, per-tool breakdown),
+  // which must render independent of baseline/AI-log availability.
+  const toolEvent = (
+    workspaceId: string,
+    index: number,
+    tool: "read_file" | "search_files" | "edit_file",
+    responseBytes: number,
+  ) => ({
+    schemaVersion: 1,
+    eventId: `${workspaceId}-tool-${index}`,
+    occurredAt: "2026-08-11T00:00:00.000Z",
+    workspaceId,
+    sessionId: "session",
+    client: "claude-code",
+    tool,
+    outcome: "ok",
+    durationMs: 1,
+    responseBytes,
+    estimatedResponseTokens: Math.ceil(responseBytes / 4),
+    baselineTokens: null,
+    estimatedSavedTokens: null,
+    baselineMethod: null,
+    writeEnabled: true,
+  });
+
   const lastJson = () => JSON.parse(writes.join("").trim()) as {
     scope: { kind: string; workspaceId?: string | null };
     eventCount: number;
     estimatedSavedTokens: number;
     measurementUnavailableReason?: string;
+    totalResponseBytes: number;
+    estimatedResponseTokens: number;
+    byTool: Record<"read_file" | "search_files" | "edit_file", number>;
   };
 
   it("reports machine scope over all events and workspace scope over its own", async () => {
@@ -129,5 +159,62 @@ describe("tl logs summary scoping", () => {
       eventCount: 0,
       measurementUnavailableReason: "scope-mismatch",
     });
+  });
+
+  it("always shows the measured TL call/byte/token/per-tool block, with baseline still unavailable", async () => {
+    const toolRoot = join(logDirectory, "ws-tool");
+    mkdirSync(toolRoot, { recursive: true });
+    const toolWsId = usageWorkspaceId(toolRoot, logDirectory);
+    expect(toolWsId).not.toBeNull();
+    const rows = [
+      toolEvent(toolWsId!, 0, "read_file", 40),
+      toolEvent(toolWsId!, 1, "read_file", 60),
+      toolEvent(toolWsId!, 2, "search_files", 100),
+      toolEvent(toolWsId!, 3, "edit_file", 200),
+    ];
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    );
+
+    await runLogs(["summary", "--json", "--workspace-root", toolRoot]);
+    const json = lastJson();
+    expect(json.eventCount).toBe(4);
+    expect(json.totalResponseBytes).toBe(400);
+    expect(json.estimatedResponseTokens).toBe(100);
+    expect(json.byTool).toEqual({ read_file: 2, search_files: 1, edit_file: 1 });
+
+    writes.length = 0;
+    await runLogs(["summary", "--workspace-root", toolRoot]);
+    const text = writes.join("");
+    expect(text).toContain("MCP calls: 4\n");
+    expect(text).toContain("TL response bytes: 400\n");
+    expect(text).toContain("TL response tokens: ~100 (est.)\n");
+    expect(text).toContain("By tool: read_file 2, search_files 1, edit_file 1\n");
+    // The measured block above comes only from local TL usage events, never
+    // from AI-provider session logs, so it renders even though this fresh
+    // workspace root cannot match any real provider session and the
+    // existing fail-closed lines below remain exactly "unavailable".
+    expect(text).toContain("Observed full-session tokens: unavailable\n");
+    expect(text).toContain("Predicted no-TL tokens: unavailable\n");
+    expect(text).toContain("Full-session token reduction: unavailable\n");
+    expect(text).toContain("Full-session cost reduction: unavailable\n");
+  });
+
+  it("shows sane zeros for the measured block on an empty store, without crashing", async () => {
+    await runLogs(["summary", "--json"]);
+    const json = lastJson();
+    expect(json.eventCount).toBe(0);
+    expect(json.totalResponseBytes).toBe(0);
+    expect(json.estimatedResponseTokens).toBe(0);
+    expect(json.byTool).toEqual({ read_file: 0, search_files: 0, edit_file: 0 });
+
+    writes.length = 0;
+    await expect(runLogs(["summary"])).resolves.toBeUndefined();
+    const text = writes.join("");
+    expect(text).toContain("MCP calls: 0\n");
+    expect(text).toContain("TL response bytes: 0\n");
+    expect(text).toContain("TL response tokens: ~0 (est.)\n");
+    expect(text).toContain("By tool: read_file 0, search_files 0, edit_file 0\n");
   });
 });

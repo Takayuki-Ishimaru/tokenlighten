@@ -5,13 +5,29 @@ export function classifySurface(relPath: string, symbol?: string): ImpactSurface
   const basename = lower.split("/").pop() ?? lower;
 
   // 1. contract
+  //
+  // Segment-anchored top-level forms, added alongside the pre-existing
+  // nested-anywhere checks below: those only ever matched `shared/`,
+  // `types/`, `schema*`, `openapi*`, and `proto/` when NESTED under another
+  // directory (e.g. `packages/app/shared/x.ts`) — the same convention at
+  // the repository root (`shared/x.ts`, `src/shared/x.ts`) is at least as
+  // common and previously fell through to "unknown". Anchored to the first
+  // path segment (optionally after a leading `src/`) so a same-prefixed
+  // filename (`sharedUtils.ts`, `mytypes.ts`) does not false-positive;
+  // mirrors the nested/top-level pairing the domain (2b) and api (2c)
+  // rules below already use for their own keywords.
   if (
     lower.includes("/shared/") ||
+    /^(?:src\/)?shared\//.test(lower) ||
     /\/enums\./.test(lower) ||
     lower.includes("/schema") ||
+    /^(?:src\/)?schemas?\//.test(lower) ||
     lower.includes("/types/") ||
+    /^(?:src\/)?types\//.test(lower) ||
     lower.includes("/openapi") ||
+    /^(?:src\/)?openapi\//.test(lower) ||
     lower.includes("/proto/") ||
+    /^(?:src\/)?proto\//.test(lower) ||
     basename.endsWith(".proto") ||
     (symbol !== undefined && /^[A-Z][A-Za-z0-9]*Enum$/.test(symbol))
   ) {

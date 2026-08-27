@@ -11,6 +11,7 @@
 import { createRequire } from "module";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
+import { wantsHelp } from "../util/helpFlag.js";
 
 const SKELETON_USAGE = `\
 Usage: tl skeleton <subcommand>
@@ -64,7 +65,7 @@ async function loadSkeletonMod(): Promise<SkeletonMod> {
 export async function runSkeleton(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
 
-  if (!sub || sub === "--help" || sub === "-h") {
+  if (!sub || wantsHelp(args)) {
     process.stdout.write(SKELETON_USAGE);
     return;
   }

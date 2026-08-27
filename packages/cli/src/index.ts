@@ -112,8 +112,9 @@ async function main(): Promise<void> {
       break;
 
     case "setup":
-      // 'tl setup --check' → alias for doctor --json prereq subset
-      if (filteredRest.includes("--check")) {
+      // 'tl setup --check' → alias for doctor --json prereq subset;
+      // --help wins over --check so setup's own usage stays reachable
+      if (filteredRest.includes("--check") && !filteredRest.includes("--help") && !filteredRest.includes("-h")) {
         await runDoctor(["--json"]);
       } else {
         await runSetup(filteredRest);

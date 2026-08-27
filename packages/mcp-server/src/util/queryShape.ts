@@ -21,6 +21,7 @@
  */
 
 import { basename } from "node:path";
+import { extractCjkTokens } from "./cjkSpans.js";
 
 /**
  * Generic query-shape classification shared by editIntentForRole,
@@ -97,9 +98,9 @@ function tokenizeIdentifierMode(query: string, minLen: number, stopWords: Readon
   const seen = new Set<string>();
   const out: string[] = [];
 
-  function add(tok: string): void {
+  function add(tok: string, opts: { bypassMinLen?: boolean } = {}): void {
     const t = tok.trim();
-    if (t.length < minLen) return;
+    if (!opts.bypassMinLen && t.length < minLen) return;
     if (stopWords.has(t.toLowerCase())) return;
     const key = t.toLowerCase();
     if (seen.has(key)) return;
@@ -120,6 +121,16 @@ function tokenizeIdentifierMode(query: string, minLen: number, stopWords: Readon
     if (/[_-]/.test(w)) for (const p of w.split(/[_-]+/)) add(p);
   }
 
+  // CJK (field-report fix, 2026-08-27): the ASCII word/quoted-phrase passes
+  // above never match a Han/Hiragana/Katakana character, so a Japanese-heavy
+  // query used to contribute NOTHING here. extractCjkTokens's own runs/
+  // bigrams/unigrams bypass this mode's minLen — an ASCII minLen of 3+ has
+  // no CJK analog (a single kanji, or a 2-char kana bigram, is already a
+  // meaningful unit; see util/cjkSpans.ts) — but still flow through `add`'s
+  // existing dedup and this caller's OWN (ASCII-only) stopWords set, which
+  // can never match a CJK token anyway.
+  for (const t of extractCjkTokens(query)) add(t, { bypassMinLen: true });
+
   // Distinctive-first: longer, non-generic, identifier-shaped tokens sort first.
   out.sort((a, b) => scoreTokenDistinctiveness(b) - scoreTokenDistinctiveness(a));
   return out;
@@ -127,7 +138,14 @@ function tokenizeIdentifierMode(query: string, minLen: number, stopWords: Readon
 
 function tokenizeSimpleMode(query: string, minLen: number, stopWords: ReadonlySet<string>): string[] {
   const raw = query.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 0);
-  return [...new Set(raw.filter((t) => t.length >= minLen && !stopWords.has(t)))];
+  const asciiTokens = raw.filter((t) => t.length >= minLen && !stopWords.has(t));
+  // CJK (field-report fix, 2026-08-27): `.split(/[^a-z0-9]+/)` treats every
+  // Han/Hiragana/Katakana character as a separator, discarding it — the same
+  // defect as tokenizeIdentifierMode above. CJK tokens bypass this mode's
+  // minLen/stopWords for the same reason (extractCjkTokens already applies
+  // its own JA-specific stopword filtering internally).
+  const cjkTokens = extractCjkTokens(query);
+  return [...new Set([...asciiTokens, ...cjkTokens])];
 }
 
 /**
