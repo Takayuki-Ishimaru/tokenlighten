@@ -18,11 +18,11 @@ import * as os from "node:os";
 // So: pin the forks pool (no threads crash), keep module isolation explicit
 // (fresh singletons per file — several specs reset handleTable/session/
 // dedupe-cache defensively and rely on not inheriting a sibling's state), cap
-// forks to half the cores so the subprocess storm can't oversubscribe, and
+// forks to two concurrent files so the subprocess storm can't oversubscribe,
 // raise the per-test/hook timeouts as a cross-run safety belt (several
 // machines run this suite concurrently, which no single config can cap).
 const CPUS = typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length;
-const MAX_FORKS = Math.max(1, Math.min(4, Math.floor(CPUS / 2)));
+const MAX_FORKS = Math.min(2, Math.max(1, Math.floor(CPUS / 2)));
 
 export default defineConfig({
   test: {

@@ -207,7 +207,9 @@
       "tool": "search_files",
       "arguments": {
         "action": "references",
-        "query": "cursorTarget",
+        "queries": [
+          "cursorTarget"
+        ],
         "cursor": "$TH"
       }
     },

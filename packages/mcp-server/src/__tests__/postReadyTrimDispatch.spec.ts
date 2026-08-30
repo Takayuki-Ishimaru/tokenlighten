@@ -116,9 +116,10 @@ function assertPostReadyDowngrade(reply: any, expectedPath: string): Record<stri
   expect(continuation, JSON.stringify(payload)).toBeTruthy();
   if (typeof continuation === "object") {
     expect(continuation.tool, JSON.stringify(payload)).toBe("read_file");
-    expect(continuation.arguments?.mode, JSON.stringify(payload)).toBe("slice");
-    expect(continuation.arguments?.handle, JSON.stringify(payload)).toBe(handle);
-    expect(continuation.arguments?.range ?? continuation.arguments?.ranges, JSON.stringify(payload)).toBeTruthy();
+    expect(continuation.arguments?.content, JSON.stringify(payload)).toBe("auto");
+    const target = continuation.arguments?.targets?.[0];
+    expect(target?.handle, JSON.stringify(payload)).toBe(handle);
+    expect(target?.range ?? target?.ranges, JSON.stringify(payload)).toBeTruthy();
   } else {
     expect(String(continuation), JSON.stringify(payload)).toContain(
       `read_file mode=slice handle=${handle}`,

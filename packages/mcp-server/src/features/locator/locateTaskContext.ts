@@ -3504,7 +3504,7 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // answer even though nothing in the query names it. Admitted BEFORE the
   // filter below and exempt from its same-surface rule — a callee in the same
   // architectural layer as its caller is the normal case, not a duplicate.
-  const importEdge = await importEdgeCandidates(workspace, primary, queryIdentTokens, getCodeFiles());
+  const importEdge = (await importEdgeCandidates(workspace, primary, queryIdentTokens, getCodeFiles())).candidates;
   const relatedRaw = [...filteredCandidates, ...importEdge]
     .filter((c) => {
       const key = `${c.path}:${c.line}`;
@@ -4751,8 +4751,23 @@ function identifierTokensIn(text: string): Set<string> {
   return out;
 }
 
-/** How many import-edge neighbours a primary may pull into `related`. */
-const IMPORT_EDGE_MAX = 2;
+/**
+ * How many import-edge neighbours a primary may pull into `related`.
+ *
+ * P1-f (2026-08-28 review-fix wave, A-5(2) explicit permission): was 2 — the
+ * exact fingerprint of the field eval's "4 definitions, 2 served" P0-1
+ * reproduction. Raised to 8 (still a bound, not removed) so a primary with
+ * up to 8 same-hop import neighbours is not truncated below what a single
+ * open-universe direct-callee request commonly needs; MAX_EVIDENCE_EXPANSION_TARGETS
+ * (readCodeTaskPack.ts, currently 4) remains the separate, tighter overall
+ * one-hop expansion cap per pack, so this raise does not by itself widen how
+ * many targets a pack can serve — it only stops import-edge candidate
+ * selection from being the bottleneck below that cap. The residual-disclosure
+ * invariant is unchanged at any cap value: `importEdgeCandidates` still
+ * returns every candidate past the cap in `remaining`, never silently drops
+ * it (locateTaskContext.ts's own `picked.slice(IMPORT_EDGE_MAX)` below).
+ */
+const IMPORT_EDGE_MAX = 8;
 /** Score for an import-edge neighbour: high enough to be kept, never to compete for `primary`. */
 const IMPORT_EDGE_SCORE = 0.9;
 /** ES/TS import statement: named bindings and/or a default binding, plus the module specifier. */
@@ -4794,30 +4809,30 @@ function resolveRelativeModule(fromRelPath: string, spec: string, files: Readonl
  * first. Within a target the substantive definition wins — the longest called
  * one, i.e. the implementation rather than the predicate beside it.
  */
-async function importEdgeCandidates(
+export async function importEdgeCandidates(
   workspace: string,
   primary: Candidate,
   queryTokens: readonly string[],
   workspaceFiles: readonly FoundFile[],
-): Promise<Candidate[]> {
-  if (!primary.symbol) return [];
+): Promise<{ candidates: Candidate[]; remaining: Candidate[] }> {
+  if (!primary.symbol) return { candidates: [], remaining: [] };
   let text: string;
   try {
     const abs = path.join(workspace, primary.path);
-    if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return [];
+    if (fs.statSync(abs).size > FILENAME_SYMBOL_REFINE_MAX_BYTES) return { candidates: [], remaining: [] };
     const decoded = decodeTextBuffer(fs.readFileSync(abs));
-    if (decoded === null) return [];
+    if (decoded === null) return { candidates: [], remaining: [] };
     text = decoded;
   } catch {
-    return [];
+    return { candidates: [], remaining: [] };
   }
   const lang = languageForPathWithContent(primary.path, text);
-  if (lang === undefined || !IMPORT_EDGE_LANGS.has(lang)) return [];
+  if (lang === undefined || !IMPORT_EDGE_LANGS.has(lang)) return { candidates: [], remaining: [] };
 
   const lines = text.split(/\r?\n/);
   const bodyEnd = findSymbolEnd(lines, primary.line, lang);
   const bodyText = lines.slice(primary.line - 1, bodyEnd).join("\n");
-  if (bodyText === "") return [];
+  if (bodyText === "") return { candidates: [], remaining: [] };
 
   const fileSet = new Set(workspaceFiles.map((f) => f.relPath));
   // binding name -> { target, order } for every workspace-local import.
@@ -4840,7 +4855,7 @@ async function importEdgeCandidates(
       if (!bindings.has(name)) bindings.set(name, { target, order: order++ });
     }
   }
-  if (bindings.size === 0) return [];
+  if (bindings.size === 0) return { candidates: [], remaining: [] };
 
   // Which bindings does the primary's OWN body reference?
   const byTarget = new Map<string, { names: string[]; firstOrder: number }>();
@@ -4850,7 +4865,7 @@ async function importEdgeCandidates(
     if (entry === undefined) byTarget.set(target, { names: [name], firstOrder: ord });
     else { entry.names.push(name); entry.firstOrder = Math.min(entry.firstOrder, ord); }
   }
-  if (byTarget.size === 0) return [];
+  if (byTarget.size === 0) return { candidates: [], remaining: [] };
 
   const picked: Array<{
     candidate: Candidate; nameCover: number; pathCover: number; count: number; order: number; delegated: boolean;
@@ -4920,7 +4935,10 @@ async function importEdgeCandidates(
     b.pathCover - a.pathCover ||
     b.count - a.count ||
     a.order - b.order);
-  return picked.slice(0, IMPORT_EDGE_MAX).map((entry) => entry.candidate);
+  return {
+    candidates: picked.slice(0, IMPORT_EDGE_MAX).map((entry) => entry.candidate),
+    remaining: picked.slice(IMPORT_EDGE_MAX).map((entry) => entry.candidate),
+  };
 }
 
 /** Cap on how many filename-matched files get a symbol-level refinement parse per locate() call. */

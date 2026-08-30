@@ -245,6 +245,20 @@ describe("createFile — write_disabled", () => {
     expect(result.error).toBe("write_disabled");
     expect(fs.existsSync(path.join(ws, "a"))).toBe(false);
   });
+
+  // W3-4(c): the write-gate refusal must carry the SAME recognized A.7.1
+  // code the five sibling write entry points already use
+  // (`write-not-enabled`), so `refusalCodeOf` (protocol/refusal.ts) resolves
+  // it correctly instead of falling through to `invalid-input` — see
+  // createFile.ts's write-gate comment for the confirmed-live collision this
+  // closes.
+  it("carries the recognized write-not-enabled code alongside error", async () => {
+    const ws = mkWorkspace();
+    const result = await createFile({ path: "new.ts", content: "content\n" }, ws, false, SESSION);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("write-not-enabled");
+  });
 });
 
 describe("createFile — mkdir-p", () => {

@@ -108,14 +108,42 @@ function lineEndWithNewlineIndexEntry(text: string, line: number): number {
 }
 
 /**
+ * Byte-identical copy of util/countLines.ts's sliceLinesToText, kept local
+ * for the same reason countLogicalLinesEntry below is (a same-process
+ * cross-check without importing an internal helper across module boundaries
+ * — see countLines.spec.ts's own "agreement" tests). Restores the source
+ * text's trailing newline when [startLine,endLine] reaches its true last
+ * logical line, so this CAS reconstruction stays byte-identical to
+ * resolveSlice's own MINT-time reconstruction (tools/readCodeModes.ts) for a
+ * whole-file-reaching range.
+ *
+ * T1b (v0.13, UTF-16 3-way read-parity wave): resolveSlice now restores that
+ * trailing newline at mint time (see its doc comment). Without the matching
+ * fix here, this VERIFY-time reconstruction would disagree with it and
+ * refuse every EOF-reaching anchor edit as served-content-stale on a file
+ * that never actually changed (live regression caught by
+ * replayCorpus.spec.ts's efd3 case).
+ */
+function sliceLinesToTextEntry(raw: string, startLine: number, endLine: number): string {
+  const lines = raw.split(/\r?\n/);
+  const total = countLogicalLinesEntry(raw);
+  const clampedEnd = Math.min(endLine, lines.length);
+  const joined = lines.slice(startLine - 1, clampedEnd).join("\n");
+  const reachesEnd = endLine >= total && (raw.endsWith("\n") || raw.endsWith("\r\n"));
+  return reachesEnd && joined.length > 0 && !joined.endsWith("\n") ? joined + "\n" : joined;
+}
+
+/**
  * The text an addressing handle's recorded sha covers, as it stands on disk
  * NOW — used to decide whether an anchor edit's coordinates are still valid.
  *
  * `shaRange === undefined` means the handle served the WHOLE file
  * (kind:"file"), whose sha is taken over the raw file text, so the raw text is
  * returned unnormalized. A slice handle (kind:"range"/"symbol") records its sha
- * over `content.split(/\r?\n/).slice(start-1,end).join("\n")` — reproduced
- * exactly here, including the LF join, so a CRLF file does not read as stale.
+ * over `content.split(/\r?\n/).slice(start-1,end).join("\n")`, restoring a
+ * trailing newline when the range reaches EOF — reproduced exactly here via
+ * sliceLinesToTextEntry above (including the LF join, so a CRLF file does not
+ * read as stale).
  *
  * A cap-truncated serve (tools/readCodeModes.ts trims a slice past
  * READ_SYMBOL_CAP_BYTES and sets truncated:true) records a sha over the
@@ -128,7 +156,7 @@ function servedScopeTextEntry(fileText: string, shaRange: string | undefined): s
   if (shaRange === undefined) return fileText;
   const parsed = parseRangeEntry(shaRange);
   if (!parsed) return fileText;
-  return fileText.split(/\r?\n/).slice(parsed.start - 1, parsed.end).join("\n");
+  return sliceLinesToTextEntry(fileText, parsed.start, parsed.end);
 }
 
 function countLogicalLinesEntry(text: string): number {

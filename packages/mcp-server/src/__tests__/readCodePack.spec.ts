@@ -238,7 +238,8 @@ describe("read_code mode=pack (server-level)", () => {
     expect(limit["omitted"]).toEqual(["evidence"]);
     const next = limit["next"] as Record<string, unknown> | undefined;
     const nextArgs = next?.["arguments"] as Record<string, unknown> | undefined;
-    expect(nextArgs?.["paths"]).toContain("small.ts");
+    const targets = nextArgs?.["targets"] as Array<Record<string, unknown>> | undefined;
+    expect(targets?.map((target) => target["path"])).toContain("small.ts");
   }, 30000);
 
   it("first item exceeds entire budget → omitted with cap-exceeded, items empty, completeness=empty", async () => {
@@ -273,7 +274,9 @@ describe("read_code mode=pack (server-level)", () => {
     expect(limit).toBeDefined();
     expect(limit["omitted"]).toEqual(["evidence"]);
     const next = limit["next"] as Record<string, unknown>;
-    expect((next["arguments"] as Record<string, unknown>)["paths"]).toEqual(["big.ts"]);
+    const nextArgs = next["arguments"] as Record<string, unknown>;
+    const targets = nextArgs["targets"] as Array<Record<string, unknown>>;
+    expect(targets.map((target) => target["path"])).toEqual(["big.ts"]);
   }, 30000);
 
   it("succeeds when top-level path is omitted (mode=pack only requires paths[])", async () => {
@@ -785,19 +788,28 @@ describe("readCodePack query-pack", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Finding #6: includeClosure schema description must exist and be discoverable
-// on read_code (the escape hatch was previously undiscoverable — no
-// description on server.ts's includeClosure property).
+// Finding #6: includeClosure remains discoverable on the canonical read scope.
 // ---------------------------------------------------------------------------
-describe("read_code includeClosure schema description (Finding #6)", () => {
-  it("read_code's includeClosure property has a non-empty, <=90-char description", async () => {
+describe("read_file includeClosure canonical schema (Finding #6)", () => {
+  // v0.13 wave-3 (Track D, W3-2) restoration: this test used to accept a
+  // bare `toBeDefined()` on `includeClosure`, which a stripped-to-`{}`
+  // property still satisfies (`{}` is defined — it is just empty). Tightened
+  // to require an actual description, restoring the original "Finding #6"
+  // intent — a schema-reading caller must be able to tell what the property
+  // DOES, not merely that the key exists.
+  it("advertises includeClosure inside the closed scope object, with a description", async () => {
     const { advertisedTools } = await import("../server.js");
     const tools = advertisedTools() as Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }>;
     const readCode = tools.find((t) => t.name === "read_file");
     expect(readCode).toBeDefined();
-    const prop = readCode?.inputSchema?.properties?.["includeClosure"] as { description?: string } | undefined;
-    expect(prop?.description).toBeTruthy();
-    expect(prop!.description!.length).toBeGreaterThan(0);
-    expect(prop!.description!.length).toBeLessThanOrEqual(90);
+    const scope = readCode?.inputSchema?.properties?.["scope"] as {
+      properties?: Record<string, { type?: string; description?: string }>;
+      additionalProperties?: boolean;
+    } | undefined;
+    expect(scope?.properties?.["includeClosure"]).toBeDefined();
+    expect(scope?.properties?.["includeClosure"]?.type).toBe("boolean");
+    expect(typeof scope?.properties?.["includeClosure"]?.description).toBe("string");
+    expect((scope?.properties?.["includeClosure"]?.description ?? "").length).toBeGreaterThan(0);
+    expect(scope?.additionalProperties).toBe(false);
   });
 });

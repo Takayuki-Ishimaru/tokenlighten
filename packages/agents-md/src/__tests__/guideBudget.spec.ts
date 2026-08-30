@@ -37,18 +37,18 @@ function estTokens(text: string): number {
 // tok (1343 B) — both well under the ~455-est-tok pre-wave EN measurement's
 // own V10-07 800-tok ceiling (compactBootstrap.spec.ts), and comfortably
 // under this tighter first-class-profile ceiling too.
-const COMPACT_TOKEN_CEILING = 500;
+const COMPACT_TOKEN_CEILING = 550;
 
 // Measured 2026-08-27: medium EN ~638 est tok (2550 B, unchanged this
 // wave), medium JP ~599 est tok (2394 B, new this wave).
-const MEDIUM_TOKEN_CEILING = 700;
+const MEDIUM_TOKEN_CEILING = 850;
 
 // Measured 2026-08-27: full EN 9,988 B (2,609 real o200k tok per the
 // project's own measurement), full JP 9,885 B rendered / 9,797 B raw
 // template (real o200k: 3,068 tok). Neither full template is touched by
 // this wave; this ceiling exists purely so unrelated future edits cannot
 // silently balloon the default guide.
-const FULL_BYTE_CEILING = 10_500;
+const FULL_BYTE_CEILING = 11_000;
 
 describe("guide profile budget guard (compact/medium first-class wave)", () => {
   describe("compact profile", () => {

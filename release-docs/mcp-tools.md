@@ -4,56 +4,70 @@ TokenLighten exposes exactly three MCP tools over stdio JSON-RPC:
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | First stop for any code, doc, or config task, including unknown-location and multi-file discovery. Reads task-relevant file content, structure, and supported document artifacts. |
-| `search_files` | Locate files, text, symbols, and references across the workspace, repo-wide and `.gitignore`-aware. |
-| `edit_file` | Make bounded edits after a prior read has provided an edit handle. |
+| `read_file` | First stop for code, documentation, configuration, logs, supported Office files, and archives. It can locate an unknown target, return focused content, or continue a task. |
+| `search_files` | Find text or symbols, enumerate references, inspect diffs, and inventory a workspace with `.gitignore`-aware coverage. |
+| `edit_file` | Apply bounded text or supported artifact edits after a read has established writable context. |
+
+## Canonical v0.13 request surface
+
+v0.13 advertises a closed canonical schema. Use these top-level fields:
+
+- `read_file`: `query`, `qref`, `targets`, `content`, `select`, `budget`, `task`, `lane`, `cwd`, and `scope`.
+- `search_files`: `action`, `queries`, `scope`, `budget`, `cursor`, `task`, `lane`, and `cwd`. The advertised actions are `find`, `references`, `diff`, and `tree`; symbol lookup uses `find` with `scope.kind:"symbol"`.
+- `edit_file`: `edits`, `artifact`, `operation_id`, `task`, `lane`, `cwd`, and `credentials`.
+
+For a new task whose files are not yet known, start with a complete natural-language `query` and `task:{epoch:"new"}`. For known files, use `targets` and request `content:"auto"`, `"outline"`, or `"full"`. Searches accept up to five literal `queries` in one call. Text edits use per-item paths or read handles inside one `edits[]` batch.
+
+Legacy v0.12 fields such as `mode`, `paths`, `handles`, bare `maxBytes`/`maxTokens`, and old task-field spellings remain dispatch-compatible during v0.13.x. They are not advertised, should not be emitted by new clients, and are scheduled for removal in v0.14.
+
+## Completion, continuation, and receipts
+
+Task packs can return a decision to answer, edit, discover, await input, or stop. Proof-carrying completion records monotone obligations, served evidence, authoritative absence, and continuations already executed. An exhaustive request does not close while an obligation remains unproved or undisclosed.
+
+Every response has a `kind`. Follow an executable `next` exactly when present. A `read.receipt` means the relevant content or decision is already current; it is not a request to repeat discovery. `task.force_serve:true` is available when a client genuinely lost previously served context.
+
+Replay-safe writes use `operation_id`. Reusing the same identifier returns the recorded result instead of applying the mutation twice. v0.13 stores compact replay v2 outcomes while keeping old retry keys fail-safe.
 
 ## Read and search
 
-`read_file` is the first stop for a task, even when you do not yet know which file or files are involved: it can provide focused source ranges, symbols, repository maps, or a task-oriented pack of context for a request, in place of manually reading and grepping through candidate files. `search_files` supports file discovery, text search, supported-language symbols, and references.
+`read_file` can return source ranges, symbols, repository maps, task-oriented context packs, and selected document or archive content. `search_files` reports whether its scanned scope was complete; a complete zero-match result can serve as authoritative absence.
 
-The tools work with normal source files and supported text files. They can also inspect selected document and archive formats; see [Language support](language-support.md).
-
-## v0.12.0 workflow additions
-
-- Same-epoch continuation preserves the complete query and monotone task requirements; stale or unrelated decisions are demoted with executable recovery.
-- Japanese prose participates in ranking through shared Han/kana spans and bigrams.
-- Guarded known-location value changes can return a compact ready edit pack.
-- `maxBytes`/`maxTokens` bound task packs and batch reads; VS Code clients use a conservative 14,336-byte task-pack default.
-- Edit retries report `replayed:true`, oversized query batches return `remaining_queries`, and whole-file handle batches disclose synthesized ranges.
-- UTF-16 search avoids false absence certificates; unsupported-encoding edits fail closed.
-- Large Markdown skeletons return heading outlines and exact identifier routing covers 1–8 MiB.
-- Compact edit proofs, optional delta-context rereads, clearer doctor/log summaries, and English/Japanese compact guides reduce overhead.
-
-Experimental graph, retrieval, coverage-packer, reasoning, fast-path, delta-context, and adaptive-wire cores remain disabled by default unless explicitly enabled.
+Budgets are structural objects. Read budgets can constrain bytes, tokens, items, rows, cells, and full-content expansion; search budgets constrain bytes, tokens, and items. When a response is bounded, use its supplied continuation instead of reconstructing a cursor.
 
 ## Editing
 
-The server starts in read-only mode. `edit_file` mutations require the server to be started with `--allow-write`.
+The server starts in read-only mode. `edit_file` requires `--allow-write`.
 
-Edits are designed to be bounded: the server normally issues a handle from a preceding read, and the edit is checked against that context. Responses can also include verification material so an MCP client can run relevant checks without reopening unrelated files.
+Edits are checked against previously served context and can be batched across independent concerns. The result distinguishes applied, rolled-back, and state-unknown outcomes. A successful create receipt proves the exact submitted content, and a successful bounded edit carries hashes and ranges for the resulting slice.
 
-Treat `--allow-write` as permission to change the selected workspace. Enable it only for repositories and clients you trust, and review client configuration before use.
+Treat `--allow-write` as permission to change the selected workspace. Enable it only for repositories and clients you trust.
 
 ## Client compatibility
 
-Use TokenLighten with an MCP-capable coding client. The CLI can set up supported workspace integrations:
+v0.13 validates and rescues JSON-stringified canonical object parameters from schema-blind clients only when the decoded value matches the advertised structure. Advertised arrays declare their item schemas.
+
+The VS Code extension derives a stable schema stamp from the advertised tools. When the stamp changes, the provider version and change event force VS Code to refresh cached MCP definitions. Workspace setup also records the stamp in generated client configuration.
+
+Set up supported clients with:
 
 ```bash
 tl workspace setup
 ```
 
-Or start the server yourself:
+Or start the server directly:
 
 ```bash
 tl mcp start --stdio --workspace /path/to/project
 ```
 
-For command details, run `tl help`. For setup and operational notes, see [Getting started](getting-started.md).
+For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
-## Known limitations (0.12.0)
+## Known limitations (0.13.0)
 
-- The pathless task-pack locator's primary index covers files through 1 MiB. Exact identifier routing adds a wide scan for the 1–8 MiB band; larger files remain readable by explicit path/range.
-- On very large repositories, the on-disk source-index cache is capped at 32 MiB; once a repository's index would exceed that, it is not persisted, so every new server process rebuilds it from scratch — the first call of a session can take 10-25 seconds. Later calls in that same process stay fast.
-- In an `edit_file` response, `core.counts` counts edited files, not edited items — a single batched edit touching 3 places in 1 file reports a count of 1, not 3.
-- The `TL_INDEX_CONSISTENCY_SCAN` index-freshness check is on by default; set it to `0` to disable. Other experimental flags (see `packages/mcp-server/src/util/flags.ts`) remain off by default.
+- The pathless task-pack locator's primary index covers files through 1 MiB. Exact identifier routing adds a wide scan for the 1–8 MiB band; larger files remain readable by explicit path and range.
+- On very large repositories, the on-disk source-index cache is capped at 32 MiB. A larger index is rebuilt for each new server process, so the first call can take 10–25 seconds.
+- In `edit.applied`, `core.counts` counts edited files, not individual edit items.
+- Some multi-target range-read combinations can re-serve earlier ranges or be refused. Use separate single-target range reads.
+- A single batch that mixes file creation with edits to existing files can be refused. Split creation from existing-file edits.
+- Concurrent write lanes in one workspace can expose stale frontier state in a known edge case. Avoid concurrent write lanes until it is corrected.
+- `TL_INDEX_CONSISTENCY_SCAN` and `TL_PROOF_COMPLETION` are enabled by default as correctness safeguards. Other experimental flags, including `TL_SCHEMA_DEFS`, remain off by default.

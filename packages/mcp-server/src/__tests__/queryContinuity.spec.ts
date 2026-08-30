@@ -31,6 +31,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildTaskExecutionContract,
   buildTaskPack,
@@ -46,7 +47,14 @@ import {
 } from "../features/task-pack/canonicalDecision.js";
 import {
   clearTaskContract,
+  recordEvidenceExpansion,
+  recordExpansionExplicitGap,
+  recordExplicitGap,
+  recordTaskContract,
   resetTaskContractStoreForTest,
+  taskContractDischargeCertificate,
+  taskContractGapProjection,
+  taskContractLedgerSnapshotForTest,
 } from "../features/task-pack/taskContractStore.js";
 import {
   queryPriorPackObligations,
@@ -160,8 +168,11 @@ describe("D1 — a `next` hint carries the whole task query", () => {
   });
 
   it("no next-hint builder embeds a sliced query any more", () => {
+    // B-F2: resolve relative to THIS file, not `process.cwd()` — the canonical
+    // form (matching the A-branch fix), so `npx vitest run` from the repo
+    // root (not just from packages/mcp-server) can find the source file.
     const source = fs.readFileSync(
-      path.join(process.cwd(), "packages/mcp-server/src/features/task-pack/readCodeTaskPack.ts"),
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "features/task-pack/readCodeTaskPack.ts"),
       "utf8",
     );
     // The exact shape of the defect: a `query="..."` / `query=<...>` template
@@ -506,5 +517,78 @@ describe("D3 — same-epoch served evidence reaches the certified frontier", () 
       tokenizeForEpoch("list the package manifest fields"),
     );
     expect(certifiedFrontier(ws)).not.toContain("h-prior");
+  });
+});
+
+describe("evidence expansion ledger", () => {
+  it("records direct callees as expansion obligations and proves only same-surface definitions", () => {
+    const workspace = makeWorkspace("evidence-expansion");
+    const epoch = tokenizeForEpoch("inspect every direct dependency of calculateInvoiceTotal");
+    recordTaskContract(workspace, epoch, { query: "inspect every direct dependency of calculateInvoiceTotal" });
+
+    recordEvidenceExpansion(workspace, ["applyTax", "resolveCurrency"], ["applyTax"]);
+
+    const obligations = taskContractLedgerSnapshotForTest(workspace)?.obligations
+      .filter((entry) => entry.kind === "dependency-definitions");
+    expect(obligations).toEqual([
+      {
+        kind: "dependency-definitions",
+        target: "applyTax",
+        polarity: "evidence",
+        origin: "evidence-expansion",
+        proof: { type: "served", witness: "applyTax" },
+      },
+      {
+        kind: "dependency-definitions",
+        target: "resolveCurrency",
+        polarity: "evidence",
+        origin: "evidence-expansion",
+      },
+    ]);
+  });
+});
+
+describe("ledger discharge binding", () => {
+  it("does not expose a terminal certificate while an epoch obligation remains open", () => {
+    const workspace = makeWorkspace("discharge-binding");
+    const query = "inspect invoice references";
+    const epoch = tokenizeForEpoch(query);
+    recordTaskContract(workspace, epoch, { query, concernTokens: ["invoice"] });
+    expect(taskContractDischargeCertificate(workspace, epoch)).toBeUndefined();
+    expect(taskContractGapProjection(workspace, epoch).open).toEqual(["concern-token:invoice"]);
+
+    recordTaskContract(workspace, epoch, { query, coveredConcernTokens: ["invoice"] });
+    expect(taskContractDischargeCertificate(workspace, epoch)?.digest).toBeDefined();
+  });
+
+  it("keeps an explicit-gap discharge visible while permitting a terminal ledger certificate", () => {
+    const workspace = makeWorkspace("explicit-gap-discharge");
+    const query = "identify every dependency";
+    const epoch = tokenizeForEpoch(query);
+    recordTaskContract(workspace, epoch, { query });
+    recordExplicitGap(workspace, "dependency-definitions", "dynamicDispatch", "dynamic dispatch is unsupported");
+
+    expect(taskContractDischargeCertificate(workspace, epoch)?.digest).toBeDefined();
+    expect(taskContractGapProjection(workspace, epoch).explicitGaps).toEqual([
+      "dependency-definitions:dynamicDispatch (dynamic dispatch is unsupported)",
+    ]);
+  });
+
+  it("discharges only an unsupported expansion universe and leaves unrelated open work blocking the certificate", () => {
+    const workspace = makeWorkspace("unsupported-expansion");
+    const query = "inspect dependencies";
+    const epoch = tokenizeForEpoch(query);
+    recordTaskContract(workspace, epoch, { query, concernTokens: ["unrelated"] });
+    recordExpansionExplicitGap(
+      workspace,
+      { kind: "dependency-definitions", target: "open-universe" },
+      ["dynamicDispatch", "runtimeHook"],
+      "one-hop extraction unsupported for python",
+    );
+
+    const snapshot = taskContractLedgerSnapshotForTest(workspace)!;
+    expect(snapshot.obligations.filter((entry) => entry.target !== "unrelated").every((entry) => entry.proof?.type === "explicit-gap")).toBe(true);
+    expect(snapshot.obligations.find((entry) => entry.target === "unrelated")?.proof).toBeUndefined();
+    expect(taskContractDischargeCertificate(workspace, epoch)).toBeUndefined();
   });
 });

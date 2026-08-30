@@ -31,6 +31,7 @@
  * below.
  */
 
+import { canonicalToolCall } from "../protocol/envelope.js";
 import {
   buildContinuation,
   deriveNextFromPlan,
@@ -256,7 +257,7 @@ export function supplyRefusalGuidance(result: Record<string, unknown>): Record<s
       // refusal-economy pass) so no refusal — from ANY of the ~70 toolError
       // sites — can reach the wire without at least one concrete next step.
       refused["alternatives"] = [{ mode: "task_pack" }];
-      refused["next"] = 'read_file mode=task_pack query="<restate the request verbatim>"';
+      refused["next"] = canonicalToolCall("read_file", { mode: "task_pack", query: "<restate the request verbatim>" });
     }
   }
   return refused;

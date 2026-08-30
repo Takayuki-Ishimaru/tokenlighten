@@ -8,7 +8,10 @@ import { availableParallelism, cpus, homedir } from "node:os";
 // the machine (per-file wall-clock over 100s, blown 5s timeouts, an outright
 // threads-pool crash). Keep the two configs' pool/timeout blocks in sync.
 const CPUS = typeof availableParallelism === "function" ? availableParallelism() : cpus().length;
-const MAX_FORKS = Math.max(1, Math.min(4, Math.floor(CPUS / 2)));
+// Keep the root invocation at the same two-file cap as the package config:
+// each file can spawn multiple real MCP stdio servers, so CPU-count-based
+// parallelism still creates a multiplicative process load.
+const MAX_FORKS = Math.min(2, Math.max(1, Math.floor(CPUS / 2)));
 
 export default defineConfig({
   test: {

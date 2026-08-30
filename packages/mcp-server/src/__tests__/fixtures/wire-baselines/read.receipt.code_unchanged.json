@@ -9,10 +9,13 @@
     "next": {
       "tool": "read_file",
       "arguments": {
-        "mode": "task_pack",
-        "taskEpoch": "new",
-        "paths": [
-          "fw/src/estimator/qkf.cpp"
+        "task": {
+          "epoch": "new"
+        },
+        "targets": [
+          {
+            "path": "fw/src/estimator/qkf.cpp"
+          }
         ]
       }
     }

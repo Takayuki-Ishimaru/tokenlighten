@@ -70,7 +70,7 @@ describe("module boundary compatibility", () => {
     expect(toolError("boom")).toEqual({
       content: [{
         type: "text",
-        text: "{\"ok\":false,\"error\":\"boom\",\"alternatives\":[{\"mode\":\"task_pack\"}],\"next\":\"read_file mode=task_pack query=\\\"<restate the request verbatim>\\\"\"}",
+        text: "{\"ok\":false,\"error\":\"boom\",\"alternatives\":[{\"mode\":\"task_pack\"}],\"next\":{\"tool\":\"read_file\",\"arguments\":{\"query\":\"<restate the request verbatim>\"}}}",
       }],
       isError: true,
     });

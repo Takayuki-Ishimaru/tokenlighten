@@ -47,7 +47,7 @@ export interface CreateFileInput {
 
 export type CreateFileResult =
   | { ok: true; path: string; bytes: number }
-  | { ok: false; error: "file_exists" | "path_escapes_root" | "write_disabled" | "write_error" | "mkdir_error"; message?: string };
+  | { ok: false; error: "file_exists" | "path_escapes_root" | "write_disabled" | "write_error" | "mkdir_error"; message?: string; code?: string };
 
 // ---------------------------------------------------------------------------
 // Main implementation
@@ -69,8 +69,28 @@ export async function createFile(
   sessionId: string
 ): Promise<CreateFileResult> {
   // Write gate.
+  //
+  // W3-4(c) (v0.13 wave-2 handoff, cross-audit D-5 property): the five
+  // sibling write entry points (rangeEdit.ts, pathlessEdit.ts,
+  // artifactEdit.ts, searchReplaceEdit.ts, renameSymbol.ts,
+  // applyEditsMulti.ts) all carry the shared, A.7.1-recognized
+  // `code: "write-not-enabled"` on their own write-gate refusal.
+  // createFile.ts was the one holdout: its error union spelled this case
+  // `error: "write_disabled"` (underscore, uncoded) with no `code` field at
+  // all, so `refusalCodeOf` (protocol/refusal.ts) — which reads `reason`,
+  // then `code`, then `terminal_reason` against the recognized enum — found
+  // none of the three and fell through to the single documented
+  // code-less-body fallback, `invalid-input`. That made a `create:true` call
+  // against a server started without `--allow-write` indistinguishable, by
+  // `code` alone, from a genuine argument-SHAPE violation — confirmed live
+  // via canonicalSurface.spec.ts's D-5 "schema-valid canonical request"
+  // property, which had to sidestep this producer (spawn a real
+  // `--allow-write` server) to stay non-vacuous. Adding the same recognized
+  // code here, alongside the existing `error` string (kept for
+  // createFile.spec.ts's pre-existing `result.error` pins), closes the gap
+  // with no other behavior change.
   if (!allowWrite) {
-    return { ok: false, error: "write_disabled" };
+    return { ok: false, error: "write_disabled", code: "write-not-enabled" };
   }
 
   const relPath = input.path;

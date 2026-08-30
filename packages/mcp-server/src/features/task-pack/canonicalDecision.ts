@@ -66,6 +66,11 @@ function firstReadOnlyContinuation(result: TaskPackResult): ContinuationCall | u
 }
 
 /** Prefer a served document's disclosed next range over a lexical re-search. */
+function servedZoomSuppressed(result: TaskPackResult, handle: string, range: string): boolean {
+  const entries = (result as TaskPackResult & { served_zoom_suppressed?: unknown }).served_zoom_suppressed;
+  return Array.isArray(entries) && entries.includes(JSON.stringify([handle, range]));
+}
+
 function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefined {
   const candidates = result.surfaces
     .map((surface) => ({
@@ -74,8 +79,14 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
     }))
     .filter((item): item is { surface: TaskPackResult["surfaces"][number]; range: unknown[] } =>
       Array.isArray(item.range)
-      && typeof item.range[0] === "string"
-      && typeof (item.surface as { handle?: unknown }).handle === "string",
+      && typeof (item.surface as { handle?: unknown }).handle === "string"
+      && item.range.some((value) =>
+        typeof value === "string"
+        && !servedZoomSuppressed(
+          result,
+          String((item.surface as { handle?: unknown }).handle),
+          value,
+        ))
     )
     .sort((a, b) => {
       const aDoc = /\.(?:md|markdown|mdx)$/iu.test((a.surface as { path?: string }).path ?? "") ? 0 : 1;
@@ -84,15 +95,13 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
     });
   const selected = candidates[0];
   if (selected === undefined) return undefined;
-  return {
-    tool: "read_file",
-    arguments: {
-      handle: (selected.surface as { handle: string }).handle,
-      range: selected.range[0] as string,
-    },
-  };
+  const handle = (selected.surface as { handle: string }).handle;
+  const range = selected.range.find((value): value is string =>
+    typeof value === "string" && !servedZoomSuppressed(result, handle, value),
+  );
+  if (range === undefined) return undefined;
+  return { tool: "read_file", arguments: { handle, range } };
 }
-
 /**
  * P0a §6.1: a prepared decision is bound to a certificate either by carrying
  * the full proof or by naming its id in the typestate. The compact
@@ -213,12 +222,18 @@ function requiredAnswerDocumentZoom(result: TaskPackResult): ContinuationCall | 
       && /\.(?:md|markdown|mdx)$/iu.test(value.path)
       && typeof value.handle === "string"
       && Array.isArray(value.remaining_ranges)
-      && typeof value.remaining_ranges[0] === "string";
+      && typeof value.handle === "string"
+      && value.remaining_ranges.some((range) =>
+        typeof range === "string" && !servedZoomSuppressed(result, value.handle as string, range))
   }) as { handle: string; remaining_ranges: string[] } | undefined;
   if (surface === undefined) return undefined;
+  const range = surface.remaining_ranges.find(
+    (candidate) => !servedZoomSuppressed(result, surface.handle, candidate),
+  );
+  if (range === undefined) return undefined;
   return {
     tool: "read_file",
-    arguments: { handle: surface.handle, range: surface.remaining_ranges[0]! },
+    arguments: { handle: surface.handle, range },
   };
 }
 

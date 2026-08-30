@@ -12,9 +12,16 @@ describe("edit_file artifact dispatch", () => {
       | { inputSchema: { properties: Record<string, unknown> } }
       | undefined;
     const properties = edit?.inputSchema.properties ?? {};
-    expect(properties["credentialRef"]).toMatchObject({ type: "string" });
-    expect(properties["outputCredentialRef"]).toMatchObject({ type: "string" });
-    expect(properties["artifact"]).toMatchObject({ type: "object" });
+    const credentials = properties["credentials"] as {
+      properties?: Record<string, unknown>;
+      additionalProperties?: boolean;
+    };
+    expect(credentials.properties?.["in"]).toBeDefined();
+    expect(credentials.properties?.["out"]).toBeDefined();
+    expect(credentials.additionalProperties).toBe(false);
+    expect(properties["credentialRef"]).toBeUndefined();
+    expect(properties["outputCredentialRef"]).toBeUndefined();
+    expect(properties["artifact"]).toMatchObject({ additionalProperties: false });
   });
 
   it("refuses the exact binary search/replace call shape before it can corrupt a document", async () => {

@@ -298,6 +298,9 @@ function projectCertificate(
 ): CertificateRef | undefined {
   const id = contract.readiness_certificate?.id ?? contract.typestate.certificate_id;
   if (typeof id !== "string" || id === "") return undefined;
+  if (contract.readiness_certificate?.id !== undefined
+    && contract.typestate.certificate_id !== undefined
+    && contract.readiness_certificate.id !== contract.typestate.certificate_id) return undefined;
   const obligations = (contract.readiness_certificate?.obligations ?? [])
     .map((obligation) => obligation.id)
     .filter((value): value is string => typeof value === "string" && value !== "");
@@ -309,7 +312,17 @@ function projectCertificate(
   const workspace = projectWorkspaceMarker(contract.workspace_state)
     ?? projectWorkspaceMarker(result["workspace_state"]);
   if (workspace === undefined) return undefined;
-  return { id, obligations: [obligations[0]!, ...obligations.slice(1)], workspace };
+  const explicitGaps = Array.isArray(result["missing"])
+    ? result["missing"]
+        .filter((entry): entry is string => typeof entry === "string" && entry.startsWith("explicit-gap:"))
+        .slice(0, 8)
+    : [];
+  return {
+    id,
+    obligations: [obligations[0]!, ...obligations.slice(1)],
+    ...(explicitGaps.length > 0 ? { gaps: [explicitGaps[0]!, ...explicitGaps.slice(1)] } : {}),
+    workspace,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +645,39 @@ export interface DecisionProjectionInput {
   /** The canonical runtime verdict; `undefined` when the pack carries no contract. */
   canonicalKind: "discover" | "await-input" | "act-answer" | "act-edit" | "terminal-closed" | undefined;
   evidence: readonly Evidence[];
+  /**
+   * R1 (2026-08-28): "has this call already been spent on this lane?", bound by
+   * the producer exit to `packServeLog`'s `hasExecutedNext` — THE one
+   * consumed-fingerprint predicate, not a second one.
+   *
+   * WHY IT BELONGS HERE. `decision.next` is minted in exactly one place — the
+   * chain below — from FOUR independent sources: the discovery bundle (read off
+   * `result.qref` + the evidence graph), the contract's own `next_call`, the
+   * continuation plan's first call, a gap's named recovery, and the served
+   * evidence zoom. The no-repeat gate at the producer exit only ever saw the
+   * SECOND of those, because that is the only one it can repair; the others
+   * never passed a consumption check at all. Filtering at the mint point is what
+   * makes the single predicate govern every carrier without standing up a
+   * parallel gate — and it is what lets the exit's repair actually reach the
+   * wire, since a bundle next outranks the repaired `next_call`.
+   *
+   * Omitted (the archive / locate-closure projector, and every test) means
+   * "nothing is known to be consumed", which is the pre-R1 behaviour exactly.
+   */
+  consumed?: (call: ToolCall) => boolean;
+}
+
+/** The first candidate this lane has not already spent; see `DecisionProjectionInput.consumed`. */
+function firstUnconsumed(
+  consumed: ((call: ToolCall) => boolean) | undefined,
+  ...candidates: (ToolCall | undefined)[]
+): ToolCall | undefined {
+  for (const candidate of candidates) {
+    if (candidate === undefined) continue;
+    if (consumed?.(candidate) === true) continue;
+    return candidate;
+  }
+  return undefined;
 }
 
 /**
@@ -646,16 +692,27 @@ export interface DecisionProjectionInput {
  * executable `next` is a TRUE statement of the same situation.
  */
 export function projectTaskDecision(input: DecisionProjectionInput): TaskDecision | undefined {
-  const { result, contract, canonicalKind, evidence } = input;
+  const { result, contract, canonicalKind, evidence, consumed } = input;
   if (canonicalKind === undefined || contract === undefined) return undefined;
 
   // W9: `gapNamedNext` is the LAST of the three, so it can only supply a call
   // when neither the bundle re-pack nor the contract has one — i.e. exactly the
   // shapes that used to fall through to `servedEvidenceZoom` (or, on the
   // `discover` arm, to `await_input:"no-grounded-call-remains"`).
-  const next = discoveryBundleNext(result as never)
-    ?? discoverNext(contract, result)
-    ?? gapNamedNext(contract);
+  //
+  // R1: the ORDER is unchanged; what is new is that a candidate this lane has
+  // already spent is skipped rather than emitted, so the precedence now reads
+  // "the highest-ranked call that can still make progress".
+  const next = firstUnconsumed(
+    consumed,
+    discoveryBundleNext(result as never),
+    discoverNext(contract, result),
+    gapNamedNext(contract),
+  );
+  // R1: the same rule for the restoring fallback the degrade arms use — a zoom
+  // of a window this lane already re-read is a round trip charged for no bytes,
+  // which is the condition `servedEvidenceZoom`'s own contract already forbids.
+  const restoringZoom = (): ToolCall | undefined => firstUnconsumed(consumed, servedEvidenceZoom(evidence));
 
   if (canonicalKind === "terminal-closed") return { kind: "done" };
 
@@ -702,7 +759,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     // `next ?? servedEvidenceZoom(evidence)`. Apply the identical, already
     // load-bearing fallback here so a certificate-floor breach is never worse
     // than "re-read a window you already have" when one is available.
-    const restoring = next ?? servedEvidenceZoom(evidence);
+    const restoring = next ?? restoringZoom();
     if (restoring !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);
@@ -778,12 +835,46 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
         }
       }
     }
-    const restoring = next ?? servedEvidenceZoom(evidence);
+    const restoring = next ?? restoringZoom();
     if (restoring !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);
       return { kind: "discover", next: restoring, ...(advisory !== undefined ? { advisory } : {}), ...(gaps.length > 0 ? { gaps } : {}) };
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // R1 (2026-08-28) — `no-grounded-call-remains` IS A CLAIM ABOUT THIS
+  // RESPONSE, AND THE RESPONSE IS THE AUTHORITY ON IT.
+  //
+  // The same rule branch 3 and the `choose-candidate` fence below already
+  // apply, stated for the one code that asserts the absence of a call: if the
+  // response CAN still name a grounded, unexecuted call, then "no grounded call
+  // remains" is false, and §2.1's honest shape for that situation is `discover`.
+  //
+  // WHY IT NOW MATTERS. `repairSuppressedNextCall` flips a contract to this code
+  // when every axis it can see is spent — but it runs at the IN-BUILD choke,
+  // where `qref` is not yet stamped, so `discoveryBundleNext` is invisible to
+  // it. The qc1 replay shape is exactly that pack: its caller-supplied
+  // `surfaceRoles` make the missing-roles hint byte-identical to the call being
+  // served, the choke rightly suppresses it, and the bundle route — unexecuted,
+  // and the route this pack shipped before — became computable only here.
+  //
+  // THE DISCIPLINE IS PRESERVED, NOT RELAXED. `next` has already passed the
+  // consumed-fingerprint filter, so a suppressed call cannot return through
+  // this door; and `discover` is the arm that EMITS `gaps`, so the repair's
+  // disclosure travels with it instead of being dropped by the gap-less
+  // `await_input` member.
+  // -------------------------------------------------------------------------
+  if (awaitCode === "no-grounded-call-remains" && next !== undefined) {
+    const gaps = projectGaps(contract);
+    const advisory = discoveryBundleAdvisory(result as never);
+    return {
+      kind: "discover",
+      next,
+      ...(advisory !== undefined ? { advisory } : {}),
+      ...(gaps.length > 0 ? { gaps } : {}),
+    };
   }
 
   const candidates = projectCandidates(result, evidence, awaitCode);
@@ -825,7 +916,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   // claimed a choice — is unreachable from here in either direction.
   // -------------------------------------------------------------------------
   if (awaitCode === "choose-candidate" && candidates.length === 0) {
-    const restoring = next ?? servedEvidenceZoom(evidence);
+    const restoring = next ?? restoringZoom();
     if (restoring !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);

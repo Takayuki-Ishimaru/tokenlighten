@@ -2,7 +2,23 @@
  * flags.ts — centralized feature flag reader.
  *
  * Reads process.env at call time so tests can manipulate env per-test.
- * No I/O, no logging, no dependencies.
+ *
+ * "No I/O" means this module never performs I/O to DECIDE a flag's value —
+ * every reader above is a pure `process.env` lookup. The proof-completion
+ * trace (`noteProofCompletionPack`, near the bottom of this file) is the one
+ * scoped, deliberate exception to that, and is not itself a flag reader: it
+ * is the live engagement counter's OPTIONAL, opt-in diagnostic side channel,
+ * gated on an explicitly named trace-file env var
+ * (`TL_PROOF_COMPLETION_TRACE_PATH`) that is unset in every normal run. When
+ * set, it appends one size-capped JSON line per newly counted pack (P2(b),
+ * 2026-08-28: capped at PROOF_COMPLETION_TRACE_MAX_BYTES, silently skipping
+ * further appends once the file reaches that size — an opt-in debug trace a
+ * caller forgot to rotate must not grow without bound). It stays in this
+ * file, not a separate module, because it reads the SAME
+ * `PROOF_COMPLETION_FLAG_REGISTRY` this file already owns and every other
+ * proof-completion reader lives here too; moving only the trace writer
+ * elsewhere would split one flag's behavior across two files for a cosmetic
+ * gain over the size cap this comment documents instead.
  *
  * ---------------------------------------------------------------------------
  * D10 — env-flag disposition for the protocol v1 freeze (2026-08-14)
@@ -334,6 +350,42 @@
  * eligible, likely tier -> inventory-only, informational tier -> traced but
  * NEVER wired).
  */
+import { appendFileSync, statSync } from "node:fs";
+
+/**
+ * `wire_effect` CORRECTED 2026-08-28 (A-F6). It read `"none"`, which was false
+ * in two ways this flag cannot avoid and must therefore declare:
+ *
+ *   1. CERTIFICATE IDENTITY. With proof completion ON a discharged ledger
+ *      contributes its digest to `deterministicCertificate`, whose id becomes
+ *      `ready-<ledger16>-<proof16>` instead of v0.12's `ready-<proof16>`.
+ *      `decision.certificate.id` is a wire field, and
+ *      `ledgerCertificateBindingValid` discriminates the two shapes by regex,
+ *      so the id form is load-bearing rather than cosmetic — it cannot be moved
+ *      under the flag without making the binding check unable to tell a
+ *      ledger-backed act from a legacy one.
+ *   2. DECISION DISTRIBUTION. That is the flag's PURPOSE (A-4..A-7 exist to
+ *      stop `act.answer` on an unresolved exhaustive query), so an exhaustive
+ *      query legitimately yields a different `decision.kind` ON and OFF.
+ *
+ * What IS parity, and what the parity spec pins, is the NON-exhaustive task:
+ * same decision kind, same certificate shape family, no engagement trace.
+ */
+export const PROOF_COMPLETION_FLAG_REGISTRY = Object.freeze({
+  flag: "TL_PROOF_COMPLETION",
+  default: "on",
+  off_compatibility: true,
+  engagement_trace_env: "TL_PROOF_COMPLETION_TRACE_PATH",
+  wire_effect: "decision-distribution+certificate-id-shape",
+});
+
+/** F-1: fail-closed registry row for the real tool-local $defs/$ref surface. */
+export const SCHEMA_DEFS_FLAG_REGISTRY = Object.freeze({
+  flag: "TL_SCHEMA_DEFS",
+  default: "off",
+  off_compatibility: true,
+  wire_effect: "tools/list-inputSchema-$defs/$ref",
+});
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -385,6 +437,57 @@ export function graphIndexMode(): "auto" | "on" | "off" {
 /** D10 (C): diagnostic trace channel. Out-of-contract, non-wire. */
 export function traceEnabled(): boolean {
   return parseBool(process.env["TL_TRACE"], false);
+}
+
+/**
+ * v0.13 proof-carrying completion is a correctness fence, so it defaults on.
+ * OFF remains a short-lived incident escape hatch and an ON/OFF parity seam.
+ */
+export function proofCompletionEnabled(): boolean {
+  return parseBool(process.env["TL_PROOF_COMPLETION"], true);
+}
+
+/** F-1: opt-in only until all three real client probes pass. */
+export function schemaDefsEnabled(): boolean {
+  return parseBool(process.env["TL_SCHEMA_DEFS"], false);
+}
+
+// Process-local diagnostic only.  The counter is deliberately incremented by
+// readCodeTaskPack's proof gate, not by flag lookup, so it measures live pack
+// decisions and remains zero when the compatibility switch is OFF.
+let proofCompletionLiveCounter = 0;
+
+/** P2(b) (2026-08-28): named bound on the opt-in trace file — an untended debug trace must not grow without bound. */
+export const PROOF_COMPLETION_TRACE_MAX_BYTES = 10 * 1024 * 1024;
+
+export function noteProofCompletionPack(): number {
+  proofCompletionLiveCounter += 1;
+  const tracePath = process.env[PROOF_COMPLETION_FLAG_REGISTRY.engagement_trace_env];
+  if (typeof tracePath === "string" && tracePath !== "") {
+    try {
+      // Size cap: skip the append (rather than truncate/rotate, either of
+      // which is a heavier decision than a diagnostic side channel should
+      // make on the caller's behalf) once the file is already at or past the
+      // bound. A missing file statSync-fails, which the catch below already
+      // treats as "proceed" for the append that follows.
+      let currentSize = 0;
+      try { currentSize = statSync(tracePath).size; } catch { /* file does not exist yet */ }
+      if (currentSize < PROOF_COMPLETION_TRACE_MAX_BYTES) {
+        appendFileSync(tracePath, `${JSON.stringify({ flag: PROOF_COMPLETION_FLAG_REGISTRY.flag, enabled: true, count: proofCompletionLiveCounter })}\n`, "utf8");
+      }
+    } catch {
+      // Diagnostics must never turn a completed proof decision into a refusal.
+    }
+  }
+  return proofCompletionLiveCounter;
+}
+
+export function proofCompletionLiveCounterForTest(): number {
+  return proofCompletionLiveCounter;
+}
+
+export function resetProofCompletionLiveCounterForTest(): void {
+  proofCompletionLiveCounter = 0;
 }
 
 /**

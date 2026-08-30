@@ -3,9 +3,10 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (compact)
 
-Three tools, nothing else: `read_file`, `edit_file`, `search_files`. Unknown file task (incl. unknown-location/multi-file discovery)=>`read_file mode=task_pack query="<verbatim request>"` before any Read/Grep/cat or Explore-style subagent; never truncate. A narrower re-pack in the same task may honestly return incomplete — that's not broken. Search: `action=find query=<one identifier>`; several=>ONE `queries=[…]`, never serial; set `path` to a known package/module subtree, repo-wide only if scope is unknown.
+Three tools, nothing else: `read_file`, `edit_file`, `search_files`. Unknown file task (incl. unknown-location/multi-file discovery)=>`read_file {query:"<verbatim request>",task:{epoch:"new"}}` before any Read/Grep/cat or Explore-style subagent; never truncate. A narrower re-pack in the same task may honestly return incomplete — that's not broken. Search: `action:"find",queries:["<one identifier>"]`; several=>ONE `queries=[…]`, never serial; set `scope.path` to a known package/module subtree, repo-wide only if scope is unknown.
+Legacy compatibility (v0.13.x only, removed in v0.14): `mode`/`paths`/`handles`/bare `maxBytes`/`maxTokens` and `taskProfile`/`taskEpoch` still work via the compatibility normalizer — never emit them in a new call; every `next` the server returns is already canonical.
 Workspace write safety: pass your own `cwd` on EVERY call — an undeclared root=>`cwd-required-for-edit`, never assume one; shared workspace=>each agent's own fixed `lane`. Name path+identifier+change plainly for a fast single-value edit; otherwise batch via `edit_file`'s `edits[]` — each item names its own target, never inherited.
 An unrecognized `kind`=SAFE-STOP: report it, issue no edit, never infer from its fields.
-A `read.receipt` is never a dead end or a re-pack cue: follow its `next`. Every `next`/hint a response advertises is executable — run it verbatim; never invent your own continuation. Any read also takes `maxBytes`/`maxTokens` to cap its response.
+A `read.receipt` is never a dead end or a re-pack cue: follow its `next`. Every `next`/hint a response advertises is executable — run it verbatim; never invent your own continuation. Any read also takes `budget.bytes`/`budget.tokens` to cap its response.
 Everything else — artifact/archive specifics, verification-kit detail, per-kind deep rules — arrives on-demand inside the response that needs it; complete only until one does.
 <!-- tokenlighten:mcp-instructions:end -->

@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、�
 
 ## ビルドせずにインストールする
 
-v0.12.1のGitHub Releaseから**[tokenlighten-vscode-extension-0.12.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.12.1/tokenlighten-vscode-extension-0.12.1.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
+v0.13.0のGitHub Releaseから**[tokenlighten-vscode-extension-0.13.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.0/tokenlighten-vscode-extension-0.13.0.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
 2. **VSIXからのインストール…**を選びます。
@@ -14,7 +14,7 @@ v0.12.1のGitHub Releaseから**[tokenlighten-vscode-extension-0.12.1.vsix](http
 4. 求められた場合はVS Codeを再読み込みします。
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.12.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.13.0.vsix
 ~~~
 
 ソースからビルドする場合:
@@ -29,6 +29,8 @@ npm run package -w tokenlighten-vscode-extension
 信頼済みのプロジェクトフォルダでTokenLightenビューを開き、**このワークスペースをセットアップ**を選択します。対応クライアントとTokenLighten管理のAI向け指示を設定し、管理ブロック外の内容は保持します。
 
 ワークスペーススイッチでTokenLightenを有効／無効にできます。セットアップを再実行すると再び有効になり、セッション単位のnative commandを使うと通常設定を変えずに一時的にTokenLightenを迂回できます。
+
+v0.13.0ではMCP provider versionにschema stampを含めます。advertiseされるtool schemaが変わるとVS Codeがcache済み定義を自動更新するため、手動でprovider名を変えたりcacheを消したりする必要はありません。
 
 ## ステータスバーと診断
 
@@ -58,4 +60,4 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 | `tokenlighten.updateCheck.enabled` | `true` | 起動時に新しいVSIXの公開を確認します。インストールには常にユーザー操作が必要です。 |
 | `tokenlighten.language` | `auto` | VS Codeの表示言語を自動使用するか、英語／日本語を選択します。 |
 
-デスクトップアプリケーションは公開v0.12.1リリースに含まれません。
+デスクトップアプリケーションは公開v0.13.0リリースに含まれません。

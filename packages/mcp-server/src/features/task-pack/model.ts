@@ -518,6 +518,10 @@ export interface TaskPackArgs {
   credentialRef?: string;
   /** Resolved secret for in-process artifact extraction; never serialized. */
   credentialPassword?: string;
+  /** Internal task-pack serving lane; never serialized or fingerprinted. */
+  lane?: string;
+  /** Internal task epoch reset marker; never serialized or fingerprinted. */
+  taskEpoch?: string;
   /** Explicit task-shape hint. The server validates it and falls back safely. */
   taskProfile?: TaskProfileRequest;
   path?: string;

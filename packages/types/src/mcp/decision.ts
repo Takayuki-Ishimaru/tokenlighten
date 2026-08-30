@@ -94,6 +94,12 @@ export type CertificateRef = {
    */
   obligations: [string, ...string[]];
 
+  /**
+   * Proved capability limits that remain material to the answer/edit.
+   * Entries retain the `explicit-gap:` prefix and are bounded by the projector.
+   */
+  gaps?: [string, ...string[]];
+
   /** The workspace state this certificate was proved against (A.2.2). */
   workspace: WorkspaceMarker;
 };

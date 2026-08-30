@@ -1,121 +1,135 @@
 # Release checklist
 
-This checklist records the v0.12.1 maintenance release described in
-[Public-source manifest](public-source-manifest.md). Publishing requires
-explicit maintainer approval; that approval was received on 2026-08-28.
+This checklist records the v0.13.0 public release described in
+[Public-source manifest](public-source-manifest.md). Preparation may proceed
+locally, but pushing, tagging, changing repository settings, or publishing a
+GitHub Release requires a separate explicit maintainer approval.
 
-## Current review status (2026-08-28)
+## Current review status (2026-08-30)
 
-- [x] Product and public workspace manifests report 0.12.1.
-- [x] The v0.12.0 benchmark interpretation remains unchanged; v0.12.1
-  introduces no new performance claim.
-- [x] Runtime dependency audit: 0 vulnerabilities.
-- [x] Full public-source staging audit: 0 vulnerabilities.
-- [x] Public-source staging build and 261 test files passed: 3,850 tests
-  passed and 2 were skipped.
+- [x] Product and public workspace manifests report 0.13.0.
+- [x] Public release notes and compatibility documentation describe the
+  canonical v0.13 surface and the v0.13.x-only legacy bridge.
+- [x] The private source build and full test suite passed: 433 package test
+  files with 8,498 tests passed and 2 skipped; 48 benchmark-library test files
+  with 941 tests passed; 96 Node benchmark tests passed.
+- [x] The Python benchmark library passed 1,035 tests with 36 skipped.
+- [x] The clean public-source staging build and 283 test files passed:
+  4,008 tests passed and 2 were skipped.
+- [x] Runtime and full dependency audits both report 0 vulnerabilities.
 - [x] Bundled CLI, dependency licenses, generated notices, public inventory,
-  VSIX manifest, and packaged MCP smoke checks passed.
-- [x] The final VSIX contains the approved license and generated notices.
-- [x] The final VSIX and checksum were generated and inspected.
-- [ ] Confirm the pushed public commit with GitHub Actions on Node.js 20.
-- [ ] Install the VSIX in a clean VS Code profile or test machine. The local
-  release host did not expose the `code` command-line launcher.
+  package version smoke, and exact three-tool smoke checks passed.
+- [x] The final public-staging VSIX contains the approved license and generated
+  notices; its checksum was generated and verified.
+- [x] Fetch the public `main` history into an isolated ready tree, disable its
+  push URL, and prepare a local release candidate commit without creating a tag.
+- [ ] Install the VSIX in a clean VS Code profile or test machine.
+- [ ] Push the reviewed public commit, then confirm GitHub Actions on Node.js
+  20 for macOS, Ubuntu, and Windows.
 
 ## 1. Content and legal gate
 
-- [x] Rebuild the public tree from the allowlist without importing private
-  repository history.
+- [x] Build the public tree from the reviewed allowlist without importing the
+  private repository's history.
 - [x] Confirm private benchmark, Core 2, design/history, proto, report, and
-  desktop-source material is absent.
-- [x] Check public documents for unreviewed claims, private paths, internal
-  design links, and stale version references.
-- [x] Publish only reviewed aggregate or representative-task figures, never
-  raw prompts, fixtures, transcripts, billing, tables, or run archives.
-- [x] State that savings are not guaranteed and that the v0.11.1 comparison
-  is descriptive rather than causal.
-- [x] Confirm the approved license and package metadata; run dependency
-  license checks and generate required notices.
-- [x] Include the approved license and notices in the VSIX.
+  desktop-source material is absent from the public inventory.
+- [x] Check public documents for private paths, internal design links, stale
+  version references, and claims not supported by reviewed aggregate evidence.
+- [x] Publish only reviewed aggregate figures, never raw prompts, fixtures,
+  transcripts, billing records, cell data, or run archives.
+- [x] Present the v0.13 point estimate and task-level strengths and weaknesses
+  in general-audience language without treating an internal statistical
+  threshold as a release criterion.
+- [x] Confirm the approved source-available license and package metadata; run
+  dependency license checks and generate required notices.
+- [x] Include the approved license and generated notices in the VSIX.
 
 ## 2. Source build and developer-test gate
 
 The public source must build and test without the private benchmark harness.
 
 ~~~bash
-npm install
+npm ci
 npm run build
 npm run test:packages
 npm run test:bundle-cli
 npm run licenses
 npm run licenses:notices
 npm audit --omit=dev --audit-level=high
+npm audit
 npm run doctor
 ~~~
 
-- [x] Run the build, package tests, bundled-CLI test, licenses, notices, and
+- [x] Run build, package tests, bundled-CLI tests, licenses, notices, and both
   audits from a clean staged-public tree.
-- [x] Confirm the runtime audit remains free of Critical and High findings.
-- [x] Confirm the full `npm audit` reports 0 vulnerabilities.
-- [x] Ensure the staged public tests do not depend on the private benchmark
+- [x] Confirm the runtime and full audits each report 0 vulnerabilities.
+- [x] Confirm the staged public tests do not depend on the private benchmark
   harness.
-- [ ] Run Node.js 20 CI on macOS, Ubuntu, and Windows with platform scope
-  documented in the README.
 - [x] Confirm generated output exposes no private benchmark command or Core 2
   implementation.
-- [x] Start the packaged MCP, confirm `initialize` reports v0.12.1, and
-  confirm `tools/list` returns exactly `read_file`, `edit_file`, and
+- [x] Start the packaged MCP, confirm `initialize` reports 0.13.0, and confirm
+  `tools/list` returns exactly `read_file`, `edit_file`, and
   `search_files`.
-- [x] Confirm all product-side `doctor` checks pass. The aggregate local
+- [x] Confirm all product-side `doctor` checks pass. The aggregate staged
   command exited nonzero only because the host's managed Claude registration
-  still records TokenLighten v0.11.1; the release did not mutate user
-  registration as part of source verification.
+  still points to TokenLighten 0.12.1; release verification did not mutate the
+  user's registration.
+- [ ] Confirm required Node.js 20 GitHub Actions checks after the public commit
+  is pushed.
 
-## 3. VS Code extension gate
+## 3. VS Code and GitHub Copilot extension gate
 
 ~~~bash
 npm run package -w tokenlighten-vscode-extension
 ~~~
 
-- [x] Build `tokenlighten-vscode-extension-0.12.1.vsix` from staged public
+- [x] Build `tokenlighten-vscode-extension-0.13.0.vsix` from staged public
   source without a missing-license warning.
 - [x] Inspect the VSIX for the approved license, generated notices, bundled
-  CLI/server, version 0.12.1, and absence of private material.
-- [ ] Install it in a clean VS Code profile or test machine.
+  CLI/server, manifest version 0.13.0, schema stamp, and absence of private
+  material.
 - [x] Run automated setup, enable/disable, session-native bypass, status,
-  Diagnostics, and update-check tests.
-- [x] Confirm the packaged manifest reports version 0.12.1.
+  Diagnostics, schema-cache, and update-check tests.
+- [x] Confirm workspace setup maintains GitHub Copilot instructions alongside
+  the supported MCP client configuration.
+- [ ] Install the VSIX in a clean VS Code profile or test machine.
 
-## 4. Benchmark disclosure gate
+## 4. Benchmark disclosure review
 
-- [x] Re-aggregate the exact retained v0.12 archive snapshot.
-- [x] Confirm the approximately 28% aggregate result from 16 matched pairs.
-- [x] Confirm the approximately 57% and 30% positive representative medians,
-  with three verified pairs each.
-- [x] Describe narrowly scoped and mixed-verification task tendencies
-  qualitatively rather than as a numeric ranking.
-- [x] Compare the approximately 21% v0.11.1 aggregate result descriptively.
-- [x] Exclude mixed-verification outcomes and avoid guaranteed-savings claims.
+- [x] Record the v0.13 aggregate cost ratio of 0.735 and explain it as a 26.5%
+  lower point estimate than native tools on the evaluated work.
+- [x] Explain that v0.12.1 introduced no performance change, so v0.12.0 is the
+  relevant historical comparator; include the v0.12 and v0.11.1 overall point
+  estimates with a descriptive-comparison caveat.
+- [x] Describe the strongest task pattern (cross-module decision tracing and
+  downstream wiring), the still-favorable multi-location tasks, and the weak
+  small known-location and narrow-calculation tasks with reviewed percentages.
+- [x] Avoid internal cell, pair, and confidence-interval details in public
+  user-facing copy, and avoid guaranteed or universal savings claims.
 
 ## 5. Artifact integrity gate
 
-- [x] Generate the checksum only after packaging gates pass.
+- [x] Generate the checksum only after public-staging package gates pass.
 - [x] Record the checksum in
-  [the GitHub Release notes](github-release-v0.12.1.md).
-- [x] Verify the artifact name, license, notices, version, and checksum.
-- [x] Preserve the VSIX and checksum as release assets.
+  [the GitHub Release notes](github-release-v0.13.0.md).
+- [x] Verify the artifact name, approved license, notices, version, archive
+  contents, and checksum.
+- [x] Preserve the VSIX and checksum together as release assets.
 
 Verified VSIX SHA-256:
 
 ~~~text
-ffcc4a39c48f17f58c28461dc31fe1000bc53e0ef6aa11760cbabf7abd30c52e  tokenlighten-vscode-extension-0.12.1.vsix
+e2f87851f98187e07826e9c942d5c3d18c7df9a216d5ad60ba0330ce4d66c6f5  tokenlighten-vscode-extension-0.13.0.vsix
 ~~~
 
 ## 6. GitHub release
 
-- [x] Receive explicit maintainer approval to publish v0.12.1.
-- [ ] Push and verify the reviewed public tree.
+- [x] Prepare the reviewed local public commit with the push URL disabled and
+  no `v0.13.0` tag.
+- [ ] Receive explicit maintainer approval for the remote publication step.
+- [ ] Push the reviewed public commit.
 - [ ] Confirm required GitHub Actions checks.
-- [ ] Create and push the approved `v0.12.1` tag.
+- [ ] Create and push the approved `v0.13.0` tag.
 - [ ] Attach the VSIX and checksum and publish the GitHub Release.
 
-The desktop application remains deferred from the public v0.12.1 release.
+The desktop application remains deferred from the public v0.13.0 release.

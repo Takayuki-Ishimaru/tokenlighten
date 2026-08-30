@@ -15,6 +15,7 @@ import {
   discoverArtifactFiles,
   extractIdentifiers,
   inferQueryProjectScope,
+  importEdgeCandidates,
   isWithinRoleSearchScope,
   locateTaskContext,
   matchBasenameTokens,
@@ -39,16 +40,18 @@ import { languageForPath } from "../../util/languages.js";
 import { elideDocComments } from "../../util/formatCompress.js";
 import {
   attachEvidenceCompletion,
+  calleesOf,
   emitEvidenceShadow,
 } from "./evidenceShadow.js";
 import { isEnumLikeQuery, stripPathSpans, tokenizeQuery } from "../../util/queryShape.js";
+import { expandOneHop } from "./openUniverseExpansion.js";
 import {
   createScanContentCache,
   deriveIdentifierVariantProbes,
   escapeRegExp,
   scanLiteral,
 } from "../search/find/findText.js";
-import { extractSymbolsFromFile, resolveCallerByteCeiling, DEFAULT_RESPONSE_BYTE_FLOOR } from "../../tools/readCodeModes.js";
+import { extractSymbolsFromFile, extractSymbolsFromLines, resolveCallerByteCeiling, DEFAULT_RESPONSE_BYTE_FLOOR } from "../../tools/readCodeModes.js";
 import { queryRequestsTestEvidence, selectQueryEvidence } from "../../tools/queryEvidence.js";
 import { resolveSemanticWiring, type SemanticWiringResolution } from "../../tools/semanticWiringResolver.js";
 import {
@@ -60,7 +63,7 @@ import {
 } from "../../util/verificationPack.js";
 import { isNativeExtPath, widenNativeRangeString } from "../../util/nativeSymbolRange.js";
 import { dominantRoot } from "../../util/dominantRoot.js";
-import { countLines } from "../../util/countLines.js";
+import { countLines, sliceLinesToText } from "../../util/countLines.js";
 import {
   dropLowestRankedHeadingIndexEntry,
   isMarkdownPath,
@@ -105,7 +108,17 @@ import {
   recordFunctionalValidationObligation,
   getFunctionalValidationObligation,
   consultExecutedLocate,
+  consultExecutedSearch,
+  hasExecutedNext,
+  nextFingerprint,
+  normalizeContractLane,
+  DEFAULT_CONTRACT_LANE,
   dirExistsCached,
+  clearExecutedNextForLane,
+  clearExecutedNextForWorkspace,
+  recordServedWindow,
+  servedWindowHasUnservedLines,
+  clearServedWindowsForScope,
   type ServedSurfaceEntry,
   type AwaitingInputLatch,
 } from "../../util/packServeLog.js";
@@ -115,6 +128,8 @@ import {
   coveragePackerEnabled,
   coveragePackerV2Enabled,
   interfaceAuthorityEnabled,
+  noteProofCompletionPack,
+  proofCompletionEnabled,
 } from "../../util/flags.js";
 import { selectCoverageOrderedEntries, estimateBodyBytes } from "./coveragePacker.js";
 import { buildInterfaceAuthoritySurfaces } from "./interfaceAuthority.js";
@@ -127,10 +142,19 @@ import {
 } from "./priorPackStore.js";
 import {
   clearTaskContract,
+  clearTaskContractsForLane,
   queryTaskContract,
+  recordExpansionExplicitGap,
+  taskContractDischargeCertificate,
+  taskContractDigest,
+  taskContractGapProjection,
+  recordEvidenceExpansion,
+  recordServedConcernEvidence,
+  recordServedRoleEvidence,
   recordTaskContract,
   resetTaskContractStoreForTest,
 } from "./taskContractStore.js";
+import { hasOpenUniverseIntent, isAdditiveEnumIntent } from "./openUniverseIntent.js";
 import { trace } from "../../util/trace.js";
 import { xlsxRoster, xlsxTable } from "../../office/xlsx.js";
 import { docxSections } from "../../office/docx.js";
@@ -206,7 +230,7 @@ import {
   isArtifactTaskPackSurface,
 } from "./artifactSections.js";
 export { isArtifactTaskPackSurface } from "./artifactSections.js";
-import { applyCanonicalTaskDecision, hasServedZoomAffordance } from "./canonicalDecision.js";
+import { applyCanonicalTaskDecision, discoveryBundleNext, hasServedZoomAffordance } from "./canonicalDecision.js";
 export {
   applyCanonicalTaskDecision,
   canonicalTaskDecisionInvariantViolations,
@@ -554,8 +578,13 @@ function sliceCode(workspace: string, relPath: string, range: string, cache?: Fi
 
   const raw = readCached(workspace, relPath, cache);
   if (raw === undefined) return undefined;
-  const lines = raw.split(/\r?\n/);
-  const slice = lines.slice(start - 1, Math.min(end, lines.length)).join("\n");
+  // T1b (v0.13, UTF-16 3-way read-parity wave): sliceLinesToText restores
+  // raw's own trailing newline when [start,end] reaches EOF -- see its doc
+  // comment (util/countLines.ts). Fixes task_pack evidence for a whole-file
+  // range coming back one trailing newline short of the SAME file read via
+  // mode=full path=/handle= (utf16ReadParity.spec.ts / the release
+  // rehearsal's utf16 scenario three_way_consistent check).
+  const slice = sliceLinesToText(raw, start, end);
   if (slice.length === 0) return undefined;
   if (Buffer.byteLength(slice, "utf8") > MAX_SURFACE_CODE_BYTES) return undefined;
   // item 11: pass the slice's true file start line so elision markers carry
@@ -2365,6 +2394,7 @@ async function buildTaskPackCore(
   if (dominancePromoted) applyDominancePromotion(result, surfaces, dominantSurfaceIndex, workspace);
 
   attachPartialTree(result, workspace);
+  const evidenceExpansion = await importEvidenceExpansion(workspace, locateResult.primary, locatingQuery, surfaces);
   return dedupeTrimAndPersist(workspace, result, {
     ...(protectedSurfaces.size > 0 ? { protectedSurfaces } : {}),
     query,
@@ -2374,6 +2404,7 @@ async function buildTaskPackCore(
     recompute: { query, missingRequired, unmatchedConcern },
     // DESIGN-v0.9 §4.6b: share the pack's read cache for codeless-surface inlining.
     cache,
+    evidenceExpansion,
   });
 }
 
@@ -2610,11 +2641,13 @@ async function buildAnswerTaskPack(
   const exactNamedFileAnswer = exactIdentifierNames.has(topAnswerPathStem)
     && rankedAnswerCandidates[0] !== undefined
     && !isNonImplementationAnswerCandidate(rankedAnswerCandidates[0].candidate);
-  const exactLocatedAnswer = exactNamedFileAnswer
+  // An exact identifier locates the start of an exhaustive scan; it cannot
+  // collapse the open universe to one answer surface.
+  const exactLocatedAnswer = !hasOpenUniverseIntent(query) && (exactNamedFileAnswer
     || (recoveredExactAnswer && exactLocatedPaths.size === 1)
     || (locateResult.hit
       && rankedAnswerCandidates[0]?.exactIdentifier === true
-      && exactLocatedPaths.size === 1);
+      && exactLocatedPaths.size === 1));
   const candidates = exactLocatedAnswer
     ? [rankedAnswerCandidates[0]!.candidate]
     : strongEvidenceAnswer
@@ -2944,7 +2977,8 @@ async function buildAnswerTaskPack(
   };
   if (dominancePromoted) applyDominancePromotion(result, surfaces, dominantSurfaceIndex, workspace);
 
-  const finalResult = dedupeTrimAndPersist(workspace, result, { args });
+  const evidenceExpansion = await importEvidenceExpansion(workspace, locateResult.hit ? locateResult.primary : [], query, surfaces);
+  const finalResult = dedupeTrimAndPersist(workspace, result, { args, evidenceExpansion });
   if (verifiedAbsentIdentifiers.length > 0) {
     verifiedAbsentIdentifiersByResult.set(finalResult, verifiedAbsentIdentifiers);
     if (result !== finalResult) verifiedAbsentIdentifiersByResult.set(result, verifiedAbsentIdentifiers);
@@ -5499,8 +5533,18 @@ async function buildSeededTaskPack(
   // budget pressure but must never drop the surface itself. Native-pair
   // siblings and locator-filled roles are NOT in `protectedSurfaces` and
   // stay droppable, same as any other pack.
+  // Answer packs can prove an explicitly named identifier absent only after
+  // scanning the bounded source universe. Register that fact before the shared
+  // readiness contract is built; recording it after dedupe would leave the
+  // current response permanently stuck at act-on-served-evidence.
+  const verifiedAbsent = proofCompletionEnabled() && answerProfile
+    ? explicitCodeIdentifiers(query).filter((identifier) =>
+        scanLiteral(identifier, workspace, { caseInsensitive: false }).length === 0
+      )
+    : [];
+  if (verifiedAbsent.length > 0) verifiedAbsentIdentifiersByResult.set(result, verifiedAbsent);
   attachPartialTree(result, workspace);
-  return dedupeTrimAndPersist(workspace, result, {
+  const finalResult = dedupeTrimAndPersist(workspace, result, {
     ...(protectedSurfaces.size > 0 ? { protectedSurfaces } : {}),
     query,
     checkRecords,
@@ -5510,6 +5554,8 @@ async function buildSeededTaskPack(
     // DESIGN-v0.9 §4.6b: share the pack's read cache for codeless-surface inlining.
     cache,
   });
+  if (verifiedAbsent.length > 0) verifiedAbsentIdentifiersByResult.set(finalResult, verifiedAbsent);
+  return finalResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -8635,6 +8681,9 @@ function verifiedAbsentIdentifiersFor(result: TaskPackResult): readonly string[]
   return verifiedAbsentIdentifiersByResult.get(result) ?? [];
 }
 
+/** P2(b): dedupes the proof-completion engagement counter to one increment per pack — see buildTaskExecutionContract's own comment at the increment site. */
+const proofCompletionCountedResults = new WeakSet<object>();
+
 function isStrongRecoveredAnswerCandidate(
   candidates: readonly RankedAnswerEvidenceCandidate[],
   query: string,
@@ -9249,6 +9298,8 @@ function nextHintForCoverage(
  * markers are matched as plain substrings ("\b" is meaningless for non-\w
  * CJK text in JS regex — there is no word-boundary concept to anchor on).
  */
+const REFERENCE_ANSWER_EN_RE = /\bfind\s+all\s+references?\b/i;
+const REFERENCE_ANSWER_JA_RE = /全参照/u;
 const ANSWER_INTENT_EN_RE = /\b(explain|describe|assess|trace|determine|investigate|why|how does|what happens|what conditions|when (?:does|do|is|are|must|should|can|will)|walk me through|where (?:is|are|does|do|did|was|were)|what (?:is|are|does|do|did)|which (?:file|files|function|functions|class|classes|module|modules|method|methods)|understand(?:ing)?|overview|summar(?:y|ies|ize[sd]?|ise[sd]?|izing|ising)|clarify|tell me|show me (?:how|where|what|which)|how (?:is|are|do|did|can|would|should|were|was)|which \w+ (?:does|do|is|are|gets?|selects?|chooses?|uses?|handles?|calls?|owns?))\b/i;
 // Descriptive JA noun phrases (「Xの実装」「Xの役割」) ask ABOUT code; request
 // forms use を/へ/に/として and are caught by REQUESTED_MUTATION_JA_NOUN_RE
@@ -9301,10 +9352,18 @@ const REQUESTED_MUTATION_JA_LINE_RE = /(?:^|\n)[^\n]{0,180}(?:を|へ|に)[^\n]{
 // particle prefix (を/へ/に/として) plus sentence-final position keeps report
 // labels (「実装状況を確認して報告」) from matching.
 const REQUESTED_MUTATION_JA_NOUN_RE = /(?:を|へ|に|として)[^\n。]{0,40}?(?:新規)?(?:修正|追加|実装|作成|生成|変更|接続|連携|配線|反映)\s*(?:[。.]|$)/;
-const PROPAGATION_INTENT_EN_RE = /\b(?:enum|union|schema|contract|exhaustive|propagat(?:e|ion)|all\s+(?:callers|references|consumers))\b/i;
+const PROPAGATION_INTENT_EN_RE = /\b(?:enum|union|schema|contract|exhaustive|every(?:where)?|all\s+(?:callers|references|consumers|definitions|direct\s+callees)|propagat(?:e|ion))\b/i;
 const PROPAGATION_INTENT_JA: readonly string[] = [
   "列挙", "全参照", "呼び出し元", "対応漏れ", "すべて", "全て", "各層", "波及",
 ];
+
+// P1-e (2026-08-28 review-fix wave): hasOpenUniverseIntent/isAdditiveEnumIntent
+// moved to openUniverseIntent.ts, the single canonical source this module and
+// taskContractStore.ts both reference (see that module's header) — extracted
+// rather than cross-imported so there is no cycle between the two. Imported
+// above with the other feature imports; re-exported here so every existing
+// `from "./readCodeTaskPack.js"` import of either name keeps working.
+export { hasOpenUniverseIntent, isAdditiveEnumIntent };
 
 /**
  * True when `query` reads as an explain/answer request AND carries no
@@ -9315,7 +9374,11 @@ const PROPAGATION_INTENT_JA: readonly string[] = [
  * either case.
  */
 function hasAnswerIntentMarker(query: string): boolean {
-  return ANSWER_INTENT_EN_RE.test(query)
+  return (proofCompletionEnabled() && (
+    REFERENCE_ANSWER_EN_RE.test(query)
+    || REFERENCE_ANSWER_JA_RE.test(query)
+  ))
+    || ANSWER_INTENT_EN_RE.test(query)
     || ANSWER_INTENT_JA.some((m) => query.includes(m))
     || ANSWER_INTENT_JA_NOUN_RE.test(query)
     || hasAnalysisIntentMarker(query);
@@ -9556,7 +9619,11 @@ function hasDefectSymptomMarker(query: string): boolean {
 const INTERROGATIVE_ANSWER_EN_RE = /\b(explain|describe|(?:assess|trace|determine|investigate)\s+(?:how|why)|why|how does|what happens|what conditions|when (?:does|do|is|are|must|should|can|will)|walk me through|where (?:is|are|does|do|did|was|were)|what (?:is|are|does|do|did)|which (?:file|files|function|functions|class|classes|module|modules|method|methods)|understand(?:ing)?|overview|summar(?:y|ies|ize[sd]?|ise[sd]?|izing|ising)|clarify|tell me|show me (?:how|where|what|which)|how (?:is|are|do|did|can|would|should|were|was)|which \w+ (?:does|do|is|are|gets?|selects?|chooses?|uses?|handles?|calls?|owns?))\b/i;
 
 function hasInterrogativeAnswerMarker(query: string): boolean {
-  return INTERROGATIVE_ANSWER_EN_RE.test(query)
+  return (proofCompletionEnabled() && (
+    REFERENCE_ANSWER_EN_RE.test(query)
+    || REFERENCE_ANSWER_JA_RE.test(query)
+  ))
+    || INTERROGATIVE_ANSWER_EN_RE.test(query)
     || ANSWER_INTENT_JA.some((m) => query.includes(m))
     || ANSWER_INTENT_JA_NOUN_RE.test(query);
 }
@@ -15995,6 +16062,7 @@ function buildReadinessObligations(
   result: TaskPackResult,
   profile: TaskProfile,
   query: string,
+  openUniverseDischarged = false,
 ): TaskReadinessObligation[] {
   const surfaces = codeTaskPackSurfaces(result.surfaces);
   const served = surfaces.filter(hasServedCode);
@@ -16035,7 +16103,7 @@ function buildReadinessObligations(
   // construction (coverage_reason "missing-roles" docs).
   const contentComplete = provedArtifactCreate || provedCreate || provedArtifactContent || (
     served.length > 0
-    && result.missing.length === 0
+    && result.missing.every((entry) => entry.startsWith("explicit-gap:"))
     && surfaces.filter((surface) => surface.required !== false).every(hasServedCode)
     && (result.content_sufficiency !== "needs-followup" || focusedAnswerEvidence)
   );
@@ -16093,7 +16161,7 @@ function buildReadinessObligations(
       obligations.push({
         id: `identifier:${identifier}`,
         kind: "explicit-identifier",
-        status: evidence.length > 0 ? "proved" : "uncovered",
+        status: evidence.length > 0 || verifiedAbsentIdentifiersFor(result).includes(identifier) ? "proved" : "uncovered",
         required: true,
         evidence,
         reason: evidence.length > 0
@@ -16123,6 +16191,26 @@ function buildReadinessObligations(
             : "behavioral question has no callable implementation body",
       });
     }
+  }
+
+  // A quantifier names an open universe, not a single identifier fact.  A-5
+  // expands it into concrete direct dependencies; until then it is deliberately
+  // undischargeable so an exact-location answer cannot falsely close it.
+  if (hasOpenUniverseIntent(query) && !isAdditiveEnumIntent(query)) {
+    const kind = /enum|列挙/.test(query) ? "enum-variants"
+      : /callers|呼び出し元/.test(query) ? "all-callers"
+      : /references|参照/.test(query) ? "all-references"
+      : "dependency-definitions";
+    obligations.push({
+      id: `open-universe:${kind}`,
+      kind: "surface-content",
+      status: openUniverseDischarged ? "proved" : "uncovered",
+      required: true,
+      evidence: [],
+      reason: openUniverseDischarged
+        ? `${kind} was discharged by an explicit evidence-expansion capability gap`
+        : `${kind} is an exhaustive open-universe requirement awaiting evidence expansion`,
+    });
   }
 
   if (profile === "change_propagation" || profile === "generic") {
@@ -16934,6 +17022,15 @@ function nextCallForUnresolved(
       },
     };
   }
+  if (unresolved.id.startsWith("open-universe:")) {
+    // Additive propagation queries still need one authoritative existence
+    // probe for the requested value before the caller continues. Prefer an
+    // identifier-shaped all-caps token (e.g. REFUNDED) over the enum name.
+    const requestedValue = query.match(/\b[A-Z][A-Z0-9_]{2,}\b/)?.[0];
+    if (requestedValue !== undefined) {
+      return { tool: "search_files", arguments: { action: "find", query: requestedValue } };
+    }
+  }
   return undefined;
 }
 
@@ -16945,6 +17042,7 @@ function deterministicCertificate(
   risk: TaskReadinessRisk,
   actionFrontier: string[],
   workspaceState: TaskWorkspaceState,
+  ledgerDigest?: string,
 ): TaskReadinessCertificate {
   const taskHash = shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16);
   const proofHash = shaOfText(JSON.stringify({
@@ -16952,10 +17050,11 @@ function deterministicCertificate(
     obligations: obligations.map((obligation) => [obligation.id, obligation.status, (obligation.evidence ?? []).map((item) => item.handle)]),
     actionFrontier,
     workspaceState: workspaceState.fingerprint,
+    ledgerDigest,
   })).replace(/^sha256:/, "").slice(0, 16);
   return {
     version: 1,
-    id: `ready-${proofHash}`,
+    id: ledgerDigest === undefined ? `ready-${proofHash}` : `ready-${ledgerDigest.slice(0, 16)}-${proofHash}`,
     task_fingerprint: `task-${taskHash}`,
     workspace_state_fingerprint: workspaceState.fingerprint,
     profile,
@@ -17046,8 +17145,89 @@ export function buildTaskExecutionContract(
   workspaceState: TaskWorkspaceState = buildTaskWorkspaceState(result),
   /** P0 defect 3: the workspace root, so the certificate can name same-epoch evidence the caller already holds. Optional — the readiness specs build contracts from synthetic results with no workspace, and omitting it is exactly the pre-defect-3 frontier. */
   workspace?: string,
+  /** A verified expansion gap from this response, before its durable replay projection is consulted. */
+  currentOpenUniverseExplicitGap = false,
+  servedZoomScope?: ServedWindowScope,
 ): TaskExecutionContract {
-  const obligations = buildReadinessObligations(result, profile, query);
+  const proofCompletion = proofCompletionEnabled();
+  // P2(b) (2026-08-28 review-fix wave): this builder runs at least twice per
+  // pack (this doc comment's own next line: "before and after final
+  // same-epoch reconciliation"), and up to four call sites in this module can
+  // each invoke it for the SAME pack. The engagement counter exists to
+  // measure live PACK decisions, not internal re-evaluations of one —
+  // dedupe on the `result` object identity (the same TaskPackResult is
+  // threaded through every re-evaluation within one pack build) so a pack
+  // that gets rebuilt three times still counts once.
+  if (proofCompletion && !proofCompletionCountedResults.has(result)) {
+    proofCompletionCountedResults.add(result);
+    noteProofCompletionPack();
+  }
+  // This builder runs before and after final same-epoch reconciliation. Its
+  // ledger rows are derived projection, so do not carry a discharged row from
+  // the preliminary evaluation into the final one.
+  result.missing = result.missing.filter((entry) => !entry.startsWith("unresolved-ledger:"));
+  const ledgerEpochTokens = tokenizeForEpoch(query);
+  const ledger = !proofCompletion || workspace === undefined
+    ? { open: [] as string[], explicitGaps: [] as string[], resolved: [] as string[] }
+    : taskContractGapProjection(workspace, ledgerEpochTokens);
+  if (ledger.open.length > 0 || ledger.explicitGaps.length > 0) {
+    result.missing = [...new Set([
+      ...result.missing,
+      ...ledger.open.map((entry) => `unresolved-ledger:${entry}`),
+      ...ledger.explicitGaps.map((entry) => `explicit-gap:${entry}`),
+    ])];
+    if (ledger.open.length > 0) {
+      result.coverage = "partial";
+      result.coverage_reason ??= "concerns-uncovered";
+    }
+  }
+  const ledgerCertificate = !proofCompletion || workspace === undefined
+    ? undefined
+    : taskContractDischargeCertificate(workspace, ledgerEpochTokens);
+  // -------------------------------------------------------------------------
+  // R2 (2026-08-28): THE EXPANSION-SUCCEEDED ARM.
+  //
+  // Until this, `openUniverseDischarged` had exactly one route — an explicit
+  // capability gap — so the open universe could be closed only by FAILING to
+  // expand it. A pack whose expansion fully SUCCEEDED had no discharge route at
+  // all: `recordEvidenceExpansion` proves each served target `{type:"served"}`,
+  // but the two-column gap projection dropped those proofs, so the
+  // `open-universe:*` obligation stayed "uncovered" with `missing:[]`,
+  // `coverage:"complete"` and zero gaps on the wire, and the certificate that
+  // would authorise `act.answer` was never minted. Reproduced on the TS
+  // 4-definition fixture in `ledgerDecisionIntegration.spec.ts`, where all four
+  // direct-callee bodies are served.
+  //
+  // THE CONDITION IS DELIBERATELY THE STRONGEST ONE THAT STILL FIRES, because a
+  // weaker one reopens P0-1 (an `act.answer` over an unresolved callee):
+  //
+  //   1. `ledger.open` is EMPTY — not "no open dependency-definitions", but
+  //      nothing open at all. With 2 of 4 targets served and 2 still open, this
+  //      is false and no discharge happens. That is the negative example, and
+  //      it is the whole safety argument: an obligation with no proof is
+  //      exactly what `open` means.
+  //   2. At least one `dependency-definitions:` obligation is actually PROVED
+  //      (served, or explicit-gap). An epoch that recorded no expansion at all
+  //      also has an empty `open`, and it must not discharge on that emptiness —
+  //      silence is not proof. This is what keeps the provisional contract
+  //      rebuilds (`rebuildFinalExecutionContract`, which can run BEFORE this
+  //      pack's own facts are persisted) fail-closed: they see an empty
+  //      projection, so this arm cannot fire on a not-yet-recorded expansion.
+  // -------------------------------------------------------------------------
+  const dependencyDefinitionsSettled = ledger.open.length === 0
+    && [...ledger.resolved, ...ledger.explicitGaps]
+      .some((entry) => entry.startsWith("dependency-definitions:"));
+  const openUniverseDischarged = hasOpenUniverseIntent(query)
+    // An explicit capability gap discharges only the open-universe axis. Other
+    // ledger obligations can still keep the terminal act locked, but the
+    // prescribed absence probe must not be re-issued while those unrelated
+    // obligations remain unresolved.
+    && (
+      currentOpenUniverseExplicitGap
+      || ledger.explicitGaps.some((entry) => entry.startsWith("dependency-definitions:open-universe "))
+      || dependencyDefinitionsSettled
+    );
+  const obligations = buildReadinessObligations(result, profile, query, openUniverseDischarged);
   const falsification = buildFalsificationReport(result, profile, obligations);
   const risk = estimateReadinessRisk(result, profile, query, obligations, falsification);
   const focusedAnswerCandidate = profile === "answer"
@@ -17056,9 +17236,23 @@ export function buildTaskExecutionContract(
     && codeTaskPackSurfaces(result.surfaces).some((surface) => surface.role === "test" && hasServedCode(surface))
     && codeTaskPackSurfaces(result.surfaces).some((surface) => isImplementationPath(surface.path) && hasServedCode(surface))
     && codeTaskPackSurfaces(result.surfaces).every(hasServedCode);
+  // A route may retain `needs-followup` after the router has already served
+  // every required primary body.  Treating that conservative routing hint as
+  // stronger than the completed, falsifiable readiness obligations strands a
+  // caller at `await_input:act-on-served-evidence`: there is no executable
+  // discovery call, but the missing certificate also prevents the decision
+  // projection from emitting the answer.  A fully served, gap-free answer
+  // route is instead a legitimate *candidate*; the proof/ledger gates below
+  // still decide whether it receives an act certificate.
+  const fullyServedAnswerRoute = result.route?.action === "answer_from_handles"
+    && result.missing.every((entry) => entry.startsWith("explicit-gap:"))
+    && codeTaskPackSurfaces(result.surfaces)
+      .filter((surface) => surface.required !== false)
+      .every(hasServedCode);
   const answerCandidate = profile === "answer"
     && (
-      (result.route?.action === "answer_from_handles" && result.content_sufficiency !== "needs-followup")
+      (result.route?.action === "answer_from_handles"
+        && (result.content_sufficiency !== "needs-followup" || fullyServedAnswerRoute))
       || focusedAnswerCandidate
     );
   // 2026-08-01: answer_from_handles is the same "working set complete" verdict
@@ -17101,7 +17295,7 @@ export function buildTaskExecutionContract(
     && (result.route?.reason?.includes(DOC_SLIVER_ROUTE_MARKER) ?? false);
   const routeCandidate = (result.route?.action === "edit_from_handles"
       || result.route?.action === "answer_from_handles")
-    && result.missing.length === 0
+    && result.missing.every((entry) => entry.startsWith("explicit-gap:"))
     && result.content_sufficiency !== "needs-followup"
     && ((result.route.max_additional_tl_calls ?? 0) === 0 || servedZoomAffordance || servedDocSliverAffordance);
   // A resolved non-artifact create target is its own terminal frontier. The
@@ -17133,10 +17327,76 @@ export function buildTaskExecutionContract(
   // still blocks acceptance exactly as before.
   const hasUnservedRequiredSurface = codeTaskPackSurfaces(result.surfaces)
     .some((surface) => surface.required !== false && !hasServedCode(surface));
+  // A digest alone is not evidence that THIS epoch has an obligation to
+  // discharge: lane state is created before the first obligation is added and
+  // may also contain an unrelated, non-matching epoch after a restart. A
+  // matching ledger with obligations still requires its branded discharge
+  // certificate; only an empty projection may proceed without one.
+  //
+  // A-F3 (2026-08-28): THAT RULE WAS FAIL-OPEN ON ITS OWN TARGET CLASS.
+  // `taskContractDigest(workspace) === undefined` — no ledger at all — read as
+  // ESTABLISHED, so the one state in which nothing has been proved was the
+  // easiest way to satisfy the theorem. Combined with the vacuous certificate
+  // an empty ledger used to mint, an exhaustive request could reach `accepted`
+  // having recorded no requirement whatsoever. An open-universe query is
+  // exactly the class A-4..A-7 exist for: for it, no ledger means NOT
+  // established, and only the branded discharge certificate over a non-empty
+  // ledger admits the act. `currentOpenUniverseExplicitGap` is deliberately not
+  // an escape here — this builder's final invocation runs after
+  // `recordEpochTaskContract` has persisted that same gap, so the durable proof
+  // is available by the time the decision ships.
+  //
+  // Non-exhaustive tasks keep the v0.12-compatible empty/absent-ledger accept.
+  // What they may NOT do is claim a ledger discharge while doing it, and
+  // `dischargeCertificate` now enforces that half: with no obligations there is
+  // no certificate, so the id stays in the legacy single-segment form.
+  const ledgerEstablished = hasOpenUniverseIntent(query)
+    ? ledgerCertificate !== undefined
+    : workspace === undefined
+      || taskContractDigest(workspace) === undefined
+      || ledgerCertificate !== undefined
+      // The current response's expansion limitation is already verified; the
+      // durable ledger is its continuation/replay record, not a prerequisite
+      // for recognizing this pack's own explicit capability gap.
+      || currentOpenUniverseExplicitGap
+      || (ledger.open.length === 0 && ledger.explicitGaps.length === 0);
+  // -------------------------------------------------------------------------
+  // A-F6 (2026-08-28): THE ACCEPTANCE LAYERS, and the OFF arm that is exactly
+  // v0.12.
+  //
+  // The shipped expression read `(!proofCompletion || proofComplete) &&
+  // (!proofCompletion || ledgerEstablished)`, which collapses to `true` when
+  // the switch is OFF — so OFF was neither v0.13 nor v0.12 but a THIRD, LOOSER
+  // behavior in which `baseReady` alone certified. The compatibility switch has
+  // to mean "v0.12 semantics", or the parity spec measures nothing and the
+  // escape hatch is more permissive than either release.
+  //
+  // LAYER 1, the theorem (A-6(1)): every readiness obligation carries a proof,
+  // and — under proof completion — the durable ledger backing them is
+  // established and discharged. Coverage classification and the risk score are
+  // NOT premises of it.
+  //
+  // LAYER 2, risk, as SUPPRESSION ONLY: it can withhold a theorem that holds,
+  // never admit one that does not. That keeps ON a restriction of OFF rather
+  // than a different rule, which is what makes the two comparable in a decision
+  // run.
+  const theoremHolds = proofComplete && (!proofCompletion || ledgerEstablished);
+  const riskSuppresses = risk.decision === "reject";
+  // E-1: every terminal act remains theorem-backed. A served-zoom
+  // affordance authorizes one bounded follow-up, but it is not a proof of
+  // unrelated answer obligations or of the task ledger's discharge. The
+  // affordance may absorb only the expected residual on the selected evidence
+  // surface (including its behavior body); an open-universe, identifier,
+  // concern, or ledger obligation still blocks the act.
+  const affordanceResidual = obligations.some((obligation) =>
+    obligation.status !== "proved"
+    && obligation.id !== "surface-content"
+    && obligation.id !== "behavior-body"
+  );
   const accepted = baseReady
     && (
-      (proofComplete && risk.decision === "accept")
-      || (servedZoomAffordance && !hasUnservedRequiredSurface)
+      (theoremHolds && !riskSuppresses)
+      || (servedZoomAffordance && !hasUnservedRequiredSurface && !affordanceResidual)
     );
   // The route relabel (answer_from_handles) is query-shape truth even when §14
   // serves the pack as generic; the terminal act must agree with it, or the
@@ -17144,8 +17404,24 @@ export function buildTaskExecutionContract(
   const answerShapedRoute = result.route?.action === "answer_from_handles";
   const terminalAction: "answer" | "edit" = profile === "answer" || answerShapedRoute ? "answer" : "edit";
   const continuationCall = result.continuation?.stages[0]?.calls[0];
-  const parsedNext = result.next ? nextStringToCall(result.next) : undefined;
+  const parsedNextCandidate = result.next ? nextStringToCall(result.next) : undefined;
+  const currentPackSpans = packServedSpans(result);
+  // The route builder can publish a zoom before same-pack sibling evidence is
+  // folded into the served-window ledger. Treat that parsed next as consumed
+  // immediately when the current response already covers its exact range; the
+  // later persisted ledger cannot repair a stale candidate that wins here.
+  const parsedNext = parsedNextCandidate !== undefined
+    && nextCallCoveredBySpans(result, parsedNextCandidate, currentPackSpans)
+    ? undefined
+    : parsedNextCandidate;
   const proofNext = nextCallForUnresolved(result, obligations, query);
+  // A pre-contract next can be stale after an authoritative absence has
+  // discharged the open-universe axis. Keep it only when the current proof
+  // model still has a matching unresolved call; otherwise the same search
+  // would be emitted again despite the durable explicit-gap witness.
+  const parsedNextAfterProof = openUniverseDischarged && proofNext === undefined
+    ? undefined
+    : parsedNext;
   // No unconditional tree fallback: every fallback must name evidence that
   // can resolve the current proof gap. Codeless surfaces re-serve their handle;
   // partial surfaces request the first explicitly omitted range.
@@ -17155,13 +17431,13 @@ export function buildTaskExecutionContract(
   const gapFallback: ContinuationCall | undefined = codelessRequired
     ? { tool: "read_file", arguments: { handle: codelessRequired.handle } }
     : undefined;
-  const partialRequired = requiredSurfaces.find((surface) =>
-    surface.content_completeness === "partial" && (surface.remaining_ranges?.length ?? 0) > 0
-  );
+  const partialRequired = requiredSurfaces
+    .map((surface) => ({ surface, range: firstUnservedPartialRange(workspace, surface, servedZoomScope, packServedSpans(result)) }))
+    .find((entry): entry is { surface: TaskPackSurface; range: string } => entry.range !== undefined);
   const partialFallback: ContinuationCall | undefined = partialRequired
     ? {
         tool: "read_file",
-        arguments: { handle: partialRequired.handle, range: partialRequired.remaining_ranges![0] },
+        arguments: { handle: partialRequired.surface.handle, range: partialRequired.range },
       }
     : undefined;
   // Serve-honesty (2026-08-01): a disclosed-but-unserved file — byte-budget
@@ -17209,7 +17485,7 @@ export function buildTaskExecutionContract(
     && (result.route.max_additional_tl_calls ?? 0) === 0;
   const candidateCall = accepted || humanChoicePending || routeClosedAnswer
     ? undefined
-    : [artifactFallback, continuationCall, parsedNext, proofNext, gapFallback, partialFallback, missingAffordance]
+    : [artifactFallback, continuationCall, proofNext, parsedNextAfterProof, gapFallback, partialFallback, missingAffordance]
         .filter((call): call is ContinuationCall => call !== undefined)
         .map((call) => admitReadOnlyNextCall(call, query))
         .find((call): call is ContinuationCall => call !== undefined);
@@ -17293,7 +17569,7 @@ export function buildTaskExecutionContract(
     workspace !== undefined ? priorEpochActionFrontier(workspace, query) : [],
   );
   const certificate = accepted
-    ? deterministicCertificate(query, profile, obligations, falsification, risk, actionFrontier, workspaceState)
+    ? deterministicCertificate(query, profile, obligations, falsification, risk, actionFrontier, workspaceState, ledgerCertificate?.digest)
     : undefined;
   const reason = accepted
     ? terminalAction === "answer"
@@ -17346,9 +17622,7 @@ export function buildTaskExecutionContract(
           : "no-grounded-call-remains"
     : undefined;
   const evidenceModel = buildDecisionEvidenceModel(terminalAction, obligations, falsification, risk);
-  const capabilityGaps = accepted
-    ? undefined
-    : buildCapabilityGaps(result, obligations, nextCall, awaitingUserInput);
+  const capabilityGaps = buildCapabilityGaps(result, obligations, nextCall, awaitingUserInput);
   const semanticClosure: TaskSemanticClosure = {
     version: 1,
     state: accepted ? "closed" : awaitingUserInput ? "awaiting-input" : "open",
@@ -17706,7 +17980,19 @@ export function reconcileTaskPackExecutionContract(result: TaskPackResult): void
  * shape). Belt-and-suspenders behind the builder/reconciler fixes; counts
  * via checks[] whenever it has to rewrite so the rate is observable.
  */
-export function enforceNoDeadEndContract(result: TaskPackResult, query: string): void {
+export function enforceNoDeadEndContract(
+  result: TaskPackResult,
+  query: string,
+  /**
+   * A-F2: the executed-next ledger this pack is being built against. Without
+   * it the guard is free to re-open a call whose result the session already
+   * consumed — which is why it had to run BEFORE suppression, and why the
+   * suppression that ran after it could leave a dead end nothing repaired.
+   * Optional so the readiness specs' synthetic, workspace-free contracts keep
+   * their pre-A-F2 call shape.
+   */
+  ledger?: { workspace: string; lane: string },
+): void {
   const contract = result.execution_contract;
   if (contract === undefined) return;
   const phase = contract.typestate.phase;
@@ -17728,11 +18014,25 @@ export function enforceNoDeadEndContract(result: TaskPackResult, query: string):
   const surfaces = codeTaskPackSurfaces(result.surfaces);
   const codeless = surfaces.find((surface) => !hasServedCode(surface));
   const unmatched = unmatchedConcernTokens(query, surfaces)[0];
-  const call: ContinuationCall = codeless !== undefined
-    ? { tool: "read_file", arguments: { handle: codeless.handle } }
-    : unmatched !== undefined
-      ? { tool: "search_files", arguments: { action: "find", query: unmatched } }
-      : { tool: "search_files", arguments: { action: "tree" } };
+  const candidates: ContinuationCall[] = [
+    ...(codeless !== undefined ? [{ tool: "read_file", arguments: { handle: codeless.handle } } as ContinuationCall] : []),
+    ...(unmatched !== undefined ? [{ tool: "search_files", arguments: { action: "find", query: unmatched } } as ContinuationCall] : []),
+    { tool: "search_files", arguments: { action: "tree" } },
+  ];
+  // A-F2: re-opening a call whose result is already consumed is the same
+  // non-progress this guard exists to prevent, one indirection removed. With a
+  // ledger in hand the guard picks the first UNEXECUTED candidate; with every
+  // candidate consumed it leaves the contract alone rather than manufacturing
+  // a loop, and the disclosure written by repairSuppressedNextCall stands.
+  const call = ledger === undefined
+    ? candidates[0]!
+    : candidates.find((candidate) => !hasExecutedNext(
+        ledger.workspace,
+        ledger.lane,
+        candidate.tool,
+        (candidate.arguments ?? {}) as Record<string, unknown>,
+      ));
+  if (call === undefined) return;
   const plan = enforceContinuationBudget({
     version: 1,
     stages: [{ execution: "sequential", calls: [call] }],
@@ -18929,7 +19229,7 @@ export function resetPackDedupeCache(): void {
  * resetPackDedupeCache, which would also discard OTHER workspaces'
  * legitimate in-task history).
  */
-export function clearPackDedupeForWorkspace(workspace: string): void {
+export function clearPackDedupeForWorkspace(workspace: string, lane?: string): void {
   const key = path.resolve(workspace);
   lastPackBlocksByWorkspace.delete(key);
   servedPacksByWorkspace.delete(key);
@@ -18943,8 +19243,24 @@ export function clearPackDedupeForWorkspace(workspace: string): void {
   // Both spellings: the store keys on the string its writers pass, and those
   // writers take `workspace` verbatim while this function's own siblings key
   // on the resolved path.
-  clearTaskContract(workspace);
-  clearTaskContract(key);
+  if (lane === undefined) {
+    // Legacy/internal callers do not have an authenticated lane. Preserve
+    // their old in-memory clearing semantics; the public server always passes
+    // its validated lane below and therefore never broad-clears peer lanes.
+    clearTaskContract(workspace);
+    clearTaskContract(key);
+    // P1-c(i): same incident class as the epoch requirement contract above
+    // (see that comment) — the executed-next ledger is the other per-lane,
+    // task-scoped store that must not let a later, unrelated task inherit an
+    // earlier one's "already ran this" suppression.
+    clearExecutedNextForWorkspace(workspace);
+    clearExecutedNextForWorkspace(key);
+  } else {
+    clearTaskContractsForLane(workspace, lane);
+    if (key !== workspace) clearTaskContractsForLane(key, lane);
+    clearExecutedNextForLane(workspace, lane);
+    if (key !== workspace) clearExecutedNextForLane(key, lane);
+  }
   // Same incident class, one store over (2026-08-27 field-eval follow-up).
   // `priorPackStore` shipped `clearPriorPackObligations` as its declared epoch
   // boundary and then never called it from production — so an explicit
@@ -19259,6 +19575,24 @@ export function packServedSpans(result: TaskPackResult): Map<string, Array<[numb
   return spans;
 }
 
+function nextCallCoveredBySpans(
+  result: TaskPackResult,
+  call: ContinuationCall,
+  spans: ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>,
+): boolean {
+  if (call.tool !== "read_file") return false;
+  const args = call.arguments as Record<string, unknown>;
+  if (typeof args.handle !== "string") return false;
+  const range = parsePackLineRange(args.range);
+  if (range === undefined) return false;
+  const surface = codeTaskPackSurfaces(result.surfaces)
+    .find((candidate) => candidate.handle === args.handle);
+  if (surface === undefined) return false;
+  return spans.get(surface.path)?.some(([start, end]) =>
+    start <= range[0] && end >= range[1]
+  ) === true;
+}
+
 /**
  * B2d: LEDGER CONTINUITY. The pack serve path never touched the served-range
  * ledger, so a slice issued right after a pack could not see the pack's own
@@ -19269,7 +19603,186 @@ export function packServedSpans(result: TaskPackResult): Map<string, Array<[numb
  * Bounded by MAX_FINGERPRINT_FILES like every other capture-time read, and
  * fail-safe: an unreadable file simply records nothing.
  */
-function recordPackServedRanges(workspace: string, result: TaskPackResult): void {
+function parsePackLineRange(value: unknown): [number, number] | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^(\d+)-(\d+)$/.exec(value);
+  if (match === null) return undefined;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  return Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start
+    ? [start, end]
+    : undefined;
+}
+
+export interface ServedWindowScope {
+  readonly epoch: string;
+  readonly lane: string;
+  readonly reset?: boolean;
+}
+
+function servedZoomScopeForArgs(
+  args: TaskPackArgs | undefined,
+  query: string,
+): ServedWindowScope | undefined {
+  if (args === undefined) return undefined;
+  return {
+    epoch: tokenizeForEpoch(query).join("\u0000"),
+    lane: normalizeContractLane(args.lane),
+    ...(args.taskEpoch === "new" ? { reset: true } : {}),
+  };
+}
+
+function scopedWindowHasUnservedLines(
+  workspace: string | undefined,
+  surface: TaskPackSurface,
+  parsed: [number, number],
+  scope: ServedWindowScope | undefined,
+): boolean {
+  if (workspace === undefined) return true;
+  if (scope === undefined) {
+    return servedFindWindowHasUnservedLines(workspace, surface.path, parsed[0], parsed[1]);
+  }
+  return servedWindowHasUnservedLines({
+    workspaceRoot: workspace,
+    epoch: scope.epoch,
+    lane: scope.lane,
+    path: surface.path,
+    sha: surfaceFileSha(workspace, surface.path),
+    startLine: parsed[0],
+    endLine: parsed[1],
+  });
+}
+
+/** Select only a disclosed window that still has bytes outside the served ledger. */
+export function firstUnservedPartialRange(
+  workspace: string | undefined,
+  surface: TaskPackSurface,
+  scope?: ServedWindowScope,
+  currentPackSpans?: ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>,
+): string | undefined {
+  for (const range of surface.remaining_ranges ?? []) {
+    const parsed = parsePackLineRange(range);
+    // Keep malformed producer data actionable; the normal read admission will
+    // reject it if it cannot be executed, while a valid range is checked against
+    // the scoped served-window ledger before it becomes a zoom.
+    if (parsed === undefined) return range;
+    const coveredByCurrentPack = currentPackSpans?.get(surface.path)?.some(([start, end]) =>
+      start <= parsed[0] && end >= parsed[1]
+    ) === true;
+    if (coveredByCurrentPack) continue;
+    if (scopedWindowHasUnservedLines(workspace, surface, parsed, scope)) return range;
+  }
+  return undefined;
+}
+
+/**
+ * Mark zoom ranges already served by this workspace session before canonical
+ * projection. This is an internal producer marker: protocol/readFamily.ts
+ * projects only the frozen wire fields, while canonicalDecision.ts uses it to
+ * avoid reviving a stale document zoom after the contract correctly declined it.
+ */
+export function markServedZoomCandidates(
+  workspace: string,
+  result: TaskPackResult,
+  forceServe = false,
+  scope?: ServedWindowScope,
+): void {
+  if (forceServe) return;
+  const suppressed: string[] = [];
+  const currentPackSpans = packServedSpans(result);
+  for (const surface of codeTaskPackSurfaces(result.surfaces)) {
+    for (const range of surface.remaining_ranges ?? []) {
+      const parsed = parsePackLineRange(range);
+      if (
+        parsed !== undefined
+        && (
+          currentPackSpans.get(surface.path)?.some(([start, end]) =>
+            start <= parsed[0] && end >= parsed[1]
+          ) === true
+          || !scopedWindowHasUnservedLines(workspace, surface, parsed, scope)
+        )
+      ) {
+        suppressed.push(JSON.stringify([surface.handle, range]));
+      }
+    }
+  }
+  if (suppressed.length > 0) {
+    (result as TaskPackResult & { served_zoom_suppressed?: string[] }).served_zoom_suppressed = suppressed;
+  }
+
+  // `result.next` and the continuation plan can be minted before the current
+  // pack's served spans are booked. If that emitted zoom is already covered by
+  // a sibling surface in this same response, remove it before canonical
+  // projection and select the first genuinely unserved required window.
+  const parsedResultNext = result.next ? nextStringToCall(result.next) : undefined;
+  const staleResultNext = parsedResultNext !== undefined
+    && nextCallCoveredBySpans(result, parsedResultNext, currentPackSpans);
+  const contractNext = result.execution_contract?.next_call;
+  const staleContractNext = contractNext !== undefined
+    && nextCallCoveredBySpans(result, contractNext, currentPackSpans);
+  const servedZoomExhausted = suppressed.length > 0
+    && codeTaskPackSurfaces(result.surfaces)
+      .filter((surface) => surface.required !== false)
+      .every((surface) =>
+        firstUnservedPartialRange(workspace, surface, scope, currentPackSpans) === undefined
+      );
+  if (
+    staleResultNext
+    || staleContractNext
+    || (!proofCompletionEnabled() && servedZoomExhausted)
+  ) {
+    delete result.next;
+    delete result.continuation;
+    const replacement = codeTaskPackSurfaces(result.surfaces)
+      .filter((surface) => surface.required !== false)
+      .map((surface) => ({
+        surface,
+        range: firstUnservedPartialRange(workspace, surface, scope, currentPackSpans),
+      }))
+      .find((entry): entry is { surface: TaskPackSurface; range: string } => entry.range !== undefined);
+    if (replacement !== undefined) {
+      const replacementCall: ContinuationCall = {
+        tool: "read_file",
+        arguments: { handle: replacement.surface.handle, range: replacement.range },
+      };
+      result.next = `read_file mode=slice handle=${replacement.surface.handle} range=${replacement.range}`;
+      if (result.execution_contract !== undefined) {
+        result.execution_contract.next_call = replacementCall;
+        if (result.execution_contract.call_budget !== undefined) {
+          result.execution_contract.call_budget = {
+            ...result.execution_contract.call_budget,
+            candidate_call: replacementCall,
+          };
+        }
+      }
+    } else if (result.execution_contract !== undefined) {
+      delete result.execution_contract.next_call;
+      if (result.execution_contract.call_budget !== undefined) {
+        delete result.execution_contract.call_budget.candidate_call;
+      }
+      // E-1 OFF parity: E-2 still removes a same-pack-served zoom, but the
+      // proof-completion switch must not turn that removal into a terminal
+      // act.* decision. Keep the legacy conservative await-input state when
+      // no unserved replacement remains; ON can certify only after discharge.
+      if (!proofCompletionEnabled()) {
+        result.execution_contract.state = "needs-followup";
+        result.execution_contract.readiness = "needs-followup";
+        result.execution_contract.discovery_complete = false;
+        result.execution_contract.next_action = "request-user-input";
+        result.execution_contract.typestate.phase = "awaiting-input";
+        result.execution_contract.typestate.allowed_actions = ["request-user-input"];
+        result.execution_contract.typestate.challenge_required_for = [];
+      }
+    }
+  }
+}
+
+function recordPackServedRanges(
+  workspace: string,
+  result: TaskPackResult,
+  scope?: ServedWindowScope,
+): void {
+  if (scope?.reset) clearServedWindowsForScope(workspace, scope.epoch, scope.lane);
   const spans = packServedSpans(result);
   if (spans.size === 0) return;
   // F3: one ordinal for the whole pack — every span it books was served by the
@@ -19294,11 +19807,23 @@ function recordPackServedRanges(workspace: string, result: TaskPackResult): void
     const totalLines = Math.max(1, countLines(text));
     for (const [start, end] of ranges) {
       if (start > totalLines) continue;
-      recordServedRange(workspace, relPath, sha, start, Math.min(end, totalLines), totalLines, {
+      const servedEnd = Math.min(end, totalLines);
+      recordServedRange(workspace, relPath, sha, start, servedEnd, totalLines, {
         mode: "task_pack",
-        range: `${start}-${Math.min(end, totalLines)}`,
+        range: `${start}-${servedEnd}`,
         call: packCall,
       });
+      if (scope !== undefined) {
+        recordServedWindow({
+          workspaceRoot: workspace,
+          epoch: scope.epoch,
+          lane: scope.lane,
+          path: relPath,
+          sha,
+          startLine: start,
+          endLine: servedEnd,
+        });
+      }
     }
   }
 }
@@ -19347,7 +19872,11 @@ function captureServedPack(
   // B2d: ledger continuity runs for EVERY captured pack, including the artifact
   // shape that returns early below — code surfaces on a mixed pack still served
   // real lines.
-  recordPackServedRanges(workspace, served);
+  recordPackServedRanges(
+    workspace,
+    served,
+    servedZoomScopeForArgs(args, args.query ?? args.symbol ?? args.path ?? ""),
+  );
   // Cached packs serialize code-surface identity (range+role). Artifact packs
   // deliberately bypass this optimization so their strict discovery shape is
   // never collapsed into, or re-served as, a code surface — so THIS pack is not
@@ -19529,11 +20058,26 @@ function suppressNonProgressingNextCall(
   result: TaskPackResult,
   args: TaskPackArgs | undefined,
   effectiveQuery: string,
+  servedZoomScope?: ServedWindowScope,
 ): void {
   const contract = result.execution_contract;
   const nextCall = contract?.next_call;
   if (contract === undefined || nextCall === undefined) return;
   const ncArgs = (nextCall.arguments ?? {}) as Record<string, unknown>;
+
+  // The server records every successful tool action before the next pack can
+  // be built.  A result (including absence/empty) is consumed work, so never
+  // put the identical action back on the wire.
+  const requestedLane = args as (TaskPackArgs & { lane?: unknown }) | undefined;
+  // A-F1: the SAME normalization the dispatcher writes under. This read keyed
+  // on "default" while the writer keyed on "" for every lane-less call, which
+  // is exactly the default single-agent path, so the gate below never fired.
+  const lane = normalizeContractLane(requestedLane?.lane);
+  if (hasExecutedNext(workspace, lane, nextCall.tool, ncArgs)) {
+    // A-F2: suppression alone was a dead end. Try the deterministic axes first.
+    repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope);
+    return;
+  }
 
   if (nextCall.tool === "read_file" && ncArgs["mode"] === "task_pack" && args !== undefined) {
     const callerPaths = [
@@ -19555,19 +20099,19 @@ function suppressNonProgressingNextCall(
     const samePaths = ncPaths.length > 0 && JSON.stringify(ncPaths) === JSON.stringify(callerPaths);
     if (sameQuery && samePaths) {
       const dir = ncPaths.find((p) => dirExistsCached(workspace, workspace, p));
-      if (dir !== undefined) {
+      if (dir !== undefined && !hasExecutedNext(workspace, lane, "search_files", { action: "tree", path: dir })) {
         contract.next_call = { tool: "search_files", arguments: { action: "tree", path: dir } };
       } else {
-        delete contract.next_call;
-        (result as unknown as Record<string, unknown>)["retry_same_call"] = false;
-        contract.reason = `${contract.reason}; identical re-call suppressed — it just ran and cannot progress`;
+        // A-F2: the dir arm's own else-branch was a second bare dead end.
+        repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope);
       }
       return;
     }
   }
 
   if (advanceExecutedLocateNextCall(workspace, contract) === "suppressed") {
-    (result as unknown as Record<string, unknown>)["retry_same_call"] = false;
+    // A-F2: a locate that returned nothing is consumed work, not a terminus.
+    repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope);
   }
 }
 
@@ -19581,17 +20125,43 @@ function suppressNonProgressingNextCall(
  * exact-fingerprint replay), because a receipt replays the contract captured
  * BEFORE its next_call ran and would otherwise re-point at it forever.
  */
-function advanceExecutedLocateNextCall(
+/** Actions advanceExecutedLocateNextCall's no-repeat check covers. tree keys on `path`; the rest key on `query`. */
+export const GENERALIZED_NO_REPEAT_ACTIONS: ReadonlySet<string> = new Set(["locate", "find", "references", "tree"]);
+/**
+ * P1-b (2026-08-28): the RECEIPT call site (compactReceiptFromRecord) passes
+ * this narrower set deliberately — see that call site's own comment for why
+ * (no wire channel exists there for a NEW find/references/tree disclosure;
+ * `read.task_pack`'s projector never ships `missing[]` and the frozen
+ * `await_input` decision member carries no `gaps` key).
+ */
+export const LOCATE_ONLY_NO_REPEAT_ACTIONS: ReadonlySet<string> = new Set(["locate"]);
+
+export function advanceExecutedLocateNextCall(
   workspace: string,
   contract: TaskExecutionContract,
+  allowedActions: ReadonlySet<string> = GENERALIZED_NO_REPEAT_ACTIONS,
 ): "advanced" | "suppressed" | "kept" {
   const nextCall = contract.next_call;
   if (nextCall === undefined || nextCall.tool !== "search_files") return "kept";
   const ncArgs = (nextCall.arguments ?? {}) as Record<string, unknown>;
-  if (ncArgs["action"] !== "locate") return "kept";
-  const executed = consultExecutedLocate(workspace, String(ncArgs["query"] ?? ""));
+  const action = typeof ncArgs["action"] === "string" ? ncArgs["action"] : "";
+  // P1-b (2026-08-28 review-fix wave): was `action !== "locate"` return
+  // "kept" — a bare passthrough that let find/references/tree re-propose an
+  // already-answered search forever, the same loop-class this locate-only
+  // check already closed for locate (P0-2's own defect class). The fresh-
+  // build call site (suppressNonProgressingNextCall) uses the default,
+  // generalized set; the receipt call site restricts to locate-only.
+  if (!allowedActions.has(action)) return "kept";
+  const searchKey = action === "tree" ? String(ncArgs["path"] ?? "") : String(ncArgs["query"] ?? "");
+  const executed = consultExecutedSearch(workspace, action, searchKey);
   if (executed === undefined) return "kept";
-  if (executed.length > 0) {
+  // Only `locate` mints handles its candidates can be batch-read from
+  // (candidateDetails[].handle). find/references/tree responses are
+  // path/line-shaped with no handle affordance (findText.ts/findReferences.ts
+  // never mint one), so advancing them to a `read_file handles=[...]` next
+  // would invent a call shape their own recorded candidates cannot back —
+  // every non-locate action here only ever SUPPRESSES a proven repeat.
+  if (action === "locate" && executed.length > 0) {
     contract.next_call = {
       tool: "read_file",
       arguments: { handles: executed.slice(0, MAX_BATCH_NEXT_HANDLES) },
@@ -19599,8 +20169,209 @@ function advanceExecutedLocateNextCall(
     return "advanced";
   }
   delete contract.next_call;
-  contract.reason = `${contract.reason}; next_call suppressed: that locate already ran this session and returned no candidates — widen scope (paths/cwd) or act on held evidence`;
+  contract.reason = `${contract.reason}; next_call suppressed: that ${action} already ran this session and returned no usable candidates — widen scope (paths/cwd) or act on held evidence`;
   return "suppressed";
+}
+
+/**
+ * A-F2 (2026-08-28): THE DETERMINISTIC ALTERNATIVE-AXIS RULES.
+ *
+ * `advanceExecutedLocateNextCall` already knew that suppressing a consumed
+ * next is only half the job — its "advanced" arm turns an executed locate into
+ * a batched read of that locate's own candidates, and
+ * `suppressNonProgressingNextCall`'s dir arm turns a same-scope re-pack into a
+ * tree of that scope. Both rules were reachable from exactly one call shape
+ * each; every OTHER suppression fell straight through to a bare
+ * `await_input: no-grounded-call-remains` with no next and no gap. This
+ * generalizes the two rules and adds the surface-derived axes, in a fixed
+ * order, and drops any candidate whose result this session has already
+ * consumed.
+ *
+ * There is deliberately NO unconditional `tree` arm: the contract builder's
+ * own rule is that "every fallback must name evidence that can resolve the
+ * current proof gap", and a repo-wide inventory names none. When no rule
+ * yields an unexecuted, evidence-naming call, the caller discloses an explicit
+ * gap instead of inventing work.
+ */
+function alternativeProgressAxis(
+  workspace: string,
+  lane: string,
+  result: TaskPackResult,
+  query: string,
+  blocked: ContinuationCall,
+  servedZoomScope?: ServedWindowScope,
+): ContinuationCall | undefined {
+  const blockedArgs = (blocked.arguments ?? {}) as Record<string, unknown>;
+  const candidates: ContinuationCall[] = [];
+
+  // Rule 1 — generalizes advanceExecutedLocateNextCall's "advanced" arm: a
+  // search whose candidates this session already holds becomes a batched read.
+  if (blocked.tool === "search_files") {
+    const executed = consultExecutedLocate(workspace, String(blockedArgs["query"] ?? ""));
+    if (executed !== undefined && executed.length > 0) {
+      candidates.push({ tool: "read_file", arguments: { handles: executed.slice(0, MAX_BATCH_NEXT_HANDLES) } });
+    }
+  }
+  // Rule 2 — generalizes the same-scope re-pack arm: a re-pack of a directory
+  // this caller already named becomes an inventory of that exact directory.
+  if (blocked.tool === "read_file" && blockedArgs["mode"] === "task_pack") {
+    const requested = Array.isArray(blockedArgs["paths"]) ? blockedArgs["paths"] as unknown[] : [];
+    for (const entry of requested) {
+      const candidate = typeof entry === "object" && entry !== null
+        ? String((entry as { path?: unknown }).path ?? "")
+        : String(entry);
+      if (candidate.length > 0 && dirExistsCached(workspace, workspace, candidate)) {
+        candidates.push({ tool: "search_files", arguments: { action: "tree", path: candidate } });
+      }
+    }
+  }
+  // Tolerates a loosely-typed producer-exit payload whose surfaces may already
+  // have been projected away; the search axes above and below still apply.
+  const surfaces = codeTaskPackSurfaces(Array.isArray(result.surfaces) ? result.surfaces : []);
+  // Rule 3 — a required surface with no served code re-serves its own handle
+  // (the contract builder's `gapFallback`, reachable after suppression).
+  for (const surface of surfaces) {
+    if (surface.required !== false && !hasServedCode(surface)) {
+      candidates.push({ tool: "read_file", arguments: { handle: surface.handle } });
+    }
+  }
+  // Rule 4 — a disclosed-partial required surface zooms its first omitted
+  // window (the builder's `partialFallback`).
+  for (const surface of surfaces) {
+    if (surface.required !== false) {
+      const range = firstUnservedPartialRange(workspace, surface, servedZoomScope, packServedSpans(result));
+      if (range !== undefined) {
+        candidates.push({
+          tool: "read_file",
+          arguments: { handle: surface.handle, range },
+        });
+      }
+    }
+  }
+  // Rule 5 — a concern token the served bodies still do not match gets its own
+  // find. Absence-proved tokens are already excluded by unmatchedConcernTokens,
+  // and the ledger filter below catches anything it misses.
+  for (const token of unmatchedConcernTokens(query, surfaces)) {
+    candidates.push({ tool: "search_files", arguments: { action: "find", query: token } });
+  }
+  // Rule 6 (R1, 2026-08-28) — THE DISCOVERY BUNDLE IS AN AXIS, NOT A SEPARATE
+  // ROUTE.
+  //
+  // `discoveryBundleNext` is the projector's own highest-ranked continuation,
+  // and it satisfies this function's admission rule exactly — its paths are
+  // "limited to files already related by served candidates or evidence edges",
+  // which is what "name evidence that can resolve the current proof gap" means
+  // for a re-pack. It was invisible here only because it is computed on the
+  // WIRE side, so a pack whose contract next_call was suppressed declared
+  // exhaustion while its own bundle route was still unexecuted — observed on
+  // the qc1 replay shape, whose caller-supplied `surfaceRoles` make the
+  // missing-roles hint byte-identical to the call being served.
+  //
+  // ORDERED LAST, deliberately: every shape rules 1–5 already repair keeps the
+  // exact call it repaired to, so this rescues only the packs that would
+  // otherwise have disclosed exhaustion. The ledger filter below still applies,
+  // so a bundle this lane has already run is not proposed again.
+  //
+  // REACHABLE ONLY FROM THE PRODUCER EXIT, and that is the point: `qref` is
+  // stamped in server.ts AFTER `buildTaskPack` returns, so at the in-build
+  // choke `discoveryBundleNext` reads an unset `qref` and declines. The exit's
+  // own call to this repair runs with the ref bound, which is where the axis
+  // becomes real.
+  const bundle = discoveryBundleNext(result);
+  if (bundle !== undefined) candidates.push(bundle);
+
+  const blockedFingerprint = nextFingerprint(blocked.tool, blockedArgs);
+  for (const candidate of candidates) {
+    const args = (candidate.arguments ?? {}) as Record<string, unknown>;
+    if (nextFingerprint(candidate.tool, args) === blockedFingerprint) continue;
+    // The predicate is RESULT CONSUMPTION, not byte novelty: an absent find and
+    // an empty tree consumed their call just as much as a served slice did.
+    if (hasExecutedNext(workspace, lane, candidate.tool, args)) continue;
+    const admitted = admitReadOnlyNextCall(candidate, query);
+    if (admitted !== undefined) return admitted;
+  }
+  return undefined;
+}
+
+/**
+ * A-F2: turn ONE suppressed next into either progress or an honest disclosure —
+ * never into a bare dead end, and never into a smaller request.
+ *
+ * Shared by this module's choke point and server.ts's producer exit, which had
+ * independently grown the same "delete next_call, set request-user-input"
+ * rewrite. The exit copy additionally FILTERED the suppressed call's query out
+ * of `missing[]`, which shrank the disclosed requirement set at the exact
+ * moment the pack lost its ability to act on it; §A-6(2) makes disclosure of an
+ * undischarged obligation permanent, so that filter is gone.
+ */
+export function repairSuppressedNextCall(
+  workspace: string,
+  lane: string,
+  result: TaskPackResult,
+  query: string,
+  blocked: ContinuationCall,
+  servedZoomScope?: ServedWindowScope,
+): "advanced" | "disclosed" {
+  const contract = result.execution_contract;
+  const alternative = alternativeProgressAxis(workspace, lane, result, query, blocked, servedZoomScope);
+  (result as unknown as Record<string, unknown>)["retry_same_call"] = false;
+  if (alternative !== undefined) {
+    if (contract !== undefined) {
+      contract.next_call = alternative;
+      contract.next_action = "followup";
+      delete contract.await_input_code;
+      contract.max_additional_discovery_calls = Math.max(contract.max_additional_discovery_calls ?? 0, 1);
+      contract.reason = `${contract.reason}; identical successful next replaced by the next unexecuted evidence axis`;
+    }
+    const plan = enforceContinuationBudget({
+      version: 1,
+      stages: [{ execution: "sequential", calls: [alternative] }],
+    });
+    if (plan) {
+      result.continuation = plan;
+      const next = deriveNextFromPlan(plan);
+      if (next !== undefined) result.next = next;
+    }
+    return "advanced";
+  }
+  // Exhausted. Disclose the gap; keep every open obligation visible.
+  const blockedTarget = typeof (blocked.arguments ?? {})["query"] === "string"
+    ? String((blocked.arguments ?? {})["query"])
+    : blocked.tool;
+  if (contract !== undefined) {
+    delete contract.next_call;
+    contract.next_action = "request-user-input";
+    contract.await_input_code = "no-grounded-call-remains";
+    contract.max_additional_discovery_calls = 0;
+    contract.reason = `${contract.reason}; identical successful next suppressed and every deterministic evidence axis is already consumed — the remaining gap is disclosed, not withdrawn`;
+    const uncovered = (contract.evidence_model?.unresolved ?? []).slice(0, 8);
+    contract.capability_gaps = [
+      ...(contract.capability_gaps ?? []).filter((gap) => gap.kind !== "missing-evidence"),
+      {
+        kind: "missing-evidence" as const,
+        recoverable: false,
+        reason: `every deterministic evidence axis for ${blockedTarget} has already been executed this task`,
+        ...(uncovered.length > 0 ? { obligation_ids: uncovered } : {}),
+      },
+    ].slice(0, 3);
+  }
+  delete result.next;
+  delete result.continuation;
+  // The producer exit calls this with a loosely-typed payload whose `missing`
+  // may legitimately be absent (its previous inline copy guarded the same way).
+  result.missing = [...new Set([
+    ...(Array.isArray(result.missing) ? result.missing : []),
+    `explicit-gap:${blockedTarget} (every deterministic evidence axis for it has already been executed)`,
+  ])];
+  // `missing[]` ships only on a partial pack (readFamily.ts A.8.2), and the
+  // frozen `await_input` member carries no `gaps` key — so without this the
+  // disclosure exists in-process and nowhere the caller can see it. A pack that
+  // has run out of ways to discharge an obligation is not complete.
+  if (result.coverage !== "partial") {
+    result.coverage = "partial";
+    result.coverage_reason ??= "concerns-uncovered";
+  }
+  return "disclosed";
 }
 
 /** Cap `reason` at `cap` chars on a clause boundary ("; " / " — "), never mid-word. */
@@ -19685,8 +20456,23 @@ function compactReceiptFromRecord(
   // executed-locate ledger so a receipt can never re-point at a call that
   // already ran (observed live: a qref re-pack replaying the locate it had
   // just triggered, once the decoy-gate made the subset receipt eligible).
+  //
+  // P1-b (2026-08-28 review-fix wave): DELIBERATELY kept locate-only here
+  // (the historical scope), not generalized to find/references/tree. Reason,
+  // discovered empirically while extending it: `read.task_pack`'s wire
+  // projector (readFamily.ts's `KEPT_ON_TASK_PACK`/`projectTaskPack`) never
+  // ships a top-level `missing[]` field, and the frozen `await_input`
+  // decision member carries no `gaps` key either (I5's own comment) — so a
+  // NEW disclosure this compact path might synthesize for a find/references/
+  // tree suppression has no wire channel to travel through without a
+  // protocol-frozen field addition, out of this wave's scope. The fresh-build
+  // path (`suppressNonProgressingNextCall` -> `repairSuppressedNextCall`)
+  // does not have this gap — it runs before the response is wire-projected
+  // and its own `missing[]` write is a genuine, already-tested mechanism —
+  // so the generalization is scoped to that path only. See the design-delta
+  // note in the A-REPORT for the fuller trace.
   const receiptAdvance = compactExecutionContract !== undefined
-    ? advanceExecutedLocateNextCall(workspace, compactExecutionContract)
+    ? advanceExecutedLocateNextCall(workspace, compactExecutionContract, LOCATE_ONLY_NO_REPEAT_ACTIONS)
     : "kept";
   // iter-2 W1/W2: the receipt's route re-affirms "working set complete — stop"
   // when the cached pack was complete/focused, so re-serves keep telling the
@@ -20162,8 +20948,18 @@ const MAX_EPOCH_CONTRACT_DISCLOSURES = 4;
  * uncovered keeps the store's claim exactly as strong as the pack's own.
  */
 function epochConcernTokensFor(result: TaskPackResult, query: string): string[] {
-  if (result.coverage_reason !== "concerns-uncovered") return [];
-  return unmatchedConcernTokens(query, codeTaskPackSurfaces(result.surfaces));
+  const tokens = result.coverage_reason === "concerns-uncovered"
+    ? unmatchedConcernTokens(query, codeTaskPackSurfaces(result.surfaces))
+    : [];
+  // Keep an additive open-universe mutation's requested value as a durable
+  // concern so an authoritative absent find can be consumed by the next
+  // same-task-handle pack (e.g. REFUNDED), even when the first pack is
+  // otherwise complete.
+  if (hasOpenUniverseIntent(query) && !isAdditiveEnumIntent(query)) {
+    const requestedValue = query.match(/\b[A-Z][A-Z0-9_]{2,}\b/)?.[0];
+    if (requestedValue !== undefined && !tokens.includes(requestedValue)) tokens.push(requestedValue);
+  }
+  return tokens;
 }
 
 /**
@@ -20187,6 +20983,12 @@ function epochServedEvidence(
       handle: entry.handle ?? "",
       path: entry.path,
       range: "",
+      // The serve log deliberately stores identities rather than response
+      // bodies.  Re-read the still-local source only for this server-side
+      // proof check, so a same-epoch challenge can prove an earlier concern
+      // from evidence it genuinely served instead of reopening it merely
+      // because the current pack selected a different frontier.
+      code: readCached(workspace, entry.path),
     })),
   ];
 }
@@ -20206,6 +21008,7 @@ function reconcileEpochTaskContract(
   if (stored === undefined) return;
   const evidence = epochServedEvidence(workspace, result, epochTokens);
   const covered = new Set([...stored.servedRoles, ...evidence.map((surface) => surface.role)]);
+  recordServedRoleEvidence(workspace, [...covered]);
   // A BACKSTOP, not a second narrator. When this pack already names the gap in
   // the ordinary vocabulary — which is the normal case now that
   // `requiredSurfacesForTask` carries roles forward at inference time — there
@@ -20223,13 +21026,42 @@ function reconcileEpochTaskContract(
     .filter((role) => !covered.has(role) && !alreadyDisclosed.includes(role.toLowerCase()))
     .slice(0, MAX_EPOCH_CONTRACT_DISCLOSURES);
   const coveredConcerns = new Set(stored.coveredConcernTokens);
+  const newlyServedConcerns = stored.concernTokens.filter((token) =>
+    concernTokenMatchesSurfaces(token, evidence)
+  );
+  // Make the durable ledger agree with the evidence reconciliation before the
+  // final contract is built.  A challenge may legitimately serve the second
+  // of two same-epoch frontiers; retaining the first frontier's proof is what
+  // makes their union terminal rather than an awaiting-input regression.
+  recordServedConcernEvidence(workspace, newlyServedConcerns);
+  newlyServedConcerns.forEach((token) => coveredConcerns.add(token));
   const uncoveredConcerns = stored.concernTokens
     .filter((token) =>
       !coveredConcerns.has(token)
       && !alreadyDisclosed.includes(token.toLowerCase())
       && !concernTokenMatchesSurfaces(token, evidence))
     .slice(0, MAX_EPOCH_CONTRACT_DISCLOSURES);
-  if (unservedRoles.length === 0 && uncoveredConcerns.length === 0) return;
+  if (unservedRoles.length === 0 && uncoveredConcerns.length === 0) {
+    // `buildTaskExecutionContract` is evaluated once before this reconciliation
+    // and once for the final wire result.  Drop only its *derived* prior
+    // projection here so the second evaluation can project the now-discharge
+    // ledger.  User-facing missing evidence and explicit capability gaps stay
+    // untouched.
+    const discharged = new Set([
+      ...[...covered].map((role) => `unresolved-ledger:required-role:${role}`),
+      ...[...coveredConcerns].map((token) => `unresolved-ledger:concern-token:${token}`),
+    ]);
+    result.missing = result.missing.filter((entry) => !discharged.has(entry));
+    if (
+      result.coverage_basis === "cumulative"
+      && result.missing.length === 0
+      && (result.missing_required_surfaces?.length ?? 0) === 0
+    ) {
+      result.coverage = "complete";
+      delete result.coverage_reason;
+    }
+    return;
+  }
 
   // The epoch's SOURCE query, not this narrowed call's — a continuation that
   // re-asks with the truncated text is the defect one file over.
@@ -20260,27 +21092,207 @@ function reconcileEpochTaskContract(
  * named as a concern, and what it actually served. Runs AFTER the
  * reconciliation above, so a pack is never measured against its own record.
  */
+interface PersistedEvidenceExpansion {
+  targets: readonly string[];
+  remaining: readonly string[];
+  gaps: readonly string[];
+}
+
+const MAX_EVIDENCE_EXPANSION_TARGETS = 4;
+
+async function importEvidenceExpansion(
+  workspace: string,
+  primaries: readonly ImpactCandidate[],
+  query: string,
+  surfaces: readonly TaskPackSurface[],
+): Promise<PersistedEvidenceExpansion> {
+  // P1-g (2026-08-28 review-fix wave): this called walkCodeFiles(workspace)
+  // — an ignore-aware walk of the ENTIRE workspace — unconditionally for
+  // every pack, including the overwhelming majority that are not an
+  // open-universe/exhaustive request and have no use for the result: both of
+  // this function's own callers feed `evidenceExpansion` into
+  // dedupeTrimAndPersist, which reads only `.gaps` (via
+  // hasCurrentEvidenceExpansionGap, itself gated on hasOpenUniverseIntent)
+  // and passes the whole object into recordEpochTaskContract, whose
+  // `expansionTargets`/`expansionGaps` both force to `[]` when
+  // `!hasOpenUniverseIntent(query)`. A non-open-universe task's expansion
+  // result is therefore fully inert downstream today — gating the walk
+  // (and the importEdgeCandidates/calleesOf work below it) behind the same
+  // canonical predicate changes no observable behavior for that majority and
+  // removes the per-pack full-repository walk from its cost. Deliberately
+  // NOT also gated on `primaries.length === 0`: even with zero primaries the
+  // pre-wave code still derived `directCallees` from already-served surface
+  // bodies via calleesOf below, independent of `files`/importEdgeCandidates
+  // — preserving that path keeps this change scoped to the walk-avoidance
+  // fix alone.
+  if (!hasOpenUniverseIntent(query)) {
+    return { targets: [], remaining: [], gaps: [] };
+  }
+  // In-pack memoization: `files` is computed once here and shared by every
+  // `primary` in the Promise.all below — this function's own two call sites
+  // (the general and answer-shaped pack builders) are mutually exclusive per
+  // pack build, so there is no second walk to memoize across within one pack.
+  const files = walkCodeFiles(workspace);
+  const queryTokens = query.toLowerCase().match(/[a-z_$][a-z0-9_$]*/g) ?? [];
+  const details = await Promise.all(primaries.slice(0, MAX_EVIDENCE_EXPANSION_TARGETS).map((primary) =>
+    importEdgeCandidates(workspace, primary as unknown as Parameters<typeof importEdgeCandidates>[1], queryTokens, files),
+  ));
+  const served = codeTaskPackSurfaces([...surfaces]).filter(hasServedCode);
+  const directCallees = served.flatMap((surface) =>
+    calleesOf(surface.code!, surface.symbol ? [surface.symbol] : []),
+  );
+  const candidates = [...new Set([
+    ...details.flatMap((detail) => detail.candidates.map((candidate) => candidate.symbol ?? candidate.path)),
+    ...directCallees,
+  ])];
+  const remaining = details.flatMap((detail) => detail.remaining.map((candidate) => candidate.symbol ?? candidate.path));
+  const primaryPath = served[0]?.path ?? primaries[0]?.path;
+  const language = primaryPath === undefined ? "unknown" : (languageForPath(primaryPath) ?? "unknown");
+  const expansion = expandOneHop(language, candidates, MAX_EVIDENCE_EXPANSION_TARGETS);
+  return {
+    targets: expansion.targets.map((entry) => entry.target),
+    remaining: [...expansion.remaining, ...remaining],
+    gaps: [
+      ...(expansion.explicitGap === undefined ? [] : [expansion.explicitGap]),
+      ...(remaining.length === 0 ? [] : [`import-edge expansion has ${remaining.length} unserved target(s)`]),
+    ],
+  };
+}
+
+/** Whether this response itself carries an extractor-capability proof that
+ * must be visible to its final readiness rebuild. Ordinary unresolved
+ * expansions remain post-decision epoch bookkeeping so their prescribed
+ * discovery next is emitted before the ledger grows. */
+function hasCurrentEvidenceExpansionGap(
+  result: TaskPackResult,
+  query: string,
+): boolean {
+  if (!hasOpenUniverseIntent(query) || isAdditiveEnumIntent(query)) return false;
+  const requestedSymbols = explicitCodeIdentifiers(query).slice(0, 1);
+  return codeTaskPackSurfaces(result.surfaces)
+    .filter(hasServedCode)
+    .some((surface) => expandOneHop(
+      languageForPath(surface.path) ?? "unknown",
+      calleesOf(servedSurfaceText(surface), surface.symbol ? [surface.symbol] : requestedSymbols),
+      MAX_EVIDENCE_EXPANSION_TARGETS,
+    ).explicitGap !== undefined);
+}
+
 function recordEpochTaskContract(
   workspace: string,
   result: TaskPackResult,
   query: string,
-): void {
+  expansion?: PersistedEvidenceExpansion,
+): boolean {
   const epochTokens = tokenizeForEpoch(query);
-  if (epochTokens.length === 0) return;
+  if (epochTokens.length === 0) return false;
   const served = codeTaskPackSurfaces(result.surfaces).filter(hasServedCode);
   // The satisfied half is harvested from the WHOLE query, not just the
   // published gap: a token this pack's evidence matches is discharged for the
   // epoch even though it was never a published requirement.
   const shaped = identifierShapedConcernSet(query);
   const queryTokens = concernAnchorTokens(query, 8).filter((token) => shaped.has(token.toLowerCase()));
+  const requestedSymbols = explicitCodeIdentifiers(query).slice(0, 1);
+  const oneHop = served.flatMap((surface) =>
+    calleesOf(servedSurfaceText(surface), surface.symbol ? [surface.symbol] : requestedSymbols),
+  );
+  const localExpansions: PersistedEvidenceExpansion[] = !hasOpenUniverseIntent(query)
+    || isAdditiveEnumIntent(query)
+    ? []
+    : served.map((surface) => {
+      const local = expandOneHop(
+        languageForPath(surface.path) ?? "unknown",
+        calleesOf(servedSurfaceText(surface), surface.symbol ? [surface.symbol] : requestedSymbols),
+        MAX_EVIDENCE_EXPANSION_TARGETS,
+      );
+      return {
+        targets: local.targets.map((entry) => entry.target),
+        remaining: [...local.remaining],
+        gaps: local.explicitGap === undefined ? [] : [local.explicitGap],
+      } satisfies PersistedEvidenceExpansion;
+    });
+  // The imported expansion is advisory input from the selected primaries. The
+  // served primary itself is the authoritative current evidence, so always
+  // compute its local one-hop result as well. This prevents an empty/cached
+  // import-edge result from erasing an unsupported-language explicit gap.
+  const expansionParts = [expansion, ...localExpansions].filter(
+    (entry): entry is PersistedEvidenceExpansion => entry !== undefined,
+  );
+  const effectiveExpansion = expansionParts.length === 0 ? undefined : {
+    targets: [...new Set(expansionParts.flatMap((entry) => entry.targets))].sort((a, b) => a.localeCompare(b)),
+    remaining: [...new Set(expansionParts.flatMap((entry) => entry.remaining))].sort((a, b) => a.localeCompare(b)),
+    gaps: [...new Set(expansionParts.flatMap((entry) => entry.gaps))].sort((a, b) => a.localeCompare(b)),
+  } satisfies PersistedEvidenceExpansion;
   recordTaskContract(workspace, epochTokens, {
     query,
     requiredRoles: result.required_surfaces ?? [],
+    // Evidence-expansion targets are dependency obligations, never query
+    // concerns. recordEvidenceExpansion below owns their lifecycle.
     concernTokens: epochConcernTokensFor(result, query),
     servedRoles: served.map((surface) => surface.role),
     coveredConcernTokens: queryTokens.filter((token) => concernTokenMatchesSurfaces(token, served)),
   });
+  // One-hop dependency proof is the evidence model for an actual
+  // open-universe request.  Applying it to a finite generic list manufactures
+  // a new dependency requirement after all of that list's named roles have
+  // been served, making a cumulative same-epoch pack impossible to close.
+  const expansionTargets = !hasOpenUniverseIntent(query) || isAdditiveEnumIntent(query)
+    ? []
+    : [...oneHop, ...(effectiveExpansion?.targets ?? [])];
+  // -------------------------------------------------------------------------
+  // R2 (2026-08-28): THE SERVED-DEFINITION WITNESS IS THE BODY, NOT THE LABEL.
+  //
+  // `servedDefinitions` was `served.map(surface => surface.symbol)` — the
+  // per-surface NAMED-SELECTOR label. A whole-file serve carries no `symbol`,
+  // so a pack that served `export function applyDiscount(…)` in full proved
+  // NOTHING about `applyDiscount`: every expansion target stayed `open`, the
+  // open-universe obligation could never be discharged by success, and the
+  // `act.answer` it gated was suppressed over evidence the response actually
+  // held (measured on the `ledgerDecisionIntegration` TS 4-definition fixture:
+  // five open dependency obligations, zero resolved, five served bodies).
+  //
+  // The honest witness is a DECLARATION in a served body, which is exactly what
+  // `extractSymbolsFromLines` — `mode=map`/`digest`'s own declaration scanner —
+  // reports. Definition-grade by construction: it matches declaration forms,
+  // never call sites, so a body that merely CALLS `applyDiscount` still proves
+  // nothing. The old label witness is kept alongside it, since a symbol-scoped
+  // serve is a definition serve by construction.
+  // -------------------------------------------------------------------------
+  const servedDefinitions = [...new Set([
+    ...served.map((surface) => surface.symbol).filter((symbol): symbol is string => symbol !== undefined),
+    ...served.flatMap((surface) => extractSymbolsFromLines(
+      servedSurfaceText(surface),
+      MAX_SERVED_DEFINITION_SYMBOLS,
+      // The expansion targets are the preferred names, so a large body's
+      // declaration scan runs to EOF for exactly the identifiers under proof
+      // instead of stopping at the first `maxSymbols` declarations.
+      new Set(expansionTargets.map((target) => target.toLowerCase())),
+    ).map((entry) => entry.name)),
+  ])];
+  recordEvidenceExpansion(workspace, expansionTargets, servedDefinitions);
+  const expansionGaps = hasOpenUniverseIntent(query)
+    ? [...new Set(effectiveExpansion?.gaps ?? [])].sort((a, b) => a.localeCompare(b))
+    : [];
+  if (expansionGaps.length > 0) {
+    recordExpansionExplicitGap(
+      workspace,
+      { kind: "dependency-definitions", target: "open-universe" },
+      expansionTargets,
+      // One immutable proof witnesses the whole extraction limitation. Calling
+      // prove once per diagnostic string attempted to overwrite the same
+      // parent/target proof on multi-gap packs.
+      expansionGaps.join("; "),
+    );
+  }
+  return expansionGaps.length > 0;
 }
+/**
+ * R2: bound on declarations scanned out of ONE served body when proving which
+ * expansion targets are resident. Generous next to `MAX_EVIDENCE_EXPANSION_TARGETS`
+ * so a dependency file's own helpers cannot crowd out the target under proof,
+ * and bounded so a large served body cannot make the recorder super-linear.
+ */
+const MAX_SERVED_DEFINITION_SYMBOLS = 64;
 
 /** Cap on how many unserved caller paths are disclosed (they share the W2 guidance-metadata budget). */
 const MAX_UNSERVED_CALLER_PATHS = 6;
@@ -21846,6 +22858,167 @@ function reconcileContentSufficiency(result: TaskPackResult): void {
 }
 
 /**
+ * Final post-trim guard: a required body which still names a bounded range is
+ * not terminal evidence.  Several late seams append `missing[]` disclosures or
+ * shed bodies after the first readiness contract has been built; merely
+ * canonicalizing that old contract can otherwise publish `prepared` with no
+ * executable way to read the range it just disclosed.
+ */
+function preservePartialRangeProgress(result: TaskPackResult): boolean {
+  // Multi-concern and answer profiles have their own certified document /
+  // cumulative affordances. This guard repairs the generic native-body trim
+  // path, where the clipped implementation itself is the only next evidence.
+  if (result.profile_binding?.selected !== "generic") return false;
+  // The response-level rollup is set by the byte-trim phase. A later optional
+  // doc-sliver may carry navigation ranges without making the task's evidence
+  // incomplete; those established prepared answers stay terminal.
+  if (result.content_completeness !== "partial") return false;
+  const surface = codeTaskPackSurfaces(result.surfaces).find((candidate) =>
+    candidate.required !== false
+    && /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)$/i.test(candidate.path)
+    && (candidate.remaining_ranges?.length ?? 0) > 0
+  );
+  const range = surface?.remaining_ranges?.[0];
+  if (surface === undefined || range === undefined) return false;
+  const marker = `remaining-range:${surface.path}:${range}`;
+  if (!result.missing.includes(marker)) {
+    result.missing = [...result.missing, marker];
+  }
+  result.content_sufficiency = "needs-followup";
+  const call: ContinuationCall = {
+    tool: "read_file",
+    arguments: { mode: "slice", handle: surface.handle, range },
+  };
+  const plan = enforceContinuationBudget({
+    version: 1,
+    stages: [{ execution: "sequential", calls: [call] }],
+  });
+  if (plan !== undefined) {
+    result.continuation = plan;
+    const next = deriveNextFromPlan(plan);
+    if (next !== undefined) result.next = next;
+  }
+  result.route = {
+    action: "inspect_handles",
+    reason: "a required served surface is partial; continue with its bounded remaining range",
+    max_additional_tl_calls: 1,
+  };
+  return true;
+}
+
+/** Rebuild readiness after every late trim/disclosure seam, before wire projection. */
+function rebuildFinalExecutionContract(
+  result: TaskPackResult,
+  profile: TaskProfile,
+  query: string,
+  workspace: string,
+  workspaceInventory: WorkspaceInventoryState,
+  proofTransition = false,
+  /** A-F2: the executed-next ledger lane, so the rebuilt contract's no-dead-end guard cannot re-open a consumed call. */
+  lane: string = DEFAULT_CONTRACT_LANE,
+): void {
+  const rangeProgress = preservePartialRangeProgress(result);
+  const proofTransitionMissing = result.missing.filter(
+    (entry) => !entry.startsWith("unresolved-ledger:"),
+  );
+  // The provisional contract runs before recordEpochTaskContract persists a
+  // current-pack capability limitation. It can therefore honestly reject an
+  // otherwise complete frontier for an open-universe proof which the same
+  // response subsequently discharges. Reconciliation deliberately demotes
+  // the route at that provisional point; restore only this exact reversible
+  // demotion before the proof-transition rebuild, never a general discovery
+  // route. All required bodies and the explicit-gap-only missing projection
+  // remain the guards on the terminal edit grant below.
+  const restoreOpenUniverseFrontier = proofTransition
+    && result.route?.action === "locate_missing_surfaces"
+    && /^ready rejected: unresolved proof open-universe:/.test(result.route.reason ?? "")
+    && result.coverage === "complete"
+    && proofTransitionMissing.every((entry) => entry.startsWith("explicit-gap:"))
+    && codeTaskPackSurfaces(result.surfaces)
+      .filter((surface) => surface.required !== false)
+      .every(hasServedCode);
+  if (restoreOpenUniverseFrontier) {
+    result.route = {
+      action: "edit_from_handles",
+      reason: "current-pack evidence-expansion capability gap discharges the exhaustive frontier",
+      max_additional_tl_calls: 0,
+    };
+    delete result.next;
+    delete result.continuation;
+  }
+  // F-B3's prior-pack disclosure is the other late mutation that can make a
+  // pre-existing certificate stale. Leave unrelated post-contract adornments
+  // on their established projection path; they do not change readiness.
+  const stalePriorObligation = result.missing.some((entry) => entry.startsWith("unserved-obligation:"));
+  if (!rangeProgress && !stalePriorObligation && !proofTransition) {
+    applyCanonicalTaskDecision(result);
+    return;
+  }
+  result.execution_contract = buildTaskExecutionContract(
+    result,
+    profile,
+    query,
+    buildTaskWorkspaceState(result, workspace, workspaceInventory),
+    workspace,
+    proofTransition,
+  );
+  reconcileTaskPackExecutionContract(result);
+  enforceNoDeadEndContract(result, query, { workspace, lane });
+  applyCanonicalTaskDecision(result);
+}
+
+/**
+ * Bind an already-prepared response to the terminal ledger snapshot written
+ * later in this same pack.  The normal epoch write is intentionally after the
+ * first decision (otherwise an unresolved dependency loses its initial find),
+ * but a certificate ID must not differ merely because the identical request
+ * is reconstructed from that durable row after a restart.
+ *
+ * This is deliberately an ID-only rebind.  Re-running the contract builder
+ * here would re-evaluate late route/continuation seams and can turn a valid
+ * prepared wiring pack into discovery.  The proof, decision, and surface
+ * projection were already adjudicated; only the durable digest component of
+ * the certificate identity became available after that adjudication.
+ */
+function rebindPreparedCertificateToLedger(
+  result: TaskPackResult,
+  profile: TaskProfile,
+  query: string,
+  workspace: string,
+): void {
+  const contract = result.execution_contract;
+  const certificate = contract?.readiness_certificate;
+  if (contract?.typestate.phase !== "prepared" || certificate === undefined) return;
+  // A-F6: the ledger-bound id form is a proof-completion artifact. This rebind
+  // was ungated, so with the compatibility switch OFF an id still acquired the
+  // `ready-<ledger16>-<proof16>` shape that v0.12 never emits — measured live
+  // on an OFF pack. OFF must reproduce v0.12's single-segment id.
+  if (!proofCompletionEnabled()) return;
+  const ledger = taskContractDischargeCertificate(workspace, tokenizeForEpoch(query));
+  const workspaceFingerprint = contract.workspace_state?.fingerprint;
+  if (ledger === undefined || workspaceFingerprint === undefined) return;
+  const taskHash = shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16);
+  const proofHash = shaOfText(JSON.stringify({
+    taskHash,
+    obligations: certificate.obligations.map((obligation) => [
+      obligation.id,
+      obligation.status,
+      (obligation.evidence ?? []).map((item) => item.handle),
+    ]),
+    actionFrontier: certificate.action_frontier,
+    workspaceState: workspaceFingerprint,
+    ledgerDigest: ledger.digest,
+  })).replace(/^sha256:/, "").slice(0, 16);
+  const id = `ready-${ledger.digest.slice(0, 16)}-${proofHash}`;
+  if (certificate.id === id) return;
+  certificate.id = id;
+  contract.typestate.certificate_id = id;
+  if (contract.semantic_closure?.state === "closed") {
+    contract.semantic_closure.closure_id = id;
+  }
+}
+
+/**
  * DESIGN-v0.9 §4.6b deterministic-next internal execution. When a
  * complete/focused pack would have emitted `read_file handles=[...]` as its
  * `next` (>=2 code-less surfaces whose handles were minted moments ago), the
@@ -22134,16 +23307,19 @@ function finalizePackServeState(
   effectiveQuery: string,
   profile: TaskProfile,
 ): boolean {
-  const isAnswer = profile === "answer" || result.route?.action === "answer_from_handles";
+  // Route classification is a response affordance, not the caller's task
+  // identity. A generic task can temporarily route through answer handles and
+  // must still retain required-role evidence for its same-epoch cumulative
+  // continuation; declared answer tasks remain excluded from edit closure.
+  const cumulativeEligible = profile !== "answer" || result.profile_binding?.source !== "explicit";
   const surfaces = codeTaskPackSurfaces(result.surfaces);
   const currentPaths = new Set(surfaces.map((s) => s.path));
   const epochTokens = tokenizeForEpoch(effectiveQuery);
 
   // Consult BEFORE recording this call's surfaces (exclude the current paths).
-  const prior = (!isAnswer && surfaces.length > 0)
+  const prior = (cumulativeEligible && surfaces.length > 0)
     ? queryServedSurfaces(workspace, workspace, { excludePaths: currentPaths, epochTokens })
     : [];
-
   const flipped = applyCumulativeCoverage(result, prior, effectiveQuery);
 
   // iter-2 W3: served_earlier is attached ONCE — on the cumulative FLIP call —
@@ -22172,7 +23348,7 @@ function finalizePackServeState(
   // Record only CHANGE-pack surfaces (an answer pack has no edit closure to
   // cumulatively complete a later change pack from, and its read-only surfaces
   // should not stand in for edit-served roles).
-  if (!isAnswer && surfaces.length > 0) {
+  if (cumulativeEligible && surfaces.length > 0) {
     recordServedSurfaces(
       workspace,
       workspace,
@@ -22351,6 +23527,8 @@ function attachSingleSiteUniqueMatchFastPath(
   }
   const source = readCached(workspace, surface.path, cache);
   if (source === undefined || source.split(replacement.search).length - 1 !== 1) return;
+  const certificate = result.execution_contract?.readiness_certificate;
+  const taskId = result.qref ?? surface.handle;
   result.fast_path = {
     kind: "single-site-unique-match",
     handle: surface.handle,
@@ -22360,8 +23538,23 @@ function attachSingleSiteUniqueMatchFastPath(
     precondition: "unique-match",
     root_bound: true,
     occurrence_count: 1,
+    ...(certificate?.id !== undefined
+      ? { certificate: {
+          id: certificate.id,
+          sha: certificate.task_fingerprint.startsWith("sha256:")
+            ? certificate.task_fingerprint
+            : `sha256:${certificate.task_fingerprint}`,
+        } }
+      : {}),
+    task: { id: taskId },
   };
-  // This duplicates the exact before/after bytes, so recheck the hard cap.
+  // The fast path is a proof-carrying edit recipe; re-send no source body or
+  // likely_edits that the normal evidence surface already carried.
+  surface.code = undefined;
+  surface.facts = undefined;
+  surface.likely_edits = undefined;
+  surface.done_check = undefined;
+  // This duplicates only the bounded recipe/proof, so recheck the hard cap.
   if (!fitsInCap(result)) delete result.fast_path;
 }
 
@@ -22492,6 +23685,7 @@ function dedupeTrimAndPersist(
      * §4.5), so it never inlines here.
      */
     cache?: FileReadCache;
+    evidenceExpansion?: PersistedEvidenceExpansion;
     /** artifact_build already attached its ranked discovery surfaces. */
     artifactSurfacesAlreadyAttached?: boolean;
   },
@@ -22501,6 +23695,7 @@ function dedupeTrimAndPersist(
     ?? opts?.args?.symbol
     ?? opts?.args?.path
     ?? "";
+  const servedZoomScope = servedZoomScopeForArgs(opts?.args, effectiveQuery);
   let semanticCheckRecords: PackCheckRecord[] = [];
   let binding = bindTaskProfile(opts?.args?.taskProfile, effectiveQuery);
   let profile = binding.selected;
@@ -22973,6 +24168,8 @@ function dedupeTrimAndPersist(
       effectiveQuery,
       buildTaskWorkspaceState(result, workspace, workspaceInventory),
       workspace,
+      false,
+      servedZoomScope,
     ),
   );
   // IMPROVEMENT A part 4: a prepared edit pack with >=2 known edit sites should
@@ -23127,6 +24324,10 @@ function dedupeTrimAndPersist(
     delete trimmed.next;
     delete trimmed.continuation;
   }
+  // Persist same-epoch role/concern evidence before the final certificate is
+  // evaluated. A continuation may legitimately serve a different frontier;
+  // the ledger must see the union it already served, not only this body.
+  reconcileEpochTaskContract(workspace, trimmed, effectiveQuery);
   // A resolved create target is the terminal frontier. Post-trim route
   // recomputation sees zero editable surfaces for a not-yet-existing file and
   // can restore `locate_missing_surfaces`; reassert the create route BEFORE
@@ -23143,6 +24344,8 @@ function dedupeTrimAndPersist(
     effectiveQuery,
     buildTaskWorkspaceState(trimmed, workspace, workspaceInventory),
     workspace,
+    false,
+    servedZoomScope,
   );
   reconcileTaskPackExecutionContract(trimmed);
   if (
@@ -23289,6 +24492,8 @@ function dedupeTrimAndPersist(
       effectiveQuery,
       buildTaskWorkspaceState(fallback, workspace, workspaceInventory),
       workspace,
+      false,
+      servedZoomScope,
     );
     // P0a §6.1: this envelope returns BEFORE the shared exit below, so it must
     // run the same canonical projection itself — otherwise the last envelope
@@ -23392,18 +24597,50 @@ function dedupeTrimAndPersist(
   // it fires at ANY pack size, not only when the overall cap binds.
   capGuidanceMetadata(trimmed);
   annotateSpannedRoots(trimmed);
-  enforceNoDeadEndContract(trimmed, effectiveQuery);
-  suppressNonProgressingNextCall(workspace, trimmed, opts?.args, effectiveQuery);
+  // A-F2 ORDER: suppress the consumed next FIRST, then repair whatever that
+  // leaves. The reverse order let a suppression that ran after the guard strip
+  // the last machine-executable action with nothing left to notice.
+  const packLane = normalizeContractLane((opts?.args as { lane?: unknown } | undefined)?.lane);
+  suppressNonProgressingNextCall(workspace, trimmed, opts?.args, effectiveQuery, servedZoomScope);
+  enforceNoDeadEndContract(trimmed, effectiveQuery, { workspace, lane: packLane });
   attachEvidenceCompletion({
     workspace,
     pack: trimmed as never,
     tokensByConcern: concernTokensById(trimmed, effectiveQuery),
     packCapBytes: capForResult(trimmed),
   });
-  // One final, evidence-derived projection owns route/contract/continuation.
-  // This runs after every trim, qref, and receipt-preparation mutation so a
-  // stale route can never reopen discovery or promote an uncertified answer.
-  applyCanonicalTaskDecision(trimmed);
+  // Evidence-expansion is a proof transition, not post-response bookkeeping.
+  // Persist its explicit capability gap before the final contract rebuild so
+  // this very pack can discharge its open-universe parent. Recording it below
+  // the rebuild made the first fresh exhaustive Go pack emit `discover` and
+  // only a later re-pack see the terminal explicit-gap proof.
+  const importedEvidenceExpansionGaps = opts?.evidenceExpansion?.gaps ?? [];
+  const preFinalExpansionGap = hasCurrentEvidenceExpansionGap(
+    trimmed,
+    effectiveQuery,
+  );
+  const evidenceExpansionGap = preFinalExpansionGap
+    && importedEvidenceExpansionGaps.length > 0;
+  if (evidenceExpansionGap) {
+    trimmed.missing = [...new Set([...trimmed.missing, ...importedEvidenceExpansionGaps.map((gap) => `explicit-gap:${gap}`)])];
+    trimmed.coverage = "partial";
+    trimmed.coverage_reason ??= "concerns-uncovered";
+  }
+  const recordedExpansionGap = preFinalExpansionGap
+    ? recordEpochTaskContract(workspace, trimmed, effectiveQuery, opts?.evidenceExpansion)
+    : false;
+  // The seams above can add a missing disclosure or retain a clipped range
+  // after the first contract build. Rebuild and project together so the wire
+  // never pairs that post-contract state with a stale prepared certificate.
+  rebuildFinalExecutionContract(
+    trimmed,
+    cumulativeComplete && trimmed.coverage_basis === "cumulative" ? "generic" : profile,
+    effectiveQuery,
+    workspace,
+    workspaceInventory,
+    preFinalExpansionGap && recordedExpansionGap,
+    packLane,
+  );
   attachSingleSiteUniqueMatchFastPath(trimmed, workspace, effectiveQuery, profile, opts?.cache);
   persistPackFingerprints(workspace, trimmed);
   // Session-state registration is skipped too for an answer pack — a later
@@ -23501,16 +24738,55 @@ function dedupeTrimAndPersist(
       recordPriorPackObligations(workspace, obligationEpochTokens, currentObligations);
     }
   }
-  // P0 defects 2 + 3: the epoch requirement contract, in the ONE order that is
-  // sound — measure this pack against what the epoch ALREADY established, then
-  // fold this pack in. Reversing it would let every pack certify against its
-  // own record. Deliberately outside the coverage-packer flag above: a false
-  // "complete" is a serve-honesty defect, not a packer optimization.
-  // Positioned with the seam, BEFORE `returned` is derived, for the same
-  // reason its doc comment gives — a `trimmed.missing` mutation applied after
-  // that point never reaches the wire.
-  reconcileEpochTaskContract(workspace, trimmed, effectiveQuery);
-  recordEpochTaskContract(workspace, trimmed, effectiveQuery);
+  // Non-gap expansion remains deliberately after final decision construction:
+  // it must not suppress the initial authoritative discovery call for an
+  // unresolved direct callee/value. Gap-bearing current evidence was recorded
+  // above because it is terminal proof for this very response.
+  if (!preFinalExpansionGap) {
+    recordEpochTaskContract(workspace, trimmed, effectiveQuery, opts?.evidenceExpansion);
+    const persistedDischarge = taskContractDischargeCertificate(
+      workspace,
+      tokenizeForEpoch(effectiveQuery),
+    );
+    // A complete same-pack expansion is terminal proof, not merely a
+    // post-decision cache write. Rebuild the contract after persistence so the
+    // certificate and act.* decision are based on the fully discharged ledger.
+    // Keep the first unresolved expansion conservative: without a discharge
+    // certificate it retains its evidence-grounded discovery path.
+    if (
+      persistedDischarge !== undefined
+      && (trimmed.route?.action === "answer_from_handles"
+        || trimmed.route?.action === "edit_from_handles")
+    ) {
+      trimmed.execution_contract = buildTaskExecutionContract(
+        trimmed,
+        cumulativeComplete && trimmed.coverage_basis === "cumulative" ? "generic" : profile,
+        effectiveQuery,
+        buildTaskWorkspaceState(trimmed, workspace, workspaceInventory),
+        workspace,
+        false,
+        servedZoomScope,
+      );
+      reconcileTaskPackExecutionContract(trimmed);
+    }
+    // The normal expansion path deliberately records only AFTER the first
+    // decision: an unresolved direct dependency must still emit its initial
+    // authoritative discovery call (I1), rather than being hidden by a
+    // ledger row made too early. A pack which was already prepared is the
+    // opposite case: its certificate is about to become a public identity,
+    // and it must bind the very ledger snapshot this call just persisted.
+    if (
+      trimmed.execution_contract?.typestate.phase === "prepared"
+      && persistedDischarge !== undefined
+    ) {
+      rebindPreparedCertificateToLedger(
+        trimmed,
+        cumulativeComplete && trimmed.coverage_basis === "cumulative" ? "generic" : profile,
+        effectiveQuery,
+        workspace,
+      );
+    }
+  }
   // iter-2 W4 (awaiting-input idempotency) + W1 (subset receipt): consult the
   // session state BEFORE capturing this pack, so neither can match the current
   // pack against itself. W4 first: a still-unresolved proof re-grants the SAME
@@ -23543,6 +24819,12 @@ function dedupeTrimAndPersist(
   //     optimization for THIS call; keep the full baseline for exact re-calls).
   const returned = idempotent ?? subset ?? trimmed;
   // Receipts are alternate wire shapes, not alternate decision semantics.
+  markServedZoomCandidates(
+    workspace,
+    returned,
+    opts?.args?.forceServe === true,
+    servedZoomScope,
+  );
   applyCanonicalTaskDecision(returned);
   // A receipt can omit the body whose exact text this shortcut certifies. Never
   // carry it across an idempotent/subset downgrade or a non-ready exit.

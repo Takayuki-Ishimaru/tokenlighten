@@ -35,7 +35,6 @@ import * as os from "os";
 import * as path from "path";
 import { createHash } from "crypto";
 import { unsafeGuardedWorkspaceRootForTests } from "../write/guardedWorkspace.js";
-import { nextText } from "./helpers/protocolNext.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -609,13 +608,27 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
     expect(readFile(ws, "existing.ts")).toBe("export const E = 1;\n");
   }, 30000);
 
-  it("create:true with BOTH from= and content=: content (the explicit literal) wins over from (an indirect copy source)", async () => {
+  it("canonical create:true with BOTH from= and content=: content (the explicit literal) wins over from (an indirect copy source)", async () => {
     const { ws, srv } = await newServer("create-from-content");
     writeFile(ws, "src.ts", "export const SRC = 1;\n");
 
-    const res = await srv.call("edit_file", { create: true, path: "out.ts", from: "src.ts", content: "export const EXPLICIT = 99;\n", cwd: ws });
+    const res = await srv.call("edit_file", {
+      edits: [{ create: true, path: "out.ts", from: "src.ts", content: "export const EXPLICIT = 99;\n" }],
+      cwd: ws,
+    });
     expect(res["kind"]).not.toBe("refusal");
     expect(readFile(ws, "out.ts")).toBe("export const EXPLICIT = 99;\n");
+  }, 30000);
+
+  it("raw top-level create:true + from= refuses and writes nothing", async () => {
+    const { ws, srv } = await newServer("raw-create-from-refusal");
+    writeFile(ws, "src.ts", "export const SRC = 1;\n");
+
+    const res = await srv.call("edit_file", { create: true, path: "out.ts", from: "src.ts", cwd: ws });
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    expect(res["field"]).toBe("from");
+    expect(fs.existsSync(path.join(ws, "out.ts"))).toBe(false);
   }, 30000);
 
   it("mode='rename' with extraneous search/replace fields: ignored — rename proceeds using from/to only, no partial/garbled result", async () => {
@@ -927,11 +940,11 @@ describe("argMatrix — search_files — already sane / documented (no change)",
     expect(String(res["detail"])).toContain("not both");
   }, 30000);
 
-  it("queries[] on a non-find action (e.g. action=symbols): pre-existing explicit error, names the offending action", async () => {
+  it("legacy action=symbols plus queries[] normalizes to the canonical symbol-find route", async () => {
     const { srv } = await newServer("search-queries-non-find");
     const res = await srv.call("search_files", { action: "symbols", query: "alpha", queries: ["alpha"] });
-    expect(res["kind"]).toBe("refusal");
-    expect(String(res["detail"])).toContain("action=find");
+    expect(res["kind"]).toBe("search.matches");
+    expect(res["matches"]).toMatchObject({ form: "symbols", total: 0 });
   }, 30000);
 
   it("action=references with BOTH symbol and query: symbol wins (documented fallback chain args.symbol ?? args.query)", async () => {
@@ -970,10 +983,13 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
       paths: ["src/order.ts"],
     });
     expect(res["kind"]).toBe("refusal");
-    expect(String(res["detail"])).toContain("query and qref are mutually exclusive for task_pack"); // §2.6: an unexecutable prose `next` folds into `detail`, so the token is contained rather than exact.
-    expect(nextText(res as Record<string, unknown>)).toContain(
-      'read_file mode=task_pack qref=q-0123456789abcdef paths=["src/order.ts"] (drop query — keeps the certified working set)',
-    );
+    expect(String(res["detail"])).toContain("query and qref are mutually exclusive for task_pack");
+    // R-5 (v0.13-3 F-2): a structured continuation survives the refusal
+    // funnel and is canonicalized once, rather than prose folding into detail.
+    expect(res["next"], JSON.stringify(res)).toEqual({
+      tool: "read_file",
+      arguments: { qref: "q-0123456789abcdef", targets: [{ path: "src/order.ts" }], content: "auto" },
+    });
   }, 30000);
 
   it("(b) query+qref, no paths: keeps the original drop-qref-restate-query hint unchanged", async () => {
@@ -985,8 +1001,11 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
       qref: "q-0123456789abcdef",
     });
     expect(res["kind"]).toBe("refusal");
-    expect(String(res["detail"])).toContain("query and qref are mutually exclusive for task_pack"); // §2.6: an unexecutable prose `next` folds into `detail`, so the token is contained rather than exact.
-    expect(nextText(res as Record<string, unknown>)).toContain('read_file mode=task_pack query="<restate the request verbatim>" (drop qref)');
+    expect(String(res["detail"])).toContain("query and qref are mutually exclusive for task_pack");
+    // R-5 (v0.13-3 F-2): the generic placeholder is deliberately still not
+    // executable (placeholder guard remains fail-closed); unlike the prior
+    // legacy prose it is not emitted as a misleading wire continuation.
+    expect(res["next"], JSON.stringify(res)).toBeUndefined();
   }, 30000);
 
   it("(c) qref+paths, no query: stays closed under the prepared certificate", async () => {
@@ -1047,11 +1066,12 @@ describe("argMatrix — field-eval T1: mode=slice + paths[] guides instead of a 
     // fix emits, not shipped as raw prose itself.
     const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
     expect(next?.tool).toBe("read_file");
-    expect(next?.arguments?.["mode"]).toBe("slice");
-    expect(next?.arguments?.["path"]).toBe("src/one.ts");
+    expect(next?.arguments?.["content"]).toBe("auto");
+    const targets = next?.arguments?.["targets"] as Array<Record<string, unknown>> | undefined;
+    expect(targets?.[0]?.["path"]).toBe("src/one.ts");
     // The caller's own range must survive into the corrected call, not be
     // silently dropped along with the path/paths[] confusion.
-    expect(next?.arguments?.["range"]).toBe("1-1");
+    expect(targets?.[0]?.["range"]).toBe("1-1");
   }, 30000);
 
   it("paths=[two paths]: refusal offers the mode=task_pack discovery form, not a re-slice of one file", async () => {
@@ -1067,8 +1087,7 @@ describe("argMatrix — field-eval T1: mode=slice + paths[] guides instead of a 
     // recovery regardless of which one fired.
     const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
     expect(next?.tool).toBe("read_file");
-    expect(next?.arguments?.["mode"]).toBe("task_pack");
-    expect(next?.arguments?.["paths"]).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(next?.arguments?.["targets"]).toEqual([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
   }, 30000);
 
   it("a genuinely pathless slice (no path, no paths[], no handle) keeps the original bare refusal", async () => {
@@ -1223,5 +1242,94 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
     expect(entry["truncated"]).toBe(false);
     expect(entry["remaining_ranges"]).toBeUndefined();
     expect(entry["next"]).toBeUndefined();
+  }, 30000);
+});
+
+// =============================================================================
+// GROUP 9 (FIXED, pre-launch bench canary 2026-08-29): mode=pack / mode=task_pack
+// legacy paths[] sent as a JSON-TEXT STRING — the wire shape a schema-blind
+// legacy client produces when it does not know `paths` is array-typed and
+// serializes the structured value itself before handing it to the transport.
+// Confirmed live pre-fix:
+//   read_file {mode:"pack", paths:"[{\"path\":\"src/one.ts\",\"range\":\"1-1\"}]", maxTokens:300}
+//   -> {"kind":"read.batch","entries":[],"limit":{"next":{"tool":"read_file",
+//        "arguments":{"targets":[{"path":"[{\"path\":\"src/one.ts\",\"range\":\"1-1\"}]"}]}}}}
+//   i.e. the WHOLE JSON-encoded array collapsed into ONE bogus bare path
+//   (mode=pack's own per-entry coercion did `path: String(p)` on the raw
+//   string), so nothing served AND the resulting `next` pointed at a path
+//   that can never exist. mode=task_pack silently lost the same seed path
+//   the same way (abstained with `no-grounded-call-remains` instead of
+//   grounding the real path+range).
+// Guard: server.ts's normalizeWireArgs (canonical==="read_file" branch) now
+// attempts JSON.parse on a string-typed `paths` that looks like a JSON array
+// (starts with "[") before falling back to the single-bare-path wrap, so a
+// legacy caller's JSON-encoded paths[] parses to the SAME array a
+// schema-aware caller would have sent natively. A genuine bare-path string
+// (never valid JSON array syntax) is provably unaffected — see the sanity
+// case below.
+// =============================================================================
+
+describe("argMatrix — read_file legacy paths[] sent as a JSON-text string (schema-blind client wire shape)", () => {
+  it("mode=pack, paths='[{path,range}]' (object-entry array, JSON-encoded as a string): serves the file, not a bogus path", async () => {
+    const { ws, srv } = await newServer("compat-pack-paths-json-string-object");
+    writeFile(ws, "src/one.ts", "line one\nline two\nline three\nline four\nline five\n");
+    const res = await srv.call("read_file", {
+      mode: "pack",
+      paths: JSON.stringify([{ path: "src/one.ts", range: "1-2" }]),
+      maxTokens: 300,
+    });
+    expect(res["kind"]).toBe("read.batch");
+    const entries = res["entries"] as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.["path"]).toBe("src/one.ts");
+    expect(entries[0]?.["range"]).toBe("1-2");
+    expect(String(entries[0]?.["content"])).toContain("line one");
+    // Pre-fix, this withheld everything and carried a `next` whose
+    // canonicalized target path was the raw JSON text of the whole paths[]
+    // array. Post-fix there is nothing withheld at all.
+    expect(res["limit"]).toBeUndefined();
+  }, 30000);
+
+  it("mode=pack, paths='[\"a.ts\",\"b.ts\"]' (bare-string array, JSON-encoded as a string): both paths survive as real entries", async () => {
+    const { ws, srv } = await newServer("compat-pack-paths-json-string-array");
+    writeFile(ws, "src/a.ts", "export const A = 1;\n");
+    writeFile(ws, "src/b.ts", "export const B = 1;\n");
+    const res = await srv.call("read_file", {
+      mode: "pack",
+      paths: JSON.stringify(["src/a.ts", "src/b.ts"]),
+      maxTokens: 300,
+    });
+    expect(res["kind"]).toBe("read.batch");
+    const entries = res["entries"] as Array<Record<string, unknown>>;
+    const paths = entries.map((e) => e["path"]);
+    expect(paths).toEqual(["src/a.ts", "src/b.ts"]);
+  }, 30000);
+
+  it("mode=task_pack, paths='[{path,range}]' (JSON-encoded as a string) + query: the seed path grounds a real act.edit, not an abstention", async () => {
+    const { ws, srv } = await newServer("compat-taskpack-paths-json-string");
+    writeFile(ws, "src/seed.ts", "line one\nline two\nline three\nline four\nline five\n");
+    const res = await srv.call("read_file", {
+      mode: "task_pack",
+      paths: JSON.stringify([{ path: "src/seed.ts", range: "1-2" }]),
+      query: "x",
+    });
+    expect(res["kind"]).toBe("read.task_pack");
+    const evidence = res["evidence"] as Array<Record<string, unknown>>;
+    expect(evidence.length).toBeGreaterThan(0);
+    expect(evidence.some((e) => e["path"] === "src/seed.ts")).toBe(true);
+    const decision = res["decision"] as Record<string, unknown>;
+    // Pre-fix this abstained (`await_input` / `no-grounded-call-remains`)
+    // because the corrupted bogus path could never ground anything.
+    expect(decision["kind"]).toBe("act.edit");
+  }, 30000);
+
+  it("mode=pack, paths='src/solo.ts' (a genuine bare-path string): unaffected by the JSON.parse attempt", async () => {
+    const { ws, srv } = await newServer("compat-pack-paths-bare-string-sanity");
+    writeFile(ws, "src/solo.ts", "export const SOLO = 1;\n");
+    const res = await srv.call("read_file", { mode: "pack", paths: "src/solo.ts", maxTokens: 300 });
+    expect(res["kind"]).toBe("read.batch");
+    const entries = res["entries"] as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.["path"]).toBe("src/solo.ts");
   }, 30000);
 });

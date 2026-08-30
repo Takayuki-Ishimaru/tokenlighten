@@ -6,9 +6,9 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.12.1 release
+## v0.13.0 release
 
-**Public Beta maintenance update.** TokenLighten v0.12.1 is the latest source release. Interfaces and supported workflows may continue to change as feedback is incorporated. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+**Public Beta correctness and compatibility update.** TokenLighten v0.13.0 is the latest source release. Interfaces and supported workflows may continue to change as feedback is incorporated. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
 
 The public release includes:
 
@@ -16,7 +16,7 @@ The public release includes:
 - source code and public package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-v0.12.1 carries forward the v0.12.0 feature set and resolves dependency, static-analysis, and source-quality findings without adding a new performance feature. It updates vulnerable dependencies, removes unused packaged dependencies, replaces superlinear parsing patterns with bounded scanners, and hardens configuration, identifier generation, document extraction, and generated-text escaping. Experimental retrieval, reasoning, fast-path, delta-context, and adaptive-wire capabilities remain off by default unless explicitly enabled.
+v0.13.0 adds proof-carrying completion, canonical MCP request schemas, compact replay receipts, stricter client-schema compatibility, and automatic VS Code schema-cache recovery. Proof completion is enabled by default as a correctness safeguard; experimental schema definitions, retrieval, reasoning, fast-path, delta-context, and adaptive-wire capabilities remain off by default unless explicitly enabled. Legacy v0.12 request fields remain accepted during v0.13.x but are no longer advertised.
 
 The public release does not include the desktop application or the private benchmark harness.
 
@@ -34,21 +34,30 @@ TokenLighten is designed to deliver its largest advantage when an agent must ide
 
 Symbol and reference search can return relevant definitions and call sites directly. Document readers can extract structured content from spreadsheets and other supported formats without loading each entire file. Together, these capabilities can reduce repeated search and rereading while the agent gathers the context required for repository-wide or cross-document work.
 
-### Developer benchmark observations
+### What the developer benchmarks suggest
 
-Across 16 matched verified pairs in the retained six-task v0.12 decision run, aggregate verified task cost with TokenLighten was approximately **28% lower** than with native tools only.
+In the v0.13 developer benchmark, the aggregate TokenLighten/native cost ratio was **0.735**. In other words, the point estimate for completing the evaluated work was **26.5% lower with TokenLighten**.
 
-For comparison, the retained v0.11.1 run showed an approximately **21% lower** aggregate cost, also across 16 matched verified pairs. The observed reduction widened by about **7 percentage points**. The task classes match, but source revisions and evaluation windows differ, so this is a descriptive rather than causal comparison.
+v0.12.1 was a maintenance release with no performance change, so v0.12.0 is the relevant historical comparison. Its overall point estimate was approximately **28% lower**, while v0.11.1 measured approximately **21% lower**. v0.13 therefore remained close to v0.12 overall and was about 5.5 percentage points better than v0.11.1. These runs used different source revisions and evaluation windows, so the comparison describes an observed trend rather than a causal release-over-release improvement.
 
-Among the clearer positive results, the artifact-driven rating-engine task showed an approximately **57% lower** median cost and the multi-bug on-call task showed an approximately **30% lower** median cost, with three verified pairs each.
+Task-level median costs show where v0.13 helped most and where it did not:
 
-The narrowly scoped calculation task was close to parity. Results were more variable when the two arms did not reach the same verification outcome, so those cases are excluded from the numeric comparisons. Small known-location tasks can also see less benefit because fixed MCP and guide overhead accounts for a larger share of the work.
+| Task pattern | v0.13 vs native | Compared with v0.12 |
+|---|---:|---|
+| Trace a health decision across modules and wire it into outbound telemetry | **42.5% lower** | The advantage widened from 19.6% lower by 22.9 percentage points. |
+| Fix several related control and mode-transition bugs | **20.3% lower** | Still favorable, but smaller than v0.12's 29.7%. |
+| Implement priority behavior across related feature paths | **12.0% lower** | Smaller than v0.12's 24.9%. |
+| Build rating rules from a spreadsheet specification | **18.0% lower** | Smaller and more variable than v0.12's 56.8%. |
+| Explain a localized orchestration path | **4.1% higher** | This small task was near parity in both releases. |
+| Make a narrowly scoped calculation or data-integrity fix | **1.1% higher** | v0.12 measured 17.9% lower, so v0.13 showed no advantage here. |
 
-These are developer-run observations, not guaranteed savings. Actual cost varies by repository, task, client, model behavior, evaluation window, and provider pricing, and local estimates are not provider billing records. The v0.12.0 benchmark disclosure is unchanged; see the [v0.12.0 release notes](release-docs/github-release-v0.12.0.md#benchmark-update) for details.
+The clearest v0.13 strength is work that requires tracing a decision through several components and connecting it to downstream consumers. Multi-location bug fixes and rule implementations also benefited, but less consistently. Small known-location tasks, localized explanations, and narrow calculations remain the weak area because fixed MCP, guidance, and verification overhead can outweigh the discovery saved. An artifact-driven task is not automatically a win when its target package is already tightly constrained.
+
+These are developer-run observations, not guaranteed savings or quality. Actual outcomes vary by repository, task, client, model behavior, evaluation window, and provider pricing, and local estimates are not provider billing records. See the [v0.13.0 release notes](release-docs/github-release-v0.13.0.md#benchmark-disclosure) for the current disclosure and [v0.12.0 release notes](release-docs/github-release-v0.12.0.md#benchmark-update) for the historical details.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.12.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.12.1/tokenlighten-vscode-extension-0.12.1.vsix)** from the v0.12.1 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.13.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.0/tokenlighten-vscode-extension-0.13.0.vsix)** from the v0.13.0 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -59,7 +68,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.12.0.vsix
+code --install-extension tokenlighten-vscode-extension-0.13.0.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required.
@@ -91,7 +100,7 @@ cd /path/to/project
 tl workspace setup
 ```
 
-This natural-autoload setup — the managed AGENTS.md/CLAUDE.md guide block plus workspace MCP configuration — is the canonical way to run TokenLighten in production. Paired delivery-parity runs found its cost within noise of manually injecting the same guide text (cost ratio 1.038–1.074 across two runs; both 95% CIs straddle parity). Do not remove the managed guide block afterward: a controlled isolation run found that dropping it costs far more than keeping it (1.254x vs 1.059x) — the largest measured cost regression found to date. See [Getting started](release-docs/getting-started.md#set-up-a-workspace) for the run references and for `tl clients activate` (machine-wide registration with Claude Code and Codex).
+This natural-autoload setup — the managed AGENTS.md/CLAUDE.md guide block plus workspace MCP configuration — is the canonical way to run TokenLighten in production. Developer comparisons found that it performed about the same as manually injecting the same guide text into every prompt. Keep the managed guide block after setup: removing it materially increased measured cost and can allow instructions to drift between sessions. See [Getting started](release-docs/getting-started.md#set-up-a-workspace) for details and for `tl clients activate` (machine-wide registration with Claude Code and Codex).
 
 The MCP server is read-only by default. Enable writes only when you intend to allow workspace changes:
 
@@ -151,7 +160,7 @@ npm run package -w tokenlighten-vscode-extension
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
-For v0.12.0, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
+For v0.13.0, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
 
 ## Documentation
 
@@ -162,15 +171,13 @@ For v0.12.0, the complete package test suite is a CI gate on Ubuntu and macOS. W
 - [Privacy, security, and support](release-docs/privacy-security-support.md)
 - [Licensing and use policy](release-docs/licensing.md)
 
-The existing `docs/` directory is development history and is not part of the public v0.12.0 source release.
+The existing `docs/` directory is development history and is not part of the public v0.13.0 source release.
 
 ## Security and support
 
 ### Dependency audit snapshot
 
-For the v0.12.0 public-source staging tree audited on 2026-08-27, `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings in the normal runtime dependency view.
-
-A full public-source staging installation, including development dependencies, reported **1 Critical, 1 High, and 5 Moderate** findings. These development-toolchain findings are outside the normal installed-VSIX runtime view. Contributors should review them before running development tools on untrusted source or content.
+For the v0.13.0 release candidate audited on 2026-08-30, both `npm audit --omit=dev` and the full `npm audit`, including development dependencies, reported **0 vulnerabilities**.
 
 This is a dated dependency-audit snapshot, not a guarantee that the software has no vulnerabilities. Audit data can change after publication; rerun `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation.
 

@@ -6,9 +6,13 @@
   "next": {
     "tool": "edit_file",
     "arguments": {
-      "handle": "$H1",
-      "content": "# regenerated harness",
-      "cwd": "$WS"
+      "cwd": "$WS",
+      "edits": [
+        {
+          "handle": "$H1",
+          "content": "# regenerated harness"
+        }
+      ]
     }
   },
   "detail": "src/test_pricing_harness.py already exists; create:true never overwrites an existing path",
@@ -16,14 +20,22 @@
     {
       "tool": "edit_file",
       "arguments": {
-        "handle": "$H1"
+        "edits": [
+          {
+            "handle": "$H1"
+          }
+        ]
       }
     },
     {
       "tool": "read_file",
       "arguments": {
-        "mode": "full",
-        "handle": "$H1"
+        "targets": [
+          {
+            "handle": "$H1"
+          }
+        ],
+        "content": "full"
       }
     }
   ],

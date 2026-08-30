@@ -43,7 +43,9 @@
       "tool": "search_files",
       "arguments": {
         "action": "tree",
-        "path": "fw/src/estimator"
+        "scope": {
+          "path": "fw/src/estimator"
+        }
       }
     },
     "gaps": [

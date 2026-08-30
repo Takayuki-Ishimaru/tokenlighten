@@ -630,15 +630,22 @@
       "definition": {
         "tool": "search_files",
         "arguments": {
-          "action": "symbols",
-          "query": "hotSym"
+          "action": "find",
+          "queries": [
+            "hotSym"
+          ],
+          "scope": {
+            "kind": "symbol"
+          }
         }
       },
       "callers": {
         "tool": "search_files",
         "arguments": {
           "action": "references",
-          "query": "hotSym"
+          "queries": [
+            "hotSym"
+          ]
         }
       }
     }
@@ -648,10 +655,14 @@
     "next": {
       "tool": "search_files",
       "arguments": {
+        "cwd": "$WS",
         "action": "find",
-        "path": "src/m11/f.ts",
-        "query": "hotSym",
-        "cwd": "$WS"
+        "queries": [
+          "hotSym"
+        ],
+        "scope": {
+          "path": "src/m11/f.ts"
+        }
       }
     },
     "omitted": [

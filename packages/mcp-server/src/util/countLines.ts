@@ -44,3 +44,39 @@ export function countLines(content: string): number {
   if (trimmed.length === 0) return 0; // content was just "\n" (or "\r\n") — see module doc comment.
   return trimmed.split("\n").length;
 }
+
+/**
+ * Reconstruct the 1-based inclusive line range [startLine, endLine] of `raw`
+ * as text — the exact `raw.split(/\r?\n/).slice(startLine - 1,
+ * endLine).join("\n")` every range-serving read path (readCodeModes.ts's
+ * resolveSlice, task-pack's sliceCode family) already performs — except it
+ * restores the source's own trailing newline when the range reaches the
+ * file's true last logical line (per this module's own countLines) and
+ * `raw` itself ends in one.
+ *
+ * T1b (v0.13, UTF-16 3-way read-parity wave): without this, a range
+ * covering the WHOLE file silently dropped that trailing newline —
+ * countLines() deliberately does not count the phantom final empty segment
+ * split() produces for trailing-newline content (see this file's other doc
+ * comment), so slicing up to exactly that count and joining never
+ * re-included it, unlike an unsliced full read of the same file (which
+ * returns the decoded buffer verbatim). That silent mismatch is what broke
+ * `three_way_consistent` in the utf16 3-way read-parity check
+ * (run_release_rehearsal.mjs's utf16 scenario / utf16ReadParity.spec.ts): a
+ * "whole file" served via a synthesized/explicit line range (task_pack
+ * evidence, or a bare-file handle resolved through read_file's `handles[]`
+ * batch) came back one trailing newline short of the SAME file served via
+ * `mode=full path=`/`handle=`. Only fires when the served range's last line
+ * IS the file's actual last line — a genuine partial/mid-file range is
+ * byte-identical to the old join, and a caller that goes on to
+ * byte-cap-truncate this result already treats it as known-incomplete
+ * regardless of the trailing newline.
+ */
+export function sliceLinesToText(raw: string, startLine: number, endLine: number): string {
+  const lines = raw.split(/\r?\n/);
+  const total = countLines(raw);
+  const clampedEnd = Math.min(endLine, lines.length);
+  const joined = lines.slice(startLine - 1, clampedEnd).join("\n");
+  const reachesEnd = endLine >= total && (raw.endsWith("\n") || raw.endsWith("\r\n"));
+  return reachesEnd && joined.length > 0 && !joined.endsWith("\n") ? joined + "\n" : joined;
+}

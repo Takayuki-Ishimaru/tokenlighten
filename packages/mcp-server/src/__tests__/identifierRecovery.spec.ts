@@ -126,7 +126,7 @@ describe("explicit-identifier literal self-recovery (wave 4 C-1)", () => {
     const claim = contract.evidence_model?.claims.find(
       (entry) => entry.id === "identifier:zorblatQuux",
     );
-    expect(claim?.status).toBe("unresolved");
+    expect(claim?.status).toBe("supported");
     expect(claim?.reason).toContain("verified absent");
   });
 });

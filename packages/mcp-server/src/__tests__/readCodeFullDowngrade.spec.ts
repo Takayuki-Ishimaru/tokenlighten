@@ -304,9 +304,10 @@ describe("readCodeFullDowngrade — byte-cap-exceeded serves the content head (W
     const next = limit["next"] as Record<string, unknown>;
     expect(next["tool"]).toBe("read_file");
     const nextArgs = next["arguments"] as Record<string, unknown>;
-    expect(nextArgs["mode"]).toBe("slice");
-    expect(nextArgs["handle"]).toMatch(/^h[0-9a-z]+$/);
-    expect(String(nextArgs["range"])).toMatch(/^\d+-\d+$/);
+    expect(nextArgs["content"]).toBe("auto");
+    const nextTarget = (nextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
+    expect(nextTarget["handle"]).toMatch(/^h[0-9a-z]+$/);
+    expect(String(nextTarget["range"])).toMatch(/^\d+-\d+$/);
   }, 30000);
 
   it("the remainder next slice actually serves the rest of the file", async () => {
@@ -326,13 +327,13 @@ describe("readCodeFullDowngrade — byte-cap-exceeded serves the content head (W
     const limit = d["limit"] as Record<string, unknown>;
     const next = limit["next"] as Record<string, unknown>;
     const nextArgs = next["arguments"] as Record<string, unknown>;
-    const range = nextArgs["range"] as string;
+    const nextTarget = (nextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
+    const range = nextTarget["range"] as string;
     expect(range).toBeDefined();
-    const handle = nextArgs["handle"] as string;
 
     const follow = await srv.rpc(3, "tools/call", {
       name: "read_file",
-      arguments: { mode: "slice", handle, range },
+      arguments: nextArgs,
     });
     const f = parseResult(follow);
     expect(f["kind"]).toBe("read.text");
@@ -403,9 +404,10 @@ describe("readCodeFullDowngrade — per-task-cap overflow converts to skeleton+r
     const limit = d["limit"] as Record<string, unknown>;
     expect(limit).toBeDefined();
     const nextArgs = (limit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
-    expect(nextArgs["mode"]).toBe("slice");
-    expect(nextArgs["handle"]).toBe(outline["handle"]);
-    const zoomRanges = nextArgs["ranges"] as string[];
+    expect(nextArgs["content"]).toBe("auto");
+    const nextTargets = nextArgs["targets"] as Array<Record<string, unknown>>;
+    expect(nextTargets[0]?.["handle"]).toBe(outline["handle"]);
+    const zoomRanges = nextTargets[0]?.["ranges"] as string[];
     expect(zoomRanges).toHaveLength(1);
     expect(zoomRanges[0]).toMatch(/^1-\d+$/);
     expect(nextArgs["allowFull"]).toBeUndefined();
@@ -438,8 +440,9 @@ describe("readCodeFullDowngrade — per-task-cap overflow converts to skeleton+r
     // and the zoom names it — no cap ever answers with a bare "no".
     const limit = d["limit"] as Record<string, unknown>;
     const nextArgs = (limit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
-    expect(nextArgs["mode"]).toBe("slice");
-    expect((nextArgs["ranges"] as string[])[0]).toMatch(/^1-\d+$/);
+    expect(nextArgs["content"]).toBe("auto");
+    const nextTargets = nextArgs["targets"] as Array<Record<string, unknown>>;
+    expect((nextTargets[0]?.["ranges"] as string[])[0]).toMatch(/^1-\d+$/);
   }, 40000);
 
   // B2c: the OTHER governor reasons are untouched — a per-PATH cap still serves
@@ -500,8 +503,9 @@ describe("readCodeFullDowngrade — tiny-skeleton-cap overflow (M1)", () => {
     expect(d["evidence"]).toBeUndefined();
     const limit = d["limit"] as Record<string, unknown>;
     const nextArgs = (limit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
-    expect(nextArgs["mode"]).toBe("slice");
-    expect(nextArgs["ranges"]).toEqual(["1-1"]);
+    expect(nextArgs["content"]).toBe("auto");
+    const nextTargets = nextArgs["targets"] as Array<Record<string, unknown>>;
+    expect(nextTargets[0]?.["ranges"]).toEqual(["1-1"]);
   }, 60000);
 });
 

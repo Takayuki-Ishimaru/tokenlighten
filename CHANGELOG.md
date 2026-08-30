@@ -2,6 +2,69 @@
 
 All notable public changes to TokenLighten are documented here.
 
+## 0.13.0
+
+Correctness and client-compatibility release centered on proof-carrying task
+completion, a canonical MCP request surface, smaller replay responses, and
+automatic VS Code schema-cache recovery.
+
+### Added
+
+- Proof-carrying completion tracks monotone task obligations, authoritative
+  absence, executed continuations, and bounded one-hop evidence expansion.
+  Exhaustive requests cannot report `act.answer` while an obligation remains
+  unproved or undisclosed.
+- Replay v2 stores compact structured edit outcomes while keeping legacy retry
+  keys fail-safe. Four measured replay cases shrank from 5,247 to 391 bytes in
+  aggregate; fresh apply responses remain unchanged.
+- A schema stamp now follows the advertised tool schema through the CLI,
+  generated client configuration, and VS Code MCP provider version. VS Code
+  refreshes definitions when that stamp changes.
+- Guide profile selection is available through the CLI and VS Code. Managed
+  guide v80 documents the canonical v0.13 call surface in English and Japanese.
+
+### Changed
+
+- The advertised request schemas now use the canonical `query`, `targets`,
+  `content`, `select`, `budget`, `task`, `scope`, `edits`, and
+  `artifact` structures. The server advertises six canonical call shapes
+  across exactly three MCP tools.
+- Legacy v0.12 request fields remain dispatch-compatible for v0.13.x but are no
+  longer advertised and are scheduled for removal in v0.14.
+- `TL_PROOF_COMPLETION` is enabled by default as a correctness safeguard.
+  Experimental `TL_SCHEMA_DEFS` remains disabled by default and fails closed.
+- JSON-stringified canonical object parameters are accepted only after strict
+  structural validation, improving compatibility with schema-blind clients.
+  Advertised arrays now declare item schemas for VS Code and OpenAI
+  function-calling validators.
+
+### Validation and benchmark disclosure
+
+- At-head protocol validation passed the baseline follower, Tier-3 follower,
+  and proof-completion-OFF follower suites at 8/8 each, plus the 7/7 release
+  rehearsal.
+- The v0.13 developer benchmark produced a TokenLighten/native aggregate cost
+  ratio of **0.735**, a point estimate of **26.5% lower** task cost. v0.12.1
+  introduced no performance change; the comparable v0.12.0 point estimate was
+  approximately 28% lower, and v0.11.1 was approximately 21% lower.
+- Task-level median costs were 42.5% lower for cross-module telemetry-health
+  wiring, 20.3% lower for a related multi-bug fix, 12.0% lower for a
+  cross-path priority feature, and 18.0% lower for spreadsheet-driven rating
+  rules. A localized explanation task cost 4.1% more and a narrow calculation
+  fix cost 1.1% more, showing that small known-location work remains the weak
+  area. These cross-release comparisons are descriptive, and developer-run
+  observations do not guarantee savings or quality on other repositories,
+  clients, models, or evaluation windows.
+
+### Known limitations
+
+- Some multi-target range-read shapes can re-serve prior ranges or be refused;
+  use separate single-target range reads as a workaround.
+- A single edit batch that mixes creation with edits to existing files can be
+  refused; apply the creation and existing-file edits in separate batches.
+- Concurrent lanes sharing one workspace can expose stale edit-frontier state
+  in a known edge case. Avoid concurrent write lanes until this is corrected.
+
 ## 0.12.1
 
 Maintenance and security-quality patch on top of v0.12.0. This release

@@ -1407,7 +1407,7 @@ const PLAN_MEMBERS = [
  */
 const KEPT_ON_TASK_PACK = [
   "profile_binding", "frontier_index", "checks", "verify", "roots", "server_build", "qref",
-  "create_target", "answer_resolution", "advisory", "scope_inferred",
+  "create_target", "answer_resolution", "advisory", "scope_inferred", "fast_path",
 ] as const;
 
 /**

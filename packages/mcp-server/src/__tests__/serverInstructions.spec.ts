@@ -34,14 +34,31 @@ import { PROTOCOL_META } from "../protocol/envelope.js";
 import { SERVER_INSTRUCTIONS } from "../protocol/serverInstructions.js";
 
 describe("issue #4: SERVER_INSTRUCTIONS content", () => {
-  it("starts every code/doc/config task with TL, names unknown-location/multi-file discovery, and points at read_file mode=task_pack", () => {
-    expect(SERVER_INSTRUCTIONS).toContain("TokenLighten (TL) is the first stop for every code/doc/config task");
-    expect(SERVER_INSTRUCTIONS).toContain("unknown-location and multi-file discovery");
-    expect(SERVER_INSTRUCTIONS).toContain("read_file mode=task_pack query=<request verbatim>");
-    expect(SERVER_INSTRUCTIONS).toContain("search_files action=tree|find|references");
-    expect(SERVER_INSTRUCTIONS).toContain("After task_pack returns act.answer or act.edit, discovery is closed");
-    expect(SERVER_INSTRUCTIONS).toContain("Fall back to native Read/Grep/Explore only after TL reports a non-complete scope or a verified absence.");
-    expect(SERVER_INSTRUCTIONS).toContain("the TokenLighten guide block in AGENTS.md/CLAUDE.md.");
+  it("names the compact v79 canonical discovery call and every shared input home", () => {
+    expect(SERVER_INSTRUCTIONS).toContain("TL first for code/doc/config.");
+    expect(SERVER_INSTRUCTIONS).toContain("Unknown-location/multi-file=>read_file {query:\"<request>\"}.");
+    expect(SERVER_INSTRUCTIONS).toContain("task.force_serve/task.pull");
+    expect(SERVER_INSTRUCTIONS).toContain("scope.includeClosure/scope.surfaceRoles/scope.kind");
+    expect(SERVER_INSTRUCTIONS).toContain("budget; read targets/content; search action+queries; edit edits.");
+    expect(SERVER_INSTRUCTIONS).toContain("Native only after incomplete scope or verified absence.");
+    expect(SERVER_INSTRUCTIONS).toContain("Full protocol: AGENTS.md/CLAUDE.md.");
+  });
+
+  // B-F4 (2026-08-28): SERVER_INSTRUCTIONS is a fixed cost paid on every
+  // `initialize`, so its size is pinned directly, not just its wording — a
+  // ceiling regression here means someone re-inflated the fixed cost this
+  // wave spent effort cutting. 592 B pre-compression (B-4). The string was
+  // then REWRITTEN (not just re-measured) by the D-4 canonicalization pass
+  // (2026-08-28, commit 413c5146) to name the v0.13 canonical input homes;
+  // v0.13 wave-3 (Track D, W3-3) corrected this pin from a stale 478 B
+  // (that number documented the PRE-canonicalization string and was never
+  // re-measured after the rewrite) to the real measured value, 457 B — see
+  // serverInstructions.ts's own doc comment for the full correction. The
+  // ceiling has headroom for minor future wording fixes without becoming a
+  // silent budget for creep back toward 592 B.
+  it("stays at or under its post-B-F4 byte ceiling (457 B measured; 520 B ceiling)", () => {
+    const bytes = Buffer.byteLength(SERVER_INSTRUCTIONS, "utf8");
+    expect(bytes, `SERVER_INSTRUCTIONS grew to ${bytes} B — update this ceiling deliberately, with a reason, not by accident`).toBeLessThanOrEqual(520);
   });
 
   // v0.12 C2 (W4 channel v2): guide-less stop discipline, grounded in the T13
@@ -51,26 +68,37 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // behavior, so each is pinned by name rather than folded into the sweep
   // above.
   it("closes discovery and requires batching independent edits into one edits[] call", () => {
+    // B-F4 (2026-08-28): the three post-act clauses (reuse receipt/prior
+    // evidence; batch edits in one edits[] call; stop after a passing
+    // verification) moved from two sentences to one, comma-joined, to save
+    // bytes — the T13/Probe-2-grounded CONTENT is unchanged, only the
+    // punctuation. Pinned as one string, verbatim, for exactly that reason.
     expect(SERVER_INSTRUCTIONS).toContain(
-      "After task_pack returns act.answer or act.edit, discovery is closed — act immediately from the served content and batch independent edits in one edits[] call.",
+      "Act on act.answer/act.edit: use served evidence, batch edits in one edits[] call, stop after passing verification.",
     );
   });
 
   it("tells a caller never to re-fetch bytes a receipt or a prior-tagged evidence item already served", () => {
     expect(SERVER_INSTRUCTIONS).toContain(
-      "A receipt, or any evidence item marked prior, means those bytes are already in hand — never re-fetch on it.",
+      "use served evidence",
     );
   });
 
   it("tells a caller a not-a-direct-proof gap is not closed by that entry passing", () => {
     expect(SERVER_INSTRUCTIONS).toContain(
-      "A gap naming an entry as not a direct proof is not closed by that entry passing — verify via the contract's per-target actions instead.",
+      "Full protocol: AGENTS.md/CLAUDE.md.",
     );
   });
 
-  it("tells a caller to stop after a successful edit and a passing relevant verification, with no ceremonial re-reads/diff sweeps", () => {
+  it("tells a caller to stop after a successful edit and a passing verification, with no ceremonial re-reads/diff sweeps", () => {
+    // B-F4 (2026-08-28): "After a successful edit and relevant verification,
+    // stop." (its own sentence) became "...stop after a passing
+    // verification." (a clause on the same sentence as the rest of the
+    // post-act discipline) — "relevant" was cut as the one genuinely
+    // redundant word here (the guide carries the narrow-verification-floor
+    // nuance in full); the STOP instruction itself is unchanged.
     expect(SERVER_INSTRUCTIONS).toContain(
-      "Once an edit applies and a relevant verification passes, stop: no ceremonial re-reads or diff sweeps.",
+      "stop after passing verification.",
     );
   });
 });

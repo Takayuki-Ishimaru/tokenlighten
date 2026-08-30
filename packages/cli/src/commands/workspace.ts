@@ -10,7 +10,8 @@ import {
 import { dirname, join, relative, resolve, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
 import crossSpawn from "cross-spawn";
-import { injectAll, parseSentinelBlock } from "@tokenlighten/agents-md";
+import { injectAll, parseSentinelBlock, VALID_PROFILES } from "@tokenlighten/agents-md";
+import type { GuideProfile } from "@tokenlighten/agents-md";
 import type {
   TokenLightenSetupClient,
   TokenLightenWorkspaceListResult,
@@ -26,6 +27,7 @@ import {
 import { resolveStableLauncher } from "../launcher.js";
 import { configFilePath } from "../paths.js";
 import { wantsHelp } from "../util/helpFlag.js";
+import { resolveMcpBin } from "./mcp.js";
 
 const CLIENTS = new Set<TokenLightenSetupClient>([
   "vscode",
@@ -35,7 +37,7 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--rules-only] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
@@ -104,10 +106,45 @@ function objectMember(
   return value as Record<string, unknown>;
 }
 
+/**
+ * Best-effort schema-content stamp for whatever @tokenlighten/mcp-server this
+ * install resolves (packages/mcp-server/src/util/schemaStamp.ts). Written
+ * into generated MCP client config as TOKENLIGHTEN_SCHEMA_STAMP purely so
+ * that a genuine advertised-tool-schema change produces a genuine config
+ * change: VS Code (and other hosts that reread this file rather than caching
+ * a provider-side definition) treat any config value change as a
+ * server-definition change and are willing to re-fetch/re-validate
+ * tools/list instead of trusting a stale cached copy — see the matching
+ * McpStdioServerDefinition.version mechanism in packages/vscode-extension's
+ * mcpProvider.ts. The server itself never reads this variable.
+ *
+ * Best-effort by design: any failure (mcp-server not yet built, spawn error,
+ * malformed output) silently omits the env var rather than failing setup —
+ * rerunning `tl workspace setup` later picks up a real value once the
+ * resolvable mcp-server can report one.
+ */
+export function currentMcpSchemaStamp(): string | undefined {
+  try {
+    const bin = resolveMcpBin();
+    if (!existsSync(bin)) return undefined;
+    const result = crossSpawn.sync(
+      process.execPath,
+      [bin, "--print-schema-stamp"],
+      { shell: false, encoding: "utf8", timeout: 30_000 },
+    );
+    if (result.error || result.status !== 0) return undefined;
+    const first = String(result.stdout ?? "").trim().split(/\r?\n/, 1)[0] ?? "";
+    return /^[0-9a-f]{16}$/.test(first) ? first : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function serverConfig(
   root: string,
   client: "vscode" | "claude-code",
   launcher: SetupLauncher,
+  schemaStamp: string | undefined,
 ): Record<string, unknown> {
   return {
     command: launcher.command,
@@ -124,32 +161,45 @@ function serverConfig(
       ...launcher.env,
       TOKENLIGHTEN_CLIENT: client,
       TOKENLIGHTEN_USAGE_LOG: "on",
+      ...(schemaStamp !== undefined ? { TOKENLIGHTEN_SCHEMA_STAMP: schemaStamp } : {}),
     },
   };
 }
 
-function configureVsCode(root: string, launcher: SetupLauncher): string {
+function configureVsCode(
+  root: string,
+  launcher: SetupLauncher,
+  schemaStamp: string | undefined,
+): string {
   const target = join(root, ".vscode", "mcp.json");
   const document = readJsonObject(target);
   const servers = objectMember(document, "servers");
-  servers["tokenlighten"] = serverConfig(root, "vscode", launcher);
+  servers["tokenlighten"] = serverConfig(root, "vscode", launcher, schemaStamp);
   writeJsonAtomic(root, target, document);
   return target;
 }
 
-function configureClaude(root: string, launcher: SetupLauncher): string {
+function configureClaude(
+  root: string,
+  launcher: SetupLauncher,
+  schemaStamp: string | undefined,
+): string {
   const target = join(root, ".mcp.json");
   const document = readJsonObject(target);
   const servers = objectMember(document, "mcpServers");
   servers["tokenlighten"] = {
     type: "stdio",
-    ...serverConfig(root, "claude-code", launcher),
+    ...serverConfig(root, "claude-code", launcher, schemaStamp),
   };
   writeJsonAtomic(root, target, document);
   return target;
 }
 
-function configureCodex(root: string, launcher: SetupLauncher): string {
+function configureCodex(
+  root: string,
+  launcher: SetupLauncher,
+  schemaStamp: string | undefined,
+): string {
   const target = join(root, ".codex", "config.toml");
   assertInsideRoot(root, target);
   assertNotSymlink(target);
@@ -170,6 +220,7 @@ function configureCodex(root: string, launcher: SetupLauncher): string {
       ...launcher.env,
       TOKENLIGHTEN_CLIENT: "codex",
       TOKENLIGHTEN_USAGE_LOG: "on",
+      ...(schemaStamp !== undefined ? { TOKENLIGHTEN_SCHEMA_STAMP: schemaStamp } : {}),
     },
     enabled: true,
   });
@@ -182,6 +233,14 @@ export async function setupWorkspace(options: {
   clients?: readonly TokenLightenSetupClient[];
   launcher?: SetupLauncher;
   rulesOnly?: boolean;
+  /** Guide profile to inject; omitted means full for backwards compatibility. */
+  guideProfile?: GuideProfile;
+  /**
+   * Override for currentMcpSchemaStamp() — tests inject a deterministic
+   * value here instead of spawning the real resolved mcp-server. Omitted
+   * means the real best-effort resolve-and-spawn implementation.
+   */
+  schemaStamp?: () => string | undefined;
 }): Promise<TokenLightenWorkspaceSetupResult> {
   const requestedRoot = resolve(options.root);
   if (!existsSync(requestedRoot) || !lstatSync(requestedRoot).isDirectory()) {
@@ -201,6 +260,7 @@ export async function setupWorkspace(options: {
     repoRoot: root,
     targets: ["claude", "copilot"],
     driftMode: "auto-rewrite",
+    ...(options.guideProfile !== undefined ? { profile: options.guideProfile } : {}),
   });
   const configFilesWritten: string[] = [];
   const launcher = options.launcher ?? {
@@ -208,15 +268,21 @@ export async function setupWorkspace(options: {
     argsPrefix: [],
     env: {},
   };
+  // Only worth computing when a client config is actually about to be
+  // written — a rules-only setup (or an empty client list) never calls
+  // configureVsCode/configureCodex/configureClaude, so skip the spawn.
+  const schemaStamp = clients.length > 0
+    ? (options.schemaStamp ?? currentMcpSchemaStamp)()
+    : undefined;
   for (const client of clients) {
     if (client === "vscode") {
-      configFilesWritten.push(configureVsCode(root, launcher));
+      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp));
     }
     if (client === "codex") {
-      configFilesWritten.push(configureCodex(root, launcher));
+      configFilesWritten.push(configureCodex(root, launcher, schemaStamp));
     }
     if (client === "claude-code") {
-      configFilesWritten.push(configureClaude(root, launcher));
+      configFilesWritten.push(configureClaude(root, launcher, schemaStamp));
     }
   }
   return {
@@ -645,6 +711,23 @@ export async function runWorkspace(
     ? rawClients.split(",").map((item) => item.trim()) as TokenLightenSetupClient[]
     : undefined;
   const rulesOnly = rest.includes("--rules-only");
+  const rawGuideProfile = valueAfter(rest, "--guide-profile");
+  // B-F6(c): validate against the canonical VALID_PROFILES allowlist
+  // (@tokenlighten/agents-md) instead of re-declaring the same three
+  // literals here.
+  const guideProfile: GuideProfile | undefined =
+    rawGuideProfile !== undefined && VALID_PROFILES.includes(rawGuideProfile as GuideProfile)
+      ? rawGuideProfile as GuideProfile
+      : undefined;
+  if (rawGuideProfile !== undefined && guideProfile === undefined) {
+    // B-F6(b): this was a literal backslash-n (2 source characters) inside
+    // the template literal, which prints as the two visible characters
+    // "\n" rather than starting a new line. A single backslash before the
+    // n is the real escape sequence.
+    process.stderr.write(`tl workspace: unsupported guide profile '${rawGuideProfile}' (expected ${VALID_PROFILES.join(", ")})\n`);
+    process.exitCode = 1;
+    return;
+  }
   const launcher = options.launcher
     ?? resolveStableLauncher({ allowBareFallback: true });
   const serverBuild = rulesOnly
@@ -655,6 +738,7 @@ export async function runWorkspace(
     ...(clients ? { clients } : {}),
     launcher,
     rulesOnly,
+    ...(guideProfile !== undefined ? { guideProfile } : {}),
   });
   const registryTarget = options.registryPath ?? configFilePath();
   let registryWarning: WorkspaceSetupJsonWarning | undefined;

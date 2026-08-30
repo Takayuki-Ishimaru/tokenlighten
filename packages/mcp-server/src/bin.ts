@@ -18,16 +18,32 @@
 //                   — packages/mcp-server/src/util/trace.ts
 //                   computedConfigSha256) for the CURRENT process environment
 //                   to stdout, then exit 0. Does not start the MCP server.
+//   --print-schema-stamp
+//                   Print the 16-lowercase-hex deterministic content stamp of
+//                   this build's advertised tools/list surface (util/
+//                   schemaStamp.ts computeSchemaStamp(advertisedTools())) to
+//                   stdout, then exit 0. Does not start the MCP server. Used
+//                   by packages/vscode-extension's build (bundled-server
+//                   provenance for the generated schema stamp) and by
+//                   packages/cli's workspace setup (TOKENLIGHTEN_SCHEMA_STAMP
+//                   written into generated MCP client config) — see
+//                   util/schemaStamp.ts for why this exists.
 
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 
 import { computedConfigSha256 } from "./util/trace.js";
-import { run } from "./server.js";
+import { computeSchemaStamp } from "./util/schemaStamp.js";
+import { advertisedTools, run } from "./server.js";
 
 /** Exported for unit testing without spawning the CLI or the MCP server. */
 export function printConfigDigestRequested(argv: readonly string[]): boolean {
   return argv.includes("--print-config-digest");
+}
+
+/** Exported for unit testing without spawning the CLI or the MCP server. */
+export function printSchemaStampRequested(argv: readonly string[]): boolean {
+  return argv.includes("--print-schema-stamp");
 }
 
 // Guards the CLI's side effects (server startup, or stdout+exit) behind
@@ -42,6 +58,9 @@ const IS_MAIN = typeof process.argv[1] === "string"
 if (IS_MAIN) {
   if (printConfigDigestRequested(process.argv.slice(2))) {
     process.stdout.write(`${computedConfigSha256()}\n`);
+    process.exit(0);
+  } else if (printSchemaStampRequested(process.argv.slice(2))) {
+    process.stdout.write(`${computeSchemaStamp(advertisedTools())}\n`);
     process.exit(0);
   } else {
     run().catch((err: unknown) => {

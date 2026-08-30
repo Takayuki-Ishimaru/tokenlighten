@@ -95,7 +95,7 @@ describe("explore action=office — S1/C3 redirect (no more dead-end error)", ()
     const exploreTool = tools.find((t) => t.name === "search_files");
     expect(exploreTool).toBeDefined();
     const actionProp = exploreTool?.inputSchema?.properties?.["action"] as { enum?: string[] } | undefined;
-    expect(actionProp?.enum).toEqual(["find", "symbols", "references", "diff", "locate", "tree"]);
+    expect(actionProp?.enum).toEqual(["find", "references", "diff", "tree"]);
     expect(actionProp?.enum).not.toContain("office");
   });
 });

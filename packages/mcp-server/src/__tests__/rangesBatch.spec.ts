@@ -30,7 +30,6 @@ import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { nextText } from "./helpers/protocolNext.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -342,14 +341,21 @@ describe("ranges[] — per-segment clamp and invalid ranges", () => {
     // drops it from the wire even though the file WAS resolved before every
     // range proved invalid. Verified live. See repair-agent report.
     // expect(data["total_lines"]).toBe(20);                             // ORIGINAL
-    expect(nextText(data as Record<string, unknown>)).toContain("read_file mode=slice");
+    // W2-4: was `expect(nextText(data)).toContain("read_file mode=slice")`
+    // (pre-v1 prose readback). Same fact on the wire directly: `next` names
+    // a read_file call re-locating by path with a real range — a slice.
+    const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool, JSON.stringify(data)).toBe("read_file");
+    const target = (next?.arguments?.["targets"] as Array<Record<string, unknown>> | undefined)?.[0];
+    expect(target?.["path"], JSON.stringify(data)).toBe("src/a.ts");
+    expect(target?.["range"] ?? target?.["ranges"], JSON.stringify(data)).toBeDefined();
     // C2-4 (already adjudicated — see readCodeHandle.spec.ts): the closed
     // advisory allowlist does not echo back a `handle`; the recovery `next`
     // above already proves a usable locator (it re-locates by `path`,
     // needing no handle at all).
   }, 30000);
 
-  it("refuses range + ranges[] together instead of silently picking one", async () => {
+  it("refuses path + range + ranges[] together with an executable canonical merged-range recovery", async () => {
     const wsDir = mkDir("exclusive");
     writeFile(wsDir, "src/a.ts", numberedLines(20));
 
@@ -363,8 +369,73 @@ describe("ranges[] — per-segment clamp and invalid ranges", () => {
     }));
     expect(data["kind"]).toBe("refusal");
     expect(String(data["detail"])).toContain("mutually exclusive");
-    // The recovery is the merged batch the caller almost certainly meant.
-    expect(nextText(data as Record<string, unknown>)).toContain('["1-2","5-6"]');
+    expect(data["next"]).toEqual({
+      tool: "read_file",
+      arguments: {
+        content: "auto",
+        targets: [{ path: "src/a.ts", ranges: ["1-2", "5-6"] }],
+      },
+    });
+  }, 30000);
+
+  it("keeps a handle locator in the canonical range + ranges[] recovery", async () => {
+    const wsDir = mkDir("exclusive-handle");
+    writeFile(wsDir, "src/a.ts", numberedLines(20));
+
+    const srv = startServer({ cwd: wsDir, args: [wsDir] });
+    servers.push(srv);
+    await srv.initialize();
+
+    const data = parseToolResult(await srv.rpc(2, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "slice", handle: "h_exact", range: "1-2", ranges: ["5-6"] },
+    }));
+    expect(data["kind"]).toBe("refusal");
+    expect(data["next"]).toEqual({
+      tool: "read_file",
+      arguments: {
+        content: "auto",
+        targets: [{ handle: "h_exact", ranges: ["1-2", "5-6"] }],
+      },
+    });
+  }, 30000);
+
+  it("does not fabricate path=undefined when range + ranges[] has no locator", async () => {
+    const wsDir = mkDir("exclusive-no-locator");
+    const srv = startServer({ cwd: wsDir, args: [wsDir] });
+    servers.push(srv);
+    await srv.initialize();
+
+    const data = parseToolResult(await srv.rpc(2, "tools/call", {
+      name: "read_file",
+      arguments: { mode: "slice", range: "1-2", ranges: ["5-6"] },
+    }));
+    expect(data["kind"]).toBe("refusal");
+    expect(data["retry"]).toBe("call");
+    expect(data["field"]).toBe("path");
+    expect(data["next"]).toBeUndefined();
+    expect(JSON.stringify(data)).not.toContain("path=undefined");
+  }, 30000);
+
+  it("keeps an ambiguous archive member range + ranges[] refusal at user input without a false path recovery", async () => {
+    const wsDir = mkDir("exclusive-archive");
+    const srv = startServer({ cwd: wsDir, args: [wsDir] });
+    servers.push(srv);
+    await srv.initialize();
+
+    const data = parseToolResult(await srv.rpc(2, "tools/call", {
+      name: "read_file",
+      arguments: {
+        mode: "slice",
+        archive: { path: "fixture.zip", member: "notes.md" },
+        range: "1-2",
+        ranges: ["5-6"],
+      },
+    }));
+    expect(data["kind"]).toBe("refusal");
+    expect(data["retry"]).toBe("user-input");
+    expect(data["next"]).toBeUndefined();
+    expect(JSON.stringify(data)).not.toContain("fixture.zip::notes.md");
   }, 30000);
 });
 
@@ -403,8 +474,9 @@ describe("ranges[] — overall response budget", () => {
     const limit = data["limit"] as Record<string, unknown>;
     const next = limit["next"] as Record<string, unknown>;
     const nextArgs = next["arguments"] as Record<string, unknown>;
-    expect(nextArgs["handle"]).toBe(evidence[0]!["handle"]);
-    expect(nextArgs["ranges"]).toEqual(remaining);
+    const targets = nextArgs["targets"] as Array<Record<string, unknown>>;
+    expect(targets[0]?.["handle"]).toBe(evidence[0]!["handle"]);
+    expect(targets[0]?.["ranges"]).toEqual(remaining);
     // Dropped windows are dropped WHOLE: no partial segment for them.
     expect(evidence.some((e) => remaining.includes(e["range"] as string))).toBe(false);
   }, 30000);

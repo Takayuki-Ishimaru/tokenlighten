@@ -78,6 +78,8 @@ export interface TaskHandleState {
   taskFingerprint: string;
   replay?: string;
   coverage?: string;
+  /** Digest of the monotone obligation ledger for restart-safe proof binding. */
+  ledgerDigest?: string;
   mintedAtMs: number;
 }
 
@@ -198,6 +200,7 @@ function asTaskState(record: StoredRecord): TaskHandleState | undefined {
     taskFingerprint: data["taskFingerprint"],
     ...(typeof data["replay"] === "string" ? { replay: data["replay"] } : {}),
     ...(typeof data["coverage"] === "string" ? { coverage: data["coverage"] } : {}),
+    ...(typeof data["ledgerDigest"] === "string" ? { ledgerDigest: data["ledgerDigest"] } : {}),
     mintedAtMs: typeof data["mintedAtMs"] === "number" ? data["mintedAtMs"] : record.updatedAtMs,
   };
 }

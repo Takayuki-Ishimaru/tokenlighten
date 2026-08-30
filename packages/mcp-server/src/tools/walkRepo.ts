@@ -550,6 +550,23 @@ function classifyIgnored(
   return null;
 }
 
+/**
+ * The durable state store is server runtime bookkeeping, not workspace
+ * material.  It is deliberately rooted at `.tokenlighten/state/` so it is
+ * excluded from version control, but its creation must not change a repeated
+ * search's declared scope.  Keep the surrounding `.tokenlighten` namespace
+ * under the ordinary ignore policy: cache/index/user files still count as
+ * explicit exclusions.  We only descend through the root to omit this one
+ * internal subtree without recording it in `WalkOmissions`.
+ */
+function isInternalStateStorePath(relPath: string): boolean {
+  return relPath === ".tokenlighten/state" || relPath.startsWith(".tokenlighten/state/");
+}
+
+function isTokenlightenRoot(relPath: string): boolean {
+  return relPath === ".tokenlighten";
+}
+
 export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundFile[] {
   const allowedExts: Set<string> | null = opts.lang
     ? new Set(LANG_EXTS[opts.lang] ?? [])
@@ -681,7 +698,10 @@ function walkDir(
       // Never followed (escape safety); counted so consumers can disclose it.
       if (om) om.symlinks += 1;
     } else if (entry.isDirectory()) {
-      const layer = classifyIgnored(layers, relPath, true);
+      // Descend only through the namespace root so its `state/` child can be
+      // invisible.  Other children remain subject to the usual matcher.
+      if (isInternalStateStorePath(relPath)) continue;
+      const layer = isTokenlightenRoot(relPath) ? null : classifyIgnored(layers, relPath, true);
       if (layer) {
         if (om) om[layer] += 1;
         continue;
@@ -689,6 +709,7 @@ function walkDir(
       if (isSourceOnlyExcludedPath(relPath + "/", explicitSubPath, fullRecall)) continue;
       walkDir(workspace, absPath, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, sizeCapBytes, explicitSubPath, fullRecall);
     } else if (entry.isFile()) {
+      if (isInternalStateStorePath(relPath)) continue;
       const layer = classifyIgnored(layers, relPath, false);
       if (layer) {
         if (om) om[layer] += 1;

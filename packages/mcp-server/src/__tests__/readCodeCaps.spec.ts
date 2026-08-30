@@ -310,8 +310,9 @@ describe("read_code hard read caps (Phase 4)", () => {
     const nextArgs = next["arguments"] as Record<string, unknown>;
     // allowFull was already supplied and still exceeded — it cannot help
     // further, so the recovery call is a plain slice, never an allowFull retry.
-    expect(nextArgs["allowFull"]).toBeUndefined();
-    expect(nextArgs["mode"]).toBe("slice");
+    expect((nextArgs["budget"] as Record<string, unknown> | undefined)?.["allowFull"]).toBeUndefined();
+    expect(nextArgs["content"]).toBe("auto");
+    expect(Array.isArray(nextArgs["targets"])).toBe(true);
     expect(data["skeleton"]).toBeUndefined();
     // Refusal fields gone.
     expect(data["ok"]).toBeUndefined();
@@ -401,7 +402,8 @@ describe("read_code hard read caps (Phase 4)", () => {
     const limit = data["limit"] as Record<string, unknown>;
     expect(limit).toBeDefined();
     const nextArgs = (limit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
-    expect(nextArgs["mode"]).toBe("slice");
+    expect(nextArgs["content"]).toBe("auto");
+    expect(Array.isArray(nextArgs["targets"])).toBe(true);
     expect(data["suggest"]).toBeUndefined(); // legacy refusal-only field, gone on the served shape
     // The full served payload itself must stay within the cap (bake-into-cap).
     const rawText = res?.result?.content?.[0]?.text as string;

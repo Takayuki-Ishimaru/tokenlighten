@@ -285,7 +285,15 @@ describe("[W5] post-ready trim serves an existing-wire skeleton, never a fake re
     // range on the minted handle. No W5-only field is introduced.
     expect(trimmed).toMatchObject({
       outline: { path: "src/beta.ts", signatures: [expect.objectContaining({ name: "beta" })] },
-      limit: { next: { tool: "read_file", arguments: { mode: "slice" } } },
+      limit: {
+        next: {
+          tool: "read_file",
+          arguments: {
+            content: "auto",
+            targets: [expect.objectContaining({ handle: expect.any(String), ranges: expect.any(Array) })],
+          },
+        },
+      },
     });
     expect(JSON.stringify(trimmed)).toMatch(/"1-\d+"/);
 

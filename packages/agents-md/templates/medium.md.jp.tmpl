@@ -3,16 +3,18 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (medium)
 
-TLは必要slice+edit handleを安価に返す. 全file作業はTLから開始 — Read/Grep/catやExplore系subagentより先に: 既知`paths`と共に`read_file mode=task_pack query="<依頼全文>"`を使用; nativeへのfan outは非complete scopeか確実な不在の後のみ. 全callに`cwd`を渡す; 共有workspaceでは固定`lane`を渡す. `taskProfile`: `answer`=read-only, `generic`=change; 不明なら省略. epoch内要件は変更まで持続し、絞ったre-packは正直にincomplete足り得る.
+TLは必要slice+edit handleを安価に返す. 全file作業はTLから開始 — Read/Grep/catやExplore系subagentより先に: 既知`targets`と共に`read_file {query:"<依頼全文>",task:{epoch:"new"}}`を使用; nativeへのfan outは非complete scopeか確実な不在の後のみ. 全callに`cwd`を渡す; 共有workspaceでは固定`lane`を渡す. `task.profile`: `answer`=read-only, `generic`=change; 不明なら省略. epoch内要件は変更まで持続し、絞ったre-packは正直にincomplete足り得る.
+
+互換性(v0.13.xのみ、v0.14で削除): `mode=task_pack`、裸の`paths`/`handles`/`maxBytes`/`maxTokens`、`taskProfile`/`taskEpoch`は互換normalizer経由で引き続き動作する — 新規callでは発行禁止; 返却される`next`は既に正準形。
 
 応答は必ず`{v:1,kind,...}`; field有無でなく`kind`で分岐. 未知の`kind`はSAFE-STOP: 報告のみでeditを発行せず、fieldからの推測禁止.
 
-- `read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`はdiscovery閉鎖、配信済み証拠で即行動. 独立した変更は一回の`edit_file`(`edits[]`、各item自前`path`/`handle`)にbatch. `discover`=>その`next`を実行; `await_input`=>携行`next`を実行、無ければcandidate`paths`で一度だけre-pack; `done`=>停止.
+- `read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`はdiscovery閉鎖、配信済み証拠で即行動. 独立した変更は一回の`edit_file`(`edits[]`、各item自前`path`/`handle`)にbatch. `discover`=>その`next`を実行; `await_input`=>携行`next`を実行、無ければcandidate`targets`で一度だけre-pack; `done`=>停止.
 - `refusal`は`retry`だけが有効な遷移: `call`=名指しfieldを修正, `new-task`=re-pack, `none`=このcall形は閉鎖. 広告済み`next`は常に逐語実行可能かつ全queryを運ぶ; 続きの自作禁止.
-- bytesが部分的ならまず同一handleをzoom: `remaining` range(有界)を要求. 上限応答後は`next`に従う; `full`再試行や新queryでのre-pack禁止. 読みは`maxBytes`/`maxTokens`でも上限可.
-- Searchは`action=find query=<識別子1語>`; 複数識別子は一回の`queries=[…]`、逐次禁止. 呼出箇所は`references`、一覧は`tree`.
+- bytesが部分的ならまず同一handleをzoom: `remaining` range(有界)を要求. 上限応答後は`next`に従う; `full`再試行や新queryでのre-pack禁止. 読みは`budget.bytes`/`budget.tokens`でも上限可.
+- Searchは`action:"find",queries:["<識別子1語>"]`; 複数識別子は一回の`queries=[…]`、逐次禁止. 呼出箇所は`references`、一覧は`tree`.
 - path+識別子+変更が平易なら単一値editは高速close. それ以外はTL handle経由で`allowPathFallback:false`によりedit; 新規fileは`create:true`+明示`cwd`. create応答の`sha`/`bytes`/`total_lines`が書込内容を証明; 読み返し不要. `operation_id`で再試行が安全化しreplayも明示.
-- edit後は最初のcompile/testコマンド前に返却済みverification kitを実行. `code`=配信済み証拠; `omitted`=`next`で名指しhandleを一括読込; `verification.status:"not-applicable"`=編集を参照するtest/mock無し. testか`git diff`で終え、関連checkが通れば停止.
+- edit後は最初のcompile/testコマンド前に返却済みverification kitを実行. `code`=配信済み証拠; `omitted`=`next`で名指し`targets`を一括読込; `verification.status:"not-applicable"`=編集を参照するtest/mock無し. testか`git diff`で終え、関連checkが通れば停止.
 
 それ以外 — wiring、archive、資格情報、kind別詳細field — は必要な応答内でon-demand配信.
 <!-- tokenlighten:mcp-instructions:end -->

@@ -34,6 +34,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { PER_TASK_FULL_CAP } from "../util/fullGovernor.js";
+import { parseProseToolCall } from "../protocol/refusal.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -291,8 +292,36 @@ describe("read_code mode=full paths=[...] — governor cap is shared across sing
     expect(entries[1]!["reason"]).toBe("per-task-cap-reached");
     expect(Array.isArray(entries[1]!["skeleton"])).toBe(true);
     expect(entries[1]!["content"]).toBeUndefined();
-    expect(String(entries[1]!["next"])).toContain("mode=slice");
-    expect(String(entries[1]!["next"])).toContain("ranges=");
+    // FX-1 (v0.13 wave-3 review fix, F-2 remainder): this `next` used to be the
+    // legacy `read_file mode=slice handle=… ranges=[…]` prose template — a raw
+    // STRING, which is a blind spot for `canonicalizeEmittedToolCalls`
+    // (protocol/envelope.ts), which only rewrites OBJECT-shaped embedded tool
+    // calls. It now names the canonical `targets=[...]` shape directly.
+    expect(String(entries[1]!["next"])).toContain("read_file targets=");
+    expect(String(entries[1]!["next"])).toContain(`"handle":"${entries[1]!["handle"]}"`);
+    expect(String(entries[1]!["next"])).toContain(`"ranges":[`);
+
+    // The protocol's prose-`next` convention is "run it verbatim" (AGENTS.md:
+    // "Every next is executable: run it verbatim"). Confirm that convention
+    // actually HOLDS for the new canonical-vocabulary wording by parsing it
+    // with the server's own prose-to-ToolCall parser (protocol/refusal.ts's
+    // `parseProseToolCall`, the same helper a refusal's `next` is normalized
+    // through) and firing the parsed call at this same real spawned server —
+    // not a template, the exact string this response just emitted.
+    const nextCall = parseProseToolCall(String(entries[1]!["next"]));
+    expect(nextCall).toBeDefined();
+    expect(nextCall!.tool).toBe("read_file");
+    expect(nextCall!.arguments["targets"]).toEqual([
+      { handle: entries[1]!["handle"], ranges: ["1-130"] },
+    ]);
+    const followUp = await srv.rpc(rpcId++, "tools/call", {
+      name: nextCall!.tool,
+      arguments: nextCall!.arguments,
+    });
+    const followUpData = parseResult(followUp);
+    // Whatever shape a slice serve takes, it must not be the one shape that
+    // would prove the new prose is NOT executable: a refusal.
+    expect(followUpData["kind"]).not.toBe("refusal");
   }, 30000);
 });
 
@@ -391,7 +420,8 @@ describe("read_code mode=full paths=[...] — a nonexistent path omits, does not
     expect(limit).toBeDefined();
     expect(limit["omitted"]).toEqual(["evidence"]);
     const next = limit["next"] as Record<string, unknown>;
-    expect((next["arguments"] as Record<string, unknown>)["paths"]).toContain("src/does-not-exist.ts");
+    const targets = (next["arguments"] as Record<string, unknown>)["targets"] as Array<Record<string, unknown>>;
+    expect(targets.map((target) => target["path"])).toContain("src/does-not-exist.ts");
   }, 30000);
 
   it("all-nonexistent paths: completeness is 'empty', items is []", async () => {
@@ -414,7 +444,8 @@ describe("read_code mode=full paths=[...] — a nonexistent path omits, does not
     expect(limit).toBeDefined();
     expect(limit["omitted"]).toEqual(["evidence"]);
     const next = limit["next"] as Record<string, unknown>;
-    expect((next["arguments"] as Record<string, unknown>)["paths"]).toEqual(["src/nope1.ts", "src/nope2.ts"]);
+    const targets = (next["arguments"] as Record<string, unknown>)["targets"] as Array<Record<string, unknown>>;
+    expect(targets.map((target) => target["path"])).toEqual(["src/nope1.ts", "src/nope2.ts"]);
   }, 30000);
 });
 
@@ -454,6 +485,7 @@ describe("read_code mode=full paths=[...] — a directory entry omits with a hel
     expect(limit).toBeDefined();
     expect(limit["omitted"]).toEqual(["evidence"]);
     const next = limit["next"] as Record<string, unknown>;
-    expect((next["arguments"] as Record<string, unknown>)["paths"]).toContain("src/adir");
+    const targets = (next["arguments"] as Record<string, unknown>)["targets"] as Array<Record<string, unknown>>;
+    expect(targets.map((target) => target["path"])).toContain("src/adir");
   }, 30000);
 });

@@ -75,6 +75,7 @@ const FLAG_KEYS = [
   "TL_OVERLAP_TRIM",
   "TL_DELTA_CONTEXT",
   "TL_COMPOUND_RETRIEVAL",
+  "TL_SCHEMA_DEFS",
 ] as const;
 
 /**
@@ -150,6 +151,13 @@ describe("D10 permanent-on freeze", () => {
     // OFF, and — like graphEvidenceEnabled before it — an out-of-contract
     // capability addition rather than a wire-shape change.
     expect(Object.keys(flags).sort()).toEqual([
+      "PROOF_COMPLETION_FLAG_REGISTRY",
+      // P2(b) (2026-08-28 review-fix wave): named bound on the opt-in
+      // TL_PROOF_COMPLETION_TRACE_PATH trace file, so an untended debug
+      // trace cannot grow without bound. Not a flag reader itself (same
+      // bucket reasoning as PROOF_COMPLETION_FLAG_REGISTRY above).
+      "PROOF_COMPLETION_TRACE_MAX_BYTES",
+      "SCHEMA_DEFS_FLAG_REGISTRY",
       "activeExperimentFlags",
       "adaptiveWholeFileEnabled",
       "bm25fCandidateEnabled",
@@ -166,13 +174,18 @@ describe("D10 permanent-on freeze", () => {
       "graphIndexMode",
       "hop1ClosureEnabled",
       "interfaceAuthorityEnabled",
+      "noteProofCompletionPack",
       "overlapTrimEnabled",
       "postReadyTrimEnabled",
       "postReadyTrimThreshold",
+      "proofCompletionEnabled",
+      "proofCompletionLiveCounterForTest",
       "reasoningIrV2Enabled",
+      "resetProofCompletionLiveCounterForTest",
       "responseFormatMode",
       "rrfFusionEnabled",
       "rrfProfilesEnabled",
+      "schemaDefsEnabled",
       "traceEnabled",
       "verificationRecipeEnabled",
       "wireBreakevenEnabled",
@@ -200,7 +213,10 @@ describe("D10 permanent-on freeze", () => {
     // ONLY writer of a carried ledger entry's `deltaFromSha`, which every
     // delta-serving branch then gates on — so OFF leaves those branches
     // unreachable and the wire unchanged (deltaContextDispatch.spec.ts cell a).
-    expect(Object.keys(flags)).toHaveLength(28);
+    // Six proof-completion exports (P2(b) added PROOF_COMPLETION_TRACE_MAX_BYTES)
+    // are intentional A correctness-fence and diagnostic-counter surfaces,
+    // pinned explicitly above.
+    expect(Object.keys(flags)).toHaveLength(36);
   });
 });
 

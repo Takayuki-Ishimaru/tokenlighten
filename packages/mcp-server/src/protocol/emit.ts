@@ -55,6 +55,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Kind, ToolCall, ToolName } from "@tokenlighten/types";
+import { createHash } from "node:crypto";
 
 import { runLadder } from "./budget/ladder.js";
 import { measureResponseBytes } from "./budget/measure.js";
@@ -64,6 +65,7 @@ import type { ShedPayload } from "./budget/shedders/registry.js";
 import { describeVerdict, validateProtocolBody, type ProtocolViolation } from "./budget/validate.js";
 import { isKnownProtocolKind } from "./budget/requiredSets.js";
 import {
+  canonicalizeEmittedToolCalls,
   isErrorForKind,
   servedWindowsOf,
   type FinalizableResult,
@@ -71,8 +73,10 @@ import {
 } from "./envelope.js";
 import { buildRefusal } from "./refusal.js";
 import { settleServedRanges } from "../state/session.js";
+import { recordServedBytes } from "../util/packServeLog.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
 import { applyResponseCodec } from "./codec/pipeline.js";
+import { ledgerCertificateBindingValid } from "./ledgerCertificateBinding.js";
 
 /**
  * The funnel tail: take a FINAL, already-projected payload to bytes.
@@ -123,15 +127,50 @@ export function emitFinalizedPayload(
   // that can feed it) without editing the table the wire depends on. It is
   // read here and nowhere else, and it changes only WHEN the ladder engages —
   // never what a rung is allowed to cut.
-  const limit = opts?.budgetOverrideBytes ?? budgetFor(kind, formOf(payload, kind));
-
-  const ladder = runLadder({
+  const declaredMaxBytes = typeof context.args?.["maxBytes"] === "number"
+    && Number.isFinite(context.args["maxBytes"])
+    && context.args["maxBytes"] > 0
+    ? Math.floor(context.args["maxBytes"])
+    : undefined;
+  // A caller-declared maxBytes is the hard transport budget for this call;
+  // maxTokens is converted to bytes by the request-side calibrated cap before
+  // the funnel. Test overrides remain explicit and cannot affect production.
+  const calibratedLimit = budgetFor(kind, formOf(payload, kind));
+  const limit = opts?.budgetOverrideBytes
+    ?? (declaredMaxBytes !== undefined
+      ? Math.min(declaredMaxBytes, calibratedLimit)
+      : calibratedLimit);
+  const ladderContext = { ...(context.args !== undefined ? { args: context.args } : {}) };
+  const stableEditKind = kind === "edit.applied"
+    || kind === "edit.rolled_back"
+    || kind === "edit.state_unknown";
+  // A live caller cap tighter than the calibrated row re-enters the same
+  // producer pipeline with that transport cap. SE-STABLE outcomes intentionally
+  // bypass this re-entry and retain their state-preserving emergency reserve.
+  const initialBudget = opts?.budgetOverrideBytes !== undefined
+    ? limit
+    : calibratedLimit;
+  let ladder = runLadder({
     payload,
     kind,
-    budget: limit,
-    context: { ...(context.args !== undefined ? { args: context.args } : {}) },
+    budget: initialBudget,
+    context: ladderContext,
     validate: (candidate) => validateShedCandidate(candidate, kind),
   });
+  if (!stableEditKind
+    && opts?.budgetOverrideBytes === undefined
+    && declaredMaxBytes !== undefined
+    && declaredMaxBytes < calibratedLimit
+    && ladder.used > limit) {
+    const reentered = runLadder({
+      payload: ladder.payload,
+      kind,
+      budget: limit,
+      context: ladderContext,
+      validate: (candidate) => validateShedCandidate(candidate, kind),
+    });
+    if (reentered.used < ladder.used) ladder = reentered;
+  }
 
   let current = ladder.payload;
   let text = ladder.text;
@@ -157,6 +196,16 @@ export function emitFinalizedPayload(
   // carry (the same accounting rule the unknown-kind gate above follows).
   const requiredSetReplacement = enforceRequiredSet(current, onWire, context);
   if (requiredSetReplacement !== undefined) return requiredSetReplacement;
+  if ((onWire === "read.task_pack") && !ledgerCertificateBindingValid(current)) {
+    const detail = "protocol v1 ledger certificate binding violation; producer emitted an unverifiable act decision";
+    if (decisionInvariantStrictEnabled()) throw new Error(detail);
+    const tool = advertisedTool(context.tool);
+    if (tool === undefined) throw new Error(detail);
+    const refusal = buildRefusal(tool, { code: "invalid-input", retry: "none", detail });
+    const refusalText = JSON.stringify(refusal);
+    noteEmission(context, { limit: 0, used: measureResponseBytes(refusalText) });
+    return { content: [{ type: "text", text: refusalText }], isError: true };
+  }
 
   // [R5-10], THE LEDGER HALF. Anything the nine booking sites recorded that
   // this response does not actually carry is retracted, and those lines stay
@@ -181,7 +230,7 @@ export function emitFinalizedPayload(
   // actually on the wire.
   text = applyResponseCodec(text, current, onWire, context, limit);
   used = measureResponseBytes(text);
-  noteEmission(context, { limit, used, ...(shed.length > 0 ? { shed } : {}) });
+  noteEmission(context, { limit, used, ...(shed.length > 0 ? { shed } : {}) }, text, kind, shed.length > 0);
   context.shedRecords = shed;
 
   const finalized: FinalizableResult = {
@@ -251,7 +300,21 @@ function failClosed(
   // response rather than a malformed replacement for it.
   if (forTool === undefined) return undefined;
 
-  return {
+  // W2-3: `next` is `ladder.continuation` — a `ToolCall` minted mid-ladder,
+  // BEFORE `finalizeProtocolResponse`'s one canonicalization pass
+  // (envelope.ts:579) ever runs, because that pass already finished before
+  // this function's caller (`emitFinalizedPayload`) started the ladder. A
+  // refusal built here is therefore a BRAND NEW payload the earlier pass
+  // never saw, and its embedded `next.arguments` stayed in whatever shape
+  // the shedder minted it — legacy (`{mode:"slice",...}`) at this HEAD,
+  // confirmed schema-INVALID against the D-2 advertised-only surface (a
+  // live sweep at a tight budget, e.g. `budget:{bytes:300}`, reproduces it
+  // 2-for-2). Re-running the SAME `canonicalizeEmittedToolCalls` the normal
+  // path already uses — not a second, parallel implementation of it — on
+  // this function's own return value closes that gap at its only other
+  // mint point, without touching the ladder's input or any byte the normal
+  // (non-fail-closed) path already produces.
+  return canonicalizeEmittedToolCalls({
     ...buildRefusal(forTool, {
       code: "cap-exceeded",
       retry: "call",
@@ -260,7 +323,7 @@ function failClosed(
         + "reduced further without breaking its required set; re-issue a narrower call",
       ...(next !== undefined ? { next } : {}),
     }),
-  } as ShedPayload;
+  }) as ShedPayload;
 }
 
 /** `context.tool` narrowed to A.1's three advertised names, or `undefined`. */
@@ -363,8 +426,59 @@ export function emitOpaqueText(
  * no budget row", which is what `budgetFor` would have needed a `kind` to
  * answer.
  */
-function noteEmission(context: ProtocolCallContext, budget: WireBudget): void {
+function carriesVerificationKit(text: string, kind: Kind | undefined): boolean {
+  if (kind !== "edit.applied") return false;
+  try {
+    const body = JSON.parse(text) as Record<string, unknown>;
+    return body.verification !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function noteEmission(
+  context: ProtocolCallContext,
+  budget: WireBudget,
+  text?: string,
+  kind?: Kind,
+  trimmed = false,
+): void {
   context.emittedBytes = budget.used;
+  if (text === undefined) return;
+  const args = context.args;
+  const epoch = typeof args?.["taskEpoch"] === "string" ? args["taskEpoch"] : undefined;
+  const lane = typeof args?.["lane"] === "string" ? args["lane"] : undefined;
+  const workspace = context.workspace;
+  if (workspace === undefined || workspace === "") return;
+  // B-F5 (2026-08-28): named "budget-shed", not "trim" — `trimmed` here is
+  // exactly `shed.length > 0` from THIS call's own budget ladder (see the
+  // one caller below), i.e. "the ladder cut at least one record to fit the
+  // budget". Post-ready trim and prior-pack dedup set explicit provenance
+  // before this funnel, while unannotated calls retain the historical
+  // kind/body inference below.
+  // Producer routes may know why a body was reduced or withheld before the
+  // final envelope exists. Prefer that explicit provenance; retain the
+  // historical kind/body inference for every unannotated call.
+  const source = context.servedBytesSource
+    ?? (kind === "read.receipt"
+      ? "receipt"
+      : trimmed
+        ? "budget-shed"
+        : carriesVerificationKit(text, kind)
+          ? "verification-kit"
+          : args?.["qref"] !== undefined
+            ? "replay"
+            : "fresh");
+  const ledgerResult = recordServedBytes({
+    workspaceRoot: workspace,
+    epoch,
+    lane,
+    bytes: budget.used,
+    digest: createHash("sha256").update(text, "utf8").digest("hex"),
+    source,
+    forceServe: args?.["force_serve"] === true,
+  });
+  context.servedBytesNovel = ledgerResult.novel;
 }
 
 /**

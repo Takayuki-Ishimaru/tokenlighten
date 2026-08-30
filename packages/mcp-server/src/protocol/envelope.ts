@@ -56,6 +56,7 @@ import {
   searchRefusalBody,
   searchRefusalCodeFor,
 } from "./searchFamily.js";
+import { bindLedgerCertificate, bindLedgerCertificateFromScope, ledgerCertificateBinding } from "./ledgerCertificateBinding.js";
 
 /** §1.1, D1. One integer, one value, one server process. */
 export const PROTOCOL_VERSION = 1 as const;
@@ -143,6 +144,10 @@ export interface ProtocolCallContext {
    * reserve assertion and S6's fence attach to it.
    */
   emittedBytes?: number;
+  /** B-6 internal novelty result from the shared served-bytes ledger. */
+  servedBytesNovel?: boolean;
+  /** Producer provenance for a served-bytes ledger entry; never serialized. */
+  servedBytesSource?: import("../util/packServeLog.js").ServedBytesLedgerEntry["source"];
   /**
    * V11-07: the resolved MCP client id, when reachable at codec time (see
    * protocol/codec/clientProfile.ts's module header). `undefined` on every
@@ -160,6 +165,14 @@ export function runWithProtocolCall<T>(context: ProtocolCallContext, fn: () => T
 
 export function protocolCallContext(): ProtocolCallContext | undefined {
   return _protocolCall.getStore();
+}
+
+/** Publish an internal source for the served-bytes ledger at the final funnel. */
+export function noteServedBytesSource(
+  source: ProtocolCallContext["servedBytesSource"],
+): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && source !== undefined) context.servedBytesSource = source;
 }
 
 /** Publish the read_file mode this dispatch resolved to (after `auto` promotion). */
@@ -312,8 +325,12 @@ function priorOnlyTextReceipt(body: Record<string, unknown>): Record<string, unk
     ...(servedBy.length > 0
       ? { served_by: servedBy.length <= 2 ? servedBy.join(" + ") : `${servedBy[0]!} +${servedBy.length - 1} more` }
       : {}),
+    // FX-1 (v0.13 wave-3 review fix): canonical `targets=[...]` prose — a
+    // raw-string `next` here bypasses `canonicalizeEmittedToolCalls` below
+    // (line ~616), which only rewrites OBJECT-shaped embedded tool calls, not
+    // plain strings.
     ...(remaining.length > 0
-      ? { next: `read_file mode=slice handle=${handle} ranges=${JSON.stringify(remaining)}` }
+      ? { next: `read_file targets=${JSON.stringify([{ handle, ranges: remaining }])}` }
       : {}),
   };
 }
@@ -558,6 +575,30 @@ export function finalizeProtocolResponse(
         context.tool === "search_files" ? searchRefusalBody(context.action ?? "", body) : body,
       )
     : { v: PROTOCOL_VERSION, kind, ...projectSuccessBody(kind, body, context) };
+  // Read/search dispatch records the authoritative resolved root in the
+  // trace-only context slot; edit dispatch uses the normal workspace slot.
+  // Both are server-validated identities, unlike caller-visible JSON fields.
+  const resolvedWorkspace = context.workspace ?? context.codecTraceWorkspace;
+  // Canonical continuations are part of the carrier certified by the ledger.
+  const canonicalPayload = canonicalizeEmittedToolCalls(payload);
+  const producerBinding = ledgerCertificateBinding(result);
+  if (producerBinding !== undefined) {
+    const taskReplay = (body.task as { replay?: unknown } | undefined)?.replay;
+    bindLedgerCertificate(canonicalPayload, {
+      ...producerBinding,
+      ...(resolvedWorkspace !== undefined && resolvedWorkspace !== ""
+        ? { workspaceIdentity: resolvedWorkspace }
+        : {}),
+      ...(typeof taskReplay === "string" && taskReplay.length > 0 ? { taskReplay } : {}),
+    });
+  } else if (resolvedWorkspace !== undefined && resolvedWorkspace !== "") {
+    // toolOk JSON-serializes the producer body, so the WeakMap/symbol marker
+    // is gone before this finalizer runs. Reassociate exactly one indexed
+    // producer binding using the funnel's resolved workspace/lane identity;
+    // absent/ambiguous/foreign candidates remain a refusal.
+    const lane = typeof context.args?.lane === "string" ? context.args.lane : undefined;
+    bindLedgerCertificateFromScope(canonicalPayload, resolvedWorkspace, lane);
+  }
 
   // P3a S1: the payload is FINAL here. Everything downstream of this line —
   // serialization, the ONE byte measurement, the shed ladder, the [R5-10]
@@ -565,7 +606,197 @@ export function finalizeProtocolResponse(
   // honest ledger order) and the §2.5 `isError` stamp — belongs to `emit.ts`.
   // The split is not cosmetic: it is what makes "one measurement point" a
   // structural property instead of a convention this function has to keep.
-  return emitFinalizedPayload(payload, kind, context);
+  return emitFinalizedPayload(canonicalPayload, kind, context);
+}
+
+/**
+ * D-4: all model-visible ToolCall carriers use the compact canonical input
+ * surface. Dispatch still accepts the legacy spellings during the migration,
+ * but emitting them would force a caller to rely on compatibility behavior.
+ */
+// W2-3: exported so `emit.ts`'s `failClosed` can re-run the SAME canonicalizer
+// on the refusal it mints — see that call site's comment for why a second,
+// parallel canonicalizer must not be written instead.
+export function canonicalizeEmittedToolCalls(value: Record<string, unknown>): Record<string, unknown> {
+  const visit = (candidate: unknown): unknown => {
+    if (Array.isArray(candidate)) return candidate.map(visit);
+    if (candidate === null || typeof candidate !== "object") return candidate;
+    const record = candidate as Record<string, unknown>;
+    const copied = Object.fromEntries(
+      Object.entries(record).map(([key, child]) => [key, key === "arguments" ? child : visit(child)]),
+    ) as Record<string, unknown>;
+    const tool = copied["tool"];
+    const argumentsValue = copied["arguments"];
+    if (
+      (tool === "read_file" || tool === "edit_file" || tool === "search_files")
+      && argumentsValue !== null && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)
+    ) {
+      copied["arguments"] = canonicalToolArguments(tool, argumentsValue as Record<string, unknown>);
+    }
+    return copied;
+  };
+  return visit(value) as Record<string, unknown>;
+}
+
+/** Construct an executable wire continuation through the one canonicalizer. */
+export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_files", args: Record<string, unknown>): Record<string, unknown> {
+  return { tool, arguments: canonicalToolArguments(tool, args) };
+}
+
+function canonicalToolArguments(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  const base: Record<string, unknown> = {};
+  if (args["lane"] !== undefined) base["lane"] = args["lane"];
+  if (args["cwd"] !== undefined) base["cwd"] = args["cwd"];
+  const task = recordOf(args["task"]) ?? canonicalTask(args);
+  if (task !== undefined) base["task"] = task;
+  const budget = recordOf(args["budget"]) ?? canonicalBudget(args);
+  if (budget !== undefined) base["budget"] = budget;
+
+  if (tool === "read_file") return { ...base, ...canonicalReadArguments(args) };
+  if (tool === "edit_file") return { ...base, ...canonicalEditArguments(args) };
+  return { ...base, ...canonicalSearchArguments(args) };
+}
+
+function canonicalTask(args: Record<string, unknown>): Record<string, unknown> | undefined {
+  const task: Record<string, unknown> = {};
+  const names: ReadonlyArray<readonly [string, string]> = [
+    ["task_handle", "handle"], ["taskEpoch", "epoch"], ["taskProfile", "profile"],
+    ["expected_state_version", "expected_state_version"], ["challenge", "challenge"],
+    ["force_serve", "force_serve"],
+  ];
+  for (const [from, to] of names) if (args[from] !== undefined) task[to] = args[from];
+  if (args["mode"] === "closure") task["pull"] = "closure";
+  return Object.keys(task).length > 0 ? task : undefined;
+}
+
+function canonicalBudget(args: Record<string, unknown>): Record<string, unknown> | undefined {
+  const budget: Record<string, unknown> = {};
+  const names: ReadonlyArray<readonly [string, string]> = [
+    ["maxBytes", "bytes"], ["maxTokens", "tokens"], ["limit", "items"],
+    ["maxRows", "rows"], ["maxCells", "cells"], ["allowFull", "allowFull"],
+  ];
+  for (const [from, to] of names) if (args[from] !== undefined) budget[to] = args[from];
+  return Object.keys(budget).length > 0 ? budget : undefined;
+}
+
+function canonicalReadArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (args["query"] !== undefined) out["query"] = args["query"];
+  if (args["qref"] !== undefined) out["qref"] = args["qref"];
+  const targets = canonicalReadTargets(args);
+  if (targets.length > 0) out["targets"] = targets;
+  const mode = args["mode"];
+  const content = args["content"];
+  if (content === "full" || content === "outline" || content === "auto") out["content"] = content;
+  // A legacy handles[] continuation requests the complete bodies behind its
+  // minted handles, even when it did not spell mode:"full" explicitly.
+  else if (Array.isArray(args["handles"])) out["content"] = "full";
+  else if (mode === "full") out["content"] = "full";
+  else if (mode === "skeleton" || mode === "map" || mode === "overview" || mode === "digest") out["content"] = "outline";
+  else if (mode !== "task_pack" && mode !== "closure" && targets.length > 0) out["content"] = "auto";
+
+  const select = {
+    ...(recordOf(args["select"]) ?? {}),
+    ...pick(args, ["kind", "comments", "sheet", "rows", "columns", "sections", "slides", "pages"]),
+  };
+  if (args["as"] !== undefined) select["format"] = args["as"];
+  if (Object.keys(select).length > 0) out["select"] = select;
+  const scope = { ...(recordOf(args["scope"]) ?? {}), ...pick(args, ["includeClosure", "surfaceRoles"]) };
+  if (Object.keys(scope).length > 0) out["scope"] = scope;
+  return out;
+}
+
+function canonicalReadTargets(args: Record<string, unknown>): Record<string, unknown>[] {
+  const common = pick(args, ["credentialRef", "range", "ranges", "symbol", "profile", "lang"]);
+  const targetFor = (source: unknown): Record<string, unknown> | undefined => {
+    const target = typeof source === "string" ? { path: source } : recordOf(source);
+    if (target === undefined) return undefined;
+    const copied = { ...common, ...pick(target, ["path", "handle", "credentialRef", "range", "ranges", "symbol", "purpose", "profile", "lang", "archive"]) };
+    const archive = recordOf(copied["archive"]);
+    if (copied["path"] === undefined && archive?.["path"] !== undefined) copied["path"] = archive["path"];
+    return copied["path"] !== undefined || copied["handle"] !== undefined ? copied : undefined;
+  };
+  // The emitter can visit a continuation more than once (notably refusal
+  // projection followed by the final envelope).  Preserve already-canonical
+  // targets as well as compatibility `paths`, so canonicalization is
+  // idempotent rather than silently narrowing an executable continuation.
+  const canonical = Array.isArray(args["targets"]) ? args["targets"].map(targetFor) : [];
+  const explicit = Array.isArray(args["paths"]) ? args["paths"].map(targetFor) : [];
+  const handles = Array.isArray(args["handles"])
+    ? args["handles"].map((handle) => targetFor({ handle }))
+    : [];
+  const direct = targetFor(args["path"] !== undefined || args["handle"] !== undefined || args["archive"] !== undefined
+    ? { path: args["path"], handle: args["handle"], archive: args["archive"] }
+    : undefined);
+  return [...canonical, ...explicit, ...handles, ...(direct === undefined ? [] : [direct])]
+    .filter((target): target is Record<string, unknown> => target !== undefined);
+}
+
+function canonicalEditArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const rawEdits = Array.isArray(args["edits"]) ? args["edits"] : [args];
+  const edits = rawEdits.map(canonicalEdit).filter((edit): edit is Record<string, unknown> => edit !== undefined);
+  if (edits.length > 0) out["edits"] = edits;
+  if (args["artifact"] !== undefined) out["artifact"] = args["artifact"];
+  if (args["operation_id"] !== undefined) out["operation_id"] = args["operation_id"];
+  const credentials: Record<string, unknown> = { ...(recordOf(args["credentials"]) ?? {}) };
+  if (args["credentialRef"] !== undefined) credentials["in"] = args["credentialRef"];
+  if (args["outputCredentialRef"] !== undefined) credentials["out"] = args["outputCredentialRef"];
+  if (Object.keys(credentials).length > 0) out["credentials"] = credentials;
+  return out;
+}
+
+function canonicalEdit(value: unknown): Record<string, unknown> | undefined {
+  const source = recordOf(value);
+  if (source === undefined) return undefined;
+  const edit = pick(source, ["path", "handle", "range", "search", "replace", "content", "create", "from", "expectedSha", "precondition", "allowPathFallback", "target", "scopeHandle", "directoryHandle", "review"]);
+  const intent = pick(source, ["from", "to", "symbol", "lang", "includeComments"]);
+  if (source["mode"] === "rename") {
+    intent["kind"] = "rename";
+    delete edit["from"];
+  } else if (typeof source["intent"] === "string") {
+    intent["kind"] = source["intent"];
+    delete edit["from"];
+  }
+  else if (recordOf(source["intent"]) !== undefined) Object.assign(intent, source["intent"]);
+  if (Object.keys(intent).length > 0) edit["intent"] = intent;
+  return Object.keys(edit).length > 0 ? edit : undefined;
+}
+
+function canonicalSearchArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const scope = {
+    ...(recordOf(args["scope"]) ?? {}),
+    ...pick(args, ["path", "credentialRef", "lang", "regex", "depth", "includeClosure", "surfaceRoles", "includeScores", "archive"]),
+  };
+  let action = args["action"];
+  if (action === "symbols") {
+    action = "find";
+    scope["kind"] = "symbol";
+  } else if (action === "locate") {
+    action = "tree";
+    scope["includeClosure"] = true;
+  }
+  if (action !== undefined) out["action"] = action;
+  const queries = Array.isArray(args["queries"])
+    ? args["queries"]
+    : typeof args["query"] === "string" ? [args["query"]] : [];
+  if (queries.length > 0) out["queries"] = queries;
+  if (args["cursor"] !== undefined) out["cursor"] = args["cursor"];
+  if (Object.keys(scope).length > 0) out["scope"] = scope;
+  return out;
+}
+
+function pick(source: Record<string, unknown>, names: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const name of names) if (source[name] !== undefined) out[name] = source[name];
+  return out;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 /** `"12-40"` / `"L12-L40"` -> `[12, 40]`. */

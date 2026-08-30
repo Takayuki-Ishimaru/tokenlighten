@@ -27,6 +27,7 @@ const {
   mockSetWorkspaceConfigured,
   mockShowDiagnosticsPanel,
   mockLanguage,
+  mockGuideProfile,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockShowInformationMessage: vi.fn(),
@@ -48,12 +49,13 @@ const {
   mockSetWorkspaceConfigured: vi.fn(),
   mockShowDiagnosticsPanel: vi.fn(),
   mockLanguage: { current: "en" },
+  mockGuideProfile: { value: "full" },
 }));
 
 vi.mock("vscode", () => ({
   workspace: {
     getConfiguration: () => ({
-      get: (_k: string, d: unknown) => d,
+      get: (key: string, d: unknown) => key === "guideProfile" ? mockGuideProfile.value : d,
       update: mockConfigurationUpdate,
     }),
     isTrusted: true,
@@ -122,6 +124,7 @@ import {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  mockGuideProfile.value = "full";
   mockActivationState.mockResolvedValue("ready");
   mockActivationStateCached.mockReturnValue("ready");
 });
@@ -142,13 +145,32 @@ describe("workspaceSetupArgs", () => {
       "/workspace",
       "--clients",
       "vscode,codex,claude-code",
+      "--guide-profile",
+      "full",
       "--json",
     ]);
     expect(workspaceSetupArgs("/workspace")).not.toContain("--rules-only");
+    expect(workspaceSetupArgs("/workspace", "medium")).toContain("medium");
   });
 });
 
 describe("setupWorkspace", () => {
+  it("passes the configured medium guide profile through to the spawned CLI", async () => {
+    mockGuideProfile.value = "medium";
+    mockShowInformationMessage
+      .mockResolvedValueOnce("Set up TokenLighten")
+      .mockResolvedValueOnce(undefined);
+    mockSpawn.mockResolvedValue({ code: 0, stdout: "{}", stderr: "" });
+    const bar = { setStale: vi.fn(), setFresh: vi.fn(), setError: vi.fn() };
+
+    await setupWorkspace(bar as never);
+
+    expect(mockSpawn).toHaveBeenCalledWith([
+      "workspace", "setup", "--root", "/workspace",
+      "--clients", "vscode,codex,claude-code", "--guide-profile", "medium", "--json",
+    ], { cwd: "/workspace" });
+  });
+
   it("marks setup ready and reloads so configured features start", async () => {
     mockShowInformationMessage
       .mockResolvedValueOnce("Set up TokenLighten")

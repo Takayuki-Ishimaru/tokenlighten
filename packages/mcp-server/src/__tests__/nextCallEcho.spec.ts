@@ -21,7 +21,6 @@ import {
   resetPackServeLogForTest,
 } from "../util/packServeLog.js";
 import { callTool } from "../server.js";
-import { nextText } from "./helpers/protocolNext.js";
 
 const roots: string[] = [];
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
@@ -121,9 +120,12 @@ describe("D4 — over-cap queries remedy stays on find", () => {
     const body = JSON.parse((res as { content: Array<{ text: string }> }).content[0]!.text) as Record<string, unknown>;
 
     expect(String(body["detail"])).toContain("at most 5 entries");
-    const next = nextText(body as Record<string, unknown>);
-    expect(next).toContain("action=find");
-    expect(next).toContain("zq1a");
-    expect(next).not.toContain("task_pack");
+    // W2-4: was string-prose `nextText(body)` checks. Same facts on the wire
+    // directly: `next` stays on search_files find (never redirects to a
+    // read_file task_pack) and carries the first over-cap query verbatim.
+    const next = body["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool, JSON.stringify(body)).toBe("search_files");
+    expect(next?.arguments?.["action"], JSON.stringify(body)).toBe("find");
+    expect(next?.arguments?.["queries"], JSON.stringify(body)).toContain("zq1a");
   });
 });

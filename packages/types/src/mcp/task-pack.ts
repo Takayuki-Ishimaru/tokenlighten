@@ -584,6 +584,10 @@ export interface TaskPackSingleSiteUniqueMatchFastPath {
   precondition: "unique-match";
   root_bound: true;
   occurrence_count: 1;
+  /** Minimal proof identity retained by the compact projection. */
+  certificate?: { id: string; sha: string };
+  /** Stable task identity used to re-bind this projection. */
+  task?: { id: string };
 }
 
 export interface ReadCodeTaskPackOutput {

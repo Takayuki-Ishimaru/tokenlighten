@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.12.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.12.1/tokenlighten-vscode-extension-0.12.1.vsix)** from the v0.12.1 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.13.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.0/tokenlighten-vscode-extension-0.13.0.vsix)** from the v0.13.0 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,7 +14,7 @@ Download **[tokenlighten-vscode-extension-0.12.1.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.12.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.13.0.vsix
 ~~~
 
 To build from source:
@@ -29,6 +29,8 @@ npm run package -w tokenlighten-vscode-extension
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. Setup configures supported clients and TokenLighten-managed AI instructions while preserving content outside managed blocks.
 
 The workspace switch enables or disables TokenLighten. Re-running setup enables it again, and the session-native command temporarily bypasses TokenLighten without changing the workspace's normal configuration.
+
+v0.13.0 includes a schema stamp in the MCP provider version. When the advertised tool schema changes, VS Code refreshes its cached definition automatically; no manual provider rename or cache reset should be needed.
 
 ## Status bar and Diagnostics
 
@@ -58,4 +60,4 @@ Repository indexing and context selection run locally. The extension does not ad
 | `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases for a newer VSIX at startup; installation always requires user action. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically or selects English/Japanese explicitly. |
 
-The desktop application is not included in the public v0.12.1 release.
+The desktop application is not included in the public v0.13.0 release.

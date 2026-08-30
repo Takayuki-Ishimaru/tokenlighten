@@ -17,7 +17,6 @@ import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { nextText } from "./helpers/protocolNext.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -194,13 +193,19 @@ describe("readCodeHandle — workspace mismatch", () => {
     // C2-4 (already adjudicated in handleWorkspaceAdoption.spec.ts): the
     // closed advisory allowlist (A.5.15) drops the structured
     // `handle`/`handleWorkspace` fields from the refusal wire — the
-    // workspace to retry with survives only inside `detail` prose, which
-    // `nextText` falls back to when `next` cannot be parsed as an
-    // executable ToolCall.
+    // workspace to retry with survives only inside `detail` prose, which is
+    // where §2.6 requires an unparseable-as-ToolCall `next` to fold into.
     expect(data["handle"]).toBeUndefined();
     expect(data["handleWorkspace"]).toBeUndefined();
-    expect(typeof nextText(data as Record<string, unknown>)).toBe("string");
-    expect(nextText(data as Record<string, unknown>)).toContain(wsDir1);
+    // D-4: was `expect(typeof nextText(data)).toBe("string")` (a tautology —
+    // nextText's return type is always `string`, so it never actually
+    // checked anything) + `expect(nextText(data)).toContain(wsDir1)`.
+    // Confirmed empirically: this refusal's recovery ("retry with cwd=... or
+    // omit cwd") is exactly the unparseable-as-ToolCall prose the comment
+    // above already describes, so `next` is absent from the wire entirely
+    // and the workspace path lives only in `detail`; assert both directly.
+    expect(data["next"], JSON.stringify(data)).toBeUndefined();
+    expect(data["detail"], JSON.stringify(data)).toContain(wsDir1);
   }, 30000);
 });
 

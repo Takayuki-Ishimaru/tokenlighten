@@ -17,6 +17,11 @@ const SCRIPT_DIR = fileURLToPath(new URL(".", import.meta.url));
 const EXTENSION_ROOT = resolve(SCRIPT_DIR, "..");
 const REPO_ROOT = resolve(EXTENSION_ROOT, "..", "..");
 const BUNDLE_SCRIPT = join(EXTENSION_ROOT, "scripts", "bundle-cli.mjs");
+const GENERATE_SCHEMA_STAMP_SCRIPT = join(
+  EXTENSION_ROOT,
+  "scripts",
+  "generate-schema-stamp.mjs",
+);
 const BUNDLED_CLI = join(EXTENSION_ROOT, "dist", "tl-cli.js");
 const BUNDLED_NOTICES = join(EXTENSION_ROOT, "dist", "THIRD_PARTY_NOTICES.md");
 const BUNDLED_MCP = join(
@@ -34,6 +39,12 @@ const BUNDLED_AGENTS_MD = join(
   "node_modules",
   "@tokenlighten",
   "agents-md",
+);
+const GENERATED_SCHEMA_STAMP = join(
+  EXTENSION_ROOT,
+  "src",
+  "generated",
+  "schemaStamp.ts",
 );
 const NPM_CLI = process.env.npm_execpath;
 assert.ok(NPM_CLI, "npm_execpath is required to verify the VSIX file list");
@@ -83,6 +94,18 @@ run(process.execPath, [BUNDLE_SCRIPT], {
   cwd: REPO_ROOT,
   env: process.env,
 });
+// generate-schema-stamp.mjs is normally run by this package's own "build"
+// script, BEFORE esbuild.config.mjs — bundle-cli.mjs alone does not invoke
+// it. Running it explicitly here makes this integration check meaningful
+// regardless of what ran earlier in the same job (it only requires
+// @tokenlighten/mcp-server to already be built, which the line above's
+// bundle-cli.mjs run does not by itself guarantee either — both scripts
+// share that same precondition, already required by `npm run build` at the
+// repo root per this package's own vscode:prepublish ordering).
+run(process.execPath, [GENERATE_SCHEMA_STAMP_SCRIPT], {
+  cwd: REPO_ROOT,
+  env: process.env,
+});
 
 const templates = join(BUNDLED_AGENTS_MD, "templates");
 assert.equal(existsSync(BUNDLED_CLI), true, "bundled CLI missing");
@@ -104,6 +127,38 @@ assert.match(
   readFileSync(BUNDLED_CLI, "utf8"),
   /@tokenlighten\/agents-md/,
   "agents-md was not retained as a runtime external",
+);
+
+// VS Code MCP definition-cache mitigation (v0.13.0): the extension bundle
+// (src/generated/schemaStamp.ts, statically imported by mcpProvider.ts) must
+// carry a stamp that agrees with what the ACTUAL shipped, esbuild-bundled
+// MCP server binary (BUNDLED_MCP) would itself report via
+// --print-schema-stamp — the generated file is produced from
+// @tokenlighten/mcp-server's plain tsc dist/index.js build (see
+// generate-schema-stamp.mjs's own header comment for why), so this is the
+// cross-check proving that choice never silently drifts from the artifact
+// that actually ships inside the VSIX.
+assert.equal(
+  existsSync(GENERATED_SCHEMA_STAMP),
+  true,
+  "generated schema stamp file missing",
+);
+const generatedStampSource = readFileSync(GENERATED_SCHEMA_STAMP, "utf8");
+const generatedStampMatch = generatedStampSource.match(
+  /TOKENLIGHTEN_SCHEMA_STAMP = "([0-9a-f]{16})"/,
+);
+assert.ok(
+  generatedStampMatch,
+  "generated schema stamp file does not contain a 16-hex TOKENLIGHTEN_SCHEMA_STAMP constant",
+);
+const generatedStamp = generatedStampMatch[1];
+const stampResult = run(process.execPath, [BUNDLED_MCP, "--print-schema-stamp"], {
+  env: process.env,
+});
+assert.equal(
+  stampResult.stdout.trim(),
+  generatedStamp,
+  "generated schema stamp does not match the bundled MCP server's own --print-schema-stamp output",
 );
 
 // Assert on the artifact that actually ships: the .vsix file list under

@@ -5,6 +5,7 @@ tsconfig.test.json
 esbuild.config.mjs
 vitest.config.ts
 scripts/bundle-cli.mjs
+scripts/generate-schema-stamp.mjs
 scripts/import-meta-url-shim.js
 scripts/test-bundle-cli-setup.mjs
 .tokenlighten/**

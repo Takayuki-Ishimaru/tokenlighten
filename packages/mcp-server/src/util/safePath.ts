@@ -11,6 +11,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { realpathSync, statSync, type Stats } from "fs";
 import { trace } from "./trace.js";
+import { decodeTextBuffer } from "./textDecode.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 const WINDOWS_DRIVE_ABSOLUTE = /^[A-Za-z]:[\\/]/;
@@ -248,7 +249,18 @@ export async function readFileSafe(
     // materializes the same buffer internally, so this is not an extra copy.)
     const buf = await fs.readFile(real);
     if (refuseIfGrown(buf.byteLength, real, root, verdict.maxBytes)) return null;
-    return buf.toString("utf8");
+    // T1 (v0.13 review-fix wave, UTF-16 read parity): share find/references/
+    // task-pack's own decodeTextBuffer (util/textDecode.ts) instead of an
+    // unconditional buf.toString("utf8") -- strips/decodes a UTF-16LE/BE BOM
+    // (and a UTF-8 BOM) the same single-implementation way those callers
+    // already do, instead of returning mis-decoded mojibake for a UTF-16
+    // file. Falls back to the PRE-EXISTING raw utf8 decode (not a new
+    // null-propagating failure) when content is undecodable (NUL-probed, no
+    // BOM): this function has ~40-80 call sites across the codebase and this
+    // fix's mandate is UTF-16 BOM parity, not a new "can't read this as
+    // text" failure mode rippling through all of them -- see this wave's
+    // B-REPORT addendum for the full reasoning.
+    return decodeTextBuffer(buf) ?? buf.toString("utf8");
   } catch { return null; }
 }
 

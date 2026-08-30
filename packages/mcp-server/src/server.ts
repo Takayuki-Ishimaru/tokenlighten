@@ -12,7 +12,7 @@
 
 import { existsSync, statSync, readFileSync, readdirSync } from "node:fs";
 import * as path from "path";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { deriveServerBuildId, deriveServerPackageVersion } from "./util/serverBuild.js";
 
 import { getFileSkeleton, isSkeletonizableLanguage } from "./tools/getFileSkeleton.js";
@@ -65,7 +65,17 @@ import {
   splitArchiveVirtualPath,
   virtualArchivePath,
 } from "./tools/archive.js";
-import { buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries } from "./features/task-pack/readCodeTaskPack.js";
+import { buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, repairSuppressedNextCall } from "./features/task-pack/readCodeTaskPack.js";
+import {
+  bindTaskContractHandle,
+  consumeExecutableNextScope,
+  recordAuthoritativeAbsentConcerns,
+  recordServedConcernEvidence,
+  registerExecutableNextScope,
+  runWithTaskContractScope,
+  taskContractDigest,
+  type TaskContractScope,
+} from "./features/task-pack/taskContractStore.js";
 import { walkCodeFiles } from "./tools/walkRepo.js";
 import { classifySurface, deriveTokenVariants } from "./util/impact.js";
 import { callWorkspace, handleTable, runWithCallWorkspace, runWithDeclaredWorkspace, setHandlePersistence, shaOfText, shaOfBytes, shortSha, type HandleEntry } from "./util/handles.js";
@@ -103,7 +113,7 @@ import { csvTable, type CsvTableResult } from "./office/csv.js";
 import { prepareOfficeDocument } from "./office/decrypt.js";
 import { resolveCredentialRef } from "./security/credentials.js";
 import { editArtifact } from "./write/artifactEdit.js";
-import { adaptiveWholeFileEnabled, decisionInvariantStrictEnabled, deltaContextEnabled, overlapTrimEnabled, postReadyTrimEnabled, reasoningIrV2Enabled } from "./util/flags.js";
+import { adaptiveWholeFileEnabled, decisionInvariantStrictEnabled, deltaContextEnabled, overlapTrimEnabled, postReadyTrimEnabled, reasoningIrV2Enabled, schemaDefsEnabled } from "./util/flags.js";
 // V11-04: the ONE advisory Task Reasoning IR v2 seam (trace-only; see its module header).
 // A1-pre (2026-08-27): recordReasoningIrV2ClosureFromEdit is the edit-side
 // half (DESIGN-v0.12-plan.md §2) — see its call site in augmentEdit, below.
@@ -113,10 +123,10 @@ import { deriveIrTaskRef, recordReasoningIrV2ClosureFromEdit, recordReasoningIrV
 import { deriveCanonicalTaskDecision, enforceCanonicalTaskDecisionAtExit } from "./features/task-pack/canonicalDecision.js";
 import type { TaskPackResult } from "./features/task-pack/model.js";
 import { projectLeanExecutionContract } from "./util/leanExecutionContract.js";
-import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, type ServedRangeLedgerReceipt } from "./state/session.js";
+import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, type ServedRangeLedgerReceipt } from "./state/session.js";
 import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, type BodyMarker } from "./util/verificationPack.js";
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
-import { getFunctionalValidationObligation, clearFunctionalValidationObligation, recordExecutedLocate } from "./util/packServeLog.js";
+import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNext, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordServedBytes } from "./util/packServeLog.js";
 import { attachSupply } from "./util/attachSupply.js";
 import { mustFetchReadBudget } from "./util/mustFetch.js";
 import { getAdaptiveAdvice } from "./util/adaptive.js";
@@ -168,16 +178,25 @@ export { toolError, toolStructuredError, toolOk } from "./protocol/result.js";
 // decision (§2.1) with its §3.4.1 sanctioned-zoom re-anchor.
 import {
   PROTOCOL_META,
+  canonicalToolCall,
   declareKind,
   finalizeProtocolResponse,
   noteCodecTraceWorkspace,
   noteResolvedAction,
   noteResolvedMode,
+  noteServedBytesSource,
   noteWorkspaceRoot,
   runWithProtocolCall,
 } from "./protocol/envelope.js";
 import { setEmittedToolCallValidator } from "./protocol/refusal.js";
 import { markReplayed } from "./protocol/editFamily.js";
+import {
+  bindLedgerCertificate,
+  isLedgerBackedCertificateId,
+  ledgerDigestBacksCertificateId,
+  withoutLedgerClaim,
+} from "./protocol/ledgerCertificateBinding.js";
+import { taskContractLedgerSnapshot } from "./features/task-pack/taskContractStore.js";
 // issue #4 (host routing/discovery): the server-level `instructions` string
 // announced on every `initialize` result across all three transport legs.
 // Re-exported so the hand-rolled leg's own tests can import it from here.
@@ -511,98 +530,6 @@ function handleWorkspaceMissingNext(handleWorkspace: string): string {
  * edit lands in THEIR tree rather than the server's startup-pinned root. See
  * write/resolveWorkspace.ts for the acceptance rules and rationale.
  */
-const CWD_PROP = {
-  cwd: { type: "string" },
-} as const;
-
-/**
- * Accepted keys of the `archive` selector, shared by read_file and
- * search_files. tools/archive.ts's selectorFromArgs (`:232-243`) accepts
- * exactly these three; before C-6 this was a bare `{type:"object"}`, which
- * made the recursive validator (§1.3.1(1)) vacuous over every archive call.
- */
-const ARCHIVE_PROP = {
-  archive: {
-    type: "object",
-    properties: {
-      path: { type: "string" },
-      member: { type: "string" },
-      prefix: { type: "string" },
-    },
-  },
-} as const;
-
-const TASK_STATE_PROPS = {
-  taskEpoch: { type: "string" },
-  // PI-09 (v0.10 alpha.2): the explicit-state REQUEST argument. Deviation D-2
-  // keeps the RESPONSE side free of a `CommonStateOutput` block — the handle
-  // rides `task.id`, which the agent already sees — so this is the only new
-  // wire surface the feature needs. Additive and optional: a legacy caller
-  // that never sends it gets byte-identical v0.9 behavior, which is what the
-  // 245-case replay corpus pins.
-  //
-  // ADVERTISED, not hidden: the server MINTS this value into `task.id` and its
-  // stale-handle refusal instructs replaying it, and "a capability the server
-  // instructs must not be one the schema hides" (the 2026-08-01 surfaceRoles
-  // defect, the same reasoning that re-advertised `qref`). A schema-validating
-  // client would otherwise drop the argument and silently start a fresh task.
-  task_handle: { type: "string", description: "opaque handle: replay a prior task_pack's task.id to continue that task" },
-  // §1.3.1(3), C-6: the challenge shape is declared IN FULL, on every tool
-  // that accepts it. This is not an ergonomic extra — §2.6 abolishes
-  // placeholder-bearing `next_call` templates on the ground that "a challenge
-  // is agent-authored, from the request schema", and that claim is only true
-  // if the request schema says what a challenge IS. The previous comment here
-  // delegated the shape elsewhere ("the execution_contract and refusal payload
-  // describe the certificate challenge fields contextually"), and that
-  // delegation is exactly the condition that made the placeholder template at
-  // state/session.ts:1376 necessary. Dispatch parses exactly these three keys
-  // (state/session.ts:2106-2131, parseChallenge).
-  //
-  // NOT dropped from search_files (WO C-6 acceptance 8): the fence DOES
-  // sanction a challenge against a search call. guardExecutionDiscovery is
-  // typed `tool: "read_file" | "search_files"` (state/session.ts:3154)
-  // and calls applyChallenge unconditionally for both (`:3187`); the
-  // search_files dispatch reaches it at server.ts's search arm. Dropping the
-  // property would hide a capability dispatch honours — the 2026-08-01
-  // surfaceRoles defect exactly. The 127 B lever (§1.3.1(3)(ii)) is therefore
-  // NOT available and does not offset the schema growth.
-  challenge: {
-    type: "object",
-    properties: {
-      certificate_id: { type: "string" },
-      obligation_id: { type: "string" },
-      expected_action_change: { type: "string" },
-    },
-  },
-  // 2026-08-07 concurrent-agent lanes: several agents multiplexed over one
-  // server process + one workspace root share a WorkspaceSession and mix
-  // fences/receipts with no way to tell actors apart; `lane` is the explicit
-  // cooperative partition. Advertised on all three tools so schema-validating
-  // clients never drop it (the B1e surfaceRoles lesson).
-  lane: { type: "string", description: "isolation key: concurrent agents on one workspace each pass their own value" },
-  // PI-09 close-out (v0.10 deferred cell): the two remaining explicit-state
-  // REQUEST arguments the reconciliation's §6 table lists beside `task_handle`
-  // (`expected_state_version` / `force_serve`; `operation_id` is edit-only and
-  // is declared on edit_file alone — see its own comment there).
-  //
-  // Both are ADDITIVE and OPTIONAL: a caller that sends neither gets
-  // byte-identical behavior, which wireBaselines + the replay corpus pin.
-  // Advertised for the same reason `task_handle`/`lane`/`surfaceRoles` are —
-  // §1.3.1(2)'s advertise-or-delete rule makes the advertised property set the
-  // ACCEPTANCE set, so a hidden argument is an argument a schema-validating
-  // client silently drops (the 2026-08-01 surfaceRoles defect).
-  //
-  // `expected_state_version` is a CAS GUARD, meaningful only beside
-  // `task_handle`: sent alone it is refused rather than ignored, because an
-  // ignored precondition is a precondition that did not hold.
-  expected_state_version: { type: "number", description: "CAS guard for task_handle: refuse if task state moved past this version" },
-  // `force_serve` is the SAFE direction (more bytes, never fewer): a caller
-  // whose context was compacted asks for the bodies again, past this session's
-  // served-content receipts. Unconditional — no flag — because withholding
-  // bytes from a caller that says it lost them is the failure this exists to
-  // remove.
-  force_serve: { type: "boolean", description: "context lost: re-serve full bodies, bypassing already-served receipts" },
-} as const;
 
 /**
  * D11: `deprecated` and `renamedAlias` are DELETED. Every entry in ALL_TOOLS is
@@ -665,7 +592,9 @@ interface TaskPackQueryResolution {
   query: string;
   error?: string;
   /** Concrete recovery for `error`, forwarded to toolError by the call sites. */
-  next?: string;
+  next?: string | Record<string, unknown>;
+  /** Human rationale retained beside a structured executable recovery. */
+  detail?: string;
   /**
    * C2: the query came from a `qref`, so this call is a replay over a working
    * set the caller still holds — not a freshly-typed request.
@@ -719,7 +648,7 @@ function resolveTaskPackQueryArg(
     // separate runs) can have its genuinely-first-served surfaces silently
     // stripped to a false "— see prior pack" pointer. See
     // clearPackDedupeForWorkspace's doc comment for the full incident.
-    clearPackDedupeForWorkspace(workspace);
+    clearPackDedupeForWorkspace(workspace, sessionLaneOf(args));
   }
   const explicit = typeof args["query"] === "string" ? args["query"].trim() : "";
   const requestedRef = typeof args["qref"] === "string" ? args["qref"].trim() : "";
@@ -743,8 +672,11 @@ function resolveTaskPackQueryArg(
       query: "",
       error: "query and qref are mutually exclusive for task_pack",
       next: hasPaths
-        ? `read_file mode=task_pack qref=${requestedRef} paths=${JSON.stringify(pathsArg)} (drop query — keeps the certified working set)`
-        : 'read_file mode=task_pack query="<restate the request verbatim>" (drop qref)',
+        ? canonicalToolCall("read_file", { mode: "task_pack", qref: requestedRef, paths: pathsArg })
+        : canonicalToolCall("read_file", { mode: "task_pack", query: "<restate the request verbatim>" }),
+      ...(hasPaths
+        ? { detail: `query and qref are mutually exclusive for task_pack; drop query and keep the certified working set qref=${requestedRef} paths=${JSON.stringify(pathsArg)}` }
+        : {}),
     };
   }
   if (explicit.length > 0) {
@@ -761,7 +693,7 @@ function resolveTaskPackQueryArg(
       ? {
           query: "",
           error: `unknown-or-stale-qref: ${requestedRef}`,
-          next: 'read_file mode=task_pack query="<restate the request verbatim>" — a qref is session-scoped and expires; restating the query mints a fresh one',
+          next: canonicalToolCall("read_file", { mode: "task_pack", query: "<restate the request verbatim>" }),
         }
       : { query, fromRef: true };
   }
@@ -770,129 +702,246 @@ function resolveTaskPackQueryArg(
 
 // Exported for ./mcp/transport/* (the advertised-or-refused gate, D11); the
 // single source of truth for the advertised surface stays right here.
+//
+// v0.13 wave-3 (Track D, W3-1) restoration: wave-2's `propertyNames()`
+// stripped every advertised property down to a bare `{}` — no `type`, no
+// `description` — across all 151 property sites in this file, in exchange
+// for a smaller minified byte count. That is the exact defect class
+// `guideSchemaParity.spec.ts` and the 2026-08-01 guard-resurrection wave
+// exist to catch on the OTHER axis (a capability the guide/server instructs
+// but the schema hides): a schema-valid caller with no other source of
+// truth (no guide loaded, a host that only reads `tools/list`) cannot tell
+// what a bare `{}` property is FOR, what values it takes, or that it exists
+// at all beyond its bare name. Every property below is restored with a
+// short (<=120 char), imperative description; `propertyNames()` is deleted
+// so a future edit cannot silently reintroduce the bare-`{}` shape by
+// reaching for the old helper. See schemaSize.spec.ts's byte-budget test
+// for the measured cost this restoration accepts (ledger comment there
+// records the before/after).
+const closed = (properties: Record<string, unknown>) => ({
+  additionalProperties: false,
+  properties,
+});
+
+const CANONICAL_ARCHIVE = closed({
+  path: { type: "string", description: "Archive path (.zip)." },
+  member: { type: "string", description: "Member path in the archive." },
+  prefix: { type: "string", description: "Only members under this prefix." },
+});
+const CANONICAL_TASK = {
+  ...closed({
+    handle: { type: "string", description: "Resumes a prior task_pack." },
+    epoch: { type: "string", description: "\"new\": resets task-pack state." },
+    profile: { type: "string", description: "answer=read-only, generic=change." },
+    expected_state_version: { type: "number", description: "CAS guard vs stale state." },
+    challenge: { type: "object", description: "Re-authorizes a decision." },
+    force_serve: { type: "boolean", description: "Re-serves already-served bodies." },
+    pull: { enum: ["closure"], description: "Returns the closure report." },
+  }),
+  dependentRequired: { expected_state_version: ["handle"] },
+};
+const CANONICAL_SCOPE = {
+  // W2-1(c): `mapCanonicalScope` (below) has always read `scope.symbol` and
+  // copied it onto the legacy `symbol` dispatch argument — it was reachable
+  // through dispatch but never advertised, so a caller composing
+  // `search_files` references/find against a specific symbol via the
+  // canonical `scope` carrier got an unknown-arguments refusal for a field
+  // the server already implements. This is the same class of defect the
+  // guard-resurrection wave fixed for other hidden-capability cases: an
+  // unadvertised accepted field is not a private implementation detail, it
+  // is a capability the caller cannot reach without already knowing the
+  // server's internals.
+  ...closed({
+    path: { type: "string", description: "Root path to search under." },
+    credentialRef: { type: "string", description: "Credential ref; never raw." },
+    lang: { type: "string", description: "Language hint." },
+    regex: { type: "boolean", description: "Regex mode (find only)." },
+    depth: { type: "number", description: "Max tree depth." },
+    includeClosure: { type: "boolean", description: "Returns the task_pack closure." },
+    surfaceRoles: { type: "array", items: { type: "string" }, description: "Surface roles for closure." },
+    includeScores: { type: "boolean", description: "Match-confidence scores." },
+    symbol: { type: "string", description: "Symbol to address/search." },
+    archive: { ...CANONICAL_ARCHIVE, description: "Archive: path/member/prefix." },
+    kind: { enum: ["text", "symbol"], description: "text or a resolved symbol." },
+  }),
+};
+// W3-4(b): search_files delivers only the byte/token/item dimensions — it has
+// no Office table concept (rows/cells) and no full-read escalation
+// (allowFull) for a search RESULT the way a file read does. Before this
+// split, CANONICAL_BUDGET was one object shared verbatim across read_file
+// and search_files, so search_files ADVERTISED all six budget members while
+// `LEGACY_DISPATCH_PROPERTIES.search_files` recognizes none of
+// rows/cells/allowFull — a schema-valid `search_files` call using any of the
+// three was refused `unknown-arguments` by the very next gate
+// (canonicalSurface.spec.ts's D-5 property test found and documented this
+// live). Splitting the advertised shape per tool closes the gap by
+// narrowing the AD, not by widening dispatch to accept table/full-read
+// concepts a search result does not have.
+const CANONICAL_BUDGET_DIMENSIONS = {
+  bytes: { type: "number", description: "Byte cap." },
+  tokens: { type: "number", description: "Token cap." },
+  items: { type: "number", description: "Item cap." },
+} as const;
+const CANONICAL_BUDGET = {
+  ...closed({
+    ...CANONICAL_BUDGET_DIMENSIONS,
+    rows: { type: "number", description: "Row cap (Office)." },
+    cells: { type: "number", description: "Cell cap (Office)." },
+    allowFull: { type: "boolean", description: "Higher full-read cap." },
+  }),
+};
+const CANONICAL_SEARCH_BUDGET = {
+  ...closed({ ...CANONICAL_BUDGET_DIMENSIONS }),
+};
+const CANONICAL_TARGET = {
+  ...closed({
+    path: { type: "string", description: "File path to read." },
+    handle: { type: "string", description: "Handle; resolves path/symbol/range." },
+    credentialRef: { type: "string", description: "Credential ref; never raw." },
+    range: { type: "string", description: "1-based N-M line window." },
+    ranges: { type: "array", items: { type: "string" }, description: "Several N-M windows, one target." },
+    symbol: { type: "string", description: "Symbol in this target." },
+    purpose: { type: "string", description: "Why this target is needed." },
+    profile: { type: "string", description: "Skeleton rendering profile." },
+    lang: { type: "string", description: "Language hint." },
+    archive: { ...CANONICAL_ARCHIVE, description: "Archive: path/member/prefix." },
+  }),
+  oneOf: [{ required: ["path"] }, { required: ["handle"] }],
+};
+const CANONICAL_SELECT = {
+  ...closed({
+    kind: { type: "string", description: "xlsx/pptx/pdf/zip kind." },
+    format: { type: "string", description: "Output format (text/json)." },
+    comments: { enum: ["elide", "keep"], description: "elide (default) or keep." },
+    sheet: { type: "string", description: "Worksheet name (xlsx)." },
+    rows: { type: "array", items: { type: "number" }, description: "Row selector (xlsx)." },
+    columns: { type: "array", items: { type: "string" }, description: "Column selector (xlsx)." },
+    sections: { type: "array", items: { type: "string" }, description: "Headings to serve (max 8)." },
+    slides: { type: "array", items: { type: "string" }, description: "Slide numbers (pptx)." },
+    pages: { type: "array", items: { type: "string" }, description: "Page numbers/ranges (pdf)." },
+  }),
+};
+
+// W2-2: the subset of `select`'s fields that address a specific ARTIFACT
+// sub-resource (a workbook sheet/rows/columns, a slide, a page, an explicit
+// `kind`/`format`) and therefore mean "serve this target through the
+// artifact reader". `comments` and `sections` are also `select` fields but
+// are NOT artifact addressing — `comments` rides the ordinary read path
+// (the long-standing `comments:"keep"` argument) and `sections` has its own
+// dedicated markdown-heading route (`args.sections`, server.ts's "Markdown
+// section read" block) that runs independently of `mode`. Naming this list
+// once, here, is what `mapCanonicalSelect` below tests against; it used to
+// treat "any select field present" as "route to artifact", which sent a
+// bare `select:{sections:[...]}` or `select:{comments:"keep"}` canonical
+// call into artifact serving — a reader that cannot answer either request.
+export const ARTIFACT_SELECT_KEYS: readonly string[] =
+  ["kind", "format", "sheet", "rows", "columns", "slides", "pages"];
+const CANONICAL_EDIT_ITEM = {
+  ...closed({
+    path: { type: "string", description: "File path to edit." },
+    from: { type: "string", description: "Source path/handle for create-by-copy." },
+    handle: { type: "string", description: "Handle; resolves path/symbol/range." },
+    range: { type: "string", description: "1-based N-M range." },
+    search: { type: "string", description: "Text to find (with replace)." },
+    replace: { type: "string", description: "Text (pair with search)." },
+    content: { type: "string", description: "Text for range, or whole file." },
+    create: { type: "boolean", description: "true: creates a new file." },
+    expectedSha: { type: "string", description: "Content hash (expected-hash)." },
+    // W3-1(b): the enum this property carries is not decoration — it is the
+    // only advertised list of the four legal `precondition` values, and a
+    // schema-diet pass that reduced this to a bare `{}` deleted that list
+    // outright rather than merely omitting its description.
+    precondition: {
+      type: "string",
+      enum: ["unique-match", "expected-hash", "scope-handle", "references-reviewed"],
+      description: "Write guard for this edit; see enum.",
+    },
+    allowPathFallback: { type: "boolean", description: "Fallback to path if handle fails." },
+    target: { type: "string", description: "\"all\": replace every match." },
+    scopeHandle: { type: "string", description: "For precondition=scope-handle." },
+    directoryHandle: { type: "string", description: "Create-into-directory address." },
+    review: { type: "boolean", description: "Attach review metadata." },
+    intent: {
+      ...closed({
+        from: { type: "string", description: "Rename source symbol name." },
+        to: { type: "string", description: "Symbol name (rename/append-*)." },
+        symbol: { type: "string", description: "Symbol for this intent." },
+        lang: { type: "string", description: "Language hint." },
+        includeComments: { type: "boolean", description: "Also update matching comments." },
+        kind: {
+          enum: ["rename", "remove-duplicate-branch", "append-union-member", "append-enum-member", "rename-symbol-references"],
+          description: "Structural intent to run.",
+        },
+      }),
+      description: "Rename/append/dedupe a member.",
+    },
+  }),
+  // W2-1(b): the three original branches left two dispatch-accepted item
+  // shapes schema-INVALID (protocol-v1-snapshot.json carries two frozen
+  // emits of exactly this kind, self-rejected by their own advertised
+  // schema before this fix): an INTENT edit (`{path|handle, intent:{...}}`,
+  // no search/replace/range/content of its own — `normalizeCanonicalRequest`
+  // has always unpacked `intent` into the legacy mode/from/to/symbol
+  // dispatch shape) and a WHOLE-FILE REPLACE (`{handle|path, content}`, no
+  // `range` — the top-level `{handle,content}` form documented in
+  // AGENTS.md's edit protocol section). The whole-file-replace branch
+  // excludes range/create/search so it cannot double-match branches 2/3, or
+  // silently accept a truncated search+replace/range+content/create+content
+  // shape that is missing its required partner field.
+  oneOf: [
+    { required: ["search", "replace"] },
+    { required: ["range", "content"] },
+    { required: ["create", "content"] },
+    { required: ["create", "from"], not: { required: ["content"] } },
+    { required: ["intent"] },
+    {
+      required: ["content"],
+      not: { anyOf: [{ required: ["range"] }, { required: ["create"] }, { required: ["search"] }] },
+    },
+  ],
+};
+
+// D-2 advertised-only input surface. Legacy spellings are normalized at the
+// dispatch boundary for the v0.13.x compatibility window.
 export const ALL_TOOLS: ToolEntry[] = [
-  // -------------------------------------------------------------------------
-  // 3 consolidated tools (read_file / edit_file / search_files)
-  // -------------------------------------------------------------------------
   {
     name: "read_file",
     enabled: !KILL_SWITCH,
     definition: {
       name: "read_file",
-      description: "Read via task_pack or handles. After act.answer/act.edit, act immediately; skip pre-edit discovery.",
-      // anthropic/alwaysLoad: clients that defer MCP tool schemas (Claude Code
-      // tool search) load these at turn 0 instead of mid-session, which would
-      // invalidate the prompt cache. All 3 schemas total ~0.7K tokens.
-      //
-      // §1.2 announcement point 3: the discoverable fallback for clients that
-      // only ever read `tools/list` and never look at `initialize`. It rides
-      // `read_file` because that is the definition already carrying `_meta`.
+      description: "Read via query/qref or targets[].",
       _meta: { "anthropic/alwaysLoad": true, ...PROTOCOL_META },
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: "object",
-        properties: {
-          path: { type: "string" },
-          credentialRef: { type: "string" },
-          mode: { type: "string", enum: ["auto", "skeleton", "symbol", "full", "pack", "map", "digest", "slice", "task_pack", "small_file", "artifact", "archive", "overview", "closure"] },
-          ...ARCHIVE_PROP,
-          symbol: { type: "string" },
-          handle: { type: "string" },
-          handles: { type: "array", items: { type: "string" } },
-          paths: {
-            type: "array",
-            // Item shape depends on mode: pack/task_pack use {path,range?,
-            // symbol?,purpose?} but also accept a bare string, coerced to
-            // {path} by each mode's own dispatch branch; full (1+ entries)
-            // and map (multi-file signature map, MULTI_FILE_MAP_CAP_BYTES
-            // total budget) use plain path strings. `type` as an array (not
-            // `oneOf`) is
-            // the cheapest correct JSON Schema for "string OR object" —
-            // dispatch does the real per-mode coercion regardless (schema is
-            // advisory, per the C9 precedent).
-            //
-            // FIX (2026-07-10a dispatch-gap): mode omitted (or "auto") plus a
-            // non-empty paths[] ALSO promotes to task_pack — same shape as
-            // pack/task_pack above, WITH or WITHOUT a query. This is the
-            // recovery a partial pack's own route.reason recommends
-            // ("re-scope with paths=[...]"); it used to fall through to the
-            // single-path modes below (which only read the singular `path`
-            // field) and hard-error "path is required".
-            //
-            // C-6 (§1.3.1(2)): the OBJECT form now declares its keys, so the
-            // recursive validator is no longer vacuous inside a paths[] entry.
-            // `properties` under a union `type` applies only when the instance
-            // IS an object, so a bare string element stays legal and `oneOf`
-            // stays unused (the policy above). mapTaskPackPaths (this file,
-            // the task_pack argument mapper) accepts exactly these four.
-            items: {
-              type: ["string", "object"],
-              properties: {
-                path: { type: "string" },
-                range: { type: "string" },
-                symbol: { type: "string" },
-                purpose: { type: "string" },
-              },
-            },
-          },
-          query: { type: "string" },
-          qref: { type: "string", description: "replay token from a prior task_pack; re-pack with qref, not the query" },
-          taskProfile: { type: "string" },
-          lang: { type: "string" },
-          maxTokens: { type: "number" },
-          allowFull: { type: "boolean" },
-          content: { type: "string", enum: ["full", "outline", "defer", "auto"] },
-          comments: { type: "string", enum: ["elide", "keep"] },
-          includeClosure: { type: "boolean", description: "false: skip task_pack promotion; return a plain code-slice pack for the query." },
-          // B1e (2026-08-01 retrieval-scope): a missing-roles pack's own
-          // recovery IS `read_file mode=task_pack … surfaceRoles=[…]` and the
-          // handler has always accepted it — but read_file's schema did not
-          // declare it, so schema-validating clients dropped the argument and
-          // the sanctioned recovery was followed 0/9 times in run
-          // 2026-07-31-semantic-signal5-2. Same "a capability the server
-          // instructs must not be one the schema hides" reasoning as the qref
-          // re-advertisement; wording matches search_files' own property.
-          surfaceRoles: { type: "array", items: { type: "string" }, description: "Preferred surface roles for closure." },
-          sheet: { type: "string" },
-          range: { type: "string" },
-          ranges: { type: "array", items: { type: "string" }, description: "mode=slice: several N-M windows of ONE file in one call (not with range)" },
-          sections: { type: "array", items: { type: "string" } },
-          slides: { type: "array", items: { type: "string" } },
-          pages: { type: "array", items: { type: "string" } },
-          // C-6 (§1.3.1(2)) advertise-or-delete: below this line are the
-          // properties dispatch has always accepted while the schema hid them.
-          // Under D2 a schema-validating client drops a hidden argument and
-          // silently gets a different budget/projection than it asked for —
-          // the 2026-08-01 surfaceRoles defect one property at a time. Values
-          // stay dispatch-validated (§1.3.1(6)); only the NAMES are declared.
-          //
-          // maxBytes  — the byte twin of maxTokens above; both are read at the
-          //             same three sites (office / full / slice). §1.3.1(2)
-          //             names this one as the defect it must close.
-          // limit     — task_pack surface cap, read beside taskProfile/
-          //             surfaceRoles in the same buildTaskPack option bag.
-          // profile   — mode=skeleton profile (class-map|symbol-map|doc-map|
-          //             full-skeleton), pinned end-to-end by
-          //             schemaAdvisory.spec.ts:335.
-          // kind / as / columns / rows / maxRows / maxCells — the mode=artifact
-          //             xlsx+csv projection bag, parsed in five consecutive
-          //             lines of the artifact branch and echoed back in the
-          //             response. The server itself hands callers `read_file
-          //             mode=artifact path=… as=json` as an executable next,
-          //             and `alternatives:[{mode:"artifact",kind:"xlsx",
-          //             as:"json"}]`, so these are instructed capabilities.
-          maxBytes: { type: "number" },
-          limit: { type: "number" },
-          profile: { type: "string" },
-          kind: { type: "string" },
-          as: { type: "string" },
-          columns: { type: "array", items: { type: "string" } },
-          rows: { type: "array", items: { type: "number" } },
-          maxRows: { type: "number" },
-          maxCells: { type: "number" },
-          ...TASK_STATE_PROPS,
-          ...CWD_PROP,
-        },
+        ...closed({
+          query: { type: "string", description: "Task-pack intent, verbatim." },
+          qref: { type: "string", description: "Replay token; re-pack with it." },
+          targets: { items: CANONICAL_TARGET, description: "Files/handles to read." },
+          content: { enum: ["auto", "outline", "full"], description: "auto/outline/full hint." },
+          select: { ...CANONICAL_SELECT, description: "Artifact/projection selector." },
+          budget: { ...CANONICAL_BUDGET, description: "Serving budget caps." },
+          task: { ...CANONICAL_TASK, description: "Task/closure control." },
+          lane: { type: "string", description: "Concurrency isolation key." },
+          cwd: { type: "string", description: "Worktree root for this call." },
+          scope: { ...CANONICAL_SCOPE, description: "Read scope fields." },
+        }),
+        oneOf: [
+          { required: ["query"], not: { required: ["targets"] } },
+          { required: ["targets"], not: { required: ["query"] } },
+          { required: ["query", "targets"] },
+          { required: ["task"], not: { anyOf: [{ required: ["query"] }, { required: ["targets"] }] } },
+          // W3-4(a) (wave-2 handoff): a BARE `qref` (no query/targets/task) is
+          // the sanctioned replay shape AGENTS.md documents verbatim ("Re-pack
+          // with the returned `qref`, no `query`"), and the legacy dispatch
+          // path (resolveTaskPackQueryArg, further down this file) has always
+          // resolved it correctly on its own — `qref` needs no canonical ->
+          // legacy translation because it is already the same top-level
+          // spelling both ways. Only the ADVERTISED schema was missing this
+          // branch (capabilityReachability.spec.ts's "read.qref-only" case,
+          // filed there as a wave-3 finding rather than fixed in wave 2).
+          { required: ["qref"], not: { anyOf: [{ required: ["query"] }, { required: ["targets"] }, { required: ["task"] }] } },
+        ],
       },
     },
   },
@@ -901,128 +950,106 @@ export const ALL_TOOLS: ToolEntry[] = [
     enabled: !KILL_SWITCH,
     definition: {
       name: "edit_file",
-      description: "Edit by handle/search or create. Batch independent edits in one edits[] call.",
+      description: "Edit via edits[] or artifact.",
       _meta: { "anthropic/alwaysLoad": true },
+      // W3-4(d) (wave-2 handoff, cross-audit P2): edit_file deliberately has
+      // NO top-level `scope`. The D-REPORT census approved exactly 7
+      // top-level fields for this tool (edits, artifact, operation_id, task,
+      // lane, cwd, credentials); an 8th, `scope`, was live on this schema
+      // between waves 1 and 3, reusing the same CANONICAL_SCOPE object
+      // read_file/search_files advertise. Live probing confirmed this was an
+      // ACTIVE DEFECT, not merely unused surface: `normalizeCanonicalRequest`'s
+      // shared preamble runs `mapCanonicalScope` for every tool alike, so
+      // `scope.regex` / `scope.includeClosure` / `scope.archive` /
+      // `scope.depth` / `scope.surfaceRoles` / `scope.includeScores` were
+      // schema-VALID per this file's own advertised shape yet refused
+      // `unknown-arguments` at dispatch (none of those legacy-mapped names
+      // are in `LEGACY_DISPATCH_PROPERTIES.edit_file`) — an advertised
+      // capability the server could never actually honour, the mirror image
+      // of the capability-reachability class W2-1 fixed. The remaining
+      // fields that DID happen to pass through (`scope.path`,
+      // `scope.credentialRef`, `scope.lang`, `scope.symbol`, because those
+      // spellings are ALSO legacy edit_file properties for unrelated
+      // reasons) are duplicate-authority shadows of edit_file's own
+      // dedicated, already-census-approved homes: `edits[].path` /
+      // `edits[].handle` for target addressing, `credentials.in` for the
+      // input credential, and `edits[].intent.lang` / `edits[].intent.symbol`
+      // for intent-scoped hints — exactly the "two spellings of one
+      // capability" class this codebase deletes rather than declares (see
+      // the `allow_create` removal comment above `create`). Deleted here
+      // rather than repaired, restoring the census-7 shape; capabilityReachability.spec.ts's
+      // old `edit.scope` positive case is removed to match (D-REPORT
+      // records the before/after).
       inputSchema: {
         type: "object",
-        properties: {
-          path: { type: "string" },
-          credentialRef: { type: "string" },
-          outputCredentialRef: { type: "string" },
-          // C-6 (§1.3.1(2)): declared keys, so the recursive validator is no
-          // longer vacuous inside an artifact edit. write/artifactEdit.ts's
-          // parseArtifact (`:88-207`) accepts exactly this shape, one branch
-          // per `kind`. `form` deliberately keeps NO declared keys and that is
-          // permanent, not C-6 debt: a PDF form is a MAP whose keys are the
-          // document's own field names — caller DATA, not protocol — which is
-          // §1.3.1(2)'s "re-typed so that it does not need to" escape.
+        ...closed({
+          edits: { items: CANONICAL_EDIT_ITEM, description: "Batch independent edits, ONE call." },
           artifact: {
-            type: "object",
-            description: "Structured xlsx/docx/pptx/pdf/zip edit.",
-            properties: {
-              kind: { type: "string", enum: ["xlsx", "docx", "pptx", "pdf", "zip"] },
-              cells: { type: "array", items: { type: "object", properties: { sheet: { type: "string" }, cell: { type: "string" }, value: {}, formula: { type: "string" } } } },
-              replacements: { type: "array", items: { type: "object", properties: { search: { type: "string" }, replace: { type: "string" }, all: { type: "boolean" } } } },
-              form: { type: "object" },
-              flatten: { type: "boolean" },
-              members: { type: "array", items: { type: "object", properties: { action: { type: "string", enum: ["add", "replace", "delete"] }, member: { type: "string" }, content: { type: "string" }, sourcePath: { type: "string" } } } },
-            },
-          },
-          handle: { type: "string", description: "handle id; resolves path/symbol/range" },
-          search: { type: "string" },
-          replace: { type: "string" },
-          content: { type: "string" },
-          create: { type: "boolean" },
-          from: { type: "string" },
-          intent: { type: "string", description: "Intent: remove-duplicate-branch|append-union-member|append-enum-member|rename-symbol-references; not with edits[]." },
-          symbol: { type: "string", description: "Symbol name used by an edit intent." },
-          lang: { type: "string", description: "Language hint used by an edit intent or rename." },
-          mode: { type: "string", enum: ["rename"], description: "Special edit mode; currently rename only." },
-          to: { type: "string", description: "New symbol name for mode=rename." },
-          review: { type: "boolean", description: "Attach bounded review metadata to a successful edit." },
-          // PI-09 close-out: the idempotency key, advertised on edit_file ONLY.
-          //
-          // WHY NOT ON THE READ TOOLS. `operation_id` deduplicates a MUTATING
-          // operation; `read_file` and `search_files` have no operation to
-          // deduplicate, so advertising it there would advertise a capability
-          // dispatch does not honour — the exact inverse of the §1.3.1(2)
-          // advertise-or-delete rule, and the reason `allow_create` was
-          // DELETED rather than declared. A read call that sends it is
-          // therefore REJECTED (the stricter honest option) by the existing
-          // strict recursive `unknown-arguments` fence, with `keys` naming the
-          // advertised set — never accepted-and-ignored, because a silently
-          // dropped idempotency key is a key the caller believes protected it.
-          operation_id: { type: "string", description: "idempotency key: a repeat replays the recorded outcome, never a second apply" },
-          edits: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                path: { type: "string" },
-                handle: { type: "string" },
-                // `range` + `content` is the ANCHOR shape: replace those lines
-                // of the handle's file BY NUMBER, without restating them in
-                // `search` (a verbatim search duplicates bytes the server
-                // already served — one measured run batched 90 edit items in
-                // a single call). 2026-07-30: carries a terse description —
-                // the same "a capability the guide instructs must not be one
-                // the schema hides" reasoning that re-advertised read_file's
-                // `qref` (see schemaSize.spec.ts's qref comment) applies
-                // identically here, so the earlier bare/undocumented form
-                // (rationalized purely by the byte budget in place at the
-                // time) does not get to become a second precedent for it.
-                // See schemaSize.spec.ts's byte-budget test for the ceiling
-                // this description pair raised.
-                range: { type: "string", description: "1-based N-M range; with content, replaces those lines (no search needed)" },
-                search: { type: "string" },
-                replace: { type: "string" },
-                content: { type: "string", description: "replacement text for range (or the whole file with no range)" },
-                precondition: {
-                  type: "string",
-                  enum: ["unique-match", "expected-hash", "scope-handle", "references-reviewed"],
+            ...closed({
+              kind: { type: "string", enum: ["xlsx", "docx", "pptx", "pdf", "zip"], description: "Artifact format." },
+              cells: {
+                type: "array",
+                description: "Sheet/cell/value/formula writes.",
+                items: {
+                  type: "object",
+                  ...closed({
+                    sheet: { type: "string", description: "Worksheet name." },
+                    cell: { type: "string", description: "A1-style cell address." },
+                    value: { description: "Literal cell value to write." },
+                    formula: { type: "string", description: "Formula to write." },
+                  }),
                 },
-                expectedSha: { type: "string" },
               },
-            },
+              replacements: {
+                type: "array",
+                description: "search/replace/all text edits.",
+                items: {
+                  type: "object",
+                  ...closed({
+                    search: { type: "string", description: "Text to find." },
+                    replace: { type: "string", description: "Replacement text." },
+                    all: { type: "boolean", description: "Replace every match." },
+                  }),
+                },
+              },
+              form: { type: "object", description: "PDF form field values." },
+              flatten: { type: "boolean", description: "Flatten the PDF form." },
+              members: {
+                type: "array",
+                description: "Zip member ops: add/replace/delete.",
+                items: {
+                  type: "object",
+                  ...closed({
+                    action: { type: "string", description: "Member op: add, replace, or delete." },
+                    member: { type: "string", description: "Member path in the archive." },
+                    content: { type: "string", description: "Text content for add/replace." },
+                    sourcePath: { type: "string", description: "Copy bytes from this file." },
+                  }),
+                },
+              },
+            }),
+            description: "xlsx/docx/pptx/pdf/zip edit.",
           },
-          precondition: {
-            type: "string",
-            enum: ["unique-match", "expected-hash", "scope-handle", "references-reviewed"],
+          operation_id: { type: "string", description: "Idempotency key." },
+          task: { ...CANONICAL_TASK, description: "Task/closure control." },
+          lane: { type: "string", description: "Concurrency isolation key." },
+          cwd: { type: "string", description: "Worktree root for this call." },
+          credentials: {
+            ...closed({
+              in: { type: "string", description: "Ref for input artifact." },
+              out: { type: "string", description: "Ref for output artifact." },
+            }),
+            description: "Artifact credential refs.",
           },
-          allowPathFallback: { type: "boolean" },
-          target: { type: "string" },
-          // C-6 (§1.3.1(2)) advertise-or-delete. All four were C9-trimmed from
-          // the advertised schema while dispatch kept accepting them; on the
-          // WRITE tool a hidden argument is the most expensive kind, because
-          // dropping it changes which span is overwritten.
-          //
-          // expectedSha     — the server EMITS `retry with expectedSha=<sha>`
-          //                   (write/preconditions.ts:82,:95, blastRadius.ts:129,
-          //                   applyEditsMulti.ts:452). A schema that hides an
-          //                   argument the server instructs is the 2026-08-01
-          //                   surfaceRoles defect verbatim.
-          // scopeHandle     — the server EMITS `precondition=scope-handle
-          //                   requires scopeHandle=<scope handle id>`
-          //                   (write/preconditions.ts:116-117,:131). Both are
-          //                   the value half of the advertised `precondition`
-          //                   enum, so hiding them made two of its four values
-          //                   unusable by a schema-validating client.
-          // directoryHandle — create-into-directory capability with its own
-          //                   end-to-end spec (editDirectoryHandle.spec.ts).
-          // includeComments — the only knob of the advertised mode:"rename"
-          //                   branch; hiding it left that mode half-described.
-          //
-          // `allow_create` is NOT here: it is DELETED (C-6 advertise-or-delete,
-          // plus the removed reads in the edit_file dispatch arm). D11 deleted
-          // the search_replace_edit alias that used to advertise it on a schema
-          // of its own, so `create` is now the ONLY spelling anywhere.
-          expectedSha: { type: "string" },
-          scopeHandle: { type: "string" },
-          directoryHandle: { type: "string" },
-          includeComments: { type: "boolean" },
-          ...TASK_STATE_PROPS,
-          ...CWD_PROP,
-        },
+        }),
+        // W2-1(a): `required:["edits"]` made an artifact-only call
+        // (`edit_file artifact={kind:"zip",members:[...]}`, AGENTS.md's own
+        // documented archive-edit shape) schema-INVALID even though dispatch
+        // has always accepted it — the advertised surface refused a capability
+        // the server implements. Either top-level carrier is sufficient on its
+        // own; a call with neither is still refused for the same reason it
+        // always was.
+        anyOf: [{ required: ["edits"] }, { required: ["artifact"] }],
       },
     },
   },
@@ -1031,102 +1058,201 @@ export const ALL_TOOLS: ToolEntry[] = [
     enabled: !KILL_SWITCH,
     definition: {
       name: "search_files",
-      description: "Find files/code. If task_pack returns act.*, act instead of further discovery.",
+      description: "Find/reference/diff/tree via queries[].",
       _meta: { "anthropic/alwaysLoad": true },
       annotations: { readOnlyHint: true },
       inputSchema: {
         type: "object",
-        properties: {
-          action: { type: "string", enum: ["find", "symbols", "references", "diff", "locate", "tree"] },
-          // W9 (2026-08-22): `queries` had NO description and the tool
-          // description never mentioned batching, so the ONLY signal that a
-          // batched find exists was the reactive FIND_HINT_TEXT hint — emitted
-          // once per session, and only AFTER two single-token find calls had
-          // already been billed. Same class as the 2026-07-30 `qref` rot and
-          // the 2026-08-01 `surfaceRoles` rot this schema's own budget rows
-          // record: a capability the server implements and the guide teaches,
-          // invisible in the one place a schema-reading client looks.
-          query: { type: "string", description: "one identifier token for find; batch several with `queries`." },
-          queries: { type: "array", items: { type: "string" }, description: "find: batch several identifiers in ONE call; each reports matched|absent|unknown (absent=scope-complete, no re-grep)." },
-          path: { type: "string" },
-          credentialRef: { type: "string" },
-          ...ARCHIVE_PROP,
-          depth: { type: "number" },
-          lang: { type: "string" },
-          limit: { type: "number" },
-          cursor: { type: "string", description: "Opaque continuation token from a prior next_call; server-issued, do not construct." },
-          includeClosure: { type: "boolean", description: "true: action=locate returns a task_pack closure response." },
-          surfaceRoles: { type: "array", items: { type: "string" }, description: "Preferred surface roles for closure." },
-          // C-6 (§1.3.1(2)) advertise-or-delete. Note that four of these six
-          // ARE advertised on read_file — the hiding was per-tool, which is
-          // why the audit had to attribute every dispatch read to its own
-          // switch arm; a union over the three tools makes them invisible.
-          //
-          // regex         — the server EMITS "retry with regex:false and one
-          //                 identifier token" (findText.ts:2429, :2480).
-          // symbol        — action=references reads it as the PRIMARY argument
-          //                 (`args["symbol"] ?? args["query"]`), and
-          //                 action=locate forwards it into the closure pack.
-          // includeScores — action=symbols; schemaAdvisory.spec.ts:433.
-          // taskProfile   — action=locate + includeClosure returns a task_pack,
-          //                 and the guide teaches taskProfile for packs.
-          // maxTokens     — diff / locate / office-backed hit budget; already
-          //                 advertised on read_file.
-          // maxBytes      — office-backed hit byte budget; twin of maxTokens.
-          regex: { type: "boolean" },
-          symbol: { type: "string" },
-          includeScores: { type: "boolean" },
-          taskProfile: { type: "string" },
-          maxTokens: { type: "number" },
-          maxBytes: { type: "number" },
-          ...TASK_STATE_PROPS,
-          ...CWD_PROP,
-        },
+        ...closed({
+          action: { enum: ["find", "references", "diff", "tree"], description: "find/references/diff/tree." },
+          // W9 (2026-08-22) / W3-2 restoration: `queries` had no description at
+          // all before this property was advertised, and the ONLY live signal
+          // that batching exists was a reactive one-per-session hint fired
+          // AFTER two single-token find calls were already billed. Losing this
+          // description again silently reintroduces that serial fan-out —
+          // schemaSize.spec.ts pins the exact substring below for that reason.
+          queries: {
+            type: "array",
+            items: { type: "string" },
+            description: "Batch call; reports matched|absent|unknown.",
+          },
+          scope: { ...CANONICAL_SCOPE, description: "Search scope fields." },
+          budget: { ...CANONICAL_SEARCH_BUDGET, description: "Serving budget caps." },
+          cursor: { type: "string", description: "Continuation token." },
+          task: { ...CANONICAL_TASK, description: "Task/closure control." },
+          lane: { type: "string", description: "Concurrency isolation key." },
+          cwd: { type: "string", description: "Worktree root for this call." },
+        }),
         required: ["action"],
+        oneOf: [
+          { properties: { action: { enum: ["find"] } }, required: ["queries"] },
+          { properties: { action: { enum: ["references", "diff", "tree"] } } },
+        ],
       },
     },
   },
-  // -------------------------------------------------------------------------
-  // D11: the 12 hidden aliases that used to live here are DELETED — the 9
-  // fully-legacy ones (get_file_skeleton, get_symbol_with_context,
-  // extract_office_text, search_replace_edit, apply_edits_multi, create_file,
-  // read_and_edit, search_symbols, get_current_diff) and the 3 renamed ones
-  // (read_code, edit_code, explore). Under D2's strict request validation an
-  // accepted-but-unadvertised NAME was the last hole of the same class the
-  // hidden-property closure shut: a caller could reach a code path no schema
-  // describes. All 12 now take the unknown-tool refusal like any stranger.
-  // -------------------------------------------------------------------------
 ];
 
+const SCHEMA_DEFS_ENABLED = schemaDefsEnabled();
 
-// ---------------------------------------------------------------------------
-// 2026-08-01 measured incident (this repo's findReferences.ts, 788 → 57
-// lines, recovered from .tokenlighten/checkpoints): a caller passed TOP-LEVEL
-// {handle, range:"676-788", content} — but edit_file has no top-level `range`
-// (range+content is an edits[] ITEM shape). The unknown key was silently
-// dropped and the {handle, content} branch below replaced the handle's OWN
-// 1-788 range: a whole-file overwrite the call never expressed. On the WRITE
-// tool an unrecognized argument can silently change WHICH span is destroyed,
-// so edit_file fails CLOSED on unknown arguments. 2026-08-13 (P1 / D2 /
-// ORCHESTRATOR CONDITION ②) generalised that stance: the read-only tools no
-// longer keep their tolerant parsing either, because D2 adjudicated requests
-// as STRICT and a schema that is merely advisory cannot be frozen. C-6
-// (advertise-or-delete, §1.3.1(2)) then closed the third state: the C9-trimmed
-// params dispatch used to accept without advertising (expectedSha,
-// scopeHandle, directoryHandle, includeComments) are now DECLARED above, and
-// the one silent alias among them — allow_create — was DELETED from this
-// tool's request surface. So the known-argument set is now exactly the
-// advertised schema object itself (single source of truth, cannot drift), and
-// EDIT_FILE_ADVISORY_ARGS is an empty residue kept only so the union below
-// keeps its shape if a future advisory name ever has to be re-introduced.
-// ---------------------------------------------------------------------------
+/**
+ * F-1 opt-in structural sharing. The default remains the expanded schema
+ * (fail-closed) until the three real-client compatibility checks pass.
+ */
+function enableSchemaDefs(): void {
+  if (!SCHEMA_DEFS_ENABLED) return;
+  const read = ALL_TOOLS.find((entry) => entry.name === "read_file")?.definition;
+  const edit = ALL_TOOLS.find((entry) => entry.name === "edit_file")?.definition;
+  const search = ALL_TOOLS.find((entry) => entry.name === "search_files")?.definition;
+  if (!read || !edit || !search) return;
+
+  const ref = (name: string): SchemaNode => ({ $ref: `#/$defs/${name}` } as unknown as SchemaNode);
+  const replace = (schema: Record<string, unknown>, defs: Record<string, unknown>, keyRefs: Array<[string, string]>) => {
+    schema.$defs = defs;
+    const props = schema.properties as Record<string, SchemaNode>;
+    for (const [key, name] of keyRefs) {
+      const prior = props[key];
+      props[key] = { ...ref(name), ...(prior && "description" in prior ? { description: prior.description } : {}) };
+    }
+  };
+
+  const readSchema = read.inputSchema as Record<string, unknown>;
+  const readProps = readSchema.properties as Record<string, SchemaNode>;
+  const readTarget = structuredClone((readProps.targets as Record<string, unknown>).items);
+  replace(readSchema, {
+    taskControl: structuredClone(CANONICAL_TASK),
+    readScope: structuredClone(CANONICAL_SCOPE),
+    readBudget: structuredClone(CANONICAL_BUDGET),
+    readTarget,
+    readSelect: structuredClone(CANONICAL_SELECT),
+  }, [["task", "taskControl"], ["scope", "readScope"], ["budget", "readBudget"], ["select", "readSelect"]]);
+  (readSchema.properties as Record<string, Record<string, unknown>>).targets.items = ref("readTarget");
+
+  const editSchema = edit.inputSchema as Record<string, unknown>;
+  const editProps = editSchema.properties as Record<string, SchemaNode>;
+  const editItem = structuredClone((editProps.edits as Record<string, unknown>).items);
+  const artifact = structuredClone(editProps.artifact);
+  const credentials = structuredClone(editProps.credentials);
+  replace(editSchema, {
+    taskControl: structuredClone(CANONICAL_TASK),
+    editItem,
+    artifact,
+    credentials,
+  }, [["task", "taskControl"], ["artifact", "artifact"], ["credentials", "credentials"]]);
+  (editSchema.properties as Record<string, Record<string, unknown>>).edits.items = ref("editItem");
+
+  const searchSchema = search.inputSchema as Record<string, unknown>;
+  replace(searchSchema, {
+    taskControl: structuredClone(CANONICAL_TASK),
+    searchScope: structuredClone(CANONICAL_SCOPE),
+    searchBudget: structuredClone(CANONICAL_SEARCH_BUDGET),
+  }, [["task", "taskControl"], ["scope", "searchScope"], ["budget", "searchBudget"]]);
+}
+
+enableSchemaDefs();
+
 const EDIT_FILE_ADVISORY_ARGS: readonly string[] = PENDING_C6_ADJUDICATION["edit_file"] ?? [];
 
-/** Advertised `properties` of a tool, straight off the ALL_TOOLS source of truth. */
+function legacyProperties(names: readonly string[]): Record<string, SchemaNode> {
+  return Object.fromEntries(names.map((name) => [name, {}])) as Record<string, SchemaNode>;
+}
+
+const LEGACY_CHALLENGE_SCHEMA: SchemaNode = {
+  type: "object",
+  properties: legacyProperties(["certificate_id", "obligation_id", "expected_action_change"]),
+};
+const LEGACY_ARCHIVE_SCHEMA: SchemaNode = {
+  type: "object",
+  properties: legacyProperties(["path", "member", "prefix"]),
+};
+const LEGACY_ARTIFACT_SCHEMA: SchemaNode = {
+  type: "object",
+  properties: {
+    ...legacyProperties(["kind", "flatten"]),
+    cells: {
+      type: "array",
+      items: { type: "object", properties: legacyProperties(["sheet", "cell", "value", "formula"]) },
+    },
+    replacements: {
+      type: "array",
+      items: { type: "object", properties: legacyProperties(["search", "replace", "all"]) },
+    },
+    form: { type: "object" },
+    members: {
+      type: "array",
+      items: { type: "object", properties: legacyProperties(["action", "member", "content", "sourcePath"]) },
+    },
+  },
+};
+const LEGACY_EDIT_ITEM_SCHEMA: SchemaNode = {
+  type: "object",
+  properties: {
+    ...legacyProperties([
+      "path", "handle", "range", "search", "replace", "content", "create", "from", "expectedSha", "precondition",
+      "allowPathFallback", "target", "scopeHandle", "directoryHandle", "review",
+    ]),
+    intent: {
+      type: "object",
+      properties: legacyProperties(["kind", "from", "to", "symbol", "lang", "includeComments"]),
+    },
+  },
+};
+const LEGACY_PATHS_SCHEMA: SchemaNode = {
+  type: "array",
+  items: {
+    type: ["string", "object"],
+    properties: legacyProperties(["path", "purpose", "range", "symbol"]),
+  },
+};
+
+const LEGACY_DISPATCH_PROPERTIES: Record<string, Record<string, SchemaNode>> = {
+  read_file: {
+    ...legacyProperties([
+    "path", "credentialRef", "mode", "symbol", "handle", "handles", "query", "qref",
+    "taskProfile", "lang", "maxTokens", "allowFull", "content", "comments", "includeClosure", "surfaceRoles",
+    "sheet", "range", "ranges", "sections", "slides", "pages", "maxBytes", "limit", "profile", "kind", "as",
+    "columns", "rows", "maxRows", "maxCells", "taskEpoch", "task_handle", "lane",
+    "expected_state_version", "force_serve", "cwd",
+    ]),
+    archive: LEGACY_ARCHIVE_SCHEMA,
+    challenge: LEGACY_CHALLENGE_SCHEMA,
+    paths: LEGACY_PATHS_SCHEMA,
+  },
+  edit_file: {
+    ...legacyProperties([
+      "path", "credentialRef", "outputCredentialRef", "handle", "search", "replace", "content",
+      "create", "from", "intent", "symbol", "lang", "mode", "to", "review", "operation_id", "precondition",
+      "allowPathFallback", "target", "expectedSha", "scopeHandle", "directoryHandle", "includeComments",
+      "taskEpoch", "task_handle", "lane", "expected_state_version", "force_serve", "cwd",
+    ]),
+    artifact: LEGACY_ARTIFACT_SCHEMA,
+    challenge: LEGACY_CHALLENGE_SCHEMA,
+    edits: { type: "array", items: LEGACY_EDIT_ITEM_SCHEMA },
+  },
+  search_files: {
+    ...legacyProperties([
+    "action", "query", "queries", "path", "credentialRef", "depth", "lang", "limit", "cursor",
+    "includeClosure", "surfaceRoles", "regex", "symbol", "includeScores", "taskProfile", "maxTokens",
+    "maxBytes", "taskEpoch", "task_handle", "lane", "expected_state_version", "force_serve", "cwd",
+    ]),
+    archive: LEGACY_ARCHIVE_SCHEMA,
+    challenge: LEGACY_CHALLENGE_SCHEMA,
+  },
+};
+
 function advertisedPropertiesFor(tool: string): Record<string, SchemaNode> {
   const definition = ALL_TOOLS.find((entry) => entry.name === tool)!.definition;
   const inputSchema = definition["inputSchema"] as { properties: Record<string, SchemaNode> };
   return inputSchema.properties;
+}
+
+function dispatchPropertiesFor(tool: string): Record<string, SchemaNode> {
+  return LEGACY_DISPATCH_PROPERTIES[tool] ?? advertisedPropertiesFor(tool);
+}
+
+/** Test-only readback of the post-normalizer validation surface. */
+export function dispatchPropertiesForTest(tool: string): Record<string, SchemaNode> {
+  return structuredClone(dispatchPropertiesFor(tool));
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,15 +1266,19 @@ function advertisedPropertiesFor(tool: string): Record<string, SchemaNode> {
 setEmittedToolCallValidator((call) => {
   const definition = ALL_TOOLS.find((entry) => entry.name === call.tool);
   if (definition === undefined) return false;
-  return requestShapeRefusal(
-    call.tool,
-    advertisedPropertiesFor(call.tool),
-    call.arguments as Record<string, unknown>,
-  ) === null;
+  const argumentsRecord = call.arguments as Record<string, unknown>;
+  // Producers are migrated independently: older ones reach this pre-wire gate
+  // in the accepted dispatch spelling, while newer ones already author the
+  // canonical public spelling. The finalizer canonicalizes both immediately
+  // afterwards. Mirror inbound acceptance here so neither valid generation is
+  // discarded before it can reach that projection, while an unknown field is
+  // still rejected by both closed schemas.
+  return requestShapeRefusal(call.tool, dispatchPropertiesFor(call.tool), argumentsRecord) === null
+    || requestShapeRefusal(call.tool, advertisedPropertiesFor(call.tool), argumentsRecord) === null;
 });
 
 function editFileAdvertisedProperties(): Record<string, unknown> {
-  return advertisedPropertiesFor("edit_file") as Record<string, unknown>;
+  return dispatchPropertiesFor("edit_file") as Record<string, unknown>;
 }
 
 /**
@@ -1226,7 +1356,7 @@ function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<s
   // — used to fail BOTH grouping branches below and vanish from every named
   // field list; `fields` (below) now names every violation unconditionally,
   // regardless of which bucket (or no bucket) it also sorts into.
-  const violations = findUnknownProperties("edit_file", advertisedPropertiesFor("edit_file"), args);
+  const violations = findUnknownProperties("edit_file", dispatchPropertiesFor("edit_file"), args);
   if (violations.length === 0) return null;
   const unknownTop: string[] = [];
   const unknownItems: Array<{ index: number; arguments: string[] }> = [];
@@ -1385,9 +1515,9 @@ function elidedContentRefusal({
   const validRange = typeof range === "string" && /^\d+(?:-\d+)?$/.test(range);
   const reread = path
     ? validRange
-      ? "read_file mode=slice path=" + path + " range=" + range + " comments=keep"
-      : "read_file mode=full path=" + path + " comments=keep"
-    : "read_file mode=task_pack query=\"re-read the affected source with comments kept\"";
+      ? canonicalToolCall("read_file", { mode: "slice", path, range, comments: "keep" })
+      : canonicalToolCall("read_file", { mode: "full", path, comments: "keep" })
+    : canonicalToolCall("read_file", { mode: "task_pack", query: "re-read the affected source with comments kept" });
 
   return {
     ok: false,
@@ -2643,8 +2773,12 @@ function servedContentReceipt(args: {
     // A partial ledger receipt must point straight at the exact windows it did
     // not establish. This is a fresh slice, not a task re-pack or a replay of
     // the already-served range above.
+    // FX-1 (v0.13 wave-3 review fix): canonical `targets=[...]` prose, not the
+    // legacy `mode=slice handle=… ranges=…` dialect — `canonicalizeEmittedToolCalls`
+    // (protocol/envelope.ts) only rewrites OBJECT-shaped embedded tool calls, so a
+    // raw STRING `next` here was a blind spot that reached the wire unconverted.
     ...(ledger.unserved.length > 0
-      ? { next: `read_file mode=slice handle=${handle} ranges=${JSON.stringify(ledger.unserved)}` }
+      ? { next: `read_file targets=${JSON.stringify([{ handle, ranges: ledger.unserved }])}` }
       : {}),
     ...(extra ?? {}),
   };
@@ -2801,8 +2935,9 @@ async function buildFullDowngradePayload(args: {
             complete: coverage.complete,
           },
       note: SERVED_CONTENT_RECEIPT_NOTE,
+      // FX-1: canonical `targets=[...]` prose (see the sibling receipt above).
       ...(coverage !== undefined && coverage.unserved.length > 0
-        ? { next: `read_file mode=slice handle=${handleId} ranges=${JSON.stringify(coverage.unserved)}` }
+        ? { next: `read_file targets=${JSON.stringify([{ handle: handleId, ranges: coverage.unserved }])}` }
         : {}),
       ...(allowFullWouldHelp ? { allow_full_would_help: true } : {}),
     };
@@ -2864,8 +2999,9 @@ async function buildFullDowngradePayload(args: {
       // PRE-FILLED zoom: same handle, the largest span this session has not
       // served yet. A cap that names the next call is a redirect; one that only
       // says "no" is the pure-loss turn W1 removed.
+      // FX-1: canonical `targets=[...]` prose (see the sibling receipts above).
       ...(largestUnserved !== undefined
-        ? { next: `read_file mode=slice handle=${handleId} ranges=${JSON.stringify([largestUnserved])}` }
+        ? { next: `read_file targets=${JSON.stringify([{ handle: handleId, ranges: [largestUnserved] }])}` }
         : {}),
       note: args.skeletonOnly === true
         ? "post-ready discovery trimmed; zoom this handle by range (the pre-filled `next` names the largest span you have not been served)"
@@ -3450,7 +3586,7 @@ async function resolveFullReadForPath(
             ...(ext === "docx" ? [{ mode: "artifact", kind: "docx" }] : []),
             ...(ext === "pdf" ? [{ mode: "artifact", kind: "pdf" }] : []),
           ],
-          next: `read_file mode=artifact path=${filePath}${ext === "xlsx" ? " as=json" : ""}${
+          next: `read_file mode=artifact path=${filePath} kind=${ext}${ext === "xlsx" ? " as=json" : ""}${
             officeOpts.credentialRef !== undefined
               ? ` credentialRef=${JSON.stringify(officeOpts.credentialRef)}`
               : ""
@@ -3526,6 +3662,7 @@ async function resolveFullReadForPath(
         }),
       };
     }
+    noteServedBytesSource("post-ready-trim");
     return {
       ok: true,
       data: await buildFullDowngradePayload({
@@ -3778,7 +3915,7 @@ function mapMissRefusalCode(reason: string): RefusalCode {
  * resolved here, at each of its two call sites, rather than changing the
  * function's own return shape underneath its other caller.
  */
-function taskPackQueryErrorPayload(resolution: { error?: string; next?: string }): Record<string, unknown> {
+function taskPackQueryErrorPayload(resolution: { error?: string; next?: string | Record<string, unknown>; detail?: string }): Record<string, unknown> {
   // Callers only reach here after their own `if (resolution.error)` guard,
   // but that narrows the ACCESSED property, not this parameter's wider
   // `TaskPackQueryResolution` source type — so `error` stays optional here
@@ -3794,7 +3931,7 @@ function taskPackQueryErrorPayload(resolution: { error?: string; next?: string }
     // message is a plain argument-shape mistake.
     code: staleQref ? "handle-unknown" : "invalid-input",
     error: message,
-    detail: message,
+    detail: resolution.detail ?? message,
     ...(resolution.next !== undefined ? { next: resolution.next } : {}),
   };
 }
@@ -4042,6 +4179,7 @@ export function recordTaskPackExecution(
   workspace: string,
   query: string,
   result: Record<string, unknown>,
+  contractScope?: TaskContractScope,
 ): void {
   const contractValue = result["execution_contract"];
   const contract = contractValue && typeof contractValue === "object"
@@ -4199,6 +4337,35 @@ export function recordTaskPackExecution(
   const effectiveContract = effectiveContractValue && typeof effectiveContractValue === "object"
     ? effectiveContractValue as TaskExecutionContract
     : undefined;
+  const alreadyExecuted = effectiveContract?.next_call;
+  if (
+    effectiveContract !== undefined
+    && alreadyExecuted !== undefined
+    && hasExecutedNext(
+      workspace,
+      normalizeContractLane(contractScope?.lane),
+      alreadyExecuted.tool,
+      alreadyExecuted.arguments as Record<string, unknown>,
+    )
+  ) {
+    // The builder's early gate can be superseded by its later canonical
+    // projection. Re-apply the exact consumed-result rule at the shared
+    // producer exit so a successful next cannot reappear on the wire.
+    //
+    // A-F2 (2026-08-28): this used to be a THIRD hand-rolled copy of the
+    // rewrite — one that tried no alternative axis, disclosed no gap, and then
+    // FILTERED the suppressed call's query out of `missing[]`, deleting the
+    // very obligation the pack had just lost the ability to discharge.
+    // Requirements are monotone (§A-6(2)): the disclosure is permanent, and
+    // suppression must yield progress or an explicit gap, never silence.
+    repairSuppressedNextCall(
+      workspace,
+      normalizeContractLane(contractScope?.lane),
+      result as unknown as TaskPackResult,
+      query,
+      alreadyExecuted,
+    );
+  }
 
   // -------------------------------------------------------------------------
   // protocol v1 §2.1 / D7: THE SINGLE DECISION, EMITTED ONCE.
@@ -4226,8 +4393,20 @@ export function recordTaskPackExecution(
     contract: effectiveContract,
     canonicalKind: canonical?.kind,
     evidence: emittedEvidence,
+    // R1: the SAME predicate the two no-repeat gates above ask, handed to the
+    // one place `decision.next` is minted. The gates can only inspect and
+    // repair `execution_contract.next_call`; the bundle re-pack, the
+    // continuation's first call, a gap's named recovery and the served-evidence
+    // zoom reach the wire without passing either of them, and a bundle next
+    // outranks the repaired `next_call`. Binding it here is what makes the
+    // consumed-fingerprint rule govern every carrier without a second gate.
+    consumed: (call) => hasExecutedNext(
+      workspace,
+      normalizeContractLane(contractScope?.lane),
+      call.tool,
+      (call.arguments ?? {}) as Record<string, unknown>,
+    ),
   });
-
   // -------------------------------------------------------------------------
   // DECISION-WIRE CONFORMANCE, at the same fence and on the same terms as the
   // canonical repair above (2026-08-20).
@@ -4274,7 +4453,10 @@ export function recordTaskPackExecution(
     result,
     effectiveContract,
     `task-${shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16)}`,
-  ));
+  ), contractScope);
+  const resolvedScope = contractScope === undefined
+    ? undefined
+    : bindTaskContractHandle(workspace, contractScope, task.id);
 
   // D10 (2026-08-14): `TL_LEAN_CONTRACT` is deleted. The lean projection is the
   // ONLY execution-contract shape that reaches the wire — the full internal
@@ -4290,6 +4472,136 @@ export function recordTaskPackExecution(
   result["task"] = task;
   result["profile"] = profile;
   if (decision !== undefined) result["decision"] = decision;
+  // P2(d) (2026-08-28 review-fix wave): was `decision?.kind === "discover" ?
+  // decision.next : undefined` — registration only ever fired for a
+  // `discover`-kind wire decision. `TaskDecision`'s own D-1 invariant
+  // (packages/types/src/mcp/decision.ts) makes `next` representable ONLY on
+  // `discover`, so that restriction was never a choice to relax on the WIRE
+  // shape. But `effectiveContract.next_call` is a SEPARATE, internal field
+  // that can be set regardless of what the wire decision ends up being —
+  // an `await_input` pack can still carry a sanctioned zoom/re-scope call
+  // internally (AGENTS.md: "await_input=>run a carried next first"), and an
+  // `act.edit` pack's own sanctioned-zoom affordance is the same shape one
+  // level down. Reading the internal contract field directly (never
+  // `decision.next`, so D-1 is untouched) lets the executable-next scope
+  // registry track those prescriptions too, so a later execution of them
+  // still attributes its absence/hit proof back to the task that prescribed
+  // it (P1-d), instead of resolving to `undefined` and recording nothing.
+  const next = effectiveContract?.next_call as { tool?: unknown; arguments?: unknown } | undefined;
+  if (
+    resolvedScope !== undefined
+    && typeof next?.tool === "string"
+    && next.arguments !== null
+    && typeof next.arguments === "object"
+    && !Array.isArray(next.arguments)
+  ) {
+    registerExecutableNextScope(workspace, resolvedScope, {
+      tool: next.tool,
+      arguments: next.arguments as Record<string, unknown>,
+    });
+  }
+  if ((decision?.kind === "act.answer" || decision?.kind === "act.edit")
+    && effectiveContract?.readiness_certificate !== undefined) {
+    const certificateId = effectiveContract.readiness_certificate.id;
+    const ledgerSnapshot = taskContractLedgerSnapshot(workspace, resolvedScope);
+    // -----------------------------------------------------------------------
+    // A-F3: `discharged` WAS A LITERAL `true`.
+    //
+    // The emit funnel's entire ledger check rests on this field —
+    // `isAuthenticatedProducerBinding` and `ledgerCertificateBindingValid` both
+    // begin by reading it — and the producer simply asserted it while handing
+    // over a snapshot it never inspected. Any act with a ledger of ANY shape,
+    // undischarged obligations included, self-certified past the funnel. It is
+    // computed from the snapshot now, which is the only thing that makes the
+    // downstream check a check.
+    //
+    // A-7 puts DEMOTION in the producer layer, and it is already there: an
+    // undischarged ledger fails `ledgerEstablished` in buildTaskExecutionContract,
+    // so a well-formed producer never reaches this branch undischarged.
+    // Withholding the binding is the fence for the case where it does — the
+    // funnel then replaces the response with a refusal, the one sanctioned
+    // funnel-side intervention, rather than shipping an unverifiable act.
+    // -----------------------------------------------------------------------
+    const discharged = ledgerSnapshot !== undefined
+      && ledgerSnapshot.obligations.length > 0
+      && ledgerSnapshot.obligations.every((obligation) => obligation.proof !== undefined);
+    // -----------------------------------------------------------------------
+    // F1 (2026-08-29, review-fix wave ①): A-F3's SECOND MISSING PREMISE.
+    //
+    // `discharged` above made the producer inspect the snapshot's PROOFS. It
+    // still never asked the only other question the funnel asks: does this
+    // snapshot BACK THIS certificate's ledger claim? `taskContractLedgerSnapshot`
+    // is scope-keyed only — unlike `taskContractDischargeCertificate`, the
+    // MINT-side read, which is additionally epoch-checked (`_sameTask`) — so the
+    // ledger it returns can belong to a different epoch than the digest baked
+    // into the id that was minted from it. The epoch reset inside
+    // `recordTaskContract`, the pre-existing destination record
+    // `bindTaskContractHandle` declines to overwrite, and a concurrent writer on
+    // the same workspace all yield a fully-proved snapshot with a DIFFERENT
+    // digest. The producer bound it blind, and `ledgerCertificateBindingValid`'s
+    // closing `startsWith` then rejected the response.
+    //
+    // E-1's widened promotion is what made that reachable on real traffic (the
+    // T07 `read_file mode=task_pack paths=["bench/fixtures/ledgerd"]` shape):
+    // more packs reach `act.*`, so more packs carry a ledger-backed identity
+    // into this branch. Under `TL_DECISION_INVARIANT_STRICT` it throws; in
+    // production it became an unexplained `invalid-input` / `retry:"none"` dead
+    // end — a refusal with nothing the caller can do about it.
+    //
+    // THE FENCE IS DEMOTION, NEVER A RELAXED CHECK. The A-7 funnel guard is
+    // correct and is untouched. What changes is that the producer no longer
+    // ASSERTS a ledger it cannot hand over: an id whose claim cannot be backed
+    // loses the claim and ships as the legacy single-segment `ready-<proof16>`
+    // identity — the same shape a non-proof-completion pack emits, which makes
+    // no ledger assertion at all. The act itself was legitimately adjudicated
+    // and still reaches the caller.
+    //
+    // Every carrier of that identity moves together, because they are compared
+    // against each other downstream: `decisionWire.ts`'s `projectCertificate`
+    // drops the certificate outright when `readiness_certificate.id` and
+    // `typestate.certificate_id` disagree, and `session.ts`'s
+    // `challengeCertificate` matches the caller-supplied `certificate_id`
+    // against the installed fence's key — hence `rekeyExecutionFenceCertificate`,
+    // since `recordExecutionContract` installed that fence far above, before the
+    // task handle had resolved the ledger scope this check needs.
+    // -----------------------------------------------------------------------
+    const backsCertificate = ledgerSnapshot !== undefined
+      && ledgerDigestBacksCertificateId(certificateId, ledgerSnapshot.digest);
+    if (ledgerSnapshot !== undefined && discharged && backsCertificate) {
+      bindLedgerCertificate(result, {
+        certificateId,
+        ledgerDigest: ledgerSnapshot.digest,
+        ledgerSnapshot,
+        discharged,
+        lane: resolvedScope?.lane,
+        taskHandle: task.id,
+      });
+    } else if (isLedgerBackedCertificateId(certificateId)) {
+      const honestId = withoutLedgerClaim(certificateId);
+      effectiveContract.readiness_certificate.id = honestId;
+      if (effectiveContract.typestate.certificate_id === certificateId) {
+        effectiveContract.typestate.certificate_id = honestId;
+      }
+      if (effectiveContract.semantic_closure?.closure_id === certificateId) {
+        effectiveContract.semantic_closure.closure_id = honestId;
+      }
+      const lean = result["execution_contract"];
+      if (lean !== null && typeof lean === "object"
+        && (lean as { certificate?: unknown }).certificate === certificateId) {
+        (lean as { certificate: string }).certificate = honestId;
+      }
+      decision.certificate.id = honestId;
+      rekeyExecutionFenceCertificate(workspace, certificateId, honestId);
+      trace("ledger_certificate_demoted", {
+        from: certificateId,
+        to: honestId,
+        reason: ledgerSnapshot === undefined
+          ? "no-ledger-at-scope"
+          : discharged ? "digest-does-not-back-certificate" : "ledger-undischarged",
+        lane: resolvedScope?.lane,
+      }, workspace);
+    }
+  }
   result["evidence"] = emittedEvidence;
   delete result["surfaces"];
 }
@@ -4335,13 +4647,14 @@ export function recordTaskPackExecution(
  * workspace), the fingerprint ships exactly as it did in v0.9 — degradation is
  * a smaller guarantee, never a wrong one.
  */
-function withTaskHandle(task: TaskRef): TaskRef {
+function withTaskHandle(task: TaskRef, contractScope?: TaskContractScope): TaskRef {
   const workspace = callWorkspace();
   if (workspace === undefined) return task;
   const handle = mintTaskHandle(workspace, {
     taskFingerprint: task.id,
     ...(task.replay !== undefined ? { replay: task.replay } : {}),
     coverage: task.coverage,
+    ...(taskContractDigest(workspace, contractScope) !== undefined ? { ledgerDigest: taskContractDigest(workspace, contractScope) } : {}),
     mintedAtMs: Date.now(),
   });
   return handle === undefined ? task : { ...task, id: handle };
@@ -5202,7 +5515,7 @@ function taskHandleRefusal(args: Record<string, unknown>, workspace: string): Re
         reason: "invalid-input",
         field: "expected_state_version",
         detail: "expected_state_version guards a task_handle's state and is meaningless without one — send both, or neither",
-        next: 'read_file mode=task_pack query="<restate the request verbatim>" taskEpoch="new"',
+        next: canonicalToolCall("read_file", { mode: "task_pack", query: "<restate the request verbatim>", taskEpoch: "new" }),
       };
     }
     return null;
@@ -5213,10 +5526,10 @@ function taskHandleRefusal(args: Record<string, unknown>, workspace: string): Re
       reason: "invalid-input",
       field: "task_handle",
       detail: "task_handle must be the opaque string a prior task_pack returned as task.id",
-      next: 'read_file mode=task_pack query="<restate the request verbatim>" taskEpoch="new"',
+      next: canonicalToolCall("read_file", { mode: "task_pack", query: "<restate the request verbatim>", taskEpoch: "new" }),
     };
   }
-  const freshPack = 'read_file mode=task_pack query="<restate the request verbatim>" taskEpoch="new"';
+  const freshPack = canonicalToolCall("read_file", { mode: "task_pack", query: "<restate the request verbatim>", taskEpoch: "new" });
 
   const resolved = resolveTaskHandle(token, workspace);
   if (resolved.ok) {
@@ -5337,6 +5650,34 @@ const OPERATION_REPLAY_MAX_BYTES = 16 * 1024;
  * this table ever holds is `JSON.stringify({v:1,…})`, which always begins `{`.
  */
 const OPERATION_OVERSIZE_MARKER = "!oversize";
+// Compatibility marker: legacy v1 parsers must reject this record as an
+// unsupported replay, never treat it as absent and re-apply the edit.
+const OPERATION_REPLAY_V2_MARKER = "structured-v2";
+
+/**
+ * B-F1 downgrade fix. The legacy `op:${operationId}` key is the ONLY key an
+ * old (pre-v:2) server ever reads, and its frozen dispatch order is:
+ * exact-match oversize marker -> refuse (safe halt); else parse v1 JSON;
+ * unreadable is treated as absent -> run() (a SECOND disk apply). See
+ * `git show 23a023e0:packages/mcp-server/src/server.ts`
+ * (`parseRecordedOperation`, `runEditWithOperationId`) for the exact frozen
+ * logic this must satisfy — that build cannot parse a v:2 record, so it
+ * would silently re-apply the edit unless the legacy key it reads is
+ * unconditionally the oversize marker. The real structured-v2 record is
+ * written to a SIBLING key under this prefix instead, in a namespace that
+ * provably never collides with a legacy key for any caller-chosen
+ * operation_id: `"op:"` and this prefix diverge at character index 2
+ * (':' vs 'v'), so `` `op:${a}` `` cannot equal
+ * `` `${OPERATION_V2_KEY_PREFIX}${b}` `` for ANY strings a, b —
+ * `operation_id` has no charset restriction, so this must hold
+ * structurally, not just empirically. The server always checks the v2 key
+ * FIRST and falls back to the legacy key only when no v2 sibling exists (an
+ * outcome recorded by an old server, or before this fix).
+ */
+const OPERATION_V2_KEY_PREFIX = "opv2:";
+
+/** Test-only: the v2 sibling-key namespace, exposed so specs can assert dual-write placement without duplicating the naming scheme. */
+export const __testOnlyOperationV2KeyPrefix = OPERATION_V2_KEY_PREFIX;
 
 /**
  * In-process claim set: `${workspace}\u0000${operationId}` for every operation
@@ -5350,22 +5691,82 @@ const OPERATION_OVERSIZE_MARKER = "!oversize";
 const _operationsInFlight = new Set<string>();
 
 /** Serialized replay payload for a recorded operation. */
-interface RecordedOperationOutcome {
-  v: 1;
-  text: string;
+interface RecordedOperationOutcomeV2 {
+  v: 2;
+  kind: "edit.applied";
+  replay_format: typeof OPERATION_REPLAY_V2_MARKER;
+  counts?: unknown;
+  paths?: unknown;
+  sha?: unknown;
+  checkpoint?: unknown;
+  outcome_hash: string;
+  read_back?: unknown;
+  applied?: unknown;
+  core?: unknown;
+  applied_note?: unknown;
+  delta?: unknown;
+  handle?: unknown;
+  lines?: unknown;
+  path?: unknown;
+  verification?: unknown;
   isError?: true;
 }
 
-function parseRecordedOperation(raw: string): RecordedOperationOutcome | undefined {
+type ParsedRecordedOperation = { text: string; isError?: true };
+
+function parseRecordedOperation(raw: string): ParsedRecordedOperation | undefined {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null) return undefined;
     const record = parsed as Record<string, unknown>;
-    if (record["v"] !== 1 || typeof record["text"] !== "string") return undefined;
-    return { v: 1, text: record["text"], ...(record["isError"] === true ? { isError: true as const } : {}) };
+    if (record["v"] === 1 && typeof record["text"] === "string") {
+      return { text: record["text"], ...(record["isError"] === true ? { isError: true as const } : {}) };
+    }
+    if (record["v"] !== 2
+      || record["kind"] !== "edit.applied"
+      || record["replay_format"] !== OPERATION_REPLAY_V2_MARKER
+      || typeof record["outcome_hash"] !== "string") return undefined;
+    const body: Record<string, unknown> = { v: 1, kind: "edit.applied" };
+    for (const key of ["counts", "paths", "sha", "checkpoint", "read_back", "applied", "core", "applied_note", "delta", "handle", "lines", "path", "verification"]) {
+      if (record[key] !== undefined) body[key] = record[key];
+    }
+    return { text: JSON.stringify(body) };
   } catch {
     return undefined;
   }
+}
+
+function structuredOperationRecord(text: string): string {
+  let body: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+  } catch {
+    // Keep a valid compact record even when an upstream emitter returned opaque text.
+  }
+  const applied = Array.isArray(body["applied"]) ? body["applied"] : [];
+  const compactApplied = applied.flatMap((entry) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const appliedEntry = entry as Record<string, unknown>;
+    const entryPath = appliedEntry["path"];
+    const entryRange = appliedEntry["range"];
+    return typeof entryPath === "string" && typeof entryRange === "string"
+      ? [{ path: entryPath, range: entryRange }]
+      : [];
+  });
+  const record: RecordedOperationOutcomeV2 = {
+    v: 2,
+    kind: "edit.applied",
+    replay_format: OPERATION_REPLAY_V2_MARKER,
+    outcome_hash: createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32),
+    // The v2 replay projection is deliberately the smallest required-set
+    // subset: address-only applied entries. `outcome_hash` stays in the
+    // journal for record validation but is intentionally not sent on replay;
+    // the first edit.applied response remains the source for counts, read_back,
+    // verification, handles and other explanatory payloads.
+    ...(compactApplied.length > 0 ? { applied: compactApplied } : {}),
+  };
+  return JSON.stringify(record);
 }
 
 /**
@@ -5443,7 +5844,15 @@ async function runEditWithOperationId(
   const key = `op:${raw}`;
   const claim = `${workspace}\u0000${key}`;
 
-  const recorded = store.lookupOperation(key);
+  // Dual-read (B-F1): a v:2 sibling record — written only by a server that
+  // has this fix — always wins when present, so THIS server's own writes
+  // always round-trip through the compact v2 projection below. Its absence
+  // means either an old server wrote the legacy key (a real v1 record or a
+  // real oversize marker), or nothing was recorded yet; the legacy-key read
+  // below covers both.
+  const v2Key = `${OPERATION_V2_KEY_PREFIX}${raw}`;
+  const recordedV2 = store.lookupOperation(v2Key);
+  const recorded = recordedV2 !== undefined ? recordedV2 : store.lookupOperation(key);
   if (recorded !== undefined) {
     if (recorded === OPERATION_OVERSIZE_MARKER) {
       return refuse({
@@ -5459,20 +5868,31 @@ async function runEditWithOperationId(
     const replay = parseRecordedOperation(recorded);
     if (replay !== undefined) {
       // THE IDEMPOTENT REPLAY. No dispatch, so no second disk apply.
-      //
-      // T4 (2026-08-27 field-eval; protocol v1's kind set stays frozen — this
-      // is an additive optional FIELD, not a new member). `replay.text` is the
-      // FINAL wire text `run()` already produced and projected on the FIRST
-      // apply — dispatch never runs a second time, so editFamily.ts's
-      // projectors never run again either, and this is the one place a
-      // replayed response is distinguishable from a fresh one at all.
-      // `markReplayed` stamps the tell (top-level `replayed:true`) on THIS
-      // copy only; the stored record and the original apply's own response
-      // stay exactly as they were — a fresh apply never carries the field.
-      return { content: [{ type: "text", text: markReplayed(replay.text) }], ...(replay.isError === true ? { isError: true as const } : {}) };
+      // v2 records carry only the side-effect identity and required replay
+      // fields; the original response body is never re-read from the journal.
+      const replayText = markReplayed(replay.text);
+      recordServedBytes({
+        workspaceRoot: workspace,
+        epoch: typeof args["taskEpoch"] === "string" ? args["taskEpoch"] : undefined,
+        lane: typeof args["lane"] === "string" ? args["lane"] : undefined,
+        bytes: Buffer.byteLength(replayText, "utf8"),
+        digest: createHash("sha256").update(replayText, "utf8").digest("hex"),
+        source: "replay",
+        forceServe: args["force_serve"] === true,
+      });
+      return { content: [{ type: "text", text: replayText }], ...(replay.isError === true ? { isError: true as const } : {}) };
     }
-    // An unreadable record is treated as absent: the alternative is refusing a
-    // write forever because one journal line got mangled.
+    // A recorded but unreadable v2 line must fail closed: treating it as
+    // absent would let an older/newer parser apply the edit a second time.
+    return refuse({
+      ok: false,
+      reason: "invalid-input",
+      field: "operation_id",
+      detail: "this operation_id already has a recorded outcome that cannot be replayed safely; nothing was applied a second time",
+      operation_id: raw,
+      retry: "none",
+      next: "search_files action=diff — verify the existing change instead of re-sending the edit",
+    });
   }
 
   if (_operationsInFlight.has(claim)) {
@@ -5496,11 +5916,23 @@ async function runEditWithOperationId(
   const isError = "isError" in result && result.isError === true;
   if (!isError) {
     const text = result.content.map((item) => item.text).join("");
-    const payload = JSON.stringify({ v: 1, text } satisfies RecordedOperationOutcome);
-    store.rememberOperation(
-      key,
-      Buffer.byteLength(payload, "utf8") <= OPERATION_REPLAY_MAX_BYTES ? payload : OPERATION_OVERSIZE_MARKER,
-    );
+    const payload = structuredOperationRecord(text);
+    const v2Value = Buffer.byteLength(payload, "utf8") <= OPERATION_REPLAY_MAX_BYTES ? payload : OPERATION_OVERSIZE_MARKER;
+    // Dual-write (B-F1). The legacy key is UNCONDITIONALLY the oversize
+    // marker — never the real record — so an old server's exact-match
+    // oversize check always catches it and fails closed instead of falling
+    // through to "unreadable = absent -> run()" (a second disk apply). The
+    // real structured-v2 record (or its own oversize marker) lives at the
+    // collision-safe v2Key instead; see OPERATION_V2_KEY_PREFIX. Order
+    // matters only for the crash window between the two appends: writing
+    // the legacy marker first means a crash before the second write still
+    // leaves an old OR new reader fail-closed (never a reapply), matching
+    // this wrapper's existing disclosed "known window" contract.
+    // The compact structured-v2 journal is intentionally only exposed when
+    // this operation is replayed, so callers can verify that replay reduced
+    // wire bytes.
+    store.rememberOperation(key, OPERATION_OVERSIZE_MARKER);
+    store.rememberOperation(v2Key, v2Value);
   }
   return result;
 }
@@ -5510,13 +5942,421 @@ async function runEditWithOperationId(
  * This is deliberately the one boundary for all consumers of task-pack
  * arguments: downstream code may rely on `paths` being an array.
  */
+function asCanonicalObject(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function mapCanonicalTask(value: unknown, args: Record<string, unknown>): void {
+  const task = asCanonicalObject(value);
+  if (task === undefined) return;
+  const names: ReadonlyArray<[string, string]> = [
+    ["handle", "task_handle"],
+    ["epoch", "taskEpoch"],
+    ["profile", "taskProfile"],
+    ["expected_state_version", "expected_state_version"],
+    ["challenge", "challenge"],
+    ["force_serve", "force_serve"],
+  ];
+  for (const [from, to] of names) {
+    if (task[from] !== undefined) args[to] = task[from];
+  }
+  // This is deliberately not a general operation discriminator.
+  if (task["pull"] === "closure") args["mode"] = "closure";
+}
+
+function mapCanonicalBudget(value: unknown, args: Record<string, unknown>): void {
+  const budget = asCanonicalObject(value);
+  if (budget === undefined) return;
+  const names: ReadonlyArray<[string, string]> = [
+    ["bytes", "maxBytes"],
+    ["tokens", "maxTokens"],
+    ["items", "limit"],
+    ["rows", "maxRows"],
+    ["cells", "maxCells"],
+    ["allowFull", "allowFull"],
+  ];
+  for (const [from, to] of names) if (budget[from] !== undefined) args[to] = budget[from];
+}
+
+function mapCanonicalScope(value: unknown, args: Record<string, unknown>): Record<string, unknown> | undefined {
+  const scope = asCanonicalObject(value);
+  if (scope === undefined) return undefined;
+  for (const name of [
+    "path", "archive", "credentialRef", "lang", "regex", "depth",
+    "includeClosure", "surfaceRoles", "includeScores", "symbol",
+  ]) {
+    if (scope[name] !== undefined) args[name] = scope[name];
+  }
+  return scope;
+}
+
+function mapCanonicalSelect(value: unknown, args: Record<string, unknown>): boolean {
+  const select = asCanonicalObject(value);
+  if (select === undefined) return false;
+  const names: ReadonlyArray<[string, string]> = [
+    ["kind", "kind"],
+    ["format", "as"],
+    ["comments", "comments"],
+    ["sheet", "sheet"],
+    ["rows", "rows"],
+    ["columns", "columns"],
+    ["sections", "sections"],
+    ["slides", "slides"],
+    ["pages", "pages"],
+  ];
+  // Every present field is still copied onto `args` unconditionally — a
+  // `comments`/`sections` selector must reach the ordinary read dispatcher
+  // exactly as before. Only the RETURN VALUE narrows to ARTIFACT_SELECT_KEYS,
+  // because that value alone decides `mode="artifact"` at the call site.
+  let selectsArtifact = false;
+  for (const [from, to] of names) {
+    if (select[from] !== undefined) {
+      args[to] = select[from];
+      if (ARTIFACT_SELECT_KEYS.includes(from)) selectsArtifact = true;
+    }
+  }
+  return selectsArtifact;
+}
+
+function legacyPathTarget(target: Record<string, unknown>): string | Record<string, unknown> {
+  if (typeof target["path"] === "string"
+    && target["range"] === undefined
+    && target["symbol"] === undefined
+    && target["purpose"] === undefined) {
+    return target["path"];
+  }
+  const mapped: Record<string, unknown> = {};
+  for (const name of ["path", "range", "symbol", "purpose"]) {
+    if (target[name] !== undefined) mapped[name] = target[name];
+  }
+  return mapped;
+}
+
+// D-3 router bridge: canonical inputs become the existing serving arguments.
+// Wire callers cannot forge this module-private symbol. It survives the one
+// internal spread between canonical projection and legacy dispatch, proving
+// that create-by-copy came from the advertised edits[] carrier.
+const CANONICAL_CREATE_COPY_INPUT = Symbol("tokenlighten.canonical-create-copy-input");
+
+// ---------------------------------------------------------------------------
+// FX-2 (v0.13 wave-3 review fix): string-to-structure leniency.
+//
+// Review probe evidence (session transcript, 2026-08-29): Claude Code 2.1.211
+// has been observed sending a top-level canonical object/array parameter
+// JSON-STRINGIFIED rather than as a native object/array — `typeof
+// input.edits === "string"` holding `JSON.stringify(...)` of the caller's
+// intended array. Codex CLI, sending native objects, does not hit this.
+//
+// Every existing consumer below is silently string-blind: `asCanonicalObject`
+// (this file) returns `undefined` for a string and callers no-op on
+// `undefined`, so a stringified `task` does not refuse — it vanishes. The
+// caller's `task.epoch`/`task.id`/`task.challenge`/`task.force_serve` binding
+// is silently dropped, the session stays on whatever state it already held,
+// and the NEXT typestate-fence refusal has nothing to do with serialization —
+// a strong root cause of the repeated execution-typestate refusal loops this
+// client was observed producing. A stringified `edits` fares better only by
+// accident: edit_file's own `Array.isArray(edits)` guard (~L11114) already
+// refuses "edits must be an array" — but only once the call clears every
+// earlier gate, and only for `edits` specifically.
+//
+// D-5 (acceptance-first: intent is unambiguous): a string is accepted IN
+// PLACE of its declared object/array shape ONLY when (a) it parses as JSON,
+// (b) the parsed value's top-level shape (object vs array) matches what the
+// field declares, AND (c) the parsed value passes the EXACT SAME recursive
+// property-name validation (`findUnknownProperties`) a natively-sent value
+// would receive against the REAL advertised schema (`advertisedPropertiesFor`
+// — the same map `emittedToolCallShape.spec.ts` validates outbound calls
+// against). A parse failure or a validation failure changes NOTHING: the
+// original string rides through untouched, so every existing refusal path
+// (`asCanonicalObject` no-op, "edits must be an array", unknown-arguments)
+// still fires exactly as it does today for anything this does not rescue —
+// this function only ever WIDENS acceptance, never narrows or hides a
+// genuine shape defect.
+//
+// Nested one-level rescue: an array field that already arrived as a native
+// array, but whose OWN elements are individually stringified objects
+// (`edits[0]` a JSON string while `edits` itself is a real array), gets the
+// identical treatment for each element — once, not recursively, so a caller
+// cannot bury an arbitrarily-deep stringified structure and have all of it
+// silently unwrapped. Scoped to fields whose declared item shape is itself an
+// object (`targets`, `edits`) — `queries`' items are plain strings by
+// design, so a literal string that happens to parse as JSON (e.g. a search
+// for the text `["x"]`) must never be reinterpreted as structure.
+// ---------------------------------------------------------------------------
+
+const CANONICAL_OBJECT_FIELDS: readonly string[] = ["task", "scope", "select", "budget", "artifact", "credentials"];
+const CANONICAL_ARRAY_FIELDS: readonly string[] = ["targets", "queries", "edits"];
+
+/**
+ * `JSON.parse` a string that at least LOOKS like an object/array — never
+ * attempted on an ordinary string value (a real path, a real query token),
+ * so a legitimate string is never even candidate-parsed, let alone coerced.
+ */
+function jsonParseIfStructureLike(value: unknown): { parsed: unknown } | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "" || !(trimmed.startsWith("{") || trimmed.startsWith("["))) return undefined;
+  try {
+    return { parsed: JSON.parse(trimmed) as unknown };
+  } catch {
+    return undefined;
+  }
+}
+
+/** True iff `value`'s top-level shape is the one `expected` names. */
+function matchesTopLevelShape(value: unknown, expected: "object" | "array"): boolean {
+  return expected === "array" ? Array.isArray(value) : asCanonicalObject(value) !== undefined;
+}
+
+/**
+ * Re-validate a rescued (parsed) value against the SAME recursive
+ * property-name schema (`findUnknownProperties`'s walk) the field would
+ * receive if it had arrived natively, scoped to just this one field — so a
+ * stringified `task` that invents an unadvertised sub-property is refused
+ * exactly as a native one would be, never silently smuggled in. Reads the
+ * REAL, LIVE advertised schema (`advertisedPropertiesFor`), never a
+ * hand-maintained mirror of it.
+ */
+function rescuedValuePassesSchema(canonical: string, field: string, value: unknown): boolean {
+  const schema = advertisedPropertiesFor(canonical)[field];
+  if (schema === undefined) return false;
+  return findUnknownProperties(canonical, { [field]: schema }, { [field]: value }).length === 0;
+}
+
+/** Declared item shape for an array field, or undefined if none is declared. */
+function arrayFieldItemSchema(canonical: string, field: string): SchemaNode | undefined {
+  return advertisedPropertiesFor(canonical)[field]?.items;
+}
+
+function rescueStringifiedCanonicalFields(canonical: string, input: Record<string, unknown>): Record<string, unknown> {
+  // Lazily cloned, and ONLY on an actual successful rescue — never merely on
+  // a candidate string being present. `normalizeCanonicalRequest`'s existing
+  // no-canonical-shape fast path returns its `input` argument BY REFERENCE
+  // (canonicalSurface.spec.ts's "keeps legacy find batches on their shared
+  // search carrier" pins this with `.toBe`), and this function must preserve
+  // that identity whenever nothing here actually changes.
+  let out: Record<string, unknown> | undefined;
+  const target = (): Record<string, unknown> => (out ??= { ...input });
+
+  for (const field of CANONICAL_OBJECT_FIELDS) {
+    const rescued = jsonParseIfStructureLike(input[field]);
+    if (rescued === undefined) continue;
+    if (matchesTopLevelShape(rescued.parsed, "object") && rescuedValuePassesSchema(canonical, field, rescued.parsed)) {
+      target()[field] = rescued.parsed;
+    }
+  }
+
+  for (const field of CANONICAL_ARRAY_FIELDS) {
+    let arrayValue = input[field];
+    const topLevelRescue = jsonParseIfStructureLike(arrayValue);
+    if (
+      topLevelRescue !== undefined
+      && matchesTopLevelShape(topLevelRescue.parsed, "array")
+      && rescuedValuePassesSchema(canonical, field, topLevelRescue.parsed)
+    ) {
+      arrayValue = topLevelRescue.parsed;
+      target()[field] = arrayValue;
+    }
+
+    // One-level nested rescue, object-shaped items only (see header doc) —
+    // reads `arrayValue` (the just-rescued array when the top-level rescue
+    // above fired, otherwise the original), never re-reads `out[field]`.
+    const itemSchema = arrayFieldItemSchema(canonical, field);
+    if (Array.isArray(arrayValue) && itemSchema?.properties !== undefined && arrayValue.some((item) => typeof item === "string")) {
+      const rescuedItems = arrayValue.map((item) => {
+        const itemRescue = jsonParseIfStructureLike(item);
+        return itemRescue !== undefined && matchesTopLevelShape(itemRescue.parsed, "object") ? itemRescue.parsed : item;
+      });
+      // Re-validate the WHOLE rescued array so a partially-rescued array (one
+      // element still an un-parseable or invalid string) never ships an
+      // unvalidated item under cover of its now-valid siblings.
+      if (rescuedItems.some((item, index) => item !== arrayValue[index]) && rescuedValuePassesSchema(canonical, field, rescuedItems)) {
+        target()[field] = rescuedItems;
+      }
+    }
+  }
+
+  return out ?? input;
+}
+
+export function normalizeCanonicalRequest(canonical: string, input: Record<string, unknown>): Record<string, unknown> {
+  // FX-2: rescue JSON-stringified canonical fields BEFORE `hasCanonicalShape`
+  // (below) or anything else inspects them — `hasCanonicalShape` itself is
+  // one of the string-blind checks this rescues (`Array.isArray(input["edits"])`
+  // is false for a stringified batch with no OTHER canonical key present,
+  // which used to make this whole function a no-op for that call).
+  input = rescueStringifiedCanonicalFields(canonical, input);
+  // `queries` is the shared legacy/canonical find carrier. A bare legacy
+  // find batch must reach the dispatcher unchanged, including its content-first
+  // did_you_mean session state. Non-find canonical search actions use queries
+  // as their canonical home and still need projection to legacy `query`.
+  const hasCanonicalShape = ["targets", "select", "budget", "task", "scope", "credentials"]
+    .some((key) => input[key] !== undefined)
+    || (canonical === "edit_file" && Array.isArray(input["edits"]))
+    || (canonical === "search_files" && input["action"] !== "find" && Array.isArray(input["queries"]));
+  if (!hasCanonicalShape) return input;
+
+  const args: Record<string, unknown> = { ...input };
+  const task = args["task"];
+  const scope = args["scope"];
+  const budget = args["budget"];
+  const select = args["select"];
+  delete args["task"];
+  delete args["scope"];
+  delete args["budget"];
+  delete args["select"];
+
+  mapCanonicalTask(task, args);
+  mapCanonicalBudget(budget, args);
+  const scopeValue = mapCanonicalScope(scope, args);
+
+  if (canonical === "read_file") {
+    const rawTargets = Array.isArray(args["targets"]) ? args["targets"] : [];
+    delete args["targets"];
+    const targets = rawTargets
+      .map(asCanonicalObject)
+      .filter((target): target is Record<string, unknown> => target !== undefined);
+    const selectsArtifact = mapCanonicalSelect(select, args);
+    if (targets.length > 0) {
+      if (args["query"] !== undefined || args["qref"] !== undefined) {
+        args["paths"] = targets.map(legacyPathTarget);
+        args["mode"] = "task_pack";
+      } else {
+        const first = targets[0]!;
+        // A multi-handle continuation is a batch: do not promote the first
+        // target's selector to call scope, where it would override content.
+        if (targets.length === 1) {
+          for (const name of ["path", "handle", "archive", "credentialRef", "range", "ranges", "symbol", "profile", "lang"]) {
+            if (first[name] !== undefined) args[name] = first[name];
+          }
+        }
+        if (targets.length > 1) {
+          const handles = targets.map((target) => target["handle"]);
+          if (handles.every((handle): handle is string => typeof handle === "string")) args["handles"] = handles;
+          else args["paths"] = targets.map(legacyPathTarget);
+        }
+        if (first["archive"] !== undefined) args["mode"] = "archive";
+        else if (selectsArtifact) args["mode"] = "artifact";
+        else if (first["ranges"] !== undefined || first["range"] !== undefined) args["mode"] = "slice";
+        else if (first["symbol"] !== undefined) args["mode"] = "symbol";
+        else if (args["content"] === "full") args["mode"] = "full";
+        else if (args["content"] === "outline") args["mode"] = "skeleton";
+        else if (args["content"] === "defer") args["mode"] = "small_file";
+      }
+    }
+    // scope is the single home for closure selection on every tool.
+    if (scopeValue?.["includeClosure"] !== undefined) args["includeClosure"] = scopeValue["includeClosure"];
+    if (scopeValue?.["surfaceRoles"] !== undefined) args["surfaceRoles"] = scopeValue["surfaceRoles"];
+    // `content` selects the legacy mode above; do not leak it into the
+    // legacy dispatcher, whose served-ledger accounting is mode-based.
+    delete args["content"];
+  } else if (canonical === "edit_file") {
+    const credentials = asCanonicalObject(args["credentials"]);
+    delete args["credentials"];
+    if (credentials?.["in"] !== undefined) args["credentialRef"] = credentials["in"];
+    if (credentials?.["out"] !== undefined) args["outputCredentialRef"] = credentials["out"];
+    if (Array.isArray(args["edits"])) {
+      const edits = args["edits"].map((value) => {
+        const item = asCanonicalObject(value);
+        if (item === undefined) return value;
+        const copy = { ...item };
+        const intent = asCanonicalObject(copy["intent"]);
+        delete copy["intent"];
+        if (intent !== undefined) {
+          for (const name of ["from", "to", "symbol", "lang", "includeComments"]) {
+            if (intent[name] !== undefined) copy[name] = intent[name];
+          }
+          if (intent["kind"] === "rename") copy["mode"] = "rename";
+          else if (intent["kind"] !== undefined) copy["intent"] = intent["kind"];
+        }
+        return copy;
+      });
+      if (edits.length === 1) {
+        const only = asCanonicalObject(edits[0]);
+        const canonicalCreateCopy = only?.["create"] === true && typeof only["from"] === "string";
+        if (only?.["create"] === true || only?.["mode"] !== undefined || only?.["intent"] !== undefined) {
+          delete args["edits"];
+          for (const [key, value] of Object.entries(only)) args[key] = value;
+          if (canonicalCreateCopy) {
+            Object.defineProperty(args, CANONICAL_CREATE_COPY_INPUT, { value: true, enumerable: true });
+          }
+        } else {
+          args["edits"] = edits;
+        }
+      } else {
+        args["edits"] = edits;
+      }
+    }
+  } else if (canonical === "search_files") {
+    const queries = Array.isArray(args["queries"]) ? args["queries"] : [];
+    delete args["queries"];
+    // Canonical search uses `queries` for every action; legacy references and
+    // symbol dispatch still read the first query from their singular slot.
+    if (args["action"] === "find" && scopeValue?.["kind"] !== "symbol") {
+      // Legacy and canonical find both accept the batched queries carrier.
+      // Keep it: dropping it turns a valid sfh6 search into a no-query refusal.
+      args["queries"] = queries;
+    } else if (args["query"] === undefined && typeof queries[0] === "string") {
+      // Legacy references and symbols dispatch through their singular query.
+      args["query"] = queries[0];
+    }
+    if (scopeValue?.["kind"] === "symbol" && args["action"] === "find") {
+      args["action"] = "symbols";
+      delete args["queries"];
+      if (typeof queries[0] === "string") args["query"] = queries[0];
+    }
+    // `locate` remains accepted only as a compatibility spelling.  Its one
+    // canonical execution route is closure-bearing tree discovery.
+    if (args["action"] === "locate") {
+      args["action"] = "tree";
+      args["includeClosure"] = true;
+    }
+  }
+
+  return args;
+}
+
 function normalizeWireArgs(
   canonical: string,
   input: Record<string, unknown>,
 ): { args: Record<string, unknown> } | { refusal: Record<string, unknown> } {
   const args = { ...input };
+  const internalArgs = args as Record<PropertyKey, unknown>;
+  const canonicalCreateCopy = internalArgs[CANONICAL_CREATE_COPY_INPUT] === true;
+  delete internalArgs[CANONICAL_CREATE_COPY_INPUT];
+  if (canonical === "edit_file" && args["create"] === true && typeof args["from"] === "string" && args["mode"] !== "rename" && args["intent"] === undefined && !Array.isArray(args["edits"]) && !canonicalCreateCopy) {
+    return { refusal: { ok: false, code: "invalid-input", field: "from", error: "top-level create-by-copy is removed; use edits:[{create:true,from,...}]", retry: "call" } };
+  }
   if (canonical === "read_file") {
-    if (typeof args["paths"] === "string") args["paths"] = [args["paths"]];
+    if (typeof args["paths"] === "string") {
+      // FX-2 (2026-08-29, pre-launch canary): a schema-blind/legacy caller
+      // that does not know `paths` is array-typed can serialize a structured
+      // paths[] value (object entries with range/symbol, or a plain string
+      // array) as ITS OWN JSON TEXT rather than a parsed array. Left
+      // untreated, the whole JSON string was wrapped as ONE bogus bare path
+      // (`[args["paths"]]`) — mode=pack's own per-entry coercion then
+      // serialized it unchanged via `path: String(p)`, producing a
+      // not-found item, an empty `read.batch` `entries:[]`, and a `next`
+      // whose canonicalized `targets[].path` carried the raw JSON text
+      // verbatim (mode=task_pack silently loses the seed path the same
+      // way). Try JSON.parse first, accepting only an ARRAY result — a real
+      // bare-path string (e.g. paths="src/foo.ts") is never valid JSON
+      // array syntax, so it falls through to the unchanged single-element
+      // wrap below untouched.
+      const rawPathsString = args["paths"] as string;
+      let parsedPathsArray: unknown[] | undefined;
+      if (rawPathsString.trim().startsWith("[")) {
+        try {
+          const parsed: unknown = JSON.parse(rawPathsString);
+          if (Array.isArray(parsed)) parsedPathsArray = parsed;
+        } catch {
+          // Not JSON — fall through to the bare-path wrap.
+        }
+      }
+      args["paths"] = parsedPathsArray ?? [rawPathsString];
+    }
     else if (args["paths"] !== undefined && !Array.isArray(args["paths"])) {
       return { refusal: { ok: false, code: "invalid-input", field: "paths", error: "paths must be an array (or one path string)", next: "read_file mode=task_pack paths=[\"path/to/file\"]" } };
     }
@@ -5600,7 +6440,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // session-state mutation — the same position edit_file's own guard has
       // held since 2026-08-01. Value validation is untouched (§1.3.1(6)):
       // `lang` is still a bare string checked by parseMcpLang below.
-      const unknownArgsRefusalRead = requestShapeRefusal("read_file", advertisedPropertiesFor("read_file"), args);
+      const unknownArgsRefusalRead = requestShapeRefusal("read_file", dispatchPropertiesFor("read_file"), args);
       if (unknownArgsRefusalRead !== null) return toolStructuredError(unknownArgsRefusalRead);
       let mode = String(args["mode"] ?? "auto");
       // B5.1: fail loud on an invalid/nonexistent cwd instead of silently
@@ -5694,12 +6534,42 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         ? (args["ranges"] as unknown[]).map((entry) => String(entry).trim()).filter((entry) => entry.length > 0)
         : [];
       let hasRangesBatch = rangesArg.length > 0;
+      if (hasRangesBatch && callerSuppliedRange && archiveSelector?.member) {
+        // Neither window can be chosen honestly here: archive members support
+        // one range per call, and `range` plus `ranges[]` is ambiguous.  Do not
+        // flatten the virtual member into an ordinary path in a recovery call.
+        return toolStructuredError({
+          ok: false,
+          error: "range and ranges[] are mutually exclusive for archive members; choose one range and retry",
+          code: "invalid-input",
+          field: "range",
+          awaiting_input: true,
+        });
+      }
       if (hasRangesBatch && callerSuppliedRange) {
+        // FX-1: a target-object FRAGMENT, not a pre-joined `key=value` string —
+        // the canonical `next` below embeds it inside `targets=[...]`, never the
+        // legacy `mode=slice handle=… /path=…` dialect (a raw-string `next` is a
+        // blind spot for `canonicalizeEmittedToolCalls`, which only rewrites
+        // OBJECT-shaped embedded tool calls).
+        const locator: Record<string, unknown> | undefined = typeof args["handle"] === "string"
+          ? { handle: args["handle"] }
+          : resolvedPath !== undefined
+            ? { path: resolvedPath }
+            : undefined;
+        if (locator === undefined) {
+          return toolStructuredError({
+            ok: false,
+            error: "range and ranges[] are mutually exclusive; provide a handle or path before retrying the merged ranges",
+            code: "invalid-input",
+            field: "path",
+          });
+        }
         return toolStructuredError({
           ok: false,
           error: "range and ranges[] are mutually exclusive — pass one window in `range`, or several in `ranges`",
           code: "invalid-input",
-          next: `read_file mode=slice ranges=${JSON.stringify([resolvedRange, ...rangesArg])}`,
+          next: `read_file targets=${JSON.stringify([{ ...locator, ranges: [resolvedRange, ...rangesArg] }])}`,
         });
       }
       if (hasRangesBatch && archiveSelector?.member) {
@@ -5903,9 +6773,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       if (!executionGuard.allowed) {
         // A served receipt is NOT a refusal: it says the caller already holds
         // these bytes, so it travels as a normal (non-isError) result.
-        return "servedReceipt" in executionGuard
-          ? toolOk(addressServedReceipt(executionGuard.servedReceipt, workspace))
-          : toolStructuredError(executionGuard.refusal);
+        if ("servedReceipt" in executionGuard) {
+          noteServedBytesSource("dedup");
+          return toolOk(addressServedReceipt(executionGuard.servedReceipt, workspace));
+        }
+        return toolStructuredError(executionGuard.refusal);
       }
 
       // -----------------------------------------------------------------------
@@ -6506,9 +7378,14 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // reason.
           declareKind("read.task_pack");
           const promoteLang = parseMcpLang(args["lang"]);
-          const result = await buildTaskPack(
-            {
+          const taskContractScope = taskContractScopeOf(args);
+          const result = await runWithTaskContractScope(taskContractScope, () => buildTaskPack(
+            ({
               ...taskCredential,
+              // Internal-only: the producer's no-repeat gate needs the same
+              // normalized lane that records successful next execution.
+              lane: normalizeContractLane(taskContractScope.lane),
+              ...(typeof args["taskEpoch"] === "string" ? { taskEpoch: args["taskEpoch"] } : {}),
               // PI-09 close-out: the explicit "I lost my context" switch.
               ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
               ...(queryArg.length > 0
@@ -6528,9 +7405,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(typeof args["maxBytes"] === "number" ? { maxBytes: args["maxBytes"] } : {}),
               ...(typeof args["maxTokens"] === "number" ? { maxTokens: args["maxTokens"] } : {}),
               ...(defaultResponseByteCeiling !== undefined ? { clientDefaultByteCeilingHint: defaultResponseByteCeiling } : {}),
-            },
+            }) as unknown as Parameters<typeof buildTaskPack>[0],
             workspace,
-          );
+          ));
           // Feature 1 (2026-07-12b2): task_pack surfaces with embedded code count as read.
           recordTaskPackSurfaceReads(workspace, result);
           // DESIGN-v0.9 §4.7: shared read-side post-processor stamps
@@ -6551,7 +7428,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const supplied = issuedRef !== undefined
             ? { ...suppliedBase, qref: issuedRef }
             : suppliedBase;
-          recordTaskPackExecution(workspace, queryArg, supplied);
+          recordTaskPackExecution(workspace, queryArg, supplied, taskContractScope);
           return toolOk(attachServerBuildOnce(supplied, workspace));
         }
       }
@@ -6579,9 +7456,13 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const tpZoomPaths = !tpHasPaths && resolvedPath !== undefined && resolvedRange !== undefined
           ? [{ path: resolvedPath, range: resolvedRange }]
           : undefined;
-        const result = await buildTaskPack(
-          {
+        const taskContractScope = taskContractScopeOf(args);
+        const result = await runWithTaskContractScope(taskContractScope, () => buildTaskPack(
+          ({
             ...taskCredential,
+            // Internal-only execution identity; never projected to the wire.
+            lane: normalizeContractLane(taskContractScope.lane),
+            ...(typeof args["taskEpoch"] === "string" ? { taskEpoch: args["taskEpoch"] } : {}),
             // PI-09 close-out: the explicit "I lost my context" switch.
             ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
             query: taskPackQuery.query.length > 0 ? taskPackQuery.query : undefined,
@@ -6618,9 +7499,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             ...(typeof args["maxBytes"] === "number" ? { maxBytes: args["maxBytes"] } : {}),
             ...(typeof args["maxTokens"] === "number" ? { maxTokens: args["maxTokens"] } : {}),
             ...(defaultResponseByteCeiling !== undefined ? { clientDefaultByteCeilingHint: defaultResponseByteCeiling } : {}),
-          },
+          }) as unknown as Parameters<typeof buildTaskPack>[0],
           workspace,
-        );
+        ));
         // Feature 1 (2026-07-12b2): task_pack surfaces with embedded code count as read.
         recordTaskPackSurfaceReads(workspace, result);
         // V11-04 (TL_REASONING_IR_V2, class (B), default OFF): the ONE advisory
@@ -6654,6 +7535,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           workspace,
           taskPackQuery.query,
           supplied,
+          taskContractScope,
         );
         trace("task_pack_end", {
           elapsed_ms: Date.now() - taskPackStartedAt,
@@ -7177,17 +8059,21 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const rawPaths = args["paths"];
           if (Array.isArray(rawPaths) && rawPaths.length > 0) {
             const pathList = rawPaths.map((entry) => String(entry));
-            const preserved = hasRangesBatch
-              ? ` ranges=${JSON.stringify(rangesArg)}`
+            // FX-1: a target-object FRAGMENT (merged into the canonical
+            // `targets=[...]` prose below), not a pre-joined `key=value` string —
+            // a raw-string `next` is a blind spot for `canonicalizeEmittedToolCalls`,
+            // which only rewrites OBJECT-shaped embedded tool calls.
+            const preserved: Record<string, unknown> = hasRangesBatch
+              ? { ranges: rangesArg }
               : resolvedRange !== undefined
-                ? ` range=${JSON.stringify(resolvedRange)}`
-                : "";
+                ? { range: resolvedRange }
+                : {};
             if (pathList.length === 1) {
               return toolError(
                 "mode=slice takes a singular path, not paths[] — did you mean the single path below?",
                 {
                   code: "invalid-input",
-                  next: `read_file mode=slice path=${JSON.stringify(pathList[0])}${preserved}`,
+                  next: `read_file targets=${JSON.stringify([{ path: pathList[0], ...preserved }])}`,
                   hint: "slice reads exactly one file; ranges[] windows several spans of THAT file, not several files",
                 },
               );
@@ -7562,8 +8448,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             .map((entry) => entry.segment);
 
           const heldCount = alreadyHeld.size + deferredHeld.length;
+          // FX-1: canonical `targets=[...]` prose, not the legacy `mode=slice`
+          // dialect (a raw-string `next` bypasses `canonicalizeEmittedToolCalls`,
+          // which only rewrites OBJECT-shaped embedded tool calls).
           const batchNext = batchRemaining !== undefined && batchRemaining.length > 0
-            ? `read_file mode=slice handle=${batchData.handle} ranges=${JSON.stringify(batchRemaining)}`
+            ? `read_file targets=${JSON.stringify([{ handle: batchData.handle, ranges: batchRemaining }])}`
             : batchData.remaining_ranges !== undefined
               ? undefined // every deferred window was already held — nothing to fetch
               : batchData.next;
@@ -11526,7 +12415,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
     // -----------------------------------------------------------------
     case "search_files": {
       // P1 / D2 / ORCHESTRATOR CONDITION ② (§1.3.1(1)) — see the read_file arm.
-      const unknownArgsRefusalSearch = requestShapeRefusal("search_files", advertisedPropertiesFor("search_files"), args);
+      const unknownArgsRefusalSearch = requestShapeRefusal("search_files", dispatchPropertiesFor("search_files"), args);
       if (unknownArgsRefusalSearch !== null) return toolStructuredError(unknownArgsRefusalSearch);
       const action = String(args["action"] ?? "");
       // protocol v1 (D4): A.5.8-A.5.10 map the four match actions onto
@@ -11555,9 +12444,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       const lang = parseMcpLang(args["lang"]);
       const executionGuard = guardExecutionDiscovery(workspace, "search_files", args);
       if (!executionGuard.allowed) {
-        return "servedReceipt" in executionGuard
-          ? toolOk(addressServedReceipt(executionGuard.servedReceipt, workspace))
-          : toolStructuredError(executionGuard.refusal);
+        if ("servedReceipt" in executionGuard) {
+          noteServedBytesSource("dedup");
+          return toolOk(addressServedReceipt(executionGuard.servedReceipt, workspace));
+        }
+        return toolStructuredError(executionGuard.refusal);
       }
 
       const archiveSelector = selectorFromArgs(args);
@@ -11751,6 +12642,44 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // L2: see the queries[] branch above — an escalation carries no files[]
         // snippets for hop-1 to describe.
         if (outcome.escalated) return toolOk(outcome.body);
+        // `absence` is the authoritative scope certificate object (not a
+        // boolean) on the find payload. Its presence is the server's completed
+        // zero-result proof; `=== true` silently discarded that proof.
+        const absent = (outcome.body as { absence?: unknown }).absence !== undefined ? [queryStr] : [];
+        // `next.arguments` intentionally carries no hidden task_handle. Bind
+        // it internally to the unique pack that issued this exact executable
+        // find. A collision in one lane resolves to undefined and proves
+        // nothing rather than guessing which task's ledger to discharge.
+        const nextScope = absent.length > 0 ? consumeExecutableNextScope(workspace, sessionLaneOf(args), {
+          tool: "search_files",
+          arguments: { action: "find", query: queryStr },
+        }) : undefined;
+        // An authoritative absence is also the explicit, durable gap witness
+        // for an open-universe request. This lets the same task handle advance
+        // after the prescribed find without repeating the search obligation.
+        if (absent.length > 0 && nextScope !== undefined) {
+          recordAuthoritativeAbsentConcerns(workspace, absent, nextScope);
+        }
+        // P1-d (2026-08-28): the HIT half of the same ledger-recording site.
+        // A prescribed find that actually finds the token discharges the SAME
+        // concern-token obligation absence would have — with a `served` proof
+        // instead. `recordServedConcernEvidence` is fail-closed on its own
+        // (it proves only an obligation the ledger already tracks), so a find
+        // over a token this task never named as a concern is a safe no-op.
+        if (absent.length === 0 && queryStr.length > 0) {
+          const hitScope = consumeExecutableNextScope(workspace, sessionLaneOf(args), {
+            tool: "search_files",
+            arguments: { action: "find", query: queryStr },
+          });
+          if (hitScope !== undefined) recordServedConcernEvidence(workspace, [queryStr], hitScope);
+        }
+        // P1-b (2026-08-28): session-level no-repeat ledger (distinct from the
+        // task-contract ledger recording just above) — find/references/tree
+        // never mint handles the way locate's candidateDetails do, so this
+        // records an empty candidate list; advanceExecutedLocateNextCall
+        // (readCodeTaskPack.ts) consults it to SUPPRESS, never advance, a
+        // repeat of this exact (action,query).
+        recordExecutedSearch(workspace, "find", queryStr, []);
         return toolOk(attachSearchHop1(outcome.body, workspace, queryStr, "find"));
       }
       if (action === "references") {
@@ -11775,6 +12704,29 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           },
           workspace,
         );
+        // P1-d (2026-08-28): references gets the SAME ledger-recording site
+        // find already has — an authoritative absence or a hit discharges the
+        // symbol's concern-token obligation, task/lane-scoped through the
+        // identical fail-closed consumeExecutableNextScope discipline. The
+        // canonical prescribed shape (readCodeTaskPack.ts's own next_call
+        // construction) always keys the symbol as `query`, never `symbol`, so
+        // the lookup below matches a server-prescribed next regardless of
+        // which argument name THIS caller used to supply it.
+        if (symbol.length > 0) {
+          const referencesScope = consumeExecutableNextScope(workspace, sessionLaneOf(args), {
+            tool: "search_files",
+            arguments: { action: "references", query: symbol },
+          });
+          if (referencesScope !== undefined) {
+            if (response.absence !== undefined) {
+              recordAuthoritativeAbsentConcerns(workspace, [symbol], referencesScope);
+            } else if (response.total > 0) {
+              recordServedConcernEvidence(workspace, [symbol], referencesScope);
+            }
+          }
+        }
+        // P1-b (2026-08-28): see the identical comment on the find branch above.
+        if (symbol.length > 0) recordExecutedSearch(workspace, "references", symbol, []);
         return toolOk(attachSearchHop1(response, workspace, symbol, "references"));
       }
       if (action === "symbols") {
@@ -11818,7 +12770,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         clearFunctionalValidationObligation(workspace);
         return toolOk(await getCurrentDiff({ path: args["path"] as string | undefined, maxTokens: args["maxTokens"] as number | undefined }, workspace));
       }
-      if (action === "locate") {
+      if (action === "locate" || (action === "tree" && args["includeClosure"] === true)) {
         // includeClosure=true routes to buildTaskPack for closure-pack shape.
         if (args["includeClosure"] === true) {
           recordReadMode(workspace, "task_pack");
@@ -11884,6 +12836,24 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const treePath = args["path"] !== undefined ? String(args["path"]) : undefined;
         const treeDepth = typeof args["depth"] === "number" ? args["depth"] : undefined;
         const result = buildCompactTree(workspace, treePath, treeDepth);
+        // P1-d (2026-08-28): a directory listing carries no concern-token to
+        // prove/disprove, but a tree call the server itself prescribed (the
+        // alternative-progress-axis fallback, and readCodeTaskPack.ts's own
+        // `{action:"tree"}`/`{action:"tree",path}` next constructions) is still
+        // executed work — consuming its scope here retires the pending-next
+        // entry so it cannot linger and later resolve an unrelated call's
+        // scope ambiguity. Fail-closed exactly like find/references: an
+        // unscoped/ambiguous tree call resolves to undefined and records
+        // nothing.
+        consumeExecutableNextScope(workspace, sessionLaneOf(args), {
+          tool: "search_files",
+          arguments: { action: "tree", ...(treePath !== undefined ? { path: treePath } : {}) },
+        });
+        // P1-b (2026-08-28): session-level no-repeat ledger, same as find's
+        // and references' recordExecutedSearch calls above — keyed on `path`
+        // (an empty-path bare-root tree is deliberately not tracked here, same
+        // guard recordExecutedSearch already applies to an empty query).
+        if (treePath !== undefined) recordExecutedSearch(workspace, "tree", treePath, []);
         // D4 / A.5.10 (C2-4): see the archive-scoped tree above — the
         // `mode:"tree"` stamp is deleted, `kind:"search.tree"` is the
         // discriminator, and the not-found / not-a-directory / symlink-escape
@@ -12348,6 +13318,31 @@ function sessionLaneOf(args: Record<string, unknown>): string {
   return typeof raw === "string" && raw.length <= SESSION_LANE_MAX_CHARS ? raw : "";
 }
 
+/**
+ * A-F1: the lane as every CONTRACT-scoped ledger keys it.
+ *
+ * `sessionLaneOf` answers a different question — WorkspaceSession's lane, whose
+ * documented sentinel for "no lane" is `""` ("the historical shared session,
+ * byte-for-byte"). Contract state (the executed-next ledger, the task-contract
+ * store) spells that same absence `"default"`. Mixing the two split the
+ * executed-next ledger in half: the writer below recorded under `""` while both
+ * readers looked under `"default"`, so the no-repeat gate addressed an empty
+ * partition on every lane-less call. Contract-keyed call sites use THIS helper;
+ * session-keyed ones keep `sessionLaneOf`.
+ */
+function contractLaneOf(args: Record<string, unknown>): string {
+  return normalizeContractLane(sessionLaneOf(args));
+}
+
+/** The authenticated scope available internally for task-pack construction. */
+function taskContractScopeOf(args: Record<string, unknown>): TaskContractScope {
+  const taskHandle = args["task_handle"];
+  return {
+    lane: sessionLaneOf(args),
+    ...(typeof taskHandle === "string" && taskHandle.length > 0 ? { taskHandle } : {}),
+  };
+}
+
 /** Bytes of the payload an MCP client hands to the model: content[*].text only. */
 export function modelVisibleBytes(result: { content: Array<{ text: string }> }): number {
   let bytes = 0;
@@ -12498,7 +13493,8 @@ export async function callTool(
   args: Record<string, unknown>,
   requestMeta?: Record<string, unknown>,
 ) {
-  return runWithTraceCall(() => callToolTraced(name, args, requestMeta));
+  const legacyArgs = normalizeCanonicalRequest(name, args);
+  return runWithTraceCall(() => callToolTraced(name, legacyArgs, requestMeta));
 }
 
 async function callToolTraced(
@@ -12546,6 +13542,10 @@ async function callToolTraced(
   const startedAt = performance.now();
   const baselineMeasurement = readBaselineMeasurement(canonical, args);
   const baselineTokens = baselineMeasurement.tokens;
+  // R1: declared outside the try so BOTH failure exits — an `isError` result
+  // and a thrown one — can withdraw the in-flight pre-record made below.
+  let inFlight: { workspace: string; lane: string } | undefined;
+  let inFlightWasKnown = true;
   try {
     // 2026-08-07 concurrent-agent lanes: both transports funnel through this
     // function, so binding the async context here scopes EVERY session lookup
@@ -12557,6 +13557,41 @@ async function callToolTraced(
     // `undefined` (the default, and every rejection) means the dispatch below
     // runs with no binding at all, which is today's behavior exactly.
     const verifiedContext = verifiedContextFor(args, requestMeta);
+    // -----------------------------------------------------------------------
+    // R1 (2026-08-28): THE IN-FLIGHT CALL IS CONSUMED WORK, AND ITS OWN
+    // RESPONSE MUST SEE THAT.
+    //
+    // The executed-next ledger was written only AFTER `callToolUninstrumented`
+    // returned, so the response BUILT BY a prescribed next could not observe
+    // that the very call producing it had just consumed that next. Both
+    // no-repeat gates (readCodeTaskPack's `suppressNonProgressingNextCall` and
+    // the shared producer exit) therefore compared against a ledger exactly one
+    // call stale and re-emitted the prescribed call byte-identically; only a
+    // THIRD identical call finally saw it and advanced. Reproduced live on the
+    // follower's f03 and Tier-3 enum-refunded shapes, where step 0 prescribes
+    // `read_file mode=task_pack query=<verbatim> surfaceRoles=[…]` and step 1 —
+    // that exact call — hands the same call back with the same open gaps.
+    //
+    // Recording at dispatch is the ledger's own rule applied at the honest
+    // moment: a caller who has spent this call cannot be told to spend it
+    // again, whatever the result turns out to be. `recordExecutedNext` returns
+    // whether the shape was ALREADY known, so a call that ends in error
+    // withdraws only a pre-record that it introduced (below), leaving a
+    // genuinely earlier execution of the same shape intact. The success path
+    // still records again with the result digest, which is what stamps
+    // `resultDigest` — this only moves WHEN the fingerprint becomes visible.
+    // -----------------------------------------------------------------------
+    if (!laneRefusal && (canonical === "read_file" || canonical === "search_files")) {
+      try {
+        const workspace = resolveWorkspaceRoot(typeof args["cwd"] === "string" ? args["cwd"] : undefined, activeRoot);
+        const lane = contractLaneOf(args);
+        inFlightWasKnown = recordExecutedNext(workspace, lane, canonical, args);
+        inFlight = { workspace, lane };
+      } catch {
+        // An unresolvable workspace is the dispatch's own problem to report;
+        // the ledger simply learns nothing about this call.
+      }
+    }
     const result = laneRefusal
       // protocol v1: the lane refusal short-circuits BEFORE the dispatch funnel,
       // so it needs its own envelope. D1 admits no exceptions — a refusal a
@@ -12578,6 +13613,24 @@ async function callToolTraced(
       };
     }
     const outcomeIsError = "isError" in result && result.isError === true;
+    // R1: withdraw an in-flight pre-record this call INTRODUCED when the call
+    // failed — a failed call spent no work the ledger may hold a later next
+    // against. A shape already present before the pre-record is left alone.
+    if (outcomeIsError && inFlight !== undefined && !inFlightWasKnown) {
+      forgetExecutedNext(inFlight.workspace, inFlight.lane, canonical, args);
+    }
+    if (!outcomeIsError && (canonical === "read_file" || canonical === "search_files")) {
+      recordExecutedNext(
+        resolveWorkspaceRoot(typeof args["cwd"] === "string" ? args["cwd"] : undefined, activeRoot),
+        // A-F1: `?? "default"` never fired — sessionLaneOf returns "" (not
+        // undefined) for a lane-less call, so every default-path write landed
+        // in a partition no reader consults.
+        contractLaneOf(args),
+        canonical,
+        args,
+        shaOfText(JSON.stringify(result.content)),
+      );
+    }
     if (!outcomeIsError) commitReadBaseline(baselineMeasurement, args);
     try {
       if (
@@ -12625,6 +13678,15 @@ async function callToolTraced(
       }
     } catch {
       // Preserve the original failure.
+    }
+    // R1: a thrown dispatch is the other failure exit — withdraw on the same
+    // rule as the `isError` path above.
+    if (inFlight !== undefined && !inFlightWasKnown) {
+      try {
+        forgetExecutedNext(inFlight.workspace, inFlight.lane, canonical, args);
+      } catch {
+        // Preserve the original failure.
+      }
     }
     throw error;
   }

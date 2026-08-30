@@ -4110,6 +4110,34 @@ export function takePreparedHandleAdvisory(workspaceRoot: string): string | unde
   return advisory;
 }
 
+/**
+ * Re-key an installed fence when the producer demotes the certificate identity
+ * it is about to ship.
+ *
+ * WHY THIS EXISTS. `recordExecutionContract` installs the fence keyed on
+ * `certificate.id`, and `challengeCertificate` matches the caller-supplied
+ * `certificate_id` against `fence.certificateId` — so the fence's key is the
+ * id the CALLER sees on the wire. `recordTaskPackExecution` learns only later
+ * (once the task handle has resolved the durable ledger scope) whether a
+ * ledger-backed id can actually be backed by a snapshot; when it cannot, it
+ * strips the ledger claim. Without this, the wire would carry one id and the
+ * fence another, and the challenge that id authorizes could never match.
+ *
+ * Deliberately a no-op unless the live fence still carries `from`: a fence that
+ * has already been cleared, revoked or replaced must not be resurrected here.
+ */
+export function rekeyExecutionFenceCertificate(
+  workspaceRoot: string,
+  from: string,
+  to: string,
+): void {
+  if (from === to) return;
+  const session = getSession(workspaceRoot);
+  const fence = session.executionFence;
+  if (fence !== undefined && fence.certificateId === from) fence.certificateId = to;
+  if (session.lastExecutionCertificateId === from) session.lastExecutionCertificateId = to;
+}
+
 /** A new task opens the gate without erasing provenance for already-served bytes. */
 export function getLastExecutionCertificateId(workspaceRoot: string): string | undefined {
   const session = getSession(workspaceRoot);

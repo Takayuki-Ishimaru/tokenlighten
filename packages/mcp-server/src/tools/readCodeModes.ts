@@ -17,7 +17,7 @@ import { handleTable, shaOfText } from "../util/handles.js";
 import { getSymbolWithContext } from "./getSymbolWithContext.js";
 import { locateTaskContext } from "../features/locator/locateTaskContext.js";
 import { languageForPathWithContent } from "../util/languages.js";
-import { countLines } from "../util/countLines.js";
+import { countLines, sliceLinesToText } from "../util/countLines.js";
 import { collectSymbols, type CollectedSymbol } from "../symbols/collectSymbols.js";
 import { getConcernTokens, hasConcernNoteFired, markConcernNoteFired, recordReadPath, isClosureSatisfied } from "../state/session.js";
 import { isMarkdownPath, parseMarkdownHeadings, selectMarkdownSections } from "../util/markdownSections.js";
@@ -169,8 +169,15 @@ export async function extractSymbolsFromFile(
 /**
  * Lightweight regex scan to find top-level symbol declarations and
  * their approximate 1-based line ranges.
+ *
+ * EXPORTED (R2, 2026-08-28) as the SYNC twin `extractSymbolsFromFile` already
+ * wraps — same function, same patterns, no I/O. The evidence-expansion ledger
+ * needs "which definitions does this served body actually declare?" from inside
+ * a synchronous recorder, and re-deriving that with a second, private pattern
+ * set is how two answers to one question start disagreeing. Purely additive:
+ * `extractSymbolsFromFile` still delegates here and is unchanged.
  */
-function extractSymbolsFromLines(
+export function extractSymbolsFromLines(
   content: string,
   maxSymbols = 16,
   preferredNames: ReadonlySet<string> = new Set(),
@@ -764,8 +771,13 @@ function sliceInvalidRemedyNext(filePath: string, totalLines: number, requested:
   if (remedied.length === 0) {
     return `read_file mode=slice path=${filePath} range=1-${Math.min(200, totalLines)}`;
   }
+  // FX-1 (v0.13 wave-3 review fix): the multi-range branch uses canonical
+  // `targets=[...]` prose — a raw-string `next` bypasses
+  // `canonicalizeEmittedToolCalls`, which only rewrites OBJECT-shaped embedded
+  // tool calls. The singular-range sibling below is unchanged (out of the
+  // confirmed-9 fix scope; see the wave-3 report addendum).
   return requested.length > 1
-    ? `read_file mode=slice path=${filePath} ranges=${JSON.stringify(remedied)}`
+    ? `read_file targets=${JSON.stringify([{ path: filePath, ranges: remedied }])}`
     : `read_file mode=slice path=${filePath} range=${remedied[0]}`;
 }
 
@@ -1183,8 +1195,14 @@ export async function resolveSlice(
       note = `boundary cuts symbol ${cutSymbol.name} (${cutRangeStr}); use symbol=${cutSymbol.name}`;
     }
 
-    const sliceLines = lines.slice(startLine - 1, endLine);
-    const sliceContent = sliceLines.join("\n");
+    // T1b (v0.13, UTF-16 3-way read-parity wave): sliceLinesToText restores
+    // the file's own trailing newline when this range reaches EOF (see its
+    // doc comment, util/countLines.ts) -- a plain lines.slice(...).join("\n")
+    // silently dropped it, so a "whole file" range (an explicit mode=slice
+    // range=1-N, or the handles[] batch's own isSynthesizedFileRange "1-N"
+    // synthesis in server.ts) came back one trailing newline short of the
+    // SAME file read via mode=full path=/handle=.
+    const sliceContent = sliceLinesToText(content, startLine, endLine);
     const sliceBytes = Buffer.byteLength(sliceContent, "utf8");
 
     let truncated = false;
@@ -1519,8 +1537,9 @@ export async function resolveSliceRanges(
       ...(invalidRanges.length > 0 ? { invalid_ranges: invalidRanges } : {}),
       ...(truncated ? { truncated: true as const } : {}),
       ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
+      // FX-1: canonical `targets=[...]` prose, not the legacy `mode=slice` dialect.
       ...(remaining.length > 0
-        ? { next: `read_file mode=slice handle=${handle.id} ranges=${JSON.stringify(remaining)}` }
+        ? { next: `read_file targets=${JSON.stringify([{ handle: handle.id, ranges: remaining }])}` }
         : {}),
       ...(concernNote !== undefined ? { concern_note: concernNote } : {}),
     },

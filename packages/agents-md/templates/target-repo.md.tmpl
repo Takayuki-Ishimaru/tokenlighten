@@ -18,19 +18,20 @@ shared contracts synchronized. Never expose secrets.
 
 docs, config, logs;Office/archives/code.
 
-- Unknown: `read_file mode=task_pack query=<complete verbatim request>`; never truncate; `taskProfile` only when user-declared, otherwise omit. Known: `read_file mode=overview|symbol|pack` or `read_file mode=small_file content=outline`; avoid `path`+`paths`.
-- `execution_contract`: `readiness_certificate`+`typestate:prepared`+closed `semantic_closure`=>`evidence_model`; `discovery_allowed:true`=>`next_call` only; awaiting-input=>choose served candidate if safe, else ask. `workspace_state` binds; `pack_unchanged` revalidates. Open=>`capability_gaps[].next_call`.
-- Search: `search_files action=find query=<token>`.
-- Archives: `read_file mode=archive|task_pack`; virtual `outer.ext!/member` immutable; non-ZIP read-only.
-- Edit: `edit_file handle=<id> allowPathFallback=false`; batch `edits[]`; tests ≤3 candidates; create `create:true content=...`/`from=<src>`; repeat `target=all`.
+- Legacy `mode`/`paths`/`taskEpoch` etc. work (v0.13.x); never emit new.
+- Unknown: `read_file {query:<complete verbatim request>,task:{epoch:"new"}}`; never truncate; `task.profile` only when user-declared, otherwise omit. Known: `read_file {targets:[{path:<p>}]}` (+`symbol`/`content:"outline"`/batch several).
+- `decision.kind`: `act.answer`/`act.edit`=>`prepared`, act via `evidence_model`; `discover`=>run its `next`; `await_input`=>run carried `next`, else safe `candidate`, else ask. `read.receipt`(`pack-unchanged`) revalidates. Open=>`gaps` (semantic, no call closes it).
+- Search: `search_files {action:"find",queries:["<token>"]}`.
+- Archives: `read_file {targets:[{archive:{path,member}}]}`; members immutable, non-ZIP read-only.
+- Edit: `edits:[{handle:<id>,allowPathFallback:false}]`; batch `edits[]`; tests ≤3 candidates; create `edits:[{create:true,content:...}]`; repeat `target:"all"`.
 
 ## Validation receipts
 
-- Credentials: opaque `credentialRef`/`outputCredentialRef` only, never passwords; server resolves `TOKENLIGHTEN_PASSWORD_<REF>`.
-- Challenge revokes epoch cert; no replay; `answer_resolution` beats decoys.
+- Credentials: opaque refs only, never passwords — `scope.credentialRef`/`targets[].credentialRef` for read/search, `credentials:{in,out}` for edit; refs resolve from server `TOKENLIGHTEN_PASSWORD_<REF>`.
+- `challenge` re-authorizes a certified decision, authored from its schema; no replay; `answer_resolution` beats decoys.
 - Artifact paths need matching `artifact_sections`; create only `create_target.path`.
 - With `--allow-write`, edit outer ZIP only via `edit_file artifact={kind:"zip",members:[...]}`; tar/tar.gz/7z/rar remain read-only.
-- Edits validate identity, match/range/overlap, syntax, and scope. `committed` needs no confirmation read; not-written/rolled-back means no write; inspect `workspace-state-unknown` before retry.
-- Re-slice handles, never paths. Candidate packs: no broad/full reads; use served bodies or one `next_call`. `downgraded_from` was served.
+- Edits validate identity, match/range/overlap, syntax, and scope. `edit.applied` needs no confirmation read; `edit.rolled_back` means no write; inspect `edit.state_unknown` before retry.
+- Re-slice handles, never paths. Candidate packs: no broad/full reads; use served bodies or one `next`. `downgraded_from` was served.
 - Use `closure` only if an edit opened checks; otherwise diff/tests.
 <!-- tokenlighten:target-agents:end -->

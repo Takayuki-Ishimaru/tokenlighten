@@ -97,9 +97,10 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const next = limit["next"] as Record<string, unknown> | undefined;
     expect(next?.["tool"]).toBe("read_file");
     const nextArgs = next?.["arguments"] as Record<string, unknown> | undefined;
+    const nextTarget = (nextArgs?.["targets"] as Array<Record<string, unknown>> | undefined)?.[0];
     // Remainder form (2026-07-09c): the continuation names the WHOLE rest of
     // the doc — the slice serve clamps per call — not a fixed +120 window.
-    const m = /^(\d+)-(\d+)$/.exec(String(nextArgs?.["range"]));
+    const m = /^(\d+)-(\d+)$/.exec(String(nextTarget?.["range"]));
     expect(m).not.toBeNull();
     const totalLines = md.replace(/\n$/, "").split("\n").length;
     expect(Number(m![2])).toBe(totalLines);
@@ -177,7 +178,8 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const limit = body["limit"] as Record<string, unknown>;
     const next = limit["next"] as Record<string, unknown> | undefined;
     const nextArgs = next?.["arguments"] as Record<string, unknown> | undefined;
-    expect(nextArgs?.["range"]).toBe("2-101");
+    const nextTarget = (nextArgs?.["targets"] as Array<Record<string, unknown>> | undefined)?.[0];
+    expect(nextTarget?.["range"]).toBe("2-101");
   });
 
   it("large .md via bare read_code (mode omitted) returns content, not a skeleton", async () => {

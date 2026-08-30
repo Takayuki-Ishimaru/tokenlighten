@@ -20,7 +20,6 @@ import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { nextText } from "./helpers/protocolNext.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -293,7 +292,18 @@ describe("intent: remove-duplicate-branch", () => {
 
     expect(data["kind"]).toBe("refusal");
     expect(data["code"]).toBe("intent-ambiguous");
-    expect(typeof nextText(data as Record<string, unknown>)).toBe("string");
+    // D-4: was `expect(typeof nextText(data)).toBe("string")` — a tautology,
+    // since nextText's return type is always `string` regardless of `data`'s
+    // content, so it never actually checked anything. Empirically the wire
+    // body carries a genuine `next` ToolCall (removeDuplicateBranch.ts emits
+    // a legacy `read_file mode=slice handle=...` string with no range, which
+    // the D-4 parser resolves to a bare re-read of that same handle); assert
+    // on the real structure instead: it points the caller back at the exact
+    // handle they submitted.
+    const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool, JSON.stringify(data)).toBe("read_file");
+    const target = (next?.arguments?.["targets"] as Array<Record<string, unknown>> | undefined)?.[0];
+    expect(target?.["handle"], JSON.stringify(data)).toBe(handle);
 
     // File must be unmodified.
     expect(readFile(wsDir, "src/classify.ts")).toBe(fixture);
@@ -690,7 +700,11 @@ describe("intent: rename-symbol-references", () => {
 
     expect(data["kind"]).toBe("refusal");
     expect(data["code"]).toBe("intent-unsupported");
-    expect(typeof nextText(data as Record<string, unknown>)).toBe("string");
+    // D-4: was `expect(typeof nextText(data)).toBe("string")` — a tautology
+    // (see the 296 note above for why). Empirically this refusal carries no
+    // `next` at all, only `detail`; assert both facts directly.
+    expect(data["next"], JSON.stringify(data)).toBeUndefined();
+    expect(data["detail"], JSON.stringify(data)).toContain("set precondition=references-reviewed after running search_files action=references");
 
     // File must be unmodified.
     expect(readFile(wsDir, "src/fn.ts")).toBe(fixture);
@@ -781,7 +795,13 @@ describe("intent dispatch: special intents are mutually exclusive with edits[]",
 
     expect(data["kind"]).toBe("refusal");
     expect(data["code"]).toBe("intent-incompatible-with-batch");
-    expect(nextText(data as Record<string, unknown>)).toContain("remove intent");
+    // D-4: was `expect(nextText(data)).toContain("remove intent")`. Empirically
+    // this refusal carries no `next` at all (§2.6: nothing executable to
+    // offer here), only `detail` — nextText's no-next detail-fallback branch
+    // is what the old assertion actually exercised, so this is a direct,
+    // semantics-preserving port (Archetype B).
+    expect(data["next"], JSON.stringify(data)).toBeUndefined();
+    expect(data["detail"], JSON.stringify(data)).toContain("remove intent");
     expect(readFile(wsDir, "src/status.ts")).toBe(fixture);
   }, 35000);
 });
@@ -849,6 +869,18 @@ describe("intent dispatch: unknown intent name returns intent-unknown", () => {
 
     expect(data["kind"]).toBe("refusal");
     expect(data["code"]).toBe("intent-unknown");
-    expect(typeof nextText(data as Record<string, unknown>)).toBe("string");
+    // D-4: was `expect(typeof nextText(data)).toBe("string")` — a tautology
+    // (see the 296 note above). Empirically the wire body carries a genuine
+    // `next` ToolCall: `intents/index.ts`'s default case hardcodes the legacy
+    // string `"edit_file search=... replace=..."`, which the D-4 parser
+    // resolves to an `edit_file` call with one `edits[]` entry whose
+    // search/replace are literally the filler text "..." (a generic
+    // illustrative shape, not a caller-specific fix). Assert on that
+    // structure directly.
+    const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool, JSON.stringify(data)).toBe("edit_file");
+    const edits = next?.arguments?.["edits"] as Array<Record<string, unknown>> | undefined;
+    expect(edits?.[0]?.["search"], JSON.stringify(data)).toBe("...");
+    expect(edits?.[0]?.["replace"], JSON.stringify(data)).toBe("...");
   }, 35000);
 });

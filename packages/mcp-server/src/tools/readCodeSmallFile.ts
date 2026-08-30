@@ -24,6 +24,7 @@ import { TINY_BYTES, TINY_LINES } from "../util/fullGovernor.js";
 import { elideDocCommentsForDisplay } from "../util/formatCompress.js";
 import { languageForPath } from "../util/languages.js";
 import { safeResolve, safeRealPath, resolveReal, isWithin, checkReadTarget } from "../util/safePath.js";
+import { decodeTextBuffer } from "../util/textDecode.js";
 import { isWorkspaceCandidateAccepted } from "../workspace/candidates.js";
 import { getFileSkeleton } from "./getFileSkeleton.js";
 import { countLines } from "../util/countLines.js";
@@ -353,7 +354,17 @@ export async function buildSmallFile(
   }
   const rawBuf = await fs.readFile(real);
   const byteSize = rawBuf.byteLength;
-  const content = rawBuf.toString("utf8");
+  // T1 (v0.13 review-fix wave, UTF-16 read parity): same
+  // decodeTextBuffer(...) ?? raw-utf8-fallback rule as util/safePath.ts's
+  // readFileSafe (see that function's comment) -- BOM-aware for UTF-16LE/BE
+  // and UTF-8, ONE shared implementation with find/references/task-pack
+  // (util/textDecode.ts), never a second decoder. byteSize above stays the
+  // RAW file byte count on purpose (matches this file's existing
+  // TINY_BYTES/governor accounting and core2's own size_bytes convention);
+  // only the served `content` string -- and therefore its sha
+  // (shaOfText(content) below) -- changes basis to the DECODED text. See
+  // this wave's B-REPORT addendum for why that pairing was chosen.
+  const content = decodeTextBuffer(rawBuf) ?? rawBuf.toString("utf8");
   // BUG FIX: was content.split(/\r?\n/).length — feeds the isTiny threshold
   // gate AND the suggested "1-<N>" slice ranges below (a phantom-inflated
   // count previously suggested a range one line past a real short file's end).

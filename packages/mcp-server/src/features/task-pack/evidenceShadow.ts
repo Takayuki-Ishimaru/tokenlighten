@@ -71,7 +71,29 @@ const CALL_STOPWORDS = new Set([
 ]);
 const MAX_CALLEES_SCANNED = 8;
 
-function calleesOf(code: string, own: readonly string[]): string[] {
+/**
+ * R2 (2026-08-28): is this call RECEIVER-QUALIFIED (`Math.round(`, `a?.b(`,
+ * `obj\n  .method(`)?
+ *
+ * A qualified call names a member of some other object. Its definition is not
+ * addressable by the bare name, so a consumer that treats the name as a
+ * locatable definition mints a requirement nothing can ever discharge —
+ * measured live: `Math.round(n)` inside a served `roundCurrency` body minted
+ * `dependency-definitions:round`, which stayed permanently `open` and, through
+ * it, kept the whole open-universe obligation uncovered on a pack that had in
+ * fact served every real callee's definition.
+ *
+ * Whitespace is skipped so a fluent chain broken across lines is still seen as
+ * qualified; nothing else about the scan changes.
+ */
+function isReceiverQualified(code: string, matchIndex: number): boolean {
+  let cursor = matchIndex - 1;
+  while (cursor >= 0 && /\s/u.test(code[cursor]!)) cursor -= 1;
+  return cursor >= 0 && code[cursor] === ".";
+}
+
+/** Existing TS/JS call-form extractor, exposed for one-hop proof expansion. */
+export function calleesOf(code: string, own: readonly string[]): string[] {
   const out: string[] = [];
   const ownLower = new Set(own.map((s) => s.toLowerCase()));
   CALL_RE.lastIndex = 0;
@@ -79,6 +101,7 @@ function calleesOf(code: string, own: readonly string[]): string[] {
     const name = m[1]!;
     if (CALL_STOPWORDS.has(name.toLowerCase())) continue;
     if (ownLower.has(name.toLowerCase())) continue;
+    if (isReceiverQualified(code, m.index)) continue;
     if (!out.includes(name)) out.push(name);
     if (out.length >= MAX_CALLEES_SCANNED) break;
   }

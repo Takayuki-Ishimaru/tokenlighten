@@ -33,6 +33,42 @@
 // surface, but expect a no-op snapshot diff, not a required one.
 // ---------------------------------------------------------------------------
 
-/** Server-level `instructions` announced on every MCP `initialize` result. */
+/**
+ * Server-level `instructions` announced on every MCP `initialize` result.
+ *
+ * B-F4 (2026-08-28): re-compressed from 592 B to 478 B. Cut only
+ * unambiguous redundancy — the "(+paths when known)" aside, the duplicate
+ * "/calls" on the search_files clause, the repeated "TL reports" subject
+ * (the fallback sentence's subject already carries from the prior
+ * sentence), and "relevant" before "verification" (still unambiguous: the
+ * guide is the place for the narrow-verification-floor nuance). Every
+ * concept from the 592 B string is still present, INCLUDING the
+ * post-edit-discipline sentence (reuse receipt/prior evidence; batch edits
+ * in one call; stop after a passing verification) — that sentence is not
+ * decorative: serverInstructions.spec.ts's own comment ties it to the T13
+ * anatomy finding (ceremonial post-edit re-reads/diff sweeps) and the
+ * Probe-2 finding (solvers distrust served evidence), and it is the ONLY
+ * textual explanation of that discipline a guide-less caller ever gets. A
+ * ~400 B target was in reach only by deleting that sentence outright, which
+ * would be reintroducing a measured defect to save ~60 B; 478 B was this
+ * wording's routing-signal-preserving floor. See the B-REPORT for the
+ * before/after measurements and the rejected sub-450 B drafts.
+ *
+ * D-4 canonicalization (2026-08-28, commit 413c5146): the string below was
+ * REWRITTEN, not merely re-measured, to name the canonical v0.13 input homes
+ * (`task.force_serve`/`task.pull`, `scope.includeClosure`/`surfaceRoles`/
+ * `kind`, `budget`, read `targets`/`content`, search `action`+`queries`,
+ * edit `edits`) in place of the pre-diet `mode=task_pack`/`action=tree|find|
+ * references` phrasing — the same routing intent, restated for the surface
+ * this schema now advertises. Every concept the B-F4 paragraph above
+ * describes (post-edit stop discipline included) is still present verbatim.
+ * v0.13 wave-3 (Track D, W3-3): the rewrite's actual measured size is 457 B,
+ * not 478 — the 478 figure above documents the PRE-canonicalization string
+ * and was never re-measured after the rewrite landed. Both
+ * rehearsal-ceiling.json's `server_instructions_bytes` and
+ * serverInstructions.spec.ts's ceiling-test title/comment are corrected to
+ * 457 alongside this comment; the 520 B ceiling itself is unchanged (457 is
+ * comfortably under it).
+ */
 export const SERVER_INSTRUCTIONS =
-  `TokenLighten (TL) is the first stop for every code/doc/config task in this workspace — including unknown-location and multi-file discovery ("where is X", "which files", "how does X work"). Start with read_file mode=task_pack query=<request verbatim> (+paths when known): one call locates, ranks and serves the relevant slices with edit handles, replacing Explore/Grep/Read fan-out. Inventory and call sites: search_files action=tree|find|references. Fall back to native Read/Grep/Explore only after TL reports a non-complete scope or a verified absence. After task_pack returns act.answer or act.edit, discovery is closed — act immediately from the served content and batch independent edits in one edits[] call. A receipt, or any evidence item marked prior, means those bytes are already in hand — never re-fetch on it. A gap naming an entry as not a direct proof is not closed by that entry passing — verify via the contract's per-target actions instead. Once an edit applies and a relevant verification passes, stop: no ceremonial re-reads or diff sweeps. Full protocol: the TokenLighten guide block in AGENTS.md/CLAUDE.md.`;
+  `TL first for code/doc/config. Unknown-location/multi-file=>read_file {query:"<request>"}. Canonical only: task.force_serve/task.pull; scope.includeClosure/scope.surfaceRoles/scope.kind; budget; read targets/content; search action+queries; edit edits. Native only after incomplete scope or verified absence. Act on act.answer/act.edit: use served evidence, batch edits in one edits[] call, stop after passing verification. Full protocol: AGENTS.md/CLAUDE.md.`;

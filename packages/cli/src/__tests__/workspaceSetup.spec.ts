@@ -112,6 +112,124 @@ describe("workspace setup", () => {
     });
   });
 
+  it("writes a schema-stamp env value into every generated MCP client config (VS Code MCP definition-cache mitigation)", async () => {
+    const root = join(tmpdir(), `tokenlighten-schema-stamp-${randomUUID()}`);
+    mkdirSync(root, { recursive: true });
+
+    await setupWorkspace({
+      root,
+      clients: ["vscode", "codex", "claude-code"],
+      schemaStamp: () => "deadbeefcafef00d",
+    });
+
+    const vscode = JSON.parse(
+      readFileSync(join(root, ".vscode", "mcp.json"), "utf8"),
+    ) as { servers: Record<string, { env: Record<string, string> }> };
+    expect(vscode.servers["tokenlighten"]?.env["TOKENLIGHTEN_SCHEMA_STAMP"]).toBe(
+      "deadbeefcafef00d",
+    );
+
+    const claude = JSON.parse(
+      readFileSync(join(root, ".mcp.json"), "utf8"),
+    ) as { mcpServers: Record<string, { env: Record<string, string> }> };
+    expect(claude.mcpServers["tokenlighten"]?.env["TOKENLIGHTEN_SCHEMA_STAMP"]).toBe(
+      "deadbeefcafef00d",
+    );
+
+    const codex = parse(
+      readFileSync(join(root, ".codex", "config.toml"), "utf8"),
+    ) as { mcp_servers: Record<string, { env: Record<string, string> }> };
+    expect(codex.mcp_servers["tokenlighten"]?.env["TOKENLIGHTEN_SCHEMA_STAMP"]).toBe(
+      "deadbeefcafef00d",
+    );
+  });
+
+  it("omits the schema-stamp env value when it cannot be determined, without failing setup", async () => {
+    const root = join(tmpdir(), `tokenlighten-schema-stamp-missing-${randomUUID()}`);
+    mkdirSync(root, { recursive: true });
+
+    const result = await setupWorkspace({
+      root,
+      clients: ["vscode"],
+      schemaStamp: () => undefined,
+    });
+
+    expect(result.clients).toEqual(["vscode"]);
+    const vscode = JSON.parse(
+      readFileSync(join(root, ".vscode", "mcp.json"), "utf8"),
+    ) as { servers: Record<string, { env: Record<string, string> }> };
+    expect(vscode.servers["tokenlighten"]?.env).not.toHaveProperty(
+      "TOKENLIGHTEN_SCHEMA_STAMP",
+    );
+  });
+
+  it("never attempts to determine a schema stamp for a rules-only setup (no client config is written)", async () => {
+    const root = join(tmpdir(), `tokenlighten-schema-stamp-rules-only-${randomUUID()}`);
+    mkdirSync(root, { recursive: true });
+    const schemaStamp = vi.fn(() => "deadbeefcafef00d");
+
+    await setupWorkspace({ root, rulesOnly: true, schemaStamp });
+
+    expect(schemaStamp).not.toHaveBeenCalled();
+  });
+
+  it("injects the medium guide profile while configuring the spawned clients", async () => {
+    const root = join(tmpdir(), `tokenlighten-setup-medium-${randomUUID()}`);
+    mkdirSync(root, { recursive: true });
+    const result = await setupWorkspace({
+      root,
+      clients: ["vscode", "codex", "claude-code"],
+      guideProfile: "medium",
+    });
+
+    expect(result.clients).toEqual(["vscode", "codex", "claude-code"]);
+    expect(readFileSync(join(root, "AGENTS.md"), "utf8")).toContain("TokenLighten MCP (medium)");
+    const vscode = JSON.parse(readFileSync(join(root, ".vscode", "mcp.json"), "utf8")) as {
+      servers: Record<string, { args: string[] }>;
+    };
+    expect(vscode.servers.tokenlighten.args).toContain(result.workspaceRoot);
+  });
+
+  it("rejects an unsupported --guide-profile CLI value with a real newline, not a literal backslash-n", async () => {
+    // B-F6(b)/(c): the error message used to end in a literal two-character
+    // "\n" (a doubled backslash in the template literal, so it never
+    // started a new line) and hand-declared the same three profile names
+    // cliArgs.ts's VALID_PROFILES already lists. This pins both fixes at
+    // once through the real CLI arg parser (runWorkspace), not the
+    // lower-level setupWorkspace() the "injects the medium guide profile"
+    // test above exercises.
+    const root = join(tmpdir(), `tokenlighten-setup-bad-profile-${randomUUID()}`);
+    mkdirSync(root, { recursive: true });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const savedExitCode = process.exitCode;
+    try {
+      await runWorkspace([
+        "setup", "--root", root, "--clients", "vscode", "--guide-profile", "bogus",
+      ], {
+        registryPath: join(root, "registry.toml"),
+        launcher: { command: "tl", argsPrefix: [], env: {} },
+      });
+
+      expect(process.exitCode).toBe(1);
+      expect(stderr).toHaveBeenCalledTimes(1);
+      const message = String(stderr.mock.calls[0]?.[0]);
+      // The real fix: a genuine newline character terminates the message,
+      // and no visible backslash-n text survives anywhere in it.
+      expect(message.endsWith("\n")).toBe(true);
+      expect(message).not.toContain("\\n");
+      // The DRY fix: the allowed-values list comes from VALID_PROFILES,
+      // not a hand-maintained duplicate — every profile name it lists is
+      // present, and the invalid input is named too.
+      expect(message).toContain("bogus");
+      expect(message).toContain("full");
+      expect(message).toContain("medium");
+      expect(message).toContain("compact");
+    } finally {
+      stderr.mockRestore();
+      process.exitCode = savedExitCode;
+    }
+  });
+
   it("repairs stale managed rules and MCP settings when setup is rerun", async () => {
     const root = join(tmpdir(), `tokenlighten-repair-${randomUUID()}`);
     mkdirSync(root, { recursive: true });

@@ -214,11 +214,12 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     const next = limit["next"] as Record<string, unknown>;
     expect(next["tool"]).toBe("read_file");
     const nextArgs = next["arguments"] as Record<string, unknown>;
-    expect(nextArgs["mode"]).toBe("slice");
-    expect(nextArgs["handle"]).toBe(evidence["handle"]);
+    expect(nextArgs["content"]).toBe("auto");
+    const nextTarget = (nextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
+    expect(nextTarget["handle"]).toBe(evidence["handle"]);
     expect(String(evidence["range"])).toMatch(/^\d+-\d+$/);
     const servedBounds = String(evidence["range"]).split("-").map(Number);
-    const nextBounds = String(nextArgs["range"]).match(/^(\d+)-(\d+)$/)!.slice(1).map(Number);
+    const nextBounds = String(nextTarget["range"]).match(/^(\d+)-(\d+)$/)!.slice(1).map(Number);
     expect(nextBounds[0]).toBe(servedBounds[1]! + 1);
 
     // Bake-into-cap: the FULL served JSON payload (this exact text) must
@@ -285,12 +286,12 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     // The continuation is a structured ToolCall now (§2.1.2 F5), so it is
     // EXECUTED verbatim rather than scraped out of prose.
     const nextArgs = (limit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
-    const range = String(nextArgs["range"]);
+    expect(nextArgs["content"]).toBe("auto");
+    const nextTarget = (nextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
+    const range = String(nextTarget["range"]);
     expect(range).toMatch(/^\d+-\d+$/);
 
-    const sliceRes = await srv.call("read_file", {
-      mode: "slice", handle: nextArgs["handle"], range,
-    });
+    const sliceRes = await srv.call("read_file", nextArgs);
     // resolveSlice's RANGE branch never refuses on cap — it serves a
     // (possibly further truncated) slice with its own continuation.
     expect(sliceRes["kind"]).toBe("read.text");
@@ -321,8 +322,10 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     const autoLimit = res["limit"] as Record<string, unknown>;
     expect(autoLimit).toBeDefined();
     const autoNextArgs = (autoLimit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
-    expect(autoNextArgs["mode"]).toBe("slice");
     const autoEvidence = (res["evidence"] as Array<Record<string, unknown>>)[0]!;
+    expect(autoNextArgs["content"]).toBe("auto");
+    const autoTarget = (autoNextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
+    expect(autoTarget["handle"]).toBe(autoEvidence["handle"]);
     expect(String(autoEvidence["body"])).toContain(symbol);
   }, 30000);
 });

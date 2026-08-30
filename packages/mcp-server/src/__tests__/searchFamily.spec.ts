@@ -138,10 +138,9 @@ describe("A.5.8 search.matches — Rule K's `matches:{form}` tag and [R4-4] per-
     expect(next.tool).toBe("search_files");
     expect(next.arguments).toMatchObject({
       action: "find",
-      query: request["query"],
-      regex: true,
-      limit: 400,
-      maxTokens: 50000,
+      queries: [request["query"]],
+      scope: { path: "Mount-M365Drive.ps1", regex: true },
+      budget: { items: 400, tokens: 50000 },
       cwd: psRoot,
     });
 
@@ -152,10 +151,10 @@ describe("A.5.8 search.matches — Rule K's `matches:{form}` tag and [R4-4] per-
     };
     expect(narrowedNext.tool).toBe("read_file");
     expect(narrowedNext.arguments).toMatchObject({
-      mode: "full",
-      path: next.arguments["path"],
+      content: "full",
+      targets: [{ path: "Mount-M365Drive.ps1" }],
+      budget: { tokens: 50000 },
       cwd: psRoot,
-      maxTokens: 50000,
     });
   });
 
@@ -447,9 +446,10 @@ describe("CANONICAL LIMIT FOLD RULE — one Limit, records > wire > time, source
     const next = limit["next"] as { tool: string; arguments: Body };
     expect(next.tool).toBe("search_files");
     expect(next.arguments["action"]).toBe("find");
-    expect(next.arguments["query"]).toBe("BIGNEEDLE");
+    expect(next.arguments["queries"]).toEqual(["BIGNEEDLE"]);
     const served = new Set((matches["files"] as Array<{ path: string }>).map((f) => f.path));
-    expect(served.has(String(next.arguments["path"]))).toBe(false);
+    const nextScope = (next.arguments["scope"] as Body)["path"];
+    expect(served.has(String(nextScope))).toBe(false);
     expect((matches["inventory"] as unknown[]).length).toBeGreaterThan(served.size);
   });
 
@@ -468,12 +468,13 @@ describe("CANONICAL LIMIT FOLD RULE — one Limit, records > wire > time, source
     expect(limit["cause"]).toBe("records");
     const next = limit["next"] as { tool: string; arguments: Body };
     expect(next.tool).toBe("search_files");
-    expect(next.arguments["action"]).toBe("symbols");
-    expect(next.arguments["query"]).toBe("probeSymbol");
+    expect(next.arguments["action"]).toBe("find");
+    expect(next.arguments["queries"]).toEqual(["probeSymbol"]);
+    expect((next.arguments["scope"] as Body)["kind"]).toBe("symbol");
     // The synthesis: an explicit limit equal to the TRUE total, so the re-issue
     // actually advances rather than repeating the same page.
-    expect(next.arguments["limit"]).toBe(matches["total"]);
-    expect(Number(next.arguments["limit"])).toBeGreaterThan(
+    expect((next.arguments["budget"] as Body)["items"]).toBe(matches["total"]);
+    expect(Number((next.arguments["budget"] as Body)["items"])).toBeGreaterThan(
       (matches["locations"] as unknown[]).length,
     );
   });

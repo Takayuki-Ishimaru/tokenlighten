@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -104,12 +104,23 @@
           "default": "auto",
           "scope": "window",
           "description": "%config.language%"
+        },
+        "tokenlighten.guideProfile": {
+          "type": "string",
+          "enum": [
+            "full",
+            "medium",
+            "compact"
+          ],
+          "default": "full",
+          "scope": "resource",
+          "description": "Guide profile injected during workspace setup."
         }
       }
     }
   },
   "scripts": {
-    "build": "node ../../scripts/clean-package-dist.mjs && node esbuild.config.mjs && tsc --noEmit",
+    "build": "node ../../scripts/clean-package-dist.mjs && node scripts/generate-schema-stamp.mjs && node esbuild.config.mjs && tsc --noEmit",
     "bundle-cli": "node scripts/bundle-cli.mjs",
     "vscode:prepublish": "npm --prefix ../.. run build && npm run bundle-cli",
     "package": "vsce package --no-dependencies",
@@ -125,6 +136,7 @@
     "smol-toml": "^1.3.1"
   },
   "devDependencies": {
+    "@tokenlighten/mcp-server": "*",
     "@types/node": "^20",
     "@types/vscode": "^1.105.0",
     "@vscode/vsce": "^3.9.2",

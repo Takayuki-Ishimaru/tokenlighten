@@ -181,9 +181,10 @@ describe("B2e — one mode=full serve is capped, and only what was sent is recor
     expect(limit["cause"]).toBe("wire");
     const next = limit["next"] as Record<string, unknown>;
     const nextArgs = next["arguments"] as Record<string, unknown>;
-    expect(nextArgs["mode"]).toBe("slice");
-    expect(nextArgs["handle"]).toBe(firstEvidence?.["handle"]);
-    expect(String(nextArgs["range"])).toMatch(/^\d+-\d+$/);
+    expect(nextArgs["content"]).toBe("auto");
+    const nextTarget = (nextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
+    expect(nextTarget["handle"]).toBe(firstEvidence?.["handle"]);
+    expect(String(nextTarget["range"])).toMatch(/^\d+-\d+$/);
   }, 40000);
 
   it("the UNSERVED tail is served as content, never a code_unchanged receipt for bytes never sent", async () => {
@@ -199,7 +200,8 @@ describe("B2e — one mode=full serve is capped, and only what was sent is recor
     }));
     const firstLimit = first["limit"] as Record<string, unknown>;
     const firstNextArgs = (firstLimit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
-    const remainder = String(firstNextArgs["range"]);
+    const firstTarget = (firstNextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
+    const remainder = String(firstTarget["range"]);
     const tail = parseResult(await srv.rpc(3, "tools/call", {
       name: "read_file", arguments: { mode: "slice", path: "src/big.ts", range: remainder },
     }));

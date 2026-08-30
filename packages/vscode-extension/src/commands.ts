@@ -17,6 +17,14 @@ import {
   workspaceMcpSettingsCached,
 } from "./workspaceState.js";
 import type { WorkspaceActivationState } from "./workspaceState.js";
+// T3 (v0.13 review-fix wave): use the canonical GuideProfile export instead
+// of re-declaring the same three-literal union locally. `import type` only
+// -- it is erased entirely at compile time (never a runtime require of the
+// package root), so this is unaffected by the CJS/import.meta.url bundling
+// hazard that keeps diagnostics.ts's RUNTIME imports (INSTRUCTIONS_VERSION,
+// parseSentinelBlock) on the /version and /sentinel subpaths instead of the
+// package root -- see that file's own header comment.
+import type { GuideProfile } from "@tokenlighten/agents-md";
 
 const firstLine = (s: string) => s.split("\n")[0] ?? s;
 
@@ -24,7 +32,7 @@ function localized(en: string, ja: string): string {
   return getDisplayLanguage() === "ja" ? ja : en;
 }
 
-export function workspaceSetupArgs(root: string): string[] {
+export function workspaceSetupArgs(root: string, profile: GuideProfile = "full"): string[] {
   return [
     "workspace",
     "setup",
@@ -32,6 +40,8 @@ export function workspaceSetupArgs(root: string): string[] {
     root,
     "--clients",
     "vscode,codex,claude-code",
+    "--guide-profile",
+    profile,
     "--json",
   ];
 }
@@ -215,7 +225,13 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   );
   if (choice !== confirm) return;
   bar.setStale();
-  const result = await spawnTl(workspaceSetupArgs(root), { cwd: root });
+  const configuredProfile = vscode.workspace
+    .getConfiguration("tokenlighten", vscode.Uri.file(root))
+    .get<string>("guideProfile", "full");
+  const profile: GuideProfile = configuredProfile === "medium" || configuredProfile === "compact"
+    ? configuredProfile
+    : "full";
+  const result = await spawnTl(workspaceSetupArgs(root, profile), { cwd: root });
   if (result.code !== 0) {
     const detail = firstLine(result.stderr || result.stdout);
     bar.setError(detail);

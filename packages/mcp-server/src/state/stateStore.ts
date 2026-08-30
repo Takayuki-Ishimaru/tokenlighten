@@ -135,8 +135,20 @@ const COMPACT_LINE_THRESHOLD = 512;
 /** Live records retained; the oldest quarter is dropped past this. */
 const RECORD_CAP = 2048;
 
-/** Bounded `operation_id` dedup table. */
-const OPERATION_CAP = 256;
+/**
+ * Bounded `operation_id` dedup table. v2 dual-writes one logical operation
+ * to the legacy and structured keys, so 512 entries retain the same 256-ID
+ * effective window as the pre-v2 256-entry table. The extra 256 Map slots are
+ * the deliberate memory trade-off: at the current compact replay record size
+ * this is a small bounded increment, while retaining the old dedup horizon.
+ *
+ * The production pair is one `!oversize` legacy marker plus one v2 value per
+ * logical ID. With 256 IDs and the 16 KiB v2 value cap, serialized operation
+ * payloads are bounded at about 4 MiB (256 * 16 KiB; legacy markers are
+ * negligible), excluding V8 object/string overhead. This is a bounded upper
+ * estimate, not a benchmark claim.
+ */
+export const OPERATION_CAP = 512;
 
 /** Refuse to load a journal larger than this (a runaway file is corruption). */
 const MAX_JOURNAL_BYTES = 8 * 1024 * 1024;

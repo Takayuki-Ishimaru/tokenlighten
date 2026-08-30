@@ -10,6 +10,12 @@ export type { ParsedSentinel } from "./sentinel.js";
 export { renderBlock, renderCanonicalBlock, renderMediumBlock, renderCompactBlock, blockSha256, INSTRUCTIONS_VERSION } from "./render.js";
 export type { GuideProfile, Locale } from "./render.js";
 
+// B-F6(c): the canonical guide-profile allowlist, so a consumer validating a
+// caller-supplied profile string (e.g. packages/cli's `tl workspace setup
+// --guide-profile`) can reference this instead of re-declaring the same
+// three literals.
+export { VALID_PROFILES } from "./cliArgs.js";
+
 export { rewrite, hasManualGuidance, removeBlock } from "./inject.js";
 export type { DriftMode, RewriteAction, RewriteResult } from "./inject.js";
 

@@ -3,16 +3,18 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (medium)
 
-TokenLighten (TL) returns exact slices + edit handles cheaply. Start EVERY file task with TL before Read/Grep/cat or an Explore-style subagent: use `read_file mode=task_pack query="<verbatim request>"` with known `paths`; fan out natively only after a non-complete scope or verified absence. Pass `cwd` on EVERY call; in a shared workspace pass a fixed `lane`. `taskProfile`: `answer` is read-only and `generic` is change; omit it when unknown. Requirements from earlier in a `taskEpoch` persist until it changes; a re-pack may honestly return incomplete.
+TokenLighten (TL) returns exact slices + edit handles cheaply. Start EVERY file task with TL before Read/Grep/cat or an Explore-style subagent: use `read_file {query:"<verbatim request>",task:{epoch:"new"}}` with known `targets`; fan out natively only after a non-complete scope or verified absence. Pass `cwd` on EVERY call; in a shared workspace pass a fixed `lane`. `task.profile`: `answer` is read-only and `generic` is change; omit it when unknown. Requirements from earlier in a `task.epoch` persist until it changes; a re-pack may honestly return incomplete.
+
+Legacy compatibility (v0.13.x only, removed in v0.14): `mode=task_pack`, bare `paths`/`handles`/`maxBytes`/`maxTokens`, and `taskProfile`/`taskEpoch` still work via the compatibility normalizer — never emit them in a new call; every `next` the server returns is already canonical.
 
 Every reply is `{v:1,kind,...}`; branch on `kind`, not field presence. An unrecognized `kind` is SAFE-STOP: report it, issue no edit, never infer from fields.
 
-- Act on `decision.kind` in `read.task_pack`: `act.answer`/`act.edit` closes discovery; use served evidence now. Batch independent changes in exactly one `edit_file` call via `edits[]` (each own `path`/`handle`). `discover` means execute its `next`; `await_input` means execute a carried `next`, otherwise re-pack once with candidate `paths`; `done` stops.
+- Act on `decision.kind` in `read.task_pack`: `act.answer`/`act.edit` closes discovery; use served evidence now. Batch independent changes in exactly one `edit_file` call via `edits[]` (each own `path`/`handle`). `discover` means execute its `next`; `await_input` means execute a carried `next`, otherwise re-pack once with candidate `targets`; `done` stops.
 - A `refusal` gives the only valid transition in `retry`: `call` fixes the named field, `new-task` re-packs, and `none` means the call shape is closed. Every advertised `next` is executable verbatim and carries the whole query; never invent a continuation.
-- Zoom the same handle when bytes are partial: request its `remaining` ranges (bounded). Follow `next` after a capped response; don't retry `full` or re-pack with a new query. Any read takes `maxBytes`/`maxTokens` to cap a response.
-- Search uses `action=find query=<one identifier>`; several identifiers go in one `queries=[…]` call, never serial. Use `references` for call sites and `tree` for inventory.
+- Zoom the same handle when bytes are partial: request its `remaining` ranges (bounded). Follow `next` after a capped response; don't retry `full` or re-pack with a new query. Any read takes `budget.bytes`/`budget.tokens` to cap a response.
+- Search uses `action:"find",queries:["<one identifier>"]`; several identifiers go in one `queries=[…]` call, never serial. Use `references` for call sites and `tree` for inventory.
 - Name path+identifier+change plainly for a fast known single-value edit. Otherwise edit through a TL handle with `allowPathFallback:false`; new files use `create:true` and an explicit `cwd`. The create response's `sha`, `bytes`, and `total_lines` prove it; skip the read-back. `operation_id` makes retries safe, flagging replays.
-- After edits, run the returned verification kit before the first compile/test command. Its `code` is served evidence; `omitted` means read named handles in one batch via `next`; `verification.status:"not-applicable"` means no test/mock references the edit. Finish with tests or `git diff`, and stop once checks pass.
+- After edits, run the returned verification kit before the first compile/test command. Its `code` is served evidence; `omitted` means read named `targets` in one batch via `next`; `verification.status:"not-applicable"` means no test/mock references the edit. Finish with tests or `git diff`, and stop once checks pass.
 
 Everything else — wiring, archives, credentials, and deep per-kind fields — arrives on demand in the response that needs it.
 <!-- tokenlighten:mcp-instructions:end -->

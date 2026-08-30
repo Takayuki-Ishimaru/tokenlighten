@@ -65,7 +65,7 @@ function mcpPidPath(): string {
  * @tokenlighten/mcp-server that resolves via node_modules — packaged vsix
  * or a normal npm install) never pays for or risks that lookup.
  */
-function resolveMcpBin(): string {
+export function resolveMcpBin(): string {
   try {
     const require = createRequire(import.meta.url);
     return join(dirname(require.resolve("@tokenlighten/mcp-server")), "bin.js");

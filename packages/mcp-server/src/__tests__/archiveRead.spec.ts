@@ -255,7 +255,10 @@ describe("read-only archive containers", () => {
       kind: "discover",
       next: {
         tool: "read_file",
-        arguments: { mode: "archive", archive: { path: "sample.zip" } },
+        arguments: {
+          targets: [{ archive: { path: "sample.zip" }, path: "sample.zip" }],
+          content: "auto",
+        },
       },
     });
   }, 30_000);
