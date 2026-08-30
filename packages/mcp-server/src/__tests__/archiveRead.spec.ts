@@ -417,3 +417,159 @@ describe("read-only archive containers", () => {
     }
   }, 30_000);
 });
+
+// F5/F4/F2 (opus pre-release review, 2026-08-30). Shares this file's
+// module-level `workspace` (with `sample.zip`/`src/policy.ts` already set up
+// by the outer beforeAll above) — two small plain files are added below for
+// the plain-target shapes these tests need.
+describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the existing all-handle+select refusal pin", () => {
+  beforeAll(() => {
+    fs.writeFileSync(path.join(workspace, "plain-one.ts"), "export const one = 1;\n", "utf8");
+    fs.writeFileSync(path.join(workspace, "plain-two.ts"), "export const two = 2;\n", "utf8");
+  });
+
+  describe("F5: scope.archive silently hijacked targets/paths before this fix (selectorFromArgs/resolvedPath reads the legacy top-level `archive` field unconditionally) — now a fail-closed refusal", () => {
+    it("shape e: two plain targets + scope.archive (no query) refuses instead of silently serving only the archive member", async () => {
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        targets: [{ path: "plain-one.ts" }, { path: "plain-two.ts" }],
+        scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
+      });
+      expect(result["kind"], JSON.stringify(result)).toBe("refusal");
+      expect(result["code"]).toBe("invalid-input");
+      expect(result["field"]).toBe("targets");
+    });
+
+    it("shape l: two plain targets + scope.archive + query refuses the same way", async () => {
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        query: "one",
+        targets: [{ path: "plain-one.ts" }, { path: "plain-two.ts" }],
+        scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
+      });
+      expect(result["kind"], JSON.stringify(result)).toBe("refusal");
+      expect(result["code"]).toBe("invalid-input");
+      expect(result["field"]).toBe("targets");
+    });
+
+    it("shape m: ONE plain target + scope.archive also refuses — the hijack does not need a second target to be ambiguous", async () => {
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        targets: [{ path: "plain-one.ts" }],
+        scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
+      });
+      expect(result["kind"], JSON.stringify(result)).toBe("refusal");
+      expect(result["code"]).toBe("invalid-input");
+      expect(result["field"]).toBe("targets");
+    });
+  });
+
+  describe("F5 invariants: shapes the gate extension must NOT catch", () => {
+    it("query + scope.archive with NO targets (the task_pack carrier AGENTS.md documents) still serves normally", async () => {
+      // Zero targets never reaches the targets.length>0-gated "query present
+      // => mode=task_pack" promotion inside normalizeCanonicalRequest, so —
+      // exactly as before this fix, since scopeArchiveWithBareTarget's own
+      // `targets.length >= 1` check makes this shape entirely untouched by
+      // it — mode falls through auto->archive (the manifest) unless the
+      // caller spells `mode:"task_pack"` explicitly, same as the existing
+      // "closes a ZIP task in one exact read_file call shape" test above
+      // (which uses the equivalent legacy `archive:{...}` field). This test
+      // reproduces that exact AGENTS.md-documented pattern through the
+      // CANONICAL `scope.archive` spelling instead.
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        mode: "task_pack",
+        query: "ZIP_BOMB_MAX_UNCOMPRESSED_BYTES",
+        task: { epoch: "new", profile: "answer" },
+        scope: { archive: { path: "sample.zip" } },
+      });
+      expect(result["kind"], JSON.stringify(result)).not.toBe("refusal");
+      expect(result["kind"], JSON.stringify(result)).toBe("read.task_pack");
+    });
+
+    it("query + scope.archive with NO targets and no explicit mode still serves (not a refusal) — pre-existing archive-manifest fallback, unaffected either way by this fix", async () => {
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        query: "ZIP_BOMB_MAX_UNCOMPRESSED_BYTES",
+        scope: { archive: { path: "sample.zip" } },
+      });
+      expect(result["kind"], JSON.stringify(result)).not.toBe("refusal");
+    });
+
+    it("a single target that carries its OWN archive selector still serves normally (no call-level scope.archive involved)", async () => {
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        targets: [{ archive: { path: "sample.zip", member: "src/policy.ts" } }],
+      });
+      expect(result["kind"], JSON.stringify(result)).not.toBe("refusal");
+    });
+  });
+
+  describe("F4: the refusal's recovery `next` carries query/task through, not just select/content", () => {
+    it("shape l's refusal next carries the original query", async () => {
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        query: "SOME_QUERY_TEXT",
+        targets: [{ path: "plain-one.ts" }, { path: "plain-two.ts" }],
+        scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
+      });
+      expect(result["kind"], JSON.stringify(result)).toBe("refusal");
+      const next = result["next"] as Record<string, unknown>;
+      const nextArgs = next["arguments"] as Record<string, unknown>;
+      expect(nextArgs["query"], JSON.stringify(result)).toBe("SOME_QUERY_TEXT");
+      expect((nextArgs["targets"] as Array<Record<string, unknown>>)[0]).toMatchObject({ path: "plain-one.ts" });
+    });
+
+    it("a refusal's next carries task (epoch/profile) through when present, and omits it entirely when absent", async () => {
+      const withTask = await invoke("read_file", {
+        cwd: workspace,
+        targets: [{ path: "plain-one.ts" }],
+        scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
+        task: { epoch: "new", profile: "answer" },
+      });
+      expect(withTask["kind"], JSON.stringify(withTask)).toBe("refusal");
+      const nextArgsWithTask = (withTask["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
+      expect(nextArgsWithTask["task"], JSON.stringify(withTask)).toMatchObject({ epoch: "new", profile: "answer" });
+
+      const withoutTask = await invoke("read_file", {
+        cwd: workspace,
+        targets: [{ path: "plain-one.ts" }],
+        scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
+      });
+      expect(withoutTask["kind"], JSON.stringify(withoutTask)).toBe("refusal");
+      const nextArgsWithoutTask = (withoutTask["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
+      expect(nextArgsWithoutTask).not.toHaveProperty("task");
+    });
+  });
+
+  describe("F2: all-handle batch + artifact select is an intentional refusal (v0.13.1 pin), not the pre-fix silent-ignore", () => {
+    it("targets:[{handle},{handle}] + select.pages refuses (select is never silently ignored in favor of the handle batch)", async () => {
+      const mintedA = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-one.ts", range: "1-1" });
+      const handleA = String((mintedA["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
+      const mintedB = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-two.ts", range: "1-1" });
+      const handleB = String((mintedB["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
+
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        targets: [{ handle: handleA }, { handle: handleB }],
+        select: { pages: ["1"] },
+      });
+      expect(result["kind"], JSON.stringify(result)).toBe("refusal");
+      expect(result["code"]).toBe("invalid-input");
+      expect(result["field"]).toBe("targets");
+    });
+
+    it("the SAME two handles with NO select still serve as an ordinary read.batch (contrast — proves the refusal above is select-triggered, not handle-batch-triggered)", async () => {
+      const mintedA = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-one.ts", range: "1-1" });
+      const handleA = String((mintedA["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
+      const mintedB = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-two.ts", range: "1-1" });
+      const handleB = String((mintedB["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
+
+      const result = await invoke("read_file", {
+        cwd: workspace,
+        targets: [{ handle: handleA }, { handle: handleB }],
+      });
+      expect(result["kind"], JSON.stringify(result)).toBe("read.batch");
+    });
+  });
+});

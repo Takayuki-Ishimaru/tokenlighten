@@ -62,12 +62,9 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
-## Known limitations (0.13.0)
+## Known limitations (0.13.1)
 
 - The pathless task-pack locator's primary index covers files through 1 MiB. Exact identifier routing adds a wide scan for the 1–8 MiB band; larger files remain readable by explicit path and range.
 - On very large repositories, the on-disk source-index cache is capped at 32 MiB. A larger index is rebuilt for each new server process, so the first call can take 10–25 seconds.
 - In `edit.applied`, `core.counts` counts edited files, not individual edit items.
-- Some multi-target range-read combinations can re-serve earlier ranges or be refused. Use separate single-target range reads.
-- A single batch that mixes file creation with edits to existing files can be refused. Split creation from existing-file edits.
-- Concurrent write lanes in one workspace can expose stale frontier state in a known edge case. Avoid concurrent write lanes until it is corrected.
 - `TL_INDEX_CONSISTENCY_SCAN` and `TL_PROOF_COMPLETION` are enabled by default as correctness safeguards. Other experimental flags, including `TL_SCHEMA_DEFS`, remain off by default.

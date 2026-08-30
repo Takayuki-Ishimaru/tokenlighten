@@ -4,7 +4,7 @@ TokenLighten runs locally and provides an MCP server for coding agents.
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.13.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.0/tokenlighten-vscode-extension-0.13.0.vsix)** from the v0.13.0 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.13.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.1/tokenlighten-vscode-extension-0.13.1.vsix)** from the v0.13.1 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 ## Build from source
 
@@ -74,4 +74,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - Learn the available operations in [MCP tools](mcp-tools.md).
 - If you use VS Code, see [VS Code extension](vscode-extension.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
-- Read the [v0.13.0 release notes](github-release-v0.13.0.md) for the current compatibility, known-limitations, and benchmark disclosure.
+- Read the [v0.13.1 release notes](github-release-v0.13.1.md) for the current compatibility, known limitations, and benchmark disclosure.

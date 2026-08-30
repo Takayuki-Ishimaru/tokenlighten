@@ -30,6 +30,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
+import { validateCreateTarget, publishNewFile } from "./createFileCore.js";
+import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/textDecode.js";
 import {
   applySingleEdit,
@@ -230,6 +232,21 @@ export interface EditEntry {
    * check is a whole-file comparison.
    */
   anchorShaRange?: string;
+  /**
+   * F-V13-2 (2026-08-30): this item CREATES a new file at `path` instead of
+   * editing an existing one — `content` (already declared above) is the
+   * body to write, verbatim, no search/replace/range involved. Mutually
+   * exclusive with every other shape this interface carries: a `create`
+   * item must be the ONLY entry for its `path` in the batch (server.ts
+   * refuses a same-path create+edit mix before this module ever sees it —
+   * see the "batch create v1 scope" comment on its edits[] pre-pass).
+   * Validated and published through the SAME no-replace primitives the
+   * single edit_file `create:true` path uses (tools/createFileCore.ts), so
+   * the two paths cannot drift apart on the CWE-59/CWE-367 no-replace
+   * guarantee or the lstat-based "something already occupies this name"
+   * check.
+   */
+  create?: boolean;
 }
 
 export interface ApplyEditsMultiInput {
@@ -238,7 +255,23 @@ export interface ApplyEditsMultiInput {
 
 export interface EditFileResult {
   path: string;
-  lines: string;
+  /**
+   * Edited SPAN, e.g. "12-15". Omitted for a create entry (`total_lines`
+   * below instead) — a create has no "edited span", the whole file is new.
+   * This is the SAME asymmetry the single edit_file `create:true` path's own
+   * response already carries (server.ts's create dispatch reports
+   * `total_lines`, never `lines`), read by both server.ts's
+   * attachAppliedReadback (per-entry `typeof f.lines === "string"` decides
+   * whether to echo a code slice — a create's body was already sent by the
+   * caller in THIS call, so echoing it back would double the bytes for no
+   * reason) and protocol/editFamily.ts's editedRows/appliedEntries, with NO
+   * changes needed in either: they already special-case "lines absent,
+   * total_lines a number" for the single-create response shape, and read
+   * per-FILE from this same array either way.
+   */
+  lines?: string;
+  /** Create entry's whole-file line count — see `lines`'s doc comment. */
+  total_lines?: number;
   delta: string;
   /**
    * DESIGN-v0.8 B3.1: a per-file handle (kind:"file", POST-edit sha) minted
@@ -263,12 +296,30 @@ export interface EditFileResult {
  */
 export interface RollbackFileState {
   path: string;
-  state: "rolled-back" | "restore-failed";
-  /** PRE-edit bytes the restore was trying to put back. `restore-failed` only. */
+  /**
+   * F-V13-2 (2026-08-30): `"removed"` / `"remove-failed"` are the DELETION
+   * counterparts of `"rolled-back"` / `"restore-failed"`, for a batch item
+   * that CREATED a new file — rolling that back means the file must not
+   * exist any more, not that it gets "restored" to some prior content (it
+   * had none). Using `"rolled-back"` with a fabricated empty-string
+   * `expected_sha` would have been a lie in both directions: the file is
+   * still ON DISK (not reverted) and there is no meaningful "expected
+   * content" to name. See `expected_sha`'s doc comment below.
+   */
+  state: "rolled-back" | "restore-failed" | "removed" | "remove-failed";
+  /**
+   * PRE-edit bytes the restore was trying to put back. `restore-failed`
+   * only. Deliberately OMITTED on `"removed"`/`"remove-failed"`: the
+   * "expected" state there is ABSENCE, which has no hash — the field's
+   * absence on those two states IS the "should not exist" signal, the same
+   * omit-rather-than-fabricate convention this whole union already follows
+   * (`stuck_sha` omitted when unreadable, `detail` capped rather than
+   * guessed).
+   */
   expected_sha?: string;
   /** What is actually on disk NOW; omitted when the file could not be read. */
   stuck_sha?: string;
-  /** Why the restore failed (capped, mirrors this file's 160-char preview cap). */
+  /** Why the restore/remove failed (capped, mirrors this file's 160-char preview cap). */
   detail?: string;
 }
 
@@ -301,21 +352,74 @@ export function restoreFailedLedgerEntry(
 }
 
 /**
+ * F-V13-2 (2026-08-30): build one `remove-failed` ledger row — the deletion
+ * counterpart of `restoreFailedLedgerEntry` above, for a batch item that
+ * CREATED a file whose rollback (unlink) itself failed. No `originalContent`
+ * parameter: unlike an edit's rollback, there is no PRE-edit content to name
+ * as `expected_sha` — the expected state is absence, which `RollbackFileState
+ * .expected_sha`'s doc comment says is spelled by omitting the field, not by
+ * hashing an empty string.
+ */
+export function removeFailedLedgerEntry(
+  rel: string,
+  abs: string,
+  err: unknown,
+): RollbackFileState {
+  let stuckSha: string | undefined;
+  try {
+    stuckSha = shortSha(shaOfText(fs.readFileSync(abs, "utf8")));
+  } catch {
+    stuckSha = undefined;
+  }
+  return {
+    path: rel,
+    state: "remove-failed",
+    ...(stuckSha !== undefined ? { stuck_sha: stuckSha } : {}),
+    detail: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+  };
+}
+
+/**
  * Short, concrete repair steps for a `rollback-failed` response. Deliberately
  * NOT phrased as retry guidance (that is what `hint` means elsewhere in this
  * union): after a failed rollback the batch must not be re-run until the
- * named files are back at their `expected_sha`.
+ * named files are back at their `expected_sha` (restore) or gone (remove).
+ *
+ * F-V13-2 (2026-08-30): the ORIGINAL single paragraph below is preserved
+ * BYTE-IDENTICAL as `restoreHint` for a ledger with no `remove-failed` rows
+ * (every ledger this function saw before this change) — no existing caller or
+ * test observes a different string for that case. A ledger that ALSO (or
+ * only) carries `remove-failed` rows — a created file this batch could not
+ * clean up during rollback — gets an ADDITIONAL sentence, never a rewrite of
+ * the restore guidance.
  */
 export function rollbackRecoveryHint(ledger: RollbackFileState[]): string {
   const stuck = ledger.filter((row) => row.state === "restore-failed").map((row) => row.path);
-  const shown = stuck.slice(0, 4);
-  const more = stuck.length - shown.length;
-  return (
-    `inspect ${shown.join(", ")}${more > 0 ? ` (+${more} more)` : ""}: each still holds POST-edit bytes ` +
-    `(stuck_sha) instead of expected_sha. This batch wrote no checkpoint (checkpoints are taken only ` +
-    `after a fully successful batch) - restore each file from version control or the previous ` +
-    `edit_file checkpoint, confirm it hashes to expected_sha, then re-run the batch.`
-  );
+  const stuckRemove = ledger.filter((row) => row.state === "remove-failed").map((row) => row.path);
+
+  const restoreHint = stuck.length === 0 ? undefined : (() => {
+    const shown = stuck.slice(0, 4);
+    const more = stuck.length - shown.length;
+    return (
+      `inspect ${shown.join(", ")}${more > 0 ? ` (+${more} more)` : ""}: each still holds POST-edit bytes ` +
+      `(stuck_sha) instead of expected_sha. This batch wrote no checkpoint (checkpoints are taken only ` +
+      `after a fully successful batch) - restore each file from version control or the previous ` +
+      `edit_file checkpoint, confirm it hashes to expected_sha, then re-run the batch.`
+    );
+  })();
+
+  const removeHint = stuckRemove.length === 0 ? undefined : (() => {
+    const shown = stuckRemove.slice(0, 4);
+    const more = stuckRemove.length - shown.length;
+    const plural = stuckRemove.length !== 1;
+    return (
+      `this batch also created ${shown.join(", ")}${more > 0 ? ` (+${more} more)` : ""} but could not remove ` +
+      `${plural ? "them" : "it"} during rollback — delete ${plural ? "them" : "it"} manually, confirm ` +
+      `${plural ? "they no longer exist" : "it no longer exists"}, then re-run the batch.`
+    );
+  })();
+
+  return [restoreHint, removeHint].filter((s): s is string => s !== undefined).join(" ");
 }
 
 export type ApplyEditsMultiResult =
@@ -450,6 +554,10 @@ export async function applyEditsMulti(
     mode: number | undefined;
     lines: string;
     delta: string;
+    /** F-V13-2: this item CREATES `rel` rather than editing it. */
+    isCreate?: boolean;
+    /** F-V13-2: whole-file line count, create entries only — see EditFileResult.lines. */
+    totalLines?: number;
   }
   const prepared: PreparedEdit[] = [];
   /** Rels where at least one edit needed literal-backslash-escape recovery. */
@@ -781,6 +889,56 @@ export async function applyEditsMulti(
       return { ok: false, error: `Refusing to write to secret/credential file: ${rel}`, code: "secret-file", path: rel };
     }
 
+    // F-V13-2 (2026-08-30): a create:true item never targets an EXISTING
+    // file, so none of the "read what's currently there" machinery below
+    // (fs.statSync, the anchor-edit CAS, range clustering, applyEditStep)
+    // applies to it — diverted to its own branch that validates + prepares
+    // the write the SAME way tools/createFile.ts's single-item create path
+    // does (tools/createFileCore.ts, shared so the two cannot drift).
+    // server.ts's edits[] pre-pass already refuses a create mixed with
+    // another item on this SAME path (v1 scope — see its own "batch create
+    // v1 scope" comment), so `group.length` here should already be 1; still
+    // defended here too since this function is also exercised directly by
+    // applyEditsMulti.spec.ts, bypassing that pre-pass.
+    const hasCreate = group.some((e) => e.create === true);
+    if (hasCreate) {
+      if (group.length > 1) {
+        return {
+          ok: false,
+          error: `cannot combine create with another edits[] item on the same path (${rel}) — issue the create as the only edits[] entry for this path, or edit it in a follow-up batch`,
+          code: "invalid-input",
+          reason: "batch-create-conflict",
+          path: rel,
+        };
+      }
+      const createEntry = group[0]!;
+      const validation = validateCreateTarget(rel, workspace);
+      if (!validation.ok) {
+        return {
+          ok: false,
+          error: validation.error === "file_exists"
+            ? `File already exists: ${rel} — edits[] create items never overwrite an existing file; edit it instead`
+            : (validation.message ?? `Cannot create ${rel}: ${validation.error}`),
+          code: validation.error === "file_exists" ? "file-exists" : "invalid-input",
+          path: rel,
+        };
+      }
+      const createBody = createEntry.content ?? "";
+      const bodyLines = countLogicalLinesEntry(createBody);
+      prepared.push({
+        rel,
+        abs: validation.absPath,
+        newContent: createBody,
+        existingContent: "",
+        mode: undefined,
+        lines: formatLines(1, Math.max(1, bodyLines)),
+        delta: formatDelta(bodyLines, 0),
+        isCreate: true,
+        totalLines: bodyLines,
+      });
+      continue;
+    }
+
     const abs = path.resolve(workspace, rel);
     if (!abs.startsWith(resolvedWorkspace + path.sep) && abs !== resolvedWorkspace) {
       return { ok: false, error: "path escapes workspace root", code: "path-escape", path: rel };
@@ -974,16 +1132,43 @@ export async function applyEditsMulti(
   const writtenFiles: string[] = [];
   // `rel` rides along so a rollback failure can name the file the way the
   // caller addressed it, without re-deriving it from the absolute path.
-  const originalContents = new Map<string, { content: string; mode: number | undefined; rel: string }>();
+  // `wasCreate` (F-V13-2): this path had NO pre-batch content — its rollback
+  // is a delete, not a restore. `content`/`mode` are unused placeholders on a
+  // create row (there is nothing to restore them TO).
+  const originalContents = new Map<string, { content: string; mode: number | undefined; rel: string; wasCreate: boolean }>();
 
   for (const item of prepared) {
-    originalContents.set(item.abs, { content: item.existingContent, mode: item.mode, rel: item.rel });
+    originalContents.set(item.abs, { content: item.existingContent, mode: item.mode, rel: item.rel, wasCreate: item.isCreate === true });
 
     try {
-      // Mode preservation: see writeExistingFileAtomic's doc comment
-      // (2026-08-07 chmod-reset incident) — covers both this primary write
-      // and the mid-batch rollback restore below.
-      writeExistingFileAtomic(item.abs, item.newContent, item.mode, { root: workspace, relPath: item.rel });
+      if (item.isCreate) {
+        // F-V13-2: publish through the SAME no-replace primitive
+        // tools/createFile.ts's single-item create path uses (never
+        // writeExistingFileAtomic, whose rename-based publish is an
+        // OVERWRITE primitive — wrong contract for "this name must be new").
+        // A race that let something occupy `item.abs` between Phase 1's
+        // validateCreateTarget and this call surfaces as `publish.ok===false`
+        // here — thrown so it joins the SAME catch-driven rollback flow as
+        // every other Phase 2 write failure below.
+        const publish = publishNewFile(item.abs, item.newContent);
+        if (!publish.ok) {
+          throw new Error(
+            publish.error === "file_exists"
+              ? `File already exists: ${item.rel}`
+              : (publish.message ?? `Cannot create file: ${item.rel}`),
+          );
+        }
+        // Best-effort, mirrors createFile.ts: a brand-new path can make the
+        // workspace's memoized manifest stale (it certifies "nothing
+        // changed" via a whole-directory fingerprint this new file would be
+        // absent from) — never fails a write that already landed on disk.
+        try { invalidateCachedWorkspaceFiles(workspace, [item.rel]); } catch { /* best-effort */ }
+      } else {
+        // Mode preservation: see writeExistingFileAtomic's doc comment
+        // (2026-08-07 chmod-reset incident) — covers both this primary write
+        // and the mid-batch rollback restore below.
+        writeExistingFileAtomic(item.abs, item.newContent, item.mode, { root: workspace, relPath: item.rel });
+      }
       writtenFiles.push(item.rel);
     } catch (err) {
       // Write failed mid-batch — roll back the files already written.
@@ -1000,6 +1185,26 @@ export async function applyEditsMulti(
       let rollbackFailed = false;
       for (const [abs, orig] of originalContents.entries()) {
         if (abs === item.abs) continue;
+        if (orig.wasCreate) {
+          // F-V13-2: this path did not exist before the batch — "rolling
+          // back" a create means DELETING the file it wrote, never
+          // "restoring" it to an empty string (that would leave a 0-byte
+          // ghost file the caller never asked for and has no reason to
+          // expect). ENOENT on the unlink means it is already gone —
+          // idempotently a success, not a failure.
+          try {
+            fs.unlinkSync(abs);
+            rollback.push({ path: orig.rel, state: "removed" });
+          } catch (rmErr) {
+            if ((rmErr as NodeJS.ErrnoException).code === "ENOENT") {
+              rollback.push({ path: orig.rel, state: "removed" });
+            } else {
+              rollbackFailed = true;
+              rollback.push(removeFailedLedgerEntry(orig.rel, abs, rmErr));
+            }
+          }
+          continue;
+        }
         try {
           writeExistingFileAtomic(abs, orig.content, orig.mode, { root: workspace, relPath: orig.rel });
           rollback.push({ path: orig.rel, state: "rolled-back" });
@@ -1093,7 +1298,12 @@ export async function applyEditsMulti(
       });
       return {
         path: item.rel,
-        lines: item.lines,
+        // F-V13-2: a create entry reports `total_lines` (whole-file count)
+        // instead of `lines` (an edited SPAN) — see EditFileResult.lines's
+        // doc comment for why this is the SAME asymmetry the single-edit
+        // create path's response already carries, read for free by both
+        // server.ts's attachAppliedReadback and protocol/editFamily.ts.
+        ...(item.isCreate ? { total_lines: item.totalLines ?? 0 } : { lines: item.lines }),
         delta: item.delta,
         handle: hEntry.id,
       };
@@ -1102,7 +1312,12 @@ export async function applyEditsMulti(
     const written = new Set(writtenFiles);
     files = prepared
       .filter((item) => written.has(item.rel))
-      .map((item) => ({ path: item.rel, lines: item.lines, delta: item.delta, handle: "" }));
+      .map((item) => ({
+        path: item.rel,
+        ...(item.isCreate ? { total_lines: item.totalLines ?? 0 } : { lines: item.lines }),
+        delta: item.delta,
+        handle: "",
+      }));
   }
 
   return {

@@ -182,6 +182,7 @@ import {
   declareKind,
   finalizeProtocolResponse,
   noteCodecTraceWorkspace,
+  notePostReadyDiscovery,
   noteResolvedAction,
   noteResolvedMode,
   noteServedBytesSource,
@@ -6040,6 +6041,78 @@ function legacyPathTarget(target: Record<string, unknown>): string | Record<stri
 // that create-by-copy came from the advertised edits[] carrier.
 const CANONICAL_CREATE_COPY_INPUT = Symbol("tokenlighten.canonical-create-copy-input");
 
+// F-V13-1 Fix B (DESIGN-v0.13-plan.md:167, 2026-08-30 triage): per-target
+// range/symbol overrides for a multi-HANDLE read_file batch. A Symbol key for
+// the exact same reason as CANONICAL_CREATE_COPY_INPUT above — it must never
+// be reachable as an advertised/wire property (requestShape.ts's
+// findUnknownProperties walks `Object.keys`/`Object.entries` only, so a
+// Symbol-keyed property is structurally invisible to it and to a caller
+// forging a plain string `"handleOverrides"` key). Unlike
+// CANONICAL_CREATE_COPY_INPUT, this is NOT deleted inside normalizeWireArgs —
+// it has to survive all the way to the A7 handles=[] batch loop deep inside
+// dispatchTool's read_file case, and `args` is passed by reference (plus one
+// more object-spread in normalizeWireArgs, which — like the canonical
+// projection's own `{...input}` — copies own ENUMERABLE properties including
+// symbol keys) the whole way there.
+const HANDLE_OVERRIDES_INPUT = Symbol("tokenlighten.read-file-handle-overrides");
+
+// I-5 fix (v0.13.1 forensics, DESIGN-v0.13-plan.md §6 2026-08-30 entry;
+// bench/workflows/experiments/2026-08-30-v0131-forensics/{REPORT.md,terra/
+// report.md}): a multi-target read_file call that mixes an archive selector
+// (or a call-level artifact `select`) with another target cannot be
+// projected onto the legacy paths[]/mode dispatcher below without either an
+// order-dependent refusal or a SILENT PARTIAL SERVE. legacyPathTarget above
+// keeps only path/range/symbol/purpose, so an archive-carrying target riding
+// alongside a plain sibling loses its selector the moment it is mapped —
+// and depending on which sibling `first` (the mode-inference target) turns
+// out to be, the call either never resolves mode="archive"/"artifact" at
+// all (the archive/artifact target becomes a bare `{}` inside paths[],
+// silently served as nothing — the correctness defect) or resolves it while
+// paths[] still carries more than one entry, which the archive/artifact
+// dispatcher refuses "path is required" — order-dependent either way.
+// Spawned-stdio-confirmed for all three shapes (terra/i5-i6-spawned-
+// results.json): archive-first+plain -> invalid-input; plain+archive-second
+// -> read.batch serving ONLY the plain target with no error at all; two
+// paths+artifact select -> invalid-input.
+//
+// F5 extension (opus pre-release review, 2026-08-30): a DIFFERENT silent-drop
+// shape shares this exact gate. `mapCanonicalScope` copies `scope.archive`
+// onto the legacy top-level `args["archive"]` field regardless of `targets`,
+// and `selectorFromArgs(args)` (tools/archive.ts) reads that top-level field
+// UNCONDITIONALLY a few hundred lines below in the read_file dispatch
+// (`archiveSelector`), computing `resolvedPath` from it before `mode` is even
+// resolved — so a `targets:[...]` batch riding alongside `scope.archive`
+// never reaches the legacy `paths[]`/multi-target machinery at all: the
+// single archive-derived `resolvedPath` silently wins and every target is
+// dropped, with no error, regardless of target count or whether `query` also
+// rode along. Gated on `scope.archive` being present AND at least one target
+// lacking its own per-target `archive` (a target that DOES carry its own
+// `archive` is unambiguous and already handled above) — this also covers a
+// SINGLE plain target, unlike the multi-target-only condition above, because
+// the silent-drop mechanism here does not require a second target to bite.
+//
+// Same module-private Symbol pattern as HANDLE_OVERRIDES_INPUT immediately
+// above — unforgeable from the wire (findUnknownProperties walks
+// Object.keys/Object.entries only) and, like that constant, survives the
+// `{...input}` spread inside normalizeWireArgs all the way to dispatchTool's
+// read_file case. Read back and returned there BEFORE declareKind — the
+// exact F-V13-1 Fix B / B1 ordering constraint documented at this file's A7
+// handles=[] block (a refusal returned after declareKind is misclassified as
+// a successful, empty read.batch).
+//
+// Reuses the existing `invalid-input` RefusalCode (A.7.1) rather than
+// minting a new one: the immediately-adjacent F-V13-1 Fix B / B1 refusals a
+// few hundred lines below this one refuse the SAME class of problem — "this
+// multi-target batch shape cannot be dispatched" — with `code:"invalid-
+// input"` plus a descriptive `field`/`error`, never a dedicated code. A new
+// code would be free to mint (refusalCodeParity.spec.ts's own doc: additive
+// minting is a floor, not a pin) but would still need a matching
+// `RequestShapeCode` entry in packages/types/src/mcp/protocol.ts for
+// refusalCodeOf to recognize it at all — extra surface with no behavioral
+// upside here, since `code`+`field`+`detail`+`next` already fully describe
+// the recovery and no caller-side branch depends on a more specific token.
+const MULTI_TARGET_SELECTOR_REFUSAL_INPUT = Symbol("tokenlighten.read-file-multi-target-selector-refusal");
+
 // ---------------------------------------------------------------------------
 // FX-2 (v0.13 wave-3 review fix): string-to-structure leniency.
 //
@@ -6219,6 +6292,67 @@ export function normalizeCanonicalRequest(canonical: string, input: Record<strin
       .map(asCanonicalObject)
       .filter((target): target is Record<string, unknown> => target !== undefined);
     const selectsArtifact = mapCanonicalSelect(select, args);
+
+    // I-5 fix: fail closed, before ANY legacy projection below, on a
+    // multi-target call that mixes an archive selector or a call-level
+    // artifact `select` with another target — see
+    // MULTI_TARGET_SELECTOR_REFUSAL_INPUT's own doc comment for the exact
+    // silent-drop/order-dependence this replaces. `targets` here is still
+    // the RAW per-target canonical objects (path/handle/archive/...), pre-
+    // legacyPathTarget, so `next` below can re-issue the caller's own first
+    // target byte-for-byte.
+    const targetsMixArchiveOrArtifactSelect = targets.length > 1
+      && (targets.some((target) => target["archive"] !== undefined) || selectsArtifact);
+    // F5 extension (opus pre-release review, 2026-08-30): see
+    // MULTI_TARGET_SELECTOR_REFUSAL_INPUT's own doc comment for the
+    // DIFFERENT silent-drop mechanism this closes (selectorFromArgs/
+    // resolvedPath hijacking the whole call from scope.archive, independent
+    // of legacyPathTarget). Deliberately allows targets.length === 1 — a
+    // lone plain target riding alongside scope.archive is dropped by that
+    // SAME mechanism, so it does not need a second target to be ambiguous.
+    // A target that already carries its own `archive` is unaffected: the
+    // `.some(... === undefined)` check is false when EVERY target is
+    // self-sufficient, so a redundant scope.archive alongside only
+    // self-sufficient targets is not itself grounds for refusal here.
+    const scopeArchiveWithBareTarget = scopeValue?.["archive"] !== undefined
+      && targets.length >= 1
+      && targets.some((target) => target["archive"] === undefined);
+    if (targetsMixArchiveOrArtifactSelect || scopeArchiveWithBareTarget) {
+      const firstTarget = targets[0]!;
+      const selectObject = asCanonicalObject(select);
+      // F4 fix (same review): the recovery `next` used to drop the caller's
+      // own query/qref and task (epoch/handle/profile/challenge/
+      // force_serve/expected_state_version) — re-issuing only the first
+      // target lost whatever task_pack discovery or re-pack context the
+      // original call carried, forcing a caller to reconstruct it from
+      // scratch. `task` mirrors `select`'s existing asCanonicalObject
+      // convention; `query`/`qref` are read straight off `args`, which
+      // nothing above this point mutates. A key absent on the original call
+      // is never fabricated here.
+      const taskObject = asCanonicalObject(task);
+      Object.defineProperty(args, MULTI_TARGET_SELECTOR_REFUSAL_INPUT, {
+        value: {
+          ok: false,
+          code: "invalid-input",
+          field: "targets",
+          error: scopeArchiveWithBareTarget && !targetsMixArchiveOrArtifactSelect
+            ? "scope.archive cannot be combined with a target that has no archive selector of its own; re-issue one call per target (next re-issues the first)"
+            : "multiple targets cannot mix an archive/artifact selector with another target in one call; re-issue one call per target (next re-issues the first)",
+          next: canonicalToolCall("read_file", {
+            cwd: args["cwd"],
+            targets: [firstTarget],
+            ...(args["query"] !== undefined ? { query: args["query"] } : {}),
+            ...(args["qref"] !== undefined ? { qref: args["qref"] } : {}),
+            ...(selectObject !== undefined ? { select: selectObject } : {}),
+            ...(args["content"] !== undefined ? { content: args["content"] } : {}),
+            ...(taskObject !== undefined ? { task: taskObject } : {}),
+          }),
+        },
+        enumerable: true,
+        configurable: true,
+      });
+    }
+
     if (targets.length > 0) {
       if (args["query"] !== undefined || args["qref"] !== undefined) {
         args["paths"] = targets.map(legacyPathTarget);
@@ -6234,12 +6368,58 @@ export function normalizeCanonicalRequest(canonical: string, input: Record<strin
         }
         if (targets.length > 1) {
           const handles = targets.map((target) => target["handle"]);
-          if (handles.every((handle): handle is string => typeof handle === "string")) args["handles"] = handles;
+          if (handles.every((handle): handle is string => typeof handle === "string")) {
+            args["handles"] = handles;
+            // F-V13-1 Fix B: the A7 handles=[] batch loop used to resolve
+            // every item from the handle's own STORED range/symbol only, so
+            // a caller asking for two different windows of the same file via
+            // targets:[{handle,range:"1-28"},{handle,range:"144-401"}] had
+            // both requested ranges silently discarded in favor of whatever
+            // the handle(s) were minted with (2026-08-29 forensics: two
+            // already-served handle+range targets returned the SAME stale
+            // stored range twice — served-content misdelivery, not a
+            // refusal). Only synthesized when at least one target actually
+            // carries an override, so an ordinary handles-only continuation
+            // (ranges[] `remaining` chains, verification-kit reads, ...)
+            // projects byte-identically to before this fix.
+            if (targets.some((t) => t["range"] !== undefined || t["ranges"] !== undefined || t["symbol"] !== undefined)) {
+              const overrides = targets.map((t) => {
+                const ov: Record<string, unknown> = {};
+                if (t["range"] !== undefined) ov["range"] = t["range"];
+                // `ranges` (plural, multi-window) is carried through so the
+                // A7 loop can refuse that one target explicitly rather than
+                // silently falling back to the stored range — see the A7
+                // handleOverrides read site for why this is not treated the
+                // same as a singular `range` override.
+                if (t["ranges"] !== undefined) ov["ranges"] = t["ranges"];
+                if (t["symbol"] !== undefined) ov["symbol"] = t["symbol"];
+                return ov;
+              });
+              Object.defineProperty(args, HANDLE_OVERRIDES_INPUT, { value: overrides, enumerable: true, configurable: true });
+            }
+          }
           else args["paths"] = targets.map(legacyPathTarget);
         }
         if (first["archive"] !== undefined) args["mode"] = "archive";
         else if (selectsArtifact) args["mode"] = "artifact";
-        else if (first["ranges"] !== undefined || first["range"] !== undefined) args["mode"] = "slice";
+        // F-V13-1 Fix A (DESIGN-v0.13-plan.md:167): this promotion is only
+        // unambiguous for a SINGLE target. Before this gate, a multi-target
+        // read_file call whose FIRST entry (or any entry, via `first`) merely
+        // happened to carry a range forced the WHOLE call to mode="slice" —
+        // and normalizeWireArgs's own mode=slice guard refuses outright the
+        // moment more than one path rides along ("mode=slice accepts one
+        // path; multiple paths are discovery scope"), so a caller who sent an
+        // ordinary canonical `targets:[{path},{path,range}]` discovery/serve
+        // request was hit with a legacy-dialect refusal it never asked for.
+        // Leaving `mode` unset for targets.length > 1 lets the request fall
+        // through to the existing mode-unspecified task_pack promotion gate
+        // below (`modeUnspecifiedOrAuto` / `pathlessExploratoryPaths`),
+        // which already handles a paths[] batch correctly — including
+        // honoring each entry's own explicit range as a zoom window
+        // (buildSeededTaskPack's `explicitSeedStart`). The all-handle branch
+        // above is unaffected: A7's handles=[] batch dispatch fires before
+        // any mode branch regardless of what `mode` resolves to here.
+        else if (targets.length === 1 && (first["ranges"] !== undefined || first["range"] !== undefined)) args["mode"] = "slice";
         else if (first["symbol"] !== undefined) args["mode"] = "symbol";
         else if (args["content"] === "full") args["mode"] = "full";
         else if (args["content"] === "outline") args["mode"] = "skeleton";
@@ -6361,13 +6541,34 @@ function normalizeWireArgs(
       return { refusal: { ok: false, code: "invalid-input", field: "paths", error: "paths must be an array (or one path string)", next: "read_file mode=task_pack paths=[\"path/to/file\"]" } };
     }
     if (args["mode"] === "slice" && Array.isArray(args["paths"]) && args["paths"].length > 1) {
+      // F-V13-1 Fix C (DESIGN-v0.13-plan.md:167): this is a LEGACY-dialect
+      // refusal site — a caller (or a stale/direct `mode=slice` call that
+      // predates Fix A's promotion gating) landed here with an explicit
+      // mode=slice over more than one path. It used to hand back a raw
+      // STRING `next` built by hand: that skips BOTH the emitted-tool-call
+      // canonicalizer (canonicalizeEmittedToolCalls only rewrites
+      // OBJECT-shaped `arguments`, never a bare string) and the refusal's own
+      // guidance-attachment pass (supplyRefusalGuidance's "already has a
+      // next" guard treats a present-but-wrong string as done), so `cwd` —
+      // required to re-issue this call against the SAME workspace — was
+      // silently dropped from the recovery. Building the `next` through
+      // canonicalToolCall the way every other executable recovery in this
+      // file does fixes both: it is a real advertised-shape object next
+      // (`{tool, arguments}`) and it carries `cwd` when the caller supplied
+      // one. The prose `error` text keeps its legacy `mode=slice` vocabulary
+      // on purpose — it is describing why this LEGACY spelling was refused,
+      // not prescribing the recovery's own shape.
       return {
         refusal: {
           ok: false,
           code: "invalid-input",
           field: "paths",
           error: "mode=slice accepts one path; multiple paths are discovery scope",
-          next: `read_file mode=task_pack paths=${JSON.stringify(args["paths"])}`,
+          next: canonicalToolCall("read_file", {
+            mode: "task_pack",
+            paths: args["paths"],
+            ...(args["cwd"] !== undefined ? { cwd: args["cwd"] } : {}),
+          }),
         },
       };
     }
@@ -6417,6 +6618,38 @@ function normalizeWireArgs(
   return { args };
 }
 
+/**
+ * I-7 (2026-08-30 forensics attribution wave): a BOUNDED shape classifier for
+ * `post_ready_followup`'s `scope_class` -- never the raw path/query itself,
+ * only which addressing family this call used. Checked handle first (names
+ * exact already-served material), then path/paths/targets (names a
+ * location), then query/queries/qref (open text) -- the same precedence a
+ * caller's own intent would resolve to when a call names more than one.
+ */
+function discoveryScopeClass(args: Record<string, unknown>): "handle" | "path" | "query" | "none" {
+  if (
+    typeof args["handle"] === "string"
+    || (Array.isArray(args["handles"]) && args["handles"].length > 0)
+  ) {
+    return "handle";
+  }
+  if (
+    typeof args["path"] === "string"
+    || (Array.isArray(args["paths"]) && args["paths"].length > 0)
+    || (Array.isArray(args["targets"]) && args["targets"].length > 0)
+  ) {
+    return "path";
+  }
+  if (
+    typeof args["query"] === "string"
+    || typeof args["qref"] === "string"
+    || (Array.isArray(args["queries"]) && args["queries"].length > 0)
+  ) {
+    return "query";
+  }
+  return "none";
+}
+
 async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>): Promise<ToolCallResult> {
   const normalized = normalizeWireArgs(canonical, rawArgs);
   if ("refusal" in normalized) return toolStructuredError(normalized.refusal);
@@ -6442,6 +6675,16 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // `lang` is still a bare string checked by parseMcpLang below.
       const unknownArgsRefusalRead = requestShapeRefusal("read_file", dispatchPropertiesFor("read_file"), args);
       if (unknownArgsRefusalRead !== null) return toolStructuredError(unknownArgsRefusalRead);
+      // I-5 fix: read back normalizeCanonicalRequest's multi-target
+      // archive/artifact fail-closed marker BEFORE any mode resolution and
+      // BEFORE declareKind — see MULTI_TARGET_SELECTOR_REFUSAL_INPUT's own
+      // doc comment for why ordering matters here (F-V13-1 Fix B / B1
+      // precedent: a refusal returned after declareKind is misclassified as
+      // a successful, empty read.batch).
+      const multiTargetSelectorRefusal = (args as Record<PropertyKey, unknown>)[MULTI_TARGET_SELECTOR_REFUSAL_INPUT] as
+        | Record<string, unknown>
+        | undefined;
+      if (multiTargetSelectorRefusal !== undefined) return toolStructuredError(multiTargetSelectorRefusal);
       let mode = String(args["mode"] ?? "auto");
       // B5.1: fail loud on an invalid/nonexistent cwd instead of silently
       // resolving against the pinned root (see checkCwdOrRefuse doc comment).
@@ -6747,6 +6990,19 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       /** This call resolved to nothing, so it put no file bytes on the wire. */
       const noteZeroByteServe = (): void =>
         noteDiscoveryServedNoBytes(discoveryGuardWorkspace, "read_file", discoveryGuardArgs);
+      // I-7 (2026-08-30 forensics attribution wave): snapshot BEFORE the guard
+      // call/short-circuit below, either of which can itself clear or bypass
+      // the fence -- "post-ready" means the fence was ALREADY prepared when
+      // this call ARRIVED, not whatever state dispatch leaves it in. Fires
+      // even on the force_serve short-circuit just below: a forced resend
+      // post-readiness is exactly the discretionary spend this event exists
+      // to observe, not a reason to skip observing it.
+      if (args["taskEpoch"] !== "new" && getExecutionFence(workspace)?.phase === "prepared") {
+        notePostReadyDiscovery({
+          forceServe: args["force_serve"] === true,
+          scopeClass: discoveryScopeClass(discoveryGuardArgs),
+        });
+      }
       // W14 L1/L3: an explicit full-content request must reach the read
       // dispatcher. The prepared-task fence can withhold a repeated slice, but
       // it cannot decide a whole-file complement (or a force_serve recovery)
@@ -6829,11 +7085,61 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // Checked before any mode branch — independent of `mode`.
       // -----------------------------------------------------------------------
       if (mode !== "closure" && Array.isArray(args["handles"]) && (args["handles"] as unknown[]).length > 0) {
-        // A.5.4: a multi-target serve reporting per-item completeness is
-        // `read.batch` whatever `mode` says — this branch runs BEFORE any mode
-        // branch, so the member is a function of `handles[]`, not of `mode`.
-        declareKind("read.batch");
         const requested = (args["handles"] as unknown[]).map(String);
+
+        // F-V13-1 Fix B (DESIGN-v0.13-plan.md:167): per-target range/symbol
+        // overrides a canonical multi-handle `targets:[]` batch carried
+        // through normalizeCanonicalRequest's HANDLE_OVERRIDES_INPUT (an
+        // internal-only Symbol key — never reachable as a wire property, see
+        // that constant's own doc comment). Absent for every call that does
+        // not use this: an ordinary legacy `handles:["h1","h2"]`
+        // continuation, a verification-kit re-fetch, or any existing corpus/
+        // replay call falls through untouched to the exact pre-fix
+        // hEntry.range/hEntry.symbol resolution below.
+        const handleOverrides = (args as Record<PropertyKey, unknown>)[HANDLE_OVERRIDES_INPUT] as
+          | Array<Record<string, unknown>>
+          | undefined;
+        // Scope note: `ranges[]` (plural, multi-window) on one target of a
+        // multi-HANDLE batch has no per-item carrier here — unlike a singular
+        // `range` override (honored per-item below), there is no slot to
+        // resolve several windows of ONE handle inside this batch's one-
+        // range-per-item shape. Refuse the WHOLE batch with a concrete
+        // task_pack recovery instead of silently falling back to that
+        // target's stored range — exactly the misdelivery this fix exists to
+        // close, just for a shape Fix B's override carrier cannot express.
+        //
+        // MUST run BEFORE `declareKind("read.batch")` below:
+        // `kindForCall` (protocol/envelope.ts) returns a declared kind
+        // UNCONDITIONALLY — `if (context.kind !== undefined) return
+        // context.kind;` is its first line, before the refusal test — so a
+        // `toolStructuredError` returned AFTER declareKind has already fired
+        // would be mis-classified as a SUCCESSFUL `read.batch` (and, having
+        // no `items`, project as `entries:[]` with no error visible at all;
+        // confirmed live while building this fix). This ordering constraint
+        // is pre-existing and not new to this fix — the B1 pre-pass refusals
+        // immediately below USED TO run in that same busted position (after
+        // declareKind), which was out of scope for F-V13-1 to touch. A later
+        // fix (2026-08-30) moved B1 ahead of declareKind too, for the exact
+        // same reason — see its own comment below.
+        if (handleOverrides?.some((ov) => Array.isArray(ov["ranges"]) && (ov["ranges"] as unknown[]).length > 0)) {
+          const recoveryPaths = requested.map((hId, idx) => {
+            const ov = handleOverrides[idx];
+            const entryPath = handleTable.get(hId)?.path;
+            const ranges = Array.isArray(ov?.["ranges"]) ? ov["ranges"] : undefined;
+            const range = typeof ov?.["range"] === "string" ? ov["range"] : undefined;
+            return {
+              ...(entryPath !== undefined ? { path: entryPath } : { handle: hId }),
+              ...(ranges !== undefined ? { ranges } : range !== undefined ? { range } : {}),
+            };
+          });
+          return toolStructuredError({
+            ok: false,
+            code: "invalid-input",
+            field: "targets",
+            error: "ranges[] on one target of a multi-handle batch is not supported; request one range per target, or re-read via task_pack",
+            next: canonicalToolCall("read_file", { mode: "task_pack", paths: recoveryPaths }),
+          });
+        }
 
         // B1 batch pre-pass: all handles in one handles=[] call must share ONE
         // workspaceRoot. When cwd was omitted, adopt that single root (the
@@ -6842,6 +7148,16 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // the per-item loop below (same omitted[] shape as today). When cwd
         // was explicit, defer to the per-item mismatch check below (unchanged
         // shape — still omitted[] with reason handle-workspace-mismatch).
+        //
+        // MUST run BEFORE `declareKind("read.batch")` below — same reasoning
+        // as Fix B's block immediately above this one (2026-08-30 fix): this
+        // pre-pass used to sit AFTER declareKind, so a `handle-workspace-
+        // mismatch` / `handle-workspace-missing` refusal returned from here
+        // was misclassified by `kindForCall` as a SUCCESSFUL, empty
+        // `read.batch` (`{v:1, kind:"read.batch", entries:[]}`, confirmed
+        // live) instead of a `refusal` — a caller saw zero error signal for a
+        // call that touched none of its requested handles. Moved ahead of
+        // declareKind, matching Fix B's own precedent exactly.
         if (!cwdExplicit) {
           const candidateRoots: string[] = [];
           for (const hId of requested) {
@@ -6874,6 +7190,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           }
           if (res.kind === "adopt") workspace = res.workspace;
         }
+
+        // A.5.4: a multi-target serve reporting per-item completeness is
+        // `read.batch` whatever `mode` says — this branch runs BEFORE any mode
+        // branch, so the member is a function of `handles[]`, not of `mode`.
+        declareKind("read.batch");
 
         recordReadMode(workspace, "handles");
         const items: Array<{ handle: string; path: string; range: string; content: string; truncated: boolean; sha: string; note?: string; concern_note?: string; downgraded_from?: "symbol"; remaining_ranges?: string[]; next?: string; synthesized_range?: boolean }> = [];
@@ -6914,7 +7235,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         let handlesBatchBytesSoFar = 0;
         let handlesBatchCapHit = false;
 
-        for (const hId of requested) {
+        for (let hIdx = 0; hIdx < requested.length; hIdx++) {
+          const hId = requested[hIdx]!;
           if (handlesBatchCapHit) {
             omitted.push({ handle: hId, reason: "cap-exceeded" });
             continue;
@@ -6976,10 +7298,33 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // a real narrow-range serve, so an agent expecting "my sliced range"
           // can tell the two apart. Absence stays the norm on every item with
           // a genuine range (real ranged handles, symbol-branch handles).
-          const isSynthesizedFileRange = hEntry.range === undefined && hEntry.symbol === undefined;
-          const hRange = hEntry.range
-            ?? (hEntry.symbol === undefined ? `1-${Math.max(1, countLines(hContent))}` : undefined);
-          const sliceResult = await resolveSlice(workspace, hPath, hContent, hEntry.symbol, hRange);
+          //
+          // F-V13-1 Fix B: an explicit per-target override (see
+          // handleOverrides above) takes the SAME precedence the single-
+          // handle mode=slice path already gives a caller-supplied `range`
+          // (the "BUG FIX (bench transcript forensics)" comment further up
+          // this function): a caller-supplied range is a sub-slice request
+          // over an already-known handle, so it wins over BOTH the handle's
+          // own stored range AND the handle's own stored symbol tag — never
+          // pass resolveSlice a stored symbol alongside an override range,
+          // or "resolveSlice checks symbol before range" silently re-serves
+          // the symbol's own span instead of the requested window (the exact
+          // bug the single-handle fix closed). An explicit override symbol
+          // with no override range still wins over the stored symbol, same
+          // as the single-handle path's `args["symbol"]` precedent. No
+          // override at all (the common case) falls through to the ORIGINAL
+          // expression byte-for-byte: overrideRange/overrideSymbol are both
+          // undefined, so effectiveRange/effectiveSymbol reduce to
+          // hEntry.range/hEntry.symbol exactly as before this fix.
+          const override = handleOverrides?.[hIdx];
+          const overrideRange = typeof override?.["range"] === "string" ? override["range"] : undefined;
+          const overrideSymbol = typeof override?.["symbol"] === "string" ? override["symbol"] : undefined;
+          const effectiveRange = overrideRange ?? hEntry.range;
+          const effectiveSymbol = overrideSymbol ?? (overrideRange === undefined ? hEntry.symbol : undefined);
+          const isSynthesizedFileRange = effectiveRange === undefined && effectiveSymbol === undefined;
+          const hRange = effectiveRange
+            ?? (effectiveSymbol === undefined ? `1-${Math.max(1, countLines(hContent))}` : undefined);
+          const sliceResult = await resolveSlice(workspace, hPath, hContent, effectiveSymbol, hRange);
           if (!sliceResult.ok) {
             // D1: a symbol-not-found miss (sliceResult.code === "not-found",
             // as opposed to a range/path miss) carries candidates/skeleton
@@ -11292,6 +11637,41 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const edits = args["edits"];
         if (!Array.isArray(edits)) return toolError("edits must be an array", { code: "invalid-input" });
 
+        // F-V13-2 (2026-08-30): a batch create item has no `handle` — the
+        // single edit_file `create:true` path's OWN cwd-less carve-out
+        // (`createDispatchRequested` above, which explicitly excludes
+        // `edits[]`) requires an explicit cwd OR an existing handle
+        // capability to pin the new file's workspace, and refuses
+        // (`cwd-required-for-create`) otherwise rather than silently
+        // guessing the server's default/pinned root. A batch whose ONLY
+        // items are creates, with no cwd and no OTHER handle-bearing item to
+        // adopt a root from, would otherwise fall through the B1 pre-pass's
+        // "no handles at all" branch (`resolveHandleWorkspace` -> {kind:
+        // "keep"}) with `workspace` silently left at its default — the exact
+        // hazard the single-create path's own guard exists to prevent.
+        // Checked up front, before B1 runs, so the whole batch refuses
+        // before any write (all-or-nothing, like every other pre-pass guard
+        // here). A batch mixing a create with a handle-bearing edit item is
+        // UNAFFECTED — that handle already pins a root for B1 below.
+        if (!cwdExplicit) {
+          const hasBatchCreate = (edits as unknown[]).some(
+            (e) => (e as Record<string, unknown>)["create"] === true,
+          );
+          const anyHandleBearing = (edits as unknown[]).some(
+            (e) => typeof (e as Record<string, unknown>)["handle"] === "string",
+          );
+          if (hasBatchCreate && !anyHandleBearing) {
+            return toolStructuredError({
+              ok: false,
+              reason: "cwd-required-for-create",
+              code: "cwd-required-for-create",
+              applied: false,
+              detail: "a batch create item names a new path with no handle to pin its workspace, so it cannot be inferred from the server default; pass cwd explicitly",
+              next: "retry the same edits[] batch with an explicit top-level cwd",
+            });
+          }
+        }
+
         // B1 batch pre-pass: all handle-bearing items in one edits[] call must
         // share ONE workspaceRoot. When cwd was omitted, adopt that single
         // root (the handles ARE the workspace pin); when the batch spans more
@@ -11481,9 +11861,114 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           uniqueMatch?: boolean;
           anchorSha?: string;
           anchorShaRange?: string;
+          create?: boolean;
         }> = [];
         for (const [index, e] of (edits as unknown[]).entries()) {
           const entry = e as Record<string, unknown>;
+
+          // F-V13-2 (2026-08-30 fix): a create:true item never targets an
+          // EXISTING file, so it is diverted here FIRST — before even the
+          // unique-match precondition check just below, which is
+          // nonsensical for a path that does not exist yet (entry.search is
+          // always undefined on a create item and would otherwise
+          // misreport "precondition-unsupported-for-batch") — and before
+          // entryHandleId/the handle- and bare-path branches further down,
+          // both of which assume "this path already exists on disk" and
+          // silently dropped entry.content/entry.create before this fix
+          // (the exact F-V13-2 bug: the item fell to the bare-path fallback,
+          // which pushed {path, search:"", replace:""}, and
+          // applyEditsMulti's Phase 1 hit a plain fs.statSync ENOENT on a
+          // target that was NEVER created — the generic "File not found"
+          // refusal, no indication create:true was ever relevant).
+          //
+          // v1 SCOPE: a batch create item supports only {path, create:true,
+          // content} or {path, create:true, from} — the plain shapes
+          // CANONICAL_EDIT_ITEM's schema already advertises for edits[]
+          // (`{required:["create","content"]}` / `{required:["create",
+          // "from"], not:{required:["content"]}}`). `directoryHandle` and a
+          // create sharing its path with another edits[] item are refused
+          // outright rather than silently ignored or given undefined
+          // behavior — the single-item create path (server.ts's
+          // args["create"]===true branch above, reached via the edits.length
+          // ===1 unwrap in normalizeCanonicalRequest) already supports both;
+          // a caller that needs them issues the create as its own call.
+          if (entry["create"] === true) {
+            if (entry["directoryHandle"] !== undefined) {
+              return toolStructuredError({
+                ok: false,
+                code: "invalid-input",
+                reason: "batch-create-directory-handle-unsupported",
+                applied: false,
+                failed_item: { index },
+                next: "directoryHandle is not supported on a batch edits[] create item — issue this create as its own single edit_file call (create:true, no edits[]), or resolve the directory to a plain path first",
+              });
+            }
+            const createTargetPath = String(entry["path"] ?? "");
+            const samePathConflict = createTargetPath !== "" && (edits as unknown[]).some((other, otherIndex) => {
+              if (otherIndex === index) return false;
+              return String((other as Record<string, unknown>)["path"] ?? "") === createTargetPath;
+            });
+            if (samePathConflict) {
+              return toolStructuredError({
+                ok: false,
+                code: "invalid-input",
+                reason: "batch-create-edit-same-path",
+                applied: false,
+                failed_item: { index, path: createTargetPath },
+                next: `${createTargetPath} appears in more than one edits[] item alongside a create:true entry — create it in its own call first, then edit it in a follow-up batch`,
+              });
+            }
+            let createBody: string;
+            if (entry["content"] !== undefined) {
+              createBody = String(entry["content"]);
+            } else if (typeof entry["from"] === "string") {
+              const resolved = await resolveCreateSourceContent(entry["from"], workspace, cwdExplicit);
+              if (!resolved.ok) {
+                if (resolved.reason === "workspace-conflict") {
+                  return toolStructuredError({
+                    ok: false,
+                    reason: "handle-workspace-mismatch",
+                    handle: String(entry["from"]),
+                    handleWorkspace: resolved.entry.workspaceRoot,
+                    next: `retry with cwd=${resolved.entry.workspaceRoot} or omit cwd`,
+                    failed_item: { index },
+                  });
+                }
+                if (resolved.reason === "workspace-missing") {
+                  return toolStructuredError({
+                    ok: false,
+                    reason: "handle-workspace-missing",
+                    handle: String(entry["from"]),
+                    handleWorkspace: resolved.entry.workspaceRoot,
+                    next: handleWorkspaceMissingNext(resolved.entry.workspaceRoot),
+                    failed_item: { index },
+                  });
+                }
+                return toolStructuredError({
+                  ok: false,
+                  code: "invalid-input",
+                  reason: "batch-create-source-unreadable",
+                  applied: false,
+                  failed_item: { index, path: createTargetPath },
+                  next: `from=${String(entry["from"])} did not resolve to a readable handle or path — supply content instead, or fix the from= source`,
+                });
+              }
+              createBody = resolved.content;
+              workspace = adoptGuardedWorkspaceRoot(resolved.workspace, workspace);
+            } else {
+              return toolStructuredError({
+                ok: false,
+                code: "invalid-input",
+                reason: "batch-create-missing-body",
+                applied: false,
+                failed_item: { index, path: createTargetPath },
+                next: "a batch create item needs content or from=",
+              });
+            }
+            typedEdits.push({ path: createTargetPath, search: "", replace: "", create: true, content: createBody });
+            continue;
+          }
+
           const entryPrecondition = entry["precondition"] ?? args["precondition"];
           const uniqueMatchBatch = entryPrecondition === "unique-match";
           if (
@@ -12442,6 +12927,14 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             }
           : {};
       const lang = parseMcpLang(args["lang"]);
+      // I-7 (2026-08-30 forensics attribution wave): see the read_file arm's
+      // own comment -- same pre-guard snapshot, same rationale.
+      if (args["taskEpoch"] !== "new" && getExecutionFence(workspace)?.phase === "prepared") {
+        notePostReadyDiscovery({
+          forceServe: args["force_serve"] === true,
+          scopeClass: discoveryScopeClass(args),
+        });
+      }
       const executionGuard = guardExecutionDiscovery(workspace, "search_files", args);
       if (!executionGuard.allowed) {
         if ("servedReceipt" in executionGuard) {
@@ -12850,10 +13343,51 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           arguments: { action: "tree", ...(treePath !== undefined ? { path: treePath } : {}) },
         });
         // P1-b (2026-08-28): session-level no-repeat ledger, same as find's
-        // and references' recordExecutedSearch calls above — keyed on `path`
-        // (an empty-path bare-root tree is deliberately not tracked here, same
-        // guard recordExecutedSearch already applies to an empty query).
-        if (treePath !== undefined) recordExecutedSearch(workspace, "tree", treePath, []);
+        // and references' recordExecutedSearch calls above — keyed on `path`.
+        // I-6 fix (v0.13.1 forensics, DESIGN-v0.13-plan.md §6 2026-08-30
+        // entry): record when treePath is undefined too, using the workspace
+        // root as the key, instead of the pre-fix `if (treePath !== undefined)`
+        // guard that left a bare-root tree with NO ledger entry at all. That
+        // silence is what let readCodeTaskPack.ts's enforceNoDeadEndContract
+        // fallback (and advanceExecutedLocateNextCall, via the receipt path)
+        // re-propose an identical pathless `{action:"tree"}` next after this
+        // exact call had already answered it (root/i6_fallback_probe.mjs:
+        // repeated_identically:true).
+        //
+        // F1 fix (opus pre-release review, 2026-08-30): the I-6 fix above
+        // recorded UNCONDITIONALLY, including on a REFUSAL. `buildCompactTree`
+        // answers not-found/not-a-directory (`ok:false`) or a symlink escape
+        // (`refused:true`) for a bad subPath — exactly the shape `protocol/
+        // searchFamily.ts`'s `searchRefusalCodeFor` + `protocol/refusal.ts`'s
+        // `isRefusalBody` (`body["ok"] === false`) classify as `kind:"refusal"`
+        // on the wire below (see the `toolOk` comment). Recording a refused
+        // call poisoned the ledger: `path:"<the workspace's own absolute
+        // path>"` is a real, observed shape (`normalizeSubPath` strips its
+        // leading slash into a bogus workspace-relative segment, so
+        // `buildCompactTree` answers `ok:false, reason:"not-found"`), and
+        // because the key collapses to the SAME `workspace` root either way,
+        // recording it made `enforceNoDeadEndContract`'s bare-tree fallback
+        // believe a successful root tree had already run when it had not —
+        // a `next`-less dead end with no ledger entry left to disprove it.
+        // Gating on success (`ok !== false && refused !== true` — the same
+        // predicate the wire classification above applies) closes that hole
+        // without reopening I-6: a GENUINE root tree still records, a refused
+        // one no longer poisons the key a genuine one would use.
+        //
+        // F8 fix (same review): `treePath || workspace` (not `??`) maps BOTH
+        // `undefined` (no `path` given) and `""` (an explicit empty path,
+        // which resolves successfully to the workspace root — the only other
+        // falsy value `treePath` can hold, since it is always `undefined` or
+        // a `String(...)`-coerced value) onto the `workspace` key. Pre-fix,
+        // `treePath ?? workspace` left `""` as the literal empty-string key,
+        // which `recordExecutedSearch`'s own `if (query.length === 0) return;`
+        // guard (packServeLog.ts) then silently dropped — a SUCCESSFUL
+        // `path:""` tree recorded nothing at all. A caller-supplied non-empty
+        // `path` is unaffected either way.
+        const treeSucceeded = result.ok !== false && result.refused !== true;
+        if (treeSucceeded) {
+          recordExecutedSearch(workspace, "tree", treePath || workspace, []);
+        }
         // D4 / A.5.10 (C2-4): see the archive-scoped tree above — the
         // `mode:"tree"` stamp is deleted, `kind:"search.tree"` is the
         // discriminator, and the not-found / not-a-directory / symlink-escape
@@ -13509,6 +14043,17 @@ async function callToolTraced(
   // decision to record.
   const routeDecision = classifyRoute(canonical, args);
   setTraceContext({ route: routeDecision.route });
+  // V13 (2026-08-30): hoisted out of the trace try-block below so the usage
+  // recorder — in the SEPARATE try/catch further down, success path AND the
+  // outer catch's error path — can stamp the SAME per-call task_ref onto its
+  // NDJSON event. Was previously a `const` scoped entirely inside that first
+  // try block, invisible to both `recorder().record()` call sites; see
+  // `TokenLightenUsageEvent.taskRef`'s doc for what the recorder does with it
+  // (task-grouped `summarizeUsage` accounting). Left `undefined` when the
+  // trace try-block below throws before assigning it, or never runs at all —
+  // exactly the "call named no task" case the recorder already treats as
+  // `taskRef: null`.
+  let dispatchQueryRef: { ref: string; repeated: boolean } | undefined;
   try {
     const cwd = typeof args["cwd"] === "string" ? args["cwd"] : undefined;
     const workspaceRoot = resolveWorkspaceRoot(cwd, activeRoot);
@@ -13519,7 +14064,7 @@ async function callToolTraced(
     // the shared default one) so route_decision, and every trace() line
     // after it, carries the fullest context this call ever resolves rather
     // than only the ones emitted after the fact.
-    const dispatchQueryRef = runWithSessionLane(
+    dispatchQueryRef = runWithSessionLane(
       sessionLaneOf(args),
       () => dispatchTaskRef(args, workspaceRoot),
     );
@@ -13647,6 +14192,9 @@ async function callToolTraced(
           baselineTokens,
           baselineMethod: baselineTokens === null ? null : "file-bytes",
           writeEnabled: ALLOW_WRITE,
+          // V13: same task_ref on a query's first call and every qref
+          // continuation of it — see the hoisted `dispatchQueryRef` doc above.
+          taskRef: dispatchQueryRef?.ref ?? null,
           kind: envelopeMeta.kind,
           mode: observedCallMode(canonical, args),
           errorCode: outcomeIsError ? envelopeMeta.errorCode : undefined,
@@ -13673,6 +14221,10 @@ async function callToolTraced(
           baselineTokens,
           baselineMethod: baselineTokens === null ? null : "file-bytes",
           writeEnabled: ALLOW_WRITE,
+          // V13: the thrown-dispatch failure exit — same `dispatchQueryRef`
+          // as the success-path record above, so a failed call still
+          // correlates to its task_ref instead of falling out of every group.
+          taskRef: dispatchQueryRef?.ref ?? null,
           mode: observedCallMode(canonical, args),
         });
       }

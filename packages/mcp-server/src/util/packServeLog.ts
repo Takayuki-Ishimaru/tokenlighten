@@ -24,6 +24,8 @@
 import * as fs from "fs";
 import * as path from "path";
 
+import { laneScopedKey } from "./laneKey.js";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -310,11 +312,33 @@ function _emptyLog(): WorkspacePackLog {
   return { epochTokens: [], entries: new Map(), order: [], statCache: new Map(), meta: {} };
 }
 
+/**
+ * F-V13-3 (2026-08-30): the log is keyed by (workspace root, CALLER'S LANE),
+ * not the root alone. `laneScopedKey` returns the root string itself when no
+ * lane is bound, so a single agent's keys are byte-identical to before.
+ *
+ * A workspace-only key made every served surface of every concurrent agent one
+ * pool. `priorEpochActionFrontier` reads `queryServedSurfaces` to build a
+ * certificate's `action_frontier`, so lane A's handles landed in lane B's
+ * certificate — the observed F-V13-3 refusal cited a frontier of three files
+ * only the OTHER lane had touched. The epoch gate could not stop it: epoch
+ * tokens accumulate as a UNION here, so one shared token between two agents'
+ * queries leaves the gate open for the rest of the session.
+ *
+ * The (root, epoch, lane)-keyed `_servedBytes`/`_servedWindows` ledgers above
+ * are untouched — they already take an EXPLICIT lane argument from their
+ * callers, which stays the more precise contract.
+ */
+function _logKey(workspaceRoot: string): string {
+  return laneScopedKey(workspaceRoot);
+}
+
 function _getLog(workspaceRoot: string): WorkspacePackLog {
-  let log = _logs.get(workspaceRoot);
+  const key = _logKey(workspaceRoot);
+  let log = _logs.get(key);
   if (log === undefined) {
     log = _emptyLog();
-    _logs.set(workspaceRoot, log);
+    _logs.set(key, log);
   }
   return log;
 }
@@ -421,7 +445,7 @@ function _fingerprint(workspace: string, relPath: string): string {
  * the same toolchain — so only the served-surface state is cleared.
  */
 export function clearServedSurfaces(workspaceRoot: string): void {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   if (log === undefined) return;
   _resetSession(log);
 }
@@ -499,7 +523,7 @@ export function queryServedSurfaces(
   workspace: string,
   opts: { excludePaths?: ReadonlySet<string>; epochTokens: readonly string[] },
 ): ServedSurfaceEntry[] {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   if (log === undefined || log.entries.size === 0) return [];
   // Epoch gate: a non-overlapping task must not read the prior task's surfaces.
   if (
@@ -535,7 +559,7 @@ export function queryServedSurfaces(
  * edit touches it). Idempotent.
  */
 export function invalidateServedPath(workspaceRoot: string, relPath: string): void {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   if (log === undefined) return;
   if (log.entries.delete(relPath)) {
     const idx = log.order.indexOf(relPath);
@@ -654,7 +678,7 @@ export function consultAwaitingInputLatch(
   currentInputPaths: readonly string[],
   currentFileFingerprint: string,
 ): AwaitingInputLatch | undefined {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   const latch = log?.meta.awaitingInput;
   if (log === undefined || latch === undefined) return undefined;
   // Different task in the same session — never latch across tasks.
@@ -682,7 +706,7 @@ export function consultAwaitingInputLatch(
 
 /** W4: explicitly clear the awaiting-input latch (e.g. once genuinely prepared). */
 export function clearAwaitingInputLatch(workspaceRoot: string): void {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   if (log?.meta.awaitingInput !== undefined) log.meta.awaitingInput = undefined;
 }
 
@@ -707,7 +731,7 @@ export function getFunctionalValidationObligation(
   workspaceRoot: string,
   epochTokens: readonly string[],
 ): FunctionalValidationObligation | undefined {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   const obligation = log?.meta.functionalValidation;
   if (log === undefined || obligation === undefined) return undefined;
   if (
@@ -727,7 +751,7 @@ export function getFunctionalValidationObligation(
  * acted on). Idempotent.
  */
 export function clearFunctionalValidationObligation(workspaceRoot: string): void {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   if (log?.meta.functionalValidation !== undefined) log.meta.functionalValidation = undefined;
 }
 

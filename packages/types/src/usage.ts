@@ -15,7 +15,18 @@ export type TokenLightenClient =
 export type TokenLightenTool = "read_file" | "search_files" | "edit_file";
 
 export interface TokenLightenUsageEvent {
-  schemaVersion: 1;
+  /**
+   * 1: the original closed field set (no `taskRef`). 2 (2026-08-30, v0.13):
+   * adds `taskRef` below so `summarizeUsage` can group a multi-call TASK's
+   * events before computing a reduction ratio. Both versions are read back
+   * by `isUsageEvent`, which validates against a CLOSED field set keyed on
+   * this value — widening the event shape without versioning it would make
+   * every already-written schemaVersion:1 NDJSON line fail that check and
+   * silently vanish from every summary. Every recorder writes 2 going
+   * forward; 1 is accepted on read only, for logs written before this field
+   * existed.
+   */
+  schemaVersion: 1 | 2;
   eventId: string;
   occurredAt: string;
   workspaceId: string;
@@ -31,6 +42,19 @@ export interface TokenLightenUsageEvent {
   estimatedSavedTokens: number | null;
   baselineMethod: "file-bytes" | null;
   writeEnabled: boolean;
+  /**
+   * schemaVersion:2 only — absent on a schemaVersion:1 line. An OPAQUE
+   * per-workspace task-correlation id (`server.ts`'s `taskQueryRef`: a SHA-256
+   * digest of workspaceRoot+query, never the raw query text or a file path —
+   * consistent with this file's "no prompts, no paths, no source text"
+   * contract above). `null` when this call named no task (e.g. a bare
+   * handle/path edit with no `query`/`qref`). Lets `summarizeUsage` group the
+   * calls of one exploratory task — an initial query call that carries no
+   * baseline of its own, followed by a qref+targets continuation whose
+   * baseline covers the WHOLE task — instead of scoring each call in
+   * isolation, which understated the true reduction ratio.
+   */
+  taskRef?: string | null;
 }
 
 export interface TokenLightenAutomaticPrice {

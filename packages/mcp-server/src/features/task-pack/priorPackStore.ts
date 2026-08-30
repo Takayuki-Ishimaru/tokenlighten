@@ -37,6 +37,8 @@
  * exactly like today.
  */
 
+import { laneScopedKey } from "../../util/laneKey.js";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -80,11 +82,29 @@ function _emptyLog(): WorkspaceObligationLog {
   return { epochTokens: [], entries: new Map(), order: [] };
 }
 
+/**
+ * F-V13-3 (2026-08-30): keyed by (workspace root, CALLER'S LANE), the same
+ * `packServeLog` discipline this module mirrors everywhere else. Obligations
+ * are per-agent by nature — `priorEpochActionFrontier` turns an open
+ * `action:"edit"` obligation into a certificate frontier entry, so a
+ * workspace-only key let one agent's edit obligations authorize (and, via
+ * F-B3's unserved-obligation disclosure, demote) another agent's pack.
+ * `laneScopedKey` returns the root string itself when no lane is bound, so a
+ * single agent keys exactly as before.
+ *
+ * The lane ALS lives in the dependency-free `util/laneKey.ts` leaf precisely so
+ * this module keeps its "only dependency is the I/O it does not do" posture.
+ */
+function _logKey(workspaceRoot: string): string {
+  return laneScopedKey(workspaceRoot);
+}
+
 function _getLog(workspaceRoot: string): WorkspaceObligationLog {
-  let log = _logs.get(workspaceRoot);
+  const key = _logKey(workspaceRoot);
+  let log = _logs.get(key);
   if (log === undefined) {
     log = _emptyLog();
-    _logs.set(workspaceRoot, log);
+    _logs.set(key, log);
   }
   return log;
 }
@@ -154,7 +174,7 @@ export function queryPriorPackObligations(
   workspaceRoot: string,
   epochTokens: readonly string[],
 ): PriorObligationRecord[] {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   if (log === undefined || log.entries.size === 0) return [];
   if (
     epochTokens.length > 0
@@ -170,7 +190,7 @@ export function queryPriorPackObligations(
 
 /** Drop every tracked obligation for a workspace (epoch reset / taskEpoch:"new"). */
 export function clearPriorPackObligations(workspaceRoot: string): void {
-  const log = _logs.get(workspaceRoot);
+  const log = _logs.get(_logKey(workspaceRoot));
   if (log === undefined) return;
   log.epochTokens = [];
   log.entries = new Map();

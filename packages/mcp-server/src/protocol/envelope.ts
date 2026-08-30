@@ -155,6 +155,30 @@ export interface ProtocolCallContext {
    * as the conservative "unknown" fallback.
    */
   clientId?: string;
+  /**
+   * I-7 (2026-08-30 forensics attribution wave): set by read_file/
+   * search_files dispatch (server.ts, both `guardExecutionDiscovery` call
+   * sites) when the session's execution fence was ALREADY `phase:"prepared"`
+   * the moment THIS call arrived -- i.e. discretionary agent spend after an
+   * answer/edit certificate, not evidence the certificate required. The T03
+   * forensics episode this exists for (bench/workflows/experiments/
+   * 2026-08-30-v0131-forensics/REPORT.md's I-1 section) found exactly this
+   * class of spend invisible in TL_TRACE: "rep0 ended with a 16,156-byte
+   * forced slice, and rep2 added two searches, one refusal, and a
+   * 20,546-byte slice" had to be hand-reconstructed from raw transcripts.
+   *
+   * Read only by emit.ts's `post_ready_followup` trace emission at the
+   * funnel tail, alongside the FINAL `onWire` kind and `used` byte count --
+   * both unknowable this early, which is why this rides the context instead
+   * of being traced directly at the guard call site. `edit_file` never sets
+   * it (guardExecutionEdit is a separate typestate-observed path), so the
+   * emission site's `!== undefined` check alone excludes edits with no
+   * special-casing. Never serialized onto the wire.
+   */
+  postReadyDiscovery?: {
+    readonly forceServe: boolean;
+    readonly scopeClass: "handle" | "path" | "query" | "none";
+  };
 }
 
 const _protocolCall = new AsyncLocalStorage<ProtocolCallContext>();
@@ -185,6 +209,20 @@ export function noteResolvedMode(mode: string): void {
 export function noteResolvedAction(action: string): void {
   const context = _protocolCall.getStore();
   if (context !== undefined && action !== "") context.action = action;
+}
+
+/**
+ * Publish that this read/search call arrived while the session's execution
+ * fence was already prepared -- see `ProtocolCallContext.postReadyDiscovery`'s
+ * doc comment for why this rides the context rather than tracing directly at
+ * the call site.
+ */
+export function notePostReadyDiscovery(fields: {
+  forceServe: boolean;
+  scopeClass: "handle" | "path" | "query" | "none";
+}): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined) context.postReadyDiscovery = fields;
 }
 
 /** Name this response's `Kind` outright. Wins over every derivation below. */

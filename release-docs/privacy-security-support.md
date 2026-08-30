@@ -22,7 +22,7 @@ The VS Code extension and CLI can produce local usage and cost-savings estimates
 
 ## Dependency security status
 
-The v0.13.0 release candidate was audited on 2026-08-30. Both `npm audit --omit=dev` and the complete `npm audit`, including development dependencies, reported **0 vulnerabilities**.
+The v0.13.1 release candidate was audited on 2026-08-30. Both `npm audit --omit=dev` and the complete `npm audit`, including development dependencies, reported **0 vulnerabilities**.
 
 Developers should continue to treat the development environment as a separate trust boundary and avoid running untrusted build scripts, tests, or development servers.
 

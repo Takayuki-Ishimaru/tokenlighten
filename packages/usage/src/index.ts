@@ -179,7 +179,15 @@ export type {
   UsageLikeEvent,
 } from "./measurementEngine.js";
 
-const EVENT_FIELDS = [
+// V13 (2026-08-30): the event field set is VERSIONED, not just widened in
+// place. `isUsageEvent` below validates each NDJSON line against a CLOSED
+// field set keyed on that line's own `schemaVersion` — appending `taskRef`
+// to one shared field list would have made every already-written
+// schemaVersion:1 line fail the `keys.length !== fieldSet.size` check and
+// silently vanish from every summary (a real data-loss regression caught
+// while building this fix). `EVENT_FIELDS_V1` is read-only from here on;
+// every recorder writes `EVENT_FIELDS` (schemaVersion:2).
+const EVENT_FIELDS_V1 = [
   "schemaVersion",
   "eventId",
   "occurredAt",
@@ -197,6 +205,11 @@ const EVENT_FIELDS = [
   "writeEnabled",
 ] as const satisfies readonly (keyof TokenLightenUsageEvent)[];
 
+const EVENT_FIELDS = [
+  ...EVENT_FIELDS_V1,
+  "taskRef",
+] as const satisfies readonly (keyof TokenLightenUsageEvent)[];
+
 const CLIENTS = new Set<TokenLightenClient>([
   "vscode",
   "codex",
@@ -205,6 +218,7 @@ const CLIENTS = new Set<TokenLightenClient>([
   "other",
 ]);
 const TOOLS = new Set<TokenLightenTool>(["read_file", "search_files", "edit_file"]);
+const EVENT_FIELD_SET_V1 = new Set<string>(EVENT_FIELDS_V1);
 const EVENT_FIELD_SET = new Set<string>(EVENT_FIELDS);
 const USAGE_RESET_FILE = ".usage-reset.ndjson";
 
@@ -352,6 +366,14 @@ export interface UsageObservation {
   baselineTokens?: number | null;
   baselineMethod?: "file-bytes" | null;
   writeEnabled: boolean;
+  /**
+   * V13: the dispatch-resolved task-correlation ref (server.ts's
+   * `dispatchQueryRef?.ref`), when this call named a task via `query`/`qref`.
+   * `null`/absent for a call with neither (a bare handle/path edit) — see
+   * `TokenLightenUsageEvent.taskRef`'s own doc for what this becomes on disk
+   * and why `summarizeUsage` groups by it.
+   */
+  taskRef?: string | null;
   /** Response envelope `kind` (e.g. "read.task_pack", "refusal") — diagnostics-only, never persisted to the usage NDJSON event. */
   kind?: string;
   /** read_file `mode` / search_files `action` enum value — diagnostics-only, never user text. */
@@ -414,8 +436,17 @@ export function createUsageRecorder(options: {
         observation.baselineTokens === null || observation.baselineTokens === undefined
           ? null
           : clampInteger(observation.baselineTokens);
+      const taskRef =
+        observation.taskRef === null
+        || observation.taskRef === undefined
+        || observation.taskRef === ""
+          ? null
+          : observation.taskRef;
       const event: TokenLightenUsageEvent = {
-        schemaVersion: 1,
+        // V13: every recorder writes schemaVersion:2 now that `taskRef`
+        // exists — see EVENT_FIELDS_V1's doc comment for why 1 stays
+        // read-only rather than being retired outright.
+        schemaVersion: 2,
         eventId: randomUUID(),
         occurredAt: new Date().toISOString(),
         workspaceId,
@@ -436,6 +467,7 @@ export function createUsageRecorder(options: {
             ? null
             : observation.baselineMethod ?? "file-bytes",
         writeEnabled: observation.writeEnabled,
+        taskRef,
       };
       const day = event.occurredAt.slice(0, 10);
       const logPath = join(directory, `usage-${day}.ndjson`);
@@ -473,16 +505,25 @@ export function createUsageRecorder(options: {
 
 function isUsageEvent(value: unknown): value is TokenLightenUsageEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const event = value as Partial<TokenLightenUsageEvent>;
+  // V13: which CLOSED field set this line must match exactly is a function
+  // of ITS OWN schemaVersion — see EVENT_FIELDS_V1's doc comment for why a
+  // single shared field list would have silently discarded every
+  // schemaVersion:1 line on read. Any other/missing schemaVersion fails
+  // closed here, same as before this field was versioned.
+  const fieldSet =
+    event.schemaVersion === 2 ? EVENT_FIELD_SET
+    : event.schemaVersion === 1 ? EVENT_FIELD_SET_V1
+    : undefined;
+  if (fieldSet === undefined) return false;
   const keys = Object.keys(value);
   if (
-    keys.length !== EVENT_FIELDS.length
-    || keys.some((key) => !EVENT_FIELD_SET.has(key))
+    keys.length !== fieldSet.size
+    || keys.some((key) => !fieldSet.has(key))
   ) {
     return false;
   }
-  const event = value as Partial<TokenLightenUsageEvent>;
-  return event.schemaVersion === 1
-    && typeof event.eventId === "string"
+  return typeof event.eventId === "string"
     && typeof event.occurredAt === "string"
     && typeof event.workspaceId === "string"
     && typeof event.sessionId === "string"
@@ -495,7 +536,11 @@ function isUsageEvent(value: unknown): value is TokenLightenUsageEvent {
     && (event.baselineTokens === null || typeof event.baselineTokens === "number")
     && (event.estimatedSavedTokens === null || typeof event.estimatedSavedTokens === "number")
     && (event.baselineMethod === null || event.baselineMethod === "file-bytes")
-    && typeof event.writeEnabled === "boolean";
+    && typeof event.writeEnabled === "boolean"
+    // schemaVersion:1 lines have no `taskRef` key at all (excluded by the
+    // closed field-set check above); schemaVersion:2 lines always carry it,
+    // `null` when the call named no task.
+    && (event.schemaVersion === 1 || event.taskRef === null || typeof event.taskRef === "string");
 }
 
 export function usageWindowStart(directory = defaultLogDir()): string | null {
@@ -1046,28 +1091,104 @@ export function summarizeUsage(
   let estimatedSavedTokens = 0;
   let automaticallyEstimatedSavedCostUsd = 0;
   let automaticallyEstimatedBaselineCostUsd = 0;
+  // Pass 1: per-event totals that are NOT part of the paired-baseline ratio.
+  // Every event counts individually here, exactly as before task grouping —
+  // these are not what the 2026-08-30 fix below changes.
   for (const event of events) {
     byTool[event.tool]++;
     byClient[event.client]++;
     if (event.outcome === "ok") successfulCalls++;
     estimatedResponseTokens += event.estimatedResponseTokens;
     if (event.outcome === "ok" && event.baselineTokens !== null) {
-      const signedSavedTokens =
-        event.baselineTokens - event.estimatedResponseTokens;
       measuredBaselineCalls++;
       measuredCallsByClient[event.client]++;
-      measuredResponseTokens += event.estimatedResponseTokens;
-      measuredBaselineTokens += event.baselineTokens;
-      measuredResponseBytes += event.responseBytes;
-      estimatedSavedTokens += signedSavedTokens;
-      savedTokensByClient[event.client] += signedSavedTokens;
-      const automaticRate =
-        AUTOMATIC_PRICING.byClient[event.client].costPerMillionTokensUsd;
-      automaticallyEstimatedSavedCostUsd +=
-        signedSavedTokens * automaticRate / 1_000_000;
-      automaticallyEstimatedBaselineCostUsd +=
-        event.baselineTokens * automaticRate / 1_000_000;
     }
+  }
+  // -------------------------------------------------------------------------
+  // Pass 2 (2026-08-30 fix): TASK-GROUPED baseline/savings accounting.
+  //
+  // A single task is often more than one MCP call — a `query`-only
+  // exploratory call that carries no baseline of its own (the caller had
+  // nothing to compare against yet), followed by a `qref`+`targets`
+  // continuation whose baseline measures what the WHOLE task would have cost
+  // a caller reading natively. Scoring each call in isolation (the pre-fix
+  // loop above, applied to `baselineTokens`/`estimatedSavedTokens` too)
+  // silently dropped the first call's real, TL-served bytes from BOTH the
+  // numerator and the denominator: a 2-call task measuring
+  // call1=8,155B(no baseline) + call2=16,082B(baseline 30,984B) reported
+  // (30,984-16,082)/30,984 = 48.1% reduction instead of the true
+  // (30,984-24,237)/30,984 = 21.8% — the task's full served weight was
+  // 24,237B, not 16,082B.
+  //
+  // Grouping key: `(sessionId, taskRef)` when `taskRef` is present —
+  // `sessionId` narrows the rare case of two different sessions hashing to
+  // the same `taskQueryRef` (same workspaceRoot+query, see server.ts's
+  // `dispatchTaskRef` doc). An event with no `taskRef` (a bare handle/path
+  // edit, or a schemaVersion:1 line predating this field) is its own
+  // singleton group, which is mathematically identical to the pre-grouping
+  // per-event loop this replaces — so a log with zero taskRef coverage
+  // reproduces today's numbers exactly.
+  //
+  // A group contributes to the measured/saved totals ONLY when at least one
+  // of its `ok` events carries a baseline (the group's "anchor") — a group
+  // with no anchor stays non-contributing, exactly like an unmeasured event
+  // today. A contributing group then adds, ONCE for the whole group: every
+  // `ok` event's `estimatedResponseTokens`/`responseBytes` (the task's full
+  // served weight, including calls that carried no baseline of their own),
+  // the SUM of the group's non-null `baselineTokens` values, and one signed
+  // `groupBaseline - groupResponse` saving.
+  //
+  // ATTRIBUTION NOTE: `savedTokensByClient` (and the automatic-pricing
+  // client rate) credits a contributing group's WHOLE signed saving to the
+  // client of the group's FIRST `ok` event. This assumes one task is worked
+  // by one client/lane (the same lane=1-agent assumption the AGENTS.md
+  // shared-workspace contract documents) — a task whose calls somehow
+  // interleaved two different clients would misattribute that group's
+  // saving to whichever call happened first. The machine/workspace-scoped
+  // totals above (`measuredBaselineTokens`, `estimatedSavedTokens`, etc.)
+  // are exact regardless; only the PER-CLIENT split inherits this
+  // approximation.
+  // -------------------------------------------------------------------------
+  const taskGroups = new Map<string, TokenLightenUsageEvent[]>();
+  let ungroupedSeq = 0;
+  for (const event of events) {
+    const key =
+      typeof event.taskRef === "string" && event.taskRef !== ""
+        ? `t\0${event.sessionId}\0${event.taskRef}`
+        : `u\0${ungroupedSeq++}`;
+    const group = taskGroups.get(key);
+    if (group === undefined) taskGroups.set(key, [event]);
+    else group.push(event);
+  }
+  for (const group of taskGroups.values()) {
+    const hasAnchor = group.some(
+      (event) => event.outcome === "ok" && event.baselineTokens !== null,
+    );
+    if (!hasAnchor) continue;
+    let groupResponseTokens = 0;
+    let groupResponseBytes = 0;
+    let groupBaselineTokens = 0;
+    let firstOkClient: TokenLightenClient | undefined;
+    for (const event of group) {
+      if (event.outcome !== "ok") continue;
+      if (firstOkClient === undefined) firstOkClient = event.client;
+      groupResponseTokens += event.estimatedResponseTokens;
+      groupResponseBytes += event.responseBytes;
+      if (event.baselineTokens !== null) groupBaselineTokens += event.baselineTokens;
+    }
+    const signedSavedTokens = groupBaselineTokens - groupResponseTokens;
+    const client = firstOkClient ?? "other";
+    measuredResponseTokens += groupResponseTokens;
+    measuredBaselineTokens += groupBaselineTokens;
+    measuredResponseBytes += groupResponseBytes;
+    estimatedSavedTokens += signedSavedTokens;
+    savedTokensByClient[client] += signedSavedTokens;
+    const automaticRate =
+      AUTOMATIC_PRICING.byClient[client].costPerMillionTokensUsd;
+    automaticallyEstimatedSavedCostUsd +=
+      signedSavedTokens * automaticRate / 1_000_000;
+    automaticallyEstimatedBaselineCostUsd +=
+      groupBaselineTokens * automaticRate / 1_000_000;
   }
   const price =
     costPerMillionTokensUsd !== undefined

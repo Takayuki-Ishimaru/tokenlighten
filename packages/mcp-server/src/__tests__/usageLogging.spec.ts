@@ -83,6 +83,11 @@ describe("MCP usage logging boundary", () => {
       estimatedSavedTokens: -events[1]!.estimatedResponseTokens,
       responseBytes: modelVisibleBytes(repeatedResult),
     });
+    // V13: neither call named a task (a bare path/mode=full read, no
+    // query/qref) — both events must correlate to no task, not to each
+    // other. See the qref-continuation test below for the positive case.
+    expect(events[0]!.taskRef).toBeNull();
+    expect(events[1]!.taskRef).toBeNull();
     const logText = readFileSync(
       join(logs, `usage-${events[0]!.occurredAt.slice(0, 10)}.ndjson`),
       "utf8",
@@ -90,5 +95,62 @@ describe("MCP usage logging boundary", () => {
     expect(logText).not.toContain("sample.ts");
     expect(logText).not.toContain("secretCustomerValue");
     expect(logText).not.toContain(root);
+  });
+
+  // -------------------------------------------------------------------------
+  // V13 (2026-08-30): task-unit usage aggregation. `summarizeUsage`
+  // (packages/usage) now groups a multi-call TASK's events by `taskRef`
+  // before computing a reduction ratio, so a query's first call (which
+  // often carries no baseline of its own) is not silently dropped once a
+  // later qref+targets continuation supplies one. That grouping depends
+  // entirely on both calls landing in the NDJSON log with the SAME taskRef
+  // — this pins the WIRING half of the fix, at the callToolTraced boundary,
+  // independent of the summarizeUsage math covered in packages/usage's own
+  // usage.spec.ts.
+  // -------------------------------------------------------------------------
+  it("stamps the SAME non-null taskRef on a query's task_pack call and its later qref+targets continuation", async () => {
+    const root = join(tmpdir(), `tokenlighten-mcp-usage-taskref-${randomUUID()}`);
+    const logs = join(root, "logs");
+    const home = join(root, "home");
+    mkdirSync(logs, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(root, "greeting.ts"),
+      "export function greet(name: string): string {\n  return `Hello, ${name}!`;\n}\n",
+    );
+    process.argv.push("--workspace", root);
+    process.env["NODE_ENV"] = "development";
+    process.env["TOKENLIGHTEN_LOG_HOME"] = logs;
+    process.env["HOME"] = home;
+    process.env["USERPROFILE"] = home;
+    vi.resetModules();
+
+    const { callTool } = await import("../server.js");
+
+    const first = await callTool("read_file", {
+      mode: "task_pack",
+      query: "Where is the greet function defined and what does it return?",
+      cwd: root,
+    });
+    const firstBody = JSON.parse((first.content[0] as { text: string }).text) as Record<string, unknown>;
+    const qref = String(firstBody["qref"]);
+    // Same format the protocol pins elsewhere (evidenceShadow.spec.ts,
+    // argMatrix.spec.ts): server.ts's taskQueryRef, "q-" + 16 hex chars.
+    expect(qref).toMatch(/^q-[a-f0-9]{16}$/);
+
+    await callTool("read_file", {
+      qref,
+      targets: [{ path: "greeting.ts" }],
+      cwd: root,
+    });
+
+    const events = readUsageEvents(logs);
+    expect(events).toHaveLength(2);
+    // The fix: BOTH calls correlate to the same task, whether the ref came
+    // from the caller's own `query` (call 1) or a verified `qref` replay of
+    // it (call 2) — dispatchTaskRef's whole point (server.ts).
+    expect(events[0]!.taskRef).toBe(qref);
+    expect(events[1]!.taskRef).toBe(qref);
+    expect(events[0]!.taskRef).toEqual(events[1]!.taskRef);
   });
 });

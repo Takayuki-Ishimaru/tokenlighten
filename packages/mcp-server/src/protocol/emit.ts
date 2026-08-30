@@ -77,6 +77,7 @@ import { recordServedBytes } from "../util/packServeLog.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
 import { applyResponseCodec } from "./codec/pipeline.js";
 import { ledgerCertificateBindingValid } from "./ledgerCertificateBinding.js";
+import { trace, isTraceEnabled } from "../util/trace.js";
 
 /**
  * The funnel tail: take a FINAL, already-projected payload to bytes.
@@ -232,6 +233,26 @@ export function emitFinalizedPayload(
   used = measureResponseBytes(text);
   noteEmission(context, { limit, used, ...(shed.length > 0 ? { shed } : {}) }, text, kind, shed.length > 0);
   context.shedRecords = shed;
+
+  // I-7 (2026-08-30 forensics attribution wave): the funnel tail is where the
+  // FINAL kind/bytes that actually ship are known -- see
+  // ProtocolCallContext.postReadyDiscovery's doc comment for the fire
+  // condition. `workspace` is edit-only on this context; `codecTraceWorkspace`
+  // is the one read_file/search_files dispatch always publishes (D1/F-C2a).
+  const postReadyWorkspace = context.workspace ?? context.codecTraceWorkspace;
+  if (context.postReadyDiscovery !== undefined && postReadyWorkspace !== undefined && isTraceEnabled()) {
+    trace(
+      "post_ready_followup",
+      {
+        tool: context.tool,
+        kind_served: onWire,
+        bytes: used,
+        force_serve: context.postReadyDiscovery.forceServe,
+        scope_class: context.postReadyDiscovery.scopeClass,
+      },
+      postReadyWorkspace,
+    );
+  }
 
   const finalized: FinalizableResult = {
     content: [{ type: "text", text }],

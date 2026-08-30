@@ -122,6 +122,7 @@ import {
   type ServedSurfaceEntry,
   type AwaitingInputLatch,
 } from "../../util/packServeLog.js";
+import { currentSessionLane, laneScopedKey } from "../../util/laneKey.js";
 import { computeClosureStateSafe } from "../../util/closureTracking.js";
 import { mustFetchPackCap } from "../../util/mustFetch.js";
 import {
@@ -155,7 +156,7 @@ import {
   resetTaskContractStoreForTest,
 } from "./taskContractStore.js";
 import { hasOpenUniverseIntent, isAdditiveEnumIntent } from "./openUniverseIntent.js";
-import { trace } from "../../util/trace.js";
+import { trace, isTraceEnabled, currentTraceCallId } from "../../util/trace.js";
 import { xlsxRoster, xlsxTable } from "../../office/xlsx.js";
 import { docxSections } from "../../office/docx.js";
 import { pptxSlides } from "../../office/pptx.js";
@@ -5859,6 +5860,62 @@ async function selectAnchorFocus(
   if (symbols.length === 0) return undefined;
 
   const lines = content.split(/\r?\n/);
+
+  // F-V13-8 (2026-08-30, independent-verification remediation): literal-first
+  // anchor. A query that names an exact, unique quoted/diff-style replacement
+  // (exactReplacementFromQuery — the same 8192B-capped, multi-quote-form
+  // parser attachSingleSiteUniqueMatchFastPath and the pre-pipeline T2 short
+  // circuit both already trust) is unambiguous positional evidence a
+  // lexical-overlap score can still lose: vocabulary shared with an
+  // unrelated symbol elsewhere in the file can outscore the symbol that
+  // actually contains the one place the literal occurs (observed: an
+  // explicit path + a quoted literal + a line-number hint anchored on the
+  // wrong symbol, dozens of lines away from the real target). When the
+  // literal (or, for the "set IDENT to NEW" form with no stated old value,
+  // the bare identifier text) occurs in `content` EXACTLY ONCE — checked
+  // with two indexOf calls, no regex, no normalization — route straight to
+  // the symbol enclosing that occurrence (reusing the `symbols` list already
+  // built above) and skip scoring entirely. Zero or multiple occurrences
+  // fall through unchanged to the lexical scoring below: uniqueness is the
+  // only signal trusted here, and choosing among several hits is left to the
+  // scoring/precondition machinery downstream — never guessed here.
+  const literalExact = exactReplacementFromQuery(query);
+  const literalText = literalExact === undefined
+    ? undefined
+    : "identifierOldValue" in literalExact
+    ? literalExact.identifierOldValue
+    : literalExact.search;
+  if (literalText !== undefined && literalText.length > 0) {
+    const firstIdx = content.indexOf(literalText);
+    if (firstIdx !== -1 && content.indexOf(literalText, firstIdx + 1) === -1) {
+      const matchLine = content.slice(0, firstIdx).split(/\r?\n/).length;
+      let enclosing: (typeof symbols)[number] | undefined;
+      let enclosingSpan = Infinity;
+      for (const sym of symbols) {
+        const bounds = sym.range.split("-");
+        const start = parseInt(bounds[0] ?? "", 10);
+        const end = parseInt(bounds[1] ?? "", 10);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start > matchLine || end < matchLine) continue;
+        const span = end - start;
+        if (span < enclosingSpan) {
+          enclosing = sym;
+          enclosingSpan = span;
+        }
+      }
+      if (enclosing !== undefined) {
+        return {
+          best: {
+            name: enclosing.name,
+            range: enclosing.range,
+            score: ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT,
+            ...(enclosing.kind ? { kind: enclosing.kind } : {}),
+          },
+          runnerUps: [],
+        };
+      }
+    }
+  }
+
   const scored: Array<AnchorFocusCandidate & { fits: boolean; exactIdentifier: boolean }> = [];
   const seenSymbolRanges = new Set<string>();
   for (const sym of symbols) {
@@ -8684,6 +8741,51 @@ function verifiedAbsentIdentifiersFor(result: TaskPackResult): readonly string[]
 /** P2(b): dedupes the proof-completion engagement counter to one increment per pack — see buildTaskExecutionContract's own comment at the increment site. */
 const proofCompletionCountedResults = new WeakSet<object>();
 
+/**
+ * I-7 (2026-08-30 forensics attribution wave): dedupes `enumerated_obligation_summary`
+ * to one emission per pack, the SAME pattern proofCompletionCountedResults
+ * uses just above and for the same reason — buildReadinessObligations runs at
+ * least twice per pack (the falsification probe's own preview call, then
+ * buildTaskExecutionContract's real one, which itself can re-evaluate one
+ * `result` up to four times), and a count of how many enumerated obligations
+ * were minted must describe the PACK, not how many times this builder
+ * happened to run over it.
+ */
+const enumeratedObligationSummaryCountedResults = new WeakSet<object>();
+
+/**
+ * I-7: dedupes `receipt_next_repair` to one emission per TOOL CALL, not per
+ * invocation of `receiptContractWithoutConsumedSearch`. Unlike the enumerated-
+ * obligation summary above there is no stable `result` object to key a
+ * WeakSet on here — `canServeCachedTaskPackReceipt`'s read-only preflight
+ * (server.ts, `exactPreparedTaskPackReceipt`) calls the SAME
+ * `tryServeCachedPack` chain the real serve path later calls again for one
+ * logical read_file request, each producing a byte-identical repair. Keyed
+ * on `currentTraceCallId()` instead — call_id is monotonic and ALS-scoped
+ * per tool call (util/trace.ts), so both invocations of one request share
+ * one id and only the first is traced. Bounded FIFO: call_id keeps climbing
+ * for the life of the process, so this evicts the oldest entry once the
+ * (generously headroomed, concurrent-lane-safe) cap is exceeded rather than
+ * growing unboundedly on a long-lived server.
+ */
+const MAX_TRACED_RECEIPT_REPAIR_CALL_IDS = 32;
+const receiptRepairTracedCallIds = new Set<number>();
+function shouldTraceReceiptRepairOnce(): boolean {
+  const callId = currentTraceCallId();
+  // Outside any runWithTraceCall scope (e.g. a direct unit call in a spec) —
+  // there is no shared id to dedupe against, so trace every time rather than
+  // silently drop a call a test is directly asserting on.
+  if (callId === undefined) return true;
+  if (receiptRepairTracedCallIds.has(callId)) return false;
+  receiptRepairTracedCallIds.add(callId);
+  while (receiptRepairTracedCallIds.size > MAX_TRACED_RECEIPT_REPAIR_CALL_IDS) {
+    const oldest = receiptRepairTracedCallIds.values().next().value as number | undefined;
+    if (oldest === undefined) break;
+    receiptRepairTracedCallIds.delete(oldest);
+  }
+  return true;
+}
+
 function isStrongRecoveredAnswerCandidate(
   candidates: readonly RankedAnswerEvidenceCandidate[],
   query: string,
@@ -11052,14 +11154,29 @@ function nearestExistingAncestorDir(workspace: string, targetPath: string): stri
  * (nearest ancestor is the workspace root) keeps no siblings: an untyped
  * project root has no established convention to imitate, so `surfaces`
  * becomes empty rather than the whole repo.
+ *
+ * F-V13-7 (2026-08-30, independent-verification remediation): the directory
+ * filter alone carried NO COUNT LIMIT — a create target sharing its
+ * directory with several existing files served every single one of them
+ * (observed: a 37-byte/1-line new-file create pulled in 5 siblings, ~13KB,
+ * before the file it was about to author even existed). `directorySiblingEvidence`
+ * right above already caps the analogous directory_evidence at 3; this now
+ * caps at `maxSiblings` (default 1 — one imitation template is enough to
+ * show the convention). Selection is deterministic: sort by path (the same
+ * bare `.sort()` directorySiblingEvidence itself uses) before slicing, so
+ * which sibling(s) survive never depends on upstream locator ordering.
  */
 function capCreateOnlyEvidence(
   surfaces: readonly TaskPackSurface[],
   workspace: string,
   targetPath: string,
+  maxSiblings = 1,
 ): TaskPackSurface[] {
   const scopeDir = nearestExistingAncestorDir(workspace, targetPath) || ".";
-  return surfaces.filter((surface) => path.posix.dirname(surface.path) === scopeDir);
+  const inScope = surfaces.filter((surface) => path.posix.dirname(surface.path) === scopeDir);
+  return inScope
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .slice(0, maxSiblings);
 }
 
 /** Most common code extension among `dir`'s immediate children (e.g. ".py"), or undefined. */
@@ -11254,24 +11371,91 @@ export function assertCreateRoute(result: TaskPackResult, profile: TaskProfile, 
   result.blocking_next_steps = undefined;
   result.next = `edit_file create:true path=${result.create_target.path}`;
   // Existing surfaces are reference context for create-only tasks. Keep a
-  // frontier only when the request also proves an independent edit target.
-  const independentEdit = (result.wiring?.edit_frontier?.length ?? 0) > 0
-    || (result.change_contract?.obligations ?? []).some((obligation) =>
-      obligation.action === "edit" && obligation.path !== result.create_target?.path);
+  // frontier only when the request also proves an independent edit target —
+  // F-V13-7 (2026-08-30, independent-verification remediation): and even
+  // then, keep ONLY that target's own evidence. Before this, ANY independent
+  // edit obligation exempted the WHOLE surface set from the create-only diet
+  // below (a single unrelated "also edit config.ts" clause let every locator
+  // hit through uncapped). `independentEditHandles`/`independentEditPaths`
+  // name exactly the wiring/obligation targets that are load-bearing for
+  // that edit; every other surface remains pure imitation reference
+  // material for the new file and stays subject to capCreateOnlyEvidence.
+  const independentEditHandles = new Set(result.wiring?.edit_frontier ?? []);
+  const independentEditPaths = new Set(
+    (result.change_contract?.obligations ?? [])
+      .filter((obligation) => obligation.action === "edit" && obligation.path !== result.create_target?.path)
+      .map((obligation) => obligation.path),
+  );
+  const independentEdit = independentEditHandles.size > 0 || independentEditPaths.size > 0;
   if (!independentEdit) {
     if (result.wiring !== undefined) result.wiring.edit_frontier = [];
     if (result.change_contract !== undefined) {
       result.change_contract.obligations = result.change_contract.obligations.filter((obligation) =>
         obligation.action !== "edit" || obligation.path === result.create_target?.path);
     }
-    // F-R14 (2026-08-22, DESIGN-v0.11 §9 residual): a create-only pack's
-    // `surfaces` are imitation references, not general evidence — cap them to
-    // the target's own directory (see capCreateOnlyEvidence's doc comment).
-    // `workspace` is only absent for legacy direct unit calls that hand-build
-    // a TaskPackResult with no real filesystem behind it; skip the cap then
-    // rather than resolve directories against a workspace that doesn't exist.
-    if (workspace !== undefined && result.surfaces.length > 0) {
-      result.surfaces = capCreateOnlyEvidence(result.surfaces, workspace, result.create_target.path);
+  }
+  // F-R14 (2026-08-22, DESIGN-v0.11 §9 residual) + F-V13-7 (2026-08-30): a
+  // create-only pack's `surfaces` are imitation references, not general
+  // evidence — cap them to the target's own directory (see
+  // capCreateOnlyEvidence's doc comment). A surface backing a proven
+  // independent edit obligation is load-bearing for that edit, not imitation
+  // material, so it is carried through untouched — never handed to the
+  // directory-scoped cap — regardless of independentEdit above. This is a
+  // SEPARATE decision from the wiring/change_contract clearing just above:
+  // diet application and frontier clearing must never be conflated — a pack
+  // can legitimately keep a real edit frontier AND still diet its unrelated
+  // imitation surfaces. `workspace` is only absent for legacy direct unit
+  // calls that hand-build a TaskPackResult with no real filesystem behind
+  // it; skip the cap then rather than resolve directories against a
+  // workspace that doesn't exist.
+  //
+  // F-V13-7 follow-up: a surface the CALLER explicitly named (`paths:[...]`,
+  // a query-named file, or a paired header/source sibling) is load-bearing
+  // for the SAME reason an independent edit target is — dropping it silently
+  // desyncs reconcileCallerPathCoverage's "every existing caller path is
+  // either served or named in missing" invariant, which then reports the cut
+  // sibling as a genuine gap and demotes the whole pack to needs-followup
+  // (observed live: `paths:[ServiceA.ts, ServiceB.ts]` + surfaceRoles:["api"]
+  // on a create query kept only ServiceA.ts, and the pack fell to
+  // locate_missing_surfaces over ServiceB.ts). These markers are exactly what
+  // the byte-budget-shedding pass below already treats as "never silently
+  // drop an explicitly requested file" — reused here, not reinvented.
+  const hasExplicitCallerProvenance = (why: string | undefined): boolean =>
+    why !== undefined
+    && (why.includes("caller-supplied") || why.includes("query-named-file") || why.includes("header-source-pair"));
+  if (workspace !== undefined && result.surfaces.length > 0) {
+    const keep = new Set(
+      result.surfaces.filter((surface) =>
+        independentEditHandles.has(surface.handle)
+        || independentEditPaths.has(surface.path)
+        || hasExplicitCallerProvenance(surface.why)),
+    );
+    const dietable = result.surfaces.filter((surface) => !keep.has(surface));
+    const cappedList = capCreateOnlyEvidence(dietable, workspace, result.create_target.path);
+    const capped = new Set(cappedList);
+    result.surfaces = result.surfaces.filter((surface) => keep.has(surface) || capped.has(surface));
+    // I-7 (2026-08-30 forensics attribution wave): fires only when the cap
+    // actually removed a candidate sibling (F-V13-7's own incident: an
+    // uncapped diet once served 5 siblings/~13KB for a 37-byte new file) —
+    // a pack whose dietable set already fit under maxSiblings triggers
+    // nothing here. `target_dir_class` mirrors capCreateOnlyEvidence's own
+    // nearestExistingAncestorDir walk: does the create target's OWN
+    // immediate parent directory already exist, or is this an as-yet-uncreated
+    // directory with no sibling convention to imitate.
+    if (isTraceEnabled() && dietable.length > cappedList.length) {
+      const targetDir = path.posix.dirname(result.create_target.path);
+      trace(
+        "create_evidence_diet",
+        {
+          candidate_siblings: dietable.length,
+          kept_siblings: cappedList.length,
+          kept_caller_named: keep.size,
+          target_dir_class: isExistingDirRel(workspace, targetDir === "." ? "" : targetDir)
+            ? "existing-dir"
+            : "new-dir",
+        },
+        workspace,
+      );
     }
   }
   result.route = {
@@ -14893,6 +15077,154 @@ function requiredQueryFacets(query: string): string[] {
   return [...new Set([...slashGroups, ...quoted].map((value) => value.toLowerCase()))].slice(0, 6);
 }
 
+/**
+ * F-V13-6 (2026-08-30, v0.13.0 external-verification P0-B): THE FINITE
+ * PLAIN-PROSE CHECKLIST.
+ *
+ * A query can name several things that must each be accounted for without
+ * using any of the four vocabularies the proof model already recognizes:
+ * `requiredQueryFacets` extracts only quoted/backticked/slash-joined tokens,
+ * `explicitCodeIdentifiers` only code-SHAPED ones, `BEHAVIOR_QUERY_RE` only
+ * behavior wording, and v0.13's obligation ledger only fires behind
+ * `hasOpenUniverseIntent` (quantifiers: "every caller", "すべての", "列挙").
+ * "…what it does with clipboard, autosave, telemetry and shortcuts" is none of
+ * those, so nothing in the proof model represented it and the certificate was
+ * vacuously complete — the reported defect (an `act.answer` over a head slice
+ * of a long file, reproduced here in its essential form: served bytes that
+ * cover none of the enumerated items).
+ *
+ * WHAT COUNTS AS AN ENUMERATION, and why each rule is here. Only ONE new
+ * judgment is added: is this prose a LIST of short noun phrases?
+ *
+ *  1. SEPARATORS are commas (ASCII and CJK), semicolons, the ideographic
+ *     middle dot, EN "and"/"or", JA "や", and line-leading bullets/numbering.
+ *     NOT "/" — slash groups are `requiredQueryFacets`' own axis, and treating
+ *     a path-shaped span as a three-item list is exactly the W9 regression
+ *     that once poisoned every facet on this file.
+ *  2. AN ITEM IS A SHORT NOUN PHRASE: at most two words (after a leading
+ *     determiner) and 32 characters. This is the rule that separates a list
+ *     from ordinary clause prose — "when the panel loads, the store is read
+ *     and the bus is bound" splits into three items, and every one of them is
+ *     a clause with a verb, so none qualifies and nothing is minted.
+ *  3. THE LEADING ITEM IS EXEMPT FROM (2) VIA ITS TAIL, because it carries the
+ *     sentence's whole preamble ("explain what the settings panel does with
+ *     clipboard"). Its last two words are re-tried as the noun phrase, which
+ *     is where the first enumerated head actually sits — in both languages
+ *     tested. The exemption is deliberately NOT extended to the other items:
+ *     that is what keeps rule (2) load-bearing against clause prose.
+ *  4. AT LEAST TWO NON-LEADING items must qualify, and at least three facets
+ *     must survive in total. Two items are never an enumeration; three are.
+ *  5. AN ITEM'S FACET IS ONE content-bearing LATIN token of it — the longest
+ *     for a genuine list item, the LAST one for the leading segment's re-tried
+ *     tail (see `enumerationItemFacet`). A facet must be provable against
+ *     served text, and a purely ideographic item ("環境変数") can never appear
+ *     literally in code — minting it would create a permanently unprovable
+ *     obligation, which is over-strictness, not rigor. Japanese enumerations
+ *     therefore contribute exactly the identifier-shaped items they name.
+ *  6. ANYTHING THE EXISTING ROUTES ALREADY OWN IS DROPPED — a backticked or
+ *     code-shaped item already has its own obligation, and two obligations
+ *     over one requirement is double-counting, not extra proof.
+ */
+const ENUMERATED_ITEM_OBLIGATION_PREFIX = "enumerated-item:";
+/** Distinct facets required before a prose list is treated as an enumeration. */
+const ENUMERATED_QUERY_MIN_FACETS = 3;
+/** Upper bound on minted enumerated obligations (cf. requiredQueryFacets' own cap). */
+const ENUMERATED_QUERY_MAX_FACETS = 8;
+/** Shortest token carrying enough signal to look for in served code. */
+const ENUMERATED_FACET_MIN_CHARS = 3;
+/** Words / characters an item may have and still read as a noun phrase, not a clause. */
+const ENUMERATED_ITEM_MAX_WORDS = 2;
+const ENUMERATED_ITEM_MAX_CHARS = 32;
+/** Function words that carry no retrieval signal, so never a facet on their own. */
+const ENUMERATED_ITEM_STOPWORDS: ReadonlySet<string> = new Set([
+  "the", "and", "but", "for", "its", "this", "that", "these", "those", "with", "from", "into",
+  "than", "then", "what", "which", "who", "why", "does", "did", "are", "was", "were", "will",
+  "would", "should", "could", "must", "may", "can", "not", "use", "uses", "used", "using", "via",
+  "per", "any", "some", "other", "others", "same", "new", "old", "only", "just", "also", "etc",
+  "more", "most", "each", "every", "all", "one", "two", "three", "four", "five", "six",
+]);
+/**
+ * NUL, deliberately: a word-shaped sentinel (" enum ") would itself be split
+ * by a query that happens to contain that word. NUL cannot occur in a request
+ * the transport delivers, and it is already this file's join separator
+ * elsewhere. Written as an escape so the source stays NUL-free.
+ */
+const ENUMERATION_SEPARATOR = "\u0000";
+const ENUMERATION_LIST_MARKER_RE = /(?:^|\n)[ \t]*(?:[-*•]|\(?\d{1,2}[.)])[ \t]+/g;
+const ENUMERATION_SEPARATOR_RE = /[,;、，・]|\band\b|\bor\b|や/gi;
+const ENUMERATION_LEADING_DETERMINER_RE = /^(?:the|a|an|its|their|this|that|these|those)\s+/i;
+
+/**
+ * The facet an item contributes, or undefined when it is not a short noun
+ * phrase.
+ *
+ * `pick` is the difference between the two callers, and it is not cosmetic. A
+ * genuine list item is a noun phrase whose most distinctive word carries the
+ * requirement ("autosave timer" -> autosave), so it takes the LONGEST token.
+ * The leading segment's re-tried tail is the end of a SENTENCE ("…decides
+ * allow"), where the enumerated head is the last word and everything before it
+ * is the verb — taking the longest there mints the verb as a requirement,
+ * observed live against replayCorpus's `resolveAccessPolicy decides allow,
+ * deny, or needs-review` entry, which then could never prove.
+ */
+function enumerationItemFacet(item: string, pick: "longest" | "last" = "longest"): string | undefined {
+  const phrase = item.trim().replace(ENUMERATION_LEADING_DETERMINER_RE, "");
+  if (phrase.length === 0 || phrase.length > ENUMERATED_ITEM_MAX_CHARS) return undefined;
+  if (phrase.split(/\s+/).length > ENUMERATED_ITEM_MAX_WORDS) return undefined;
+  // Internal hyphens are part of the token: "needs-review" is one enumerated
+  // item, and splitting it into "needs"/"review" both loses the requirement and
+  // weakens the substring match that proves it.
+  const tokens = (phrase.match(/[A-Za-z_$][A-Za-z0-9_$]*(?:-[A-Za-z0-9_$]+)*/g) ?? [])
+    .map((token) => token.toLowerCase())
+    .filter((token) =>
+      token.length >= ENUMERATED_FACET_MIN_CHARS
+      && !ENUMERATED_ITEM_STOPWORDS.has(token)
+      && !READINESS_PROBE_GENERIC_TOKENS.has(token));
+  if (tokens.length === 0) return undefined;
+  return pick === "last"
+    ? tokens[tokens.length - 1]!
+    : tokens.reduce((best, token) => (token.length > best.length ? token : best));
+}
+
+/**
+ * Exported for its own regression pin (enumeratedItemObligation.spec.ts),
+ * matching the precedent set by `advanceExecutedLocateNextCall` and
+ * `repairSuppressedNextCall`: a shape-classification heuristic whose
+ * false-positive boundary is the whole risk is worth testing directly, not
+ * only through six layers of pack assembly.
+ */
+export function enumeratedQueryFacets(query: string): string[] {
+  const items = stripPathSpans("", query)
+    .replace(ENUMERATION_LIST_MARKER_RE, ENUMERATION_SEPARATOR)
+    .replace(ENUMERATION_SEPARATOR_RE, ENUMERATION_SEPARATOR)
+    .split(ENUMERATION_SEPARATOR)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  if (items.length < ENUMERATED_QUERY_MIN_FACETS) return [];
+  const trailing = items.slice(1)
+    .map((item) => enumerationItemFacet(item))
+    .filter((facet): facet is string => facet !== undefined);
+  // Rule 4's floor, applied to the items that had to earn it the hard way.
+  if (trailing.length < ENUMERATED_QUERY_MIN_FACETS - 1) return [];
+  const leadWords = items[0]!.trim().split(/\s+/);
+  const lead = enumerationItemFacet(items[0]!)
+    ?? enumerationItemFacet(leadWords.slice(-ENUMERATED_ITEM_MAX_WORDS).join(" "), "last");
+  const owned = new Set([
+    ...requiredQueryFacets(query),
+    ...explicitCodeIdentifiers(query).map((identifier) => identifier.toLowerCase()),
+  ]);
+  const facets: string[] = [];
+  const seen = new Set<string>();
+  for (const facet of lead !== undefined ? [lead, ...trailing] : trailing) {
+    if (owned.has(facet) || seen.has(facet)) continue;
+    seen.add(facet);
+    facets.push(facet);
+  }
+  return facets.length >= ENUMERATED_QUERY_MIN_FACETS
+    ? facets.slice(0, ENUMERATED_QUERY_MAX_FACETS)
+    : [];
+}
+
 function probeFileText(workspace: string, filePath: string): string | undefined {
   try {
     const rootReal = fs.realpathSync(workspace);
@@ -16063,6 +16395,8 @@ function buildReadinessObligations(
   profile: TaskProfile,
   query: string,
   openUniverseDischarged = false,
+  /** I-7: workspace for the trace-only enumerated_obligation_summary emission below; omitted by the readiness specs that build synthetic results with no real filesystem — same optionality convention buildTaskExecutionContract's own `workspace` param already uses. */
+  workspace?: string,
 ): TaskReadinessObligation[] {
   const surfaces = codeTaskPackSurfaces(result.surfaces);
   const served = surfaces.filter(hasServedCode);
@@ -16190,6 +16524,103 @@ function buildReadinessObligations(
             ? `callable evidence is missing query facets: ${missingFacets.join(",")}`
             : "behavioral question has no callable implementation body",
       });
+    }
+    // F-V13-6: one obligation per enumerated item, minted independently of the
+    // behavior-body branch above so a checklist with no behavior wording is
+    // still represented. `kind:"concern"` is the existing wire vocabulary for
+    // "a requirement the query raised that needs its own served evidence"; the
+    // id prefix keeps the items individually addressable, which is what puts
+    // each unproved one on the wire by NAME (falsification.unresolved and the
+    // capability gap's obligation_ids).
+    //
+    // BODY-SCOPED PROOF (surfaceBodyContainsToken, not surfaceContainsToken):
+    // this obligation exists because a served RANGE was treated as evidence for
+    // a question it never covered, so proving it from the file PATH would
+    // recreate the same vacuity one level down — the exact reason
+    // surfaceBodyContainsToken was split out for proof obligations in the first
+    // place.
+    const enumeratedFacets = enumeratedQueryFacets(query);
+    if (enumeratedFacets.length > 0) {
+      // DISCHARGE BY NAMED AUTHORITY — the line between "no evidence for what
+      // was asked" and "proof of a negative".
+      //
+      // When the request NAMES an implementation and the pack served that
+      // body in full, an item the body does not mention is already answered by
+      // the served bytes ("it never returns choose-candidate"). Requiring a
+      // literal occurrence there would demand the server prove a negative and
+      // would reopen discovery on a complete, correctly-targeted pack —
+      // observed against replayCorpus's `buildTaskExecutionContract returns
+      // answer-ready, edit-ready, choose-candidate, or needs-followup` entry,
+      // where two of the four states genuinely do not exist in the function.
+      // The defect this obligation exists for has no such anchor: nothing the
+      // request enumerated appears anywhere in the served bytes, and no
+      // identifier it named was served whole.
+      const queryIdentifiers = explicitCodeIdentifiers(query);
+      const namedAuthorityServed = queryIdentifiers.length > 0
+        && served.some((surface) =>
+          surface.content_completeness !== "partial"
+          && queryIdentifiers.some((identifier) => surfaceBodyContainsToken(surface, identifier)));
+      // I-7 (2026-08-30 forensics attribution wave): the span of `obligations`
+      // this block is about to mint, so the trace emission below can report on
+      // exactly those entries without touching the loop that mints them.
+      const enumeratedObligationsStart = obligations.length;
+      for (const facet of enumeratedFacets) {
+        const evidence = served
+          .filter((surface) => surfaceBodyContainsToken(surface, facet))
+          .map(readinessEvidence);
+        obligations.push({
+          id: `${ENUMERATED_ITEM_OBLIGATION_PREFIX}${facet}`,
+          kind: "concern",
+          status: evidence.length > 0 || namedAuthorityServed ? "proved" : "uncovered",
+          required: true,
+          evidence: evidence.slice(0, 3),
+          reason: evidence.length > 0
+            ? `enumerated item ${facet} appears in served evidence`
+            : namedAuthorityServed
+              ? `enumerated item ${facet} is answerable from the fully served implementation the request named`
+              : `enumerated item ${facet} was named by the request but has no served evidence`,
+        });
+      }
+      // I-7: observe the minting itself (facet count / unproved count / the
+      // named-authority discharge route), not the eventual act/gap decision --
+      // T03 forensics needed exactly this and had to hand-reconstruct it from
+      // raw transcripts (bench/workflows/experiments/2026-08-30-v0131-forensics/
+      // REPORT.md's I-1 section). Dedup to one emission per pack via
+      // enumeratedObligationSummaryCountedResults — see its own doc comment.
+      // `workspace` is omitted by readiness specs that build synthetic
+      // results with no real filesystem, which this silently skips (never
+      // throws) rather than trace against a workspace that doesn't exist.
+      //
+      // PRIVACY: facets are QUERY-DERIVED tokens the caller typed, unlike the
+      // workspace-relative PATHS several existing events already emit
+      // (edit_hunk_frontier's `path`, repeated_range's `path`,
+      // post_edit_readback's `path`) — no existing trace event emits a raw
+      // query substring (grepped: only `query_chars`/length and `task_ref`/
+      // hash exist), so this follows that precedent rather than the path one:
+      // a short content hash (reusing shaOfText, the same primitive
+      // handle-content-addressing already uses) plus the char length, never
+      // the literal word.
+      if (
+        isTraceEnabled()
+        && workspace !== undefined
+        && !enumeratedObligationSummaryCountedResults.has(result)
+      ) {
+        enumeratedObligationSummaryCountedResults.add(result);
+        const minted = obligations.slice(enumeratedObligationsStart);
+        trace(
+          "enumerated_obligation_summary",
+          {
+            facet_count: enumeratedFacets.length,
+            unproved_count: minted.filter((obligation) => obligation.status === "uncovered").length,
+            named_authority_discharge: namedAuthorityServed,
+            facets: enumeratedFacets.map((facet) => ({
+              hash: shaOfText(facet).slice(7, 15),
+              chars: facet.length,
+            })),
+          },
+          workspace,
+        );
+      }
     }
   }
 
@@ -16488,6 +16919,30 @@ function actionFrontierForCertificate(
   const createTarget = result.create_target?.path ? [result.create_target.path] : [];
   // Create-only context surfaces are read-only imitation evidence, not edit targets.
   // Mixed create+edit requests retain independent wiring/change obligations.
+  //
+  // THE EMPTY RETURN IS LOAD-BEARING — do not "fix" it (2026-08-30, F-V13-3
+  // wave; measured, not reasoned). Returning `[...createTarget]` here looks
+  // like the obvious repair for "a create pack does not authorize its own
+  // create target", and it is wrong twice over:
+  //
+  //  (a) It is unnecessary. `recordExecutionContract` (state/session.ts, the
+  //      2026-07-25 T13 refuse-only-fence guard) CLEARS the fence outright for
+  //      an edit-terminal certificate with no handles, no action paths and no
+  //      evidence — which is exactly a create-only pack — so the create is
+  //      ungated. Verified end to end through the real dispatch, including the
+  //      case where the same lane already holds admissible material (so the
+  //      guard does NOT fire and the fence installs with an empty frontier):
+  //      the `edits[]` create still lands, authorized by server.ts's own
+  //      create pin (`create_target.authorized_by:"explicit-cwd"`).
+  //  (b) It closes discovery. A non-empty frontier makes this a real prepared
+  //      fence, so the NEXT task_pack of an unrelated task in the same session
+  //      is refused `prepared-discovery-closed` — a single-lane wire change,
+  //      caught by replayCorpus's tew3_2/tew3_3 (a create pack followed by an
+  //      enum-addition pack).
+  //
+  // The create refusal observed in the field (F-V13-3, v0.13.0 decision run)
+  // was NOT this: the lane's fence held a PEER lane's certificate. That is
+  // fixed in the five lane-scoped stores, not here.
   if (createTarget.length > 0 && fromWiring.length === 0 && fromChange.length === 0) return [];
   return [...new Set([
     ...createTarget, ...fromWiring, ...fromChange, ...provedImplementation,
@@ -16965,13 +17420,50 @@ function admitReadOnlyNextCall(call: ContinuationCall, originalQuery: string): C
   return { ...call, arguments: args };
 }
 
+/**
+ * F-V13-6, THE TERMINATION RULE FOR ENUMERATED ITEMS.
+ *
+ * A stricter obligation must not buy itself an escape hatch: the only thing
+ * this adds is ONE bounded `find` per item, and only while that find is still
+ * unspent. Once the session has run it — whatever it returned — the item is
+ * NOT promoted to proved (a search result the pack never served is not served
+ * evidence) and it is NOT proposed again. The obligation then simply stays
+ * uncovered and travels as an honest disclosure, which is the convergent state
+ * for a requirement the repository cannot satisfy.
+ *
+ * `workspace` is optional so the readiness specs' synthetic, workspace-free
+ * contracts keep their existing call shape; without it the first unproved item
+ * is proposed exactly once per pack, as any other proof next would be.
+ */
+function enumeratedItemFindCall(
+  obligations: readonly TaskReadinessObligation[],
+  workspace: string | undefined,
+): ContinuationCall | undefined {
+  for (const obligation of obligations) {
+    if (obligation.status === "proved") continue;
+    if (!obligation.id.startsWith(ENUMERATED_ITEM_OBLIGATION_PREFIX)) continue;
+    const facet = obligation.id.slice(ENUMERATED_ITEM_OBLIGATION_PREFIX.length);
+    if (facet.length === 0) continue;
+    if (workspace !== undefined && consultExecutedSearch(workspace, "find", facet) !== undefined) continue;
+    return { tool: "search_files", arguments: { action: "find", query: facet } };
+  }
+  return undefined;
+}
+
 function nextCallForUnresolved(
   result: TaskPackResult,
   obligations: readonly TaskReadinessObligation[],
   query: string,
+  workspace?: string,
 ): ContinuationCall | undefined {
   const unresolved = obligations.find((obligation) => obligation.status === "uncovered");
   if (!unresolved) return undefined;
+  // Ahead of the generic branches below: an enumerated item names its own
+  // search term, so the shared "first uncovered obligation" fallbacks would
+  // otherwise emit a symbols/references sweep over an unrelated token.
+  if (unresolved.id.startsWith(ENUMERATED_ITEM_OBLIGATION_PREFIX)) {
+    return enumeratedItemFindCall(obligations, workspace);
+  }
   const identifier = unresolved.id.startsWith("identifier:") ? unresolved.id.slice("identifier:".length) : undefined;
   if (identifier) return { tool: "search_files", arguments: { action: "symbols", query: identifier } };
   const connection = result.wiring?.connections[0];
@@ -17227,7 +17719,22 @@ export function buildTaskExecutionContract(
       || ledger.explicitGaps.some((entry) => entry.startsWith("dependency-definitions:open-universe "))
       || dependencyDefinitionsSettled
     );
-  const obligations = buildReadinessObligations(result, profile, query, openUniverseDischarged);
+  // I-7: forwards this builder's OWN `workspace` param (undefined for the
+  // synthetic/unit-built contracts several readiness specs construct — same
+  // optionality this whole function already has) so buildReadinessObligations
+  // can trace-summarize an enumerated-item mint. NOT threaded into
+  // runInternalReadinessFalsification's OWN preview call, above this
+  // function's definition — that call's `initialObligations` is a throwaway
+  // internal check (never assigned to result.execution_contract, never
+  // returned to a caller), so it must never win the one-emission-per-pack
+  // dedup below. This function itself runs multiple times per pack (its own
+  // P2(b) comment above, and runRecursiveReadOnlyClosure's discovery-loop
+  // callers re-invoke it once per depth as evidence grows), so the dedup can
+  // land on an early, not-yet-fully-settled evaluation for a pack that engages
+  // that loop — an accepted, disclosed imprecision for a trace-only summary,
+  // never a wire effect. See enumeratedObligationSummaryCountedResults' doc
+  // comment.
+  const obligations = buildReadinessObligations(result, profile, query, openUniverseDischarged, workspace);
   const falsification = buildFalsificationReport(result, profile, obligations);
   const risk = estimateReadinessRisk(result, profile, query, obligations, falsification);
   const focusedAnswerCandidate = profile === "answer"
@@ -17414,7 +17921,7 @@ export function buildTaskExecutionContract(
     && nextCallCoveredBySpans(result, parsedNextCandidate, currentPackSpans)
     ? undefined
     : parsedNextCandidate;
-  const proofNext = nextCallForUnresolved(result, obligations, query);
+  const proofNext = nextCallForUnresolved(result, obligations, query, workspace);
   // A pre-contract next can be stale after an authoritative absence has
   // discharged the open-universe axis. Keep it only when the current proof
   // model still has a matching unresolved call; otherwise the same search
@@ -17481,8 +17988,22 @@ export function buildTaskExecutionContract(
   // plus a search_files next_call. Deliberately scoped to the answer route: the
   // edit side keeps its no-dead-end override below, which exists for starved
   // required surfaces.
+  // F-V13-6: "the pack's OWN verdict that discovery is closed" is exactly what
+  // an unproved ENUMERATED item contradicts — the same proof model, saying the
+  // request named something the served bytes do not cover. Without this the
+  // stricter obligation would land the caller on a bare
+  // `await_input:"act-on-served-evidence"`, whose frozen wire member carries no
+  // `gaps` key, so the open items could not be NAMED and the honest disclosure
+  // would be silent. Scoped to the new obligation class: a pack that could not
+  // previously mint one is byte-identical to before. The escape is bounded by
+  // `enumeratedItemFindCall`, which proposes each item's find at most once per
+  // session and nothing at all once they are spent.
+  const enumeratedItemOpen = obligations.some((obligation) =>
+    obligation.status !== "proved"
+    && obligation.id.startsWith(ENUMERATED_ITEM_OBLIGATION_PREFIX));
   const routeClosedAnswer = result.route?.action === "answer_from_handles"
-    && (result.route.max_additional_tl_calls ?? 0) === 0;
+    && (result.route.max_additional_tl_calls ?? 0) === 0
+    && !enumeratedItemOpen;
   const candidateCall = accepted || humanChoicePending || routeClosedAnswer
     ? undefined
     : [artifactFallback, continuationCall, proofNext, parsedNextAfterProof, gapFallback, partialFallback, missingAffordance]
@@ -17971,6 +18492,49 @@ export function reconcileTaskPackExecutionContract(result: TaskPackResult): void
 }
 
 /**
+ * I-6 fix (v0.13.1 forensics, DESIGN-v0.13-plan.md §6 2026-08-30 entry;
+ * bench/workflows/experiments/2026-08-30-v0131-forensics/{REPORT.md,root/
+ * i6_fallback_probe.mjs,root/i6-fallback-result.json}): whether ONE of
+ * `enforceNoDeadEndContract`'s own last-resort candidates has already run.
+ *
+ * `hasExecutedNext` fingerprints the WHOLE call — tool, action, AND every
+ * task/budget/scope field the real dispatch carried (packServeLog.ts's
+ * `nextFingerprint`/`semanticTask`). A real search_files dispatch almost
+ * always carries SOME task envelope (`taskEpoch`/`taskProfile`/...), while
+ * this guard's own bare `{action:"tree"}` candidate carries none — so their
+ * fingerprints never match, and `hasExecutedNext` alone can never see that
+ * the candidate already ran (measured: recording a real dispatch's args
+ * `{cwd,lane,action:"tree",taskEpoch:"new",taskProfile:"answer"}` and then
+ * checking the bare candidate against it returns `false` — the two
+ * fingerprints differ only in the task field the candidate never carries).
+ * Root's unit probe reproduced the resulting loop end-to-end: the identical
+ * pathless-tree next came back after the SAME workspace/lane had already
+ * executed it (`i6-fallback-result.json`: `repeated_identically:true`).
+ *
+ * `consultExecutedSearch`'s coarser `${action}::${query-or-path}` ledger is
+ * immune to that task/epoch noise — the same two-ledger reasoning
+ * `receiptContractWithoutConsumedSearch` below already documents for the
+ * receipt path — so this checks it too, scoped to the one candidate shape
+ * that is actually pathless: a bare `search_files` tree. server.ts's
+ * `recordExecutedSearch` call now keys a pathless tree under the workspace
+ * root (`treePath ?? workspace`), matched here with the identical fallback,
+ * so a bare-tree candidate consulted here and a bare-tree call recorded
+ * there always agree on one key.
+ */
+function noDeadEndCandidateAlreadyExecuted(
+  ledger: { workspace: string; lane: string },
+  candidate: ContinuationCall,
+): boolean {
+  const candidateArgs = (candidate.arguments ?? {}) as Record<string, unknown>;
+  if (hasExecutedNext(ledger.workspace, ledger.lane, candidate.tool, candidateArgs)) return true;
+  if (candidate.tool === "search_files" && candidateArgs["action"] === "tree") {
+    const treePath = typeof candidateArgs["path"] === "string" ? candidateArgs["path"] : undefined;
+    return consultExecutedSearch(ledger.workspace, "tree", treePath ?? ledger.workspace) !== undefined;
+  }
+  return false;
+}
+
+/**
  * Final no-dead-end invariant (2026-07-30): a non-prepared pack must always
  * carry at least one machine-executable action — a bounded next/continuation,
  * a route with sanctioned calls, or a granted terminal action. A response
@@ -18024,14 +18588,12 @@ export function enforceNoDeadEndContract(
   // ledger in hand the guard picks the first UNEXECUTED candidate; with every
   // candidate consumed it leaves the contract alone rather than manufacturing
   // a loop, and the disclosure written by repairSuppressedNextCall stands.
+  // I-6 fix: "unexecuted" is decided by noDeadEndCandidateAlreadyExecuted
+  // (hasExecutedNext PLUS a pathless-tree-aware consultExecutedSearch check —
+  // see that function's own doc comment), not by hasExecutedNext alone.
   const call = ledger === undefined
     ? candidates[0]!
-    : candidates.find((candidate) => !hasExecutedNext(
-        ledger.workspace,
-        ledger.lane,
-        candidate.tool,
-        (candidate.arguments ?? {}) as Record<string, unknown>,
-      ));
+    : candidates.find((candidate) => !noDeadEndCandidateAlreadyExecuted(ledger, candidate));
   if (call === undefined) return;
   const plan = enforceContinuationBudget({
     version: 1,
@@ -19231,9 +19793,13 @@ export function resetPackDedupeCache(): void {
  */
 export function clearPackDedupeForWorkspace(workspace: string, lane?: string): void {
   const key = path.resolve(workspace);
-  lastPackBlocksByWorkspace.delete(key);
-  servedPacksByWorkspace.delete(key);
-  certifiedWorkingSets.delete(key);
+  // F-V13-3: lane-scoped, so `task.epoch:"new"` clears THIS agent's caches
+  // and never a peer lane's. The key SPELLING is preserved verbatim (this
+  // function has always resolved, while captureServedPack keys on the raw
+  // `workspace` string its caller passes); unifying it is a separate change.
+  lastPackBlocksByWorkspace.delete(laneScopedKey(key));
+  servedPacksByWorkspace.delete(laneScopedKey(key));
+  certifiedWorkingSets.delete(laneScopedKey(key));
   // P0 defect 2 (2026-08-27): the epoch requirement contract is the same class
   // of workspace-keyed, task-scoped state, and `taskEpoch:"new"` is exactly
   // the boundary at which it must go. Doing it HERE rather than in server.ts's
@@ -19296,6 +19862,16 @@ export function clearPackDedupeForWorkspace(workspace: string, lane?: string): v
  * file-fingerprint list used to prove the surfaces are unchanged.
  */
 interface ServedPackRecord {
+  /**
+   * F-V13-3 (2026-08-30): the lane this pack was SERVED to. The window is
+   * keyed per (workspace, lane), so this is defence in depth on the two
+   * lookups that hand a stored `executionContract` back to a caller
+   * (tryServeCachedPack / tryServeSemanticDuplicatePack) — a receipt that
+   * restates a certificate is an authorization like any other, and
+   * `computePackFingerprint` cannot discriminate lanes (it hashes query
+   * tokens + paths + roles + workspace, nothing about the caller).
+   */
+  lane: string;
   /** hash of (normalized query tokens + sorted paths[] + surfaceRoles + workspace) — the dedup-eligible identity. */
   fingerprint: string;
   /** JSON of the "extra" args {path,symbol,lang,limit} the served call carried; a differing value forces recompute (those args change served content). */
@@ -19892,11 +20468,11 @@ function captureServedPack(
   if ((result.surfaces as TaskPackResultSurface[]).some(isArtifactTaskPackSurface)) {
     const artifactSignatureKey =
       `${fingerprint} ${computeExtraArgsKey(args)} ${computeRequestProfileKey(args)}`;
-    const remaining = (servedPacksByWorkspace.get(workspace) ?? []).filter(
+    const remaining = (servedPacksByWorkspace.get(laneScopedKey(workspace)) ?? []).filter(
       (r) => `${r.fingerprint} ${r.extraArgsKey} ${r.requestProfileKey}` !== artifactSignatureKey,
     );
-    if (remaining.length > 0) servedPacksByWorkspace.set(workspace, remaining);
-    else servedPacksByWorkspace.delete(workspace);
+    if (remaining.length > 0) servedPacksByWorkspace.set(laneScopedKey(workspace), remaining);
+    else servedPacksByWorkspace.delete(laneScopedKey(workspace));
     return;
   }
   const distinctPaths: string[] = [];
@@ -19924,6 +20500,7 @@ function captureServedPack(
     ...(s.total_lines !== undefined ? { total_lines: s.total_lines } : {}),
   }));
   const record: ServedPackRecord = {
+    lane: currentSessionLane(),
     fingerprint,
     extraArgsKey: computeExtraArgsKey(args),
     requestProfileKey: computeRequestProfileKey(args),
@@ -19956,12 +20533,12 @@ function captureServedPack(
   // the SIGNATURE (so two genuinely differently-profiled calls keep their own
   // slots) even though LOOKUP matches it loosely via packProfileCompatible.
   const signatureKey = `${fingerprint}\u0000${record.extraArgsKey}\u0000${record.requestProfileKey}`;
-  const kept = (servedPacksByWorkspace.get(workspace) ?? []).filter(
+  const kept = (servedPacksByWorkspace.get(laneScopedKey(workspace)) ?? []).filter(
     (r) => `${r.fingerprint}\u0000${r.extraArgsKey}\u0000${r.requestProfileKey}` !== signatureKey,
   );
   kept.push(record);
   while (kept.length > MAX_CACHED_PACKS_PER_WORKSPACE) kept.shift();
-  servedPacksByWorkspace.set(workspace, kept);
+  servedPacksByWorkspace.set(laneScopedKey(workspace), kept);
 }
 
 /**
@@ -20136,6 +20713,157 @@ export const GENERALIZED_NO_REPEAT_ACTIONS: ReadonlySet<string> = new Set(["loca
  */
 export const LOCATE_ONLY_NO_REPEAT_ACTIONS: ReadonlySet<string> = new Set(["locate"]);
 
+/**
+ * F-V13-5 (2026-08-30, v0.13.0 external-verification P0-A): the actions whose
+ * stale `next_call` a RECEIPT can carry but cannot itself repair.
+ *
+ * THE OBSERVED LOOP. A caller re-sent the same query seven times and got the
+ * byte-identical `search_files action=tree` `next` back every time, after
+ * running that tree on turn one. The fresh-build path had the right brake all
+ * along — `recordExecutedSearch` -> `suppressNonProgressingNextCall` ->
+ * `advanceExecutedLocateNextCall(..., GENERALIZED_NO_REPEAT_ACTIONS)` ->
+ * `repairSuppressedNextCall`, which either finds an alternative progress axis
+ * or discloses an honest gap. The RECEIPT paths never reach it: an identical
+ * (or qref-replayed, or semantically duplicate) request short-circuits on
+ * `computePackFingerprint`, which hashes the REQUEST and therefore cannot see
+ * that the stored contract's own next has since been consumed.
+ * `compactReceiptFromRecord` then advances only `LOCATE_ONLY_NO_REPEAT_ACTIONS`
+ * — deliberately, because it has no wire channel for a NEW find/references/tree
+ * disclosure (see its own comment). So for exactly these three actions a
+ * receipt re-proposed consumed work forever.
+ *
+ * THE FIX IS NOT A REFUSAL, not a widening of the receipt's own advance, and
+ * NOT a decline. `guardExecutionDiscovery` records that refusing a
+ * discovery-phase caller measurably drove native-tool desertion, and the
+ * receipt's locate-only scope is load-bearing (pinned in
+ * advanceExecutedLocateNextCall.spec.ts).
+ *
+ * DECLINING WAS TRIED FIRST AND IS WRONG, for a reason worth keeping: the
+ * receipt is the ONLY read-family member that ships a top-level `missing[]`
+ * (`projectTaskPack`'s allowlist has no such member), so falling through to a
+ * full build trades a stale next for a LOST disclosure. sequenceCorpus's I5
+ * invariant — "a continuation is progress or a disclosed gap, never a bare
+ * terminus" — catches exactly that: the fall-through terminated with no next
+ * AND no `missing[]`. So the three entry points REPAIR the contract they are
+ * about to re-serve (drop the consumed next, say why) and serve the receipt,
+ * which keeps both halves honest.
+ *
+ * The set is derived from the two published ones rather than spelled out, so
+ * an action added to the generalized set joins this one automatically.
+ */
+const RECEIPT_UNREPAIRABLE_STALE_ACTIONS: ReadonlySet<string> = new Set(
+  [...GENERALIZED_NO_REPEAT_ACTIONS].filter((action) => !LOCATE_ONLY_NO_REPEAT_ACTIONS.has(action)),
+);
+
+/**
+ * The contract a receipt may honestly re-serve: `contract` itself when its
+ * `next_call` is still owed, or a COPY with a consumed find/references/tree
+ * dropped and the reason stamped.
+ *
+ * Returns the argument BY IDENTITY when nothing is stale, so every receipt
+ * that was correct before is byte-for-byte unchanged and the caller can tell
+ * the two cases apart with `===`. The stored record and the live result are
+ * never mutated: the repair happens on a clone.
+ *
+ * TWO LEDGERS, because the fresh-build gate consults two. `hasExecutedNext`
+ * fingerprints the WHOLE call and is what `suppressNonProgressingNextCall`
+ * tries first; `consultExecutedSearch` (via advanceExecutedLocateNextCall)
+ * keys on `${action}::${query-or-path}`. Neither subsumes the other for this
+ * class: a bare `{action:"tree"}` carries no path, and `hasExecutedNext`
+ * fingerprints the WHOLE call — including the task/budget/scope envelope a
+ * real dispatch almost always carries and a synthesized bare candidate never
+ * does — so it alone can never recognize a repeat of exactly this shape
+ * (I-6, 2026-08-30: measured, and reproduced end-to-end by root's unit
+ * probe — `i6-fallback-result.json`'s `repeated_identically:true`). PRE-I-6,
+ * a bare tree additionally had NO key in the action+term ledger at all
+ * (server.ts's `recordExecutedSearch` call only fired `if (treePath !==
+ * undefined)`), so neither ledger covered it. Both now key a pathless tree
+ * under the workspace root (`treePath ?? workspace`, matched here by this
+ * function's own `searchKey` fallback below) — the SAME fix
+ * `noDeadEndCandidateAlreadyExecuted` above applies to the fresh-build
+ * guard's own bare-tree candidate. The action+term ledger remains the one
+ * that ALSO recognizes a call the agent executed under a different argument
+ * SPELLING than the contract proposed (`references scope.symbol=X` for a
+ * proposed `references query=X` — the observed loop, and the case the
+ * wire's own exact-fingerprint `firstUnconsumed` filter cannot see). Only
+ * "suppressed" counts from the first: an "advanced" locate is already
+ * repaired in-receipt by `compactReceiptFromRecord`, and a "kept" next has
+ * never run. Both arms stay inside RECEIPT_UNREPAIRABLE_STALE_ACTIONS, so a
+ * read/zoom next is never touched.
+ */
+function receiptContractWithoutConsumedSearch(
+  workspace: string,
+  contract: TaskExecutionContract | undefined,
+  /**
+   * I-7 (2026-08-30 forensics attribution wave): the lane the STORED record
+   * this contract came from was served into, defaulting to the current lane
+   * for the one call site (`tryServeSubsetReceipt`'s synthetic, never-stored
+   * record) that has no separate record to compare against — see
+   * ServedPackRecord.lane's own F-V13-3 doc comment; `same_lane` below is a
+   * regression canary for that exact cross-lane leakage class, not a
+   * functional input to the repair decision itself.
+   */
+  recordLane: string = currentSessionLane(),
+): TaskExecutionContract | undefined {
+  const nextCall = contract?.next_call;
+  if (contract === undefined || nextCall === undefined) return contract;
+  if (nextCall.tool !== "search_files") return contract;
+  const ncArgs = (nextCall.arguments ?? {}) as Record<string, unknown>;
+  const action = typeof ncArgs["action"] === "string" ? ncArgs["action"] : "";
+  if (!RECEIPT_UNREPAIRABLE_STALE_ACTIONS.has(action)) return contract;
+  // THE WIRE ALREADY OWNS HALF OF THIS, AND MUST KEEP IT. `projectTaskDecision`
+  // filters a consumed candidate out of its own precedence chain
+  // (`firstUnconsumed`), so a receipt whose next this lane executed VERBATIM
+  // still progresses — the chain simply falls through to the discovery bundle
+  // or a gap-named call. Repairing that case here would replace a progressing
+  // continuation with a bare terminus, because a contract with no `next_call`
+  // canonicalizes to `await_input` and the wire's other candidates are then
+  // never consulted (sequenceCorpus's I5 invariant catches exactly this).
+  //
+  // What the wire CANNOT see is a call executed under a different argument
+  // spelling than the contract proposed, because its filter is a whole-call
+  // fingerprint: `references scope.symbol=X` does not fingerprint-match a
+  // proposed `references query=X`, so the identical next came back every time.
+  // That — and only that — is what this repairs.
+  if (hasExecutedNext(workspace, currentSessionLane(), nextCall.tool, ncArgs)) return contract;
+  const repaired: TaskExecutionContract = { ...contract, next_call: structuredClone(nextCall) };
+  const outcome = advanceExecutedLocateNextCall(workspace, repaired, RECEIPT_UNREPAIRABLE_STALE_ACTIONS);
+  if (outcome === "kept") return contract;
+  // I-7: the contract was ACTUALLY repaired — the one place shared by all
+  // three receipt call sites (tryServeSubsetReceipt's own no-record call,
+  // tryServeCachedPack, tryServeSemanticDuplicatePack via
+  // receiptRecordWithoutConsumedSearch) where a stale next_call this
+  // request's own fingerprint-match check could not see gets fixed before
+  // the receipt goes out. See this function's own long doc comment above for
+  // why a decline was tried first and is wrong. `outcome` here is always
+  // "suppressed" today (RECEIPT_UNREPAIRABLE_STALE_ACTIONS excludes
+  // "locate", the only action advanceExecutedLocateNextCall's "advanced" arm
+  // handles), kept as the callee's own three-value type rather than
+  // hand-narrowed so this stays correct if that ever changes.
+  if (isTraceEnabled() && shouldTraceReceiptRepairOnce()) {
+    trace(
+      "receipt_next_repair",
+      {
+        action,
+        outcome,
+        has_path: typeof ncArgs["path"] === "string" && (ncArgs["path"] as string).length > 0,
+        same_lane: recordLane === currentSessionLane(),
+      },
+      workspace,
+    );
+  }
+  return repaired;
+}
+
+/** The record a receipt may honestly re-serve; identity-preserving when nothing is stale. */
+function receiptRecordWithoutConsumedSearch(
+  workspace: string,
+  record: ServedPackRecord,
+): ServedPackRecord {
+  const repaired = receiptContractWithoutConsumedSearch(workspace, record.executionContract, record.lane);
+  return repaired === record.executionContract ? record : { ...record, executionContract: repaired };
+}
+
 export function advanceExecutedLocateNextCall(
   workspace: string,
   contract: TaskExecutionContract,
@@ -20152,7 +20880,12 @@ export function advanceExecutedLocateNextCall(
   // build call site (suppressNonProgressingNextCall) uses the default,
   // generalized set; the receipt call site restricts to locate-only.
   if (!allowedActions.has(action)) return "kept";
-  const searchKey = action === "tree" ? String(ncArgs["path"] ?? "") : String(ncArgs["query"] ?? "");
+  // I-6 fix: a pathless tree keys on the workspace root, the SAME fallback
+  // server.ts's recordExecutedSearch call now records it under — previously
+  // `""` here, which never matched anything server.ts recorded (that call
+  // used to skip a pathless tree entirely) and left a bare-tree next_call
+  // permanently unrepairable by this function.
+  const searchKey = action === "tree" ? String(ncArgs["path"] ?? workspace) : String(ncArgs["query"] ?? "");
   const executed = consultExecutedSearch(workspace, action, searchKey);
   if (executed === undefined) return "kept";
   // Only `locate` mints handles its candidates can be batch-read from
@@ -20538,20 +21271,32 @@ function tryServeCachedPack(
   args: TaskPackArgs,
   fingerprint: string,
 ): TaskPackResult | undefined {
-  const records = servedPacksByWorkspace.get(workspace);
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
   if (records === undefined || records.length === 0) return undefined;
   const extraArgsKey = computeExtraArgsKey(args);
   const requestProfileKey = computeRequestProfileKey(args);
   // Most-recent first: if the same signature was served twice in the window, the
   // freshest capture carries the most up-to-date check ids / contract.
+  const lane = currentSessionLane();
   const prev = [...records].reverse().find(
     (r) => r.fingerprint === fingerprint
       && r.extraArgsKey === extraArgsKey
+      // F-V13-3: never re-serve another lane's record. A miss here is not a
+      // refusal — it falls through to the full recompute this lane is owed.
+      && r.lane === lane
       // B2b: an omitted taskProfile is the same request, not a new one.
       && packProfileCompatible(requestProfileKey, r.requestProfileKey),
   );
   if (prev === undefined) return undefined;
-  return revalidateRecordToReceipt(workspace, prev, args.taskQueryRefReplay === true);
+  // F-V13-5: the exact-fingerprint hit is the loop's own shape — the same
+  // request, so the same fingerprint, so the same stored contract, so the same
+  // consumed `next` — and the fingerprint cannot see the execution that
+  // happened between the two calls.
+  return revalidateRecordToReceipt(
+    workspace,
+    receiptRecordWithoutConsumedSearch(workspace, prev),
+    args.taskQueryRefReplay === true,
+  );
 }
 
 /**
@@ -20667,7 +21412,7 @@ function tryServeSemanticDuplicatePack(
   workspace: string,
   args: TaskPackArgs,
 ): TaskPackResult | undefined {
-  const records = servedPacksByWorkspace.get(workspace);
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
   if (records === undefined || records.length === 0) return undefined;
   const queryTokens = tokenizeForEpoch(args.query ?? args.symbol ?? args.path ?? "");
   if (queryTokens.length < 2) return undefined; // too little signal to match semantically
@@ -20679,8 +21424,14 @@ function tryServeSemanticDuplicatePack(
   if (!inventory.complete) return undefined;
   const curTokenSet = new Set(queryTokens);
   const curRoles = (args.surfaceRoles ?? []).slice().sort().join("\u0000");
+  const lane = currentSessionLane();
   // Most-recent first: prefer the freshest matching record.
   for (const prev of [...records].reverse()) {
+    // F-V13-3: a semantic duplicate is duplicate only WITHIN one lane — this
+    // path is strictly looser than the exact one (near-token-equality, not
+    // identity), so it is the likelier of the two to collapse two agents'
+    // distinct working sets into one another's receipt.
+    if (prev.lane !== lane) continue;
     // Same "extra" args (path/symbol/lang/limit) — a differing value changes
     // served content, exactly as the exact path requires. B2b: the requested
     // profile is gated separately, so an omitted one still matches.
@@ -20711,7 +21462,14 @@ function tryServeSemanticDuplicatePack(
     // A pathless re-ask (no explicit paths) rides on token overlap alone, so it
     // must clear a stricter bar: all-but-one current token present in the record.
     if (curPaths.length === 0 && shared < queryTokens.length - 1) continue;
-    const receipt = revalidateRecordToReceipt(workspace, prev, args.taskQueryRefReplay === true);
+    // F-V13-5: the looser of the two receipt paths repairs its match the same
+    // way the exact one does — the staleness is a property of the RECORD, not
+    // of how it was selected.
+    const receipt = revalidateRecordToReceipt(
+      workspace,
+      receiptRecordWithoutConsumedSearch(workspace, prev),
+      args.taskQueryRefReplay === true,
+    );
     if (receipt !== undefined) return receipt;
   }
   return undefined;
@@ -20770,7 +21528,7 @@ function tryServeSubsetReceipt(
   );
   if (bodySurfaces.length === 0) return undefined;
   if (result.execution_contract?.workspace_state === undefined) return undefined;
-  const records = servedPacksByWorkspace.get(workspace);
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
   if (records === undefined || records.length === 0) return undefined;
   // Whole-workspace-unchanged proof: the CURRENT inventory-complete fingerprint
   // must equal one a prior serve captured. This rules out a new/changed UNSERVED
@@ -20804,6 +21562,10 @@ function tryServeSubsetReceipt(
     if (fileShas.length >= MAX_FINGERPRINT_FILES) break;
   }
   const record: ServedPackRecord = {
+    // Synthetic, never stored (see the workspaceState note below), but the
+    // field is required so no record-builder can forget it — and the honest
+    // value is the lane this subset receipt is being served INTO.
+    lane: currentSessionLane(),
     fingerprint: "",
     extraArgsKey: "",
     requestProfileKey: "auto",
@@ -20838,7 +21600,12 @@ function tryServeSubsetReceipt(
     next: result.next,
     profileBinding: result.profile_binding,
     taskProfile: result.task_profile,
-    executionContract: result.execution_contract,
+    // F-V13-5, belt-and-braces on the third door: this path compacts a FRESHLY
+    // BUILT pack, so `suppressNonProgressingNextCall` has normally repaired a
+    // consumed next already — but the compaction is otherwise free to
+    // re-publish whatever contract survived it, and the identity-preserving
+    // repair costs nothing when there is nothing to repair.
+    executionContract: receiptContractWithoutConsumedSearch(workspace, result.execution_contract),
     contentSufficiency: result.content_sufficiency,
     checkIds: (getPackChecks(workspace)?.checks ?? []).map((c) => c.id),
     fileShas,
@@ -21371,8 +22138,20 @@ export function resetPendingCandidatePaths(): void {
 // behaviour — the working set changed, so the proof must be redone.
 // ---------------------------------------------------------------------------
 
-/** The proof a prepared pack shipped, retained per workspace for one epoch. */
+/** The proof a prepared pack shipped, retained per (workspace, lane) for one epoch. */
 interface CertifiedWorkingSet {
+  /**
+   * F-V13-3 (2026-08-30): the lane the certificate was ISSUED in. The map key
+   * already partitions by lane, so this is defence in depth — a certificate is
+   * an authorization, and an authorization must be able to state who it was
+   * issued to, independently of where it happens to be filed. The live incident
+   * was a cross-lane clone of `contract` (see carryForwardCertifiedWorkingSet),
+   * which reinstalls a peer lane's `execution_contract` wholesale: in one
+   * direction that fenced lane `canon-plan`'s create behind lane
+   * `canon-ledger`'s frontier, and in the other it would have AUTHORIZED an
+   * edit on evidence the calling lane never held.
+   */
+  lane: string;
   epochTokens: string[];
   contract: TaskExecutionContract;
   concerns: TaskPackResult["concerns"];
@@ -21412,7 +22191,8 @@ function rememberCertifiedWorkingSet(
     if (sha !== undefined) fileShas.push({ path: surface.path, sha });
     if (fileShas.length >= MAX_FINGERPRINT_FILES) break;
   }
-  certifiedWorkingSets.set(path.resolve(workspace), {
+  certifiedWorkingSets.set(laneScopedKey(path.resolve(workspace)), {
+    lane: currentSessionLane(),
     epochTokens: tokenizeForEpoch(query),
     contract: structuredClone(contract),
     concerns: result.concerns === undefined ? undefined : structuredClone(result.concerns),
@@ -21445,8 +22225,13 @@ function carryForwardCertifiedWorkingSet(
   if (requested.length === 0) return;
   // Nothing to repair on a replay that certified itself.
   if (result.execution_contract?.typestate?.phase === "prepared") return;
-  const prior = certifiedWorkingSets.get(path.resolve(workspace));
+  const prior = certifiedWorkingSets.get(laneScopedKey(path.resolve(workspace)));
   if (prior === undefined) return;
+  // F-V13-3: a certificate rides forward only into the lane it was issued in.
+  // Redundant with the lane-scoped key by construction — deliberately so: this
+  // is the line that clones a whole `execution_contract` onto another response,
+  // so it fails closed on its own evidence rather than trusting its filing.
+  if (prior.lane !== currentSessionLane()) return;
   // Same task, and the certified files are still byte-identical: a certificate
   // is a claim about a working set, so it may only ride forward while that set
   // is provably the one it was issued over.
@@ -22209,7 +22994,7 @@ export function attachRuntimeHint(result: TaskPackResult): void {
  * the map). Read BEFORE captureServedPack runs, so it reflects prior calls only.
  */
 function isFirstEpochPack(workspace: string, epochTokens: readonly string[]): boolean {
-  const records = servedPacksByWorkspace.get(workspace);
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
   if (records === undefined || records.length === 0) return true;
   if (epochTokens.length === 0) return records.length === 0;
   return !records.some((r) => epochsOverlap(r.epochTokens, epochTokens));
@@ -22454,7 +23239,7 @@ function downgradeToAwaitingInput(
  */
 function residentSurfaceKeys(workspace: string, _result: TaskPackResult): Set<string> {
   const out = new Set<string>();
-  const records = servedPacksByWorkspace.get(workspace);
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
   if (records === undefined) return out;
   for (const rec of records) {
     const shaByPath = new Map(rec.fileShas.map(({ path: p, sha }) => [p, sha]));
@@ -22482,7 +23267,7 @@ function residentBodyIndex(
   epochTokens: readonly string[],
 ): Map<string, { handle: string; sha: string }> {
   const idx = new Map<string, { handle: string; sha: string }>();
-  const records = servedPacksByWorkspace.get(workspace);
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
   if (records === undefined || epochTokens.length === 0) return idx;
   for (const rec of records) {
     if (!epochsOverlap(rec.epochTokens, epochTokens)) continue;
@@ -22605,7 +23390,7 @@ export function applyResidentFileDedup(
  * prior pack"` pointing at code the prior pack never actually delivered.
  */
 export function applyPackDedupe(workspace: string, result: TaskPackResult): void {
-  const prior = lastPackBlocksByWorkspace.get(workspace) ?? [];
+  const prior = lastPackBlocksByWorkspace.get(laneScopedKey(workspace)) ?? [];
   const running: PackedBlockFingerprint[] = prior.map((f) => ({ ...f, fromPriorPack: true }));
 
   for (const surf of result.surfaces) {
@@ -22658,7 +23443,7 @@ export function persistPackFingerprints(workspace: string, result: TaskPackResul
       fromPriorPack: true,
     });
   }
-  lastPackBlocksByWorkspace.set(workspace, fingerprints);
+  lastPackBlocksByWorkspace.set(laneScopedKey(workspace), fingerprints);
 }
 
 /**
@@ -24842,7 +25627,7 @@ function dedupeTrimAndPersist(
     // supersedes any earlier certificate for this task/session; retaining it
     // would let a later qref replay resurrect authority the current evidence
     // just withdrew.
-    certifiedWorkingSets.delete(path.resolve(workspace));
+    certifiedWorkingSets.delete(laneScopedKey(path.resolve(workspace)));
   }
   if (opts?.args !== undefined) {
     const captureTarget = idempotent ?? trimmed;

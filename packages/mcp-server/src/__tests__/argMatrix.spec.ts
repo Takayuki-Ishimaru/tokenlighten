@@ -353,6 +353,107 @@ describe("argMatrix — edit_file — FIXED: create + edits[] conflict", () => {
 });
 
 // =============================================================================
+// GROUP 2b (FIXED, F-V13-2, 2026-08-30): a create:true ITEM inside a
+// multi-item edits[] batch, mixed with existing-file search/replace items —
+// distinct from GROUP 2 above (a TOP-LEVEL create:true argument alongside
+// edits[], refused outright as an incompatible combination) and from the
+// single-item edits:[{create:true,...}] case at :611-621 below, which
+// normalizeCanonicalRequest unwraps to the top-level single-create dispatch
+// before this batch-dispatch code ever runs (edits.length===1 only). Every
+// case here has >= 2 edits[] items, so it stays a raw batch and exercises
+// the PER-ITEM create branch server.ts's typedEdits construction loop now
+// carries. Before the fix: the create item's `content`/`create` fields were
+// silently dropped by the bare-path fallback (which only ever reads
+// entry.search/entry.replace), producing {path, search:"", replace:""};
+// applyEditsMulti's Phase 1 then hit a plain fs.statSync ENOENT on a target
+// that was NEVER created and refused the WHOLE batch "File not found:
+// <create target>" — with no indication create:true was ever relevant.
+// =============================================================================
+describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi-item edits[] batch", () => {
+  it("4 existing-file edits + 1 create:true item in ONE edits[] batch: all 5 land in one call", async () => {
+    const { ws, srv } = await newServer("batch-create-mix");
+    writeFile(ws, "a.ts", "const A = 1;\n");
+    writeFile(ws, "b.ts", "const B = 1;\n");
+    writeFile(ws, "c.ts", "const C = 1;\n");
+    writeFile(ws, "d.ts", "const D = 1;\n");
+
+    const res = await srv.call("edit_file", {
+      edits: [
+        { path: "a.ts", search: "A = 1", replace: "A = 2" },
+        { path: "b.ts", search: "B = 1", replace: "B = 2" },
+        { path: "c.ts", search: "C = 1", replace: "C = 2" },
+        { path: "d.ts", search: "D = 1", replace: "D = 2" },
+        { path: "new.ts", create: true, content: "export const N = 1;\n" },
+      ],
+      cwd: ws,
+    });
+
+    expect(res["kind"]).toBe("edit.applied");
+    expect(readFile(ws, "a.ts")).toBe("const A = 2;\n");
+    expect(readFile(ws, "b.ts")).toBe("const B = 2;\n");
+    expect(readFile(ws, "c.ts")).toBe("const C = 2;\n");
+    expect(readFile(ws, "d.ts")).toBe("const D = 2;\n");
+    expect(readFile(ws, "new.ts")).toBe("export const N = 1;\n");
+  }, 30000);
+
+  it("create:true + from: inside a multi-item edits[] batch copies the source content", async () => {
+    const { ws, srv } = await newServer("batch-create-from");
+    writeFile(ws, "src.ts", "export const SRC = 1;\n");
+    writeFile(ws, "existing.ts", "export const E = 1;\n");
+
+    const res = await srv.call("edit_file", {
+      edits: [
+        { path: "existing.ts", search: "E = 1", replace: "E = 2" },
+        { path: "copy.ts", create: true, from: "src.ts" },
+      ],
+      cwd: ws,
+    });
+
+    expect(res["kind"]).not.toBe("refusal");
+    expect(readFile(ws, "existing.ts")).toBe("export const E = 2;\n");
+    expect(readFile(ws, "copy.ts")).toBe("export const SRC = 1;\n");
+  }, 30000);
+
+  it("directoryHandle on a batch create item is an explicit refusal (v1 scope), not silently ignored or misapplied", async () => {
+    const { ws, srv } = await newServer("batch-create-directory-handle-refused");
+    writeFile(ws, "existing.ts", "export const E = 1;\n");
+
+    // The refusal fires on PRESENCE of directoryHandle, before any lookup —
+    // an unresolvable id proves the guard runs ahead of handle resolution,
+    // not just ahead of a successful one.
+    const res = await srv.call("edit_file", {
+      edits: [
+        { path: "existing.ts", search: "E = 1", replace: "E = 2" },
+        { path: "sub.ts", create: true, content: "export const N = 1;\n", directoryHandle: "not-a-real-handle" },
+      ],
+      cwd: ws,
+    });
+
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    // All-or-nothing: the whole batch refused before any write.
+    expect(readFile(ws, "existing.ts")).toBe("export const E = 1;\n");
+    expect(fs.existsSync(path.join(ws, "sub.ts"))).toBe(false);
+  }, 30000);
+
+  it("a create:true item sharing its path with another edits[] item in the SAME batch is an explicit refusal, not a create+edit chain", async () => {
+    const { ws, srv } = await newServer("batch-create-same-path-refused");
+
+    const res = await srv.call("edit_file", {
+      edits: [
+        { path: "chained.ts", create: true, content: "export const N = 1;\n" },
+        { path: "chained.ts", search: "N = 1", replace: "N = 2" },
+      ],
+      cwd: ws,
+    });
+
+    expect(res["kind"]).toBe("refusal");
+    expect(res["code"]).toBe("invalid-input");
+    expect(fs.existsSync(path.join(ws, "chained.ts"))).toBe(false);
+  }, 30000);
+});
+
+// =============================================================================
 // GROUP 3 (FIXED): target="all" is consulted in exactly ONE dispatch branch
 // (handleId && handleRange && target==="all"). A plain path+search+replace
 // call with target="all" but no range handle silently drops target, and —

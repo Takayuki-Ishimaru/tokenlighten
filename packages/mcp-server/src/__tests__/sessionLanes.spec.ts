@@ -15,6 +15,19 @@ import {
   runWithSessionLane,
   type WorkspaceSession,
 } from "../util/session.js";
+import {
+  clearServedSurfaces,
+  queryServedSurfaces,
+  recordServedSurfaces,
+  resetPackServeLogForTest,
+} from "../util/packServeLog.js";
+import {
+  queryPriorPackObligations,
+  recordPriorPackObligations,
+  resetPriorPackStoreForTest,
+  type PriorObligationRecord,
+} from "../features/task-pack/priorPackStore.js";
+import { clearPackDedupeForWorkspace } from "../features/task-pack/readCodeTaskPack.js";
 
 /**
  * Concurrent-agent session lanes (2026-08-07).
@@ -88,7 +101,11 @@ function laneCert(
   };
 }
 
-afterEach(() => resetAll());
+afterEach(() => {
+  resetAll();
+  resetPackServeLogForTest();
+  resetPriorPackStoreForTest();
+});
 
 /** callTool's MCP result, loosened: isError is present only on refusal branches. */
 interface ToolResult {
@@ -225,5 +242,127 @@ describe("concurrent-agent session lanes: callTool dispatch", () => {
     }
     // A refused partition key must leave no session behind under any lane.
     expect(getSession(resolved).readsByMode.size).toBe(0);
+  });
+});
+
+/**
+ * F-V13-3 (2026-08-30): lane isolation below the WorkspaceSession layer.
+ *
+ * Lanes shipped as a `WorkspaceSession` property, so only that one layer knew
+ * whose call it was serving. The stores UNDER it — packServeLog's served
+ * surfaces and priorPackStore's obligations — keyed on the workspace root
+ * alone, and both feed `priorEpochActionFrontier`, which turns them into a
+ * certificate's `action_frontier`. Two agents against one checkout therefore
+ * minted each other's write permissions.
+ *
+ * These use REAL files under a tmpdir on purpose: `queryServedSurfaces`
+ * revalidates every consulted entry by re-statting it, so a virtual path is
+ * dropped as unreadable and every assertion below would pass vacuously
+ * against an empty array.
+ */
+describe("F-V13-3: task-pack stores partition by lane", () => {
+  function workspaceWith(...files: string[]): string {
+    const ws = realpathSync(mkdtempSync(path.join(tmpdir(), "tl-lane-stores-")));
+    for (const name of files) writeFileSync(path.join(ws, name), `// ${name}\n`);
+    return ws;
+  }
+
+  const EPOCH = ["update", "pricing", "rules"];
+
+  function obligation(id: string, filePath: string): PriorObligationRecord {
+    return {
+      id,
+      path: filePath,
+      role: "impl",
+      kind: "behavior-body",
+      action: "edit",
+      required: true,
+      open: true,
+    };
+  }
+
+  it("served surfaces are per lane, and the lane-less key is byte-identical to before", () => {
+    const ws = workspaceWith("a.ts", "b.ts", "c.ts");
+    const served = (p: string) => [{ path: p, role: "impl", handle: `h-${p}` }];
+
+    runWithSessionLane("canon-ledger", () => recordServedSurfaces(ws, ws, served("a.ts"), EPOCH));
+    runWithSessionLane("canon-plan", () => recordServedSurfaces(ws, ws, served("b.ts"), EPOCH));
+    // No lane at all: the historical shared session, keyed on the bare root.
+    recordServedSurfaces(ws, ws, served("c.ts"), EPOCH);
+
+    const paths = (lane: string) =>
+      runWithSessionLane(lane, () => queryServedSurfaces(ws, ws, { epochTokens: EPOCH }))
+        .map((entry) => entry.path);
+
+    // The live incident: lane `canon-plan` was refused citing a frontier of
+    // files only `canon-ledger` had served. Neither lane may see the other's.
+    expect(paths("canon-ledger")).toEqual(["a.ts"]);
+    expect(paths("canon-plan")).toEqual(["b.ts"]);
+    expect(paths("")).toEqual(["c.ts"]);
+  });
+
+  it("prior-pack edit obligations are per lane", () => {
+    const ws = workspaceWith("a.ts", "b.ts");
+
+    runWithSessionLane("canon-ledger", () =>
+      recordPriorPackObligations(ws, EPOCH, [obligation("ob-ledger", "a.ts")]));
+    runWithSessionLane("canon-plan", () =>
+      recordPriorPackObligations(ws, EPOCH, [obligation("ob-plan", "b.ts")]));
+
+    const ids = (lane: string) =>
+      runWithSessionLane(lane, () => queryPriorPackObligations(ws, EPOCH)).map((o) => o.id);
+
+    expect(ids("canon-ledger")).toEqual(["ob-ledger"]);
+    expect(ids("canon-plan")).toEqual(["ob-plan"]);
+    // An obligation recorded in a lane never leaks into the default session,
+    // where priorEpochActionFrontier would hand it to an unrelated caller.
+    expect(ids("")).toEqual([]);
+  });
+
+  it("one lane's taskEpoch:new epoch boundary leaves every peer lane's state standing", () => {
+    const ws = workspaceWith("a.ts", "b.ts");
+    runWithSessionLane("canon-ledger", () => {
+      recordServedSurfaces(ws, ws, [{ path: "a.ts", role: "impl", handle: "h-a" }], EPOCH);
+      recordPriorPackObligations(ws, EPOCH, [obligation("ob-ledger", "a.ts")]);
+    });
+    runWithSessionLane("canon-plan", () => {
+      recordServedSurfaces(ws, ws, [{ path: "b.ts", role: "impl", handle: "h-b" }], EPOCH);
+      recordPriorPackObligations(ws, EPOCH, [obligation("ob-plan", "b.ts")]);
+    });
+
+    // `canon-plan` declares a fresh task. Pre-fix this cleared the ONE shared
+    // slot; the peer lane then wrote it straight back, which is why the live
+    // `task.epoch:"new"` escape could not clear the stale certificate.
+    runWithSessionLane("canon-plan", () => clearPackDedupeForWorkspace(ws, "canon-plan"));
+
+    expect(
+      runWithSessionLane("canon-ledger", () => queryServedSurfaces(ws, ws, { epochTokens: EPOCH }))
+        .map((entry) => entry.path),
+    ).toEqual(["a.ts"]);
+    expect(
+      runWithSessionLane("canon-ledger", () => queryPriorPackObligations(ws, EPOCH)).map((o) => o.id),
+    ).toEqual(["ob-ledger"]);
+    // The declaring lane's own obligations are the ones that go.
+    expect(
+      runWithSessionLane("canon-plan", () => queryPriorPackObligations(ws, EPOCH)),
+    ).toEqual([]);
+  });
+
+  it("clearServedSurfaces clears only the calling lane", () => {
+    const ws = workspaceWith("a.ts", "b.ts");
+    runWithSessionLane("canon-ledger", () =>
+      recordServedSurfaces(ws, ws, [{ path: "a.ts", role: "impl", handle: "h-a" }], EPOCH));
+    runWithSessionLane("canon-plan", () =>
+      recordServedSurfaces(ws, ws, [{ path: "b.ts", role: "impl", handle: "h-b" }], EPOCH));
+
+    runWithSessionLane("canon-plan", () => clearServedSurfaces(ws));
+
+    expect(
+      runWithSessionLane("canon-ledger", () => queryServedSurfaces(ws, ws, { epochTokens: EPOCH }))
+        .map((entry) => entry.path),
+    ).toEqual(["a.ts"]);
+    expect(
+      runWithSessionLane("canon-plan", () => queryServedSurfaces(ws, ws, { epochTokens: EPOCH })),
+    ).toEqual([]);
   });
 });

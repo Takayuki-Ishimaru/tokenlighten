@@ -517,6 +517,258 @@ describe("privacy-preserving usage recording", () => {
     });
   });
 
+  // ---------------------------------------------------------------------
+  // V13 (2026-08-30): task-unit aggregation. `summarizeUsage` used to score
+  // every event in total isolation, so a multi-call TASK whose first call
+  // (a pathless `query`-only exploratory read) carries no baseline of its
+  // own — nothing to compare against yet — dropped that call's real served
+  // bytes from BOTH the numerator and the denominator entirely, once a
+  // later `qref`+`targets` continuation of the SAME task supplied the
+  // baseline. `taskRef` (stamped by server.ts's `callToolTraced` on every
+  // recorded event, correlating a task's calls) now groups a task's events
+  // before the ratio is computed. See summarizeUsage's own "Pass 2" comment
+  // in index.ts for the full mechanism.
+  // ---------------------------------------------------------------------
+  it("groups a multi-call task's events before computing the reduction ratio, instead of dropping the baseline-less call", () => {
+    // Real defect numbers: call1 is a pathless query-only read (8,155B
+    // response, no baseline yet); call2 is the qref+targets continuation
+    // that supplies the baseline (30,984B — what reading the file natively
+    // would have cost for the WHOLE task). Scoring call2 alone reported
+    // (30,984-16,082)/30,984*100 ~= 48.1% "reduction" — the task's true
+    // served weight is BOTH calls' bytes, 24,237B, for a true ~21.8%.
+    const responseBytes1 = 8_155;
+    const responseBytes2 = 16_082;
+    const baselineBytes = 30_984;
+    const responseTokens1 = Math.ceil(responseBytes1 / 4);
+    const responseTokens2 = Math.ceil(responseBytes2 / 4);
+    const baselineTokens = Math.ceil(baselineBytes / 4);
+    const base = {
+      schemaVersion: 2 as const,
+      occurredAt: "2026-08-30T00:00:00.000Z",
+      workspaceId: "workspace",
+      sessionId: "same-session",
+      client: "claude-code" as const,
+      tool: "read_file" as const,
+      outcome: "ok" as const,
+      durationMs: 1,
+      baselineMethod: "file-bytes" as const,
+      writeEnabled: true,
+      // Same taskRef on both — call1's own pathless-query dispatch and
+      // call2's qref replay of it (server.ts's dispatchTaskRef: a fresh
+      // `query` and its later `qref` replay hash to the identical ref).
+      taskRef: "q-shared-task-ref",
+    };
+    const call1 = {
+      ...base,
+      eventId: "call1-query-only",
+      responseBytes: responseBytes1,
+      estimatedResponseTokens: responseTokens1,
+      baselineTokens: null,
+      estimatedSavedTokens: null,
+    };
+    const call2 = {
+      ...base,
+      eventId: "call2-qref-continuation",
+      responseBytes: responseBytes2,
+      estimatedResponseTokens: responseTokens2,
+      baselineTokens,
+      estimatedSavedTokens: baselineTokens - responseTokens2,
+    };
+
+    const summary = summarizeUsage([call1, call2]);
+    const expectedPercent =
+      (baselineTokens - (responseTokens1 + responseTokens2)) / baselineTokens * 100;
+
+    expect(summary.measuredResponseBytes).toBe(responseBytes1 + responseBytes2);
+    expect(summary.measuredResponseTokens).toBe(responseTokens1 + responseTokens2);
+    expect(summary.measuredBaselineTokens).toBe(baselineTokens);
+    expect(summary.estimatedSavedTokens)
+      .toBe(baselineTokens - (responseTokens1 + responseTokens2));
+    expect(summary.estimatedTokenReductionPercent).toBeCloseTo(expectedPercent, 5);
+    // Human-readable pin on the exact defect-report numbers: true ~21.8%,
+    // not the pre-fix ~48.1% (call1 dropped from both sides of the ratio).
+    expect(summary.estimatedTokenReductionPercent).toBeCloseTo(21.8, 1);
+    expect(summary.estimatedTokenReductionPercent).not.toBeCloseTo(48.1, 0);
+    // The call TALLY stays per-anchor-event (call2 only carries a baseline
+    // of its own) — this fix groups the RATIO's numerator/denominator, not
+    // the "how many calls had their own baseline" count.
+    expect(summary.measuredBaselineCalls).toBe(1);
+  });
+
+  it("locks in N/A for a taskRef-bearing call whose group has no baseline anchor at all", () => {
+    const summary = summarizeUsage([{
+      schemaVersion: 2,
+      eventId: "lonely-query",
+      occurredAt: "2026-08-30T00:00:00.000Z",
+      workspaceId: "workspace",
+      sessionId: "session",
+      client: "claude-code",
+      tool: "read_file",
+      outcome: "ok",
+      durationMs: 1,
+      responseBytes: 500,
+      estimatedResponseTokens: 125,
+      baselineTokens: null,
+      estimatedSavedTokens: null,
+      baselineMethod: null,
+      writeEnabled: true,
+      taskRef: "q-lonely-task",
+    }]);
+
+    expect(summary.measuredBaselineTokens).toBe(0);
+    expect(summary.measuredBaselineCalls).toBe(0);
+    expect(summary.measuredResponseTokens).toBe(0);
+    expect(summary.measuredResponseBytes).toBe(0);
+    expect(summary.estimatedSavedTokens).toBe(0);
+    expect(summary.estimatedTokenReductionPercent).toBeNull();
+    expect(summary.estimatedReductionPercent).toBeNull();
+  });
+
+  it("createUsageRecorder writes schemaVersion:2 with taskRef, and summarizeUsage groups two same-taskRef calls it wrote end to end", () => {
+    const directory = join(tmpdir(), `tokenlighten-usage-taskgroup-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+    const previous = process.env["NODE_ENV"];
+    process.env["NODE_ENV"] = "development";
+    try {
+      const recorder = createUsageRecorder({
+        workspaceRoot: "/workspace/task-group",
+        client: "claude-code",
+        directory,
+        sessionId: "task-group-session",
+      });
+      recorder.record({
+        tool: "read_file",
+        outcome: "ok",
+        durationMs: 5,
+        responseBytes: 8_155,
+        baselineTokens: null,
+        writeEnabled: true,
+        taskRef: "q-recorder-task",
+      });
+      recorder.record({
+        tool: "read_file",
+        outcome: "ok",
+        durationMs: 5,
+        responseBytes: 16_082,
+        baselineTokens: 7_746,
+        baselineMethod: "file-bytes",
+        writeEnabled: true,
+        taskRef: "q-recorder-task",
+      });
+    } finally {
+      process.env["NODE_ENV"] = previous;
+    }
+
+    const events = readUsageEvents(directory);
+    expect(events).toHaveLength(2);
+    expect(events[0]!.schemaVersion).toBe(2);
+    expect(events[0]!.taskRef).toBe("q-recorder-task");
+    expect(events[1]!.taskRef).toBe("q-recorder-task");
+    // Both calls came off the SAME recorder instance (one MCP session), so
+    // both events land in one (sessionId, taskRef) group.
+    expect(events[0]!.sessionId).toBe(events[1]!.sessionId);
+
+    const summary = summarizeUsage(events);
+    expect(summary.measuredResponseTokens).toBe(2_039 + 4_021);
+    expect(summary.measuredBaselineTokens).toBe(7_746);
+    expect(summary.measuredBaselineCalls).toBe(1);
+    expect(summary.estimatedTokenReductionPercent).toBeCloseTo(21.8, 1);
+  });
+
+  it("still reads a schemaVersion:1 line (no taskRef key at all) and matches the pre-V13 assertions exactly", () => {
+    const directory = join(tmpdir(), `tokenlighten-usage-v1-compat-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+    const occurredAt = "2026-08-01T00:00:00.000Z";
+    // Hand-written v1 NDJSON line — no `taskRef` key at all, the exact shape
+    // every recorder wrote before this field existed. Mirrors the numbers
+    // (and resulting assertions) of "writes only the fixed event schema and
+    // computes savings" above verbatim, built directly rather than through
+    // createUsageRecorder (which now always writes schemaVersion:2).
+    appendFileSync(
+      join(directory, `usage-${occurredAt.slice(0, 10)}.ndjson`),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        eventId: "v1-legacy-event",
+        occurredAt,
+        workspaceId: "workspace",
+        sessionId: "v1-session",
+        client: "codex",
+        tool: "read_file",
+        outcome: "ok",
+        durationMs: 12,
+        responseBytes: 400,
+        estimatedResponseTokens: 100,
+        baselineTokens: 500,
+        estimatedSavedTokens: 400,
+        baselineMethod: "file-bytes",
+        writeEnabled: true,
+      })}\n`,
+    );
+
+    const events = readUsageEvents(directory);
+    expect(events).toHaveLength(1);
+    expect(events[0]).not.toHaveProperty("taskRef");
+
+    expect(summarizeUsage(events)).toMatchObject({
+      measuredResponseTokens: 100,
+      measuredBaselineTokens: 500,
+      measuredResponseBytes: 400,
+      measuredBaselineBytes: 2000,
+      estimatedReductionPercent: 80,
+      estimatedTokenReductionPercent: 80,
+      estimatedBaselineCostUsd: 0.001,
+      estimatedCostReductionPercent: 80,
+      pricingMode: "automatic",
+      costPerMillionTokensUsd: null,
+      estimatedSavedCostUsd: 0.0008,
+    });
+  });
+
+  it("reads a directory mixing schemaVersion:1 and schemaVersion:2 lines together", () => {
+    const directory = join(tmpdir(), `tokenlighten-usage-mixed-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+    const occurredAt = "2026-08-30T00:00:00.000Z";
+    const day = occurredAt.slice(0, 10);
+    const v1Line = {
+      schemaVersion: 1,
+      eventId: "mixed-v1",
+      occurredAt,
+      workspaceId: "workspace",
+      sessionId: "mixed-session-1",
+      client: "codex",
+      tool: "read_file",
+      outcome: "ok",
+      durationMs: 1,
+      responseBytes: 40,
+      estimatedResponseTokens: 10,
+      baselineTokens: 20,
+      estimatedSavedTokens: 10,
+      baselineMethod: "file-bytes",
+      writeEnabled: true,
+    };
+    const v2Line = {
+      ...v1Line,
+      schemaVersion: 2,
+      eventId: "mixed-v2",
+      sessionId: "mixed-session-2",
+      taskRef: null,
+    };
+    appendFileSync(
+      join(directory, `usage-${day}.ndjson`),
+      `${JSON.stringify(v1Line)}\n${JSON.stringify(v2Line)}\n`,
+    );
+
+    const events = readUsageEvents(directory);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.eventId).sort()).toEqual(["mixed-v1", "mixed-v2"]);
+
+    const summary = summarizeUsage(events);
+    expect(summary.eventCount).toBe(2);
+    expect(summary.measuredBaselineCalls).toBe(2);
+    expect(summary.measuredBaselineTokens).toBe(40);
+    expect(summary.estimatedSavedTokens).toBe(20);
+  });
+
   it("exports the same five-file bundle used by every UI", async () => {
     const directory = join(tmpdir(), `tokenlighten-usage-${randomUUID()}`);
     mkdirSync(directory, { recursive: true });
@@ -1331,6 +1583,72 @@ describe("privacy-preserving usage recording", () => {
         baselineMethod: null,
         writeEnabled: true,
         query: "must never be exported",
+      })}\n`,
+    );
+    expect(readUsageEvents(directory)).toEqual([]);
+  });
+
+  // V13: the closed-schema check above is now VERSIONED (EVENT_FIELDS_V1 vs
+  // EVENT_FIELDS, selected by the line's own schemaVersion) rather than one
+  // shared field list, specifically so `taskRef` could be added without
+  // breaking already-written schemaVersion:1 lines the way appending it to
+  // one shared list would have (every such line would gain an extra-key
+  // mismatch and silently vanish, the same failure mode the sibling test
+  // above guards for "extra field on a v1 line"). These two cover the new
+  // failure modes a versioned schema introduces: a v2 line missing the key
+  // its own version requires, and a v1 line carrying a key its version does
+  // not.
+  it("rejects a schemaVersion:2 line missing the taskRef key its own version requires", () => {
+    const directory = join(tmpdir(), `tokenlighten-usage-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+    const occurredAt = new Date().toISOString();
+    appendFileSync(
+      join(directory, `usage-${occurredAt.slice(0, 10)}.ndjson`),
+      `${JSON.stringify({
+        schemaVersion: 2,
+        eventId: randomUUID(),
+        occurredAt,
+        workspaceId: "opaque",
+        sessionId: "opaque",
+        client: "other",
+        tool: "read_file",
+        outcome: "ok",
+        durationMs: 1,
+        responseBytes: 4,
+        estimatedResponseTokens: 1,
+        baselineTokens: null,
+        estimatedSavedTokens: null,
+        baselineMethod: null,
+        writeEnabled: true,
+        // taskRef deliberately omitted — every schemaVersion:2 line must carry it.
+      })}\n`,
+    );
+    expect(readUsageEvents(directory)).toEqual([]);
+  });
+
+  it("rejects a schemaVersion:1 line carrying a taskRef key its own version does not admit", () => {
+    const directory = join(tmpdir(), `tokenlighten-usage-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+    const occurredAt = new Date().toISOString();
+    appendFileSync(
+      join(directory, `usage-${occurredAt.slice(0, 10)}.ndjson`),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        eventId: randomUUID(),
+        occurredAt,
+        workspaceId: "opaque",
+        sessionId: "opaque",
+        client: "other",
+        tool: "read_file",
+        outcome: "ok",
+        durationMs: 1,
+        responseBytes: 4,
+        estimatedResponseTokens: 1,
+        baselineTokens: null,
+        estimatedSavedTokens: null,
+        baselineMethod: null,
+        writeEnabled: true,
+        taskRef: "q-should-not-be-on-a-v1-line",
       })}\n`,
     );
     expect(readUsageEvents(directory)).toEqual([]);

@@ -15,10 +15,10 @@
  * eviction only decides whether an internal Map entry survives.
  */
 
-import { AsyncLocalStorage } from "async_hooks";
 import { createHash } from "crypto";
 import type { TaskExecutionContract } from "@tokenlighten/types";
 import { postReadyTrimEnabled, postReadyTrimThreshold } from "../util/flags.js";
+import { laneScopedKey, rootOfLaneScopedKey } from "../util/laneKey.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1314,32 +1314,21 @@ export function resetClockForTest(): void {
 // historical shared session, byte-for-byte.
 // ---------------------------------------------------------------------------
 
-const _sessionLane = new AsyncLocalStorage<string>();
+// F-V13-3 (2026-08-30): the lane ALS and the composite-key derivation now live
+// in the dependency-free leaf `util/laneKey.ts`, so the stores BELOW this layer
+// can partition by lane too — packServeLog's served surfaces, priorPackStore's
+// obligations, and readCodeTaskPack's three task_pack caches were all keyed on
+// the workspace root ALONE, which is exactly how one lane's certificate came to
+// fence, and to authorize, another lane's edits. They cannot import THIS module
+// (it pulls in util/flags.js; they are deliberate leaves), hence the leaf. The
+// two ALS entry points are re-exported so every existing importer of
+// state/session (and of its util/session facade) is unchanged, and the key
+// derivation is byte-identical — same NUL marker, same "no lane returns the
+// root itself" identity.
+export { runWithSessionLane, currentSessionLane } from "../util/laneKey.js";
 
-/** Runs fn with every getSession call bound to the given lane ("" = default). */
-export function runWithSessionLane<T>(lane: string, fn: () => T): T {
-  return lane === "" ? fn() : _sessionLane.run(lane, fn);
-}
-
-/** The lane bound to the current async context; "" outside any lane. */
-export function currentSessionLane(): string {
-  return _sessionLane.getStore() ?? "";
-}
-
-// NUL never occurs in a filesystem path, so a composite key cannot collide
-// with a real root, and rootOfSessionKey is an exact inverse for the
-// registry scans that must keep reporting plain roots (otherActiveRoots).
-const LANE_KEY_MARKER = "\u0000lane:";
-
-function sessionKeyFor(workspaceRoot: string): string {
-  const lane = currentSessionLane();
-  return lane === "" ? workspaceRoot : workspaceRoot + LANE_KEY_MARKER + lane;
-}
-
-function rootOfSessionKey(key: string): string {
-  const marker = key.indexOf(LANE_KEY_MARKER);
-  return marker === -1 ? key : key.slice(0, marker);
-}
+const sessionKeyFor = laneScopedKey;
+const rootOfSessionKey = rootOfLaneScopedKey;
 
 /**
  * Evicts sessions idle longer than SESSION_IDLE_TTL_MS, gated on the

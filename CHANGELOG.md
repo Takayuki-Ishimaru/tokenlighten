@@ -2,6 +2,33 @@
 
 All notable public changes to TokenLighten are documented here.
 
+## 0.13.1
+
+Reliability update for concurrent agents and canonical v0.13 request shapes.
+The MCP surface and advertised schemas are unchanged.
+
+### Fixed
+
+- Isolated task state between concurrent agent lanes so one lane cannot reuse
+  another lane's readiness or edit context.
+- Corrected ranged multi-target reads and mixed batches that create files while
+  editing existing files.
+- Prevented completed continuations and pathless tree fallbacks from being
+  proposed repeatedly.
+- Required checklist-style tasks in English and Japanese to prove or disclose
+  every item before reporting completion.
+- Made mixed archive/plain-target reads and workspace-coherence failures return
+  explicit, recoverable refusals instead of incomplete-looking successes.
+- Reduced unnecessary context for explicit new-file creation and uniquely
+  identified literal edits.
+
+### Changed
+
+- Local savings accounting now aggregates complete tasks, including exploration
+  calls. Usage events use `schemaVersion: 2`; version-1 logs remain readable.
+- Local diagnostics gained additional count- and hash-only attribution events;
+  tool responses are unchanged.
+
 ## 0.13.0
 
 Correctness and client-compatibility release centered on proof-carrying task

@@ -166,6 +166,23 @@ export function resetTraceCallIdForTest(): void {
 }
 
 /**
+ * The current call's own monotonic id, when known — "when known" matches
+ * every other per-call envelope field (see `traceEnvelope`'s own doc
+ * comment); `undefined` outside any `runWithTraceCall` scope.
+ *
+ * I-7 (2026-08-30 forensics attribution wave): exported so an emission site
+ * whose underlying mechanism runs MORE THAN ONCE per tool call (a read-only
+ * preflight that probes the same code path the real serve later re-runs,
+ * e.g. `canServeCachedTaskPackReceipt` ahead of the real
+ * `tryServeCachedPack`) can dedupe to one trace line per CALL rather than per
+ * invocation — see readCodeTaskPack.ts's `receipt_next_repair` emission for
+ * the concrete case this exists for.
+ */
+export function currentTraceCallId(): number | undefined {
+  return _traceCallContext.getStore()?.callId;
+}
+
+/**
  * The common envelope every trace record carries, folded into both
  * `trace()` and `traceCausalAttestation()` — see this file's V10-02 header
  * doc for the field-by-field rationale. Spread AFTER a record's own
