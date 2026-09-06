@@ -282,6 +282,14 @@ function editedRows(body: Body): Body[] {
   if (path !== undefined) {
     const row: Body = { path };
     keep(row, body, ["lines", "delta", "handle"]);
+    // INV-I-5 (FX-P2): `path_fallback:true` (server.ts's edit_file dispatch,
+    // the stale-handle-but-unique-path-search case) rides the SAME plain
+    // {path,...} body shape `keep` already reads here — carried through so
+    // `appliedEntries` below can surface it as `AppliedEntry.path_fallback`.
+    // `keep` only copies a present, non-empty value, so `false`/absent never
+    // lands (the additive-field convention this module's `replayed` field
+    // already established).
+    if (body["path_fallback"] === true) row["path_fallback"] = true;
     // A CREATE has no edited span — the whole file is new — so it carries
     // `total_lines` instead of `lines`. Spelled as the span it is, so the one
     // per-file array stays TOTAL over `core.paths` on this path too; without it
@@ -399,6 +407,8 @@ function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
     if (lines !== undefined && lines !== range) entry.lines = lines;
     const delta = str(row["delta"]);
     if (delta !== undefined) entry.delta = delta;
+    // INV-I-5 (FX-P2): additive-only — absent unless the row actually set it.
+    if (row["path_fallback"] === true) entry.path_fallback = true;
     entries.push(entry);
   }
   // A read-back entry for a path no row named (an intent dispatch that edits a
@@ -538,10 +548,10 @@ function reclassificationReceipt(body: Body): EditReclassification | undefined {
  */
 const KEPT_ON_APPLIED = [
   "path", "lines", "delta", "handle", "sha",
-  "bytes", "total_lines", "read_back", "create_target",
+  "bytes", "total_lines", "read_back", "create_target", "cwd_source",
   "from", "to", "changed_files", "total_replacements", "skipped",
   "review", "verification", "verify_note", "closure", "change_contract", "unread_note",
-  "changes", "encrypted", "warnings", "artifact", "members", "form", "hint",
+  "changes", "replacements", "encrypted", "warnings", "artifact", "members", "form", "hint",
   // `warning`, `leftoverLines` — B4.2's ORPHAN-TAIL disclosure
   // (server.ts's `attachOrphanTailWarning`). A `{handle, content}` replace on a
   // tiny file that leaves 1-3 unreplaced lines behind ships the warning plus

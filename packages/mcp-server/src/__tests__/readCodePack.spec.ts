@@ -388,6 +388,63 @@ describe("read_code mode=pack (server-level)", () => {
     const serialized = JSON.stringify(res.result);
     assertNoForbiddenKeys(serialized);
   }, 30000);
+
+  // FX-U3 (2026-09-04, round-19A informational finding): the admission loop
+  // above used to compare RAW CONTENT CHARS against `maxTokens * 4`,
+  // ignoring the wire envelope every admitted item costs once
+  // `protocol/readFamily.ts` wraps it (`{form,path,range,truncated,
+  // [purpose,]content}`) and the fixed `{v,kind,entries}` skeleton around
+  // them — measured live at 5.8x-13.5x the declared ceiling for a many-tiny-
+  // file pack. `readCodePack.ts`'s two admission loops now budget the WIRE
+  // bytes each item actually costs
+  // (`packItemWireBytes`/`PACK_FIXED_ENVELOPE_BYTES`), so the wire size
+  // should track the declared ceiling far more tightly. The remaining slack
+  // below is NOT producer error: `limit.next`'s recovery block (up to 8
+  // omitted paths plus the caller's own `cwd`) is synthesized downstream
+  // (`readFamily.ts`'s `deriveNext`) from data this producer does not
+  // control the size of — `RECOVERY_TOLERANCE_BYTES` is a generous, named
+  // allowance for exactly that (8 short relative paths + a short tmp `cwd`
+  // + the `{"cause":"wire","omitted":["evidence"],"next":{...}}` wrapper),
+  // nowhere near the ~2000 B the original bug overshot by.
+  //
+  // REVERT CHECK (recorded, not re-run automatically — see the FX-U3 task
+  // report for the live run): reverting `readCodePack.ts`'s two admission
+  // loops to their pre-FX-U3 raw-content-char budgeting was verified live to
+  // fail this test (`wireBytes` far exceeding `declaredCeiling +
+  // RECOVERY_TOLERANCE_BYTES`) while leaving every other test in this file
+  // green. Restored after confirming the failure.
+  it("FX-U3: mode=pack wire bytes stay within the declared maxTokens ceiling plus the recovery block's documented tolerance", async () => {
+    const wsDir = mkDir("pack-wire-budget");
+    const RECOVERY_TOLERANCE_BYTES = 300;
+    const NFILES = 40;
+    const paths: Array<{ path: string }> = [];
+    for (let i = 0; i < NFILES; i++) {
+      const p = `s${i}.ts`;
+      writeFile(wsDir, p, `export const V${i}=${i};\n`);
+      paths.push({ path: p });
+    }
+
+    const srv = startServer({ cwd: wsDir, args: [wsDir] });
+    servers.push(srv);
+    await srv.initialize();
+
+    for (const maxTokens of [50, 100]) {
+      const res = await srv.rpc(2, "tools/call", {
+        name: "read_file",
+        arguments: { mode: "pack", paths, maxTokens },
+      });
+      const text = res?.result?.content?.[0]?.text as string;
+      expect(typeof text).toBe("string");
+      const wireBytes = Buffer.byteLength(text, "utf8");
+      const data = JSON.parse(text) as Record<string, unknown>;
+      expect(data["kind"]).toBe("read.batch");
+      const declaredCeiling = maxTokens * 4;
+      expect(
+        wireBytes,
+        `maxTokens=${maxTokens} wireBytes=${wireBytes} declaredCeiling=${declaredCeiling}`,
+      ).toBeLessThanOrEqual(declaredCeiling + RECOVERY_TOLERANCE_BYTES);
+    }
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------

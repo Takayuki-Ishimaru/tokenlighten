@@ -133,6 +133,19 @@ export interface CsvTableResult {
   warnings: string[];
   /** Present only when truncated: exact range= call to fetch the remainder. */
   note?: string;
+  /**
+   * DESIGN-v0.15 ruling (v) (round-18A finding 1): the PHYSICAL file line
+   * span (1-based inclusive, `"start-end"`) that the served rows actually
+   * occupy in the source file — the union of the shipped rows' own physical
+   * spans, which diverges from `range`'s logical row numbers whenever the
+   * file has a blank line or an RFC4180 quoted field with an embedded
+   * newline anywhere at or before the served window. `undefined` when
+   * `servedCount === 0` (nothing shipped) or the parser could not establish
+   * a reliable row→physical-line mapping (see `parseCsv`'s `lineSpansRef`
+   * doc) — callers MUST treat `undefined` as fail-closed (book nothing,
+   * corroborate nothing), never fall back to `range`.
+   */
+  fileLineRange?: string;
 }
 
 export type CsvTableFailure = { ok: false; error: string; warnings: string[] };
@@ -217,12 +230,38 @@ export interface ParseCsvQuota {
  * existing caller, including the sniff sampler and direct unit tests) and
  * `truncatedRef` is the opt-in side channel csvTable uses to know its
  * `total_rows` became a lower bound rather than an exact count.
+ *
+ * PHYSICAL LINE SPANS (DESIGN-v0.15 ruling (v), 2026-09-03, round-18A finding
+ * 1): `opts.lineSpansRef`, when supplied, is populated with one 1-based
+ * inclusive `[startLine, endLine]` physical-file-line span per entry of the
+ * returned `records` array, in the SAME order and (outside the pathological
+ * exits below) the SAME length — the physical extent of that record in the
+ * source file, including any blank lines a caller filters out afterward and
+ * every physical line an RFC4180 quoted field's embedded newline spans.
+ * "Physical line" here means the codebase's own convention
+ * (`util/countLines.ts`, `content.split(/\r?\n/)`): a line break is exactly
+ * one `\n`, optionally preceded by `\r` (CRLF collapses to ONE break); a lone
+ * `\r` with no following `\n` is NOT a line break under that convention, but
+ * IS a valid CSV record terminator under RFC4180-adjacent old-Mac dialects —
+ * when that divergence is observed, `lineSpansRef.reliable` is set `false`
+ * (row-to-physical-line mapping is not well-defined for this file under the
+ * split(/\r?\n/) convention) and callers MUST NOT book any span from
+ * `lineSpansRef.spans` for this parse — fail-closed, per ruling (v)'s "row→
+ * 行の対応が取れない場合は記帳しない". The pathological delimiter-flood early
+ * return also marks `reliable = false` (its flushed final record has no
+ * matching span pushed, so `spans.length !== records.length` on top of the
+ * flag — callers should check BOTH).
  */
 export function parseCsv(
   text: string,
   delimiter: string,
   quote: string = QUOTE,
-  opts: { limit?: number; quota?: ParseCsvQuota; truncatedRef?: { truncated: boolean } } = {},
+  opts: {
+    limit?: number;
+    quota?: ParseCsvQuota;
+    truncatedRef?: { truncated: boolean };
+    lineSpansRef?: { spans: Array<[number, number]>; reliable: boolean };
+  } = {},
 ): string[][] {
   // A leading BOM may survive if a caller parses text directly rather than via
   // decodeCsvBytes — strip it defensively so field 0 never carries ﻿.
@@ -231,6 +270,7 @@ export function parseCsv(
   const records: string[][] = [];
   const limit = opts.limit;
   const quota = opts.quota;
+  const lineSpansRef = opts.lineSpansRef;
   let field = "";
   let record: string[] = [];
   let inQuotes = false;
@@ -239,6 +279,11 @@ export function parseCsv(
   let i = 0;
   let charsSoFar = 0;
   let cellsSoFar = 0;
+  // Physical-line bookkeeping (used only when lineSpansRef is supplied — the
+  // increments below are cheap enough to always perform, so no separate
+  // "tracking enabled" branch is needed).
+  let currentLine = 1;
+  let recordStartLine = 1;
 
   const markTruncated = (): void => {
     if (opts.truncatedRef) opts.truncatedRef.truncated = true;
@@ -254,6 +299,7 @@ export function parseCsv(
     cellsSoFar += record.length;
     field = "";
     records.push(record);
+    if (lineSpansRef) lineSpansRef.spans.push([recordStartLine, currentLine]);
     record = [];
     started = false;
   };
@@ -271,6 +317,11 @@ export function parseCsv(
         i++;
         continue;
       }
+      // An embedded newline inside a quoted field is a real physical line
+      // break (RFC4180) — advance the line cursor exactly like the
+      // outside-quotes CRLF/LF branches below, so a multi-line quoted
+      // record's span reaches every physical line it occupies.
+      if (ch === "\n") currentLine++;
       field += ch;
       i++;
       continue;
@@ -288,24 +339,40 @@ export function parseCsv(
       started = true;
       if (quota?.maxFieldsPerRecord !== undefined && record.length >= quota.maxFieldsPerRecord) {
         // A single record has already proven the input pathological (e.g. a
-        // delimiter flood) — flush it as-is (ragged) and stop entirely.
+        // delimiter flood) — flush it as-is (ragged) and stop entirely. No
+        // matching lineSpansRef entry is pushed for this flushed record, and
+        // reliability is revoked: callers must not book from this parse.
         records.push(record);
         markTruncated();
+        if (lineSpansRef) lineSpansRef.reliable = false;
         return records;
       }
       i++;
       continue;
     }
     if (ch === "\r") {
-      if (text[i + 1] === "\n") i++; // CRLF
+      const isCrlf = text[i + 1] === "\n";
+      if (isCrlf) i++; // CRLF
+      else if (lineSpansRef) {
+        // A lone CR record terminator (old-Mac dialect) is NOT a line break
+        // under this codebase's split(/\r?\n/) convention — the physical
+        // line cursor would not advance here for an ordinary text read, so a
+        // row-number-to-physical-line mapping is not well-defined for this
+        // file. Fail closed: never book from lineSpansRef.spans below.
+        lineSpansRef.reliable = false;
+      }
       endRecord();
       i++;
+      if (isCrlf) { currentLine++; recordStartLine = currentLine; }
+      else recordStartLine = currentLine; // lone CR: no line advance (see above)
       if (limit !== undefined && records.length >= limit) { markTruncated(); return records; }
       if (overQuota()) { markTruncated(); return records; }
       continue;
     }
     if (ch === "\n") {
       endRecord();
+      currentLine++;
+      recordStartLine = currentLine;
       i++;
       if (limit !== undefined && records.length >= limit) { markTruncated(); return records; }
       if (overQuota()) { markTruncated(); return records; }
@@ -321,6 +388,7 @@ export function parseCsv(
   if (field !== "" || record.length > 0 || started || inQuotes) {
     record.push(field);
     records.push(record);
+    if (lineSpansRef) lineSpansRef.spans.push([recordStartLine, currentLine]);
   }
   return records;
 }
@@ -468,7 +536,13 @@ export function csvTable(
   // parseTruncated tracks whether PARSE_MAX_* fired early (finding 1) — see
   // the truncation-warning block near the end of this function.
   const parseTruncated = { truncated: false };
-  const allRecords = parseCsv(text, delimiter, QUOTE, {
+  // round-18A finding 1 / ruling (v): track each record's PHYSICAL file line
+  // span alongside it, filtering blanks OUT OF BOTH ARRAYS TOGETHER so
+  // `dataSpans[i]` always names `dataRecords[i]`'s real file lines — the
+  // logical row numbering below (which skips blanks by construction) must
+  // never be silently re-used as a physical line number again.
+  const lineSpansState: { spans: Array<[number, number]>; reliable: boolean } = { spans: [], reliable: true };
+  const rawRecords = parseCsv(text, delimiter, QUOTE, {
     limit: PARSE_MAX_RECORDS,
     quota: {
       maxChars: PARSE_MAX_CHARS,
@@ -476,7 +550,20 @@ export function csvTable(
       maxCumulativeCells: PARSE_MAX_CUMULATIVE_CELLS,
     },
     truncatedRef: parseTruncated,
-  }).filter((r) => !isBlankRecord(r));
+    lineSpansRef: lineSpansState,
+  });
+  // Spans are reliable only when the parser marked them so AND every parsed
+  // record actually received a matching entry (the delimiter-flood early
+  // exit flushes a final record with none — see parseCsv's doc comment).
+  const spansReliable = lineSpansState.reliable && lineSpansState.spans.length === rawRecords.length;
+  const allRecords: string[][] = [];
+  const allSpans: Array<[number, number]> = [];
+  for (let idx = 0; idx < rawRecords.length; idx++) {
+    const r = rawRecords[idx]!;
+    if (isBlankRecord(r)) continue;
+    allRecords.push(r);
+    if (spansReliable) allSpans.push(lineSpansState.spans[idx]!);
+  }
 
   // Header detection must run against the actual delimiter's parse (the sniff
   // sample used the same delimiter, so this agrees with dialect.headerLikely).
@@ -486,6 +573,7 @@ export function csvTable(
 
   const headerRecord = hasHeader ? (allRecords[0] ?? []) : undefined;
   const dataRecords = hasHeader ? allRecords.slice(1) : allRecords;
+  const dataSpans = spansReliable ? (hasHeader ? allSpans.slice(1) : allSpans) : undefined;
   const firstDataRow = hasHeader ? 2 : 1; // logical row number of data row 0
 
   // Column roster. Ragged data rows can be wider than the header; the header
@@ -575,6 +663,25 @@ export function csvTable(
 
   const truncated = servedCount < windowSize || parseTruncated.truncated;
 
+  // round-18A finding 1 / ruling (v): the PHYSICAL file line span the served
+  // rows occupy — the union (first row's start line .. last row's end line)
+  // of the shipped rows' own spans, NOT the logical `range` above. Left
+  // `undefined` (fail-closed) whenever nothing shipped, or the parser could
+  // not establish a reliable mapping, or (defensively) the span array
+  // doesn't line up 1:1 with the data rows it should describe.
+  let fileLineRange: string | undefined;
+  if (
+    servedCount > 0
+    && dataSpans !== undefined
+    && dataSpans.length === dataRecords.length
+  ) {
+    const firstSpan = dataSpans[sIdx];
+    const lastSpan = dataSpans[sIdx + servedCount - 1];
+    if (firstSpan !== undefined && lastSpan !== undefined) {
+      fileLineRange = `${firstSpan[0]}-${lastSpan[1]}`;
+    }
+  }
+
   const result: CsvTableResult = {
     ok: true,
     columns: selectedColumns,
@@ -585,6 +692,7 @@ export function csvTable(
     total_columns: totalColumns,
     dialect: { delimiter, header: hasHeader },
     warnings,
+    ...(fileLineRange !== undefined ? { fileLineRange } : {}),
   };
 
   // Honest truncation guidance: the exact range= call for the next rows.

@@ -11,14 +11,14 @@
 
 ## Conventions
 
-Follow repo build/test/format/architecture patterns. Keep changes scoped and
-shared contracts synchronized. Never expose secrets.
+Follow repo patterns; scope edits, sync contracts, protect secrets.
+Root designs/plan rule; regenerate AI rules from templates.
 
 ## TokenLighten Tool Gating
 
 docs, config, logs;Office/archives/code.
 
-- Legacy `mode`/`paths`/`taskEpoch` etc. work (v0.13.x); never emit new.
+- Aliases: TL_LEGACY_INPUT=accept; TL_LEGACY_INPUT=refuse rejects; never emit.
 - Unknown: `read_file {query:<complete verbatim request>,task:{epoch:"new"}}`; never truncate; `task.profile` only when user-declared, otherwise omit. Known: `read_file {targets:[{path:<p>}]}` (+`symbol`/`content:"outline"`/batch several).
 - `decision.kind`: `act.answer`/`act.edit`=>`prepared`, act via `evidence_model`; `discover`=>run its `next`; `await_input`=>run carried `next`, else safe `candidate`, else ask. `read.receipt`(`pack-unchanged`) revalidates. Open=>`gaps` (semantic, no call closes it).
 - Search: `search_files {action:"find",queries:["<token>"]}`.

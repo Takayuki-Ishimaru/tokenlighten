@@ -164,8 +164,8 @@ export function callToNextString(call: ContinuationCall): string | undefined {
  * inverse of callToNextString on the emitted forms. Returns undefined for any
  * shape outside that set (free-text re-scope hints, wiring/style nexts).
  */
-export function nextStringToCall(next: string): ContinuationCall | undefined {
-  const s = next.trim();
+export function nextStringToCall(source: string): ContinuationCall | undefined {
+  const s = source.trim();
   let m: RegExpMatchArray | null;
 
   if ((m = s.match(/^read_file handles=\[(.*)\]$/)) !== null) {
@@ -211,16 +211,13 @@ export function nextStringToCall(next: string): ContinuationCall | undefined {
 }
 
 /**
- * §5.3 legacy-next derivation: the `next` string is ALWAYS the serialization of
- * the plan's first call. Single source of truth — used everywhere a plan is
- * emitted so `next` and `continuation` can never diverge. Returns undefined
- * only for an empty plan or a first call with no legacy-string form (the caller
- * then keeps its prior `next`).
+ * §5.3 continuation derivation: `next` is ALWAYS the plan's first executable
+ * call. Single source of truth — used everywhere a plan is emitted so `next`
+ * and `continuation` can never diverge. Returns undefined only for an empty
+ * plan.
  */
-export function deriveNextFromPlan(plan: ContinuationPlan): string | undefined {
-  const first = plan.stages[0]?.calls[0];
-  if (!first) return undefined;
-  return callToNextString(first);
+export function deriveNextFromPlan(plan: ContinuationPlan): ContinuationCall | undefined {
+  return plan.stages[0]?.calls[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +278,7 @@ export function enforceContinuationBudget(plan: ContinuationPlan): ContinuationP
 /** The minimal pack-shaped view buildContinuation reads (avoids a hard dep on TaskPackResult). */
 export interface ContinuationSource {
   coverage?: "complete" | "focused" | "partial";
-  next?: string;
+  next?: ContinuationCall;
   surfaces?: Array<{ handle: string; code?: string; code_unchanged?: string }>;
 }
 
@@ -314,9 +311,8 @@ function codelessHandles(src: ContinuationSource): string[] {
  * is applied by attachSupply at the dispatch boundary, not here.
  */
 export function buildContinuation(src: ContinuationSource): ContinuationPlan | undefined {
-  if (typeof src.next !== "string" || src.next.length === 0) return undefined;
-  const first = nextStringToCall(src.next);
-  if (!first) return undefined;
+  if (src.next === undefined) return undefined;
+  const first = src.next;
 
   const calls: ContinuationCall[] = [first];
 

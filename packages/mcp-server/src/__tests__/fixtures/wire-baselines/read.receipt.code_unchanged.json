@@ -9,6 +9,7 @@
     "next": {
       "tool": "read_file",
       "arguments": {
+        "cwd": "$WS",
         "task": {
           "epoch": "new"
         },
@@ -16,7 +17,8 @@
           {
             "path": "fw/src/estimator/qkf.cpp"
           }
-        ]
+        ],
+        "content": "auto"
       }
     }
   }

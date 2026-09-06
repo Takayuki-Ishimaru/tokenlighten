@@ -41,15 +41,16 @@ function writeGraph(workspace: string, graph: unknown): void {
 const emptyWalkCache = { get: (_opts: WalkOptions): FoundFile[] => [] };
 
 let savedRrf: string | undefined;
-let savedProfiles: string | undefined;
 let savedBm25f: string | undefined;
 let savedGraphIndex: string | undefined;
 let savedHome: string | undefined;
 let tmpHome: string;
 
 beforeEach(() => {
+  // TL_RRF_FUSION is now tri-state (off/on/profiles) — CONSOLIDATED (v0.14
+  // flag inventory, 2026-08-31): the former separate TL_RRF_PROFILES pair
+  // var is this var's "profiles" value, so one save/restore covers both.
   savedRrf = process.env["TL_RRF_FUSION"];
-  savedProfiles = process.env["TL_RRF_PROFILES"];
   savedBm25f = process.env["TL_BM25F_CANDIDATE"];
   savedGraphIndex = process.env["TL_GRAPH_INDEX"];
   savedHome = process.env.HOME;
@@ -62,8 +63,6 @@ beforeEach(() => {
 afterEach(() => {
   if (savedRrf === undefined) delete process.env["TL_RRF_FUSION"];
   else process.env["TL_RRF_FUSION"] = savedRrf;
-  if (savedProfiles === undefined) delete process.env["TL_RRF_PROFILES"];
-  else process.env["TL_RRF_PROFILES"] = savedProfiles;
   if (savedBm25f === undefined) delete process.env["TL_BM25F_CANDIDATE"];
   else process.env["TL_BM25F_CANDIDATE"] = savedBm25f;
   if (savedGraphIndex === undefined) delete process.env["TL_GRAPH_INDEX"];
@@ -113,7 +112,6 @@ describe("applyHybridRetrieval — Wave C (F-A5) absence-of-graph byte identity"
   it("a workspace with NO .tokenlighten/index/ directory adds zero candidates, for a query that WOULD graph-match if a graph existed", async () => {
     process.env["TL_RRF_FUSION"] = "1";
     delete process.env["TL_BM25F_CANDIDATE"];
-    delete process.env["TL_RRF_PROFILES"];
     const ws = buildOrdersWorkspace(); // no tl-graph.json written
     const before = baseCandidates();
     const candidates = [...before];
@@ -130,7 +128,6 @@ describe("applyHybridRetrieval — Wave C (F-A5) absence-of-graph byte identity"
   it("the SAME call with a real graph present DOES report graph hits — a paired control proving the no-graph case above is caused by graph absence, not some other reason", async () => {
     process.env["TL_RRF_FUSION"] = "1";
     delete process.env["TL_BM25F_CANDIDATE"];
-    delete process.env["TL_RRF_PROFILES"];
     setTraceEnabledForTest(true);
     const ws = buildOrdersWorkspace();
     writeGraph(ws, reserveStockGraph());
@@ -163,8 +160,7 @@ describe("applyHybridRetrieval — Wave C (F-A5) absence-of-graph byte identity"
   });
 
   it("a graph-favoring weight override is inert when no graph index exists (multiplying nothing changes nothing)", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     const ws = buildOrdersWorkspace();
 
@@ -192,8 +188,7 @@ describe("applyHybridRetrieval — Wave C (F-A5) absence-of-graph byte identity"
 
 describe("applyHybridRetrieval — Wave C (F-A5) quality-gate participation", () => {
   it("a graph list with real role/match-count spread passes the gate and is NOT recorded in gated_retrievers", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     setTraceEnabledForTest(true);
     const ws = buildOrdersWorkspace();
@@ -211,8 +206,7 @@ describe("applyHybridRetrieval — Wave C (F-A5) quality-gate participation", ()
   });
 
   it("a flat (all-reference, single-match, uniform-score) graph list is gated OUT of fusion with reason degenerate-scores, but its candidates still enter the pool", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     setTraceEnabledForTest(true);
     const ws = mkWorkspace();
@@ -257,8 +251,7 @@ describe("applyHybridRetrieval — Wave C (F-A5) quality-gate participation", ()
 
 describe("applyHybridRetrieval — Wave C (F-A5) hard floor holds under adversarial graph weights", () => {
   it("an exact-path candidate stays first even when the graph axis is weighted overwhelmingly and every other axis is muted", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     const ws = mkWorkspace();
     for (let i = 0; i < 8; i++) writeFile(ws, `src/decoy${i}.ts`, `export function decoy${i}(): void {}\n`);
@@ -299,8 +292,7 @@ describe("applyHybridRetrieval — Wave C (F-A5) hard floor holds under adversar
   });
 
   it("holds under NEUTRAL_WEIGHTS too (not just an adversarial vector)", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     const ws = buildOrdersWorkspace();
     writeGraph(ws, reserveStockGraph());
@@ -342,9 +334,8 @@ describe("applyHybridRetrieval — Wave C (F-A5) exact top-1 non-degradation on 
 
 describe("applyHybridRetrieval — Wave C (F-A5) no-gold non-regression", () => {
   it("a genuinely irrelevant query adds zero candidates even though a real (unrelated) graph index exists for this workspace", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     process.env["TL_BM25F_CANDIDATE"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
     const ws = buildOrdersWorkspace();
     writeGraph(ws, reserveStockGraph());
     const candidates = baseCandidates();

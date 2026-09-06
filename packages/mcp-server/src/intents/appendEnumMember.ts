@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import type { ToolCall } from "@tokenlighten/types";
 import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
 import { formatDelta, formatLines } from "../util/lineDelta.js";
@@ -8,7 +9,7 @@ import { countLines } from "../util/countLines.js";
 
 export type AppendEnumMemberResult =
   | { ok: true; path: string; lines: string; delta: string }
-  | { ok: false; reason: string; next?: string };
+  | { ok: false; reason: string; next?: ToolCall; detail?: string };
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -107,8 +108,12 @@ export async function applyAppendEnumMember(
   lang: string | undefined,
 ): Promise<AppendEnumMemberResult> {
   if (!allowWrite) return { ok: false, reason: "write-not-enabled" };
-  if (!symbolName) return { ok: false, reason: "intent-unsupported", next: `read_file mode=slice handle=${handleId}` };
-  if (!IDENT_RE.test(target)) return { ok: false, reason: "intent-unsupported", next: "target must be an enum identifier" };
+  if (!symbolName) return {
+    ok: false,
+    reason: "intent-unsupported",
+    next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+  };
+  if (!IDENT_RE.test(target)) return { ok: false, reason: "intent-unsupported", detail: "target must be an enum identifier" };
   if (looksLikeSecretFile(relPath)) return { ok: false, reason: "intent-unsupported" };
 
   const abs = safeResolveForWrite(relPath, workspace);
@@ -135,8 +140,8 @@ export async function applyAppendEnumMember(
   }
 
   const after = appendEnumMember(before, symbolName, target, lang);
-  if (after === "DUPLICATE") return { ok: false, reason: "intent-unsupported", next: "enum member already present" };
-  if (!after || after === before) return { ok: false, reason: "intent-unsupported", next: "enum declaration not found" };
+  if (after === "DUPLICATE") return { ok: false, reason: "intent-unsupported", detail: "enum member already present" };
+  if (!after || after === before) return { ok: false, reason: "intent-unsupported", detail: "enum declaration not found" };
 
   // Mode preservation: see writeExistingFileAtomic's doc comment
   // (2026-08-07 chmod-reset incident).

@@ -1,8 +1,10 @@
 // coveragePackerV2.spec.ts — V11-03 Coverage Packer v2 unit contract.
 //
 // Everything here is pure: no fixtures, no server, no I/O. The integration
-// behaviour behind TL_COVERAGE_PACKER_V2 (server-dispatch fixtures, byte
-// comparisons against v1, and the change_contract second seam) lives in
+// behaviour behind TL_COVERAGE_PACKER=v2 (CONSOLIDATED, v0.14 flag
+// inventory, 2026-08-31: the former separate TL_COVERAGE_PACKER_V2 pair var
+// is now this var's "v2" value — server-dispatch fixtures, byte comparisons
+// against v1, and the change_contract second seam) lives in
 // coveragePackerV2Integration.spec.ts.
 
 import { describe, it, expect } from "vitest";

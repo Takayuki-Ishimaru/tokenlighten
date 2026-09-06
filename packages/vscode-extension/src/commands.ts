@@ -25,6 +25,7 @@ import type { WorkspaceActivationState } from "./workspaceState.js";
 // parseSentinelBlock) on the /version and /sentinel subpaths instead of the
 // package root -- see that file's own header comment.
 import type { GuideProfile } from "@tokenlighten/agents-md";
+import type { DisplayTier, MeasurementDisplayTiers } from "@tokenlighten/usage";
 
 const firstLine = (s: string) => s.split("\n")[0] ?? s;
 
@@ -254,11 +255,49 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 
+export type UsageMeasurementTier = DisplayTier;
+
+function usageMeasurementStatus(status: string, language: "en" | "ja"): string {
+  if (language === "ja") {
+    if (status === "measured") return "実測";
+    if (status === "estimated") return "推定";
+    if (status === "unavailable") return "利用不可";
+  }
+  return status;
+}
+
+export function formatUsageMeasurementStatus(
+  tier: UsageMeasurementTier,
+  language: "en" | "ja",
+): string {
+  const status = usageMeasurementStatus(tier.status, language);
+  return language === "ja"
+    ? `${status}（根拠: ${tier.basis}）`
+    : `${status} (basis: ${tier.basis})`;
+}
+
+export function formatUsageMeasurementTier(
+  tier: UsageMeasurementTier,
+  language: "en" | "ja",
+): string {
+  const tokens = tier.tokens === null
+    ? (language === "ja" ? "利用不可" : "unavailable")
+    : language === "ja"
+      ? `${tier.tokens.toLocaleString("ja-JP")}トークン`
+      : `${tier.tokens.toLocaleString("en-US")} tokens`;
+  const status = usageMeasurementStatus(tier.status, language);
+  return language === "ja"
+    ? `${tokens}（${status}・根拠: ${tier.basis}）`
+    : `${tokens} (${status}; basis: ${tier.basis})`;
+}
+
 export interface UsageSummary {
   eventCount: number;
   successfulCalls: number;
   failedCalls: number;
   estimatedResponseTokens: number;
+  method?: "file-bytes";
+  measurementDisplay?: MeasurementDisplayTiers;
   measuredBaselineCalls: number;
   measuredResponseBytes?: number;
   measuredBaselineBytes?: number;
@@ -372,6 +411,11 @@ export async function showUsageDashboard(
     `Measured calls: ${summary.measuredBaselineCalls}; response bytes vs baseline: ${measuredRatio === null ? "unavailable" : `${(measuredRatio * 100).toFixed(1)}%`}.`,
     `実測呼び出し: ${summary.measuredBaselineCalls}、応答バイト対ベースライン比: ${measuredRatio === null ? "利用不可" : `${(measuredRatio * 100).toFixed(1)}%`}。`,
   );
+  const measurementLine = summary.measurementDisplay
+    ? language === "ja"
+      ? `TL応答合計: 約${summary.estimatedResponseTokens.toLocaleString("ja-JP")}トークン（方式: ${summary.method ?? "file-bytes"}）、観測usage: ${formatUsageMeasurementStatus(summary.measurementDisplay.wire, "ja")}、MCP応答オーバーヘッド: ${formatUsageMeasurementTier(summary.measurementDisplay.mcpResponse, "ja")}、回避コンテキスト: ${formatUsageMeasurementTier(summary.measurementDisplay.contextAvoided, "ja")}、セッション回避ターン: ${formatUsageMeasurementTier(summary.measurementDisplay.session, "ja")}、純減: ${summary.measurementDisplay.session.net ? formatUsageMeasurementTier(summary.measurementDisplay.session.net, "ja") : "利用不可"}。`
+      : `TL response total: ~${summary.estimatedResponseTokens.toLocaleString("en-US")} tokens (method: ${summary.method ?? "file-bytes"}); observed usage: ${formatUsageMeasurementStatus(summary.measurementDisplay.wire, "en")}; MCP response overhead: ${formatUsageMeasurementTier(summary.measurementDisplay.mcpResponse, "en")}; context avoided: ${formatUsageMeasurementTier(summary.measurementDisplay.contextAvoided, "en")}; session avoided-turn: ${formatUsageMeasurementTier(summary.measurementDisplay.session, "en")}; net: ${summary.measurementDisplay.session.net ? formatUsageMeasurementTier(summary.measurementDisplay.session.net, "en") : "unavailable"}.`
+    : localized("Response/context/session tiers unavailable.", "応答・回避コンテキスト・セッション層は利用できません。");
   const warnings = summary.sessionEstimate?.warnings ?? [];
   const unavailableReason = summary.measurementUnavailableReason
     ?? (warnings.includes("recorder-off") ? "recorder-off"
@@ -427,7 +471,7 @@ button{margin-top:20px;padding:8px 14px}
 </div>
 <p class="note">${metricNote} ${copy.measured}: ${summary.measuredBaselineCalls}</p>
 ${calibrationLine ? `<p class="note">${calibrationLine}</p>` : ""}
-<p class="note">${measuredLine}</p>
+<p class="note">${measuredLine}</p>\n<p class="note">${measurementLine}</p>
 ${reason ? `<p class="note">${reason}</p>` : ""}
 <button id="export">${copy.export}</button>
 <script>

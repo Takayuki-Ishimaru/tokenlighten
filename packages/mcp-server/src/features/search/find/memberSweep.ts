@@ -30,6 +30,7 @@ import * as path from "path";
 import { collectSymbols, type CollectedSymbol } from "../../../symbols/collectSymbols.js";
 import { languageForPathWithContent } from "../../../util/languages.js";
 import { MAX_RESPONSE_BYTES as FIND_MAX_RESPONSE_BYTES, MAX_INVENTORY_RESPONSE_BYTES } from "./findText.js";
+import type { ToolCall } from "@tokenlighten/types";
 import type { FindResponse } from "./findText.js";
 
 /** Bare identifier token — mirrors findReferences.ts's own IDENT_RE gate. */
@@ -44,7 +45,7 @@ export interface MemberSweepAttachment {
   /** Up to 12 member names, public/exported-looking members first. */
   members: string[];
   /** Ready-to-run BATCHED find call for the first <=5 members. */
-  next: string;
+  next: ToolCall;
 }
 
 /** One sentence, in the existing hint style, describing the affordance. */
@@ -92,7 +93,10 @@ function buildAttachment(symbol: string, members: string[]): MemberSweepAttachme
   return {
     symbol,
     members,
-    next: `search_files action=find queries=${JSON.stringify(members.slice(0, NEXT_BATCH_SIZE))}`,
+    next: {
+      tool: "search_files",
+      arguments: { action: "find", queries: members.slice(0, NEXT_BATCH_SIZE) },
+    },
   };
 }
 

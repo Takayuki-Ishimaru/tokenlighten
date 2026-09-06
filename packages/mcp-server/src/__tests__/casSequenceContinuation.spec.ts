@@ -84,7 +84,7 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     const prescribed = nextOf(first);
     expect(prescribed, JSON.stringify(first)).toEqual({
       tool: "search_files",
-      arguments: { action: "find", queries: ["REFUNDED"] },
+      arguments: { cwd, lane, task: { handle: taskHandle }, action: "find", queries: ["REFUNDED"] },
     });
 
     // STEP 1: a WRONG expected_state_version refuses fail-closed and names
@@ -99,6 +99,15 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     expect(refused["field"]).toBe("expected_state_version");
     expect(refused["actual"], JSON.stringify(refused)).toBe(liveVersion);
     expect(refused["retry"]).toBe("new-task");
+    // The retry is an executable qref re-pack, not the placeholder-shaped next
+    // that the refusal scrub correctly removes.
+    expect(refused["next"], JSON.stringify(refused)).toMatchObject({
+      tool: "read_file",
+      arguments: { task: { epoch: "new" } },
+    });
+    expect((refused["next"] as { arguments: { qref?: unknown } }).arguments.qref).toEqual(
+      (resolved as { state: { replay?: unknown } }).state.replay,
+    );
 
     // STEP 2: execute the task's own PRESCRIBED find. This is a
     // proof-transition write (P1-a: the ledger records the authoritative
@@ -128,5 +137,24 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
       continuedNext === undefined || JSON.stringify(continuedNext) !== JSON.stringify(prescribed),
       JSON.stringify(continued),
     ).toBe(true);
+  });
+
+  it("refuses legacy input by default but accepts the explicit compatibility escape hatch", async () => {
+    const cwd = mkWorkspace("legacy-input");
+    writeFile(cwd, "src/value.ts", "export const value = 1;\n");
+    const saved = process.env["TL_LEGACY_INPUT"];
+    try {
+      delete process.env["TL_LEGACY_INPUT"];
+      const refused = await dispatch("read_file", { mode: "task_pack", query: "value", cwd });
+      expect(refused).toMatchObject({ kind: "refusal", code: "legacy-input", field: "mode", retry: "call" });
+      expect(refused["did_you_mean"]).toBeDefined();
+
+      process.env["TL_LEGACY_INPUT"] = "accept";
+      const accepted = await dispatch("read_file", { mode: "task_pack", query: "value", cwd });
+      expect(accepted["kind"], JSON.stringify(accepted)).toBe("read.task_pack");
+    } finally {
+      if (saved === undefined) delete process.env["TL_LEGACY_INPUT"];
+      else process.env["TL_LEGACY_INPUT"] = saved;
+    }
   });
 });

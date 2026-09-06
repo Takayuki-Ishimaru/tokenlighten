@@ -22,7 +22,7 @@ read-only unless started with `--allow-write`.
 - **Explicit recovery instead of silent omission.** Unsupported mixed-target
   reads and workspace-coherence failures return a refusal with a recovery path.
 
-See the [changelog](../CHANGELOG.md) for the complete v0.13.1 inventory.
+See the [changelog](../CHANGELOG.md) for release highlights.
 
 ## Compatibility
 
@@ -32,35 +32,8 @@ See the [changelog](../CHANGELOG.md) for the complete v0.13.1 inventory.
 - Legacy v0.12 field spellings remain compatibility-only in v0.13.x and are
   scheduled for removal in v0.14.
 - `TL_PROOF_COMPLETION` defaults to on; `TL_SCHEMA_DEFS` defaults to off.
-- The desktop application and private benchmark harness are not included in
+- The desktop application is not included in
   the public source release.
-
-## Validation summary
-
-The release candidate passed the package and benchmark-library test suites,
-protocol follower and release-rehearsal checks, generated-artifact checks,
-dependency-license checks, and runtime and full dependency audits. The
-advertised schema remains within the v0.13.0 compatibility ceiling.
-
-## Benchmark disclosure
-
-The v0.13.1 developer benchmark produced a TokenLighten/native aggregate cost
-ratio of **0.809**, a point estimate of **19.1% lower task cost**. Both
-configurations solved and verified all 18 evaluated tasks.
-
-| Task pattern | v0.13.1 vs native |
-|---|---:|
-| Cross-module decision tracing and downstream wiring | **29.0% lower** |
-| Related multi-bug fix across control and mode transitions | **17.9% lower** |
-| Spreadsheet-driven rating-rule implementation | **16.7% lower** |
-| Narrow calculation or data-integrity fix | **7.3% lower** |
-| Priority behavior spanning related feature paths | **7.4% lower** |
-
-Localized explanation work was more sensitive to fixed overhead and remains an area for improvement.
-
-Median solver turns were 29.2% lower with TokenLighten. These are
-developer-run observations, not guaranteed savings. Results vary by repository,
-task, client, model behavior, evaluation window, and provider pricing.
 
 ## Install the VS Code extension
 

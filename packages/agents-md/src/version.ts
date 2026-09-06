@@ -13,4 +13,4 @@
 // consumers (injectAll.ts, index.ts) — this file is the source of truth.
 
 /** Current version string. Bump when prose changes materially. */
-export const INSTRUCTIONS_VERSION = "2026-08-29-v80-canonical-surface";
+export const INSTRUCTIONS_VERSION = "2026-09-05-v89-declare-profile";

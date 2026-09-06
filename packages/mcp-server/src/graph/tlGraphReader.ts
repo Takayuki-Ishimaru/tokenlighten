@@ -174,10 +174,19 @@ export function parseTlGraph(jsonText: string): GraphIndex {
   // Build lookup maps.
   const defMap = new Map<string, GraphLocation>();
   const refMap = new Map<string, GraphLocation[]>();
+  // FX-U2 (round 19B finding 1): count DISTINCT definitions per bare name,
+  // additively — `defMap` above stays last-wins (unchanged reader
+  // behavior for `definition()`), but a consumer deciding whether a merged
+  // `references()` list can be attributed to one specific definition needs
+  // to know when more than one raw `symbols[]` entry shares that name (see
+  // `GraphIndex.definitionCount`'s doc in graph/index.ts for the full
+  // mechanism this counter exists to serve).
+  const defCountMap = new Map<string, number>();
 
   for (const sym of rawSymbols) {
     if (sym.definition) {
       defMap.set(sym.name, sym.definition);
+      defCountMap.set(sym.name, (defCountMap.get(sym.name) ?? 0) + 1);
     }
     refMap.set(sym.name, sym.references ?? []);
   }
@@ -196,6 +205,22 @@ export function parseTlGraph(jsonText: string): GraphIndex {
     },
     references(symbol: string): GraphLocation[] {
       return refMap.get(symbol) ?? [];
+    },
+    definitionCount(symbol: string): number {
+      return defCountMap.get(symbol) ?? 0;
+    },
+    // FX-V2 (round 20B finding 1, HIGH, 2026-09-04, ruling (y)): explicit,
+    // never omitted — this index's `references()` above is built from
+    // `indexStore.ts`'s `outgoingSymbolRefs`, a raw identifier-token count
+    // over the whole file (`skeleton-engine/graphBuilder.ts`'s `refsByName`),
+    // not a call-site extraction. It cannot distinguish a genuine call from
+    // a comment, an unrelated same-named local, or the definition's own
+    // body mentioning its own name — see `GraphIndex.hasCallEdges`'s doc in
+    // `graph/index.ts` for the full mechanism and the round-20B repro this
+    // closes. `relationGraphPort.ts`'s `callersOf` must never be attached
+    // to this index's `references`.
+    hasCallEdges(): boolean {
+      return false;
     },
     importsOf(filePath: string): string[] {
       return importsMap.get(filePath) ?? [];

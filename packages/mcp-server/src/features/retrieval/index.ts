@@ -68,7 +68,7 @@ export interface HybridRetrievalInput {
    */
   weights?: Partial<Record<FieldName, number>>;
   /**
-   * V11-02 (flag: TL_RRF_PROFILES, composes with TL_RRF_FUSION). Optional
+   * V11-02 (TL_RRF_FUSION=profiles since the v0.14 consolidation). Optional
    * task-aware profile context, threaded by the one production call site
    * (locateTaskContext.ts) ONLY under the flag. Default undefined -> profile
    * resolution never runs; fusion behavior is byte-identical to pre-V11-02

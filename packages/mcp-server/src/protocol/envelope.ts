@@ -35,12 +35,13 @@
 // ---------------------------------------------------------------------------
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Kind, ToolName } from "@tokenlighten/types";
+import type { Evidence, Kind, ToolCall, ToolName } from "@tokenlighten/types";
 
 import {
   buildRefusal,
-  containsPlaceholder,
+  containsPlaceholderForCall,
   isRefusalBody,
+  parseProseToolCall,
 } from "./refusal.js";
 import {
   carryDisclosures,
@@ -51,12 +52,38 @@ import { emitFinalizedPayload, emitOpaqueText } from "./emit.js";
 import { isEditFamilyKind, projectEditBody } from "./editFamily.js";
 import { isReadFamilyKind, projectReadBody, receiptOf } from "./readFamily.js";
 import {
+  applySearchDedup,
   isSearchFamilyKind,
   projectSearchBody,
   searchRefusalBody,
   searchRefusalCodeFor,
 } from "./searchFamily.js";
 import { bindLedgerCertificate, bindLedgerCertificateFromScope, ledgerCertificateBinding } from "./ledgerCertificateBinding.js";
+import { isAdvertisedToolName } from "./advertisedTools.js";
+import {
+  finalizeSemanticFrontierAttestation,
+  semanticFrontierPathId,
+  type SemanticFrontierWireObservation,
+} from "../features/task-pack/semanticFrontier.js";
+import { isTraceEnabled, responseWitnessHmac, trace, traceBounded } from "../util/trace.js";
+// FX-W3 (ruling (aa), 2026-09-04): `servedWindowsOf` no longer re-derives file
+// spans by re-parsing a served body for marker-shaped lines at all — see its
+// own doc comment. `sentinelComment.ts`'s detector (below) is the one text
+// classifier this module still consults, and only to recognise TL's own
+// synthetic renderings (skeleton/scope views), never to widen anything.
+import { isTokenlightenSentinelLine } from "../util/sentinelComment.js";
+import {
+  runWithSemanticFrontierTrace,
+  semanticFrontierDecisionWitnessId,
+  semanticFrontierEvidenceWitnessId,
+  takeSemanticFrontierTraceState,
+} from "./semanticFrontierTraceContext.js";
+import type { SemanticFrontierWithholdingMarks } from "./semanticFrontierTraceContext.js";
+// W-DEMOTE follow-up (§6 P-2): the pure counters function this trace wires
+// in below; decisionWire.ts's own doc comment on it says this is the file
+// meant to call it, unchanged.
+import { semanticFrontierDemotionCounters } from "./decisionWire.js";
+import { batchHintsEnabled, sfDemoteEnabled } from "../util/flags.js";
 
 /** §1.1, D1. One integer, one value, one server process. */
 export const PROTOCOL_VERSION = 1 as const;
@@ -125,12 +152,92 @@ export interface ProtocolCallContext {
    * `workspace` itself for read/search (an earlier version of this fix)
    * changed a `read.receipt`'s `next.arguments` shape and broke
    * wireBaselines.spec.ts's pinned bytes — exactly the regression D1's own
-   * "ZERO wire-byte change" requirement forbids. This field is read by
-   * NOTHING except pipeline.ts, so it cannot repeat that mistake.
+   * "ZERO wire-byte change" requirement forbids. This field was read by
+   * NOTHING except pipeline.ts until the disclosed exception immediately
+   * below.
    *
-   * INTERNAL AND NON-WIRE, same posture as `emittedBytes` below.
+   * DISCLOSED SECOND READER (TL_SEARCH_DEDUP, W-T-D wave, default OFF):
+   * `projectSuccessBody`'s search-family branch also reads this field, to
+   * give `searchFamily.ts`'s `applySearchDedup` the workspace root it needs
+   * to key the per-task dedup ledger — the ONLY workspace root a read/search
+   * call publishes into this context by the time the funnel runs.  This does
+   * NOT repeat the read.receipt regression above: `applySearchDedup` is the
+   * identity function whenever `searchDedupEnabled()` is false (the shipped
+   * default), so the search-family wire stays byte-identical with the flag
+   * off, and `read.*` responses never call it at all — only the two
+   * search-family kinds this field already exists for are affected, and only
+   * behind the flag.
+   *
+   * INTERNAL AND NON-WIRE for every OTHER purpose, same posture as
+   * `emittedBytes` below.
    */
   codecTraceWorkspace?: string;
+  /**
+   * VF-5/VF-7 hand-off: the workspace root a `read_file` call resolved
+   * against, published ONLY for `protocol/readFamily.ts`'s verify-first
+   * closure gate (`verifyClosureGate`'s kit-less session-obligation
+   * fallback, and `receiptOf`'s `closure-complete` withhold check) -- a
+   * THIRD, dedicated slot, deliberately separate from both `workspace`
+   * (edit-only; reusing it for read/search broke wireBaselines.spec.ts's
+   * pinned bytes, per `codecTraceWorkspace`'s own doc comment above) and
+   * `codecTraceWorkspace` (trace-only; read by nothing wire-affecting).
+   * Read by nothing else, so populating it changes no wire byte on any
+   * path that does not also flip TL_SF_VERIFY_FIRST on.
+   */
+  verifyClosureWorkspace?: string;
+  /**
+   * FX-N (ruling (s), 2026-09-03): the workspace root a `read_file` /
+   * `search_files` call resolved against, published so `emit.ts`'s [R5-10]
+   * settlement runs for the READ family too.
+   *
+   * A FOURTH dedicated slot, for the same reason `verifyClosureWorkspace` and
+   * `codecTraceWorkspace` are their own: `workspace` is EDIT-only (see
+   * `noteWorkspaceRoot`'s doc comment) and is read by `readFamily.ts`'s
+   * `projectReadBody` to decide whether a `read.receipt`'s continuation echoes
+   * `cwd` -- populating it on a read moves pinned wire bytes
+   * (wireBaselines.spec.ts). This slot is read by exactly ONE consumer,
+   * `emit.ts`'s ledger half, so setting it changes no wire byte on any path.
+   *
+   * WHY IT MUST EXIST. Before FX-N the retraction half of [R5-10] was
+   * unreachable for reads: `settleServedRanges` ran only under
+   * `context.workspace`, so a `read_file` that booked a provisional serve span
+   * and then shed to `refusal/cap-exceeded` left that span standing, and the
+   * next slice of the same file answered `read.receipt{code-unchanged}` naming
+   * the REFUSAL as the serving call (round-16 finding 1a, `r16_y`). It also
+   * left the union/residency writes that ride the same booking standing, which
+   * granted `edit_file` write authority over a file no byte of which had ever
+   * been sent (1b) and laundered an FX-L `withheld` address to `shipped` (1c).
+   */
+  readServeWorkspace?: string;
+  /**
+   * FX-O1 (ruling (t), 2026-09-03): the workspace-relative FILE PATH a serve
+   * site staged bytes for, published by the staging sites whose wire payload
+   * carries no `path` of its own.
+   *
+   * WHY IT EXISTS. `servedWindowsOf` attributes a served body to a file by the
+   * `path` it finds in scope on the payload. Two production serve shapes carry
+   * a body with no `path` anywhere above it — `mode=symbol`'s assembled scope
+   * view (`{...symbolData, code, handle, sha}`) and `mode=auto`'s small-content
+   * serve (`{content, language, handle, sha}`) — so both projected to
+   * `unattributed: true`, and the settlement's `unattributed` arm FAILED OPEN:
+   * it promoted every pending staged path, including a residue left behind by
+   * an earlier call that threw before reaching the funnel (round-17 finding 2).
+   * Ruling (t) makes that arm fail CLOSED, which would have retracted those two
+   * shapes' own honest bookings — so the staging sites now name the path they
+   * staged for, on the call's own context, and the projector attributes the
+   * pathless body to it. `unattributed` is then unreachable for a shipped body.
+   *
+   * AMBIGUITY IS A NON-ANSWER. A call that stages for two different paths sets
+   * this to `""`, which `emit.ts` reads as "no attribution" — a pathless body
+   * in a multi-path response cannot be assigned to one of them, and guessing
+   * would book bytes against a file the wire never named. Non-wire, like the
+   * four workspace slots above: read by exactly one consumer, the funnel.
+   */
+  serveAttributionPath?: string;
+  /** Resolved workspace root inherited by executable continuations. */
+  continuationWorkspace?: string;
+  /** Opaque task identity minted while projecting this response. */
+  continuationTaskHandle?: string;
   /**
    * P3a S1: body bytes this call's response measured at the ONE emission point
    * (`budget/measure.ts`, via `emit.ts`). Written by `noteEmission`, once, on
@@ -179,12 +286,29 @@ export interface ProtocolCallContext {
     readonly forceServe: boolean;
     readonly scopeClass: "handle" | "path" | "query" | "none";
   };
+  /**
+   * W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF): set by read_file/
+   * search_files dispatch (server.ts, both `guardExecutionDiscovery` call
+   * sites) from `recordReadFamilySingleTargetCall`'s (state/session.ts)
+   * return value — true iff THIS call is single-target AND it brought the
+   * session's consecutive-single-target-read-family-call streak to
+   * SERIAL_SINGLE_TARGET_HINT_THRESHOLD or beyond. `undefined`/`false` for
+   * every multi-target call, every edit_file call (which never sets this at
+   * all), and every call made before the flag turned this tracking on.
+   * Consumed once, at the funnel tail, by `applySerialSingleTargetHint` —
+   * which additionally gates on `kind` so the hint never rides an
+   * `edit_file`/refusal/receipt-shaped response even if this happened to be
+   * true for one (it structurally cannot be, since edit_file never sets it,
+   * but the kind gate is the honest, non-coincidental reason). Never
+   * serialized onto the wire itself.
+   */
+  serialSingleTargetHint?: boolean;
 }
 
 const _protocolCall = new AsyncLocalStorage<ProtocolCallContext>();
 
 export function runWithProtocolCall<T>(context: ProtocolCallContext, fn: () => T): T {
-  return _protocolCall.run(context, fn);
+  return _protocolCall.run(context, () => runWithSemanticFrontierTrace(fn));
 }
 
 export function protocolCallContext(): ProtocolCallContext | undefined {
@@ -225,6 +349,12 @@ export function notePostReadyDiscovery(fields: {
   if (context !== undefined) context.postReadyDiscovery = fields;
 }
 
+/** Publish whether TL_BATCH_HINTS's serial-single-target-read-family-call streak fired on THIS call — see `ProtocolCallContext.serialSingleTargetHint`'s own doc comment. */
+export function noteSerialSingleTargetHint(fires: boolean): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined) context.serialSingleTargetHint = fires;
+}
+
 /** Name this response's `Kind` outright. Wins over every derivation below. */
 export function declareKind(kind: Kind): void {
   const context = _protocolCall.getStore();
@@ -244,6 +374,45 @@ export function noteWorkspaceRoot(root: string): void {
   if (context !== undefined && root !== "") context.workspace = root;
 }
 
+/** VF-5/VF-7: publish `ProtocolCallContext.verifyClosureWorkspace` (see its own doc comment). */
+export function noteVerifyClosureWorkspace(root: string): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && root !== "") context.verifyClosureWorkspace = root;
+}
+
+/**
+ * FX-N (ruling (s)): publish `ProtocolCallContext.readServeWorkspace` -- the
+ * root a read/search dispatch resolved against, consumed ONLY by `emit.ts`'s
+ * [R5-10] settlement. See that field's own doc comment for why this is a
+ * dedicated slot rather than a second writer of `noteWorkspaceRoot`'s
+ * edit-only `workspace`.
+ */
+export function noteReadServeWorkspace(root: string): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && root !== "") context.readServeWorkspace = root;
+}
+
+/**
+ * FX-O1 (ruling (t)): name the file a serve site just STAGED bytes for, so a
+ * payload that carries the body without a `path` is still attributable.
+ *
+ * Called from the raw-read staging sites, beside their `recordServedRange`
+ * loop. Monotone toward "ambiguous": the first path wins, a SECOND, different
+ * path collapses the slot to `""` and the funnel then attributes nothing —
+ * see `ProtocolCallContext.serveAttributionPath`'s doc comment. Calling it
+ * from a site whose payload DOES name its path is harmless and deliberate:
+ * the attribution is consulted only where the walk found no `path` at all.
+ */
+export function noteServeAttribution(filePath: string): void {
+  const context = _protocolCall.getStore();
+  if (context === undefined || filePath === "") return;
+  if (context.serveAttributionPath === undefined) {
+    context.serveAttributionPath = filePath;
+    return;
+  }
+  if (context.serveAttributionPath !== filePath) context.serveAttributionPath = "";
+}
+
 /**
  * D1 (F-C2a): publish the workspace root read_file/search_files dispatch
  * resolved against, for protocol/codec/pipeline.ts's trace emissions ONLY.
@@ -255,6 +424,160 @@ export function noteWorkspaceRoot(root: string): void {
 export function noteCodecTraceWorkspace(root: string): void {
   const context = _protocolCall.getStore();
   if (context !== undefined && root !== "") context.codecTraceWorkspace = root;
+}
+
+/** Publish the resolver-approved workspace inherited by wire continuations. */
+export function noteContinuationWorkspace(root: string): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && root !== "") context.continuationWorkspace = root;
+}
+
+/** Publish the opaque task handle minted for continuations in this response. */
+export function noteContinuationTaskHandle(handle: string): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined && handle !== "") context.continuationTaskHandle = handle;
+}
+
+function semanticTraceRecordOf(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/**
+ * W-DEMOTE follow-up (§6 P-2), TL_SF_DEMOTE only. `exemptPaths` is derived
+ * from this SAME observed wire array, never from internal snapshot/ledger
+ * state — decisionWire.ts's own doc comment on `semanticFrontierDemotionCounters`
+ * is explicit that `re_suppression_count` must be independently checkable
+ * "from the PROJECTED wire shape alone".
+ *
+ * FX-R3d (D10, 2026-09-04): a path is exempt iff some entry for it SHIPS
+ * BYTES — a `body` (served now) or a `prior` (proven already held). It used to
+ * be the negation of the demoted SHAPE, which additionally made a path exempt
+ * on the strength of a bare or capped bodyless row; such a row proves nothing
+ * is held, so pairing it with a genuinely demoted row of the same path would
+ * have reported a re-suppression that did not happen. The live case this
+ * counter exists for is unaffected: D3(b)'s `drv_baro.h` exempted its demoted
+ * `1-23` row via a bodied `1-49` sibling, which is a body.
+ */
+function semanticFrontierWireExemptPaths(evidence: readonly Evidence[]): Set<string> {
+  const exempt = new Set<string>();
+  for (const entry of evidence) {
+    const holdsBytes = entry.body !== undefined || entry.prior !== undefined;
+    if (holdsBytes && typeof entry.path === "string") exempt.add(entry.path);
+  }
+  return exempt;
+}
+
+/**
+ * Facts are read from the codec/fail-closed result, never the producer body.
+ *
+ * `marks` (FX-R3d, D10) is the producer's own record of which rows had a body
+ * withheld and by WHICH mechanism, carried here as opaque witness ids by
+ * `projectEvidence`. It is intersected with the final wire below: the counters
+ * report what this response actually did, not what its shape resembles.
+ */
+function observeSemanticFrontierWire(
+  text: string,
+  marks: SemanticFrontierWithholdingMarks,
+): SemanticFrontierWireObservation {
+  try {
+    const body = semanticTraceRecordOf(JSON.parse(text));
+    if (body === undefined) return { wire_observed: false, wire_kind: null, decision_kind: null };
+    const evidence = Array.isArray(body["evidence"]) ? body["evidence"] : [];
+    let evidenceBodyBytes = 0;
+    let evidencePriorBytes = 0;
+    const evidencePathIds: string[] = [];
+    const evidenceWitnessIds: string[] = [];
+    const typedEvidence: Evidence[] = [];
+    for (const entry of evidence) {
+      const item = semanticTraceRecordOf(entry);
+      if (item === undefined) continue;
+      if (typeof item["body"] === "string") evidenceBodyBytes += Buffer.byteLength(item["body"], "utf8");
+      if (typeof item["prior"] === "string") evidencePriorBytes += Buffer.byteLength(item["prior"], "utf8");
+      if (typeof item["path"] === "string") evidencePathIds.push(semanticFrontierPathId(item["path"]));
+      evidenceWitnessIds.push(semanticFrontierEvidenceWitnessId(item));
+      typedEvidence.push(item as unknown as Evidence);
+    }
+    const decision = semanticTraceRecordOf(body["decision"]);
+    // Absent when TL_SF_DEMOTE is off, so the legacy/off trace shape stays
+    // byte-identical to before this wave — never a defaulted 0 (§4.4).
+    const demotion = sfDemoteEnabled()
+      ? semanticFrontierDemotionCounters(typedEvidence, semanticFrontierWireExemptPaths(typedEvidence), marks)
+      : undefined;
+    return {
+      wire_observed: true,
+      ...(typeof body["kind"] === "string" ? { wire_kind: body["kind"] } : {}),
+      decision_kind: typeof decision?.["kind"] === "string" ? decision["kind"] : null,
+      evidence_count: evidence.length,
+      evidence_body_bytes: evidenceBodyBytes,
+      evidence_prior_bytes: evidencePriorBytes,
+      // Preserve one opaque identity per final evidence entry.  Two ranges of
+      // the same path are two delivered records, so deduping here would make
+      // the trace undercount post-codec evidence.
+      evidence_path_ids: evidencePathIds,
+      evidence_witness_ids: evidenceWitnessIds,
+      ...(semanticFrontierDecisionWitnessId(decision?.["next"]) !== undefined
+        ? { decision_next_witness_id: semanticFrontierDecisionWitnessId(decision?.["next"]) }
+        : {}),
+      ...(demotion !== undefined
+        ? {
+          demoted_count: demotion.demotedCount,
+          re_suppression_count: demotion.reSuppressionCount,
+          withheld_named_count: demotion.withheldNamedCount,
+        }
+        : {}),
+    };
+  } catch {
+    return { wire_observed: false, wire_kind: null, decision_kind: null };
+  }
+}
+
+function emitSemanticFrontierFinalTrace(context: ProtocolCallContext, result: FinalizableResult): void {
+  const state = takeSemanticFrontierTraceState();
+  if (state === undefined || !isTraceEnabled()) return;
+  const workspace = context.codecTraceWorkspace ?? context.workspace;
+  if (workspace === undefined || workspace === "") return;
+  const text = result.content[0]?.text;
+  const observation = typeof text === "string"
+    ? observeSemanticFrontierWire(text, state.marks)
+    : { wire_observed: false, wire_kind: null, decision_kind: null };
+  const event = finalizeSemanticFrontierAttestation(state.seed, observation, state.witnesses);
+  // The event never receives the response, query, address, handle, or nonce.
+  // It carries only a nonce-keyed witness which the paid runner recomputes
+  // from its captured actual MCP response before accepting the attestation.
+  const responseWitness = typeof text === "string" ? responseWitnessHmac(text) : undefined;
+  if (responseWitness !== undefined) event["response_witness"] = responseWitness;
+  // W-DEMOTE follow-up (§6 P-2): a re-suppression is supposed to be
+  // impossible by construction (isSemanticFrontierDemotionEligible is
+  // opt-in; I-2/D4 fail closed). This assertion is trace-only — it never
+  // throws into the response — so the paid verifier can catch a regression
+  // from the trace stream alone even though nothing here can block the call.
+  const reSuppressionCount = event["re_suppression_count"];
+  if (typeof reSuppressionCount === "number" && reSuppressionCount > 0) {
+    const demotedCount = event["demoted_count"];
+    trace("sf_demote_invariant_violation", {
+      re_suppression_count: reSuppressionCount,
+      demoted_count: typeof demotedCount === "number" ? demotedCount : 0,
+    }, workspace);
+  }
+  traceBounded("semantic_frontier_attestation", event, workspace, {
+    schema_version: event["schema_version"],
+    eligible: event["eligible"],
+    attempted: event["attempted"],
+    committed: event["committed"],
+    guard_enabled: event["guard_enabled"],
+    marker_count: event["marker_count"],
+    suppression_reasons: event["suppression_reasons"],
+    wire_observed: event["wire_observed"],
+    wire_kind: event["wire_kind"] ?? null,
+    decision_kind: event["decision_kind"] ?? null,
+    ...(responseWitness === undefined ? {} : { response_witness: responseWitness }),
+    ...(event["demoted_count"] !== undefined ? { demoted_count: event["demoted_count"] } : {}),
+    ...(event["re_suppression_count"] !== undefined ? { re_suppression_count: event["re_suppression_count"] } : {}),
+    ...(event["withheld_named_count"] !== undefined ? { withheld_named_count: event["withheld_named_count"] } : {}),
+    truncated_count: event["truncated_count"],
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +605,78 @@ const SEARCH_MATCH_ACTIONS: ReadonlySet<string> = new Set([
   "find", "symbols", "locate", "diff", "",
 ]);
 
+// ---------------------------------------------------------------------------
+// W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF — DESIGN-v0.15-sf-
+// turn-economy.md §3). server.ts's own `READ_BATCH_HINT_TEXT`/
+// `composeReadBatchHint` already nudge a caller re-reading the SAME path in
+// serial slices; this is the sibling for a serial run of single-target calls
+// across the read family generally — read_file with one target/handle OR
+// search_files action=find with one query, path- and tool-agnostic, firing
+// from the THRESHOLD'th (SERIAL_SINGLE_TARGET_HINT_THRESHOLD, state/
+// session.ts) consecutive single-target call regardless of path — the exact
+// shape a task-handle-replay route produced 32 times running in the r4 SF05
+// treatment session this candidate answers.
+//
+// R28-FIX (2026-09-05 review): this constant used to be a byte-identical
+// copy of `READ_BATCH_HINT_TEXT`, which was inaccurate on three counts —
+// this mechanism fires from the 3rd+ call, not the 2nd; it fires for
+// search_files find, not only read_file; and it fires across DIFFERENT
+// paths, not "on this path". Reworded to describe the actual mechanism.
+// The MARKER substring ("fold the remaining ranges into ONE targets") is
+// kept verbatim on purpose: `bench/workflows/run_semantic_frontier_smoke.mjs`
+// scans for it (`BATCH_HINT_MARKER`) to detect either hint, and this
+// module's own dedup guard below keys on the same substring
+// (`BATCH_HINT_DEDUP_MARKER`) rather than full-text equality, because the
+// two hints' texts no longer match byte-for-byte. Not imported from
+// server.ts (server.ts is this module's OWN caller, via the funnel
+// `finalizeProtocolResponse` below, so an import back would be circular).
+// ---------------------------------------------------------------------------
+export const SERIAL_SINGLE_TARGET_HINT_TEXT =
+  "3rd+ consecutive single-target read_file or search_files find call this session — fold the remaining ranges into ONE targets:[...] call (read_file) or queries:[...] call (search_files, <=5, OR-matched) instead of serial single-target calls";
+
+/**
+ * Shared substring both this hint and server.ts's `READ_BATCH_HINT_TEXT`
+ * carry on purpose (also bench/workflows/run_semantic_frontier_smoke.mjs's
+ * own `BATCH_HINT_MARKER` — keep all three byte-identical). Used as the
+ * dedup key in `applySerialSingleTargetHint` below: whichever of the two
+ * hints occupies the response's `hint` field first wins the one slot — the
+ * dedup key is deliberately the MARKER substring, not full-text equality,
+ * because the two hints' full texts differ (R28-FIX above).
+ */
+const BATCH_HINT_DEDUP_MARKER = "fold the remaining ranges into ONE targets";
+
+/** The `Kind`s this hint may ride — every read-family SUCCESS shape; never a receipt, a refusal, or any edit_file kind. */
+const SERIAL_SINGLE_TARGET_HINT_KINDS: ReadonlySet<Kind> = new Set([
+  "read.text", "read.map", "read.batch", "read.artifact", "search.matches",
+]);
+
+/**
+ * Attaches (or merges into an existing) `hint` field carrying the SAME
+ * marker text `composeReadBatchHint` (server.ts) emits, when
+ * `context.serialSingleTargetHint` fired for this call and `kind` is one of
+ * the qualifying read-family success shapes. Merges with "; " (the same
+ * idiom server.ts's own `note` composition uses) rather than overwriting, and
+ * never duplicates the text if the response already carries it (e.g. this
+ * exact response ALSO qualified for server.ts's own per-path serial-slice
+ * hint, which shares this wording).
+ */
+function applySerialSingleTargetHint(
+  context: ProtocolCallContext,
+  kind: Kind,
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  if (context.serialSingleTargetHint !== true) return body;
+  if (!SERIAL_SINGLE_TARGET_HINT_KINDS.has(kind)) return body;
+  const existing = typeof body["hint"] === "string" ? body["hint"] : undefined;
+  if (existing !== undefined && existing.includes(BATCH_HINT_DEDUP_MARKER)) return body;
+  return {
+    ...body,
+    hint: existing !== undefined && existing !== ""
+      ? `${existing}; ${SERIAL_SINGLE_TARGET_HINT_TEXT}`
+      : SERIAL_SINGLE_TARGET_HINT_TEXT,
+  };
+}
+
 /**
  * §2.3 / A.4 receipt detection — the tag test C2-2 promised.
  *
@@ -298,7 +693,7 @@ const SEARCH_MATCH_ACTIONS: ReadonlySet<string> = new Set([
  * keeps its content-bearing member rather than shipping a residency claim it
  * cannot address.
  */
-function isReceiptBody(body: Record<string, unknown>): boolean {
+function isReceiptBody(body: Record<string, unknown>, workspaceRoot?: string): boolean {
   // §2.3, and A.4's "NOT HERE" note: `query_mismatch` is NOT a receipt form in
   // v1. It is reclassified to `refusal` with `retry:"new-task"` and its
   // executable re-pack `next` — the receipt union has five forms and none of
@@ -307,7 +702,7 @@ function isReceiptBody(body: Record<string, unknown>): boolean {
   // (D4), and a receipt that is really a refusal is the wrong member however
   // its body is later shaped.
   if (body["query_mismatch"] === true) return false;
-  return receiptOf(body) !== undefined;
+  return receiptOf(body, workspaceRoot) !== undefined;
 }
 
 /**
@@ -363,12 +758,15 @@ function priorOnlyTextReceipt(body: Record<string, unknown>): Record<string, unk
     ...(servedBy.length > 0
       ? { served_by: servedBy.length <= 2 ? servedBy.join(" + ") : `${servedBy[0]!} +${servedBy.length - 1} more` }
       : {}),
-    // FX-1 (v0.13 wave-3 review fix): canonical `targets=[...]` prose — a
-    // raw-string `next` here bypasses `canonicalizeEmittedToolCalls` below
-    // (line ~616), which only rewrites OBJECT-shaped embedded tool calls, not
-    // plain strings.
+    // v0.14 §7.4: continuations are structured at every producer; the
+    // final recursive pass only canonicalizes and attributes this executable call.
     ...(remaining.length > 0
-      ? { next: `read_file targets=${JSON.stringify([{ handle, ranges: remaining }])}` }
+      ? {
+          next: {
+            tool: "read_file",
+            arguments: { targets: [{ handle, ranges: remaining }], content: "auto" },
+          },
+        }
       : {}),
   };
 }
@@ -504,7 +902,7 @@ export function kindForCall(
   // §2.3: a receipt is a success (isError unset) in every family, including the
   // prepared fence's stop on a `search_files` call — `Kind` names the payload's
   // family, not the tool that was called, and there is no `search.receipt`.
-  if (isReceiptBody(body)) return "read.receipt";
+  if (isReceiptBody(body, context.verifyClosureWorkspace)) return "read.receipt";
 
   if (context.tool === "search_files") {
     const action = context.action ?? "";
@@ -570,20 +968,25 @@ export function finalizeProtocolResponse(
   result: FinalizableResult,
 ): FinalizableResult {
   const context = _protocolCall.getStore() ?? { tool: canonical };
+  const finalizeOpaque = (): FinalizableResult => {
+    const finalized = emitOpaqueText(result, context);
+    emitSemanticFrontierFinalTrace(context, finalized);
+    return finalized;
+  };
   const text = result.content[0]?.text;
-  if (typeof text !== "string") return emitOpaqueText(result, context);
+  if (typeof text !== "string") return finalizeOpaque();
 
   let body: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(text);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return emitOpaqueText(result, context);
+      return finalizeOpaque();
     }
     body = parsed as Record<string, unknown>;
   } catch {
     // Defensive: every helper in this tree emits JSON. A non-JSON payload is a
     // bug elsewhere and must not be turned into a second bug here.
-    return emitOpaqueText(result, context);
+    return finalizeOpaque();
   }
 
   // L3: receipt conversion happens before classification so an all-prior
@@ -593,6 +996,14 @@ export function finalizeProtocolResponse(
   }
 
   const kind = kindForCall(context, body, result.isError === true);
+  // W-BATCH-HINT candidate 3: flag-gated here too (not just at the two
+  // server.ts call sites that set `context.serialSingleTargetHint`) so this
+  // funnel's own dead-code-by-default property — the same one
+  // `clientAcknowledgedPrior`/`projectCoveredBy` document above — holds for
+  // this lever independently of whether server.ts's own gate ever drifts.
+  if (batchHintsEnabled()) {
+    body = applySerialSingleTargetHint(context, kind, body);
+  }
   // §4.2.1(1) SE-STABLE, STRUCTURAL. The three side-effect kinds are
   // refusal-conversion-FORBIDDEN. The enforcement lives in `kindForCall`'s
   // WRITE_TOOLS branch: a recognized side-effect kind returns before the
@@ -644,7 +1055,13 @@ export function finalizeProtocolResponse(
   // honest ledger order) and the §2.5 `isError` stamp — belongs to `emit.ts`.
   // The split is not cosmetic: it is what makes "one measurement point" a
   // structural property instead of a convention this function has to keep.
-  return emitFinalizedPayload(canonicalPayload, kind, context);
+  const finalized = emitFinalizedPayload(canonicalPayload, kind, context);
+  // This is deliberately outside emit.ts: its return value is the only place
+  // all codec/shedding/fail-closed exits have converged.  The observer parses
+  // those final bytes and consumes its seed, so no producer-time estimate can
+  // survive a wire-shape change or leak into a later call.
+  emitSemanticFrontierFinalTrace(context, finalized);
+  return finalized;
 }
 
 /**
@@ -660,16 +1077,29 @@ export function canonicalizeEmittedToolCalls(value: Record<string, unknown>): Re
     if (Array.isArray(candidate)) return candidate.map(visit);
     if (candidate === null || typeof candidate !== "object") return candidate;
     const record = candidate as Record<string, unknown>;
-    const copied = Object.fromEntries(
-      Object.entries(record).map(([key, child]) => [key, key === "arguments" ? child : visit(child)]),
-    ) as Record<string, unknown>;
+    const copied: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) {
+      if (key === "arguments") {
+        copied[key] = child;
+        continue;
+      }
+      if (key === "next" && typeof child === "string") {
+        const parsed = parseProseToolCall(child);
+        if (parsed !== undefined) copied[key] = visit(parsed);
+        continue;
+      }
+      copied[key] = visit(child);
+    }
     const tool = copied["tool"];
     const argumentsValue = copied["arguments"];
     if (
       (tool === "read_file" || tool === "edit_file" || tool === "search_files")
       && argumentsValue !== null && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)
     ) {
-      copied["arguments"] = canonicalToolArguments(tool, argumentsValue as Record<string, unknown>);
+      // Route object-shaped continuations through the public constructor too:
+      // otherwise the final recursive pass would normalize syntax but miss
+      // cwd/task attribution for direct mint sites.
+      copied["arguments"] = canonicalToolCall(tool, argumentsValue as Record<string, unknown>)["arguments"];
     }
     return copied;
   };
@@ -677,16 +1107,76 @@ export function canonicalizeEmittedToolCalls(value: Record<string, unknown>): Re
 }
 
 /** Construct an executable wire continuation through the one canonicalizer. */
-export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_files", args: Record<string, unknown>): Record<string, unknown> {
-  return { tool, arguments: canonicalToolArguments(tool, args) };
+export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_files", args: Record<string, unknown>): ToolCall {
+  return { tool, arguments: attributedContinuationArguments(canonicalToolArguments(tool, args)) } as ToolCall;
+}
+
+/**
+ * Continuations inherit only the call identity needed to execute in the same
+ * workspace/task. This is deliberately narrow: lane is copied only when the
+ * caller supplied it, and state-version/qref are never manufactured.
+ */
+function attributedContinuationArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const context = protocolCallContext();
+  if (context === undefined) return args;
+  const inbound = context.args;
+
+  const attributed = { ...args };
+  const resolvedCwd = context.continuationWorkspace ?? context.workspace;
+  if (attributed["cwd"] === undefined) {
+    if (typeof resolvedCwd === "string" && resolvedCwd !== "") attributed["cwd"] = resolvedCwd;
+    else if (typeof inbound?.["cwd"] === "string") attributed["cwd"] = inbound["cwd"];
+  }
+  // Empty lane is the canonical default and must stay absent on the wire;
+  // echoing lane:"" reintroduces the absent-vs-empty duality in continuations.
+  if (
+    attributed["lane"] === undefined
+    && typeof inbound?.["lane"] === "string"
+    && inbound["lane"] !== ""
+  ) {
+    attributed["lane"] = inbound["lane"];
+  }
+
+  const inboundTask = recordOf(inbound?.["task"]);
+  const inboundHandle = typeof inboundTask?.["handle"] === "string"
+    ? inboundTask["handle"]
+    : typeof inbound?.["task_handle"] === "string"
+      ? inbound["task_handle"]
+      : context.continuationTaskHandle;
+  if (inboundHandle !== undefined) {
+    const task = recordOf(attributed["task"]);
+    const explicitLegacyHandle = typeof attributed["task_handle"] === "string";
+    // `taskEpoch` is the legacy spelling of the same producer declaration.
+    // Check it before injecting the inherited handle: otherwise the later
+    // canonicalTask pass sees the injected `{task:{handle}}` and silently
+    // drops the caller's fresh-epoch request.
+    const declaredEpoch = task?.["epoch"] !== undefined || attributed["taskEpoch"] !== undefined;
+    if (task !== undefined) {
+      if (
+        task["handle"] === undefined
+        && !declaredEpoch
+        && !explicitLegacyHandle
+      ) {
+        attributed["task"] = { ...task, handle: inboundHandle };
+      }
+    } else if (
+      attributed["task"] === undefined
+      && !declaredEpoch
+      && !explicitLegacyHandle
+    ) {
+      attributed["task"] = { handle: inboundHandle };
+    }
+  }
+  return attributed;
 }
 
 function canonicalToolArguments(tool: string, args: Record<string, unknown>): Record<string, unknown> {
   const base: Record<string, unknown> = {};
-  if (args["lane"] !== undefined) base["lane"] = args["lane"];
+  if (typeof args["lane"] === "string" && args["lane"] !== "") base["lane"] = args["lane"];
   if (args["cwd"] !== undefined) base["cwd"] = args["cwd"];
-  const task = recordOf(args["task"]) ?? canonicalTask(args);
+  const task = canonicalTask(args);
   if (task !== undefined) base["task"] = task;
+  else if (args["task"] !== undefined) base["task"] = args["task"];
   const budget = recordOf(args["budget"]) ?? canonicalBudget(args);
   if (budget !== undefined) base["budget"] = budget;
 
@@ -696,14 +1186,14 @@ function canonicalToolArguments(tool: string, args: Record<string, unknown>): Re
 }
 
 function canonicalTask(args: Record<string, unknown>): Record<string, unknown> | undefined {
-  const task: Record<string, unknown> = {};
+  const task: Record<string, unknown> = { ...(recordOf(args["task"]) ?? {}) };
   const names: ReadonlyArray<readonly [string, string]> = [
     ["task_handle", "handle"], ["taskEpoch", "epoch"], ["taskProfile", "profile"],
     ["expected_state_version", "expected_state_version"], ["challenge", "challenge"],
     ["force_serve", "force_serve"],
   ];
   for (const [from, to] of names) if (args[from] !== undefined) task[to] = args[from];
-  if (args["mode"] === "closure") task["pull"] = "closure";
+  if (args["mode"] === "closure" && task["pull"] === undefined) task["pull"] = "closure";
   return Object.keys(task).length > 0 ? task : undefined;
 }
 
@@ -866,7 +1356,36 @@ function parseServedRange(value: unknown): [number, number] | undefined {
  * the other projectors; the CALL moved to the funnel tail so the ledger settles
  * against the post-shed payload rather than the pre-shed one.
  */
-export function servedWindowsOf(payload: Record<string, unknown>): {
+/**
+ * FX-O1 (ruling (t), 2026-09-03): is this served string TokenLighten's own
+ * SYNTHETIC RENDERING of a file rather than a window of the file's lines?
+ *
+ * Two response shapes carry an assembled view whose lines do NOT map to file
+ * lines: `mode=symbol`'s scope view (`// tokenlighten:scope path=… symbol=…`,
+ * then imports, signatures, a `// target:` marker and the body — `server.ts`'s
+ * own comment at the symbol booking site says so in as many words) and
+ * `mode=skeleton`'s signature map (`// tokenlighten:skeleton path=… lang=…`,
+ * JSON-encoded into a batch entry's `content`). Deriving file spans from those
+ * bytes would book coordinates from a different space; a skeleton is not a body
+ * at all (ruling (s): "skeleton (map/outline) は本体ではない").
+ *
+ * Detected through `util/sentinelComment.ts`'s own detector — the single owner
+ * of that vocabulary, which already recognises the `//`, `#` and `/* … *\/`
+ * forms — on the FIRST line, tolerating the leading `"` a JSON-encoded skeleton
+ * entry carries. A real file whose first line happens to be a TokenLighten
+ * sentinel is misread as synthetic; the cost is one redundant re-serve of that
+ * file, never a claim about bytes that did not ship.
+ */
+function _isSyntheticRendering(text: string): boolean {
+  const newline = text.indexOf("\n");
+  const firstLine = newline === -1 ? text : text.slice(0, newline);
+  return isTokenlightenSentinelLine(firstLine.replace(/^"+/, ""));
+}
+
+export function servedWindowsOf(
+  payload: Record<string, unknown>,
+  attributedPath?: string,
+): {
   unattributed: boolean;
   windows: Array<{ path: string; start: number; end: number }>;
 } {
@@ -908,23 +1427,153 @@ export function servedWindowsOf(payload: Record<string, unknown>): {
     if (value === null || typeof value !== "object") return;
     const record = value as Record<string, unknown>;
     const own = record["path"];
-    const scopePath = typeof own === "string" && own !== "" ? own : inheritedPath;
+    // FX-O1 (ruling (t)): `attributedPath` is the LAST resort — the path a
+    // staging site named on the call context for exactly the shapes whose
+    // payload carries a body and no `path` anywhere above it (see
+    // `noteServeAttribution`). A payload that names its own path is unaffected.
+    const scopePath = typeof own === "string" && own !== ""
+      ? own
+      : inheritedPath ?? (attributedPath !== undefined && attributedPath !== "" ? attributedPath : undefined);
 
     // `body` is the v1 evidence field; `content` and `code` are the pre-v1
     // dialects still spoken by members this projector passes through.
-    const carried = [record["body"], record["content"], record["code"]]
+    //
+    // FX-O1 (ruling (t), 2026-09-03) — `code` NEEDS ADDRESSING BESIDE IT.
+    // The two real `code` dialects both carry it: `mode=symbol`'s scope view is
+    // `{...symbolData, code, handle, sha, range}` and a verification-kit
+    // surface is `{path, role, handle, code}`. But `code` is ALSO an ordinary
+    // enum field elsewhere on the protocol — `decision.discover.gaps[].code`
+    // (a `CapabilityGapCode` such as `"missing-evidence"`) rides an ordinary
+    // task_pack, has no addressing of any kind, and was read here as a served
+    // body with nothing to attribute it to. Every pack carrying a gap therefore
+    // projected `unattributed: true`, which the old fail-open arm hid
+    // completely and the fail-closed arm would have turned into a retraction of
+    // that pack's own honest bookings. The `refusal` guard above is the same
+    // class of false positive, caught earlier and narrower.
+    const addressed = (typeof record["handle"] === "string" && record["handle"] !== "")
+      || typeof record["range"] === "string"
+      || typeof record["served_range"] === "string";
+    const carried = [record["body"], record["content"], addressed ? record["code"] : undefined]
       .find((candidate) => typeof candidate === "string" && candidate !== "");
     if (carried !== undefined) {
       if (scopePath === undefined) {
         unattributed = true;
       } else {
-        // A body with no parsable range covers the file: whole-file serves
-        // (`mode=full`, `small_file`) declare no window of their own, and
-        // claiming less than everything here would retract a genuine serve.
+        // FX-W3 (ruling (aa), 2026-09-04) — THE DECLARED WINDOW, VERBATIM.
+        // NEVER RE-DERIVED BY PARSING THE BODY.
+        //
+        // FX-N/FX-O1 used to EXTEND the declared window past what `range`
+        // says by re-running `servedSpansOfDisplayedText` over the wire body
+        // itself, to bridge the gap between a `mode=full`/`small_file`
+        // serve's DISPLAY-line-synthesized `range` (`readFamily.ts`'s
+        // single-window arm writes `1-<lineCount(body)>`) and the FILE
+        // coordinates a real elision genuinely reaches (the replay corpus's
+        // `seh6` fixture: a 40-line file whose lines 9-29 are one comment
+        // block ships 20 display lines, declares `range:"1-20"`, and honestly
+        // booked FILE spans 1-8 and 30-40 — read literally, `1-20` retracts
+        // 30-40 outright).
+        //
+        // Round-17 and round-21A both broke that widening, two different
+        // ways: an ordinary `range:"1-200"` slice the wire governor trims to
+        // 7 lines satisfies the SAME numeric shape the rule looked for, by
+        // construction (the shed narrows `range` to the surviving body); and
+        // — the deeper defect — the re-parse cannot tell a genuine elision
+        // marker from a caller's OWN file content that merely LOOKS like one
+        // (`/* doc elided L5-250 */` as a literal, non-comment line).
+        // Combined with an ordinary `budget.bytes` shed, that let a lane
+        // which genuinely received only the first 76 of 300 lines end up
+        // with a corroborated reach over lines it never saw in any form
+        // (round-21A finding 1).
+        //
+        // RULING (aa): this projector NEVER widens — it reports exactly what
+        // the wire declares, in file coordinates where the shape allows it,
+        // and nothing else. The gap `seh6` needs bridged is instead closed
+        // downstream, in `state/session.ts`'s `_settleSessionServeBookings` —
+        // the SAME module that already holds each call's own TRUE recorded
+        // extent (`WorkspaceSession.pendingRenderedExtent`, written by
+        // `recordServedRange` from its OWN `provenance.range` argument, never
+        // from wire text) — which widens a window THIS projector already
+        // attributed to a path, and ONLY when `emit.ts` has independently
+        // confirmed no wire-level shedding touched this response at all. A
+        // window this function never produced (an unattributed or
+        // out-of-scope path) can never be manufactured downstream either:
+        // `_settleSessionServeBookings` only ever widens an EXISTING entry of
+        // `windows`, never adds one.
         const range = parseServedRange(record["range"]) ?? parseServedRange(record["served_range"]);
-        windows.push(range !== undefined
-          ? { path: scopePath, start: range[0], end: range[1] }
-          : { path: scopePath, start: 1, end: Number.MAX_SAFE_INTEGER });
+        const synthetic = _isSyntheticRendering(carried as string);
+        if (range === undefined) {
+          // No declared window. A whole-file serve is the ordinary case and
+          // covers the file — claiming less would retract a genuine serve. A
+          // SYNTHETIC body with no window is a skeleton/outline batch entry:
+          // ruling (s) says a skeleton is not a body, so it corroborates
+          // nothing (round-17 finding 6 — it used to corroborate the whole
+          // file, the same coordinate-space confusion in a second place).
+          if (!synthetic) windows.push({ path: scopePath, start: 1, end: Number.MAX_SAFE_INTEGER });
+        } else {
+          // Both the synthetic (scope-view `range` IS file coordinates) and
+          // ordinary cases take the declared window VERBATIM now — see the
+          // comment above for where the `seh6` widening moved to.
+          windows.push({ path: scopePath, start: range[0], end: range[1] });
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // FX-P1 (DESIGN-v0.15 ruling (u), 2026-09-03; round-17 finding 3) — A
+    // TEXT ARTIFACT'S ROWS ARE BYTES ON THE WIRE.
+    //
+    // The walk above looks for a STRING body (`body`/`content`/`code`). A
+    // csv/tsv `read.artifact` carries its evidence as a STRUCTURED table —
+    // `{form:"csv", range:"2-61", columns:[…], rows:[[…],…]}` under the
+    // response's own `path` — so it matched nothing and every `read.artifact`
+    // payload projected `windows: []` (measured live, round-17 `r17_g`/`r17_c`).
+    // FX-O2 then staged an honest booking for those rows and watched it be
+    // retracted at settlement for want of corroboration: SAFE but inert.
+    //
+    // RULING (u)/(v), AS IMPLEMENTED (round-18A finding 1, 2026-09-03
+    // correction). A `read.artifact` of a TEXT artifact that ships `rows` for
+    // a row `range` IS bytes on the wire, and corroborates EXACTLY the
+    // PHYSICAL file line span those rows occupy — no widening, no reach
+    // extension. That span is carried on the wire as `file_range`
+    // (`csvArtifactShape`/`bookCsvArtifactServe` in server.ts, and
+    // `csvTable`/`office/csv.ts`, which is the ONE place that computes it) —
+    // NOT `range`, whose LOGICAL row numbers diverge from file lines whenever
+    // the file has a blank line (skipped when numbering rows) or an RFC4180
+    // quoted field with an embedded newline: reading `range` here as a file
+    // window let this corroboration CONFIRM a span the producer never
+    // shipped, which is the direction ruling (t)/(v) exist to close (measured
+    // live: `scratchpad/r18/a3_csv.mts`, `r18/b_csv_blank.mts` — a later
+    // identical-range TEXT read answered `code-unchanged` for file lines that
+    // were never on the wire). `file_range` is absent whenever the producer
+    // could not establish a reliable mapping (fail-closed on the staging
+    // side too — `bookCsvArtifactServe` books nothing in that case), so a
+    // missing `file_range` corroborates nothing here, by construction the
+    // same producer and this clause agree. Nothing here can WIDEN a staged
+    // span: the settlement intersects, so a producer that staged less keeps
+    // less.
+    //
+    // BINARY CONTAINERS GRANT NOTHING, and that is the dividing line ruling
+    // (s) drew. `form:"xlsx.table"` also carries `rows` + `range`, but those
+    // are SHEET coordinates in an OOXML container an `edit_file`
+    // search/replace cannot target at all; docx/pptx/pdf/zip members are the
+    // same. They keep `recordArtifactServedRange`'s separate sheet/range dedup
+    // ledger and are excluded here by naming the ONE text form explicitly
+    // rather than by testing for `rows`.
+    //
+    // A `budget`-shed csv response narrows its own `range`/`file_range` with
+    // its rows (the bounded-head and columns-only rungs each rebuild the
+    // table before booking), so the window this reads is already the
+    // post-shed truth.
+    const artifactRows = record["rows"];
+    if (
+      scopePath !== undefined
+      && Array.isArray(artifactRows)
+      && artifactRows.length > 0
+      && (record["form"] === "csv" || (record["mode"] === "artifact" && record["kind"] === "csv"))
+    ) {
+      const fileRange = parseServedRange(record["file_range"]);
+      if (fileRange !== undefined && fileRange[0] >= 1) {
+        windows.push({ path: scopePath, start: fileRange[0], end: fileRange[1] });
       }
     }
 
@@ -1039,6 +1688,7 @@ function projectSuccessBody(
     // arm), which scopes its epoch-reset `next` to what this call asked for.
     projected = projectReadBody(kind, projected, {
       workspace: context.workspace,
+      verifyClosureWorkspace: context.verifyClosureWorkspace,
       args: context.args,
     });
   } else if (isSearchFamilyKind(kind)) {
@@ -1051,6 +1701,18 @@ function projectSuccessBody(
     // applies here and is scoped to `edit_file` below (C2-5's migration).
     // -----------------------------------------------------------------------
     projected = projectSearchBody(kind, projected, context.action ?? "", context.args ?? {});
+    // TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, W-T-D, default
+    // OFF): additive, on top of the A.5.8-A.5.10 projection above, never
+    // instead of it. `codecTraceWorkspace` is read here as a SECOND consumer
+    // beyond its originally-documented trace-only use (see that field's own
+    // doc comment) — disclosed there — because it is the only workspace root
+    // this funnel has for a read/search call by this point
+    // (`noteWorkspaceRoot`'s `context.workspace` is populated by the edit
+    // dispatcher only). Reading it here is still zero-effect with the flag
+    // off: `applySearchDedup` is the identity function in that case.
+    if (context.codecTraceWorkspace !== undefined) {
+      projected = applySearchDedup(kind, projected, context.action ?? "", context.args ?? {}, context.codecTraceWorkspace);
+    }
   } else if (isEditFamilyKind(kind)) {
     // -----------------------------------------------------------------------
     // A.5.11–A.5.14 (C2-5): the edit family's authored bodies, and the §4.2.1
@@ -1114,13 +1776,11 @@ function projectSuccessBody(
   return projected;
 }
 
-const TOOL_NAMES: ReadonlySet<string> = new Set(["read_file", "edit_file", "search_files"]);
-
 /** True iff `value` is in ToolCall position: `{tool: <advertised>, arguments: {}}`. */
 function isToolCallShaped(value: unknown): value is { tool: string; arguments: Record<string, unknown> } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as { tool?: unknown; arguments?: unknown };
-  return typeof record.tool === "string" && TOOL_NAMES.has(record.tool)
+  return typeof record.tool === "string" && isAdvertisedToolName(record.tool)
     && record.arguments !== null && typeof record.arguments === "object" && !Array.isArray(record.arguments);
 }
 
@@ -1141,7 +1801,7 @@ function scrubTemplateCalls(value: unknown): void {
   const record = value as Record<string, unknown>;
   for (const [key, child] of Object.entries(record)) {
     if (key === "arguments") continue;
-    if (isToolCallShaped(child) && containsPlaceholder(child.arguments)) {
+    if (isToolCallShaped(child) && containsPlaceholderForCall(child.tool, child.arguments)) {
       delete record[key];
       // C2-6 (nested-scrub fix, C2-5 handoff): `next_call_is_template:true`
       // is a PAIRED marker — it exists to describe `next_call` (or `next`,

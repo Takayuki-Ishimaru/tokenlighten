@@ -1,4 +1,4 @@
-import type { RefusalCode } from "@tokenlighten/types";
+import type { RefusalCode, ToolCall } from "@tokenlighten/types";
 
 import { supplyRefusalGuidance } from "../util/attachSupply.js";
 
@@ -33,7 +33,7 @@ export interface RefusalRecovery {
   /** A handle the caller can actually resolve (never a stale/unknown one). */
   handle?: string;
   /** A concrete, copy-pasteable next call. Wins over any derived default. */
-  next?: string;
+  next?: ToolCall;
   /** One-line explanation of the constraint that was violated. */
   hint?: string;
   /**

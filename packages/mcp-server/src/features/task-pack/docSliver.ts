@@ -83,8 +83,16 @@ export const DOC_SLIVER_HEADINGS_CAP_BYTES = 2048;
 export const DOC_SLIVER_ROUTE_MARKER = "authority doc ";
 /** Minimum context around a Markdown anchor when its section is short. */
 const DOC_ANCHOR_RADIUS_LINES = 20;
-/** Keep a large heading bounded; short sections are expanded by context. */
-const DOC_ANCHOR_SECTION_MAX_LINES = 150;
+/**
+ * Keep a large heading bounded; short sections are expanded by context.
+ *
+ * EXPORTED (2026-09-05, doc anchor-focus): `selectAnchorFocus`'s Markdown branch
+ * uses the SAME ceiling to decide which sections are anchorable at all. Past it,
+ * `docAnchorRange` stops describing the section and returns a ±radius window at
+ * its head — fine for a zoom hint, wrong for a serve that calls itself "the
+ * matched section".
+ */
+export const DOC_ANCHOR_SECTION_MAX_LINES = 150;
 
 /** Minimum concern-match score before a heading is named as THE zoom target. */
 const DOC_SLIVER_MIN_MATCH_SCORE = 2;
@@ -190,6 +198,20 @@ function servedSpanIsSection(
   return false;
 }
 
+/**
+ * ASCII identifier tokens of a query, lowercased, minus generic words.
+ *
+ * EXPORTED (2026-09-05, doc anchor-focus) as `docQueryTokens`. `selectAnchorFocus`
+ * scores a MARKDOWN file's sections with exactly this token set, so the anchor a
+ * pack serves and the zoom this module would offer over it are chosen by ONE
+ * vocabulary. Re-deriving a second doc tokenizer there is how the two started
+ * disagreeing: `tokenizeForEpoch` keeps "contract"/"md"/"doc", which is precisely
+ * how the file's own basename stem came to act as an explicit code identifier.
+ */
+export function docQueryTokens(query: string): string[] {
+  return queryTokens(query);
+}
+
 /** ASCII identifier tokens of a query, lowercased, minus generic words. */
 function queryTokens(query: string): string[] {
   const raw = query.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
@@ -233,23 +255,85 @@ function selectTargetHeading(
   lines: readonly string[],
   tokens: readonly string[],
 ): { heading: MarkdownHeading; score: number } | undefined {
-  if (tokens.length === 0) return undefined;
-  let best: { heading: MarkdownHeading; score: number; span: number } | undefined;
+  const best = mostSpecificDocHeadingMatch(rankDocHeadingMatches(headings, lines, tokens));
+  return best ? { heading: best.heading, score: best.score } : undefined;
+}
+
+/**
+ * The most SPECIFIC matching section: start at the best-ranked match and
+ * descend, repeatedly, into the best-ranked match strictly NESTED inside it.
+ *
+ * Why this and not simply rank 0 (2026-09-05, doc anchor-focus). A parent
+ * section's body CONTAINS its children's, so every body hit a subsection earns
+ * is also counted for its parent — and a parent heading that happens to name
+ * one more query token (a chapter title carrying the project name, say) then
+ * outranks the subsection that actually holds the answer. Measured on
+ * `bench/fixtures/aeroctl/CONTRACT.md`: "## 7. Control (`<control/...>`,
+ * namespace `aeroctl::control`)" (117 lines) outscored "### 7.6
+ * `<control/mixer.hpp>`" (11 lines) purely on the inherited hits plus
+ * `aeroctl` in its own title. Both contain the motor-ordering authority, but
+ * only the specific one is a claim about WHERE it is — and, on the serving
+ * path, only the specific one is affordable: the parent's window cost ~3KB and
+ * pushed a three-concern pack past the transport ceiling, whose trim ladder
+ * then dropped the doc surface outright.
+ *
+ * Each step strictly shrinks the span (a child starts after its parent and
+ * ends no later), so the descent terminates.
+ */
+export function mostSpecificDocHeadingMatch(
+  matches: readonly DocHeadingMatch[],
+): DocHeadingMatch | undefined {
+  let target = matches[0];
+  if (target === undefined) return undefined;
+  for (;;) {
+    const parent = target;
+    const child = matches.find((m) =>
+      m !== parent
+      && m.heading.line > parent.heading.line
+      && m.heading.endLine <= parent.heading.endLine);
+    if (child === undefined) return parent;
+    target = child;
+  }
+}
+
+/** One scored section: the heading, its match score and its own line span. */
+export interface DocHeadingMatch {
+  heading: MarkdownHeading;
+  score: number;
+  /** Inclusive line count of the heading's own section. */
+  span: number;
+}
+
+/**
+ * Every section scoring at or above DOC_SLIVER_MIN_MATCH_SCORE, best first.
+ *
+ * EXPORTED (2026-09-05, doc anchor-focus): `selectTargetHeading` takes entry 0
+ * — the exact "score, then shorter span, then document order" pick it made
+ * inline before — and `selectAnchorFocus`'s Markdown branch takes the same
+ * ranking, using the tail as its runner-up `outline`. One ranking, two readers:
+ * the section a pack ANCHORS on and the section this module would zoom to can
+ * no longer name different places.
+ *
+ * Ordering note: the input is in document order and `Array.prototype.sort` is
+ * stable (ES2019+), so `(score desc, span asc)` reproduces the old scan's tie
+ * break exactly — ties on both keys keep document order.
+ */
+export function rankDocHeadingMatches(
+  headings: readonly MarkdownHeading[],
+  lines: readonly string[],
+  tokens: readonly string[],
+): DocHeadingMatch[] {
+  if (tokens.length === 0) return [];
+  const matches: DocHeadingMatch[] = [];
   for (const heading of headings) {
     const body = lines.slice(heading.line - 1, heading.endLine).join("\n");
     const score = 3 * wordHits(heading.text, tokens)
       + Math.min(wordHits(body, tokens), DOC_SLIVER_MAX_BODY_HITS);
     if (score < DOC_SLIVER_MIN_MATCH_SCORE) continue;
-    const span = heading.endLine - heading.line + 1;
-    if (
-      best === undefined
-      || score > best.score
-      || (score === best.score && span < best.span)
-    ) {
-      best = { heading, score, span };
-    }
+    matches.push({ heading, score, span: heading.endLine - heading.line + 1 });
   }
-  return best ? { heading: best.heading, score: best.score } : undefined;
+  matches.sort((a, b) => (b.score - a.score) || (a.span - b.span));
+  return matches;
 }
 
 /**
@@ -317,7 +401,15 @@ export function planDocSliver(
   };
 }
 
-function docAnchorRange(heading: MarkdownHeading, totalLines: number): string {
+/**
+ * The bounded window a doc anchor is served/zoomed at: the heading's own
+ * section, widened to at least DOC_ANCHOR_RADIUS_LINES of context on each side
+ * and capped at DOC_ANCHOR_SECTION_MAX_LINES for a long section.
+ *
+ * EXPORTED (2026-09-05, doc anchor-focus) so `selectAnchorFocus` serves the SAME
+ * span this module's `next_call` would have pointed at.
+ */
+export function docAnchorRange(heading: MarkdownHeading, totalLines: number): string {
   const sectionEnd = Math.min(heading.endLine, totalLines);
   const sectionLines = sectionEnd - heading.line + 1;
   const contextStart = Math.max(1, heading.line - DOC_ANCHOR_RADIUS_LINES);

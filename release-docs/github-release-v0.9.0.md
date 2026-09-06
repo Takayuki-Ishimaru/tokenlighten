@@ -46,16 +46,13 @@ TokenLighten indexes and selects repository context locally. It does not add an 
 
 The MCP server is read-only by default. Start it with `--allow-write` only when you intend to permit workspace changes.
 
-## Dependency security snapshot
+## Dependency updates
 
-For the staged v0.9.0 release audited on 2026-08-16, `npm audit --omit=dev` reported **0 Critical, 0 High, and 2 Moderate** findings for normal VS Code extension/runtime use. A full source-development installation including development dependencies reported **1 Critical, 1 High, and 5 Moderate** findings. The development-toolchain findings are known and are not a v0.9.0 release blocker; they are not part of normal installed-VSIX runtime use.
-
-These counts are a dated snapshot, not a guarantee of zero vulnerabilities. Rerun `npm audit --omit=dev` or `npm audit` against the exact release you use.
+This historical release has known dependency security issues. Use the latest released version and run `npm audit --omit=dev` or `npm audit` against the exact checkout you use.
 
 ## Known limitations
 
 - The desktop application is not included in v0.9.0.
-- The complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the build, bundled CLI, dependency licenses/notices, runtime dependency audit, and diagnostics, but some non-portable test fixtures keep the complete suite from being a Windows release gate in v0.9.0. Windows and VSIX installation remain supported.
 - Savings vary by task, repository, client, and model behavior; local estimates are not provider billing records.
 - Rename and reference operations are conservative and lexical rather than language-server semantic operations.
 - Scanned or image-only PDFs are unsupported because PDF reading requires a text layer.

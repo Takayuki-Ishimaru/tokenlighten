@@ -16,7 +16,7 @@
  * against a fresh read immediately before the existing apply machinery runs,
  * and refuses through the SAME stale-handle/precondition-shaped refusal the
  * rest of the write path already uses (write/preconditions.ts's
- * `hash-mismatch` — see that module's `current_sha`/`next` convention, which
+ * `hash-mismatch` — see that module's `current_sha`/`detail` convention, which
  * this module's callers mirror rather than invent a new refusal shape for).
  *
  * WHY BOTH `contentSha` AND `surroundingHash`. `contentSha` is the same

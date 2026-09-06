@@ -388,21 +388,66 @@ describe("L2 — repeated all-served find escalates to protocol", () => {
     expect(afterReset.body["all_served_occurrence"]).toBe(1);
   });
 
-  it("leaves zero-match finds and uncertified sessions alone", () => {
+  it("a zero-match find leaves the ledger alone, certified or not", () => {
     const ws = makeAeroctlWorkspace("neutral");
     servePackSurfaces(ws);
 
-    // No certificate: "you already hold this" is not a protocol-grade claim.
-    const uncertified = runFind(ws, { action: "find", query: "yaw", path: "CONTRACT.md" });
-    expect(uncertified.escalated).toBe(false);
-    expect(uncertified.body["all_served"]).toBe(true);
-    expect(getServedFindLedgerForTest(ws)).toBeUndefined();
-
-    armCertificate(ws);
-    // A zero-match find is neither residency nor progress — it must not count.
+    // A zero-match find is neither residency nor progress — it must not count,
+    // with or without a live certificate.
     const miss = runFind(ws, { action: "find", query: "nonexistent_token_zzz", path: "CONTRACT.md" });
     expect(miss.escalated).toBe(false);
     expect(getServedFindLedgerForTest(ws)).toBeUndefined();
+
+    armCertificate(ws);
+    const missAgain = runFind(ws, { action: "find", query: "nonexistent_token_zzz", path: "CONTRACT.md" });
+    expect(missAgain.escalated).toBe(false);
+    expect(getServedFindLedgerForTest(ws)).toBeUndefined();
+  });
+
+  // C1 (2026-09-03, INV-C F1): the certificate-armed tests above proved the
+  // ladder for the task-pack path; this pins the SAME ladder for a session
+  // that never opens a task pack at all — plain `read_file targets:[...]` +
+  // `search_files find` (INV-C's own repro: 4 byte-identical repeats of a
+  // fully-served find, forever answered with a bare, ignorable
+  // `all_served:true` and no `all_served_occurrence`, no unlock, no receipt).
+  // `PLAIN_MODE_LADDER_ID` (servedFindEscalation.ts) now gives that mode its
+  // own stable ladder key so it steps through the identical noted ->
+  // escalated state machine, using the SAME served-range ledger, while never
+  // claiming a real certificate exists (no `certificate_id`, no `challenge`
+  // transition — there is no fence to challenge).
+  it("C1: the all-served ladder now engages for an uncertified (plain-mode) session too", () => {
+    const ws = makeAeroctlWorkspace("plain-mode");
+    servePackSurfaces(ws);
+    // Deliberately NO armCertificate(ws) — this is the exact "pure discovery,
+    // no task pack ever opened" mode the defect measured.
+
+    const first = runFind(ws, { action: "find", query: "7.6", path: "CONTRACT.md" });
+    expect(first.escalated).toBe(false);
+    expect(first.body["all_served"]).toBe(true);
+    // Pre-fix this was ALWAYS undefined in plain mode — the ladder never ran.
+    expect(first.body["all_served_occurrence"]).toBe(1);
+    expect(getServedFindLedgerForTest(ws)?.occurrences).toBe(1);
+
+    // A second, DIFFERENT query landing on the same already-served file —
+    // same "occurrence" ladder rung the certificate path exercises in
+    // "escalates the SECOND distinct all-served find" above.
+    const second = runFind(ws, { action: "find", query: "yaw", path: "CONTRACT.md" });
+    expect(second.escalated).toBe(true);
+    expect(second.body["ok"]).toBe(false);
+    expect(second.body["error"]).toBe("find-all-served-repeat");
+    expect(second.body["terminal"]).toBe(true);
+    expect(second.body["retry_same_call"]).toBe(false);
+    // Never a real certificate: nothing here can be `challenge`d.
+    expect(second.body["certificate_id"]).toBeUndefined();
+    const unlock = second.body["unlock"] as Record<string, unknown>;
+    expect((unlock["accepted_transitions"] as string[]).some((t) => t.includes("challenge"))).toBe(false);
+    expect(unlock["challenge"]).toBeUndefined();
+    // The reason names THIS SESSION, honestly, rather than a fabricated cert.
+    expect(String(second.body["terminal_reason"])).toContain("this session (no certificate)");
+    // The receipt (paths/lines/counts) still rides the escalation.
+    const receipt = second.body["files"] as Record<string, unknown>[];
+    expect(receipt[0]?.["path"]).toBe("CONTRACT.md");
+    expect(receipt[0]).not.toHaveProperty("snippets");
   });
 
   it("clears the ledger on a successful edit", () => {

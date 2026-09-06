@@ -27,7 +27,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | @scure/base@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
 | @types/node@14.18.63 | MIT |  | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @xmldom/xmldom@0.8.15 | MIT |  | https://github.com/xmldom/xmldom |
-| @zip.js/zip.js@2.8.61 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
+| @zip.js/zip.js@2.11.2 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
 | accepts@2.0.0 | MIT |  | https://github.com/jshttp/accepts |
 | adler-32@1.3.1 | Apache-2.0 | sheetjs | https://github.com/SheetJS/js-adler32 |
 | ajv-formats@3.0.1 | MIT | Evgeny Poberezkin | https://github.com/ajv-validator/ajv-formats |
@@ -93,7 +93,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | express@5.2.1 | MIT | TJ Holowaychuk | https://github.com/expressjs/express |
 | fast-csv@4.3.6 | MIT | Doug Martin | https://github.com/C2FO/fast-csv |
 | fast-deep-equal@3.1.3 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/fast-deep-equal |
-| fast-uri@3.1.6 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
+| fast-uri@3.1.7 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
 | finalhandler@2.1.1 | MIT | Douglas Christopher Wilson | https://github.com/pillarjs/finalhandler |
 | forwarded@0.2.0 | MIT |  | https://github.com/jshttp/forwarded |
 | fresh@2.0.0 | MIT | TJ Holowaychuk | https://github.com/jshttp/fresh |
@@ -108,7 +108,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | graceful-fs@4.2.11 | ISC |  | https://github.com/isaacs/node-graceful-fs |
 | has-symbols@1.1.0 | MIT | Jordan Harband | https://github.com/inspect-js/has-symbols |
 | hasown@2.0.4 | MIT | Jordan Harband | https://github.com/inspect-js/hasOwn |
-| hono@4.13.5 | MIT | Yusuke Wada | https://github.com/honojs/hono |
+| hono@4.13.7 | MIT | Yusuke Wada | https://github.com/honojs/hono |
 | http-errors@2.0.1 | MIT | Jonathan Ong | https://github.com/jshttp/http-errors |
 | iconv-lite@0.7.3 | MIT | Alexander Shtuchkin | https://github.com/pillarjs/iconv-lite |
 | ieee754@1.2.1 | BSD-3-Clause | Feross Aboukhadijeh | https://github.com/feross/ieee754 |
@@ -121,7 +121,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | is-promise@4.0.0 | MIT | ForbesLindesay | https://github.com/then/is-promise |
 | isarray@1.0.0 | MIT | Julian Gruber | https://github.com/juliangruber/isarray |
 | isexe@2.0.0 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/isexe |
-| jose@6.2.10 | MIT | Filip Skokan | https://github.com/panva/jose |
+| jose@6.2.12 | MIT | Filip Skokan | https://github.com/panva/jose |
 | json-schema-traverse@1.0.0 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/json-schema-traverse |
 | json-schema-typed@8.0.2 | BSD-2-Clause | Remy Rylan | https://github.com/RemyRylan/json-schema-typed |
 | jszip@3.10.1 | (MIT OR GPL-3.0-or-later) | Stuart Knightley | https://github.com/Stuk/jszip |
@@ -785,7 +785,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 1b7ebc8d7889ed25491484ab2b102370742ca6c0b26650a0c62cc2269b579b84
 
-Applies to: `@zip.js/zip.js@2.8.61`
+Applies to: `@zip.js/zip.js@2.11.2`
 
 ```text
 BSD 3-Clause License
@@ -4074,7 +4074,7 @@ MIT
 
 ### MIT — SHA-256 8078b0829d6c3e9ecde2f003e1966e4cad3efc6e7a640efbab0313cc166b1af1
 
-Applies to: `jose@6.2.10`
+Applies to: `jose@6.2.12`
 
 ```text
 The MIT License (MIT)
@@ -5386,7 +5386,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
 
-Applies to: `hono@4.13.5`
+Applies to: `hono@4.13.7`
 
 ```text
 MIT License
@@ -6437,7 +6437,7 @@ THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
 
-Applies to: `fast-uri@3.1.6`
+Applies to: `fast-uri@3.1.7`
 
 ```text
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae

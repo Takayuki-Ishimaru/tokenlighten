@@ -49,6 +49,7 @@ import type {
 import {
   canClose,
   deriveDagEnabled,
+  isValidDisposition,
   normalizeObligationNode,
   validateObligationEdges,
   type ObligationClosureState,
@@ -151,6 +152,13 @@ function canonicalObligation(o: ObligationNode): Record<string, unknown> {
     advisory: o.advisory,
     blockedBy: [...o.blockedBy],
     predicate: o.predicate,
+    // `disposition` (DESIGN-v0.15-semantic-frontier-plan.md §3.2.1) is inside
+    // identity, per that section — a node whose next act changes IS a state
+    // change. Included only when present: `stableStringify` drops `undefined`
+    // entries, so a disposition-less node's projection — and therefore its
+    // `stateHash` — is byte-for-byte identical to before this field existed,
+    // and every record persisted before this change keeps hashing the same.
+    ...(o.disposition === undefined ? {} : { disposition: o.disposition }),
   };
 }
 
@@ -190,7 +198,8 @@ export type OpRefusalReason =
   | "unknown-obligation"
   | "unknown-tombstone"
   | "invalid-closure"
-  | "invalid-edges";
+  | "invalid-edges"
+  | "invalid-disposition";
 
 export type ApplyOpsResult =
   | { ok: true; state: TaskReasoningIRv2 }
@@ -298,6 +307,15 @@ function applyAdd(draft: Draft, op: Extract<ReasoningDeltaOp, { op: "add" }>): O
     case "obligation": {
       if (draft.obligations.some((o) => o.id === op.obligation.id)) {
         return { reason: "duplicate-obligation", detail: `obligation ${op.obligation.id} already present` };
+      }
+      // Fail closed on an out-of-vocabulary disposition — the same rule
+      // `irStore.ts`'s decoder applies to a persisted record applies here to
+      // one arriving live through a delta.
+      if (!isValidDisposition(op.obligation.disposition)) {
+        return {
+          reason: "invalid-disposition",
+          detail: `obligation ${op.obligation.id}: unknown disposition ${JSON.stringify(op.obligation.disposition)}`,
+        };
       }
       // An obligation may NOT arrive pre-satisfied: closure is `canClose`'s
       // decision alone, so an `add` lands it open (or blocked/invalidated) and

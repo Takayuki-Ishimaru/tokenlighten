@@ -37,7 +37,13 @@ export default defineConfig({
     // same specs passed from the repo root. Keep in sync with the root config.
     // P0a §6.1: canonical-decision invariant strictness — see the ROOT
     // vitest.config.ts comment. Keep the two env blocks in sync.
-    env: { TOKENLIGHTEN_ALLOWED_PARENTS: os.homedir(), TL_DECISION_INVARIANT_STRICT: "1" },
+    env: {
+      TOKENLIGHTEN_ALLOWED_PARENTS: os.homedir(),
+      TL_DECISION_INVARIANT_STRICT: "1",
+      // The test suite intentionally exercises legacy fixtures; production
+      // remains refuse-by-default and tests opt in explicitly/cross-platform.
+      TL_LEGACY_INPUT: "accept",
+    },
     pool: "forks",
     isolate: true,
     poolOptions: {

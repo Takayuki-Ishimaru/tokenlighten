@@ -61,6 +61,25 @@ export function isAdvisoryOrigin(origin: ObligationOrigin): boolean {
   return origin === "heuristic";
 }
 
+/**
+ * `ObligationNode.disposition` vocabulary (DESIGN-v0.15-semantic-frontier-plan.md
+ * §3.2.1). The single source of truth for the four legal values — `irStore.ts`'s
+ * decoder and this module's own construction/delta paths both check against it,
+ * so the wire boundary and the in-process boundary can never drift apart.
+ */
+export const OBLIGATION_DISPOSITIONS = ["edit", "review", "verify", "measure"] as const;
+
+/**
+ * True for `undefined` (unstated — a real value, not a default) or one of the
+ * four dispositions. Anything else is out-of-vocabulary and must be REJECTED,
+ * never coerced: a silently-normalized disposition would make a node claim a
+ * next act nobody asked for, exactly the failure mode `irStore.ts`'s decoder
+ * already fails closed on.
+ */
+export function isValidDisposition(value: unknown): value is ObligationNode["disposition"] {
+  return value === undefined || (OBLIGATION_DISPOSITIONS as readonly unknown[]).includes(value);
+}
+
 /** Re-derive a node with `advisory` forced from `origin` and its edges bounded. */
 export function normalizeObligationNode(node: ObligationNode): ObligationNode {
   return normalizeNode(node, node.blockedBy.slice(0, OBLIGATION_DEPENDENCIES_MAX));
@@ -72,7 +91,12 @@ export function normalizeObligationNode(node: ObligationNode): ObligationNode {
 
 export interface DagRefusal {
   ok: false;
-  reason: "duplicate-node" | "unknown-dependency" | "self-dependency" | "cyclic-dependency";
+  reason:
+    | "duplicate-node"
+    | "unknown-dependency"
+    | "self-dependency"
+    | "cyclic-dependency"
+    | "invalid-disposition";
   detail: string;
   /** Present for `cyclic-dependency`: the node ids on the detected cycle. */
   cycle?: string[];
@@ -97,6 +121,13 @@ export function validateObligationEdges(nodes: readonly ObligationNode[]): DagRe
   for (const node of nodes) {
     if (byId.has(node.id)) {
       return { ok: false, reason: "duplicate-node", detail: `obligation id repeated: ${node.id}` };
+    }
+    if (!isValidDisposition(node.disposition)) {
+      return {
+        ok: false,
+        reason: "invalid-disposition",
+        detail: `${node.id}: unknown disposition ${JSON.stringify(node.disposition)}`,
+      };
     }
     byId.set(node.id, node);
   }
@@ -163,6 +194,12 @@ function normalizeNode(node: ObligationNode, blockedBy: string[]): ObligationNod
     advisory: isAdvisoryOrigin(node.origin),
     blockedBy: [...blockedBy],
     predicate: node.predicate,
+    // `disposition` (DESIGN-v0.15 §3.2.1) rides through untouched — absent
+    // stays absent, so a node that never declared one does not acquire one by
+    // passing through the DAG. The caller (buildObligationDag /
+    // reasoningDelta's applyAdd) is responsible for having already validated
+    // it against `OBLIGATION_DISPOSITIONS`; this function is not a gate.
+    ...(node.disposition === undefined ? {} : { disposition: node.disposition }),
   };
 }
 
@@ -281,19 +318,44 @@ export function canClose(nodeId: string, state: ObligationClosureState): CanClos
 }
 
 /**
- * The evidence ids of `refs` that actually resolve in the catalog AND are not
- * heuristic. An unresolvable ref and a heuristic ref are equally worthless for
- * closure — neither is direct or structural repository evidence.
+ * The grounding CLASS a claim demands of its evidence (SF-F2). Made explicit
+ * because "not heuristic" was never the whole rule: a `structural` catalog
+ * entry records that an address EXISTS, not that its bytes were delivered, so
+ * it can ground a claim ABOUT structure (a declaration site, a usage page, a
+ * relation proven by a packet) and must not ground a claim about a BODY (a
+ * definition, a template/generated pair, a verification, an explanation).
+ *
+ * `"structural"` is the permissive class and stays the DEFAULT, so every
+ * pre-existing caller keeps exactly the behavior it had; a caller that means
+ * "bytes, or nothing" now has to say so, and `sfState.markConcernSatisfied`
+ * does (see `SfSatisfactionProof.grounding`).
+ */
+export type EvidenceGroundingClass = "direct" | "structural";
+
+/** Catalog classes each grounding class accepts. `heuristic` is in neither. */
+const GROUNDING_ACCEPTS: Readonly<Record<EvidenceGroundingClass, ReadonlySet<string>>> = Object.freeze({
+  direct: new Set(["direct"]),
+  structural: new Set(["direct", "structural"]),
+});
+
+/**
+ * The evidence ids of `refs` that actually resolve in the catalog AND meet the
+ * requested grounding class. An unresolvable ref and a heuristic ref are
+ * equally worthless for closure — neither is direct or structural repository
+ * evidence — and under `grounding:"direct"` a `structural` ref is worthless
+ * too, because nothing bound the claim to bytes.
  */
 export function groundedEvidenceIds(
   refs: readonly EvidenceId[],
   catalog: readonly EvidenceIdentity[],
+  grounding: EvidenceGroundingClass = "structural",
 ): ReadonlySet<EvidenceId> {
+  const accepts = GROUNDING_ACCEPTS[grounding] ?? GROUNDING_ACCEPTS.structural;
   const classOf = new Map(catalog.map((e) => [e.evidenceId, e.evidenceClass] as const));
   const out = new Set<EvidenceId>();
   for (const ref of refs) {
     const cls = classOf.get(ref);
-    if (cls === undefined || cls === "heuristic") continue;
+    if (cls === undefined || !accepts.has(cls)) continue;
     out.add(ref);
   }
   return out;

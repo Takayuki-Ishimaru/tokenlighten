@@ -251,11 +251,16 @@ describe("read-only archive containers", () => {
       archive: { path: "sample.zip" },
     });
     expect(result["kind"]).toBe("read.task_pack");
+    const task = result["task"] as Record<string, unknown> | undefined;
+    const taskHandle = String(task?.["id"]);
+    expect(taskHandle).toMatch(/^tlh_task_v1_/);
     expect(result["decision"]).toEqual({
       kind: "discover",
       next: {
         tool: "read_file",
         arguments: {
+          cwd: workspace,
+          task: { handle: taskHandle },
           targets: [{ archive: { path: "sample.zip" }, path: "sample.zip" }],
           content: "auto",
         },

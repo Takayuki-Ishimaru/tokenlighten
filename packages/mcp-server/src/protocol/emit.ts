@@ -39,10 +39,10 @@
 // S2), the ladder runner (`budget/ladder.ts`, S3), the thirteen per-kind
 // shedders (`budget/shedders/`, S3), the `ShedRecord[]` -> `Limit{cause:"wire"}`
 // derivation (`budget/wireLimit.ts`, S3), and §4.3's fail-closed tail.
+//   S5  the §2.1.1 act-floor check and demote-to-`discover` (landed in
+//       `budget/ladder.ts`, with the demoted call canonicalized before emit)
 //
 // DOES NOT SHIP (by stage assignment, not oversight):
-//   S5  the §2.1.1 act-floor check and demote-to-`discover` — the slot is named
-//       and always-holding in `budget/ladder.ts`
 //   S6  the G8 grep fence over the measurement point, and the sweep
 //
 // §0.3 MAKES THE WHOLE PIPELINE A REFACTOR AT DEFAULT BUDGETS: byte-invisible
@@ -59,7 +59,7 @@ import { createHash } from "node:crypto";
 
 import { runLadder } from "./budget/ladder.js";
 import { measureResponseBytes } from "./budget/measure.js";
-import { budgetFor, type WireBudget } from "./budget/wireBudget.js";
+import { budgetFor, estimateBytesFromTokens, floorBytes, type WireBudget } from "./budget/wireBudget.js";
 import { shedderFor } from "./budget/shedders/index.js";
 import type { ShedPayload } from "./budget/shedders/registry.js";
 import { describeVerdict, validateProtocolBody, type ProtocolViolation } from "./budget/validate.js";
@@ -72,7 +72,7 @@ import {
   type ProtocolCallContext,
 } from "./envelope.js";
 import { buildRefusal } from "./refusal.js";
-import { settleServedRanges } from "../state/session.js";
+import { settleServedCallBookings } from "../state/session.js";
 import { recordServedBytes } from "../util/packServeLog.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
 import { applyResponseCodec } from "./codec/pipeline.js";
@@ -120,7 +120,10 @@ export function emitFinalizedPayload(
   context: ProtocolCallContext,
   opts?: { budgetOverrideBytes?: number },
 ): FinalizableResult {
-  if (!isKnownProtocolKind(kind)) return emitUnknownKindRefusal(kind, context);
+  if (!isKnownProtocolKind(kind)) {
+    discardStagedServeBookings(context);
+    return emitUnknownKindRefusal(kind, context);
+  }
 
   // THE BUDGET ROW, OR A TEST-ONLY OVERRIDE. Production callers pass no `opts`
   // at all; the override exists so a spec can drive the ladder past the point
@@ -128,15 +131,62 @@ export function emitFinalizedPayload(
   // that can feed it) without editing the table the wire depends on. It is
   // read here and nowhere else, and it changes only WHEN the ladder engages —
   // never what a rung is allowed to cut.
-  const declaredMaxBytes = typeof context.args?.["maxBytes"] === "number"
+  const declaredMaxBytesArg = typeof context.args?.["maxBytes"] === "number"
     && Number.isFinite(context.args["maxBytes"])
     && context.args["maxBytes"] > 0
     ? Math.floor(context.args["maxBytes"])
     : undefined;
-  // A caller-declared maxBytes is the hard transport budget for this call;
-  // maxTokens is converted to bytes by the request-side calibrated cap before
-  // the funnel. Test overrides remain explicit and cannot affect production.
+  // FX-R3 (2026-09-03, round-18B finding 3): a caller-declared
+  // `budget.tokens`/`maxTokens` used to be inert here — this module read only
+  // `maxBytes`, so `budget.tokens` shed/refused nothing on every kind that
+  // funnels through `emitFinalizedPayload` (i.e. every response of the three
+  // advertised tools except the handles-batch aggregate ceiling, which had
+  // its own separate, correctly-scaled conversion in
+  // `tools/readCodeModes.ts`'s `resolveCallerByteCeiling`). Converted here
+  // with the SAME ratio (`estimateBytesFromTokens`,
+  // `protocol/budget/wireBudget.ts`) so a token budget binds the ladder
+  // exactly as the equivalent byte budget would — `declaredMaxBytes` is
+  // still just "the hard transport budget for this call", now derived from
+  // whichever of the two the caller supplied (the tighter one, if both).
+  //
+  // FX-U3 (2026-09-04): FX-S #2's blanket `context.mode === "pack" ?
+  // undefined : …` exclusion is REMOVED. It existed because
+  // `tools/readCodePack.ts`'s producer measured a DIFFERENT quantity (raw
+  // content chars) against the same nominal `maxTokens` this module converts
+  // to bytes, so folding `maxTokens` in here too double-applied the budget
+  // and fail-closed an already-honest partial `read.batch` to a bare
+  // refusal. The producer now budgets the WIRE envelope itself
+  // (`packItemWireBytes`/`PACK_FIXED_ENVELOPE_BYTES`, `readCodePack.ts`), the
+  // same quantity this module measures, so the fold applies to `mode=pack`
+  // exactly as it does to every other kind. `maxBytes` is unaffected either
+  // way — `readCodePack.ts` never reads it.
+  const declaredMaxTokensArg = estimateBytesFromTokens(context.args?.["maxTokens"]);
+  const declaredMaxBytesRaw = declaredMaxBytesArg !== undefined && declaredMaxTokensArg !== undefined
+    ? Math.min(declaredMaxBytesArg, declaredMaxTokensArg)
+    : (declaredMaxBytesArg ?? declaredMaxTokensArg);
+  // Test overrides remain explicit and cannot affect production.
   const calibratedLimit = budgetFor(kind, formOf(payload, kind));
+  // `read.batch`'s own shed ladder (`shedders/readBatch.ts`) floors at ONE
+  // entry: a payload that arrives with zero entries because THIS CALL never
+  // had any to give (`mode=pack`'s honest "first item exceeds the entire
+  // budget" shape, `readCodePack.spec.ts`) is not shed down to empty — it
+  // ARRIVES empty — so the ladder never exercises the "declines below the
+  // floor" rule and ships as-is. But a caller-declared budget too small even
+  // for THAT already-minimal shape (e.g. `maxTokens:1`) would otherwise still
+  // fail the tail's `used > limit` check below and get converted to a
+  // refusal, discarding the very `omitted[]`/`limit.next` evidence the shape
+  // exists to carry — the exact regression FX-S's blanket exclusion was
+  // introduced to avoid, just reached through the fold above instead of
+  // around it. Clamped ONLY for `mode=pack`, and only up to this kind's own
+  // protocol floor (`floorBytes`, `protocol/budget/wireBudget.ts` — the
+  // pinned minimum ANY legitimate response of this shape has ever measured):
+  // a caller's declared ceiling can still bind pack to anything AT OR ABOVE
+  // that floor exactly like every other kind, it just cannot be driven below
+  // the one number under which this module would otherwise treat the
+  // producer's own honest floor as a violation to fail closed.
+  const declaredMaxBytes = context.mode === "pack" && declaredMaxBytesRaw !== undefined
+    ? Math.max(declaredMaxBytesRaw, floorBytes(kind, formOf(payload, kind)))
+    : declaredMaxBytesRaw;
   const limit = opts?.budgetOverrideBytes
     ?? (declaredMaxBytes !== undefined
       ? Math.min(declaredMaxBytes, calibratedLimit)
@@ -157,6 +207,7 @@ export function emitFinalizedPayload(
     budget: initialBudget,
     context: ladderContext,
     validate: (candidate) => validateShedCandidate(candidate, kind),
+    canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
   });
   if (!stableEditKind
     && opts?.budgetOverrideBytes === undefined
@@ -169,6 +220,7 @@ export function emitFinalizedPayload(
       budget: limit,
       context: ladderContext,
       validate: (candidate) => validateShedCandidate(candidate, kind),
+      canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
     });
     if (reentered.used < ladder.used) ladder = reentered;
   }
@@ -196,7 +248,10 @@ export function emitFinalizedPayload(
   // served-window bookings or emission rows behind that the refusal does not
   // carry (the same accounting rule the unknown-kind gate above follows).
   const requiredSetReplacement = enforceRequiredSet(current, onWire, context);
-  if (requiredSetReplacement !== undefined) return requiredSetReplacement;
+  if (requiredSetReplacement !== undefined) {
+    discardStagedServeBookings(context);
+    return requiredSetReplacement;
+  }
   if ((onWire === "read.task_pack") && !ledgerCertificateBindingValid(current)) {
     const detail = "protocol v1 ledger certificate binding violation; producer emitted an unverifiable act decision";
     if (decisionInvariantStrictEnabled()) throw new Error(detail);
@@ -204,6 +259,7 @@ export function emitFinalizedPayload(
     if (tool === undefined) throw new Error(detail);
     const refusal = buildRefusal(tool, { code: "invalid-input", retry: "none", detail });
     const refusalText = JSON.stringify(refusal);
+    discardStagedServeBookings(context);
     noteEmission(context, { limit: 0, used: measureResponseBytes(refusalText) });
     return { content: [{ type: "text", text: refusalText }], isError: true };
   }
@@ -217,9 +273,67 @@ export function emitFinalizedPayload(
   // that dropped an `Evidence.body` retracts the claim that those bytes reached
   // the consumer, and `servedWindowsOf` sees the retraction automatically
   // because it books a window iff a body string is present at that node.
-  if (context.workspace !== undefined && context.workspace !== "") {
-    settleServedRanges(context.workspace, servedWindowsOf(current));
-  }
+  //
+  // FX-N (ruling (s), 2026-09-03) — AND IT NOW RUNS FOR READS.
+  //
+  // The guard used to be `context.workspace !== undefined`, and
+  // `noteWorkspaceRoot` has exactly one non-test call site: `server.ts`'s
+  // `finishEdit`, the EDIT dispatch. So this half — the half `envelope.ts`'s
+  // F-A1-6 fix was written to feed ("a refusal projects `{unattributed:false,
+  // windows:[]}` so `settleServedRanges` then retracts every pending span for
+  // this call") — was dead for every `read_file`/`search_files` response ever
+  // emitted. Round-16 finding 1 is what that cost: a byte-free
+  // `refusal/cap-exceeded` left its provisional span standing, and the next
+  // slice of the same file was answered `read.receipt{code-unchanged,
+  // served_by:"full 1-400 (call #2)"}` — naming the refusal as the serve.
+  //
+  // `readServeWorkspace` is the read-scoped slot that closes it (see its doc
+  // comment for why it is a fourth field rather than a second writer of the
+  // edit-only `workspace`). A call is either an edit dispatch or a read/search
+  // dispatch, never both, so the two never contend; `settleServedCallBookings`
+  // additionally settles any OTHER session this call booked into (a handle
+  // that adopted its own mint root), and is the single pass that promotes the
+  // staged union/residency bookings — one booking write per call, after the
+  // wire is final, exactly as ruling (s) requires.
+  //
+  // FX-O1 (ruling (t), 2026-09-03) — AND IT IS ATTRIBUTED. `serveAttribution`
+  // is the path a staging site named for the two production shapes whose
+  // payload carries a body with no `path` of its own (`mode=symbol`'s scope
+  // view, `mode=auto`'s small-content serve). Without it those responses
+  // projected `unattributed: true`, and the settlement's `unattributed` arm
+  // failed OPEN — promoting every pending staged path, including residue a
+  // call that threw before the funnel left behind. That arm is fail-CLOSED
+  // now (`state/session.ts`), which is only honest because the attribution
+  // makes `unattributed` unreachable for a shipped body. An empty string means
+  // the call staged for two different paths: ambiguous, so no attribution.
+  const settlementRoot = context.workspace !== undefined && context.workspace !== ""
+    ? context.workspace
+    : context.readServeWorkspace;
+  const serveAttribution = context.serveAttributionPath !== undefined
+    && context.serveAttributionPath !== ""
+    ? context.serveAttributionPath
+    : undefined;
+  // FX-W3 (ruling (aa), 2026-09-04): `wasShed` is the ONE signal that lets
+  // `state/session.ts`'s settlement widen a staged claim past the wire's own
+  // declared window — and only when THIS response's own ladder run performed
+  // ZERO shedding. `ladder.records` (populated above, BEFORE any `failClosed`
+  // conversion) is exactly that record; a ladder that genuinely cut nothing
+  // but was later replaced by a required-set refusal is moot regardless,
+  // since `servedWindowsOf` returns `windows: []` for any `kind: "refusal"`
+  // payload and there is then nothing for the settlement to widen. With ANY
+  // shedding at all, no widening is ever offered, closing round-21A finding 1
+  // (a forged marker-shaped literal plus an ordinary `budget.bytes` shed
+  // could otherwise have inflated corroboration past what the wire actually
+  // carried, when the widening lived in the wire-text-parsing projector
+  // instead of here). See `WorkspaceSession.pendingRenderedExtent`'s doc
+  // comment for how the true extent is recorded, in file coordinates, at
+  // STAGING time, independent of this signal.
+  const wasShed = ladder.records.length > 0;
+  settleServedCallBookings(
+    servedWindowsOf(current, serveAttribution),
+    settlementRoot !== undefined && settlementRoot !== "" ? settlementRoot : undefined,
+    wasShed,
+  );
 
   const shed = ladder.records;
   // V10-11: choose the wire REPRESENTATION of the payload already finalized
@@ -259,6 +373,27 @@ export function emitFinalizedPayload(
   };
   if (isErrorForKind(onWire)) finalized.isError = true;
   return finalized;
+}
+
+/**
+ * FX-N (ruling (s)): the three EARLY RETURNS out of `emitFinalizedPayload`
+ * each ship a refusal in place of the payload the producers booked against,
+ * so they settle exactly as a refusal does — against an empty window list.
+ * FX-O1 (ruling (t)) adds `emitOpaqueText`'s three exits, for the same reason
+ * and with the same call: an unparseable response corroborates nothing, and
+ * what it leaves staged is residue the NEXT call would otherwise settle.
+ * Nothing is retracted that a previous call established (the staged bookings
+ * of THIS call were never written); the provisional spans this call booked
+ * are dropped, which is what "a refusal books nothing" means concretely.
+ */
+function discardStagedServeBookings(context: ProtocolCallContext): void {
+  const root = context.workspace !== undefined && context.workspace !== ""
+    ? context.workspace
+    : context.readServeWorkspace;
+  settleServedCallBookings(
+    { unattributed: false, windows: [] },
+    root !== undefined && root !== "" ? root : undefined,
+  );
 }
 
 /**
@@ -321,20 +456,10 @@ function failClosed(
   // response rather than a malformed replacement for it.
   if (forTool === undefined) return undefined;
 
-  // W2-3: `next` is `ladder.continuation` — a `ToolCall` minted mid-ladder,
-  // BEFORE `finalizeProtocolResponse`'s one canonicalization pass
-  // (envelope.ts:579) ever runs, because that pass already finished before
-  // this function's caller (`emitFinalizedPayload`) started the ladder. A
-  // refusal built here is therefore a BRAND NEW payload the earlier pass
-  // never saw, and its embedded `next.arguments` stayed in whatever shape
-  // the shedder minted it — legacy (`{mode:"slice",...}`) at this HEAD,
-  // confirmed schema-INVALID against the D-2 advertised-only surface (a
-  // live sweep at a tight budget, e.g. `budget:{bytes:300}`, reproduces it
-  // 2-for-2). Re-running the SAME `canonicalizeEmittedToolCalls` the normal
-  // path already uses — not a second, parallel implementation of it — on
-  // this function's own return value closes that gap at its only other
-  // mint point, without touching the ladder's input or any byte the normal
-  // (non-fail-closed) path already produces.
+  // W2-3: `next` is `ladder.continuation`, and a refusal built here is a new
+  // payload after the producer envelope pass has completed. Re-run the SAME
+  // `canonicalizeEmittedToolCalls` used by the normal path so this second mint
+  // point cannot reintroduce a stale continuation shape.
   return canonicalizeEmittedToolCalls({
     ...buildRefusal(forTool, {
       code: "cap-exceeded",
@@ -345,6 +470,35 @@ function failClosed(
       ...(next !== undefined ? { next } : {}),
     }),
   }) as ShedPayload;
+}
+
+/**
+ * Canonicalize calls minted by an act-floor demotion, then remove only the
+ * optional `content:"auto"` default. Addressed recovery reads already default
+ * to auto at dispatch, so carrying that hint on every duplicated recovery
+ * call needlessly pushes a valid discover response over a tight wire cap.
+ */
+function canonicalizeBudgetDemotion(candidate: ShedPayload): ShedPayload {
+  const canonical = canonicalizeEmittedToolCalls(candidate);
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (value === null || typeof value !== "object") return value;
+    const record = value as Record<string, unknown>;
+    const copied: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) copied[key] = visit(child);
+    if (
+      typeof copied["tool"] === "string"
+      && copied["arguments"] !== null
+      && typeof copied["arguments"] === "object"
+      && !Array.isArray(copied["arguments"])
+    ) {
+      const args = { ...(copied["arguments"] as Record<string, unknown>) };
+      if (args["content"] === "auto") delete args["content"];
+      copied["arguments"] = args;
+    }
+    return copied;
+  };
+  return visit(canonical) as ShedPayload;
 }
 
 /** `context.tool` narrowed to A.1's three advertised names, or `undefined`. */
@@ -408,7 +562,18 @@ function emitSideEffectViolationRefusal(
  *
  * Returns `result` ITSELF — the same object, the same string — so the bytes are
  * identical by identity rather than by reconstruction. There is no `kind` on
- * this path, therefore no budget row, no ladder, and nothing to settle.
+ * this path, therefore no budget row and no ladder.
+ *
+ * FX-O1 (ruling (t), 2026-09-03) — BUT THERE IS SOMETHING TO SETTLE, and the
+ * sentence that used to end the paragraph above ("and nothing to settle") was
+ * how this exit escaped [R5-10]. A serve path stages its bookings on the
+ * session while it assembles the body; these three exits then ship a response
+ * whose text this server could not even parse as an object, so it carries no
+ * evidence to corroborate ANYTHING. Left unsettled, that staging survived as
+ * RESIDUE which the next call in the same lane settled against its OWN
+ * corroboration — the laundering channel round-17 finding 2 demonstrated but
+ * could not find a production entrance for. This is one: reachable, and closed
+ * the same way a refusal is, by settling against an empty window list.
  *
  * WHY MEASURE AT ALL. R1's residual is the class "some responses leave the
  * funnel without passing the measurement point". A pipeline that measures only
@@ -422,6 +587,7 @@ export function emitOpaqueText(
   result: FinalizableResult,
   context: ProtocolCallContext,
 ): FinalizableResult {
+  discardStagedServeBookings(context);
   const text = result.content[0]?.text;
   if (typeof text === "string") {
     const used = measureResponseBytes(text);

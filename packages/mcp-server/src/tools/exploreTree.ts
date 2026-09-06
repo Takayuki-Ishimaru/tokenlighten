@@ -27,6 +27,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import type { ToolCall } from "@tokenlighten/types";
 import { walkCodeFiles, createWalkOmissions, type WalkOmissions } from "./walkRepo.js";
 import { FIND_ACTION_EXTRA_BASENAMES, FIND_ACTION_EXTRA_EXTS } from "../features/search/find/findText.js";
 import { resolveReal, isWithin } from "../util/safePath.js";
@@ -61,9 +62,39 @@ function newTreeDirNode(relPath: string): TreeDirNode {
 /**
  * Normalize a caller-supplied subPath to a POSIX prefix with no leading "./",
  * no leading/trailing slash. Returns "" for undefined / "." / "" (whole-root).
+ *
+ * C3 (2026-09-03, INV-C F3): an ABSOLUTE `subPath` is resolved against
+ * `workspace` the same way `find`/`references` already correctly resolve
+ * theirs elsewhere in this codebase (a bare `path.resolve(workspace, raw)`,
+ * whose Node semantics return an absolute `raw` untouched, then a
+ * workspace-relative form via `path.relative`) — checked on the RAW string,
+ * before the backslash-to-forward-slash rewrite below, so a platform-native
+ * absolute path (e.g. a Windows drive path) is still detected correctly.
+ *
+ * Previously EVERY leading "/" was unconditionally stripped
+ * (`p.replace(/^\/+/, "")`) and the remainder treated as workspace-RELATIVE,
+ * so an absolute path under the workspace — including the workspace root
+ * itself — silently resolved to a path that does not exist
+ * (`<workspace>/<workspace-without-its-leading-slash>`) and was refused
+ * `not-found`, for a directory the very same session could freely
+ * `find`/`references` a moment earlier (measured: `search_files
+ * {action:"tree", path:"<ws>"}` on the workspace's own absolute path).
+ *
+ * An absolute `subPath` that resolves OUTSIDE `workspace` entirely yields a
+ * `path.relative` result starting with ".." (or, cross-drive on Windows, one
+ * that is still absolute) — passed straight through, unchanged, into the
+ * SAME `p.replace(/^\/+/, "")`/`containedSubPath` pipeline a relative "../x"
+ * escape already goes through below, so it refuses via the EXISTING
+ * `path-outside-workspace` shape rather than a new one.
  */
-function normalizeSubPath(subPath?: string): string {
+function normalizeSubPath(workspace: string, subPath?: string): string {
   if (!subPath) return "";
+  if (path.isAbsolute(subPath)) {
+    const abs = path.resolve(subPath);
+    const workspaceAbs = path.resolve(workspace);
+    const rel = path.relative(workspaceAbs, abs).replace(/\\/g, "/");
+    return rel === "" || rel === "." ? "" : rel;
+  }
   let p = subPath.replace(/\\/g, "/");
   while (p.startsWith("./")) p = p.slice(2);
   p = p.replace(/^\/+/, "").replace(/\/+$/, "");
@@ -204,7 +235,7 @@ export interface CompactTree {
    */
   did_you_mean?: { path: string; children: string[] };
   /** Present only alongside reason:"not-a-directory": the read_file call that actually serves subPath. */
-  next?: string;
+  next?: ToolCall;
   /**
    * Present only when the requested path exists and IS a directory but is
    * empty (tree is legitimately "", as opposed to the not-found case above
@@ -244,18 +275,25 @@ export interface TreeScopeReport {
     visited: number;
     /** Files that made it into the rendered tree (walkCodeFiles' FoundFile[] count). */
     returned: number;
-    /** Sum of `excluded_by_reason`'s 7 values. */
+    /** Sum of `excluded_by_reason`'s 8 values. */
     excluded: number;
     /** Subtrees the walker could not even read (WalkOmissions.unreadable_dirs). */
     errors: number;
   };
   /**
-   * One key per WalkOmissions EXCLUSION reason — 7 of its 8 fields. The 8th,
-   * `unreadable_dirs`, is an ERROR (nothing about that subtree was
-   * classified, so it is not a willful exclusion) and is folded into
-   * `counts.errors` instead — see buildScopeReport's doc comment. All 7 keys
-   * are always present, even at 0: an honest zero rather than an omitted
-   * key, so this object's own values always sum to exactly `counts.excluded`.
+   * One key per WalkOmissions EXCLUSION reason — 8 of its fields
+   * (`unreadable_dirs` is an ERROR, folded into `counts.errors` instead, and
+   * `outside_workspace` never reaches this walk: `buildCompactTree`'s own
+   * `containedSubPath` boundary check refuses before any walk runs — see
+   * buildScopeReport's doc comment). All 8 keys are always present, even at
+   * 0: an honest zero rather than an omitted key, so this object's own
+   * values always sum to exactly `counts.excluded`.
+   *
+   * FX-R1 (2026-09-03, round-18B review finding 1): `source_only_excluded`
+   * added — a walkRepo.ts `SOURCE_ONLY_EXCLUDED_*` skip (`.tokenlighten/
+   * cache|index/`, `coverage/`) is a deliberate, product-code-level
+   * exclusion like `ignored`, so it is disclosed the same way rather than
+   * silently vanishing the way the removed `runs/` generalization did.
    */
   excluded_by_reason: {
     ignored: number;
@@ -265,6 +303,7 @@ export interface TreeScopeReport {
     symlinks: number;
     non_text: number;
     secrets: number;
+    source_only_excluded: number;
   };
 }
 
@@ -294,7 +333,10 @@ export interface TreeScopeReport {
  * exclusive with every file/directory branch; `unreadable_dirs` fires only
  * on an early `return` from a `readdirSync` failure, before any child entry
  * (and therefore any other counter) is ever touched. No entry can land under
- * two reasons, so summing `excluded_by_reason`'s 7 values never double-counts.
+ * two reasons, so summing `excluded_by_reason`'s 8 values never double-counts
+ * (`source_only_excluded` is likewise mutually exclusive with the rest —
+ * `isSourceOnlyExcludedPath` is checked only after `classifyIgnored` already
+ * declined to claim the entry, see walkRepo.ts's walkDir).
  */
 function buildScopeReport(
   omissions: WalkOmissions,
@@ -309,6 +351,7 @@ function buildScopeReport(
     symlinks: omissions.symlinks,
     non_text: omissions.non_text,
     secrets: omissions.secrets,
+    source_only_excluded: omissions.source_only_excluded,
   };
   const excluded =
     excluded_by_reason.ignored +
@@ -317,7 +360,8 @@ function buildScopeReport(
     excluded_by_reason.oversize +
     excluded_by_reason.symlinks +
     excluded_by_reason.non_text +
-    excluded_by_reason.secrets;
+    excluded_by_reason.secrets +
+    excluded_by_reason.source_only_excluded;
   const errors = omissions.unreadable_dirs;
   const visited = returned + excluded + errors;
   const completeness: "complete" | "partial" = truncated || errors > 0 ? "partial" : "complete";
@@ -434,7 +478,7 @@ export function buildCompactTree(
 ): CompactTree {
   const effectiveDepth =
     typeof depth === "number" && depth >= 0 ? Math.floor(depth) : TREE_DEFAULT_DEPTH;
-  const normalizedSub = normalizeSubPath(subPath);
+  const normalizedSub = normalizeSubPath(workspace, subPath);
 
   // Nonexistent subPath: an agent that guessed a wrong directory name
   // previously got a silent {tree:"", truncated:false} indistinguishable from
@@ -474,7 +518,7 @@ export function buildCompactTree(
         ok: false,
         reason: "not-a-directory",
         did_you_mean: buildDidYouMean(workspace, requestedAbs),
-        next: `read_file path=${normalizedSub}`,
+        next: { tool: "read_file", arguments: { targets: [{ path: normalizedSub }], content: "auto" } },
       };
     }
   }

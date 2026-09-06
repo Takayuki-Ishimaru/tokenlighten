@@ -70,7 +70,10 @@ describe("D1 — caller-dir pack must not echo its own invocation", () => {
     const result = await buildTaskPack({ query, paths: ["src"] }, root);
 
     expect(result.missing).toContain("src/ (directory)");
-    expect(result.next).toBe("search_files action=tree path=src");
+    expect(result.next).toEqual({
+      tool: "search_files",
+      arguments: { action: "tree", path: "src" },
+    });
     const nextCall = result.execution_contract?.next_call;
     if (nextCall !== undefined) {
       const args = (nextCall.arguments ?? {}) as Record<string, unknown>;

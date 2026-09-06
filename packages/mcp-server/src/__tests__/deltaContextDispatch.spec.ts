@@ -1,7 +1,6 @@
 /**
  * deltaContextDispatch.spec.ts — B2 / V12-02 delta context, through the REAL
- * dispatcher (spawned server + JSON-RPC), the same way
- * `postReadyTrimDispatch.spec.ts` exercises W5/W7.
+ * dispatcher (spawned server + JSON-RPC).
  *
  * WHY A SPAWNED SERVER. The lever spans three modules that only meet at
  * runtime: the write seam (`write/atomicWrite.ts` -> `write/deltaContext.ts`),

@@ -209,7 +209,8 @@ export function registerExecutableNextScope(
  * Resolve and consume only a unique task provenance. The durable lane index is
  * consulted after restart; more than one matching live task is ambiguous.
  */
-export function consumeExecutableNextScope(
+/** Resolve a unique pending-next owner without spending the capability. */
+export function resolveExecutableNextScope(
   workspaceRoot: string,
   lane: string,
   next: { tool: string; arguments: Record<string, unknown> },
@@ -230,10 +231,57 @@ export function consumeExecutableNextScope(
   const record = _load(workspaceRoot, resolved);
   const fingerprint = _nextFingerprint(next);
   if (record === undefined || !record.pendingNexts.includes(fingerprint)) return undefined;
+  return resolved;
+}
+
+/** Resolve and consume only a unique task provenance. */
+export function consumeExecutableNextScope(
+  workspaceRoot: string,
+  lane: string,
+  next: { tool: string; arguments: Record<string, unknown> },
+): TaskContractScope | undefined {
+  const resolved = resolveExecutableNextScope(workspaceRoot, lane, next);
+  if (resolved === undefined) return undefined;
+  const record = _load(workspaceRoot, resolved);
+  const fingerprint = _nextFingerprint(next);
+  if (record === undefined || !record.pendingNexts.includes(fingerprint)) return undefined;
   record.pendingNexts = record.pendingNexts.filter((value) => value !== fingerprint);
   _persist(workspaceRoot, record);
-  _nextScopes.delete(key);
+  _nextScopes.delete(_nextScopeKey(workspaceRoot, _scope({ lane }).lane, next));
   return resolved;
+}
+
+/**
+ * Recover a continuation's task scope only when this lane has exactly one
+ * live handle-backed task whose original request is the same verbatim query.
+ *
+ * This is intentionally narrower than the normal epoch-overlap rule.  It is
+ * solely the compatibility bridge for a re-pack that omitted a handle after
+ * executing a server-prescribed continuation: a competing same-query task is
+ * ambiguous and therefore remains unbound.
+ */
+export function uniqueTaskScopeForExactQuery(
+  workspaceRoot: string,
+  lane: string,
+  query: string,
+): TaskContractScope | undefined {
+  if (query === "") return undefined;
+  const normalizedLane = _scope({ lane }).lane;
+  const matches = _loadLaneIndex(workspaceRoot, normalizedLane)
+    .filter((taskHandle) => taskHandle !== "")
+    .map((taskHandle) => ({ lane: normalizedLane, taskHandle }))
+    .filter((scope) => _load(workspaceRoot, scope)?.query === query);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** The handleless continuation bridge never crosses an explicit new-epoch boundary. */
+export function recoverHandlelessTaskScope(
+  workspaceRoot: string,
+  lane: string,
+  query: string,
+  taskEpoch?: string,
+): TaskContractScope | undefined {
+  return taskEpoch === "new" ? undefined : uniqueTaskScopeForExactQuery(workspaceRoot, lane, query);
 }
 
 /** Test-only view of the current resolution without consuming it. */
@@ -622,6 +670,25 @@ export function recordExpansionExplicitGap(
 ): void {
   recordExplicitGap(workspaceRoot, parent.kind, parent.target, witness, scope);
   for (const target of targets) recordExplicitGap(workspaceRoot, "dependency-definitions", target, witness, scope);
+}
+
+/**
+ * Raw, ungated read of the query text a scope's contract record holds (or
+ * `undefined` when no record exists there — cold store, evicted, or a scope
+ * this epoch never wrote). R27 M1: `state/stateHandles.ts`'s qref-durability
+ * slot uses this to rehydrate a caller's `qref` from the record `persistTask
+ * Contract` already writes, instead of keeping a second, redundant plaintext
+ * copy of the query on disk. Deliberately skips `queryTaskContract`'s
+ * `_sameTask` epoch-identity gate: that check exists to stop an UNRELATED
+ * later task from inheriting an earlier one's requirement obligations, which
+ * is not a concern here — the caller authenticates the returned text itself
+ * (by re-hashing it against the `ref` it already holds) rather than trusting
+ * the scope match alone, so a stale or foreign record just fails that
+ * hash check instead of resolving.
+ */
+export function rawContractQueryForScope(workspaceRoot: string, scope?: TaskContractScope): string | undefined {
+  const record = _load(workspaceRoot, _effectiveScope(scope));
+  return record !== undefined && record.query !== "" ? record.query : undefined;
 }
 
 export function queryTaskContract(

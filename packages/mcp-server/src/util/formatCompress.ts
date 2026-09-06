@@ -138,7 +138,40 @@ const PYTHON_LIKE_LANGS = new Set(["python"]);
  * comment or string regions are left exactly as they were found.
  */
 export function elideDocComments(text: string, lang?: string, startLine: number = 1): string {
-  if (!text) return text;
+  return elideDocCommentsWithWindows(text, lang, startLine).text;
+}
+
+/**
+ * FX-W3 (ruling (aa), 2026-09-04): the elided-WINDOW-returning twin of
+ * `elideDocComments`. Round-21A's finding: TL's own ledger accounting used to
+ * DECIDE which file lines were "elided" (and therefore write-authority-
+ * eligible under ruling (x)) by re-parsing the RENDERED OUTPUT for
+ * marker-shaped lines after the fact (`servedSpansOfDisplayedText`,
+ * `envelope.ts`'s settlement corroboration). A literal string in ordinary
+ * file content that merely LOOKS like `/* doc elided L5-250 *\/` is
+ * byte-identical to a genuine marker and indistinguishable from one by that
+ * re-parse — so a forged marker plus an ordinary wire-level `budget.bytes`
+ * shed could make a lane that received only the first 76 of 300 lines walk
+ * away holding write authority over the whole file.
+ *
+ * RULING (aa): the elided windows are a FACT OF THE RENDERER, not a fact of
+ * the wire text. This function computes and returns them at the EXACT moment
+ * `elideCBlockComments`/`elidePythonDocstrings` collapse a genuine multi-line
+ * block — never by scanning the OUTPUT afterward — so `elided` can only ever
+ * name a window this call itself removed. A caller's own file content that
+ * happens to contain marker-shaped text never appears here unless this scan
+ * itself collapsed it from a real 2+-line comment/docstring block.
+ *
+ * Every OTHER export in this module (`elideDocComments`,
+ * `elideDocCommentsForDisplay`) is a thin wrapper over this one scan, so the
+ * windows and the text can never disagree with each other.
+ */
+export function elideDocCommentsWithWindows(
+  text: string,
+  lang?: string,
+  startLine: number = 1,
+): { text: string; elided: Array<[number, number]> } {
+  if (!text) return { text, elided: [] };
 
   const isCLang = lang !== undefined && C_BLOCK_COMMENT_LANGS.has(lang);
   const isPython = lang !== undefined && PYTHON_LIKE_LANGS.has(lang);
@@ -147,7 +180,7 @@ export function elideDocComments(text: string, lang?: string, startLine: number 
   // unknown/undefined) gets NO elision — the source is not C-comment-shaped
   // and treating `/*`/`"""` sequences as comments there deletes real content
   // (BUG-3: unbackticked glob patterns in .md contract prose).
-  if (!isCLang && !isPython) return text;
+  if (!isCLang && !isPython) return { text, elided: [] };
 
   // item 11: `startLine` is the 1-based FILE line of `text`'s first line, so a
   // marker on a slice can carry TRUE file line numbers rather than
@@ -156,6 +189,39 @@ export function elideDocComments(text: string, lang?: string, startLine: number 
   const base = Number.isFinite(startLine) && startLine >= 1 ? Math.floor(startLine) : 1;
   if (isPython) return elidePythonDocstrings(text, base);
   return elideCBlockComments(text, base);
+}
+
+/**
+ * FX-W3: pure arithmetic complement of `windows` within [rangeStart,
+ * rangeEnd] — the SURVIVING (non-elided) file-line spans a serve site should
+ * book, computed directly from the RENDERER's own accounting
+ * (`elideDocCommentsWithWindows`'s `elided` list, or an equivalent
+ * caller-supplied window list) rather than by re-parsing the rendered text
+ * for marker-shaped lines (ruling (aa)). `windows` is assumed ascending and
+ * non-overlapping — `elideDocCommentsWithWindows`'s own left-to-right scan
+ * already guarantees this for its own output.
+ *
+ * Pure and total: an empty `windows` list returns `[[rangeStart, rangeEnd]]`
+ * unchanged (nothing was elided, so the whole window survived), matching
+ * what `servedSpansOfDisplayedText` returned for marker-free text.
+ */
+export function spansExcludingWindows(
+  rangeStart: number,
+  rangeEnd: number,
+  windows: ReadonlyArray<readonly [number, number]>,
+): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let cursor = rangeStart;
+  for (const [winStart, winEnd] of windows) {
+    const clampedStart = Math.max(rangeStart, winStart);
+    const clampedEnd = Math.min(rangeEnd, winEnd);
+    if (clampedEnd < clampedStart) continue; // window lies entirely outside [rangeStart, rangeEnd]
+    if (clampedEnd < cursor) continue; // window lies entirely behind the cursor already
+    if (clampedStart > cursor) spans.push([cursor, clampedStart - 1]);
+    cursor = Math.max(cursor, clampedEnd + 1);
+  }
+  if (cursor <= rangeEnd) spans.push([cursor, rangeEnd]);
+  return spans;
 }
 
 /**
@@ -205,6 +271,36 @@ const ELISION_MARKER_SPAN_RE_G =
   /\/\*\s*doc elided L(\d+)-(\d+)\s*\*\/|#\s*doc elided L(\d+)-(\d+)/g;
 
 /**
+ * round-18A finding 7 (2026-09-03): a genuine elision marker's from/to are
+ * NOT position-verifiable (see servedSpansOfDisplayedText's own doc comment
+ * below -- some callers pass file-absolute numbers, others code-relative
+ * ones starting at L1), so there is no sound way to prove a marker-shaped
+ * string found in already-displayed text was actually emitted by
+ * elideCBlockComments/elidePythonDocstrings rather than being literal file
+ * content those never touched (a single-line block comment that happens to
+ * read "doc elided L5-150" is byte-identical to a genuine multi-line marker
+ * and indistinguishable from it by shape or position alone; measured live,
+ * scratchpad/r18/h_elide.mts).
+ *
+ * What IS true of every marker this codebase actually emits: it stands in
+ * for a real collapsed block, and the pinned elision fixtures this file's
+ * own settlement corroboration must not regress (replayCorpus's seh1/seh4/
+ * seh6 group -- a 40-line file collapsing one 21-line comment block into a
+ * 20-line display) show a collapse ratio close to 1x relative to the TOTAL
+ * displayed window. A single match claiming a width many times the entire
+ * displayed text's own line count is far more consistent with a forged or
+ * coincidental literal than a genuine collapse. servedSpansOfDisplayedText
+ * refuses to trust (treats as ordinary, non-collapsing content) any match
+ * whose declared width exceeds lines.length * MARKER_WIDTH_TRUST_MULTIPLIER
+ * -- which only ever NARROWS what this function reports (the safe direction,
+ * ruling (t)/(v)): a genuine marker with a legitimately enormous compression
+ * ratio relative to a tiny displayed window costs one redundant re-serve
+ * instead of a false receipt; a forged one can no longer shift booked spans
+ * off the lines that shipped.
+ */
+const MARKER_WIDTH_TRUST_MULTIPLIER = 8;
+
+/**
  * 2026-08-02 serve-honesty F1 — the INVERSE of the eliders above.
  *
  * Given the text a caller will ACTUALLY receive for a window that starts at
@@ -234,6 +330,21 @@ const ELISION_MARKER_SPAN_RE_G =
  * @param rangeEnd   optional 1-based file line the window ends at; spans are
  *                   clamped to it (a display that runs long can never widen
  *                   the booking).
+ *
+ * FX-X3 (round-22B review, ruling (aa), 2026-09-04): retained TEST-ONLY.
+ * `readCodeSmallFile.ts`'s `small_file` serve was the last production booking
+ * site still calling this (marker-reparsing) producer — every content-bearing
+ * serve site now books via `spansExcludingWindows` over the renderer's own
+ * `elided` window list instead (never by re-parsing displayed text for
+ * marker-shaped lines — see this function's own doc above for exactly why
+ * that re-parse is unsound). `fxnBookingSettlementFence.spec.ts`'s
+ * "servedSpansOfDisplayedText has no remaining non-test caller" check pins
+ * this: it fails the day a NEW production call site reappears without a
+ * reviewed exception. Kept (rather than deleted) because several existing
+ * unit suites (`fxv1ElidedWindowForeignHandleCoverage.spec.ts`,
+ * `fxoServeCoordinateSettlement.spec.ts`, `fxw3RendererAccountedElision
+ * .spec.ts`, `readDocSectionsBooking.spec.ts`) still exercise its arithmetic
+ * directly as a documented historical/regression reference.
  */
 export function servedSpansOfDisplayedText(
   rangeStart: number,
@@ -251,6 +362,9 @@ export function servedSpansOfDisplayedText(
   // A trailing newline leaves one empty tail element that is not a source line.
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
 
+  // round-18A finding 7: see MARKER_WIDTH_TRUST_MULTIPLIER's doc comment.
+  const trustedWidthCeiling = Math.max(1, lines.length) * MARKER_WIDTH_TRUST_MULTIPLIER;
+
   const spans: Array<[number, number]> = [];
   let cursor = base;
   let openStart = base;
@@ -261,7 +375,7 @@ export function servedSpansOfDisplayedText(
 
   for (const line of lines) {
     ELISION_MARKER_SPAN_RE_G.lastIndex = 0;
-    let sawMarker = false;
+    let sawTrustedMarker = false;
     for (
       let match = ELISION_MARKER_SPAN_RE_G.exec(line);
       match !== null;
@@ -271,14 +385,20 @@ export function servedSpansOfDisplayedText(
       const to = Number(match[2] ?? match[4]);
       const width =
         Number.isFinite(from) && Number.isFinite(to) && to >= from ? to - from + 1 : 1;
-      sawMarker = true;
+      // round-18A finding 7: an untrusted match (width wildly out of
+      // proportion to the whole displayed window — see
+      // MARKER_WIDTH_TRUST_MULTIPLIER) is treated as ordinary content, not a
+      // marker: skip it here and let the marker-free fallback below advance
+      // the cursor by one line, same as any other non-marker line.
+      if (width > trustedWidthCeiling) continue;
+      sawTrustedMarker = true;
       closeRun(cursor - 1);
       cursor += width;
       openStart = cursor;
     }
     // A marker CONSUMES its output line (the collapsed block ends there), so
-    // only a marker-free line advances the cursor by one.
-    if (!sawMarker) cursor += 1;
+    // only a marker-free (or untrusted-marker) line advances the cursor by one.
+    if (!sawTrustedMarker) cursor += 1;
     if (cursor > ceiling + 1) break;
   }
   closeRun(cursor - 1);
@@ -308,21 +428,33 @@ export function servedSpansOfDisplayedText(
  * multi-line comment present). Falls back to the RAW (comments-kept) text,
  * plus a `note` explaining why, only when eliding would leave nothing (after
  * stripping the marker itself) while the raw input was non-empty.
+ *
+ * FX-W3 (ruling (aa), 2026-09-04): ALSO returns `elided`, the exact file-line
+ * windows this call's OWN scan removed — a fact of the renderer
+ * (`elideDocCommentsWithWindows`), always `[]` when `keepComments` is set, the
+ * text is empty, elision made no change, or the doc-only fallback fired
+ * (nothing was actually removed from what shipped in any of those cases).
+ * Serve sites book their ledger spans from this list (`spansExcludingWindows`)
+ * instead of re-parsing `content` for marker-shaped lines.
  */
 export function elideDocCommentsForDisplay(
   text: string,
   lang: string | undefined,
   keepComments: boolean,
   startLine?: number,
-): { content: string; note?: string } {
-  if (keepComments || text.trim() === "") return { content: text };
-  const elided = elideDocComments(text, lang, startLine);
-  if (elided === text) return { content: elided };
-  const withoutMarkers = elided.split(ELISION_MARKER_RE).join("").trim();
+): { content: string; note?: string; elided: Array<[number, number]> } {
+  if (keepComments || text.trim() === "") return { content: text, elided: [] };
+  const { text: elidedText, elided } = elideDocCommentsWithWindows(text, lang, startLine);
+  if (elidedText === text) return { content: elidedText, elided: [] };
+  const withoutMarkers = elidedText.split(ELISION_MARKER_RE).join("").trim();
   if (withoutMarkers === "") {
-    return { content: text, note: "doc-only file; comments kept (elision would have removed all content)" };
+    return {
+      content: text,
+      note: "doc-only file; comments kept (elision would have removed all content)",
+      elided: [],
+    };
   }
-  return { content: elided };
+  return { content: elidedText, elided };
 }
 
 /**
@@ -332,8 +464,9 @@ export function elideDocCommentsForDisplay(
  * line-start `/*` inside a multi-line template literal is not an opener.
  * Trailing/inline `//` comments and single-line `/* ... *\/` are preserved.
  */
-function elideCBlockComments(text: string, startLine: number = 1): string {
+function elideCBlockComments(text: string, startLine: number = 1): { text: string; elided: Array<[number, number]> } {
   const out: string[] = [];
+  const elided: Array<[number, number]> = [];
   const n = text.length;
   let i = 0;
   // 1-based FILE line number of `text[i]` (starts at startLine so a slice's
@@ -370,6 +503,7 @@ function elideCBlockComments(text: string, startLine: number = 1): string {
         // Spans 2+ source lines (1+ embedded newline). Preserve any real code
         // that follows `*/` on the closing line — only the block itself goes.
         out.push(`/* doc elided L${line}-${line + span} */`);
+        elided.push([line, line + span]);
         line += span;
         atLineStart = false;
         i = blockEnd;
@@ -406,7 +540,7 @@ function elideCBlockComments(text: string, startLine: number = 1): string {
     if (ch !== " " && ch !== "\t") atLineStart = false;
   }
 
-  return out.join("");
+  return { text: out.join(""), elided };
 }
 
 /**
@@ -418,8 +552,9 @@ function elideCBlockComments(text: string, startLine: number = 1): string {
  * are left untouched. There is no `//`/`#` line-comment handling here (`#`
  * comments are single-line and cheap; `//` is floor division, not a comment).
  */
-function elidePythonDocstrings(text: string, startLine: number = 1): string {
+function elidePythonDocstrings(text: string, startLine: number = 1): { text: string; elided: Array<[number, number]> } {
   const out: string[] = [];
+  const elided: Array<[number, number]> = [];
   const n = text.length;
   let i = 0;
   // 1-based FILE line number (starts at startLine so a slice's markers carry
@@ -456,6 +591,7 @@ function elidePythonDocstrings(text: string, startLine: number = 1): string {
       const span = countNewlines(block);
       if (span >= 1) {
         out.push(`# doc elided L${line}-${line + span}`);
+        elided.push([line, line + span]);
         line += span;
         sawStatement = true;
         prevNonBlankEndsColon = false;
@@ -524,7 +660,7 @@ function elidePythonDocstrings(text: string, startLine: number = 1): string {
     }
   }
 
-  return out.join("");
+  return { text: out.join(""), elided };
 }
 
 /**

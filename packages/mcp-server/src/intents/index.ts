@@ -8,6 +8,7 @@
  * (server.ts edit_code handler) augments success with handle/sha.
  */
 
+import type { ToolCall } from "@tokenlighten/types";
 import type { HandleEntry } from "../util/handles.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 import { applyRemoveDuplicateBranch } from "./removeDuplicateBranch.js";
@@ -17,7 +18,7 @@ import { applyRenameSymbolReferences } from "./renameSymbolReferences.js";
 
 export type IntentResult =
   | ({ ok: true } & Record<string, unknown>)
-  | { ok: false; reason: string; next?: string };
+  | { ok: false; reason: string; next?: ToolCall; detail?: string };
 
 interface IntentArgs {
   /** Resolved workspace-relative path (from handle or explicit arg). */
@@ -97,7 +98,7 @@ export async function applyIntent(
       return {
         ok: false,
         reason: "intent-unknown",
-        next: "edit_file search=... replace=...",
+        detail: "Use edit_file with an exact search/replace edit instead.",
       };
   }
 }

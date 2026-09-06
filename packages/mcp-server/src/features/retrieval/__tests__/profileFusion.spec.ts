@@ -30,14 +30,15 @@ function writeFile(workspace: string, rel: string, content: string): void {
 const emptyWalkCache = { get: (_opts: WalkOptions): FoundFile[] => [] };
 
 let savedRrf: string | undefined;
-let savedProfiles: string | undefined;
 let savedBm25f: string | undefined;
 let savedHome: string | undefined;
 let tmpHome: string;
 
 beforeEach(() => {
+  // TL_RRF_FUSION is now tri-state (off/on/profiles) — CONSOLIDATED (v0.14
+  // flag inventory, 2026-08-31): the former separate TL_RRF_PROFILES pair
+  // var is this var's "profiles" value, so one save/restore covers both.
   savedRrf = process.env["TL_RRF_FUSION"];
-  savedProfiles = process.env["TL_RRF_PROFILES"];
   savedBm25f = process.env["TL_BM25F_CANDIDATE"];
   savedHome = process.env.HOME;
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "tl-profile-fusion-home-"));
@@ -48,8 +49,6 @@ beforeEach(() => {
 afterEach(() => {
   if (savedRrf === undefined) delete process.env["TL_RRF_FUSION"];
   else process.env["TL_RRF_FUSION"] = savedRrf;
-  if (savedProfiles === undefined) delete process.env["TL_RRF_PROFILES"];
-  else process.env["TL_RRF_PROFILES"] = savedProfiles;
   if (savedBm25f === undefined) delete process.env["TL_BM25F_CANDIDATE"];
   else process.env["TL_BM25F_CANDIDATE"] = savedBm25f;
   if (savedHome === undefined) delete process.env.HOME;
@@ -76,8 +75,7 @@ function floorAndNonFloorCandidates(): Candidate[] {
 }
 
 describe("applyHybridRetrieval — V11-02 flag-off byte identity", () => {
-  it("with TL_RRF_PROFILES unset, profileContext/retrieverWeights inputs are inert — output matches the same call without them", async () => {
-    delete process.env["TL_RRF_PROFILES"];
+  it("with TL_RRF_FUSION=1 (profiles not engaged), profileContext/retrieverWeights inputs are inert — output matches the same call without them", async () => {
     process.env["TL_RRF_FUSION"] = "1";
     delete process.env["TL_BM25F_CANDIDATE"];
     const ws = buildWorkspace();
@@ -107,8 +105,7 @@ describe("applyHybridRetrieval — V11-02 flag-off byte identity", () => {
 
 describe("applyHybridRetrieval — V11-02 hard floors hold under adversarial weights", () => {
   it("an all-zero retrieverWeights vector (every named retriever muted) still keeps every floor candidate ahead of every non-floor candidate", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     const ws = buildWorkspace();
     const candidates = floorAndNonFloorCandidates();
@@ -135,8 +132,7 @@ describe("applyHybridRetrieval — V11-02 hard floors hold under adversarial wei
   });
 
   it("holds under every shipped named profile's weight vector, not just an adversarial one", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
 
     for (const profile of Object.values(TASK_PROFILES)) {
@@ -166,8 +162,7 @@ describe("applyHybridRetrieval — V11-02 hard floors hold under adversarial wei
 
 describe("applyHybridRetrieval — V11-02 weak-retriever quality gate", () => {
   it("a flat (all-tied) heuristic score distribution is gated out of fusion and recorded with a reason, via the trace", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     setTraceEnabledForTest(true);
     const ws = buildWorkspace();
@@ -193,8 +188,7 @@ describe("applyHybridRetrieval — V11-02 weak-retriever quality gate", () => {
 
 describe("applyHybridRetrieval — V11-02 trace attribution", () => {
   it("weightsVersion, profile, and retriever_weights are present in the trace when profiles are active", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     setTraceEnabledForTest(true);
     const ws = buildWorkspace();
@@ -220,8 +214,7 @@ describe("applyHybridRetrieval — V11-02 trace attribution", () => {
   });
 
   it("a query with no structural signal resolves to the general profile (neutral weights) in the trace", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     setTraceEnabledForTest(true);
     const ws = buildWorkspace();
@@ -239,8 +232,7 @@ describe("applyHybridRetrieval — V11-02 trace attribution", () => {
   });
 
   it("a tuner-style retrieverWeights override is labeled 'override', not 'inferred', and reports no profile field", async () => {
-    process.env["TL_RRF_FUSION"] = "1";
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     delete process.env["TL_BM25F_CANDIDATE"];
     setTraceEnabledForTest(true);
     const ws = buildWorkspace();
@@ -275,7 +267,6 @@ describe("applyHybridRetrieval — V11-02 no-gold false-positive discipline", ()
     process.env["TL_RRF_FUSION"] = "1";
     const noGoldQuery = "rotate the database encryption keys immediately";
 
-    delete process.env["TL_RRF_PROFILES"];
     const wsOff = buildWorkspace();
     const poolOff = floorAndNonFloorCandidates();
     await applyHybridRetrieval(
@@ -283,7 +274,7 @@ describe("applyHybridRetrieval — V11-02 no-gold false-positive discipline", ()
       poolOff,
     );
 
-    process.env["TL_RRF_PROFILES"] = "1";
+    process.env["TL_RRF_FUSION"] = "profiles";
     for (const profile of Object.values(TASK_PROFILES)) {
       const wsOn = buildWorkspace();
       const poolOn = floorAndNonFloorCandidates();

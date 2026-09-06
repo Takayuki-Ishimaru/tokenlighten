@@ -4,11 +4,9 @@
 
 Security fixes are provided for the latest released version of TokenLighten. Older releases may be asked to upgrade before a fix is evaluated.
 
-## Dependency audit status
+## Dependency updates
 
-For the v0.13.1 release candidate audited on 2026-08-30, both `npm audit --omit=dev` and the full `npm audit` reported 0 vulnerabilities.
-
-These counts are a dated snapshot rather than a statement that TokenLighten is free of vulnerabilities. Advisory data and dependency reachability can change. Users and contributors should rerun `npm audit --omit=dev` and, for source development, `npm audit` against the exact release or checkout they use.
+v0.14.0 includes dependency updates that address security issues. Advisory information can change after release. Users and contributors can run `npm audit --omit=dev` and, for source development, `npm audit` against the exact release or checkout they use.
 
 ## Reporting a vulnerability
 

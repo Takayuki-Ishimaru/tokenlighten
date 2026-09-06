@@ -250,6 +250,24 @@ describe("A.5.8 `diff` — A.9.2 row 8 (total_files) and row 9 (error -> refusal
     expect(matches["query"]).toBeUndefined();
   });
 
+  it("discloses capped untracked files as untracked_omitted on the wire", async () => {
+    const root = mkdir("diff-untracked-capped");
+    write(root, "README.md", "initial\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"], { cwd: root });
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: root });
+    for (let i = 0; i < 80; i += 1) {
+      write(root, `untracked/${String(i).padStart(3, "0")}-${"x".repeat(80)}.ts`, `export const V${i} = ${i};\n`);
+    }
+
+    const { body } = await call({ cwd: root, action: "diff" });
+    const matches = matchesOf(body, "diff");
+    expect(body["limit"]).toBeDefined();
+    expect(Number(matches["untracked_omitted"])).toBeGreaterThan(0);
+    expect((matches["files"] as Array<Record<string, unknown>>).every((file) => file["status"] === "created")).toBe(true);
+    expect((matches["files"] as unknown[]).length + Number(matches["untracked_omitted"])).toBe(matches["total_files"]);
+  });
+
   it("row 9: a failed `git diff` is a REFUSAL, not a success carrying an error string", async () => {
     // A repository with no commits: `git diff HEAD` fails on the revision, which
     // is the shape that produced §4.1's measured 7,576-byte response of which
@@ -368,6 +386,41 @@ describe("A.5.9 search.references — [R4-7] cursor placement and row 19's cause
     // Disjoint from `limit.omitted` (a three-value enum array) — this one is
     // a count map, and no `limit` is owed on an untruncated response.
     expect(body["limit"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FX-R1 (2026-09-03, round-18B review finding 5): `action:"references"` had
+// no not-found/outside-workspace refusal parity with `find`/`tree` at the
+// wire — see findReferences.spec.ts for the module-level regression; these
+// are the RPC-boundary pins proving the SAME shape reaches `callTool`.
+// ---------------------------------------------------------------------------
+describe("A.5.9 search.references — not-found / path-outside-workspace parity (FX-R1, finding 5)", () => {
+  it("a nonexistent path refuses not-found + did_you_mean, same shape find/tree already carry", async () => {
+    const root = mkdir("refs-notfound");
+    write(root, "src/a.ts", "export function fxr1NeedleFn() {}\n");
+
+    const { body, isError } = await call({ cwd: root, action: "references", query: "fxr1NeedleFn", path: "srcc" });
+    expect(isError).toBe(true);
+    expect(body["kind"]).toBe("refusal");
+    expect(body["code"]).toBe("not-found");
+    expect(body["did_you_mean"]).toBeDefined();
+    // No confidence-shaped success fields ride alongside the refusal.
+    expect(body["total"]).toBeUndefined();
+    expect(body["references"]).toBeUndefined();
+    expect(body["files"]).toBeUndefined();
+  });
+
+  it("an out-of-workspace path refuses path-outside-workspace, not a disclosed-but-unrefused omitted.outside_workspace", async () => {
+    const root = mkdir("refs-escape");
+    write(root, "src/a.ts", "export function fxr1EscapeFn() {}\n");
+    const outside = mkdir("refs-escape-outside");
+
+    const { body, isError } = await call({ cwd: root, action: "references", query: "fxr1EscapeFn", path: outside });
+    expect(isError).toBe(true);
+    expect(body["kind"]).toBe("refusal");
+    expect(body["code"]).toBe("path-outside-workspace");
+    expect(body["omitted"]).toBeUndefined();
   });
 });
 
@@ -572,5 +625,46 @@ describe("A.5.15 Refusal — `certificate_id` is CONDITIONALLY REQUIRED on retry
     }) as Record<string, unknown>;
     expect(refusal["retry"]).toBe("none");
     expect(refusal["certificate_id"]).toBe("cert-xyz");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FX-R1 (2026-09-03, round-18B review finding 10): the unknown-`action`
+// refusal carried no `field`/`keys` — a caller had nothing to mechanically
+// recover from, unlike every other out-of-enum/unknown-arguments refusal in
+// this server (§1.3.1(4)/(5)). Additive fix: `field:"action"` plus `keys`
+// naming the six canonical actions this dispatch chain accepts
+// (`SEARCH_FILES_CANONICAL_ACTIONS`, searchFamily.ts) — NOT the advertised
+// 4-value JSON-Schema `action.enum`, which stays untouched
+// (`exploreOffice.spec.ts` pins it). The seven undocumented aliases
+// (grep/search/list/def/definitions/usages/callers) stay accepted.
+// ---------------------------------------------------------------------------
+describe("search_files unknown action — field/keys (FX-R1, finding 10)", () => {
+  it("an unrecognized action refuses invalid-input with field:\"action\" and the six canonical actions as keys", async () => {
+    const root = mkdir("unknown-action");
+    write(root, "package.json", '{"name":"unknown-action","type":"module"}\n');
+
+    const { body, isError } = await call({ cwd: root, action: "bogus-action" });
+    expect(isError).toBe(true);
+    expect(body["kind"]).toBe("refusal");
+    expect(body["code"]).toBe("invalid-input");
+    expect(body["field"]).toBe("action");
+    const keys = body["keys"] as string[] | undefined;
+    expect(keys, JSON.stringify(body)).toBeDefined();
+    expect(keys).toEqual(["find", "symbols", "references", "diff", "locate", "tree"]);
+    // The seven undocumented aliases are deliberately NOT advertised as keys
+    // — an alias is a compatibility spelling, not a canonical value.
+    expect(keys).not.toContain("grep");
+    expect(keys).not.toContain("usages");
+  });
+
+  it("an undocumented alias (e.g. \"grep\") still resolves — this refusal only fires once no canonical name or alias matched", async () => {
+    const root = mkdir("alias-still-works");
+    write(root, "package.json", '{"name":"alias-still-works","type":"module"}\n');
+    write(root, "src/a.ts", "export const fxr1AliasToken = 1;\n");
+
+    const { body, isError } = await call({ cwd: root, action: "grep", query: "fxr1AliasToken" });
+    expect(isError).toBeFalsy();
+    expect(body["kind"]).toBe("search.matches");
   });
 });

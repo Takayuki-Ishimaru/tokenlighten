@@ -531,7 +531,15 @@ describe("loadGraphIndex — scip.binpb present", () => {
     expect(index!.definition("AlphaFunc")!.path).toBe("src/alpha.ts");
   });
 
-  it("tl-graph.json takes priority over scip.binpb when both exist", () => {
+  it("a valid scip.binpb takes priority over tl-graph.json when both exist (round-22B finding 1, HIGH, ruling (bb)/(z))", () => {
+    // Before this fix, TokenLighten's own auto-written tl-graph.json (step 10
+    // of loadOrBuildSourceIndex, written unconditionally on the FIRST ordinary
+    // read against any workspace) permanently shadowed a real, pre-existing,
+    // hand- or tool-provided scip.binpb — the round's SCIP-honesty machinery
+    // (hasCallEdges()===false, honest referencedBy) could never engage for the
+    // exact scenario it exists for. loadGraphIndex must now prefer a VALID
+    // scip.binpb unconditionally, so a stale tl-graph.json left over from
+    // before SCIP was ever introduced to a workspace cannot shadow it either.
     const ws = mkWorkspace();
     // tl-graph.json has "GraphPreferred" symbol; scip.binpb has "AlphaFunc".
     const tlGraph = {
@@ -550,9 +558,55 @@ describe("loadGraphIndex — scip.binpb present", () => {
 
     const index = loadGraphIndex(ws);
     expect(index).toBeDefined();
-    // Should use tl-graph.json (GraphPreferred defined, AlphaFunc not).
+    // Must use scip.binpb (AlphaFunc defined, GraphPreferred not) — and the
+    // SCIP-sourced index must report the SCIP capabilities (hasCallEdges()
+    // false, hasReferenceOccurrences() true), never the tl-graph.json reader's
+    // capabilities, proving the actual scip.binpb parser ran, not a coincidence.
+    expect(index!.definition("AlphaFunc")).toBeDefined();
+    expect(index!.definition("GraphPreferred")).toBeUndefined();
+    expect(index!.hasCallEdges?.()).toBe(false);
+    expect(index!.hasReferenceOccurrences?.()).toBe(true);
+  });
+
+  it("falls back to tl-graph.json when scip.binpb is absent (unchanged behavior)", () => {
+    const ws = mkWorkspace();
+    const tlGraph = {
+      version: 1,
+      symbols: [
+        {
+          name: "GraphPreferred",
+          definition: { path: "src/graph.ts", line: 1, column: 0 },
+          references: [],
+        },
+      ],
+      files: [],
+    };
+    writeFile(ws, ".tokenlighten/index/tl-graph.json", JSON.stringify(tlGraph));
+
+    const index = loadGraphIndex(ws);
+    expect(index).toBeDefined();
     expect(index!.definition("GraphPreferred")).toBeDefined();
-    expect(index!.definition("AlphaFunc")).toBeUndefined();
+  });
+
+  it("falls back to tl-graph.json when scip.binpb exists but is over the size cap (invalid-for-priority-purposes)", () => {
+    const ws = mkWorkspace();
+    const tlGraph = {
+      version: 1,
+      symbols: [
+        {
+          name: "GraphPreferred",
+          definition: { path: "src/graph.ts", line: 1, column: 0 },
+          references: [],
+        },
+      ],
+      files: [],
+    };
+    writeFile(ws, ".tokenlighten/index/tl-graph.json", JSON.stringify(tlGraph));
+    writeOversizeFile(ws, ".tokenlighten/index/scip.binpb", GRAPH_INDEX_MAX_BYTES + 1);
+
+    const index = loadGraphIndex(ws);
+    expect(index).toBeDefined();
+    expect(index!.definition("GraphPreferred")).toBeDefined();
   });
 });
 

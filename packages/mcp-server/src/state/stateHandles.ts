@@ -30,6 +30,8 @@
  */
 
 import { shaOfText } from "../util/handles.js";
+import { currentSessionLane } from "../util/laneKey.js";
+import { rawContractQueryForScope } from "../features/task-pack/taskContractStore.js";
 
 import type { HandleEntry } from "../util/handles.js";
 import { handleKeyRing } from "./handleKeys.js";
@@ -129,7 +131,32 @@ export function mintTaskHandle(workspaceRoot: string, state: TaskHandleState): s
       const freshUntil = existing.updatedAtMs + TASK_HANDLE_TTL_MS * 0.75;
       if (typeof token === "string" && Date.now() < freshUntil) {
         const check = validateHandleToken({ token, expectedPurpose: "task", workspaceRoot });
-        if (check.ok) return token;
+        if (check.ok) {
+          // FX-M1/B4: the freshness/validity check above only ever decided
+          // whether to keep the SAME token (the re-emit contract this
+          // function's own doc comment requires — `TaskRef.id` must survive
+          // re-packs of the same task). It never decided whether to keep the
+          // OLD DATA, but the code used to return here before any write,
+          // discarding the caller's just-computed `replay`/`coverage`/
+          // `ledgerDigest` and leaving `resolveTaskHandle` serving whatever
+          // the FIRST mint of this fingerprint recorded — for up to 18h
+          // (75% of the 24h TTL). Persist the caller's current state under
+          // the SAME token every time instead: identity stays stable (the
+          // hard guarantee), and the record a later `resolveTaskHandle`
+          // returns is never more than one mint stale. A lost CAS race
+          // (`put.ok === false`, some other call advanced this record
+          // between the `get` above and this `put`) is not an error here —
+          // the token itself is still valid and is returned regardless; the
+          // next mint call for this fingerprint will persist again.
+          store.put({
+            key,
+            purpose: "task",
+            data: { ...state, token },
+            ttlMs: TASK_HANDLE_TTL_MS,
+            expectedVersion: existing.version,
+          });
+          return token;
+        }
       }
     }
 
@@ -331,6 +358,169 @@ export function rehydrateHandleEntry(id: string, workspaceRoot: string): HandleE
   if (data.id !== id || typeof data.workspaceRoot !== "string") return undefined;
   if (data.workspaceRoot !== workspaceRoot) return undefined;
   return data;
+}
+
+// ---------------------------------------------------------------------------
+// Task-query-ref persistence (G2, 2026-09-04 — DESIGN-v0.15 §0.3(ll))
+// ---------------------------------------------------------------------------
+
+/**
+ * `state/session.ts`'s `activeTaskQuery` used to live ONLY in the in-process
+ * `WorkspaceSession` map: a plain, unpersisted field. Two things made that a
+ * live dead end rather than a session-scoped nicety:
+ *
+ *  - a `qref` (the natural-language query keyed by its own content hash) is
+ *    the ONLY way `resolveTaskPackQueryArg` (`server.ts`) can replay a
+ *    task_pack without the caller restating the query text; a server restart
+ *    or a reconnect against a fresh process left that map empty, so the
+ *    caller's own `qref` refused as `unknown-or-stale-qref` with nothing to
+ *    do but retype the request from scratch.
+ *  - the persisted task handle (`mintTaskHandle`/`resolveTaskHandle` above)
+ *    ALREADY carries a `replay` field that is exactly this qref — so the
+ *    task ledger surviving a restart while the qref ledger did not meant a
+ *    task handle's own prescribed recovery (`{qref: state.replay, task:
+ *    {epoch:"new"}}`) was itself an executable-looking call that silently
+ *    resolved to nothing post-restart.
+ *
+ * The fix mirrors the content-handle pattern immediately above rather than
+ * the MAC-authenticated task/continuation tokens: a `qref` is not a bearer
+ * capability (resolving it only reveals query text the caller already
+ * supplied to mint it), so a plain, unsigned store record is the honest
+ * shape — same posture as `recordHandleEntry`/`rehydrateHandleEntry`.
+ *
+ * R27 M1 (2026-09-04): the slot ITSELF holds no query text — this module's
+ * own header (PI-09 item 7) is explicit that persisted state keeps natural-
+ * language query text to the necessary minimum, and a THIRD verbatim copy
+ * sitting in this store's append-only `journal.ndjson` (every superseded
+ * value too, since the journal is never rewritten in place) is exactly the
+ * opposite of minimum. `persistQueryRef` writes only `ref` and a workspace-
+ * salted `queryHash`; `rehydrateQueryRef` recovers the text from the record
+ * `features/task-pack/taskContractStore.ts`'s `recordTaskContract` already
+ * persists for the same (workspace, lane) — the FIRST pack of a task epoch
+ * writes its full source query there as the requirement model's identity
+ * anchor, so a plain query/qref pack (no explicit `task_handle`, the default
+ * scope) already has exactly this text on disk before this slot is ever
+ * consulted. The recovered text is never trusted on the scope match alone:
+ * it is re-hashed and compared against `queryHash`, so a stale, evicted, or
+ * wrong-scope contract record fails closed exactly like an unresolvable ref
+ * — this module never fabricates a match. When no contract record survives
+ * (evicted, or the epoch never wrote one), rehydration honestly misses; the
+ * caller's own `unknown-or-stale-qref` recovery already echoes back whatever
+ * query text the SAME call supplied, so nothing upstream depends on this
+ * slot being the last copy standing.
+ *
+ * SINGLE SLOT, ON PURPOSE. `activeTaskQuery` in `session.ts` has always been
+ * one field, not a table: minting a new qref supersedes whatever the
+ * workspace's session was holding, and `taskEpoch:"new"` clears it outright
+ * (`clearTaskQueryRef`). The persisted record mirrors that exactly — ONE key
+ * per (workspace, lane), overwritten on every `rememberTaskQuery` and deleted
+ * on every `clearTaskQueryRef` — so a superseded or epoch-cleared qref is
+ * exactly as unresolvable after a restart as it is within one live process.
+ * Keying by ref instead (one row per minted qref) would let an OLD,
+ * already-superseded ref outlive its in-memory supersession purely because
+ * the disk write raced ahead of the next mint, silently reopening a task the
+ * caller (or the workspace's own epoch boundary) had already moved past.
+ *
+ * LANE-SCOPED. The physical store file is per-workspace, not per-lane, so the
+ * slot KEY folds in `currentSessionLane()` — otherwise two lanes sharing one
+ * workspace would hand each other's qref back, the exact cross-lane leak
+ * `util/handles.ts`'s `laneOf`/`canonicalKey` partition content handles to
+ * prevent.
+ */
+const QREF_SLOT_PREFIX = "qref-active";
+
+/** Persisted qref entries share the task ledger's restart horizon. */
+const QUERY_REF_TTL_MS = TASK_HANDLE_TTL_MS;
+
+function qrefSlotKey(): string {
+  const lane = currentSessionLane();
+  // Empty lane is the ordinary single-agent session: keep the historical
+  // (unsuffixed) key shape so every lane-less workspace's store gains no new
+  // key shape at all, matching `util/handles.ts`'s own "absent means no lane"
+  // convention.
+  return lane === "" ? QREF_SLOT_PREFIX : `${QREF_SLOT_PREFIX}:${lane}`;
+}
+
+/**
+ * Workspace-salted validation hash for a qref's query text — never used to
+ * RECOVER the text, only to confirm a candidate recovered elsewhere is the
+ * one this slot actually minted. Salted with `workspaceRoot` so identical
+ * query text in two workspaces hashes differently, matching every other
+ * cross-workspace boundary this store enforces.
+ */
+function qrefQueryHash(workspaceRoot: string, query: string): string {
+  return shaOfText(`${workspaceRoot}\u0000${query}`);
+}
+
+/**
+ * Persist (ref, queryHash) as the workspace+lane's single active qref slot,
+ * overwriting whatever the slot held before. Best-effort: a write failure (no
+ * store, read-only workspace) leaves the in-process session as the sole,
+ * pre-G2 authority for this call — never an error the caller sees.
+ *
+ * R27 M1: no query TEXT is written here — see the section header. `query` is
+ * still the parameter shape callers already pass (`rememberTaskQuery`'s own
+ * signature is unchanged); only its on-disk representation changed.
+ */
+export function persistQueryRef(workspaceRoot: string, ref: string, query: string): void {
+  if (ref === "" || query === "") return;
+  const store = stateStoreFor(workspaceRoot);
+  if (store === undefined || !store.available) return;
+  try {
+    store.put({
+      key: qrefSlotKey(),
+      purpose: "qref",
+      data: { ref, workspaceRoot, queryHash: qrefQueryHash(workspaceRoot, query) },
+      ttlMs: QUERY_REF_TTL_MS,
+    });
+  } catch {
+    /* best-effort, as above */
+  }
+}
+
+/**
+ * Restart recovery for `resolveTaskQueryRef`: consult the durable slot ONLY
+ * when the in-process session has none, and only for the workspace+lane the
+ * current call resolved against — re-asserted from the stored `workspaceRoot`
+ * field rather than trusted, same discipline as `rehydrateHandleEntry`. A
+ * `ref` that does not match the slot's CURRENT contents (superseded by a
+ * later `rememberTaskQuery`, or cleared by `taskEpoch:"new"`) is exactly as
+ * unresolvable as it would be against a live in-memory session — see the
+ * single-slot rationale above.
+ *
+ * R27 M1: the slot itself carries no text to return, only `queryHash`. The
+ * text comes from `taskContractStore.rawContractQueryForScope` — the same
+ * (workspace, lane) with no task handle, the default scope a plain
+ * query/qref pack writes under — and is accepted ONLY when it re-hashes to
+ * this slot's `queryHash`; anything else (no contract record survived, or one
+ * survived but hashes to something else) is exactly as unresolvable as a
+ * truly unknown ref.
+ */
+export function rehydrateQueryRef(workspaceRoot: string, ref: string): string | undefined {
+  if (ref === "") return undefined;
+  const store = stateStoreFor(workspaceRoot);
+  if (store === undefined || !store.available) return undefined;
+  const record = store.get(qrefSlotKey());
+  if (record === undefined || record.purpose !== "qref") return undefined;
+  const data = record.data;
+  if (data["ref"] !== ref) return undefined;
+  if (data["workspaceRoot"] !== workspaceRoot) return undefined;
+  if (typeof data["queryHash"] !== "string" || data["queryHash"] === "") return undefined;
+  const candidate = rawContractQueryForScope(workspaceRoot, { lane: currentSessionLane() });
+  if (candidate === undefined || candidate === "") return undefined;
+  if (qrefQueryHash(workspaceRoot, candidate) !== data["queryHash"]) return undefined;
+  return candidate;
+}
+
+/** Explicit epoch boundary, mirrored onto the durable slot. */
+export function clearPersistedQueryRef(workspaceRoot: string): void {
+  const store = stateStoreFor(workspaceRoot);
+  if (store === undefined || !store.available) return;
+  try {
+    store.delete(qrefSlotKey());
+  } catch {
+    /* best-effort, as above */
+  }
 }
 
 /** Installation identity is stable across restarts; exposed for diagnostics. */

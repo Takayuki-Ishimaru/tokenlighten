@@ -15,6 +15,7 @@ import type {
   TaskWorkspaceState,
   TaskWiringProfile,
   TaskPackSingleSiteUniqueMatchFastPath,
+  ToolCall,
 } from "@tokenlighten/types";
 import type { ContinuationPlan } from "../../util/continuation.js";
 import type { OoxmlVisualInventory } from "../../office/ooxmlVisuals.js";
@@ -196,7 +197,7 @@ export interface ArtifactTaskPackSectionEntry {
    */
   remaining_sections?: string[];
   /** Exact one-call fetch for `remaining_sections`, addressed by `handle`. */
-  next?: string;
+  next?: ToolCall;
   /** One-line truthful disclosure of what the budget cut and why. */
   note?: string;
 }
@@ -295,7 +296,24 @@ export interface TaskPackResult {
    * task-closing content).
    */
   tree?: string;
-  next?: string;
+  next?: ToolCall;
+  /** Directed literal relation whose grammar-bound source was exhaustively absent. */
+  literal_source_absence?: {
+    subject: string;
+    role_source: string;
+    scanned_paths: number;
+    /** Number of paths in the one shared ordinary-find primary universe. */
+    universe_paths: number;
+    /** Binds policy version, minimal scopes, paths, sizes, and mtimes. */
+    universe_fingerprint: string;
+    /** True only when every universe path was decodable and no hard walk gap occurred. */
+    universe_complete: boolean;
+    /** Minimal scope union used by both ordinary find and literal-first. */
+    scope: string;
+    /** Policy exclusions disclosed by the shared walk. */
+    excluded_paths: number;
+    destination_occurrences: number;
+  };
   /** DESIGN-v0.9 §8: stable per-concern coverage for multi_concern packs. */
   concerns?: ConcernCoverage[];
   /** Repository-observed lexical ties that bounded search cannot resolve. */
@@ -494,8 +512,6 @@ type ValidLang = McpLang;
 
 export interface TaskPackArgs {
   query?: string;
-  /** Server-derived trace join key. Internal only; never serialized or fingerprinted. */
-  evidenceShadowQref?: string;
   /**
    * C2: this call resolved its query from a `qref`, i.e. it is a REPLAY over an
    * already-certified working set rather than a freshly-typed request. Server-
@@ -520,6 +536,24 @@ export interface TaskPackArgs {
   credentialPassword?: string;
   /** Internal task-pack serving lane; never serialized or fingerprinted. */
   lane?: string;
+  /**
+   * DESIGN-v0.15-sf-intent-layers.md §4.1: `ALLOW_WRITE` (server.ts:452),
+   * threaded so `bindTaskProfile`/`extractStructuralConcerns` can gate "edit"
+   * disposition outright when write is not allowed. Server-derived, internal
+   * only; never serialized or fingerprinted. Omitted (`undefined`) is
+   * permissive (`true`) so a direct `buildTaskPack` call that predates this
+   * field — most unit tests — keeps its exact prior behavior.
+   */
+  writeAllowed?: boolean;
+  /**
+   * Canonical, server-resolved task identity for result-consumption state.
+   *
+   * This is the durable `task.id` / task-handle's underlying fingerprint, not
+   * the caller spelling and not a wire field.  It deliberately stays out of
+   * request fingerprints: it partitions the executed-next ledger while the
+   * call shape remains the same canonical protocol call.
+   */
+  taskBinding?: string;
   /** Internal task epoch reset marker; never serialized or fingerprinted. */
   taskEpoch?: string;
   /** Explicit task-shape hint. The server validates it and falls back safely. */

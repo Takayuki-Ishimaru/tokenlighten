@@ -636,7 +636,8 @@
           ],
           "scope": {
             "kind": "symbol"
-          }
+          },
+          "cwd": "$WS"
         }
       },
       "callers": {
@@ -645,7 +646,8 @@
           "action": "references",
           "queries": [
             "hotSym"
-          ]
+          ],
+          "cwd": "$WS"
         }
       }
     }

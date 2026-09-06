@@ -5,20 +5,72 @@ import {
   deriveCanonicalTaskDecision,
   discoveryBundleAdvisory,
   discoveryBundleNext,
+  semanticFrontierNextAllowed,
+  sanitizeSemanticFrontierNext,
 } from "../features/task-pack/canonicalDecision.js";
+import { annotateSemanticFrontierContinuation } from "../features/task-pack/semanticFrontier.js";
+
+function markOptional(result: any, path: string): void {
+  for (const surface of result.surfaces) if (surface.path !== path) surface.code = "--semantic-frontier";
+  annotateSemanticFrontierContinuation(result, "--semantic-frontier flag", true);
+}
 
 describe("discovery bundle next", () => {
+  it("leaves legacy partial projector records eligible when surfaces are absent", () => {
+    // Capability-gap projection deliberately supplies only contract fields;
+    // lack of a surface array is not proof of an optional lexical carrier.
+    expect(semanticFrontierNextAllowed({})).toBe(true);
+    expect(sanitizeSemanticFrontierNext({}, {
+      tool: "search_files", arguments: { action: "find", query: "missing-capability" },
+    } as any)).toEqual({ tool: "search_files", arguments: { action: "find", query: "missing-capability" } });
+  });
+
   it("emits the exact bounded qref task-pack bundle for known candidates", () => {
     const result = {
       mode: "task_pack", qref: "q-known", coverage: "partial", coverage_reason: "candidate-list",
       surfaces: [{ path: "src/a.ts" }, { path: "src/b.ts" }, { path: "src/a.ts" }], missing: [],
     } as any;
+    markOptional(result, "src/lexical-only.ts");
     expect(discoveryBundleNext(result)).toEqual({
       tool: "read_file", arguments: { mode: "task_pack", qref: "q-known", paths: ["src/a.ts", "src/b.ts"] },
     });
     expect(discoveryBundleAdvisory(result)).toBe(
       "advisory: bundled paths are limited to files already related by served candidates or evidence edges",
     );
+  });
+
+  it("excludes optional lexical surfaces from a candidate-list bundle", () => {
+    // This exercises guard-ON suppression semantics explicitly; the guard now
+    // defaults OFF (packages/mcp-server/src/util/flags.ts), so force it on for
+    // the duration of this assertion and restore whatever was there before.
+    const previousGuard = process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+    process.env["TL_SEMANTIC_FRONTIER_GUARD"] = "1";
+    try {
+      const result = {
+        mode: "task_pack", qref: "q-required-only", coverage: "partial", coverage_reason: "candidate-list",
+        surfaces: [
+          { path: "src/required-a.ts" },
+          { path: "src/lexical-only.ts", required: false, continuation_optional: true },
+          { path: "src/required-b.ts", required: true },
+        ], missing: [],
+      } as any;
+      markOptional(result, "src/lexical-only.ts");
+      expect(discoveryBundleNext(result)?.arguments["paths"])
+        .toEqual(["src/required-a.ts", "src/required-b.ts"]);
+    } finally {
+      if (previousGuard === undefined) delete process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+      else process.env["TL_SEMANTIC_FRONTIER_GUARD"] = previousGuard;
+    }
+  });
+
+  it("keeps a required remainder on wire evidence as the zoom affordance", async () => {
+    const { projectEvidence } = await import("../protocol/decisionWire.js");
+    expect(projectEvidence([{
+      path: "src/required.ts", handle: "h-required", required: true,
+      remaining_ranges: ["31-60"],
+    }])).toEqual([{
+      path: "src/required.ts", handle: "h-required", remaining: ["31-60"],
+    }]);
   });
 
   it("does not offer a bundle for a complete single-file pack", () => {
@@ -34,6 +86,36 @@ describe("discovery bundle next", () => {
       surfaces, missing: [],
     } as any);
     expect(next?.arguments["paths"]).toEqual(surfaces.slice(0, 8).map((s) => s.path));
+  });
+
+  it("sanitizes optional-only addresses across contract, continuation, and gap carriers while preserving legacy required", () => {
+    // Guard-ON suppression semantics; force the flag on for this assertion
+    // since it now defaults OFF (see flags.ts semanticFrontierGuardEnabled).
+    const previousGuard = process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+    process.env["TL_SEMANTIC_FRONTIER_GUARD"] = "1";
+    try {
+      const result = { mode: "task_pack", coverage: "partial", missing: [], surfaces: [
+        { path: "src/required.ts", handle: "h-required" },
+        { path: "src/optional.ts", handle: "h-optional", required: false, continuation_optional: true },
+        { path: "src/shared.ts", handle: "h-shared", required: false },
+        { path: "src/shared.ts", handle: "h-shared", required: true },
+      ] } as any;
+      markOptional(result, "src/optional.ts");
+      for (const call of [
+        { tool: "read_file", arguments: { paths: ["src/required.ts", "src/optional.ts", "src/shared.ts"] } },
+        { tool: "read_file", arguments: { handles: ["h-required", "h-optional", "h-shared"] } },
+        { tool: "read_file", arguments: { targets: [{ path: "src/optional.ts" }, { handle: "h-required" }, { handle: "h-shared" }] } },
+      ] as any[]) {
+        expect(sanitizeSemanticFrontierNext(result, call)?.arguments).not.toMatchObject({ path: "src/optional.ts" });
+        expect(JSON.stringify(sanitizeSemanticFrontierNext(result, call))).not.toContain("h-optional");
+        expect(JSON.stringify(sanitizeSemanticFrontierNext(result, call))).toContain("shared");
+      }
+      expect(sanitizeSemanticFrontierNext(result, { tool: "read_file", arguments: { path: "src/optional.ts" } } as any)).toBeUndefined();
+      expect(sanitizeSemanticFrontierNext(result, { tool: "search_files", arguments: { action: "find", query: "only-query" } } as any)).toBeDefined();
+    } finally {
+      if (previousGuard === undefined) delete process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+      else process.env["TL_SEMANTIC_FRONTIER_GUARD"] = previousGuard;
+    }
   });
 
   it("uses only graph endpoints when partial discovery has evidence relations", () => {
@@ -158,6 +240,40 @@ describe("discovery bundle next — read-only candidate list reaches the decisio
     // A discovery contract must not keep claiming a pending human choice.
     expect(contract["await_input_code"]).toBeUndefined();
     expect(canonicalTaskDecisionInvariantViolations(result)).toEqual([]);
+  });
+
+  it("does not turn optional partial evidence into a wire zoom or canonical document discovery", async () => {
+    // `projectEvidence` has no guardEnabled parameter — it always reads the
+    // live flag, which now defaults OFF (flags.ts semanticFrontierGuardEnabled).
+    // Force guard-ON for the duration of this suppression assertion.
+    const previousGuard = process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+    process.env["TL_SEMANTIC_FRONTIER_GUARD"] = "1";
+    try {
+      const { projectEvidence } = await import("../protocol/decisionWire.js");
+      const optionalSurface = {
+        path: "docs/supporting.md", handle: "h-optional", required: false, continuation_optional: true,
+        remaining_ranges: ["31-60"],
+      } as any;
+      annotateSemanticFrontierContinuation({ mode: "task_pack", coverage: "partial", missing: [], surfaces: [optionalSurface] } as any, "--semantic-frontier flag", true);
+      expect(projectEvidence([optionalSurface])).toEqual([{ path: "docs/supporting.md", handle: "h-optional" }]);
+
+      const optionalDocument = {
+        mode: "task_pack", coverage: "partial", surfaces: [{
+        path: "docs/supporting.md", handle: "h-optional", required: false, continuation_optional: true,
+          remaining_ranges: ["31-60"],
+        }], missing: [],
+        route: { action: "answer_from_handles", reason: "supporting", max_additional_tl_calls: 1 },
+        execution_contract: {
+          typestate: { phase: "awaiting-input", allowed_actions: ["request-user-input"], challenge_required_for: [] },
+          reason: "need a user choice",
+        },
+      } as any;
+      markOptional(optionalDocument, "docs/supporting.md");
+      expect(deriveCanonicalTaskDecision(optionalDocument)?.kind).toBe("await-input");
+    } finally {
+      if (previousGuard === undefined) delete process.env["TL_SEMANTIC_FRONTIER_GUARD"];
+      else process.env["TL_SEMANTIC_FRONTIER_GUARD"] = previousGuard;
+    }
   });
 
   it("the wire decision carries the bundle plus the standing bounded-paths advisory", async () => {

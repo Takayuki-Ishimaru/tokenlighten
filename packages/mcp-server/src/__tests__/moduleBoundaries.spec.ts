@@ -66,11 +66,13 @@ describe("module boundary compatibility", () => {
     // 2026-07-30 refusal-economy pass: a bare toolError with no path/handle
     // recovery hint still must not reach the wire as a zero-content dead end
     // (W2) — toolStructuredError routes every ok:false payload through
-    // supplyRefusalGuidance, which derives the generic task_pack fallback.
+    // supplyRefusalGuidance. R28-FIX (2026-09-05): the fallback is G2's
+    // taskPackRecoveryFor — retry:"new-task" + actionable prose, never the
+    // legacy `alternatives`/placeholder `next` (stripped by containsPlaceholder).
     expect(toolError("boom")).toEqual({
       content: [{
         type: "text",
-        text: "{\"ok\":false,\"error\":\"boom\",\"alternatives\":[{\"mode\":\"task_pack\"}],\"next\":{\"tool\":\"read_file\",\"arguments\":{\"query\":\"<restate the request verbatim>\"}}}",
+        text: "{\"ok\":false,\"error\":\"boom\",\"retry\":\"new-task\",\"remaining\":\"no working set survives this call — resend read_file with your original request text as query and task.epoch=\\\"new\\\" (canonical input; legacy mode is refused)\"}",
       }],
       isError: true,
     });

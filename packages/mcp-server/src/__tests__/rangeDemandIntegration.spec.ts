@@ -149,16 +149,6 @@ async function readRange(
   }));
 }
 
-async function searchReferences(
-  server: ServerHandle,
-  id: number,
-): Promise<Record<string, any>> {
-  return parseResult(await server.rpc(id, "tools/call", {
-    name: "search_files",
-    arguments: { action: "references", query: "target" },
-  }));
-}
-
 afterEach(() => {
   for (const server of servers.splice(0)) server.kill();
   for (const dir of tmpDirs.splice(0)) {
@@ -170,12 +160,11 @@ afterEach(() => {
   }
 });
 
-describe("served-range delivery and adaptive whole-file escalation", () => {
+describe("served-range delivery", () => {
   it("suppresses an unchanged repeated range while preserving its receipt", async () => {
     const workspace = makeWorkspace("dedupe");
     const server = startServer(workspace, {
       TL_SERVED_RANGE_LEDGER: "1",
-      TL_ADAPTIVE_WHOLE_FILE: "0",
     });
     servers.push(server);
     await server.initialize();
@@ -209,37 +198,10 @@ describe("served-range delivery and adaptive whole-file escalation", () => {
     }
   }, 30_000);
 
-  it("escalates the third non-contiguous demand through the ordinary full governor", async () => {
-    const workspace = makeWorkspace("adaptive");
-    const server = startServer(workspace, {
-      TL_SERVED_RANGE_LEDGER: "1",
-      TL_ADAPTIVE_WHOLE_FILE: "1",
-    });
-    servers.push(server);
-    await server.initialize();
-
-    const first = await readRange(server, 2, "1-20");
-    const second = await readRange(server, 3, "101-120");
-    const third = await readRange(server, 4, "201-220");
-
-    expect(first.served_range_ledger).toBeUndefined();
-    expect(second.served_range_ledger).toBeUndefined();
-    // v1 deletes `mode`/`fullFileExpansion`/`expanded_from`/`served_range_ledger`
-    // outright (Rule K + A.5.2's "has no v1 representation" preamble) — the
-    // structural fact an escalation-to-whole-file leaves on the wire is a
-    // `read.text` evidence entry whose range spans the entire file, with no
-    // `limit` (nothing withheld).
-    expect(third.kind).toBe("read.text");
-    expect(third.evidence?.[0]?.range).toBe("1-420");
-    expect(third.limit).toBeUndefined();
-    expect(third.evidence?.[0]?.body).toContain("VALUE_419");
-  }, 30_000);
-
   it("keeps six demands as six slices when ledger and escalation are ablated", async () => {
     const workspace = makeWorkspace("off");
     const server = startServer(workspace, {
       TL_SERVED_RANGE_LEDGER: "0",
-      TL_ADAPTIVE_WHOLE_FILE: "0",
     });
     servers.push(server);
     await server.initialize();
@@ -254,39 +216,6 @@ describe("served-range delivery and adaptive whole-file escalation", () => {
     expect(responses.every((response) => response.kind === "read.text")).toBe(true);
     expect(responses.every((response) => response.served_range_ledger === undefined)).toBe(true);
     expect(responses.at(-1)?.evidence?.[0]?.body).toContain("VALUE_419");
-  }, 30_000);
-});
-
-describe("search hop-1 integration", () => {
-  it("closes one reference hop with exact code and an edit handle", async () => {
-    const workspace = makeWorkspace("hop1-on");
-    const server = startServer(workspace, { TL_HOP1_CLOSURE: "1" });
-    servers.push(server);
-    await server.initialize();
-
-    const response = await searchReferences(server, 2);
-
-    expect(response.hop1).toEqual([
-      expect.objectContaining({
-        path: "src/calls.ts",
-        line: 1,
-        relation: "definition",
-        handle: expect.stringMatching(/^h[0-9a-z]+$/),
-        code: expect.stringContaining("export function target"),
-      }),
-    ]);
-  }, 30_000);
-
-  it("returns the legacy search envelope when hop-1 is ablated", async () => {
-    const workspace = makeWorkspace("hop1-off");
-    const server = startServer(workspace, { TL_HOP1_CLOSURE: "0" });
-    servers.push(server);
-    await server.initialize();
-
-    const response = await searchReferences(server, 2);
-
-    expect(response.files).toEqual(expect.any(Array));
-    expect(response.hop1).toBeUndefined();
   }, 30_000);
 });
 

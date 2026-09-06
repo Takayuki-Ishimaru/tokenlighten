@@ -35,9 +35,15 @@ import type {
   WorkspaceMarker,
 } from "@tokenlighten/types";
 import type { TaskExecutionContract } from "@tokenlighten/types";
+import type { TaskPackResult } from "../features/task-pack/model.js";
 
 import { emittableToolCall } from "./refusal.js";
-import { discoveryBundleAdvisory, discoveryBundleNext } from "../features/task-pack/canonicalDecision.js";
+import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor } from "../features/task-pack/canonicalDecision.js";
+import { semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
+import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
+import { noteSemanticFrontierDecisionSuppression, noteSemanticFrontierEvidenceSuppression, noteSemanticFrontierWithholding, semanticFrontierEvidenceWitnessId } from "./semanticFrontierTraceContext.js";
+import type { SemanticFrontierWithholdingMarks } from "./semanticFrontierTraceContext.js";
+import { isSemanticFrontierNamedJoin, wasSemanticFrontierBodyWithheld } from "../features/task-pack/sfWithholdingMarks.js";
 
 /**
  * §3.4.1: "bounded by the same cap 4 the current implementation applies". The
@@ -136,6 +142,12 @@ const EVIDENCE_KEPT_BEYOND_APPENDIX = ["sha", "symbol", "why", "likely_edits"] a
  * address §2.1.1's floor and A.8's E-8 both read. §2.1.1: `prior` is VERIFIABLE
  * — the named call is the task_pack call this response is the unchanged
  * re-issue of, which the caller made and holds.
+ *
+ * FX-M4 (P1): "which the caller ... holds" is the word this label's own
+ * consumer (`projectEvidence`, below) used to fail to check per row — see its
+ * `remaining.length === 0` guard on the fallback branch. This function still
+ * returns one candidate label for the whole receipt; per-row eligibility for
+ * it is decided at the call site below, from each row's own `remaining`.
  */
 export function packUnchangedPriorLabel(result: Record<string, unknown>): string | undefined {
   if (result["receipt"] !== "pack-unchanged" && result["pack_unchanged"] !== true) return undefined;
@@ -147,15 +159,73 @@ export function packUnchangedPriorLabel(result: Record<string, unknown>): string
 
 export function projectEvidence(surfaces: unknown, priorForBodyless?: string): Evidence[] {
   if (!Array.isArray(surfaces)) return [];
-  const evidence: Evidence[] = [];
+  // D5: the two flags are mutually exclusive — `flags.ts`'s
+  // `assertSemanticFrontierV2FlagConsistency`, invoked once from `server.ts`
+  // startup, throws before the server accepts a call otherwise — so at most
+  // one of these is ever true within a running process.
+  const guardActive = semanticFrontierGuardEnabled();
+  const demoteActive = !guardActive && sfDemoteEnabled();
+  // W-DEMOTE (§3.5): demoted rows are collected separately and appended
+  // AFTER every other row, so a supporting candidate is reachable but never
+  // competes with a required/primary row for front-of-array attention. Flag
+  // off (or the legacy guard on instead) leaves `demoted` empty forever, so
+  // the returned order is exactly the input order — byte-identical (§4.4).
+  const primary: Evidence[] = [];
+  const demoted: Evidence[] = [];
   for (const surface of surfaces) {
     if (surface === null || typeof surface !== "object" || Array.isArray(surface)) continue;
     const record = surface as Record<string, unknown>;
     const handle = typeof record["handle"] === "string" ? record["handle"] : "";
     if (handle === "") continue;
-    const remaining = Array.isArray(record["remaining_ranges"])
+    // `required` expresses edit/primary status, not continuation duty. Only
+    // the internal semantic-frontier annotation suppresses a remainder.
+    const suppressRemaining = guardActive
+      && isSemanticFrontierContinuationOptional(surface as TaskPackResult["surfaces"][number])
+      && Array.isArray(record["remaining_ranges"])
+      && record["remaining_ranges"].some((entry) => typeof entry === "string");
+    const remaining = (!suppressRemaining)
+      && Array.isArray(record["remaining_ranges"])
       ? record["remaining_ranges"].filter((entry): entry is string => typeof entry === "string")
       : [];
+    // W-DEMOTE: demote-not-remove. canonicalDecision.ts's
+    // `isSemanticFrontierDemotionEligible` is OPT-IN — it is only true for a
+    // surface that canonicalDecision.ts's marking pass affirmatively proved
+    // is SF-optional, not one of
+    // `snapshot.requiredAddresses` (I-2), and whose bytes the caller does not
+    // already hold (D4).
+    // THE BODY DOES NOT COME OFF HERE. `typeof record["code"] !== "string"`
+    // below is deliberate and stays: this projector never withholds a body it
+    // was handed, because every serve-booking producer upstream (server.ts's
+    // `recordTaskPackSurfaceReads`, `recordServedEditAdmissibility`, the
+    // cumulative served-surface log, `rememberCertifiedWorkingSet`,
+    // `recordPackServedRanges`) has already read `surface.code` as the truth
+    // about what this response sends. `canonicalDecision.ts`'s
+    // `applySemanticFrontierDemotion` is what strips the body and widens
+    // `remaining_ranges` to cover it; it runs at readCodeTaskPack.ts's
+    // PRE-BOOKING seam, inside `dedupeTrimAndPersist`, AFTER
+    // `finalizePackServeState` (the classifier needs the finalized
+    // `execution_contract`) and before `bookShippedPackServeState` — the one
+    // pass that books, and the one FX-J routed every `TL_SF_DEMOTE` producer
+    // through so the ordering claim holds for all of them rather than for
+    // some (round-13 finding 1, round-14 finding 1). FX-K made that pass
+    // unconditional, so the same claim now holds with every flag off, where
+    // `trimToCap` Phase E/F is what sheds the body (round-15 finding 1).
+    // The enumeration above is the set the pass owns, NOT every writer:
+    // `recordEpochTaskContract`, `reconcileEpochTaskContract` and (under
+    // `TL_COVERAGE_PACKER=v2`) `recordPriorPackObligations` also assert
+    // served-ness, from post-`trimToCap` but pre-seam positions the contract
+    // rebuild forces — see canonicalDecision.ts's W-DEMOTE header and the
+    // per-producer allowlist in `sfBookingOrderFence.spec.ts`. By the time an
+    // eligible surface reaches this loop it is already bodyless, and this gate
+    // simply ranks it into the supporting tail.
+    // `remaining.length > 0` here is never suppressed by `guardActive`
+    // (mutually exclusive above), so a demoted row's `remaining` is always
+    // the FULL, un-suppressed range — the exact repair for the legacy
+    // deletion this wave retires.
+    const demotable = demoteActive
+      && remaining.length > 0
+      && typeof record["code"] !== "string"
+      && isSemanticFrontierDemotionEligible(surface);
     const carried: Record<string, unknown> = {};
     for (const key of EVIDENCE_KEPT_BEYOND_APPENDIX) {
       const value = record[key];
@@ -164,25 +234,153 @@ export function projectEvidence(surfaces: unknown, priorForBodyless?: string): E
       if (Array.isArray(value) && value.length === 0) continue;
       carried[key] = value;
     }
-    evidence.push({
+    const projected: Evidence = {
       handle,
       // §3.3's addressing triple, plus [R4-2] / A.9.2 row 22: `role` SURVIVES
       // the collapse, and is never defaulted to "unknown" — absence tells a
       // caller that passed `surfaceRoles` that the selector did not bind.
       ...(typeof record["path"] === "string" ? { path: record["path"] } : {}),
       ...(typeof record["range"] === "string" ? { range: record["range"] } : {}),
-      ...(typeof record["code"] === "string" ? { body: record["code"] } : {}),
-      ...(typeof record["code_unchanged"] === "string"
+      // A demoted row is bodyless BY DEFINITION (§3.5.1's supporting tier):
+      // no `body`, no `prior` — just enough to stay addressable via `handle`
+      // + `remaining` in a follow-up call.
+      ...(!demotable && typeof record["code"] === "string" ? { body: record["code"] } : {}),
+      // FX-M4 (P1, 2026-09-03): the fallback branch used to fire for EVERY
+      // code-less, non-`code_unchanged` row on a `pack-unchanged` receipt,
+      // regardless of whether THIS row's bytes were ever shipped — a
+      // byte-cap-stripped row (readCodeTaskPack.ts's `trimToCap` Phase E)
+      // that never carried a body got the same "you already hold this"
+      // `prior` claim as a row that genuinely did. `remaining.length === 0`
+      // is the fix: `compactReceiptFromRecord`'s `surfaceRangeShipped` check
+      // (the ledger, not the record's own self-report) is the ONLY producer
+      // that stamps `remaining_ranges` on a compact-receipt row, and it does
+      // so exactly for a row the ledger cannot prove was shipped — so a row
+      // carrying `remaining` here has an unserved window by construction and
+      // must not also claim `prior`. A row with no `remaining` is unaffected
+      // (byte-identical to before).
+      ...(!demotable && typeof record["code_unchanged"] === "string"
         ? { prior: record["code_unchanged"] }
-        : priorForBodyless !== undefined && typeof record["code"] !== "string"
+        : !demotable && priorForBodyless !== undefined && typeof record["code"] !== "string" && remaining.length === 0
           ? { prior: priorForBodyless }
           : {}),
       ...(remaining.length > 0 ? { remaining } : {}),
       ...(typeof record["role"] === "string" ? { role: record["role"] as SurfaceRole } : {}),
       ...carried,
-    });
+    };
+    if (suppressRemaining) noteSemanticFrontierEvidenceSuppression(projected as unknown as Record<string, unknown>);
+    // FX-R3d (D10): carry the PRODUCER's own record of who withheld this
+    // row's body forward to the funnel exit, keyed by the projected row's own
+    // addressing triple so `protocol/envelope.ts` can intersect it with the
+    // final wire. Publishing is unconditional on what the row ended up
+    // carrying — the envelope decides whether it actually shipped bodyless —
+    // and gated on `demoteActive` so the legacy/guard/flag-off arms emit
+    // nothing and their counters stay absent (§4.4).
+    //
+    // FX-OH F2 (2026-09-04) — THESE MARKS HAVE A SECOND CONSUMER NOW.
+    // `readFamily.ts`'s `nextTargetsWithheldFrontierRow` reads the same two
+    // sets to refuse promoting a withheld SUPPORTING/caller-named row to the
+    // response-level `limit.next`. That is why the marks are published for
+    // EVERY such row here rather than only for the ones a counter would need:
+    // measurement and the `limit` degrade are two readings of one fact, and a
+    // second, independently-derived predicate over wire SHAPE is exactly the
+    // class of defect D10 retired. Still gated on `demoteActive`, so the
+    // flag-off wire keeps both the empty counters and the untouched `limit`.
+    if (demoteActive) {
+      const projectedRecord = projected as unknown as Record<string, unknown>;
+      if (wasSemanticFrontierBodyWithheld(surface)) noteSemanticFrontierWithholding("demoted", projectedRecord);
+      if (isSemanticFrontierNamedJoin(surface)) noteSemanticFrontierWithholding("named", projectedRecord);
+    }
+    (demotable ? demoted : primary).push(projected);
   }
-  return evidence;
+  return demoted.length > 0 ? [...primary, ...demoted] : primary;
+}
+
+// ---------------------------------------------------------------------------
+// W-DEMOTE (§6 P-2) — re-suppression / demotion counters.
+//
+// WHAT THESE COUNT, AND WHY IT IS NOT THE WIRE SHAPE (FX-R3d, D10,
+// 2026-09-04). `demoted_count` used to be read off the SHAPE of the projected
+// rows: no `body`, no `prior`, a non-empty `remaining` ⇒ "demoted". That
+// definition cannot tell a body W-DEMOTE withheld from a body some OTHER
+// mechanism never sent, and after D8 (FX-R3c) the difference became routine —
+// a caller-named file joins the frontier bodyless whenever it exceeds the
+// join's inline bound or the pack's byte cap. On the sealed SF05 replay
+// exactly that happened (a 1514-line caller-named document shipping as
+// `remaining:["1-1514"]`): the attestation read `demoted_count:1,
+// committed:true` while `applySemanticFrontierDemotion` had withheld ZERO
+// bodies. Since `committed` is the engagement signal for the deterministic v2
+// gate, the smoke floor and the paid A/B, shape-based counting INFLATED
+// engagement with non-demotions. That is a measurement-honesty defect, and it
+// is fixed here rather than tuned around.
+//
+// The rule now: only rows the demotion pass ITSELF marked
+// (`features/task-pack/sfWithholdingMarks.ts`, set inside
+// `applySemanticFrontierDemotion`) can count, and only if the FINAL shipped
+// wire still shows them bodyless.
+//   - a marked row that ships bodyless  -> counted;
+//   - a marked row that ends up with a body or a `prior` (force_serve, a
+//     receipt restatement, any later re-serve) -> NOT counted;
+//   - an unmarked bodyless row -> NEVER counted, whatever its shape.
+//
+// `re_suppression_count` (I-2/D4) keeps its role as the INDEPENDENT invariant
+// witness, and is now scoped to marked rows too: a row this pass withheld
+// whose address the same wire simultaneously proves the caller holds — a body
+// or a `prior` for the same path on some other row — is a re-suppression. That
+// is the wire-observable signature of the intra-pack residency defect D3(b)
+// fixed (live: `drv_baro.h` shipping a bodied `1-49` row beside a demoted
+// `1-23` row). It must be 0; it is measured, never assumed.
+//
+// `withheld_named_count` is the residual the old definition used to hide
+// inside `demoted_count`: rows D8's caller-named frontier join minted that
+// ship bodyless (past its inline bound or `trimToCap` Phase E) and that
+// W-DEMOTE did not touch. It stays visible — an unserved caller-named
+// address is worth seeing — without polluting the engagement signal.
+//
+// EXEMPTNESS IS STILL READ FROM THE WIRE ALONE. `exemptPaths` is supplied by
+// the caller (`protocol/envelope.ts`) and derived from the same observed
+// evidence array, never from ledger/snapshot state, so this function stays
+// what it always was: the independent check, computed without re-deriving
+// eligibility. Only its INPUT set changed — a mark, which the producer
+// asserts, replaces a shape, which anything could accidentally wear.
+// ---------------------------------------------------------------------------
+
+export interface SemanticFrontierDemotionCounters {
+  /** Rows `applySemanticFrontierDemotion` withheld and the wire still ships bodyless. */
+  readonly demotedCount: number;
+  /** Counted demotions whose `path` is in `exemptPaths`. Must be 0 (I-2/D4). */
+  readonly reSuppressionCount: number;
+  /** Caller-named D8 rows shipped bodyless that W-DEMOTE did not demote. */
+  readonly withheldNamedCount: number;
+}
+
+/** True when the FINAL wire row carries no bytes and no prior-held claim. */
+function shipsBodyless(entry: Evidence): boolean {
+  return entry.body === undefined && entry.prior === undefined;
+}
+
+export function semanticFrontierDemotionCounters(
+  evidence: readonly Evidence[],
+  exemptPaths: ReadonlySet<string>,
+  marks: SemanticFrontierWithholdingMarks,
+): SemanticFrontierDemotionCounters {
+  let demotedCount = 0;
+  let reSuppressionCount = 0;
+  let withheldNamedCount = 0;
+  for (const entry of evidence) {
+    if (!shipsBodyless(entry)) continue;
+    const id = semanticFrontierEvidenceWitnessId(entry as unknown as Record<string, unknown>);
+    if (marks.demoted.has(id)) {
+      demotedCount += 1;
+      if (entry.path !== undefined && exemptPaths.has(entry.path)) reSuppressionCount += 1;
+      continue;
+    }
+    // A caller-named row is only reported here when W-DEMOTE did not demote
+    // it; the `continue` above makes the two counts disjoint by construction.
+    if (marks.named.has(id) && entry.remaining !== undefined && entry.remaining.length > 0) {
+      withheldNamedCount += 1;
+    }
+  }
+  return { demotedCount, reSuppressionCount, withheldNamedCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -296,14 +494,28 @@ function projectCertificate(
   contract: TaskExecutionContract,
   result: Record<string, unknown>,
 ): CertificateRef | undefined {
-  const id = contract.readiness_certificate?.id ?? contract.typestate.certificate_id;
+  const literalAbsenceSubject = decisionGradeLiteralAbsenceSubject(
+    result as unknown as Pick<import("../features/task-pack/model.js").TaskPackResult, "coverage" | "literal_source_absence">,
+    contract,
+  );
+  const boundId = contract.readiness_certificate?.id ?? contract.typestate.certificate_id;
+  const id = boundId ?? (literalAbsenceSubject === undefined
+    ? undefined
+    : `ready-literal-absence:${contract.semantic_closure?.closure_id ?? literalAbsenceSubject}`);
   if (typeof id !== "string" || id === "") return undefined;
   if (contract.readiness_certificate?.id !== undefined
     && contract.typestate.certificate_id !== undefined
     && contract.readiness_certificate.id !== contract.typestate.certificate_id) return undefined;
-  const obligations = (contract.readiness_certificate?.obligations ?? [])
+  const certificateObligations = (contract.readiness_certificate?.obligations ?? [])
     .map((obligation) => obligation.id)
     .filter((value): value is string => typeof value === "string" && value !== "");
+  const absenceObligations = literalAbsenceSubject === undefined
+    ? []
+    : (contract.evidence_model?.claims ?? [])
+        .filter((claim) => claim.status === "supported")
+        .map((claim) => claim.id)
+        .filter((value): value is string => typeof value === "string" && value !== "");
+  const obligations = certificateObligations.length > 0 ? certificateObligations : absenceObligations;
   if (obligations.length === 0) return undefined;
   // A.2.4: the marker is the state the certificate was PROVED against, so the
   // contract's own copy is the authority. The pack's top-level `workspace_state`
@@ -577,7 +789,36 @@ function projectCandidates(
   evidence: readonly Evidence[],
   awaitCode: AwaitInputCode,
 ): Candidate[] {
-  if (result["coverage_reason"] !== "candidate-list" && awaitCode !== "choose-candidate") return [];
+  // D9 (FX-R3c, ruling (cc)): the AMBIGUOUS-BASENAME choice. FX-R3b already
+  // put the same-basename matches on the concern (`SfStructuralConcern
+  // .candidates`) when a caller-typed filename resolved to several files and
+  // no co-mentioned family token disambiguated it; §10.0's arbiter now
+  // surfaces them, and D8's frontier join makes each one an addressable row of
+  // THIS response — so an `await_input` that would otherwise carry neither
+  // `next` nor `candidates` can name the choice it is actually asking about.
+  // Ordered strictly BELOW the historical gate, so every pack that already
+  // produced candidates produces byte-identical ones.
+  if (result["coverage_reason"] !== "candidate-list" && awaitCode !== "choose-candidate") {
+    const named = sfAwaitInputCandidatePathsFor(result);
+    if (named.length === 0) return [];
+    const rowFor = new Map<string, Evidence>();
+    for (const entry of evidence) {
+      if (entry.path !== undefined && !rowFor.has(entry.path)) rowFor.set(entry.path, entry);
+    }
+    const chosen: Candidate[] = [];
+    for (const path of named) {
+      const row = rowFor.get(path);
+      // Only a row THIS response actually carries can be chosen between: a
+      // path with no handle is not an address the caller can act on.
+      if (row === undefined) continue;
+      chosen.push({
+        path,
+        handle: row.handle,
+        ...(row.role !== undefined ? { kind: row.role } : {}),
+      });
+    }
+    return chosen;
+  }
   const candidates: Candidate[] = [];
   for (const entry of evidence) {
     if (entry.path === undefined) continue;
@@ -611,8 +852,17 @@ export function answerFloorHolds(
   // there be ONE definition of the floor instead of a typed one and a
   // hand-rolled copy — `Evidence[]` still satisfies it, structurally.
   evidence: readonly { readonly body?: string; readonly prior?: string }[],
+  certificate?: {
+    readonly obligations?: readonly string[];
+    readonly workspace?: { readonly inventory_complete?: boolean };
+  },
 ): boolean {
-  return evidence.some((entry) => entry.body !== undefined || entry.prior !== undefined);
+  if (evidence.some((entry) => entry.body !== undefined || entry.prior !== undefined)) return true;
+  const obligations = certificate?.obligations;
+  return certificate?.workspace?.inventory_complete === true
+    && Array.isArray(obligations)
+    && obligations.length > 0
+    && obligations.some((id) => id.startsWith("literal-source-absent:") && id.length > "literal-source-absent:".length);
 }
 
 /**
@@ -681,6 +931,120 @@ function firstUnconsumed(
 }
 
 /**
+ * A literal source cohort is one indivisible discovery obligation: every
+ * exact witness must be served before an edit can be prepared.  Its contract
+ * continuation therefore outranks an advisory qref bundle.  The bundle is a
+ * useful generic re-pack axis, but it cannot stand in for the omitted exact
+ * witness and previously re-opened the same generic pack indefinitely.
+ */
+function literalCohortContinuation(
+  result: Record<string, unknown>,
+  contract: TaskExecutionContract | undefined,
+): ToolCall | undefined {
+  const missing = result["missing"];
+  return Array.isArray(missing) && missing.includes("source-cohort-remaining")
+    ? discoverNext(contract, result)
+    : undefined;
+}
+
+/** A continuation before/after the guard, retained only while choosing wire next. */
+interface SemanticFrontierNextCandidate {
+  readonly raw: ToolCall | undefined;
+  readonly guarded: ToolCall | undefined;
+  readonly suppressionReason: string;
+}
+
+function sameToolCall(left: ToolCall | undefined, right: ToolCall | undefined): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function firstProgressingIndex(
+  candidates: readonly SemanticFrontierNextCandidate[],
+  consumed: ((call: ToolCall) => boolean) | undefined,
+  key: "raw" | "guarded",
+): number | undefined {
+  const index = candidates.findIndex((candidate) => {
+    const call = candidate[key];
+    return call !== undefined && consumed?.(call) !== true;
+  });
+  return index < 0 ? undefined : index;
+}
+
+/**
+ * Project the ranked discovery candidates once, and attribute suppression only
+ * when it changes the final wire decision.  Helper calls stay pure: a loser,
+ * an already consumed candidate, or an advisory probe must never fabricate a
+ * commit merely because it noticed an optional carrier.
+ */
+function projectSemanticFrontierNext(
+  result: Record<string, unknown>,
+  contract: TaskExecutionContract,
+  consumed: ((call: ToolCall) => boolean) | undefined,
+): ToolCall | undefined {
+  const taskResult = result as unknown as TaskPackResult;
+  const guardEnabled = semanticFrontierGuardEnabled();
+  const allowed = semanticFrontierNextAllowed({
+    surfaces: Array.isArray(result["surfaces"]) ? result["surfaces"] as TaskPackResult["surfaces"] : [],
+  }, guardEnabled);
+  const guarded = (raw: ToolCall | undefined): ToolCall | undefined =>
+    !guardEnabled ? raw : allowed ? sanitizeSemanticFrontierNext(taskResult, raw, true) : undefined;
+  const rawLiteral = sanitizeSemanticFrontierNext(taskResult, literalCohortContinuation(result, contract), false);
+  const rawBundle = discoveryBundleNext(taskResult, false);
+  const rawContract = sanitizeSemanticFrontierNext(taskResult, discoverNext(contract, result), false);
+  const rawGap = sanitizeSemanticFrontierNext(taskResult, gapNamedNext(contract), false);
+  // D8 (FX-R3c, DC2) NOTE: §10.0 names `selectCanonicalNext` the single arbiter
+  // of `decision.next`, but `rawBundle` still outranks `rawContract` here, so
+  // on a CANDIDATE-LIST pack the wire keeps offering the discovery bundle even
+  // when the arbiter named a caller-named address the bundle omits. FX-R3c
+  // deliberately did NOT reorder this list: the ordering is wire-visible for
+  // every SF-flagged pack, the sealed SF05 shape is already repaired without it
+  // (`rawContract` beats `rawGap` and `servedEvidenceZoom`, which is what that
+  // replay fell through to), and a ranking change with no failing case behind
+  // it is a lever, not a fix. Left as an open item with the evidence attached.
+  const candidates: SemanticFrontierNextCandidate[] = [
+    { raw: rawLiteral, guarded: guarded(rawLiteral), suppressionReason: "continuation-target" },
+    {
+      raw: rawBundle,
+      guarded: !guardEnabled ? rawBundle : allowed ? discoveryBundleNext(taskResult, true) : undefined,
+      suppressionReason: "discovery-bundle",
+    },
+    { raw: rawContract, guarded: guarded(rawContract), suppressionReason: "continuation-target" },
+    { raw: rawGap, guarded: guarded(rawGap), suppressionReason: "continuation-target" },
+  ];
+  const rawWinner = firstProgressingIndex(candidates, consumed, "raw");
+  const guardedWinner = firstProgressingIndex(candidates, consumed, "guarded");
+  const noteFinalDecisionEffect = (reason: string): void => {
+    noteSemanticFrontierDecisionSuppression(
+      reason,
+      guardedWinner === undefined ? undefined : candidates[guardedWinner]!.guarded,
+    );
+  };
+  if (guardEnabled && guardedWinner !== undefined) {
+    const winner = candidates[guardedWinner]!;
+    // (a) The call we actually put on the wire was changed by the guard.
+    if (!sameToolCall(winner.raw, winner.guarded)) {
+      noteFinalDecisionEffect(winner.suppressionReason);
+    }
+    // (b) A higher-ranked usable call was removed or turned into one this lane
+    // already consumed, so the winner (rather than a mere loser) changed.
+    if (rawWinner !== guardedWinner) {
+      for (let index = 0; index < guardedWinner; index += 1) {
+        const candidate = candidates[index]!;
+        if (candidate.raw !== undefined
+          && consumed?.(candidate.raw) !== true
+          && (candidate.guarded === undefined || consumed?.(candidate.guarded) === true)) {
+          noteFinalDecisionEffect(candidate.suppressionReason);
+        }
+      }
+    }
+  } else if (guardEnabled && rawWinner !== undefined) {
+    // The guard changed a progress-capable winner into await-input.
+    noteFinalDecisionEffect(candidates[rawWinner]!.suppressionReason);
+  }
+  return guardedWinner === undefined ? undefined : candidates[guardedWinner]!.guarded;
+}
+
+/**
  * §2.1's one-to-one projection of `CanonicalTaskDecisionKind` onto the wire
  * union, WITH §2.1.1's coupling rule applied.
  *
@@ -703,12 +1067,15 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   // R1: the ORDER is unchanged; what is new is that a candidate this lane has
   // already spent is skipped rather than emitted, so the precedence now reads
   // "the highest-ranked call that can still make progress".
-  const next = firstUnconsumed(
-    consumed,
-    discoveryBundleNext(result as never),
-    discoverNext(contract, result),
-    gapNamedNext(contract),
-  );
+  let nextComputed = false;
+  let next: ToolCall | undefined;
+  const nextForDecision = (): ToolCall | undefined => {
+    if (!nextComputed) {
+      next = projectSemanticFrontierNext(result, contract, consumed);
+      nextComputed = true;
+    }
+    return next;
+  };
   // R1: the same rule for the restoring fallback the degrade arms use — a zoom
   // of a window this lane already re-read is a round trip charged for no bytes,
   // which is the condition `servedEvidenceZoom`'s own contract already forbids.
@@ -720,7 +1087,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     const certificate = projectCertificate(contract, result);
     if (certificate !== undefined) {
       if (canonicalKind === "act-answer") {
-        if (answerFloorHolds(evidence)) return { kind: "act.answer", certificate };
+        if (answerFloorHolds(evidence, certificate)) return { kind: "act.answer", certificate };
       } else {
         const frontier = projectFrontier(contract, evidence, result);
         // [R5-23] / ruling 6: the create target is the SECOND arm of the floor,
@@ -759,7 +1126,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     // `next ?? servedEvidenceZoom(evidence)`. Apply the identical, already
     // load-bearing fallback here so a certificate-floor breach is never worse
     // than "re-read a window you already have" when one is available.
-    const restoring = next ?? restoringZoom();
+    const restoring = nextForDecision() ?? restoringZoom();
     if (restoring !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);
@@ -769,6 +1136,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   }
 
   if (canonicalKind === "discover") {
+    const next = nextForDecision();
     if (next !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);
@@ -819,7 +1187,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     const certificate = projectCertificate(contract, result);
     if (certificate !== undefined) {
       if (contract.next_action === "answer") {
-        if (answerFloorHolds(evidence)) return { kind: "act.answer", certificate };
+        if (answerFloorHolds(evidence, certificate)) return { kind: "act.answer", certificate };
       } else {
         const frontier = projectFrontier(contract, evidence, result);
         const createTarget = projectCreateTarget(result);
@@ -835,7 +1203,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
         }
       }
     }
-    const restoring = next ?? restoringZoom();
+    const restoring = nextForDecision() ?? restoringZoom();
     if (restoring !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);
@@ -866,12 +1234,13 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   // disclosure travels with it instead of being dropped by the gap-less
   // `await_input` member.
   // -------------------------------------------------------------------------
-  if (awaitCode === "no-grounded-call-remains" && next !== undefined) {
+  const noGroundedNext = awaitCode === "no-grounded-call-remains" ? nextForDecision() : undefined;
+  if (noGroundedNext !== undefined) {
     const gaps = projectGaps(contract);
     const advisory = discoveryBundleAdvisory(result as never);
     return {
       kind: "discover",
-      next,
+      next: noGroundedNext,
       ...(advisory !== undefined ? { advisory } : {}),
       ...(gaps.length > 0 ? { gaps } : {}),
     };
@@ -916,7 +1285,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   // claimed a choice — is unreachable from here in either direction.
   // -------------------------------------------------------------------------
   if (awaitCode === "choose-candidate" && candidates.length === 0) {
-    const restoring = next ?? restoringZoom();
+    const restoring = nextForDecision() ?? restoringZoom();
     if (restoring !== undefined) {
       const gaps = projectGaps(contract);
       const advisory = discoveryBundleAdvisory(result as never);

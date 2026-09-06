@@ -15,6 +15,7 @@
  */
 
 import * as fs from "fs";
+import type { ToolCall } from "@tokenlighten/types";
 import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
@@ -23,7 +24,7 @@ import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 export type AppendUnionMemberResult =
   | { ok: true; path: string; lines: string; delta: string }
-  | { ok: false; reason: string; next?: string };
+  | { ok: false; reason: string; next?: ToolCall; detail?: string };
 
 /** Escape a string to be safe inside a TypeScript string-literal regex. */
 function escapeForRegex(s: string): string {
@@ -122,21 +123,25 @@ export async function applyAppendUnionMember(
 
   // TypeScript only.
   if (lang && lang !== "ts" && lang !== "js") {
-    return { ok: false, reason: "intent-lang-unsupported", next: "edit_file search=... replace=..." };
+    return { ok: false, reason: "intent-lang-unsupported", detail: "Use edit_file with an exact search/replace edit for this language." };
   }
   // For non-TS extension files when lang is not specified, check the extension.
   if (relPath && !lang) {
     const ext = relPath.split(".").pop()?.toLowerCase();
     if (ext && ext !== "ts" && ext !== "tsx" && ext !== "js" && ext !== "jsx" && ext !== "mts" && ext !== "cts") {
-      return { ok: false, reason: "intent-lang-unsupported", next: "edit_file search=... replace=..." };
+      return { ok: false, reason: "intent-lang-unsupported", detail: "Use edit_file with an exact search/replace edit for this language." };
     }
   }
 
   if (!symbolName) {
-    return { ok: false, reason: "intent-unsupported", next: `read_file mode=slice handle=${handleId}` };
+    return {
+      ok: false,
+      reason: "intent-unsupported",
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+    };
   }
   if (!target || target.trim() === "") {
-    return { ok: false, reason: "intent-unsupported", next: "provide target member name" };
+    return { ok: false, reason: "intent-unsupported", detail: "provide target member name" };
   }
 
   if (looksLikeSecretFile(relPath)) {
@@ -165,7 +170,11 @@ export async function applyAppendUnionMember(
     rawMode = statReadTargetSync(realPath, workspace).mode;
     raw = fs.readFileSync(realPath, "utf8");
   } catch {
-    return { ok: false, reason: "intent-unsupported", next: `read_file mode=slice handle=${handleId}` };
+    return {
+      ok: false,
+      reason: "intent-unsupported",
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+    };
   }
 
   const parsed = parseUnionTypeAlias(raw, symbolName);
@@ -173,7 +182,7 @@ export async function applyAppendUnionMember(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: `read_file mode=slice handle=${handleId}`,
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -182,7 +191,7 @@ export async function applyAppendUnionMember(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: `${symbolName} already contains member "${target}"`,
+      detail: `${symbolName} already contains member "${target}"`,
     };
   }
 
@@ -200,7 +209,7 @@ export async function applyAppendUnionMember(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: `write failed: ${(err as Error).message}`,
+      detail: `write failed: ${(err as Error).message}`,
     };
   }
 

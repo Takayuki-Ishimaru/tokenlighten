@@ -1,18 +1,20 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.13.1.
+This directory contains the public documentation for TokenLighten v0.14.0.
 
 ## Start here
 
 - [Getting started](getting-started.md) — install, build, and set up a workspace.
-- [MCP tools](mcp-tools.md) — the three tools and canonical v0.13 workflow.
+- [MCP tools](mcp-tools.md) — the three tools and canonical v0.14 workflow.
 - [VS Code extension](vscode-extension.md) /
   [日本語](vscode-extension.ja.md) — install and diagnose the VSIX.
 - [Language support](language-support.md) — languages, formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
-- [GitHub Release v0.13.1](github-release-v0.13.1.md) — reliability,
-  compatibility, and benchmark disclosure.
+- [GitHub Release v0.14.0](github-release-v0.14.0.md) — canonical
+  continuations, recovery, compatibility, and known limitations.
+- [Historical GitHub Release v0.13.1](github-release-v0.13.1.md) —
+  reliability update for concurrent agents and canonical request shapes.
 - [Historical GitHub Release v0.13.0](github-release-v0.13.0.md) — proof
   completion and canonical request surface.
 - [Historical GitHub Release v0.12.1](github-release-v0.12.1.md) — maintenance
@@ -23,9 +25,8 @@ This directory contains the public documentation for TokenLighten v0.13.1.
 
 ## Release scope
 
-The v0.13.1 public release includes the CLI, MCP server, selected developer
-source/tests, and VS Code extension. The desktop application and private
-benchmark harness are excluded.
+The v0.14.0 public release includes the CLI, MCP server, selected developer
+source/tests, and VS Code extension. The desktop application is not included.
 
 TokenLighten is source-available, not OSI-approved open source. See
 [Licensing](licensing.md) before redistribution or product integration.

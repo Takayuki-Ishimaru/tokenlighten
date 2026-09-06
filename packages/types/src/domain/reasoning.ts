@@ -131,6 +131,23 @@ export type ObligationNode = {
   /** Dependency edges: this node cannot close until each named node has closed. */
   blockedBy: string[];
   predicate: EvidencePredicate;
+  /**
+   * What the caller wants DONE with this obligation, when a request expressed
+   * one (DESIGN-v0.15-semantic-frontier-plan.md §3.2.1). It is a disposition,
+   * not a kind: it never decides WHETHER the node closes, only what the next
+   * act on it would be, so an absent value is fully meaningful ("unstated").
+   *
+   * Optional and internal — this is a domain type, not a wire type, and adding
+   * it changes no response byte. It DOES enter `stateHash` via `obligations`,
+   * which is correct: a node whose disposition changed calls for a different
+   * next act.
+   *
+   * NOT YET PERSISTED: `irStore.decodeObligations` rebuilds nodes field by
+   * field and does not read this one, so a disposition written today does not
+   * survive a store round-trip. W-SATISFACTION extends that decoder in the
+   * same change that starts writing dispositions.
+   */
+  disposition?: "edit" | "review" | "verify" | "measure";
 };
 
 /** What a rejected hypothesis was rejected OVER. `complete` is the scope-completeness proof. */

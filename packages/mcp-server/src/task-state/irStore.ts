@@ -470,6 +470,34 @@ function decodeObligations(value: unknown): ObligationNode[] | undefined {
     const advisory = o["advisory"];
     const blockedBy = decodeStringArray(o["blockedBy"]);
     const predicate = decodePredicate(o["predicate"]);
+    // `disposition` (DESIGN-v0.15 §3.2.1) is OPTIONAL and internal. Absent
+    // stays absent — "unstated" is a real value, not a default. A PRESENT
+    // value must be one of the four: an out-of-vocabulary value is CORRUPTION,
+    // decoded fail-closed like every other field here rather than coerced,
+    // because a silently-normalized disposition would make a record claim a
+    // next act nobody asked for.
+    //
+    // W-DISPOSITION-PERSIST CLOSED THE OTHER HALF. `stateHash`'s
+    // `canonicalObligation` projection (`reasoningDelta.ts`) now includes this
+    // field when present, and `normalizeObligationNode`/`normalizeNode`
+    // (`obligationDag.ts`) carry it through `add`/`update` instead of
+    // dropping it — validated against the same `OBLIGATION_DISPOSITIONS`
+    // vocabulary this decoder checks. This decode was written first as
+    // forward-compatibility so a record from a newer build never became
+    // unreadable by an older one that merely ignored the field; it still
+    // does exactly that, but is no longer the only site that knows the field
+    // exists.
+    const dispositionRaw = o["disposition"];
+    let disposition: ObligationNode["disposition"];
+    if (dispositionRaw !== undefined) {
+      if (
+        dispositionRaw !== "edit" && dispositionRaw !== "review"
+        && dispositionRaw !== "verify" && dispositionRaw !== "measure"
+      ) {
+        return undefined;
+      }
+      disposition = dispositionRaw;
+    }
     if (id === undefined || claim === undefined || evidenceRefs === undefined) return undefined;
     if (blockedBy === undefined || predicate === undefined || typeof advisory !== "boolean") return undefined;
     if (state !== "open" && state !== "satisfied" && state !== "blocked" && state !== "invalidated") return undefined;
@@ -482,7 +510,17 @@ function decodeObligations(value: unknown): ObligationNode[] | undefined {
     // `advisory` is derived from `origin`; a record that disagrees has been
     // tampered with or written by a different version. Fail closed.
     if (advisory !== (origin === "heuristic")) return undefined;
-    out.push({ id, claim, state, evidenceRefs, origin, advisory, blockedBy, predicate });
+    out.push({
+      id,
+      claim,
+      state,
+      evidenceRefs,
+      origin,
+      advisory,
+      blockedBy,
+      predicate,
+      ...(disposition === undefined ? {} : { disposition }),
+    });
   }
   return out;
 }

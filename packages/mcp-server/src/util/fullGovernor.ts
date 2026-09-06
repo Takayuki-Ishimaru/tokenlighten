@@ -269,8 +269,30 @@ export function decideFullRead(args: DecideFullReadArgs): FullReadDecision {
     return { decision: "allow" };
   }
 
+  // FX-G13 G3 (2026-09-04, external assessment finding G3): the per-task cap
+  // must never downgrade a SMALL file's full read to a `read.map` skeleton —
+  // measured, this produced 43 read.map->zoom two-step reads across 33 cells
+  // (6 in one SF05 cell), each one an extra solver turn to re-fetch content
+  // cheap enough to have shipped outright on the first call. `TINY_BYTES`
+  // (8192) is BYTE-IDENTICAL to server.ts's read_code-local `SMALL_FILE_BYTES`
+  // and readCodeSmallFile.ts's `AUTO_FULL_THRESHOLD_BYTES` — the same
+  // small-file line this server draws everywhere else — so this reuses it
+  // rather than minting a fourth copy of the same number.
+  //
+  // Deliberately NOT the `isTiny` gate above (which ALSO requires
+  // `lineCount <= TINY_LINES` and has returned by this point when both hold):
+  // a file at, say, 5 KB over 400 short lines is exactly as cheap to serve
+  // whole as one at 5 KB over 100 lines, and the per-task cap's rationale —
+  // bounding EXPENSIVE full expansions — does not distinguish the two. Only
+  // the byte size gates this exemption; `isTiny`'s OWN separate governance
+  // (TINY_TASK_CAP / tinySkeletonCap) is untouched, and so is every other
+  // cap below (per-path, allowFull, candidate-pack) — a REPEAT read of the
+  // same small file still downgrades via per-path-cap, and allowFull
+  // semantics are unchanged.
+  const isSmallByBytes = args.byteSize <= TINY_BYTES;
+
   // Per-task cap check (uses adaptive effective cap, which may be lower than the static constant).
-  if (session.fullExpansionsTotal >= effectiveCap) {
+  if (!isSmallByBytes && session.fullExpansionsTotal >= effectiveCap) {
     return {
       decision: "downgrade",
       reason: "per-task-cap-reached",

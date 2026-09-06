@@ -491,6 +491,12 @@ type RefusalCore = {
   /** Prose. Shed first under budget pressure (A.8 rule E-7). */
   detail?: string;
 
+  /** Minimum usable response budget for budget-below-minimum refusals. */
+  required_min_bytes?: number;
+
+  /** Host-floor normalization applied before admission, when applicable. */
+  budget_floor_applied?: { requested: number; applied: number };
+
   /** Owed work after recovery, unchanged. Absence means the recovery completes the request. */
   remaining?: string;
 };
@@ -557,7 +563,8 @@ export type RequestShapeCode =
   | "cwd-required-for-create"           // server.ts (grep "cwd-required-for-create")
   | "workspace-boundary"                // server.ts (grep "workspace-boundary"); write/pathlessEdit.ts (grep "workspace-boundary")
   | "mixed-batch-workspace-ambiguous"   // server.ts (grep "mixed-batch-workspace-ambiguous")
-  | "elided-content";                   // server.ts (grep "elided-content")
+  | "elided-content"                   // server.ts (grep "elided-content")
+  | "legacy-input";                    // server.ts (TL_LEGACY_INPUT compatibility gate)
 
 /** Handle addressing (§3.3: a handle is a server-side capability token). */
 export type HandleCode =
@@ -631,6 +638,7 @@ export type IntentCode =
 export type ReadLimitCode =
   | "symbol-cap-reached"              // server.ts (grep "symbol-cap-reached")
   | "cap-exceeded"                    // server.ts (grep "cap-exceeded")
+  | "budget-below-minimum"             // features/task-pack/readCodeTaskPack.ts (grep "budget-below-minimum")
   | "per-task-cap-reached"            // server.ts (grep "per-task-cap-reached"); util/fullGovernor.ts (grep "per-task-cap-reached")
   | "per-path-cap-reached"            // util/fullGovernor.ts (grep "per-path-cap-reached")
   | "candidate-pack-full-repeat"      // util/fullGovernor.ts (grep "candidate-pack-full-repeat")

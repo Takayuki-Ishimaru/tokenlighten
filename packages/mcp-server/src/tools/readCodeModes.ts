@@ -21,6 +21,7 @@ import { countLines, sliceLinesToText } from "../util/countLines.js";
 import { collectSymbols, type CollectedSymbol } from "../symbols/collectSymbols.js";
 import { getConcernTokens, hasConcernNoteFired, markConcernNoteFired, recordReadPath, isClosureSatisfied } from "../state/session.js";
 import { isMarkdownPath, parseMarkdownHeadings, selectMarkdownSections } from "../util/markdownSections.js";
+import { estimateBytesFromTokens } from "../protocol/budget/wireBudget.js";
 import type { TreeSitterPaths } from "../skeleton/types.js";
 import type {
   ReadCodeMapOutput,
@@ -28,8 +29,10 @@ import type {
   ReadCodeSliceOutput,
   ImpactSurface,
   McpLang,
+  ToolCall,
 } from "@tokenlighten/types";
 import { MCP_LANGS } from "@tokenlighten/types";
+import { canonicalToolCall } from "../protocol/envelope.js";
 
 // ---------------------------------------------------------------------------
 // Byte caps
@@ -81,8 +84,6 @@ export const MAX_SLICE_RANGES = 12;
 /** Never trim a task_pack response smaller than this, however small the resolved ceiling -- "never refuse" stays true at every cap. */
 export const DEFAULT_RESPONSE_BYTE_FLOOR = 4096;
 
-const BYTES_PER_TOKEN_ESTIMATE = 4;
-
 /**
  * The byte ceiling the CALLER's own arguments impose, or `defaultCeiling`
  * when the caller supplied neither. Never widens `defaultCeiling`: an
@@ -90,6 +91,13 @@ const BYTES_PER_TOKEN_ESTIMATE = 4;
  * matching every other cap in this server ("never loosen honesty") -- a
  * generous value here is simply ignored in favor of whatever tighter,
  * type-specific bound the response family already enforces.
+ *
+ * FX-U3 (2026-09-04): the local `BYTES_PER_TOKEN_ESTIMATE` duplicate is
+ * retired in favor of the single canonical estimator
+ * (`estimateBytesFromTokens`, `protocol/budget/wireBudget.ts`) every other
+ * caller-declared token budget in this server is now measured against
+ * (`emit.ts`'s funnel, `readCodePack.ts`'s pack producer) -- same ratio, same
+ * rounding, one source instead of three independently-maintained copies.
  */
 export function resolveCallerByteCeiling(
   explicitMaxBytes: number | undefined,
@@ -100,9 +108,8 @@ export function resolveCallerByteCeiling(
   if (typeof explicitMaxBytes === "number" && Number.isFinite(explicitMaxBytes) && explicitMaxBytes > 0) {
     candidates.push(Math.floor(explicitMaxBytes));
   }
-  if (typeof explicitMaxTokens === "number" && Number.isFinite(explicitMaxTokens) && explicitMaxTokens > 0) {
-    candidates.push(Math.floor(explicitMaxTokens * BYTES_PER_TOKEN_ESTIMATE));
-  }
+  const fromTokens = estimateBytesFromTokens(explicitMaxTokens);
+  if (fromTokens !== undefined) candidates.push(fromTokens);
   if (candidates.length > 0) return Math.min(...candidates);
   return defaultCeiling;
 }
@@ -689,7 +696,7 @@ export type ResolveSliceResult =
        * batch path forwards them explicitly (same one-line additions `note`/
        * `next` already needed there).
        */
-      data: ReadCodeSliceOutput & { note?: string; assembled?: true; next?: string; concern_note?: string; downgraded_from?: "symbol"; remaining_ranges?: string[]; total_lines?: number };
+      data: ReadCodeSliceOutput & { note?: string; assembled?: true; next?: ToolCall; concern_note?: string; downgraded_from?: "symbol"; remaining_ranges?: string[]; total_lines?: number };
     }
   | {
       ok: false;
@@ -711,7 +718,7 @@ export type ResolveSliceResult =
        * name a range that WILL parse). Forwarded verbatim by server.ts's
        * mode=slice refusal branch, where it wins over the generic derivation.
        */
-      next?: string;
+      next?: ToolCall;
       /** The file's true line count — the fact a bad range needed. */
       total_lines?: number;
     };
@@ -762,23 +769,24 @@ function remedyRangeString(raw: string): string | undefined {
 // `ranges=[...]` for several), so the suggestion is never wider than what was
 // asked. Falls back to a small first window — never the whole file — when
 // nothing was correctable.
-function sliceInvalidRemedyNext(filePath: string, totalLines: number, requested: readonly string[]): string {
+function sliceInvalidRemedyNext(filePath: string, totalLines: number, requested: readonly string[]): ToolCall {
   const remedied: string[] = [];
   for (const raw of requested) {
     const fixed = remedyRangeString(raw);
     if (fixed !== undefined && !remedied.includes(fixed)) remedied.push(fixed);
   }
   if (remedied.length === 0) {
-    return `read_file mode=slice path=${filePath} range=1-${Math.min(200, totalLines)}`;
+    return canonicalToolCall("read_file", {
+      path: filePath,
+      range: `1-${Math.min(200, totalLines)}`,
+    });
   }
-  // FX-1 (v0.13 wave-3 review fix): the multi-range branch uses canonical
-  // `targets=[...]` prose — a raw-string `next` bypasses
-  // `canonicalizeEmittedToolCalls`, which only rewrites OBJECT-shaped embedded
-  // tool calls. The singular-range sibling below is unchanged (out of the
-  // confirmed-9 fix scope; see the wave-3 report addendum).
   return requested.length > 1
-    ? `read_file targets=${JSON.stringify([{ path: filePath, ranges: remedied }])}`
-    : `read_file mode=slice path=${filePath} range=${remedied[0]}`;
+    ? canonicalToolCall("read_file", {
+        targets: [{ path: filePath, ranges: remedied }],
+        content: "auto",
+      })
+    : canonicalToolCall("read_file", { path: filePath, range: remedied[0] });
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,7 +1064,7 @@ export async function resolveSlice(
           assembled: true,
           downgraded_from: "symbol",
           remaining_ranges: [symRangeStr],
-          next: `read_file mode=slice handle=${resumeHandle.id} range=${symRangeStr}`,
+          next: canonicalToolCall("read_file", { handle: resumeHandle.id, range: symRangeStr }),
         },
       };
     }
@@ -1265,9 +1273,9 @@ export async function resolveSlice(
     // read converges in ceil(bytes/cap) calls. Without this, agents invent
     // fixed-window walks (2026-07-09c: 92 slice calls across 10 arm-A cells
     // were the dominant residual turn cost).
-    let next: string | undefined;
+    let next: ToolCall | undefined;
     if (remainingRange !== undefined) {
-      next = `read_file mode=slice handle=${handleEntry.id} range=${remainingRange}`;
+      next = canonicalToolCall("read_file", { handle: handleEntry.id, range: remainingRange });
     }
     // C2 (2026-07-24): the fully-doc-comment slice case (DEFECT B, bench
     // 2026-07-09e) no longer manufactures a comments=keep round-trip hint here.
@@ -1384,7 +1392,7 @@ export type ResolveSliceRangesResult =
         /** True when any segment was body-capped or any requested range was dropped. */
         truncated?: true;
         note?: string;
-        next?: string;
+        next?: ToolCall;
         concern_note?: string;
       };
     }
@@ -1393,7 +1401,7 @@ export type ResolveSliceRangesResult =
       error: string;
       code?: "not-found" | "range-invalid";
       total_lines?: number;
-      next?: string;
+      next?: ToolCall;
     };
 
 /**
@@ -1417,7 +1425,10 @@ export async function resolveSliceRanges(
   requested: readonly string[],
 ): Promise<ResolveSliceRangesResult> {
   const totalLines = countLines(content);
-  const wholeFileRangeHint = `read_file mode=slice path=${filePath} range=1-${totalLines}`;
+  const wholeFileRangeHint = canonicalToolCall("read_file", {
+    path: filePath,
+    range: `1-${totalLines}`,
+  });
 
   const seen = new Set<string>();
   const wanted: string[] = [];
@@ -1537,9 +1548,13 @@ export async function resolveSliceRanges(
       ...(invalidRanges.length > 0 ? { invalid_ranges: invalidRanges } : {}),
       ...(truncated ? { truncated: true as const } : {}),
       ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
-      // FX-1: canonical `targets=[...]` prose, not the legacy `mode=slice` dialect.
       ...(remaining.length > 0
-        ? { next: `read_file targets=${JSON.stringify([{ handle: handle.id, ranges: remaining }])}` }
+        ? {
+            next: canonicalToolCall("read_file", {
+              targets: [{ handle: handle.id, ranges: remaining }],
+              content: "auto",
+            }),
+          }
         : {}),
       ...(concernNote !== undefined ? { concern_note: concernNote } : {}),
     },

@@ -142,6 +142,25 @@ describe("V11-04 irStore — checkpoint + delta log round trip", () => {
     expect(loaded.state).toEqual(live);
   });
 
+  it("a disposition set via an `add` delta survives the delta-log round trip", () => {
+    const ws = mkWs("disposition");
+    const key = irStateKey({ workspaceRef: ws, taskRef: "t", lane: "" });
+    const checkpoint = state({ taskRef: "t" });
+    checkpointIrState(ws, key, checkpoint, 0);
+
+    const step = buildReasoningDelta(checkpoint, [
+      { op: "add", target: "obligation", obligation: node("o1", { disposition: "measure" }) },
+    ]);
+    if (!step.ok) throw new Error(`fixture delta refused: ${step.reason}`);
+    recordIrDelta(ws, key, step.delta, step.state, irRecordVersion(ws, key));
+
+    const loaded = loadIrState(ws, key);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.state.obligations.find((o) => o.id === "o1")?.disposition).toBe("measure");
+    expect(loaded.state.stateHash).toBe(step.state.stateHash);
+  });
+
   it("clearIrState removes the record", () => {
     const ws = mkWs("clear");
     const key = irStateKey({ workspaceRef: ws, taskRef: "t", lane: "" });

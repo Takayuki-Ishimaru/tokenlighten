@@ -13,7 +13,21 @@
  *   Occurrence:
  *     field 1: range (repeated int32, packed or unpacked — [startLine, startChar, endLine, endChar] or [startLine, startChar, endLine] for same-line)
  *     field 2: symbol (string)
- *     field 3: symbol_roles (int32; bit 0 = IsDefinition)
+ *     field 3: symbol_roles (int32 bitmask — the real SCIP `SymbolRole` enum,
+ *       decoded in full as of FX-W1, round 21B finding 1, HIGH, 2026-09-04,
+ *       ruling (z); this file's own decoder previously read only bit 0):
+ *         0x1  Definition
+ *         0x2  Import
+ *         0x4  WriteAccess
+ *         0x8  ReadAccess
+ *         0x10 Generated
+ *         0x20 Test
+ *         0x40 ForwardDefinition
+ *       NONE of these bits is a "call" — SCIP has no dedicated call role at
+ *       all, so an occurrence that is merely not-a-definition (an import
+ *       specifier, a value read, a callback assignment, a type reference)
+ *       must never be treated as a call site. See `parseOccurrence` and
+ *       `buildGraphIndex` below for what each bit gates.
  *
  * Wire types: 0=varint, 1=64-bit, 2=length-delimited, 5=32-bit.
  * Unknown fields are skipped via wire-type rules.
@@ -130,11 +144,35 @@ class ProtoReader {
 // SCIP structure types
 // ---------------------------------------------------------------------------
 
+// FX-W1 (round 21B finding 1, HIGH, 2026-09-04, ruling (z)): the real SCIP
+// `SymbolRole` enum's bit values (scip.proto) — this decoder previously read
+// only bit 0. None of these is a "call" role; SCIP has no such concept.
+const SCIP_ROLE_DEFINITION = 0x1;
+const SCIP_ROLE_IMPORT = 0x2;
+const SCIP_ROLE_WRITE_ACCESS = 0x4;
+const SCIP_ROLE_READ_ACCESS = 0x8;
+const SCIP_ROLE_GENERATED = 0x10;
+const SCIP_ROLE_TEST = 0x20;
+const SCIP_ROLE_FORWARD_DEFINITION = 0x40;
+
 interface ScipOccurrence {
   symbol: string;
   startLine: number;
   startChar: number;
   isDefinition: boolean;
+  /**
+   * FX-W1: `Import` occurrences (a plain `import { x } from "./y.js"`
+   * specifier) are never a reference-OF-USE — they name the symbol without
+   * reading, writing, or calling it. Excluded from `references()` alongside
+   * `isDefinition` (see `buildGraphIndex` below), so an import-only file
+   * yields no relation at all, honest or otherwise.
+   */
+  isImport: boolean;
+  isWriteAccess: boolean;
+  isReadAccess: boolean;
+  isGenerated: boolean;
+  isTest: boolean;
+  isForwardDefinition: boolean;
 }
 
 interface ScipDocument {
@@ -212,7 +250,13 @@ function parseOccurrence(reader: ProtoReader): ScipOccurrence {
     symbol,
     startLine,
     startChar,
-    isDefinition: (symbolRoles & 1) !== 0,
+    isDefinition: (symbolRoles & SCIP_ROLE_DEFINITION) !== 0,
+    isImport: (symbolRoles & SCIP_ROLE_IMPORT) !== 0,
+    isWriteAccess: (symbolRoles & SCIP_ROLE_WRITE_ACCESS) !== 0,
+    isReadAccess: (symbolRoles & SCIP_ROLE_READ_ACCESS) !== 0,
+    isGenerated: (symbolRoles & SCIP_ROLE_GENERATED) !== 0,
+    isTest: (symbolRoles & SCIP_ROLE_TEST) !== 0,
+    isForwardDefinition: (symbolRoles & SCIP_ROLE_FORWARD_DEFINITION) !== 0,
   };
 }
 
@@ -308,7 +352,18 @@ function buildGraphIndex(documents: ScipDocument[]): GraphIndex {
         if (!defMap.has(occ.symbol)) {
           defMap.set(occ.symbol, loc);
         }
-      } else {
+      } else if (!occ.isImport) {
+        // FX-W1 (round 21B finding 1, ruling (z)): an Import-role occurrence
+        // (a plain `import { x } from "./y.js"` specifier) is excluded here
+        // too — it names the symbol without reading, writing, or calling it,
+        // so it is never a reference-OF-USE. Before this fix, `refMap`
+        // admitted every non-definition occurrence, including Import ones,
+        // making an import-only file indistinguishable from a genuine
+        // reference/call site through this exact path (round-21B's
+        // reproduction). `importsOf` below still counts Import occurrences —
+        // that IS the correct signal for "this file imports that file" — but
+        // `references()` (consumed by `relationGraphPort.ts`'s `callersOf`
+        // and the FX-W1 `referencedBy` computation) must not.
         const existing = refMap.get(occ.symbol);
         if (existing) {
           existing.push(loc);
@@ -368,6 +423,29 @@ function buildGraphIndex(documents: ScipDocument[]): GraphIndex {
     // "cannot prove freshness", never as "assume fresh".
     rootHash(): string | undefined {
       return undefined;
+    },
+    // FX-W1 (round 21B finding 1, HIGH, 2026-09-04, ruling (z)): superseding
+    // FX-V2's `true` here. SCIP's `symbol_roles` bitmask distinguishes a
+    // DEFINITION from every other occurrence, and (as of this fix) an
+    // IMPORT occurrence from a genuine reference (`references()`/`refMap`
+    // above) — but neither of those, nor any other role bit (WriteAccess/
+    // ReadAccess/Generated/Test/ForwardDefinition), is a "call". SCIP has no
+    // dedicated call role at all (round-21B's reproduction: an import-only
+    // occurrence and a genuine call site were both admitted as
+    // indistinguishable `direct_calls` callers through this exact `true`).
+    // No provider in this codebase proves a call today — see
+    // `GraphIndex.hasCallEdges`'s doc (graph/index.ts) for the full ruling.
+    hasCallEdges(): boolean {
+      return false;
+    },
+    // FX-W1 (round 21B finding 1, ruling (z)): this reader DOES prove real
+    // reference OCCURRENCES — `references()`/`refMap` above already exclude
+    // Definition and Import roles, so every location it returns is a
+    // genuine attributed use site (file+line), never a whole-file
+    // identifier-token count. See `GraphIndex.hasReferenceOccurrences`'s doc
+    // (graph/index.ts) for what a consumer may (and may not) ground on this.
+    hasReferenceOccurrences(): boolean {
+      return true;
     },
   };
 }

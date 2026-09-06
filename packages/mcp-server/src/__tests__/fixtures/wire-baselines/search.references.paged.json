@@ -192,9 +192,6 @@
       "lines": [
         1
       ],
-      "snippets": [
-        "cursorTarget(19);"
-      ],
       "in_comment": [
         false
       ]
@@ -203,19 +200,23 @@
   "total": 40,
   "limit": {
     "cause": "wire",
+    "omitted": [
+      "metadata",
+      "results"
+    ],
     "next": {
       "tool": "search_files",
       "arguments": {
+        "cwd": "$WS",
+        "budget": {
+          "bytes": 2048
+        },
         "action": "references",
         "queries": [
           "cursorTarget"
         ],
         "cursor": "$TH"
       }
-    },
-    "omitted": [
-      "results",
-      "metadata"
-    ]
+    }
   }
 }

@@ -104,7 +104,7 @@ import { looksLikeStateHandle } from "../state/handleCodec.js";
 import { mintContinuationHandle, resolveContinuationHandle } from "../state/stateHandles.js";
 import type { LangKey, WalkOmissions } from "./walkRepo.js";
 import { walkCodeFiles, createWalkOmissions, TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "./walkRepo.js";
-import { escapeRegExp, trimMatchText, buildOmittedExtra, createScanCoverage } from "../features/search/find/findText.js";
+import { escapeRegExp, trimMatchText, buildOmittedExtra, createScanCoverage, findScopeBoundaryRefusal } from "../features/search/find/findText.js";
 import { decodeTextBuffer } from "../util/textDecode.js";
 import { collectLexicalSegments, segmentKindAt } from "./lexicalRanges.js";
 import {
@@ -113,13 +113,58 @@ import {
   type MemberSweepAttachment,
   type MemberSweepCandidate,
 } from "../features/search/find/memberSweep.js";
+// FX-G13 G1 (2026-09-04): the default page ceiling is the calibrated
+// protocol wire-budget frame for this exact (kind,form), not a private
+// literal — see MAX_RESPONSE_BYTES's own doc comment below.
+import { budgetFor } from "../protocol/budget/wireBudget.js";
 
 const MAX_REFERENCES = 200;
 /** Safety valve: never tree-sitter-parse more than this many candidate files for one member_sweep lookup. */
 const MAX_MEMBER_SWEEP_CANDIDATES = 20;
 
-/** Hard byte cap for the full JSON response. */
-export const MAX_RESPONSE_BYTES = 2048;
+/**
+ * FX-G13 G1 (2026-09-04, external assessment finding G1): the DEFAULT byte
+ * ceiling for one page — the calibrated protocol wire-budget frame for this
+ * exact (kind,form) (`search.references`, see `protocol/budget/wireBudget.ts`'s
+ * own `"search.references"` row), NOT a private fixed literal.
+ *
+ * THE DEFECT THIS REPLACES. This constant used to be a bare `2048` — an order
+ * of magnitude below the 16 KiB frame every OTHER emitted response on this
+ * server is already measured against (the frame's own predecessor comment
+ * cites this exact constant: "4 x 2048 = 8192 -> ... 16384"). A widely
+ * referenced symbol therefore served ONE reference per page and needed as
+ * many pages as matches to enumerate them: measured, a 33-cell external
+ * assessment run recorded 71 page-follow round trips driven by this single
+ * gap, one control page costing 1,886 B of which only 362 B was payload and
+ * 1,456 B was per-page envelope (`member_sweep` re-computed identically on
+ * every page — see the `isFirstPage` gating below — plus the continuation
+ * call itself) that the 16 KiB frame would have carried in ONE page.
+ *
+ * `effectiveResponseCap` below is what a call actually measures against: the
+ * SMALLER of this frame and an explicit caller-declared `budget.bytes`
+ * (`FindReferencesInput.maxBytes`, mapped from the canonical `budget.bytes`
+ * field at the `server.ts` dispatch boundary) — a caller may narrow the page
+ * width, never widen past the calibrated frame. `budget.bytes:2048`
+ * reproduces the exact pre-fix page width, which is why the corpus/unit
+ * pins that exercise a multi-page chain now declare it explicitly rather
+ * than relying on the (now much wider) default to force pagination.
+ */
+export const MAX_RESPONSE_BYTES = budgetFor("search.references");
+
+/**
+ * FX-G13 G1: the byte ceiling ONE call actually measures against.
+ * `input.maxBytes` narrows the default frame down; it can never widen past
+ * it (§0.3's "no legitimate response ever exceeds its row" — see
+ * `wireBudget.ts`). Anything not a finite positive number is ignored, so an
+ * absent/garbled `budget.bytes` falls back to the default frame rather than
+ * refusing the call.
+ */
+function effectiveResponseCap(maxBytes: number | undefined): number {
+  if (typeof maxBytes !== "number" || !Number.isFinite(maxBytes) || maxBytes <= 0) {
+    return MAX_RESPONSE_BYTES;
+  }
+  return Math.min(MAX_RESPONSE_BYTES, Math.floor(maxBytes));
+}
 
 /**
  * Ceiling on the flat `references[]` convenience array — independent of
@@ -152,6 +197,12 @@ export interface FindReferencesInput {
    * (serve-from-start) and disclosed via `cursor_note`; an over-the-end
    * cursor simply leaves nothing to serve. */
   cursor?: string;
+  /** FX-G13 G1 (2026-09-04): caller-declared page-width ceiling, from the
+   * canonical `budget.bytes` field (mapped to this name at the `server.ts`
+   * dispatch boundary — see `mapCanonicalBudget`). NARROWS the default
+   * protocol wire-budget frame (`MAX_RESPONSE_BYTES`); never widens past it.
+   * See `effectiveResponseCap`. */
+  maxBytes?: number;
 }
 
 export interface Reference {
@@ -301,6 +352,89 @@ export function looksLikeComment(line: string, language: string): boolean {
 }
 
 const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
+
+// ---------------------------------------------------------------------------
+// FX-OH F7 (2026-09-04) — A QUALIFIED `Class::method` USED TO SCAN NOTHING.
+//
+// THE DEFECT, MEASURED. `IDENT_RE` rejects `EKF::isHealthy`, so the guard below
+// returned `{total:0, references:[], files:[]}` in 97 B — the walk never ran,
+// `scannedFiles` stayed 0, and `withAbsence` (whose FIRST gate is exactly
+// `scannedFiles === 0`) therefore attached no certificate. The wire was
+// byte-indistinguishable from a certified absence WITHOUT the certificate, so
+// the shipped guide's "0-match + `absence` means verifiable absence, no
+// re-grep" did not license stopping and the solver re-issued the same tokens
+// as `find` on the next turn (r3 SF13 A#6 -> A#7). It also silently undercut
+// `TL_SF_STRUCTURAL_CONCERNS`'s advertised ability to anchor a frontier on a
+// qualified `Class::method`.
+//
+// THE RULE NOW. A `::`-qualified name whose every segment is identifier-shaped
+// RESOLVES to its member (the last segment) and the walk runs on that, so a
+// real zero earns its `absence` over a real `scanned_files`. A name this
+// function cannot resolve to an identifier at all is REFUSED (`retry:"call"`,
+// with `did_you_mean` naming the unqualified tail when there is one) rather
+// than answered with an uncertified zero — the one shape the guide has no
+// transition for.
+//
+// NO POST-FILTER ON THE QUALIFIER. Filtering the member's references down to
+// lines that also mention `EKF` would drop every ordinary instance call site
+// (`ekf.isHealthy()`, `ekf_->isHealthy()`) and then certify their absence — a
+// certificate that lies is worse than the bare zero this fix removes. The
+// response therefore reports `symbol` as the member actually scanned, which is
+// also what `absence.symbol` and the continuation `next_call` carry, so every
+// field on the wire agrees about what was searched.
+// ---------------------------------------------------------------------------
+
+/** The member (last segment) of a fully identifier-shaped `A::b[::c]` name. */
+export function qualifiedSymbolMember(raw: string): string | undefined {
+  if (!raw.includes("::")) return undefined;
+  const parts = raw.split("::");
+  if (parts.length < 2) return undefined;
+  if (!parts.every((part) => IDENT_RE.test(part))) return undefined;
+  return parts[parts.length - 1];
+}
+
+/**
+ * The refusal an unresolvable symbol earns. `did_you_mean` is offered only for
+ * a `::`-shaped input carrying at least one identifier-shaped segment — the
+ * unqualified symbol the caller can re-issue — never a token chopped out of
+ * arbitrary prose.
+ */
+function unresolvableSymbolRefusal(raw: string): Record<string, unknown> {
+  const identSegments = raw.includes("::")
+    ? raw.split("::").filter((part) => IDENT_RE.test(part))
+    : [];
+  const didYouMean = identSegments[identSegments.length - 1];
+  return {
+    ok: false,
+    reason: "invalid-input",
+    field: "query",
+    detail: raw === ""
+      ? "action=references needs a symbol; pass queries=[\"<identifier>\"]"
+      : `'${raw}' is neither an identifier nor a fully qualified Class::method name, so no scan was run`,
+    ...(didYouMean !== undefined ? { did_you_mean: didYouMean } : {}),
+  };
+}
+
+/**
+ * FX-OH F7's totality guarantee: the walk opened NOTHING and disclosed
+ * nothing, so this response can neither certify an absence (no scan, no
+ * certificate — `withAbsence`'s own first gate) nor point at an exclusion. A
+ * zero with no certificate and no disclosure is the shape the guide has no
+ * transition for, so it is refused instead of shipped.
+ */
+function emptyScanRefusal(subPath: string | undefined, unreadableFiles: number): Record<string, unknown> {
+  const scope = subPath !== undefined && subPath !== "" ? subPath : ".";
+  const cause = unreadableFiles > 0
+    ? `every one of the ${unreadableFiles} walked file(s) failed to read`
+    : "the walk opened nothing";
+  return {
+    ok: false,
+    reason: "not-found",
+    field: "path",
+    detail: `no source file under '${scope}' was scanned — ${cause}, so this call can certify neither a reference nor an absence`,
+    did_you_mean: ".",
+  };
+}
 
 /**
  * L2 (2026-08-01 references-contract): build-output directory segments. A
@@ -455,6 +589,23 @@ function continuationNextCall(
       ...(input.path ? { path: input.path } : {}),
       ...(input.lang ? { lang: input.lang } : {}),
       ...(input.limit !== undefined ? { limit: effectiveMatchLimit(input.limit) } : {}),
+      // FX-G13 G1: only echoed when the CALLER declared an explicit page-width
+      // ceiling — an undeclared `maxBytes` already keeps paging at the same
+      // default frame, and re-stating it on every page would be exactly the
+      // per-page constant-material repetition this fix removes elsewhere
+      // (see the `isFirstPage` member_sweep gating below). A flat field here,
+      // same as `limit` above: this object is the pre-canonicalization
+      // internal shape — `protocol/envelope.ts`'s `canonicalToolArguments`
+      // (via `canonicalBudget`) folds it, together with any sibling `limit`,
+      // into ONE wire `budget:{bytes,items}` object before this ever reaches
+      // a caller, so a nested `budget` built HERE would instead bypass that
+      // merge (`canonicalBudget` never runs when `args.budget` is already a
+      // record) and silently drop a sibling `limit`. Carries the same
+      // clamped value this page actually measured against, so a repeat is
+      // idempotent.
+      ...(input.maxBytes !== undefined
+        ? { maxBytes: effectiveResponseCap(input.maxBytes) }
+        : {}),
       cursor: encodeReferencesCursor(pos, workspaceRoot),
     },
   };
@@ -467,7 +618,10 @@ function continuationNextCall(
  */
 function withAbsence(
   result: FindReferencesResult,
-  args: { symbol: string; scannedFiles: number; unreadableFiles: number; oversizeOmitted: number; undecodableFiles: number; subPath?: string },
+  args: { symbol: string; scannedFiles: number; unreadableFiles: number; oversizeOmitted: number; undecodableFiles: number; sourceOnlyExcluded: number; subPath?: string },
+  // FX-G13 G1: the CALL's effective cap (`effectiveResponseCap`), not the
+  // module-default frame — honors an explicit caller `budget.bytes` here too.
+  responseCap: number = MAX_RESPONSE_BYTES,
 ): FindReferencesResult {
   // "Read nothing" must never render as "it isn't there" — no scan, no
   // certificate (same gate as findText's buildAbsenceExtra).
@@ -478,6 +632,12 @@ function withAbsence(
   // no certificate, not even a caveated one, while any are outstanding. The
   // caller still sees the exclusion via `result.omitted.oversize`.
   if (args.oversizeOmitted > 0) return result;
+  // FX-R1 (2026-09-03, round-18B review finding 1): a `SOURCE_ONLY_EXCLUDED_*`
+  // skip (walkRepo.ts's `.tokenlighten/cache|index/`, `coverage/`) is the
+  // SAME unknown-to-the-caller remainder as oversize — a candidate this
+  // fullRecall walk never opened cannot be ruled out. Mirrors the oversize
+  // gate exactly; disclosed via `result.omitted.source_only_excluded`.
+  if (args.sourceOnlyExcluded > 0) return result;
   // 2026-08-27 (encoding-honesty): a file the walk opened and read, but
   // whose bytes could not be decoded with confidence (see
   // util/textDecode.ts's decodeTextBuffer), is the SAME unknown remainder as
@@ -499,15 +659,46 @@ function withAbsence(
     : base;
   for (const candidate of [full, base]) {
     const withCert = { ...result, absence: candidate };
-    if (Buffer.byteLength(JSON.stringify(withCert), "utf8") <= MAX_RESPONSE_BYTES) return withCert;
+    if (Buffer.byteLength(JSON.stringify(withCert), "utf8") <= responseCap) return withCert;
   }
   return result;
 }
 
 export async function findReferences(input: FindReferencesInput, workspace: string): Promise<FindReferencesResult> {
-  const symbol = input.symbol;
-  if (!symbol || !IDENT_RE.test(symbol)) {
-    return { symbol, references: [], files: [], truncated: false, total: 0 };
+  // FX-G13 G1: the ceiling THIS call measures against — the default frame,
+  // narrowed only by an explicit caller `budget.bytes` (never widened).
+  const responseCap = effectiveResponseCap(input.maxBytes);
+  const requested = input.symbol;
+  // FX-OH F7: resolve a qualified `Class::method` to its member BEFORE the
+  // walk; refuse anything that resolves to no identifier at all.
+  const symbol = requested && IDENT_RE.test(requested)
+    ? requested
+    : (requested ? qualifiedSymbolMember(requested) : undefined);
+  if (symbol === undefined) {
+    return {
+      symbol: requested,
+      references: [],
+      files: [],
+      truncated: false,
+      total: 0,
+      ...unresolvableSymbolRefusal(requested ?? ""),
+    } as unknown as FindReferencesResult;
+  }
+
+  // FX-R1 (2026-09-03, round-18B review finding 5): `search_files
+  // action=references` had no `not-found`/`path-outside-workspace` parity
+  // with `find`/`tree` — a nonexistent `path` returned a bare
+  // `{total:0,references:[],files:[]}` with no `omitted`/`absence`/refusal
+  // of any kind (confidence-shaped, indistinguishable from a real scanned
+  // negative), and an out-of-workspace `path` only reached a disclosed-but-
+  // unrefused `omitted.outside_workspace` after a real walk. Reuses `find`'s
+  // own `findScopeBoundaryRefusal` verbatim — same code, same shape, same
+  // `did_you_mean` — checked before the walk, exactly like `find` does.
+  if (input.path) {
+    const notFound = findScopeBoundaryRefusal(workspace, input.path);
+    if (notFound !== undefined) {
+      return { symbol, references: [], files: [], truncated: false, total: 0, ...notFound } as unknown as FindReferencesResult;
+    }
   }
 
   const needle = new RegExp(`\\b${escapeRegExp(symbol)}\\b`, "g");
@@ -515,7 +706,11 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // Full-recall: findReferences must see EVERY reference to be correct, so it
   // opts out of build-dir/generated noise filtering (a real `src/build/` or
   // `**/generated/` source file must not be silently dropped). The
-  // bench-runs/cache/coverage exclusions still apply — those are never source.
+  // `.tokenlighten/cache|index/`/`coverage/` exclusions still apply — those
+  // are never source (see walkRepo.ts's `SOURCE_ONLY_EXCLUDED_*`); a
+  // TokenLighten-repository-specific run-archive path like
+  // `bench/workflows/runs/` is excluded (if at all) only via this
+  // workspace's own `.tokenlightenignore`, never a product-code literal.
   // F-W2D-1: `omissions` used to be omitted entirely — this walk tracked NO
   // skip counts, so an oversize (or ignored/gitignored) file's absence from
   // `all` below was indistinguishable from "scanned and clean". `sizeCapBytes`
@@ -654,27 +849,54 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // below applies with no matches (no groups to fit, no member_sweep
   // candidates), so this is also the cheap path.
   if (all.length === 0) {
+    const zeroDisclosure = buildOmittedExtra(walkOmissions, scanCoverage);
+    // FX-OH F7's totality clause: no scan, no disclosure, no certificate — the
+    // one zero shape the guide has no transition for. Refuse instead of
+    // shipping it (see `emptyScanRefusal`).
+    if (scannedFiles === 0 && Object.keys(zeroDisclosure).length === 0) {
+      return {
+        symbol,
+        references: [],
+        files: [],
+        truncated: false,
+        total: 0,
+        ...emptyScanRefusal(input.path, unreadableFiles),
+      } as unknown as FindReferencesResult;
+    }
     return withAbsence(
-      { symbol, references: peekProbe, files: [], truncated: false, total: 0, ...buildOmittedExtra(walkOmissions, scanCoverage) },
+      { symbol, references: peekProbe, files: [], truncated: false, total: 0, ...zeroDisclosure },
       {
         symbol,
         scannedFiles,
         unreadableFiles,
         oversizeOmitted: walkOmissions.oversize,
         undecodableFiles: scanCoverage.undecodable.size,
+        sourceOnlyExcluded: walkOmissions.source_only_excluded,
         ...(input.path ? { subPath: input.path } : {}),
       },
+      responseCap,
     );
   }
 
-  // C7 — group by file (path not repeated per line) and fit within
-  // MAX_RESPONSE_BYTES, same foothold-first policy as findText.ts's
+  // C7 — group by file (path not repeated per line) and fit within the
+  // effective cap, same foothold-first policy as findText.ts's
   // fitFilesToCap: every matched file keeps at least one line before any
   // file's line-list is trimmed further, and before any file is dropped.
   // `references` is fixed-size at this point (capped above, independent of
   // `files`), so fitReferencesToCap can include it EXACTLY in its trial
   // measurements without the loop needing to recompute it per trial.
-  const memberSweep = memberSweepCandidates.length > 0
+  //
+  // FX-G13 G1(b): member_sweep (and its `hint`) is recomputed from scratch on
+  // EVERY page of a chain — the walk is stateless, so a continuation page
+  // re-derives the identical attachment a caller already received on page 1.
+  // Measured: 569 B of a 1,886 B control page was this same constant
+  // material repeated. `isFirstPage` (this call is serving from the START of
+  // the match stream — no cursor, or an undecodable one) gates it: a true
+  // continuation (`cursorPos` resolved to a real resume point) never
+  // recomputes or re-attaches it. This also skips the tree-sitter parse
+  // computeMemberSweep does, on every page after the first.
+  const isFirstPage = cursorPos === undefined;
+  const memberSweep = isFirstPage && memberSweepCandidates.length > 0
     ? await computeMemberSweep(symbol, memberSweepCandidates)
     : undefined;
   // F-W2D-1: `omitted` rides the SAME budgeted `extra` record member_sweep
@@ -733,13 +955,13 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
     ? 0
     : windowed.slice(servedRefs.length).filter((r) => r.path === lastSlicedPath).length;
   let fitted = fitReferencesPrefix(
-    fileGroups, symbol, peekProbe, all.length, MAX_RESPONSE_BYTES,
+    fileGroups, symbol, peekProbe, all.length, responseCap,
     matchTruncated ? continuationProbe : reasonProbe,
     limitRemainderForLast,
   );
   if (fitted.cut && !matchTruncated) {
     fitted = fitReferencesPrefix(
-      fileGroups, symbol, peekProbe, all.length, MAX_RESPONSE_BYTES,
+      fileGroups, symbol, peekProbe, all.length, responseCap,
       continuationProbe, limitRemainderForLast,
     );
   }

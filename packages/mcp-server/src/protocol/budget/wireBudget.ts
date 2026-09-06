@@ -616,6 +616,12 @@ const BUDGET_BY_FORM: Readonly<Partial<Record<Kind, Readonly<Record<string, numb
     /**
      * 8 KiB. Predecessor: `KIT_NOTE_MAX_BYTES = 240`
      * (`util/verificationPack.ts:1174`). Bounded shape: `kit_ref` + `next`.
+     *
+     * FX-N0 (2026-09-03): declared-but-currently-unproduced — see
+     * `protocol/readFamily.ts`'s `kit-unchanged` case and
+     * `protocol/budget/requiredSets.ts`'s `kit-unchanged` row for the
+     * fuller citation. The pin/floor stays here regardless, since this is
+     * a budget cap keyed by wire form, not a claim that the form ships.
      */
     "kit-unchanged": 8192,
     /**
@@ -667,6 +673,41 @@ const BUDGET_BY_FORM: Readonly<Partial<Record<Kind, Readonly<Record<string, numb
 export function budgetFor(kind: Kind, form?: string): number {
   const byForm = form === undefined ? undefined : BUDGET_BY_FORM[kind]?.[form];
   return byForm ?? BUDGET_BY_KIND[kind];
+}
+
+// ---------------------------------------------------------------------------
+// FX-R3 (2026-09-03, round-18B finding 3) — the ONE tokens<->bytes ratio a
+// caller-declared `budget.tokens`/`maxTokens` is measured against.
+//
+// This is the same ratio `@tokenlighten/usage`'s `estimateTokensFromBytes`
+// uses in the other direction (`Math.ceil(bytes / 4)`, `packages/usage/src/
+// index.ts`) — the estimator the server's own post-hoc usage accounting
+// reports back to the caller (`server.ts`'s `est_tokens`/`tokens` fields,
+// `protocol/codec/pipeline.ts`). Keeping both directions on the same constant
+// means a caller who reads the server's own token estimate off one response
+// and then BUDGETS in tokens for the next gets the ratio it was calibrated
+// against, not a second, silently different one.
+//
+// `tools/readCodeModes.ts`'s `resolveCallerByteCeiling` (the ONE place this
+// ratio previously engaged, for the handles-batch aggregate ceiling) already
+// used this exact value under its own local `BYTES_PER_TOKEN_ESTIMATE`
+// constant — this is that same number, promoted to the shared, wire-facing
+// module so `emit.ts`'s funnel (every kind, not just the handles batch) can
+// use it too.
+// ---------------------------------------------------------------------------
+
+/** Bytes assumed to make up one token, for a caller-declared token budget. */
+export const BYTES_PER_TOKEN_ESTIMATE = 4;
+
+/**
+ * Convert a caller-declared `maxTokens`/`budget.tokens` value into the byte
+ * ceiling it implies. Returns `undefined` for anything that is not a finite
+ * positive number, so a call site can `??` straight past it into "no token
+ * budget declared" without a separate validity check.
+ */
+export function estimateBytesFromTokens(tokens: unknown): number | undefined {
+  if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return undefined;
+  return Math.floor(tokens * BYTES_PER_TOKEN_ESTIMATE);
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +787,9 @@ const FLOOR_BY_FORM: Readonly<Partial<Record<Kind, Readonly<Record<string, numbe
     "code-unchanged": 235,
     /** Pin `read.receipt.prepared_discovery_closed` — the `decision-unchanged` form's actual shape name — `bytes_raw` = 354 B. */
     "decision-unchanged": 354,
+    // FX-N0 (2026-09-03): unpinned because no producer emits this form today
+    // (see `protocol/readFamily.ts`'s `kit-unchanged` case) — the floor, not
+    // a measured pin, so there is nothing to pin against.
     "kit-unchanged": UNPINNED_FORM_FLOOR_BYTES,
     "closure-complete": UNPINNED_FORM_FLOOR_BYTES,
   },

@@ -95,6 +95,63 @@ export function measureBlastRadius(opts: {
 }
 
 /**
+ * Equivalent guard for a replace-all operation. A search string proves the
+ * bytes it changes, but a near-whole-file fan-out still needs an explicit
+ * expected-hash acknowledgement. Count distinct touched lines (rather than
+ * raw matches) so repeated tokens on one line do not masquerade as a broad
+ * edit.
+ */
+export function measureReplaceAllBlastRadius(opts: {
+  fileText: string;
+  search: string;
+  replace: string;
+}): BlastRadiusMeasure | null {
+  if (opts.search === "") return null;
+  const fileLines = countLines(opts.fileText);
+  if (fileLines === 0) return null;
+  if (Buffer.byteLength(opts.fileText, "utf8") <= TINY_BYTES && fileLines <= TINY_LINES) return null;
+
+  const text = opts.fileText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const search = opts.search.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const replace = opts.replace.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const touchedLines = new Set<number>();
+  let index = text.indexOf(search);
+  let scanOffset = 0;
+  let scanLine = 1;
+  let replacements = 0;
+  while (index !== -1) {
+    // Advance from the previous non-overlapping match instead of rescanning
+    // text.slice(0, index) for every occurrence (quadratic on broad edits).
+    for (let offset = scanOffset; offset < index; offset += 1) {
+      if (text[offset] === "\n") scanLine += 1;
+    }
+    const startLine = scanLine;
+    for (let offset = index; offset < index + search.length; offset += 1) {
+      if (text[offset] === "\n") scanLine += 1;
+    }
+    for (let line = startLine; line <= scanLine; line += 1) touchedLines.add(line);
+    replacements += 1;
+    scanOffset = index + search.length;
+    index = text.indexOf(search, scanOffset);
+  }
+  if (replacements === 0) return null;
+
+  const resultingLines = countLines(text.split(search).join(replace));
+  const replacementLines = replacements * countLines(replace);
+  const shrinkRatio = (fileLines - resultingLines) / fileLines;
+  const replacedRatio = touchedLines.size / fileLines;
+  if (shrinkRatio <= BLAST_SHRINK_RATIO && replacedRatio <= BLAST_REPLACED_RATIO) return null;
+  return {
+    fileLines,
+    replacedLines: touchedLines.size,
+    replacementLines,
+    resultingLines,
+    shrinkPercent: Math.round(shrinkRatio * 100),
+    replacedPercent: Math.round(replacedRatio * 100),
+  };
+}
+
+/**
  * Structured refusal for the single-edit dispatch paths (server.ts). The
  * batch path (applyEditsMulti) folds the same numbers into its StepResult
  * error/hint instead — its refusal must ride the existing step→result lift.
@@ -128,6 +185,9 @@ export function blastRadiusRefusal(opts: {
     // `expected-hash` retry this refusal PRESCRIBES is unauthorable without it.
     current_sha: opts.currentSha,
     error: `this single hunk replaces ${m.replacedLines} of the file's ${m.fileLines} lines (${m.replacedPercent}%)${shrinkClause} — a whole-file-scale replacement requires precondition:"expected-hash" to prove it is intentional`,
-    next: `re-issue the SAME call with precondition:"expected-hash" expectedSha=${opts.currentSha} to acknowledge the full-range replacement, or replace only the lines that actually change via edits:[{handle, range:"N-M", content}]`,
+    // This is guidance, not an executable continuation: the old prose `next`
+    // field was routinely mistaken for a call and violated the v1 ToolCall
+    // contract. Keep the recovery recipe in prose `detail` instead.
+    detail: `re-issue the SAME call with precondition:"expected-hash" expectedSha=${opts.currentSha} to acknowledge the full-range replacement, or replace only the lines that actually change via edits:[{handle, range:"N-M", content}]`,
   };
 }

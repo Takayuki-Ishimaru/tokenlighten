@@ -20,13 +20,9 @@ For supported password-protected documents and archives, provide a credential re
 
 The VS Code extension and CLI can produce local usage and cost-savings estimates. These are estimates derived from local information; they are not AI-provider billing records. Do not export logs without reviewing them for your organization's privacy requirements.
 
-## Dependency security status
+## Dependency updates
 
-The v0.13.1 release candidate was audited on 2026-08-30. Both `npm audit --omit=dev` and the complete `npm audit`, including development dependencies, reported **0 vulnerabilities**.
-
-Developers should continue to treat the development environment as a separate trust boundary and avoid running untrusted build scripts, tests, or development servers.
-
-Audit results can change as advisories are published or dependencies change. This dated snapshot is not a guarantee of zero risk. Run `npm audit --omit=dev` for the runtime view and `npm audit` for the full development view.
+v0.14.0 includes dependency updates that address security issues. Use the latest released version. Source users can run `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation. Advisory information can change after release.
 
 ## Support and service level
 

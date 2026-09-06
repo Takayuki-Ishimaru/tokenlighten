@@ -29,11 +29,11 @@
 // renamed to `content.form` (A.9.2 row 7).
 // ---------------------------------------------------------------------------
 
-import type { ProtocolVersion, Evidence, FreshEvidence, Limit } from "./protocol.js";
+import type { ProtocolVersion, Evidence, FreshEvidence, Limit, ToolCall } from "./protocol.js";
 import type { TaskRef, TaskDecision } from "./decision.js";
 import type { Receipt } from "./receipts.js";
 import type { ImpactSurface } from "./locate-impact.js";
-import type { ProfilePlan } from "./task-pack.js";
+import type { ProfilePlan, TaskVerifyObligation } from "./task-pack.js";
 import type { ArchiveFormat, ReadFileArchiveEntry } from "./archive.js";
 import type { ReadCodePackOutput } from "./read-edit.js";
 
@@ -52,6 +52,8 @@ export type ReadTaskPackResult = {
   profile: "answer" | "generic";
   evidence: Evidence[];
   decision: TaskDecision;
+  /** Unresolved obligations, emitted only while `task.coverage` is `partial`. */
+  missing?: string[];
   /** Optional, non-binding task lifecycle notice. */
   advisory?: string;
   /** Additive provenance for a successful pathless locator scope retry. */
@@ -379,7 +381,7 @@ export type BatchEntry =
       /** Class (c): the per-task-cap projection, in place of raw content. */
       skeleton?: string;
       remaining_ranges?: string[];
-      next?: string;
+      next?: ToolCall;
       /** Class (a) only: the modes that CAN read this source. */
       alternatives?: unknown[];
     };
@@ -639,6 +641,28 @@ export type ReadClosureResult = {
    * deviation is declared at the point of departure instead.
    */
   summary?: ClosureSessionSummary;
+  /**
+   * W-VERIFY-CLOSURE (DESIGN-v0.15-sf-verification-first.md §3.4, wire table
+   * row 3). The verify obligations this closure REFUSES to call done: every
+   * `TaskVerifyObligation` whose `satisfied_by` is `"unproven"` or
+   * `"served-untested"`, carried whole so the caller sees WHICH evidence class
+   * is missing and what state TL could actually prove.
+   *
+   * OPTIONAL AND FLAG-GATED (`TL_SF_VERIFY_FIRST`, default OFF). Absence means
+   * the gate did not run — NEVER "everything is verified". Reuses the existing
+   * `remaining` vocabulary (`refusal.retry:"none"`'s owed work), so this is a
+   * new FIELD on an existing member, not a new kind and not a new refusal.
+   */
+  remaining?: TaskVerifyObligation[];
+  /**
+   * Same rule, `TaskVerificationRecipe.gaps`' vocabulary: one human-readable
+   * line per entry in `remaining`, built from the obligation's own
+   * `kind`/`targets` at population time (an `unproven` obligation carries no
+   * `evidence[]` to quote). `remaining` says what is owed; `gaps` says what is
+   * unproven and what would prove it. Sheddable prose (rung 1) — `remaining`
+   * outlives it (rung 3), and `open`/`done`/`total` outlive both.
+   */
+  gaps?: string[];
 };
 
 /** The measured `mode=closure` summary object (`util/closureTracking.ts`). */

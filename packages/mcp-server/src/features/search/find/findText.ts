@@ -29,6 +29,7 @@ import { regexSignatureLines } from "../../../skeleton/regexFallback.js";
 import { languageForPath } from "../../../util/languages.js";
 import { classifyCommentLines } from "../../../util/lineClassify.js";
 import { handleTable } from "../../../util/handles.js";
+import { isWithin } from "../../../util/safePath.js";
 // L3 (2026-08-08 find-honesty): recovery affordances rank by what the SERVED
 // surface actually contains, and the edit-grade hint is gated on whether the
 // file it names could be an edit target at all. state/session.ts imports
@@ -146,6 +147,67 @@ export const FIND_ACTION_EXTRA_BASENAMES = [
   "Rakefile",
   "Procfile",
 ] as const;
+
+export interface FindTextUniverse {
+  /** Exact primary action=find file universe, sorted by workspace-relative path. */
+  files: FoundFile[];
+  /** Every policy exclusion or walk failure observed while enumerating it. */
+  omissions: WalkOmissions;
+  /** Minimal, non-overlapping scopes; "." denotes the workspace root. */
+  scopes: string[];
+}
+
+function normalizeFindUniverseScope(raw: string): string {
+  return raw.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "");
+}
+
+/**
+ * Enumerate the primary action=find universe once. Literal-first routing calls
+ * this same function so extensions, extensionless basenames, gitignore
+ * semantics, and the 8 MiB text-scan ceiling cannot drift independently.
+ */
+export function enumerateFindTextUniverse(
+  workspace: string,
+  input: { path?: string; paths?: readonly string[]; lang?: LangKey } = {},
+): FindTextUniverse {
+  const requested = input.paths && input.paths.length > 0
+    ? input.paths
+    : input.path
+      ? [input.path]
+      : [""];
+  const normalized = [...new Set(requested.map(normalizeFindUniverseScope))];
+  const scopes = normalized.includes("")
+    ? [""]
+    : normalized
+        .sort((left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right))
+        .filter((scope, index, all) =>
+          !all.slice(0, index).some((parent) => scope === parent || scope.startsWith(parent + "/"))
+        );
+  const omissions = createWalkOmissions();
+  const byPath = new Map<string, FoundFile>();
+  for (const scope of scopes) {
+    for (const file of walkCodeFiles(workspace, {
+      ...(input.lang ? { lang: input.lang } : {}),
+      ...(scope ? { subPath: scope } : {}),
+      extraExts: FIND_ACTION_EXTRA_EXTS,
+      extraBasenames: FIND_ACTION_EXTRA_BASENAMES,
+      // Exact text search is a recall surface, not an orientation surface:
+      // declaration/generated/build paths can be the authoritative rename
+      // target and must not disappear from either find or literal-first.
+      fullRecall: true,
+      respectGitignore: true,
+      omissions,
+      sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
+    })) {
+      byPath.set(file.relPath, file);
+    }
+  }
+  return {
+    files: [...byPath.values()].sort((left, right) => left.relPath.localeCompare(right.relPath)),
+    omissions,
+    scopes: scopes.map((scope) => scope || "."),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Constants — exported so budget tests (P3.3) can import them.
@@ -1341,6 +1403,17 @@ function buildAbsenceExtra(args: {
   // scan (TEXT_SCAN_MAX_FILE_SIZE_BYTES), so this gate should fire only for
   // genuinely huge files, not the common case.
   if (args.omissions.oversize > 0) return {};
+  // FX-R1 (2026-09-03, round-18B review finding 1): a `SOURCE_ONLY_EXCLUDED_*`
+  // skip (walkRepo.ts's `.tokenlighten/cache|index/`, `coverage/` — never
+  // source, but excluded by product-code rule rather than by
+  // `.tokenlightenignore`/`DEFAULT_IGNORE`) is treated exactly like an
+  // oversize file: a candidate the caller never asked to exclude and this
+  // scan never opened cannot be ruled out, so no certificate — not even a
+  // caveated one — is issued while any are outstanding. This is the
+  // specific fix for the class of bug the `runs/` generalization introduced
+  // (a source-only exclusion silently backing a false `absence`) — see
+  // `omitted.source_only_excluded` (buildOmittedExtra) for the disclosure.
+  if (args.omissions.source_only_excluded > 0) return {};
   // 2026-08-27 (encoding-honesty): a file the walk opened and read, but
   // whose bytes could not be decoded with confidence (no recognized BOM,
   // NUL-riddled leading bytes — typically a UTF-16-without-BOM save, the
@@ -1400,7 +1473,7 @@ function buildAbsenceExtra(args: {
 
 export function buildOmittedExtra(om: WalkOmissions, coverage?: ScanCoverage): Record<string, unknown> {
   const pruned: Partial<WalkOmissions> & { undecodable?: number } = {};
-  for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "oversize", "symlinks", "non_text", "secrets", "unreadable_dirs"] as const) {
+  for (const key of ["ignored", "gitignored", "tokenlighten_ignored", "oversize", "symlinks", "non_text", "secrets", "unreadable_dirs", "outside_workspace", "source_only_excluded"] as const) {
     if (om[key] > 0) pruned[key] = om[key];
   }
   // Undecodable text (see decodeTextBuffer/readLinesCached) is scan-time,
@@ -2343,6 +2416,41 @@ function composeHint(internalHint: string | undefined, extraHint: string | undef
 }
 
 /**
+ * C2 (2026-09-03, INV-C F2): honest disclosure for a scoped `find` that
+ * walked and scanned ZERO files because every entry under `path` was
+ * EXCLUDED by an ignore layer — not because `path` does not exist (that is
+ * `findScopeBoundaryRefusal`, checked earlier and mutually exclusive with
+ * this) and not a genuine "scanned real content, found nothing" result
+ * (`buildAbsenceExtra`'s own `scanned_files === 0` gate already withholds
+ * `absence` here, so this response never falsely certifies completeness —
+ * but until this fix it gave NO alternative signal for the `.gitignore`
+ * case either, reading exactly like a real negative search).
+ *
+ * Previously fired ONLY for `.tokenlightenignore`
+ * (`walkOmissions.tokenlighten_ignored`) — a scope entirely excluded by the
+ * borrowed `.gitignore` layer instead left `omitted:{gitignored:N}` as the
+ * only clue (a careful reader COULD infer nothing was scanned, but got no
+ * prose, unlike its `.tokenlightenignore` sibling for the identical "nothing
+ * was scanned" cause). Names every ignore file actually responsible — a
+ * scope covered by both layers names both — so the remediation points at
+ * something the caller can act on: widen `path` past that file's rule, or
+ * read the excluded content directly by explicit path.
+ */
+function excludedScopeHint(
+  inputPath: string | undefined,
+  walkedCount: number,
+  omissions: WalkOmissions,
+): string | undefined {
+  if (!inputPath || walkedCount !== 0) return undefined;
+  const layers: string[] = [];
+  if (omissions.tokenlighten_ignored > 0) layers.push(".tokenlightenignore");
+  if (omissions.gitignored > 0) layers.push(".gitignore");
+  if (layers.length === 0) return undefined;
+  const named = layers.join(" and ");
+  return `scope '${inputPath}' is excluded by ${named} (nothing was scanned); drop the pattern, widen 'path' to a scope not fully covered by ${layers.length > 1 ? "those files" : named}, or read files there by explicit path`;
+}
+
+/**
  * PI-05 (F-A1-3 register) — seed of the plan's `NextActionPolicy` arbiter
  * (DESIGN-v0.10-expansion-plan-v1.3.md:1392-1421; full module out of scope
  * for this fix). Single rule enforced here: a response that just certified
@@ -2364,6 +2472,123 @@ function absenceAwareHint(
   hasAbsence: boolean,
 ): string | undefined {
   return decideHint({ primary: missHint, secondary: extraHint }, { strongAbsence: hasAbsence }).text;
+}
+
+/** Cap on the number of child names listed in a not-found `did_you_mean`. Mirrors `exploreTree.ts`'s DID_YOU_MEAN_CHILDREN_CAP. */
+const FIND_DID_YOU_MEAN_CHILDREN_CAP = 20;
+
+/**
+ * C2 (2026-09-03, INV-C F2): `search_files action=tree` refuses `not-found`
+ * (with a `did_you_mean` ancestor listing) when its `path` does not exist
+ * under the workspace at all; `find` had no equivalent check, so the SAME
+ * typo'd scope silently came back as an ordinary `total_matches:0` response
+ * — indistinguishable on the wire from a real, fully-scanned negative search
+ * (INV-C's exact repro: `find query=... path=<ws>/srcc`, no `absence`, no
+ * `omitted`, no signal of any kind).
+ *
+ * Returns the tree-identical refusal body (`ok:false, reason:"not-found",
+ * did_you_mean:{path, children}`) — same code, same field, same shape — or
+ * `undefined` when `path` resolves to something real and contained, in which
+ * case the caller's normal scan proceeds unchanged.
+ *
+ * Deliberately NOT a reuse of `exploreTree.ts`'s own `normalizeSubPath`: that
+ * function strips every leading `/` before ever calling `path.resolve`,
+ * which mis-resolves an ABSOLUTE `path` as workspace-relative (C3, fixed
+ * separately in `exploreTree.ts` — not duplicated here). `find` already
+ * resolves `path` correctly elsewhere in this file via a bare
+ * `path.resolve(workspace, path)`, which passes an absolute `path` through
+ * untouched (Node's own `path.resolve` semantics) — this helper resolves the
+ * exact same way, so the existence check agrees with what the rest of this
+ * module scans.
+ *
+ * A `path` that resolves to a REAL FILE is not "not found" for `find`: unlike
+ * `tree`, `find`'s own scope resolution (`walkCodeFiles`'s subPath handling,
+ * `tools/walkRepo.ts:477`) explicitly supports scoping to a single file
+ * ("subPath = single file -> returns [that file] if it qualifies"), so only
+ * genuine non-existence refuses here.
+ *
+ * Finding 1 (2026-09-03, INV-H): a `path` that lexically escapes the
+ * workspace — an absolute path outside it, or a relative `../..` climb — used
+ * to be "left alone" here (returning `undefined`) on the claim that this was
+ * "a DIFFERENT, already-handled refusal class (workspace-boundary / path
+ * escape), decided upstream of this file". **That claim was false for
+ * `find`**: no upstream handling exists. `walkCodeFiles`'s own identical
+ * lexical `isWithin` gate (`tools/walkRepo.ts:606-608`) silently returns zero
+ * files with no omission counter, so an out-of-workspace `scope.path` came
+ * back as an ordinary, confidence-shaped `total_matches:0` — indistinguishable
+ * from a real, fully-scanned negative search (and never falsely certifying
+ * `absence` either, since `buildAbsenceExtra`'s own `scanned_files === 0` gate
+ * withholds that separately). `search_files action=tree` already refuses the
+ * identical input (`exploreTree.ts`'s `containedSubPath` -> `refused:true` ->
+ * `path-outside-workspace` via `protocol/searchFamily.ts`'s conversion); this
+ * function now refuses it too, reusing the SAME `path-outside-workspace` code
+ * through the generic `ok:false` funnel (`protocol/refusal.ts`'s
+ * `isRefusalBody` already treats any `ok:false` body as a refusal) rather than
+ * duplicating tree's `refused:true` producer shape.
+ *
+ * Renamed from `findScopeNotFoundRefusal` (this function now also owns the
+ * boundary check, not only the not-found one) — a leftover reference to the
+ * old name would be exactly the kind of drift this comment used to warn
+ * against.
+ *
+ * FX-R1 (2026-09-03, round-18B review finding 5): exported so
+ * `tools/findReferences.ts` can reuse it verbatim — `search_files
+ * action=references` had no not-found/outside-workspace refusal at all
+ * (a bare `total:0` with no `omitted`/`absence`/refusal for a nonexistent
+ * scope, and only a disclosed-but-unrefused `omitted.outside_workspace` for
+ * an escaping one), unlike `find`/`tree`'s identical `path-outside-workspace`
+ * / `not-found` shape. Same function, same code, same `did_you_mean` shape —
+ * no reimplementation to drift out of sync with this one.
+ */
+export function findScopeBoundaryRefusal(workspace: string, requestedPath: string): Record<string, unknown> | undefined {
+  const trimmed = requestedPath.trim();
+  if (trimmed === "" || trimmed === ".") return undefined;
+  const workspaceAbs = path.resolve(workspace);
+  const abs = path.resolve(workspace, trimmed);
+  if (!isWithin(abs, workspaceAbs)) {
+    return { ok: false, reason: "path-outside-workspace", field: "path" };
+  }
+  try {
+    fs.statSync(abs);
+    return undefined; // exists (file or directory) — not this refusal's concern
+  } catch {
+    // fall through: genuinely absent, build the recovery listing below
+  }
+
+  // Walk up to the nearest existing ancestor directory (the workspace root in
+  // the worst case, which always exists) — same ancestor-walk shape as
+  // `exploreTree.ts`'s `nearestExistingAncestor`. Deliberately walked against
+  // `workspaceAbs` (the SAME non-realpath'd boundary `abs` was checked
+  // against above), never a freshly-`resolveReal`'d one: on a platform where
+  // the workspace root itself sits behind a symlink (macOS's `/tmp` ->
+  // `/private/tmp`, which is exactly what `os.tmpdir()`-rooted callers hit),
+  // comparing a `path.resolve`-built `cur` against a REALPATH'd boundary
+  // string mismatches on the very first iteration and collapses straight to
+  // "." — the walk never gets a chance to find the real nearest ancestor.
+  let cur = abs;
+  for (;;) {
+    try {
+      if (fs.statSync(cur).isDirectory()) break;
+    } catch {
+      // does not exist (or not statable) — keep walking up
+    }
+    if (cur === workspaceAbs || !isWithin(cur, workspaceAbs)) { cur = workspaceAbs; break; }
+    const parent = path.dirname(cur);
+    if (parent === cur) { cur = workspaceAbs; break; } // hit filesystem root
+    cur = parent;
+  }
+  const relPath = path.relative(workspaceAbs, cur).replace(/\\/g, "/");
+  let children: string[] = [];
+  try {
+    children = fs.readdirSync(cur).sort().slice(0, FIND_DID_YOU_MEAN_CHILDREN_CAP);
+  } catch {
+    children = [];
+  }
+  return {
+    ok: false,
+    reason: "not-found",
+    did_you_mean: { path: relPath === "" ? "." : relPath, children },
+  };
 }
 
 /**
@@ -2402,33 +2627,42 @@ export function buildFindResponse(
     return { ...build([]), hint: composeHint("query is empty; provide one identifier token, e.g. query=\"parseConfig\"", opts.extraHint) };
   }
 
+  // C2: a scope that does not exist AT ALL refuses `not-found` exactly like
+  // `tree` does, rather than silently scanning zero files and reporting an
+  // ordinary (indistinguishable-from-real) 0-match. Checked before the walk
+  // — a nonexistent path can never be "scanned", so there is nothing below
+  // for it to fall through to. Finding 1 (INV-H): the SAME check also refuses
+  // `path-outside-workspace` for a scope that lexically escapes the
+  // workspace, same shape as `tree`'s identical refusal.
+  if (input.path) {
+    const notFound = findScopeBoundaryRefusal(workspace, input.path);
+    // Merged onto `build([])`, never returned bare: server.ts's dispatch
+    // (and this module's own memberSweep/relatedLookups attachments) read
+    // `.files`/`.total_files`/etc. off every `buildFindResponse` result
+    // unconditionally — a bare `{ok:false,...}` with no `files` array would
+    // crash the very first downstream `.files.map(...)`. The refusal fields
+    // (`ok`/`reason`/`did_you_mean`) still win via spread order; `isRefusalBody`
+    // (protocol/refusal.ts) keys off `ok === false` regardless of what else
+    // rides along, so the extra zero-value fields change nothing on the wire.
+    if (notFound !== undefined) return { ...build([]), ...notFound } as unknown as FindResponse;
+  }
+
   // ---- One walk per response. Every pass below scans the same walked file
   // list through one shared content cache instead of re-walking and
   // re-reading per term/probe; the walk's per-layer skip counts are
   // disclosed as `omitted` on every return path — a skipped file must never
   // read as "searched and found nothing".
-  const walkOmissions = createWalkOmissions();
-  const walked = walkCodeFiles(workspace, {
+  const universe = enumerateFindTextUniverse(workspace, {
     ...(input.lang ? { lang: input.lang } : {}),
-    ...(input.path ? { subPath: input.path } : {}),
-    extraExts: FIND_ACTION_EXTRA_EXTS,
-    extraBasenames: FIND_ACTION_EXTRA_BASENAMES,
-    respectGitignore: true,
-    omissions: walkOmissions,
-    // A plain literal/regex line scan (scanLiteral, below) is cheap even at
-    // tens of thousands of lines — only the (separate, tree-sitter-driven)
-    // symbol/role machinery needs the tighter 1 MB default. See
-    // TEXT_SCAN_MAX_FILE_SIZE_BYTES's doc comment.
-    sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
+    ...(input.path ? { path: input.path } : {}),
   });
+  const walked = universe.files;
+  const walkOmissions = universe.omissions;
   const contentCache = createScanContentCache();
   // Which walked files really got content-scanned — the sole basis for the
   // zero-match absence certificate (see FindAbsence / buildAbsenceExtra).
   const coverage = createScanCoverage();
-  const scopeHint =
-    input.path && walked.length === 0 && walkOmissions.tokenlighten_ignored > 0
-      ? `scope '${input.path}' is excluded by .tokenlightenignore (nothing was scanned); drop the pattern or read files there by explicit path`
-      : undefined;
+  const scopeHint = excludedScopeHint(input.path, walked.length, walkOmissions);
   const extraHint = composeHint(scopeHint, opts.extraHint);
   const literalCaseInsensitive = input.caseInsensitive ?? (!input.regex && isSingleToken(query));
   /** Certificate fragment for a zero-match return; `{}` when absence is not certifiable. */
@@ -2783,6 +3017,18 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
     return { ...build([]), hint: "queries is empty; provide 1-5 literal tokens" };
   }
 
+  // C2 (see buildFindResponse's own copy of this check): a scope that does
+  // not exist at all refuses `not-found`, same shape as `tree`, rather than
+  // falling through to an ordinary 0-match over zero queries[] terms.
+  // Finding 1 (INV-H): also refuses `path-outside-workspace` for a scope that
+  // lexically escapes the workspace.
+  if (input.path) {
+    const notFound = findScopeBoundaryRefusal(workspace, input.path);
+    // See buildFindResponse's identical merge for why this rides on
+    // `build([])` rather than returning bare.
+    if (notFound !== undefined) return { ...build([]), ...notFound } as unknown as FindResponse;
+  }
+
   // One walk per response — same contract as buildFindResponse: shared file
   // list + content cache across the 1-5 query terms, `omitted` disclosure on
   // every return path.
@@ -2802,10 +3048,7 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
   });
   const contentCache = createScanContentCache();
   const coverage = createScanCoverage();
-  const scopeHint =
-    input.path && walked.length === 0 && walkOmissions.tokenlighten_ignored > 0
-      ? `scope '${input.path}' is excluded by .tokenlightenignore (nothing was scanned); drop the pattern or read files there by explicit path`
-      : undefined;
+  const scopeHint = excludedScopeHint(input.path, walked.length, walkOmissions);
 
   const hitTerms: string[] = [];
   const mergedMatches: TextMatch[] = [];

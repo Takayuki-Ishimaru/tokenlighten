@@ -32,15 +32,31 @@ export const DEFAULT_IGNORE: string[] = [
   "target/",
   "third_party/",
   "vendor/",
-  // Project-specific noise directories
+  // Generic conventional-directory defaults. These are NOT tied to any one
+  // caller repository — "proto/" (legacy/generated-proto salvage),
+  // "benchmark/"/"eval/" (perf or evaluation harness output), "samples/"
+  // (example scaffolding), "release/"/"outputs/" (build/publish artifacts)
+  // are common conventions across many codebases. Every one of them is a
+  // DISCLOSED omission, never silent: walkRepo.ts's `classifyIgnored`
+  // attributes any path matched here to `WalkOmissions.ignored`, which is
+  // always counted and surfaced (search.tree's `excluded_by_reason.ignored`,
+  // `omitted`/`scope_report`), and NONE of these six entries are in
+  // PROTECTED_IGNORE below — so a workspace's own .tokenlightenignore CAN
+  // override any of them with a negation (e.g. "!proto/\n!proto/**\n"),
+  // unlike the PROTECTED_IGNORE entries, which no workspace file can lift.
+  // Repository-specific exclusions (a particular fixture path, a particular
+  // run-archive directory) do NOT belong here — see .tokenlightenignore at
+  // the repo root, which is additive workspace configuration, not product
+  // code (FX-T, 2026-09-03: moved "bench/fixtures/_buggy/" — a
+  // TokenLighten-repo-specific literal that had been living here — out to
+  // this repo's own .tokenlightenignore; see FX-R1 for the identical prior
+  // move of "bench/workflows/runs/").
   "proto/",
   "benchmark/",
   "samples/",
   "eval/",
   "release/",
   "outputs/",
-  // Bench-planted buggy mirrors — exclude narrow path so real user _buggy/ folders are unaffected
-  "bench/fixtures/_buggy/",
   // VCS and env
   ".git/",
   ".cache/",
@@ -86,7 +102,6 @@ const PROTECTED_IGNORE: string[] = [
   ".tokenlighten/",
   "third_party/",
   "vendor/",
-  "bench/fixtures/_buggy/",
   ".env",
   ".env.*",
 ];

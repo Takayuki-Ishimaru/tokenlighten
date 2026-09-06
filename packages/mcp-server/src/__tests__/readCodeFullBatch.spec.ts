@@ -34,7 +34,6 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { PER_TASK_FULL_CAP } from "../util/fullGovernor.js";
-import { parseProseToolCall } from "../protocol/refusal.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -292,31 +291,21 @@ describe("read_code mode=full paths=[...] — governor cap is shared across sing
     expect(entries[1]!["reason"]).toBe("per-task-cap-reached");
     expect(Array.isArray(entries[1]!["skeleton"])).toBe(true);
     expect(entries[1]!["content"]).toBeUndefined();
-    // FX-1 (v0.13 wave-3 review fix, F-2 remainder): this `next` used to be the
-    // legacy `read_file mode=slice handle=… ranges=[…]` prose template — a raw
-    // STRING, which is a blind spot for `canonicalizeEmittedToolCalls`
-    // (protocol/envelope.ts), which only rewrites OBJECT-shaped embedded tool
-    // calls. It now names the canonical `targets=[...]` shape directly.
-    expect(String(entries[1]!["next"])).toContain("read_file targets=");
-    expect(String(entries[1]!["next"])).toContain(`"handle":"${entries[1]!["handle"]}"`);
-    expect(String(entries[1]!["next"])).toContain(`"ranges":[`);
-
-    // The protocol's prose-`next` convention is "run it verbatim" (AGENTS.md:
-    // "Every next is executable: run it verbatim"). Confirm that convention
-    // actually HOLDS for the new canonical-vocabulary wording by parsing it
-    // with the server's own prose-to-ToolCall parser (protocol/refusal.ts's
-    // `parseProseToolCall`, the same helper a refusal's `next` is normalized
-    // through) and firing the parsed call at this same real spawned server —
-    // not a template, the exact string this response just emitted.
-    const nextCall = parseProseToolCall(String(entries[1]!["next"]));
-    expect(nextCall).toBeDefined();
-    expect(nextCall!.tool).toBe("read_file");
-    expect(nextCall!.arguments["targets"]).toEqual([
-      { handle: entries[1]!["handle"], ranges: ["1-130"] },
-    ]);
+    // The downgrade continuation is an already-canonical ToolCall, not prose.
+    // Assert the entire executable call and then issue it verbatim against the
+    // same server so both vocabulary and attribution stay covered.
+    const nextCall = entries[1]!["next"] as { tool: string; arguments: Record<string, unknown> };
+    expect(nextCall).toEqual({
+      tool: "read_file",
+      arguments: {
+        cwd: ws,
+        targets: [{ handle: entries[1]!["handle"], ranges: ["1-130"] }],
+        content: "auto",
+      },
+    });
     const followUp = await srv.rpc(rpcId++, "tools/call", {
-      name: nextCall!.tool,
-      arguments: nextCall!.arguments,
+      name: nextCall.tool,
+      arguments: nextCall.arguments,
     });
     const followUpData = parseResult(followUp);
     // Whatever shape a slice serve takes, it must not be the one shape that

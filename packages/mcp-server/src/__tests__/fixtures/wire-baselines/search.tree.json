@@ -19,7 +19,8 @@
       "oversize": 0,
       "symlinks": 0,
       "non_text": 0,
-      "secrets": 0
+      "secrets": 0,
+      "source_only_excluded": 0
     }
   }
 }

@@ -267,7 +267,19 @@ describe("pathlessExactEdit / pathlessSymbolEdit — workspace-boundary post-che
     expect(result.nested_workspace).toBe(agent);
     expect(result.workspace).toBe(repo);
     expect(result.paths).toEqual(["wt/agent-exact/src/nested.ts"]);
-    expect(String(result.next)).toContain(agent);
+    expect(result.next).toEqual({
+      tool: "edit_file",
+      arguments: {
+        cwd: agent,
+        edits: [{
+          path: "src/nested.ts",
+          search: '"PXB_EXACT_MARKER"',
+          replace: '"REWRITTEN"',
+          precondition: "unique-match",
+          allowPathFallback: false,
+        }],
+      },
+    });
 
     // No write happened.
     expect(fs.readFileSync(markerFile, "utf8")).toBe('export const x = "PXB_EXACT_MARKER";\n');
@@ -327,6 +339,19 @@ describe("pathlessExactEdit / pathlessSymbolEdit — workspace-boundary post-che
     expect(result.nested_workspace).toBe(agent);
     expect(result.workspace).toBe(repo);
     expect(result.paths).toEqual(["wt/agent-symbol/src/nestedFn.ts"]);
+    expect(result.next).toEqual({
+      tool: "edit_file",
+      arguments: {
+        cwd: agent,
+        edits: [{
+          path: "src/nestedFn.ts",
+          search: '"PXB_SYMBOL_MARKER"',
+          replace: '"REWRITTEN"',
+          precondition: "unique-match",
+          allowPathFallback: false,
+        }],
+      },
+    });
 
     expect(fs.readFileSync(markerFile, "utf8")).toContain("PXB_SYMBOL_MARKER");
     expect(fs.readFileSync(markerFile, "utf8")).not.toContain("REWRITTEN");

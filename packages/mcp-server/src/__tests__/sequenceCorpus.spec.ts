@@ -308,15 +308,21 @@ describe("sequence corpus", () => {
 
     const query = "Add REFUNDED everywhere InvoiceStatus is used.";
     const first = await pack(server, 2, cwd, query);
+    const firstTask = bodyValue(first.task);
     const prescribed = nextOf(first);
     expect(prescribed).toEqual({
       tool: "search_files",
-      arguments: { action: "find", queries: ["REFUNDED"] },
+      arguments: {
+        cwd: fs.realpathSync(cwd),
+        lane: "sequence-corpus",
+        task: { handle: firstTask.id },
+        action: "find",
+        queries: ["REFUNDED"],
+      },
     });
     const absence = await server.call(3, prescribed!.tool, { ...prescribed!.arguments, cwd, lane: "sequence-corpus" });
     expect((absence.matches as Record<string, unknown> | undefined)?.absence).toBeDefined();
 
-    const firstTask = bodyValue(first.task);
     const continued = await pack(server, 4, cwd, query, {
       task_handle: firstTask.id,
       ...(typeof firstTask.state_version === "number" ? { expected_state_version: firstTask.state_version } : {}),
@@ -347,15 +353,20 @@ describe("sequence corpus", () => {
 
     const query = "Add REFUNDED everywhere InvoiceStatus is used.";
     const first = await packNoLane(server, 2, cwd, query);
+    const firstTask = bodyValue(first.task);
     const prescribed = nextOf(first);
     expect(prescribed).toEqual({
       tool: "search_files",
-      arguments: { action: "find", queries: ["REFUNDED"] },
+      arguments: {
+        cwd: fs.realpathSync(cwd),
+        task: { handle: firstTask.id },
+        action: "find",
+        queries: ["REFUNDED"],
+      },
     });
     const absence = await server.call(3, prescribed!.tool, { ...prescribed!.arguments, cwd });
     expect((absence.matches as Record<string, unknown> | undefined)?.absence).toBeDefined();
 
-    const firstTask = bodyValue(first.task);
     const continued = await packNoLane(server, 4, cwd, query, {
       task_handle: firstTask.id,
       ...(typeof firstTask.state_version === "number" ? { expected_state_version: firstTask.state_version } : {}),

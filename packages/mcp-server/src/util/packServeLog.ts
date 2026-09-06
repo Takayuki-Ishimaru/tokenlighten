@@ -42,6 +42,17 @@ export interface ServedSurfaceEntry {
   fingerprint: string;
   /** Monotonic sequence — orders served_earlier and drives FIFO eviction. */
   servedAt: number;
+  /**
+   * C1 (DESIGN-v0.15 §12 rows 82-84, R31-FIX regression): whether the
+   * recording call's own surface for this path already amounted to
+   * everything a whole-file re-pack of it could add (see
+   * `util/surfaceServedCoverage.ts`'s `surfaceAlreadyCoversWholeFile`, which
+   * the recorder evaluates once at record time). `undefined` — the caller
+   * did not supply the range-aware verdict — is treated as `true` by every
+   * consumer, preserving this ledger's original path-only semantics for
+   * every caller that does not thread it through.
+   */
+  fullyServed?: boolean;
 }
 
 /** Cached filesystem-kind probe result (Improvement D toolchain honesty). */
@@ -406,6 +417,25 @@ export function consultExecutedSearch(workspaceRoot: string, action: string, que
   return _getLog(workspaceRoot).meta.executedLocates?.get(executedSearchKey(action, query));
 }
 
+/**
+ * W3 (DESIGN-v0.15-sf-intent-layers.md §4.4a): true when a search of this
+ * `action` kind has been recorded ANYWHERE in this task's `executedLocates`
+ * ledger, regardless of which query it was keyed to. Unlike
+ * `consultExecutedSearch` (which answers for one exact (action,query) pair),
+ * this answers "did a `references` call happen THIS TASK at all" — the fact
+ * `resolveIntent`'s `referencesObserved` needs, independent of whether the
+ * current query happens to repeat that earlier call's exact term.
+ */
+export function hasExecutedSearchAction(workspaceRoot: string, action: string): boolean {
+  const map = _getLog(workspaceRoot).meta.executedLocates;
+  if (map === undefined) return false;
+  const prefix = `${action}::`;
+  for (const key of map.keys()) {
+    if (key.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
 export function recordExecutedLocate(
   workspaceRoot: string,
   query: string,
@@ -443,6 +473,23 @@ function _fingerprint(workspace: string, relPath: string): string {
  * Drop every logged surface for a workspace (epoch reset / taskEpoch:"new").
  * Leaves the toolchain stat cache intact — a new task in the same checkout has
  * the same toolchain — so only the served-surface state is cleared.
+ *
+ * M1 (2026-09-05 R28 remediation): this WAS a test-only reset hook —
+ * `recordServedSurfaces`'s query-token-overlap heuristic was the only
+ * production epoch transition, and it never runs at all for a declared
+ * `task.profile:"answer"` task (candidate-list packs skip it), so
+ * `hasExecutedSearchAction`'s `executedLocates` ledger (what `sfIntent.ts`'s
+ * `referencesObserved` reads) survived an EXPLICIT `task.epoch:"new"`
+ * indefinitely. Now called directly, lane-aware (via `laneScopedKey`'s
+ * `AsyncLocalStorage` binding — the caller need not thread a lane through),
+ * from BOTH of `state/session.ts`'s `task.epoch:"new"` reset blocks
+ * (`guardExecutionDiscovery` and `guardExecutionEditCore`), at exactly the
+ * same point each already clears `WorkspaceSession.intentEditObserved` — see
+ * those call sites' own comments. `recordServedSurfaces`'s heuristic reset is
+ * UNCHANGED and stays a useful sibling (it also catches a re-pack that
+ * carries no explicit `task.epoch:"new"` but plainly asks something
+ * unrelated); this is no longer a second, redundant production path — it is
+ * the ONLY one an explicit epoch declaration can rely on.
  */
 export function clearServedSurfaces(workspaceRoot: string): void {
   const log = _logs.get(_logKey(workspaceRoot));
@@ -462,7 +509,7 @@ export function clearServedSurfaces(workspaceRoot: string): void {
 export function recordServedSurfaces(
   workspaceRoot: string,
   workspace: string,
-  surfaces: ReadonlyArray<{ path: string; role: string; handle?: string }>,
+  surfaces: ReadonlyArray<{ path: string; role: string; handle?: string; fullyServed?: boolean }>,
   epochTokens: readonly string[],
 ): void {
   const log = _getLog(workspaceRoot);
@@ -493,6 +540,7 @@ export function recordServedSurfaces(
       path: s.path,
       role: s.role,
       ...(s.handle ? { handle: s.handle } : {}),
+      ...(s.fullyServed !== undefined ? { fullyServed: s.fullyServed } : {}),
       fingerprint,
       servedAt: ++_seq,
     };
@@ -929,7 +977,7 @@ function semanticReadTargets(args: Record<string, unknown>): Record<string, unkn
 function semanticNextArguments(tool: string, args: Record<string, unknown>): Record<string, unknown> {
   if (tool !== "read_file" && tool !== "search_files") {
     return Object.fromEntries(Object.entries(args)
-      .filter(([key]) => key !== "cwd" && key !== "lane" && key !== "task_handle"));
+      .filter(([key]) => key !== "cwd" && key !== "lane" && key !== "task_handle" && key !== "taskBinding"));
   }
   const out: Record<string, unknown> = {};
   const task = semanticTask(args);
@@ -991,14 +1039,32 @@ export function nextFingerprint(tool: string, args: Record<string, unknown>): st
   return JSON.stringify([tool, actionKey, stableFingerprintValue(rest)]);
 }
 
+/**
+ * The result-consumption ledger is normally lane-scoped for backwards
+ * compatibility.  Once a live task handle has been resolved, however, a
+ * continuation belongs to that canonical task identity, not every task that
+ * happens to share a workspace/lane and an identical next-call shape.
+ *
+ * `taskBinding` is server-derived (the handle's stored task fingerprint), so
+ * it is never accepted from or emitted to the wire.  Empty/absent retains the
+ * historical key byte-for-byte for callers without durable task state.
+ */
+function executedNextLedgerKey(workspaceRoot: string, lane: string, taskBinding?: string): string {
+  const base = `${workspaceRoot}\u0000${normalizeContractLane(lane)}`;
+  return typeof taskBinding === "string" && taskBinding.length > 0
+    ? `${base}\u0000task:${taskBinding}`
+    : base;
+}
+
 export function recordExecutedNext(
   workspaceRoot: string,
   lane: string,
   tool: string,
   args: Record<string, unknown>,
   resultDigest?: string,
+  taskBinding?: string,
 ): boolean {
-  const key = `${workspaceRoot}\u0000${normalizeContractLane(lane)}`;
+  const key = executedNextLedgerKey(workspaceRoot, lane, taskBinding);
   const fingerprint = nextFingerprint(tool, args);
   let seen = _executedNextFingerprints.get(key);
   if (seen === undefined) {
@@ -1019,8 +1085,14 @@ export function recordExecutedNext(
   return repeated;
 }
 
-export function hasExecutedNext(workspaceRoot: string, lane: string, tool: string, args: Record<string, unknown>): boolean {
-  return _executedNextFingerprints.get(`${workspaceRoot}\u0000${normalizeContractLane(lane)}`)?.has(nextFingerprint(tool, args)) ?? false;
+export function hasExecutedNext(
+  workspaceRoot: string,
+  lane: string,
+  tool: string,
+  args: Record<string, unknown>,
+  taskBinding?: string,
+): boolean {
+  return _executedNextFingerprints.get(executedNextLedgerKey(workspaceRoot, lane, taskBinding))?.has(nextFingerprint(tool, args)) ?? false;
 }
 
 /**
@@ -1036,15 +1108,73 @@ export function hasExecutedNext(workspaceRoot: string, lane: string, tool: strin
  * present, and only a pre-record that introduced it is ever withdrawn, so a
  * genuinely earlier execution of the same shape survives a later failure.
  */
-export function forgetExecutedNext(workspaceRoot: string, lane: string, tool: string, args: Record<string, unknown>): void {
+export function forgetExecutedNext(
+  workspaceRoot: string,
+  lane: string,
+  tool: string,
+  args: Record<string, unknown>,
+  taskBinding?: string,
+): void {
   _executedNextFingerprints
-    .get(`${workspaceRoot}${String.fromCharCode(0)}${normalizeContractLane(lane)}`)
+    .get(executedNextLedgerKey(workspaceRoot, lane, taskBinding))
     ?.delete(nextFingerprint(tool, args));
 }
 
+/**
+ * E2 (2026-09-05, measured on paid smoke r9 / SF13): the paths this TASK EPOCH
+ * has already served, stamped onto a pack result under a SYMBOL key.
+ *
+ * A symbol property is invisible to `JSON.stringify` and to `Object.keys`, so
+ * this carries the epoch's served ledger to the wire-side continuation
+ * projectors (`discoveryBundleNext`, which has no workspace handle of its own)
+ * without adding a single response byte or a new wire field to strip.
+ */
+const EPOCH_SERVED_PATHS_KEY = Symbol.for("tokenlighten.epochServedPaths");
+
+/**
+ * Stamp the epoch's already-served paths onto `target`. Silently ignores a non-object.
+ *
+ * MUST be `enumerable: true` — this is what survives `{ ...result }`. The
+ * dispatch path copies the task_pack result object at least twice before
+ * `discoveryBundleNext` ever reads this ledger (`attachSupply.ts`'s
+ * `{ ...result }` shallow copy, then `server.ts`'s own `{ ...suppliedBase,
+ * qref }` spread) — a non-enumerable Symbol-keyed property does not survive
+ * an object spread, so it would be silently dropped before the one call site
+ * that consumes it, making the cross-call half of E2 dead in production
+ * while still passing a unit test that stamps and reads the same raw object
+ * literal. This mirors the `SF_CONTEXT_TOKEN_KEY` precedent in
+ * `sfSatisfaction.ts` (see the comment above `attachSupply.ts`'s spread) —
+ * do not flip this back to `enumerable: false`. Still zero wire bytes:
+ * `JSON.stringify` never serialises Symbol-keyed properties, enumerable or
+ * not, and no wire projector iterates `Object.keys`/`Object.entries`/`for
+ * ... in` over the raw result object to leak it either.
+ */
+export function stampEpochServedPaths(target: unknown, paths: Iterable<string>): void {
+  if (target === null || typeof target !== "object") return;
+  Object.defineProperty(target, EPOCH_SERVED_PATHS_KEY, {
+    value: new Set(paths),
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
+/** Paths an earlier call in this epoch already served, or an empty set. */
+export function epochServedPaths(target: unknown): ReadonlySet<string> {
+  if (target === null || typeof target !== "object") return new Set<string>();
+  const value = (target as Record<symbol, unknown>)[EPOCH_SERVED_PATHS_KEY];
+  return value instanceof Set ? value as ReadonlySet<string> : new Set<string>();
+}
+
 /** Focused regression seam for result-consumption bindings. */
-export function executedNextRecordForTest(workspaceRoot: string, lane: string, tool: string, args: Record<string, unknown>): ExecutedNextRecord | undefined {
-  return _executedNextFingerprints.get(`${workspaceRoot}\u0000${normalizeContractLane(lane)}`)?.get(nextFingerprint(tool, args));
+export function executedNextRecordForTest(
+  workspaceRoot: string,
+  lane: string,
+  tool: string,
+  args: Record<string, unknown>,
+  taskBinding?: string,
+): ExecutedNextRecord | undefined {
+  return _executedNextFingerprints.get(executedNextLedgerKey(workspaceRoot, lane, taskBinding))?.get(nextFingerprint(tool, args));
 }
 
 /**
@@ -1065,8 +1195,12 @@ export function executedNextRecordForTest(workspaceRoot: string, lane: string, t
  * without this function needing to import anything from them.
  */
 export function clearExecutedNextForLane(workspaceRoot: string, lane: string): void {
-  const sep = String.fromCharCode(0);
-  _executedNextFingerprints.delete(`${workspaceRoot}${sep}${normalizeContractLane(lane)}`);
+  const base = executedNextLedgerKey(workspaceRoot, lane);
+  for (const key of _executedNextFingerprints.keys()) {
+    if (key === base || key.startsWith(`${base}${String.fromCharCode(0)}`)) {
+      _executedNextFingerprints.delete(key);
+    }
+  }
 }
 
 /** Legacy/internal no-lane callers: forget every ledger for this workspace, both key spellings a caller may pass (see clearPackDedupeForWorkspace). */

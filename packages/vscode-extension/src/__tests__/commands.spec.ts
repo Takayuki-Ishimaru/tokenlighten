@@ -240,6 +240,18 @@ describe("showUsageDashboard", () => {
     successfulCalls: 4,
     failedCalls: 0,
     estimatedResponseTokens: 750,
+    method: "file-bytes" as const,
+    measurementDisplay: {
+      wire: { status: "measured", basis: "test", tokens: null },
+      mcpResponse: { status: "estimated", basis: "test", tokens: 10 },
+      contextAvoided: { status: "estimated", basis: "test", tokens: -250 },
+      session: {
+        status: "estimated",
+        basis: "test",
+        tokens: 500,
+        net: { status: "measured", basis: "test", tokens: -260 },
+      },
+    },
     measuredBaselineCalls: 3,
     measuredResponseBytes: 400,
     measuredBaselineBytes: 800,
@@ -265,6 +277,7 @@ describe("showUsageDashboard", () => {
     const panel = mockCreateWebviewPanel.mock.results[0]!.value as { webview: { html: string } };
     expect(panel.webview.html).toContain("Calibrating: 0/24 paired samples (medium 12 / high 24).");
     expect(panel.webview.html).toContain("Measured calls: 3; response bytes vs baseline: 50.0%.");
+    expect(panel.webview.html).toContain("TL response total: ~750 tokens (method: file-bytes); observed usage: measured (basis: test); MCP response overhead: 10 tokens (estimated; basis: test); context avoided: -250 tokens (estimated; basis: test); session avoided-turn: 500 tokens (estimated; basis: test); net: -260 tokens (measured; basis: test).");
     expect(panel.webview.html).toContain("Calibrating: 0/24 paired samples");
   });
 
@@ -384,6 +397,9 @@ describe("showUsageDashboard", () => {
       webview: { html: string };
     };
     expect(panel.webview.html).toContain("信頼度: medium。");
+    expect(panel.webview.html).toContain(
+      "回避コンテキスト: -250トークン（推定・根拠: test）",
+    );
   });
 });
 

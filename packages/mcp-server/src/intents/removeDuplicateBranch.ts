@@ -10,6 +10,7 @@
  */
 
 import * as fs from "fs";
+import type { ToolCall } from "@tokenlighten/types";
 import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
@@ -18,7 +19,7 @@ import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 export type RemoveDuplicateBranchResult =
   | { ok: true; path: string; lines: string; delta: string }
-  | { ok: false; reason: string; next?: string };
+  | { ok: false; reason: string; next?: ToolCall; detail?: string };
 
 interface Block {
   /** 0-based line index of the branch header line ("if" or "} else if"). */
@@ -120,7 +121,7 @@ export async function applyRemoveDuplicateBranch(
   }
 
   if (!relPath) {
-    return { ok: false, reason: "intent-unsupported", next: "provide a file handle" };
+    return { ok: false, reason: "intent-unsupported", detail: "provide a file handle" };
   }
 
   if (looksLikeSecretFile(relPath)) {
@@ -149,7 +150,11 @@ export async function applyRemoveDuplicateBranch(
     rawMode = statReadTargetSync(realPath, workspace).mode;
     raw = fs.readFileSync(realPath, "utf8");
   } catch {
-    return { ok: false, reason: "intent-unsupported", next: `read_file mode=slice handle=${handleId}` };
+    return {
+      ok: false,
+      reason: "intent-unsupported",
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+    };
   }
 
   // Parse optional range constraint ("a-b", 1-based inclusive).
@@ -182,7 +187,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: scopeStart !== undefined ? "intent-no-duplicate-in-scope" : "intent-unsupported",
-      next: `read_file mode=slice handle=${handleId}`,
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -192,7 +197,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: scopeStart !== undefined ? "intent-no-duplicate-in-scope" : "intent-unsupported",
-      next: `read_file mode=slice handle=${handleId}`,
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -218,7 +223,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: scopeStart !== undefined ? "intent-no-duplicate-in-scope" : "intent-unsupported",
-      next: `read_file mode=slice handle=${handleId}`,
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -226,7 +231,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: "intent-ambiguous",
-      next: `read_file mode=slice handle=${handleId}`,
+      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -261,7 +266,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: `write failed: ${(err as Error).message}`,
+      detail: `write failed: ${(err as Error).message}`,
     };
   }
 

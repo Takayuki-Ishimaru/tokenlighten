@@ -19,6 +19,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes } from "node:crypto";
 
+import { currentSessionLane } from "./laneKey.js";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -62,6 +64,26 @@ export interface HandleEntry {
   /** Absolute, fully resolved workspace root used for scoping. */
   workspaceRoot: string;
   /**
+   * FX-P1 (INV-I-2, 2026-09-03) — THE LANE THAT MINTED THIS HANDLE.
+   *
+   * Present only for a handle minted inside a `runWithSessionLane` binding
+   * (i.e. a call that sent `lane`); ABSENT for the ordinary single-agent
+   * session, whose lane is `""`. That asymmetry is deliberate and is what
+   * keeps every lane-less deployment byte-identical: no field is written, no
+   * persisted record grows, and the edit gate's lane check reads `undefined`
+   * as "no positive evidence about a minting lane" and admits, exactly as
+   * `addressShipped` treats unknown residency.
+   *
+   * WHY IT IS ALSO PART OF `canonicalKey`. Without it, two lanes reading the
+   * same file dedup onto ONE entry: the second lane would be handed the first
+   * lane's handle by its OWN honest read, and the gate below would then refuse
+   * the edit it just earned. Partitioning the dedup identity by lane makes
+   * "the handle you hold was minted by your lane" true by construction for
+   * every handle a lane obtained legitimately, so the refusal fires only for a
+   * handle string that genuinely crossed lanes.
+   */
+  lane?: string;
+  /**
    * True when some call in this handle's LINEAGE actually named `workspaceRoot`
    * — an explicit `cwd`, or an earlier declared handle this call adopted.
    *
@@ -101,7 +123,7 @@ const BASE36_ID_LENGTH = 10;
  *
  * Exported for B2 (2026-08-04 review): a caller that must size a response
  * BEFORE the handle exists has to charge itself the real width, or its byte
- * accounting silently lies. evidenceShadow.ts's pending-evidence placeholder
+ * accounting silently lies. A pending-evidence placeholder
  * derives its length from this so a future id-format change cannot reopen the
  * gap unnoticed.
  */
@@ -224,6 +246,16 @@ function mintIsDeclared(entry: HandleMintInput): boolean {
   return declared !== undefined && entry.workspaceRoot === declared;
 }
 
+/**
+ * FX-P1: the lane a mint belongs to — an explicit `lane` on the input (a
+ * re-mint from an existing entry) first, else the ambient
+ * `runWithSessionLane` binding of the call in flight. `""` is the lane-less
+ * default session.
+ */
+function laneOf(entry: HandleMintInput | HandleEntry): string {
+  return entry.lane ?? currentSessionLane();
+}
+
 function canonicalKey(entry: HandleMintInput): string {
   return JSON.stringify([
     entry.kind,
@@ -232,6 +264,11 @@ function canonicalKey(entry: HandleMintInput): string {
     entry.symbol ?? "",
     entry.sha ?? "",
     entry.workspaceRoot,
+    // FX-P1 (INV-I-2): the minting lane forks the dedup identity, so a lane
+    // never inherits a peer lane's handle id from its own read. Empty for the
+    // lane-less session, which keeps the historical key shape's meaning (the
+    // string gains one `,""`, and canonical keys are process-internal).
+    laneOf(entry),
     // paths are not included in the key because scope/reference-set handles
     // rarely need canonicalization, and the ordering would need normalisation.
     // If this becomes an issue, sort + join can be added here.
@@ -274,10 +311,14 @@ export class HandleTable {
       const value = randomBase36HandleValue();
       id = `h${value.toString(36).padStart(BASE36_ID_LENGTH, "0")}`;
     } while (this._entries.has(id));
+    // FX-P1: stamp the minting lane. Written ONLY when there is one, so a
+    // lane-less session's entries (and their persisted records) are unchanged.
+    const mintLane = laneOf(entry);
     const full: HandleEntry = {
       ...entry,
       purpose: entry.purpose ?? "content",
       ...(mintIsDeclared(entry) ? { workspaceDeclared: true } : {}),
+      ...(mintLane !== "" ? { lane: mintLane } : {}),
       id,
       createdAt: this._counter,
     };

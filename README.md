@@ -1,4 +1,15 @@
-# TokenLighten
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/branding/github-header-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/branding/github-header-light.png">
+    <img src="assets/branding/github-header-light.png" alt="TokenLighten MCP" width="100%">
+  </picture>
+</p>
+
+<h1 align="center">
+  <img src="assets/branding/app-icon.png" alt="" width="48" height="48">
+  TokenLighten
+</h1>
 
 [English](README.md) | [日本語](README.ja.md)
 
@@ -6,9 +17,16 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.13.1 release
+## v0.14.0 release
 
-**Public Beta reliability update.** TokenLighten v0.13.1 is the latest source release. It improves correctness for concurrent agents, multi-target reads, batched file creation, continuations, and checklist-style tasks without changing the three-tool MCP surface. Interfaces and supported workflows may continue to change as feedback is incorporated. Keep backups of important work, and do not include private source code, credentials, or customer data in public issue reports.
+**Public Beta.** TokenLighten v0.14.0 improves how coding agents find relevant context, continue interrupted reads, and apply focused edits. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
+
+The main changes in v0.14.0 are:
+
+- clearer next steps when a request exceeds its response budget or needs a different search scope;
+- more focused discovery for edits that identify a unique piece of source text;
+- more consistent continuation and retry behavior; and
+- updated dependencies that address security issues.
 
 The public release includes:
 
@@ -16,7 +34,7 @@ The public release includes:
 - source code and public package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-Task state is now isolated between concurrent agent lanes, ranged multi-target reads and mixed create/edit batches behave consistently, and local savings accounting follows complete tasks rather than individual calls. Proof completion remains enabled by default. Legacy v0.12 request fields remain accepted during v0.13.x but are no longer advertised.
+**Compatibility:** the legacy v0.12/v0.13 request fields are refused by default. Update custom clients to the current request format; `TL_LEGACY_INPUT=accept` is available on the server as a temporary migration bridge. See the [v0.14.0 release notes](release-docs/github-release-v0.14.0.md) for compatibility details and known limitations.
 
 ## Why TokenLighten
 
@@ -32,27 +50,37 @@ TokenLighten is designed to deliver its largest advantage when an agent must ide
 
 Symbol and reference search can return relevant definitions and call sites directly. Document readers can extract structured content from spreadsheets and other supported formats without loading each entire file. Together, these capabilities can reduce repeated search and rereading while the agent gathers the context required for repository-wide or cross-document work.
 
-### What the developer benchmarks suggest
+### Indicative savings (v0.14.0)
 
-In the v0.13.1 developer benchmark, the aggregate TokenLighten/native cost ratio was **0.809**: a point estimate of **19.1% lower task cost with TokenLighten**. Both configurations solved and verified all 18 evaluated tasks.
+In a v0.14.0 comparison, total task cost was **36.7% lower with TokenLighten** than with the same agent using native file-reading and search tools alone. The comparison includes only work whose outcome was verified in both configurations.
 
-Task-level results varied:
-
-| Task pattern | v0.13.1 vs native |
+| Task pattern | Median task-cost reduction |
 |---|---:|
-| Trace a decision across modules and connect downstream behavior | **29.0% lower** |
-| Fix related bugs across control and mode transitions | **17.9% lower** |
-| Build rating rules from a spreadsheet specification | **16.7% lower** |
-| Make a narrow calculation or data-integrity fix | **7.3% lower** |
-| Implement priority behavior across related feature paths | **7.4% lower** |
+| Implement priority behavior across related feature paths | **59.1%** |
+| Trace a decision across modules and connect downstream behavior | **40.5%** |
+| Build rating rules from a spreadsheet specification | **39.1%** |
+| Make a narrow calculation or data-integrity fix | **29.0%** |
+| Explain a localized decision and its downstream effect | **25.1%** |
+| Fix related bugs across control and mode transitions | **17.9%** |
 
-The strongest results remained on work that requires tracing and changing several related locations. Localized explanation work was more sensitive to fixed overhead and remains an area for improvement.
+**These percentages describe cost savings, not token-count reductions.** Input, output, and cached tokens have different prices, so a cost reduction cannot be converted directly into the same token reduction. The amount of context avoided depends on how much source material the agent would otherwise read and reread.
 
-These are developer-run observations, not guaranteed savings or quality. Results vary by repository, task, client, model behavior, evaluation window, and provider pricing, and local estimates are not provider billing records. See the [v0.13.1 release notes](release-docs/github-release-v0.13.1.md#benchmark-disclosure) for the full disclosure.
+Use these results as a guide, not a guaranteed saving. Results vary by repository, task, client, model behavior, and pricing. For your own workspace, the CLI and VS Code usage views show locally measured usage and estimates; these are not provider billing records.
+
+### Tasks that may benefit less
+
+TokenLighten is less likely to help when little discovery or rereading is needed:
+
+- **Small edits at one known location**, such as replacing a value or fixing a short calculation.
+- **Localized explanations**, such as explaining a short function whose code has already been provided.
+
+For these tasks, the additional context needed for tool definitions, guidance, and calls can outweigh the reading that TokenLighten avoids. Earlier comparisons included small fixes and localized explanations with similar or higher task cost. The v0.14.0 examples above showed savings, but do not establish that every small task will cost less.
+
+TokenLighten also does not provide full type-aware semantic analysis. Cross-file renames that depend on types, imports, or overload resolution still require language-aware tools and verification. See [Language and file support](release-docs/language-support.md) for the supported boundaries.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.13.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.1/tokenlighten-vscode-extension-0.13.1.vsix)** from the v0.13.1 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.14.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.0/tokenlighten-vscode-extension-0.14.0.vsix)** from the v0.14.0 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -63,7 +91,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.13.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.0.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required.
@@ -95,7 +123,7 @@ cd /path/to/project
 tl workspace setup
 ```
 
-This natural-autoload setup — the managed AGENTS.md/CLAUDE.md guide block plus workspace MCP configuration — is the canonical way to run TokenLighten in production. Developer comparisons found that it performed about the same as manually injecting the same guide text into every prompt. Keep the managed guide block after setup: removing it materially increased measured cost and can allow instructions to drift between sessions. See [Getting started](release-docs/getting-started.md#set-up-a-workspace) for details and for `tl clients activate` (machine-wide registration with Claude Code and Codex).
+`tl workspace setup` configures workspace MCP access and maintains the TokenLighten guide blocks in AGENTS.md/CLAUDE.md. Keep those blocks so supported agents can follow the current tool instructions across sessions. See [Getting started](release-docs/getting-started.md#set-up-a-workspace) for details and for machine-wide client registration with `tl clients activate`.
 
 The MCP server is read-only by default. Enable writes only when you intend to allow workspace changes:
 
@@ -155,8 +183,6 @@ npm run package -w tokenlighten-vscode-extension
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
-For v0.13.1, the complete package test suite is a CI gate on Ubuntu and macOS. Windows CI verifies the source build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. The complete package suite is not yet a Windows release gate because some test fixtures are not portable to Windows; this does not make Windows or VSIX installation unsupported, and Windows-specific test coverage will be expanded.
-
 ## Documentation
 
 - [Getting started](release-docs/getting-started.md)
@@ -166,15 +192,7 @@ For v0.13.1, the complete package test suite is a CI gate on Ubuntu and macOS. W
 - [Privacy, security, and support](release-docs/privacy-security-support.md)
 - [Licensing and use policy](release-docs/licensing.md)
 
-The existing `docs/` directory is development history and is not part of the public v0.13.1 source release.
-
 ## Security and support
-
-### Dependency audit snapshot
-
-For the v0.13.1 release candidate audited on 2026-08-30, both `npm audit --omit=dev` and the full `npm audit`, including development dependencies, reported **0 vulnerabilities**.
-
-This is a dated dependency-audit snapshot, not a guarantee that the software has no vulnerabilities. Audit data can change after publication; rerun `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation.
 
 The server is read-only unless started with `--allow-write`. Review [SECURITY.md](SECURITY.md) before reporting a vulnerability and [SUPPORT.md](SUPPORT.md) for the best-effort support policy. Do not post credentials, private source code, customer data, or unsanitized logs in public issues.
 

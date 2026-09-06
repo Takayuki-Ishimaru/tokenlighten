@@ -31,7 +31,13 @@ import {
   REFUSAL_DISCLOSURE_POLICY,
   WORKSPACE_DISCLOSURE_KEYS,
 } from "./disclosure.js";
-import { PROTOCOL_VERSION } from "./envelope.js";
+import { canonicalToolCall, PROTOCOL_VERSION } from "./envelope.js";
+import { isAdvertisedToolName } from "./advertisedTools.js";
+import {
+  EDIT_SEARCH_PLACEHOLDER,
+  EDIT_REPLACE_PLACEHOLDER,
+  CREATE_BODY_PLACEHOLDER,
+} from "../state/session.js";
 
 // ---------------------------------------------------------------------------
 // The emitted-`ToolCall` gate (A.9.4 / TC-2)
@@ -60,6 +66,15 @@ export function emittedToolCallIsValid(call: ToolCall): boolean {
 }
 
 /**
+ * Bootstrap canary: direct protocol-unit tests intentionally keep the
+ * historical fail-open default, while the live server must install TC-2's
+ * validator before it can emit any continuation.
+ */
+export function emittedToolCallValidatorInstalled(): boolean {
+  return _validator !== undefined;
+}
+
+/**
  * §2.6: "A `next` is either fully executable or it is not emitted." A
  * placeholder-bearing call is not executable — a caller that runs it verbatim
  * sends `<exact text to replace>` as real bytes, the exact defect
@@ -74,7 +89,76 @@ export function containsPlaceholder(value: unknown): boolean {
   return false;
 }
 
-const TOOL_NAMES: ReadonlySet<string> = new Set(["read_file", "edit_file", "search_files"]);
+/**
+ * R31 finding #3 (P1, 2026-09-05): the small, fixed set of literal
+ * placeholder strings this codebase's OWN `next_call`/`next` shapes actually
+ * emit inside an `edit_file` payload field (server.ts's
+ * `editFileUnknownArgumentRefusal`/edits-item-shape refusals) -- these are
+ * genuinely unfilled templates and must still be caught, but by EXACT
+ * string match, never by the generic `<...>` substring regex below, because
+ * that regex also matches perfectly ordinary generic-typed code
+ * (`Map<string, number>`, `std::vector<int>`) that a caller's OWN verbatim
+ * `search`/`replace`/`content` text is documented to carry (the D3
+ * operations->edits rewrite echoes the caller's own hunk text verbatim).
+ */
+const EDIT_PAYLOAD_PLACEHOLDER_LITERALS = new Set([
+  // The canonical prescription-placeholder family (state/session.ts) — the
+  // SAME three literals editFileUnknownArgumentRefusal, the P4.1 targetless-
+  // item advisory template, and the cwd-required-for-create refusal all
+  // share, so a caller can never distinguish which producer sent them.
+  EDIT_SEARCH_PLACEHOLDER,
+  EDIT_REPLACE_PLACEHOLDER,
+  CREATE_BODY_PLACEHOLDER,
+  // Two further `content` literals server.ts mints ad hoc (not yet folded
+  // into the session.ts family) for the range-scoped edits[] shape-error
+  // recovery and the incident-shape corrective call.
+  "<replacement text for exactly those lines>",
+  "<replacement text for the WHOLE range>",
+]);
+
+/**
+ * `edit_file` field names — top-level or inside one `edits[]` item — that
+ * carry the CALLER's own verbatim text, never a server-authored template.
+ */
+const EDIT_VERBATIM_PAYLOAD_FIELDS = new Set(["search", "replace", "content"]);
+
+function isEditPayloadPlaceholder(value: unknown): boolean {
+  return typeof value === "string" && EDIT_PAYLOAD_PLACEHOLDER_LITERALS.has(value);
+}
+
+/**
+ * Structural (non-verbatim) placeholder scan for one `edits[]` item: every
+ * field is checked EXCEPT the caller-verbatim payload fields, which are
+ * checked by exact literal match instead of the generic regex.
+ */
+function editsItemContainsPlaceholder(item: unknown): boolean {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return containsPlaceholder(item);
+  return Object.entries(item as Record<string, unknown>).some(([key, child]) =>
+    EDIT_VERBATIM_PAYLOAD_FIELDS.has(key) ? isEditPayloadPlaceholder(child) : containsPlaceholder(child)
+  );
+}
+
+/**
+ * Placeholder scan for a tool call's `arguments`, aware that an `edit_file`
+ * call's `search`/`replace`/`content` (top-level, or inside each `edits[]`
+ * item) are documented to always carry the caller's own verbatim text —
+ * exempt from the recursive `<...>` regex `containsPlaceholder` runs, and
+ * checked against `EDIT_PAYLOAD_PLACEHOLDER_LITERALS` instead so a genuinely
+ * unfilled server-authored template call is still rejected. Every other
+ * field (`path`, `handle`, `range`, and everything on every other tool) is
+ * scanned exactly as `containsPlaceholder` always has.
+ */
+export function containsPlaceholderForCall(tool: string, value: unknown): boolean {
+  if (tool !== "edit_file" || value === null || typeof value !== "object" || Array.isArray(value)) {
+    return containsPlaceholder(value);
+  }
+  const args = value as Record<string, unknown>;
+  return Object.entries(args).some(([key, child]) => {
+    if (key === "edits" && Array.isArray(child)) return child.some(editsItemContainsPlaceholder);
+    if (EDIT_VERBATIM_PAYLOAD_FIELDS.has(key)) return isEditPayloadPlaceholder(child);
+    return containsPlaceholder(child);
+  });
+}
 
 /**
  * Coerce a value that claims to be a call into an EMITTABLE `ToolCall`, or
@@ -84,12 +168,17 @@ const TOOL_NAMES: ReadonlySet<string> = new Set(["read_file", "edit_file", "sear
 export function emittableToolCall(value: unknown): ToolCall | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as { tool?: unknown; arguments?: unknown };
-  if (typeof record.tool !== "string" || !TOOL_NAMES.has(record.tool)) return undefined;
+  if (typeof record.tool !== "string" || !isAdvertisedToolName(record.tool)) return undefined;
   if (record.arguments === null || typeof record.arguments !== "object" || Array.isArray(record.arguments)) {
     return undefined;
   }
-  const call = { tool: record.tool as ToolName, arguments: record.arguments as ToolCall["arguments"] };
-  if (containsPlaceholder(call.arguments)) return undefined;
+  // This gate also serves shedders/refusal projectors directly, before the
+  // envelope's recursive pass. Build via the same continuation boundary.
+  const call = canonicalToolCall(record.tool as ToolName, record.arguments as Record<string, unknown>) as ToolCall;
+  // R31 finding #3: `edit_file`'s caller-verbatim payload fields
+  // (search/replace/content) are exempt from the generic regex here — see
+  // `containsPlaceholderForCall`'s own doc comment.
+  if (containsPlaceholderForCall(call.tool, call.arguments)) return undefined;
   return emittedToolCallIsValid(call) ? call : undefined;
 }
 
@@ -110,7 +199,7 @@ export function parseProseToolCall(text: string): ToolCall | undefined {
   const trimmed = text.trim();
   const space = trimmed.indexOf(" ");
   const tool = space === -1 ? trimmed : trimmed.slice(0, space);
-  if (!TOOL_NAMES.has(tool)) return undefined;
+  if (!isAdvertisedToolName(tool)) return undefined;
   const rest = space === -1 ? "" : trimmed.slice(space + 1).trim();
 
   const args: Record<string, unknown> = {};
@@ -243,7 +332,8 @@ const REFUSAL_CODES: ReadonlySet<string> = new Set<RefusalCode>([
   "intent-no-duplicate-in-scope", "intent-incompatible-with-batch",
   "intent-requires-handle",
   // ReadLimitCode
-  "symbol-cap-reached", "cap-exceeded", "per-task-cap-reached", "per-path-cap-reached",
+  "symbol-cap-reached", "cap-exceeded", "budget-below-minimum", "legacy-input",
+  "per-task-cap-reached", "per-path-cap-reached",
   "candidate-pack-full-repeat", "tiny-task-cap-reached", "allowfull-task-cap-reached",
   "artifact-full-downgraded", "not-tiny", "broad-overview-query",
   "not-a-directory", "is-a-directory", "markdown-section-read-failed",
@@ -686,7 +776,25 @@ function nextOf(body: Record<string, unknown>): ToolCall | undefined {
  * required, removable under §1.5.
  */
 const REFUSAL_ADVISORY_KEYS_BY_CODE: Readonly<Record<string, readonly string[]>> = {
+  "budget-below-minimum": ["required_min_bytes", "budget_floor_applied"],
   "create-target-exists": ["handle", "bytes", "sha", "content_identical"],
+
+  /**
+   * FX-L (2026-09-03, DESIGN-v0.15 ruling (r)) — ADDITIVE, one key, one code.
+   *
+   * `execution-typestate` refuses an edit target that is outside the certified
+   * frontier. Since FX-L there is a second, materially different reason a
+   * CERTIFICATE-NAMED address can be outside it: the response that named it was
+   * capped, so the caller never received its bytes. `next` carries the whole
+   * recovery (a `read_file` of exactly those addresses), and `code`/`retry` are
+   * unchanged — this key only lets the refusal say, in the read family's own
+   * vocabulary, WHICH of the two situations produced it, so a caller can tell
+   * "you may not write here" from "you have not been given this yet".
+   *
+   * Emitted only alongside that recovery `next` (state/session.ts's
+   * `withheldNextCall`), so no existing refusal gains a byte.
+   */
+  "execution-typestate": ["cause"],
 
   /**
    * S5 (C2-9, 2026-08-14) — RAISED FOR ADJUDICATION, NOT PRE-APPROVED. This
@@ -837,6 +945,32 @@ export const REFUSAL_ADVISORY_KEYS: readonly string[] = [
   // every other entry in this flat list: advisory, no consumer branch
   // required, removable under §1.5.
   "remaining_queries",
+  // `cwd_corrected` — FX-P4 (2026-09-03, DESIGN-v0.15-sf-turn-economy.md §1.2
+  // ratified ruling, closing the gap FX-P3 reported and left as
+  // `cwdNearMiss.spec.ts` test "B"). `checkCwdWithCorrection` (server.ts) can
+  // silently adopt a corrected read/search cwd and then STILL fail the
+  // subsequent lookup — e.g. the corrected root is the right tree but lacks
+  // the requested file, so the call ends in an ordinary `not-found`. Before
+  // this entry, `dispatchWithWorkspaceNotes` stamped the correction record
+  // onto the body regardless of outcome, but `buildRefusal` rebuilds a
+  // refusal's payload from a closed key set and silently dropped it — the
+  // caller was told "not found" against a root it never learned was
+  // substituted. `cwd_corrected` is server-minted and not
+  // caller-recoverable (the caller sent the ORIGINAL, uncorrected cwd), so it
+  // is advisory by the same test every other entry here passes: dropping it
+  // costs the caller a round trip re-deriving which tree actually answered,
+  // never a wrong answer.
+  //
+  // Excluded below for `invalid-cwd`/`cwd-required-for-edit`/
+  // `cwd-required-for-create`: those codes mean the cwd itself was rejected
+  // (or required and absent), so pairing them with "here is the root I
+  // corrected you to" would assert two contradictory things about the same
+  // cwd in one response. `checkCwdWithCorrection` never actually constructs
+  // that combination today (a correction and the pre-correction refusal are
+  // mutually exclusive return arms), but the exclusion is a code-level
+  // guarantee rather than a fact about one call site, the same posture
+  // `path-outside-workspace`/`alternatives` already takes below.
+  "cwd_corrected",
 ];
 
 // The call-scoped WORKSPACE DISCLOSURES are a DIFFERENT CLASS from the advisory
@@ -883,6 +1017,12 @@ export function buildRefusal(forTool: ToolName, body: Record<string, unknown>): 
     // makes this a code-level guarantee so no producer can reintroduce that
     // misleading recovery through the otherwise-valid advisory field.
     if (code === "path-outside-workspace" && key === "alternatives") continue;
+    // FX-P4: never pair `cwd_corrected` with a refusal that is ITSELF about
+    // the cwd being invalid or missing — see the flat list's entry above.
+    if (
+      key === "cwd_corrected"
+      && (code === "invalid-cwd" || code === "cwd-required-for-edit" || code === "cwd-required-for-create")
+    ) continue;
     const value = body[key];
     if (value === undefined || value === null) continue;
     // A.8 rule E-1: never emit `[]`/`{}`/`""` in place of absence.

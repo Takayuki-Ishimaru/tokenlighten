@@ -313,8 +313,16 @@ describe("A1 — inline budgets stay honest", () => {
     // and fetchable in ONE call.
     expect((entry?.remaining_sections ?? []).length).toBeGreaterThan(0);
     expect(entry?.handle).toBe(artifactSurfaces(result)[0]?.handle);
-    expect(entry?.next).toContain(`read_file mode=artifact handle=${entry?.handle}`);
-    expect(entry?.next).toContain("slides=");
+    expect(entry?.next).toMatchObject({
+      tool: "read_file",
+      arguments: expect.objectContaining({
+        mode: "artifact",
+        handle: entry?.handle,
+        slides: expect.any(Array),
+      }),
+    });
+    const remainingSlides = entry?.next?.arguments["slides"];
+    expect(Array.isArray(remainingSlides) ? remainingSlides.length : 0).toBeGreaterThan(0);
     expect(String(entry?.note)).toContain("per-artifact inline cap");
   }, 30_000);
 

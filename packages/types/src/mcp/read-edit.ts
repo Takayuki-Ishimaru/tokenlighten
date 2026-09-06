@@ -236,6 +236,13 @@ export interface EditFailure {
     | "not-found";
   /** When non-unique, a few candidate matches as handles. */
   matches?: Array<{ handle: string; path: string; line: number }>;
+  // R29-FIX (2026-09-05, D1): the ONE argument a caller must fix to retry --
+  // set at the producer (preconditions.ts's hash-mismatch branch: "expectedSha")
+  // so attachSupply's isGenuinelyBareRefusal sees a real classification signal
+  // instead of misreading a legacy `reason`-only failure as genuinely bare and
+  // forcing the nuclear retry:"new-task" recovery onto a one-field-fixable
+  // refusal (measured: 5x hash-mismatch in a single paid smoke, r9).
+  field?: string;
   /**
    * When hash-mismatch, the current sha so the client can refresh.
    *
@@ -247,11 +254,11 @@ export interface EditFailure {
    */
   current_sha?: string;
   /**
-   * S1: a one-line recovery instruction so a bare precondition failure is a
-   * redirect, not a dead end — e.g. "retry with expectedSha=<current_sha>" for
-   * a hash-mismatch, or a scopeHandle hint for a scope-violation.
+   * S1: prose recovery guidance for a precondition failure. This is not a
+   * complete executable tool call: the original edit arguments remain with the
+   * caller, so the instruction belongs in `detail`, never in protocol `next`.
    */
-  next?: string;
+  detail?: string;
 }
 
 // ---------------------------------------------------------------------------

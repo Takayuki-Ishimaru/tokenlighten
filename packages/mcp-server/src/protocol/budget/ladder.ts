@@ -160,8 +160,10 @@ export function runLadder(input: {
   budget: number;
   context: ShedContext;
   validate: (candidate: ShedPayload) => boolean;
+  /** Canonicalize tool calls minted by a post-projection demotion. */
+  canonicalize?: (candidate: ShedPayload) => ShedPayload;
 }): LadderOutcome {
-  const { payload, kind, budget, context, validate } = input;
+  const { payload, kind, budget, context, validate, canonicalize } = input;
 
   const records: ShedRecord[] = [];
   let continuation: ToolCall | undefined;
@@ -248,6 +250,16 @@ export function runLadder(input: {
         if (demoted === undefined) break ladder;
         candidateShed = demoted;
         candidate = publish(candidateShed, candidateRecords, candidateContinuation);
+        // `demoteToDiscover` is intentionally a pure payload transform and is
+        // also unit-tested in isolation. Its calls are minted after the
+        // producer envelope pass, so run the envelope-owned canonicalizer here
+        // before the candidate is validated or measured. This closes the
+        // prepared->discover wire gap without coupling the budget module back
+        // to the envelope (and without introducing an import cycle).
+        if (canonicalize !== undefined) {
+          candidateShed = canonicalize(candidateShed);
+          candidate = publish(candidateShed, candidateRecords, candidateContinuation);
+        }
         demotions += 1;
         demotedThisStep = true;
       }

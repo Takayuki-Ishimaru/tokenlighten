@@ -1,4 +1,5 @@
 import type { McpLang } from "./languages.js";
+import type { ToolCall } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // explore action=locate
@@ -83,7 +84,7 @@ export interface LocateAbstainData {
   /** NEW (v0.6): surfaces missing for "missing-surface" reason. */
   missing?: ImpactSurface[];
   /** One-call recovery using the pre-minted handles on the top candidates. */
-  next?: string;
+  next?: ToolCall;
   /**
    * NEW (2026-08-01, not-found dead end): the workspace root that was actually
    * searched, plus a one-line re-scope hint. Emitted ONLY on a candidate-less

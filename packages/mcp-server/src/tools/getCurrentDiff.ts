@@ -38,7 +38,7 @@ export interface DiffHunk {
 
 export interface DiffFile {
   path: string;
-  status: "added" | "modified" | "deleted" | "renamed";
+  status: "added" | "created" | "modified" | "deleted" | "renamed";
   hunks: DiffHunk[];
 }
 
@@ -46,6 +46,8 @@ export interface GetCurrentDiffResult {
   files: DiffFile[];
   truncated: boolean;
   totalFiles: number;
+  /** Untracked files withheld by the response cap. */
+  untrackedOmitted?: number;
   error?: string;
 }
 
@@ -129,6 +131,18 @@ function parseDiff(raw: string): DiffFile[] {
   return files;
 }
 
+/** Parse NUL-delimited untracked paths emitted by `git ls-files -z`. */
+function parseUntracked(raw: string): DiffFile[] {
+  return raw
+    .split("\0")
+    .filter((filePath) => filePath.length > 0)
+    .map((filePath) => ({
+      path: filePath,
+      status: "created",
+      hunks: [],
+    }));
+}
+
 // ---------------------------------------------------------------------------
 // Main implementation
 // ---------------------------------------------------------------------------
@@ -143,19 +157,21 @@ export async function getCurrentDiff(
   input: GetCurrentDiffInput,
   workspace: string
 ): Promise<GetCurrentDiffResult> {
-  // Build git diff arguments.
-  const gitArgs = ["diff", "--no-color", "HEAD"];
-  if (input.path) {
-    gitArgs.push("--", input.path);
-  }
+  const pathArgs = input.path ? ["--", input.path] : [];
+  const gitArgs = ["diff", "--no-color", "HEAD", ...pathArgs];
+  const untrackedArgs = [
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "-z",
+    ...pathArgs,
+  ];
 
-  // Run git diff.
-  let fullDiff: string;
-  try {
-    fullDiff = await new Promise<string>((resolve, reject) => {
+  const runGit = (args: string[]): Promise<string> =>
+    new Promise<string>((resolve, reject) => {
       execFile(
         "git",
-        ["-C", workspace, ...gitArgs],
+        ["-C", workspace, ...args],
         { timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 }, // 64 MB buffer
         (err, stdout, stderr) => {
           if (err) {
@@ -166,6 +182,14 @@ export async function getCurrentDiff(
         }
       );
     });
+
+  let fullDiff: string;
+  let untracked: string;
+  try {
+    [fullDiff, untracked] = await Promise.all([
+      runGit(gitArgs),
+      runGit(untrackedArgs),
+    ]);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -176,7 +200,7 @@ export async function getCurrentDiff(
     };
   }
 
-  const allFiles = parseDiff(fullDiff);
+  const allFiles = [...parseDiff(fullDiff), ...parseUntracked(untracked)];
   const totalFiles = allFiles.length;
 
   // Apply byte cap: accumulate files until serialized JSON would exceed cap.
@@ -197,9 +221,13 @@ export async function getCurrentDiff(
     files.push(file);
   }
 
+  const untrackedOmitted = truncated
+    ? allFiles.slice(files.length).filter((file) => file.status === "created").length
+    : 0;
   return {
     files,
     truncated,
     totalFiles,
+    ...(untrackedOmitted > 0 ? { untrackedOmitted } : {}),
   };
 }

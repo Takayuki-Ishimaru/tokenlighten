@@ -87,10 +87,13 @@ describe("no-repeat holds in the pre-ready, fence non-armed zone (P1-h(iii), A-3
     // which is exactly the state recordExecutionContract's `state !== "ready"`
     // branch clears the fence for.
     expect(firstDecision?.["kind"], JSON.stringify(first)).toBe("discover");
+    const task = first["task"] as Record<string, unknown> | undefined;
+    const taskHandle = String(task?.["id"]);
+    expect(taskHandle).toMatch(/^tlh_task_v1_/);
     const prescribed = nextOf(first);
     expect(prescribed, JSON.stringify(first)).toEqual({
       tool: "search_files",
-      arguments: { action: "find", queries: ["REFUNDED"] },
+      arguments: { cwd, lane, task: { handle: taskHandle }, action: "find", queries: ["REFUNDED"] },
     });
 
     // THE NAMED ASSERTION: the fence non-armed zone, by name, not inference.
@@ -102,7 +105,6 @@ describe("no-repeat holds in the pre-ready, fence non-armed zone (P1-h(iii), A-3
     // contract state !== "ready" -> "ready" transition.
     expect(getExecutionFence(cwd), "a read-only search_files call must not install a fence").toBeUndefined();
 
-    const task = first["task"] as Record<string, unknown> | undefined;
     const continued = await dispatch("read_file", {
       mode: "task_pack",
       query: "Add REFUNDED everywhere InvoiceStatus is used.",

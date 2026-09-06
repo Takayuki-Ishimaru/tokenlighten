@@ -19,7 +19,7 @@
       ],
       "role": "unknown",
       "symbol": "place",
-      "why": "anchor-focus: query-matched symbol place"
+      "why": "anchor-focus: query-matched symbol place; caller-supplied"
     },
     {
       "handle": "$H2",

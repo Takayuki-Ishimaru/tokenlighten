@@ -90,6 +90,18 @@ export type Receipt =
        *  absence means provenance is not recoverable, and the `sha` still
        *  proves the bytes. */
       served_by?: string;
+      /** W-LEDGER (DESIGN-v0.15-sf-turn-economy.md §2, `TL_RECEIPT_COVERAGE`,
+       *  default OFF). The PLURAL of `served_by`, for a receipt decided from
+       *  `state/session.ts`'s per-PATH cumulative `servedRangeLedger` rather
+       *  than from one handle: a window the caller already holds because THREE
+       *  earlier slices covered it has no single call to name. Each entry is
+       *  `{range, served_by?}` with `range` in the protocol's own 1-based
+       *  inclusive `"<start>-<end>"` spelling (the `Evidence.range` /
+       *  `remaining` dialect). Same honesty rule as `served_by`: an entry may
+       *  only name lines some earlier response in THIS lane and THIS workspace
+       *  actually put on the wire, at THIS sha. Emitted iff the flag is on and
+       *  at least one span survives (E-1: never `[]`). */
+      covered_by?: Array<{ range: string; served_by?: string }>;
       /** [R5-10] continuation: the executable call that supersedes this
        *  suppression. Present on every emitted `code-unchanged`. */
       next?: ToolCall;

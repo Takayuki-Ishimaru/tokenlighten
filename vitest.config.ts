@@ -27,7 +27,12 @@ export default defineConfig({
     // violation that survives the repair throw, so a regression fails loudly
     // here instead of shipping a self-contradicting response to an agent.
     // Keep in sync with packages/mcp-server/vitest.config.ts.
-    env: { TOKENLIGHTEN_ALLOWED_PARENTS: homedir(), TL_DECISION_INVARIANT_STRICT: "1" },
+    env: {
+      TOKENLIGHTEN_ALLOWED_PARENTS: homedir(),
+      TL_DECISION_INVARIANT_STRICT: "1",
+      // Legacy fixtures use the v0.13 compatibility escape hatch explicitly.
+      TL_LEGACY_INPUT: "accept",
+    },
     pool: "forks",
     isolate: true,
     poolOptions: {

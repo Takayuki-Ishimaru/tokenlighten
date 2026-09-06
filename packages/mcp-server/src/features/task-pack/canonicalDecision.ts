@@ -1,29 +1,877 @@
-import type { TaskExecutionContract, ToolCall } from "@tokenlighten/types";
+import type { TaskExecutionContract, TaskReadinessObligation, ToolCall } from "@tokenlighten/types";
 import {
-  deriveNextFromPlan,
   enforceContinuationBudget,
-  type ContinuationCall,
   type ContinuationPlan,
 } from "../../util/continuation.js";
 import type { TaskPackResult } from "./model.js";
 import { codeTaskPackSurfaces } from "./artifactSections.js";
+import { semanticFrontierGuardEnabled, sfDemoteEnabled, batchHintsEnabled } from "../../util/flags.js";
+import { isSemanticFrontierContinuationOptional } from "./semanticFrontier.js";
+import { sfPackContextFor, isAddressGroundingOpenConcern } from "./sfSatisfaction.js";
+import { selectCanonicalNext } from "./selectCanonicalNext.js";
+import { sfByteResidency, type SfTaskContext } from "../../task-state/sfState.js";
+import { epochServedPaths } from "../../util/packServeLog.js";
+import {
+  surfaceAlreadyCoversWholeFile,
+  surfaceExceedsRepackBudget,
+  type CoverageProbeSurface,
+} from "../../util/surfaceServedCoverage.js";
+import { trace } from "../../util/trace.js";
+import { markSemanticFrontierWithheldBody } from "./sfWithholdingMarks.js";
+
+type ContinuationCall = ToolCall;
+type SemanticSurfaceCarrier = { readonly surfaces?: unknown };
+
+/**
+ * Wire projection unit tests legitimately carry a partial producer record.
+ * Missing/non-array surfaces mean this guard has no semantic evidence to
+ * suppress, so preserve the pre-guard continuation behavior (allowed).
+ */
+function semanticSurfaces(result: SemanticSurfaceCarrier): TaskPackResult["surfaces"] {
+  return Array.isArray(result.surfaces) ? result.surfaces as TaskPackResult["surfaces"] : [];
+}
 
 const DISCOVERY_BUNDLE_PATH_CAP = 8;
 
+/**
+ * E2 (2026-09-05, measured on paid smoke r9 / SF13): a bundle target this task
+ * has ALREADY been served IN AN EARLIER CALL is not an affordance — it is a
+ * self-loop.
+ *
+ * Live: call 1's `decision.next` re-requested, via `qref` + `targets`, exactly
+ * the six paths the same pack had just served with bodies; following it
+ * returned those same paths as `prior` and minted another `next` over five of
+ * them. 71 KB of packs advanced nothing.
+ *
+ * Scoped to the epoch's served ledger ONLY (`stampEpochServedPaths` — a PRIOR
+ * call's history the caller already holds from a separate turn); this is
+ * cross-call redundancy with no ambiguity. A bodyless candidate stays
+ * eligible — serving its body is exactly what the bundle is for — which is
+ * why the `candidate-list` branch below is deliberately NOT filtered.
+ *
+ * Deliberately NOT used to drop a path THIS SAME pack already embeds a body
+ * for — see `surfaceFullyCoversPathInThisPack` and its caller in
+ * `discoveryBundleNext`'s graph branch for why that is a different question
+ * (whether firing is worthwhile at all, not which paths belong in the bundle
+ * once it fires).
+ */
+function pathServedInEarlierCall(
+  servedInEpoch: ReadonlySet<string>,
+  candidatePath: string,
+): boolean {
+  return servedInEpoch.has(candidatePath);
+}
+
+/** Finds THIS pack's own surface for `candidatePath`, projected to the shape
+ * `util/surfaceServedCoverage.ts`'s predicates read. `undefined` when this
+ * pack carries no surface for the path at all. */
+function coverageProbeSurfaceFor(
+  result: SemanticSurfaceCarrier,
+  candidatePath: string,
+): CoverageProbeSurface | undefined {
+  const record = semanticSurfaces(result).find((surface) => {
+    return (surface as { path?: unknown }).path === candidatePath;
+  }) as {
+    code?: unknown;
+    code_unchanged?: unknown;
+    range?: unknown;
+    content_completeness?: unknown;
+    remaining_ranges?: unknown;
+  } | undefined;
+  if (record === undefined) return undefined;
+  return {
+    code: typeof record.code === "string" ? record.code : undefined,
+    code_unchanged: typeof record.code_unchanged === "string" ? record.code_unchanged : undefined,
+    range: typeof record.range === "string" ? record.range : undefined,
+    content_completeness: record.content_completeness === "partial" ? "partial" : undefined,
+    remaining_ranges: Array.isArray(record.remaining_ranges)
+      ? record.remaining_ranges.filter((entry): entry is string => typeof entry === "string")
+      : undefined,
+  };
+}
+
+/**
+ * C1 (DESIGN-v0.15 §12 rows 82-84, R31-FIX regression): whether THIS SAME
+ * pack's own surface for `candidatePath` already amounts to everything a
+ * whole-file re-pack could add — see util/surfaceServedCoverage.ts's header
+ * for the exact rule. Used only to decide whether a graph-relation bundle is
+ * worth FIRING at all (`discoveryBundleNext`'s `hasUnservedRelatedNode`
+ * gate); a path this pack already fully covers still belongs in the bundle's
+ * `paths` array once firing is justified — bundling the whole related
+ * cluster in one re-pack call is what makes it a BUNDLE, and the caller-named
+ * `qref` re-pack was never a per-path grant (`discoveryBundleAdvisory`).
+ */
+function surfaceFullyCoversPathInThisPack(
+  result: SemanticSurfaceCarrier,
+  candidatePath: string,
+): boolean {
+  const probe = coverageProbeSurfaceFor(result, candidatePath);
+  return probe !== undefined && surfaceAlreadyCoversWholeFile(probe);
+}
+
+/**
+ * C1: whether THIS SAME pack's own surface for `candidatePath` PROVES a
+ * re-pack would only reproduce the same already-served anchor window — the
+ * original E2 self-loop case (a large file's cap-trimmed embed). Unlike
+ * `surfaceFullyCoversPathInThisPack`, this DOES drop the path from
+ * `discoveryBundleNext`'s `paths` array: re-including it would be wasteful,
+ * never merely redundant (see util/surfaceServedCoverage.ts's header).
+ */
+function surfaceExceedsRepackBudgetInThisPack(
+  result: SemanticSurfaceCarrier,
+  candidatePath: string,
+): boolean {
+  const probe = coverageProbeSurfaceFor(result, candidatePath);
+  return probe !== undefined && surfaceExceedsRepackBudget(probe);
+}
+
+/** Only explicitly classified lexical surfaces are outside canonical continuation. */
+export function semanticFrontierNextAllowed(
+  result: SemanticSurfaceCarrier,
+  guardEnabled = semanticFrontierGuardEnabled(),
+): boolean {
+  const surfaces = semanticSurfaces(result);
+  return !guardEnabled
+    || surfaces.length === 0
+    || surfaces.some((surface) => !isSemanticFrontierContinuationOptional(surface));
+}
+
+function optionalOnlyAddresses(result: SemanticSurfaceCarrier): { paths: Set<string>; handles: Set<string> } {
+  const all = semanticSurfaces(result);
+  const optional = (field: "path" | "handle") => new Set(all
+    .filter((surface) => typeof surface[field] === "string" && isSemanticFrontierContinuationOptional(surface))
+    .map((surface) => surface[field] as string)
+    .filter((address) => !all.some((surface) => surface[field] === address && !isSemanticFrontierContinuationOptional(surface))));
+  return { paths: optional("path"), handles: optional("handle") };
+}
+
+/** Strip only targets proven supporting-only; query-only searches remain valid. */
+export function sanitizeSemanticFrontierNext(
+  result: SemanticSurfaceCarrier,
+  call: ToolCall | undefined,
+  guardEnabled = semanticFrontierGuardEnabled(),
+): ToolCall | undefined {
+  if (call === undefined || !guardEnabled) return call;
+  const optional = optionalOnlyAddresses(result);
+  if (optional.paths.size === 0 && optional.handles.size === 0) return call;
+  const args = { ...call.arguments } as Record<string, unknown>;
+  const optionalTarget = (value: Record<string, unknown>): boolean => {
+    const addresses = [typeof value.path === "string" ? optional.paths.has(value.path) : false, typeof value.handle === "string" ? optional.handles.has(value.handle) : false];
+    // A mismatched mixed target is unsafe: either optional-only address makes
+    // it a continuation carrier for that optional surface.
+    return addresses.some(Boolean);
+  };
+  if (Array.isArray(args.targets)) args.targets = args.targets.filter((target) => target !== null && typeof target === "object" && !optionalTarget(target as Record<string, unknown>));
+  for (const [singular, plural, set] of [["path", "paths", optional.paths], ["handle", "handles", optional.handles]] as const) {
+    if (typeof args[singular] === "string" && set.has(args[singular] as string)) delete args[singular];
+    if (Array.isArray(args[plural])) args[plural] = args[plural].filter((value): value is string => typeof value === "string" && !set.has(value));
+  }
+  const hasAddress = typeof args.path === "string" || typeof args.handle === "string"
+    || (Array.isArray(args.paths) && args.paths.length > 0) || (Array.isArray(args.handles) && args.handles.length > 0)
+    || (Array.isArray(args.targets) && args.targets.length > 0);
+  const hadAddress = Object.prototype.hasOwnProperty.call(call.arguments, "path") || Object.prototype.hasOwnProperty.call(call.arguments, "handle")
+    || Object.prototype.hasOwnProperty.call(call.arguments, "paths") || Object.prototype.hasOwnProperty.call(call.arguments, "handles") || Object.prototype.hasOwnProperty.call(call.arguments, "targets");
+  if (hadAddress && !hasAddress) {
+    return undefined;
+  }
+  return { ...call, arguments: args as ToolCall["arguments"] };
+}
+
+// ---------------------------------------------------------------------------
+// W-DEMOTE (v0.15 §3.5 / D4) — staged demotion, not removal.
+//
+// The legacy TL_SEMANTIC_FRONTIER_GUARD path (sanitizeSemanticFrontierNext
+// above, decisionWire.ts's suppressRemaining) deletes an optional-only
+// address's `remaining` field, or drops it from `next` outright. That is the
+// exact backfire the v0.15 plan measured (DESIGN-v0.15-semantic-frontier-plan
+// .md §0.1 / v2 SF05 #17->#21): the caller re-discovers the same address by
+// hand, via an explicit `targets` re-request, because nothing server-side
+// left it reachable.
+//
+// TL_SF_DEMOTE (mutually exclusive with the guard flag; the check is
+// `flags.ts`'s `assertSemanticFrontierV2FlagConsistency`, invoked once from
+// `server.ts` startup so an inconsistent flag set refuses to boot rather than
+// producing two conflicting projections at runtime) never deletes
+// `remaining`. decisionWire.ts's projectEvidence keeps every SF-optional
+// candidate's evidence[] row — handle, path, role, full `remaining` — and
+// only reorders it after the required/primary rows. This module is the
+// SOURCE of the one signal decisionWire.ts cannot derive on its own: which
+// individual surface OBJECTS are exempt from that reordering because
+// demoting them would violate D4 (served-ledger supremacy) or I-2
+// (required/explicit addresses are permanently un-demotable).
+//
+// WHY A SIDE TABLE, NOT A NEW FIELD. §4.2 fixes wire-field parity at zero new
+// fields for demotion; a WeakMap keyed on the surface OBJECT (exactly how
+// `isSemanticFrontierContinuationOptional`'s own WeakSet in
+// semanticFrontier.ts already works) carries the signal from this module's
+// early pass — `applyCanonicalTaskDecision` runs inside readCodeTaskPack.ts's
+// task-pack construction, before server.ts ever calls decisionWire.ts's
+// projectEvidence on the same `result.surfaces` array — forward to that
+// later, narrower-scoped call, without adding anything a codec could
+// serialize.
+//
+// WHY A MAP AND NOT A SET (SF-8). A `WeakSet` records "this surface passed the
+// predicate ONCE", and that is not the same claim as "this surface may be
+// demoted NOW". Between the marking pass and `projectEvidence`, the same pack
+// can gain a body for the surface, gain a `required` use for its address, or
+// see the served ledger record the path — every one of which must un-mark it.
+// The Map keeps each mark bound to the PACK it was taken on, so the predicate
+// is RE-EVALUATED against that pack's live SF context at read time, and the
+// answer can go from true back to false. It never goes the other way: a
+// surface this pass never marked stays ineligible forever, which is the
+// fail-closed default (I-1/D4) a set of EXEMPTIONS would have inverted.
+// ---------------------------------------------------------------------------
+
+/** One marked surface, bound to the pack whose SF context governs it. */
+interface SfDemotionMark {
+  readonly result: TaskPackResult;
+}
+
+const sfDemotionMarks = new WeakMap<object, SfDemotionMark>();
+
+/**
+ * D4's residency reader for one pack. The SF context (`sfSatisfaction.ts`'s
+ * `SfPackContext`) carries only `snapshot.ledgerWired` — whether A ledger was
+ * wired — never the reader itself, so the task_pack seam publishes the reader
+ * here alongside it. Absent means residency is UNKNOWN for every address of
+ * this pack, and unknown is never eligible.
+ */
+const sfDemotionResidency = new WeakMap<object, SfTaskContext>();
+
+/**
+ * Publish the SF task context (its `ledger` in particular) for `result`, so
+ * demotion eligibility can ask the served ledger about a SPECIFIC ADDRESS
+ * rather than settling for the pack-wide `ledgerWired` boolean. Called by the
+ * task_pack seam with the very context it drove `openSfTask`/`recordServed`
+ * with — never re-derived here, so the two can never disagree.
+ */
+export function attachSfDemotionResidency(result: object, ctx: SfTaskContext): void {
+  if (result === null || typeof result !== "object") return;
+  sfDemotionResidency.set(result, ctx);
+}
+
+// ---------------------------------------------------------------------------
+// FX-Y1 (round-23B review finding 1, HIGH, ruling (cc), 2026-09-04) — the
+// AWAIT-INPUT EMISSION INVARIANT.
+//
+// Independent of the satisfaction fix (`sfSatisfaction.ts`'s
+// `relationDisclosureSatisfies`), the review named a second, structural
+// requirement: this arbiter must never hand the caller a bare
+// `{kind:"await-input"}` with nothing it can act on. `selectCanonicalNext`
+// (§10.0 DC2) is free to return `next:null` with `closure.canAct:false` —
+// that is its honest answer when its OWN priority-2 pass finds no open
+// non-advisory concern to name a call for, which can happen even while
+// `snapshot.allNonAdvisoryClosed` is still `false` (see
+// `pickTopUnsatisfiedConcern`'s `isConcernOpen` re-check: a concern the
+// snapshot still lists open can independently read as already-served by its
+// OWN, stricter address check). Emitting `await-input` on THAT shape is
+// exactly the dead end the review reproduced: a concern this layer cannot
+// even name a call for is not a concern this layer can honestly claim is
+// blocking.
+//
+// The fix is fail-CLOSED toward action, not toward silence: whatever the
+// underlying (pre-SF) decision already proved — `act-answer`/`act-edit` — is
+// what ships, because SF found no address to demand and no address to name
+// as `next` either, so it has nothing left to make a case with. This is I-1's
+// posture applied to this one seat: "never worse than the pre-SF decision."
+// A trace-safe counter records every time this fires, so the gap this
+// invariant papers over stays visible instead of vanishing into a decision
+// that looks ordinary on the wire.
+// ---------------------------------------------------------------------------
+
+let sfAwaitInputInvariantFallbackCount = 0;
+
+/** Test-only: the number of times the invariant below has fired this process. */
+export function sfAwaitInputInvariantFallbackCountForTest(): number {
+  return sfAwaitInputInvariantFallbackCount;
+}
+
+/** Test-only: reset the counter so one spec's assertions cannot see another's fires. */
+export function resetSfAwaitInputInvariantFallbackCountForTest(): void {
+  sfAwaitInputInvariantFallbackCount = 0;
+}
+
+/**
+ * Record that the invariant below fired. Best-effort and fail-open (I-1):
+ * tracing must never affect the decision it is observing, so a missing
+ * workspace root (no residency context published for this pack) or a
+ * throwing trace sink both degrade to "counter incremented, no trace line" —
+ * never a thrown error into the decision path.
+ */
+function traceSfAwaitInputInvariantFallback(result: TaskPackResult, reason: string): void {
+  sfAwaitInputInvariantFallbackCount += 1;
+  try {
+    const workspaceRoot = sfDemotionResidency.get(result)?.workspaceRoot;
+    if (typeof workspaceRoot === "string" && workspaceRoot !== "") {
+      trace("sf_await_input_invariant_fallback", { reason }, workspaceRoot);
+    }
+  } catch {
+    // Best-effort only — see this function's own doc comment.
+  }
+}
+
+/**
+ * The full eligibility predicate, evaluated against `result`'s CURRENT state.
+ *
+ * A surface is safe to reorder into the demoted tail only when SF classifies
+ * it optional, it is NOT one of `snapshot.requiredAddresses` (I-2), the caller
+ * does not ALREADY HOLD its bytes (no `code_unchanged` restatement in THIS
+ * response), and the byte-residency ledger answers a PROVEN "never served"
+ * for its address (D4: served or unknown is never eligible).
+ *
+ * FOURTH INERTNESS LAYER (2026-09-03, FX-H). This predicate used to
+ * disqualify any surface carrying a `code` body, under the label "D4:
+ * residency served-now". That reading is circular: a body this very response
+ * has not sent yet is not something the caller "already holds" — it is
+ * exactly the byte §3.5.1's `supporting` tier exists to withhold. With that
+ * clause in place, TL_SF_DEMOTE could only ever REORDER rows some OTHER
+ * subsystem (the budget shedder) had already stripped, so on any pack that
+ * fits its budget — every small workspace, and the combined pin's own
+ * fixture — the flag changed no byte at all. D4 itself is unharmed: the
+ * per-address `sfByteResidency` check below is the authority on "already
+ * held", and `code_unchanged` (a restatement of bytes the caller received
+ * earlier) still disqualifies outright.
+ */
+function demotionEligibleNow(result: TaskPackResult, surface: object): boolean {
+  if (!sfDemoteEnabled()) return false;
+  const ctx = sfPackContextFor(result);
+  if (ctx === undefined || ctx.observationOnly || !ctx.snapshot.active) return false;
+  // D4: no ledger wired means residency is UNKNOWN for every candidate this
+  // call could demote. Fail closed rather than guess (§0.2 D4).
+  if (ctx.snapshot.ledgerWired !== true) return false;
+  if (!isSemanticFrontierContinuationOptional(surface as TaskPackResult["surfaces"][number])) return false;
+  const record = surface as unknown as Record<string, unknown>;
+  // D4: the caller already holds these bytes from an earlier call — never
+  // demote (and nothing to save: a restatement is already cheap).
+  if (typeof record["code_unchanged"] === "string") return false;
+  const path = typeof record["path"] === "string" ? record["path"] : undefined;
+  if (path === undefined) return false;
+  if (ctx.snapshot.requiredAddresses.includes(path)) return false; // I-2.
+  // RULING (dd), round-24 finding 1, 2026-09-04 (FX-Y2): an address that
+  // grounds an OPEN non-advisory concern — its own, or (for an open relation
+  // concern) a definition/declaration sibling's — is treated as required for
+  // demotion purposes exactly like I-2, even though it was never caller-named
+  // and `requiredAddresses` above therefore never lists it. See
+  // `isAddressGroundingOpenConcern`'s own doc comment (sfSatisfaction.ts) for
+  // the full mechanism this closes: a sibling concern satisfied by the sync
+  // pass, off a body this same pack was about to demote out from under a
+  // still-open relation concern's later disclosure-based closure.
+  if (isAddressGroundingOpenConcern(path, ctx.concerns, ctx.snapshot.openNonAdvisory)) return false;
+  // D4, per ADDRESS: the ledger is the only authority on whether the caller
+  // already holds bytes for this path. `known:false` (no reader published) is
+  // UNKNOWN, and unknown fails closed exactly like served.
+  const taskCtx = sfDemotionResidency.get(result);
+  if (taskCtx === undefined) return false;
+  const residency = sfByteResidency(taskCtx, { path });
+  if (!residency.known || residency.servedPath) return false;
+  // D3(b) (FX-R3, 2026-09-04): INTRA-PACK RESIDENCY. The ledger above answers
+  // for EARLIER calls only; it cannot see a sibling row minted moments ago in
+  // THIS pack. Live (smoke-r3 cell SF05 ... -r0): the recursive read closure
+  // minted a second `drv_baro.h` row for `1-23` while the pack already served
+  // `1-49` WITH a body, the classifier marked the narrow row optional, and the
+  // wire shipped a demoted row for a path a primary row was shipping bytes
+  // for — `re_suppression_count:1`, the invariant `decisionWire.ts` claimed
+  // was "0 by construction". Bytes another row of this same pack puts on the
+  // wire ARE served (ruling (c): only `not served` is demotable), so this
+  // surface is not demotable.
+  if (packSiblingServesThisWindow(result, surface, path)) return false;
+  return true;
+}
+
+/** `"<start>-<end>"` → `[start, end]` for the sibling check below. */
+function demotionLineSpan(value: unknown): [number, number] | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^(\d+)-(\d+)$/.exec(value.trim());
+  if (match === null) return undefined;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < start) return undefined;
+  return [start, end];
+}
+
+/**
+ * D3(b): does ANOTHER row of `result` carry a body covering (or overlapping)
+ * `surface`'s own window for the same path?
+ *
+ * File coordinates per ruling (t): both spans are the surfaces' own served
+ * line ranges. A sibling body whose range cannot be parsed counts as covering
+ * the whole file — fail-closed toward "already served", which only ever KEEPS
+ * a body (it can never un-suppress one, so `re_suppression_count` stays 0).
+ */
+function packSiblingServesThisWindow(
+  result: TaskPackResult,
+  surface: object,
+  path: string,
+): boolean {
+  if (!Array.isArray(result.surfaces)) return false;
+  const own = demotionLineSpan((surface as unknown as Record<string, unknown>)["range"]);
+  for (const sibling of result.surfaces) {
+    if (sibling === surface || sibling === null || typeof sibling !== "object") continue;
+    const record = sibling as unknown as Record<string, unknown>;
+    if (record["path"] !== path) continue;
+    const body = typeof record["code"] === "string" && record["code"] !== ""
+      ? record["code"]
+      : typeof record["code_unchanged"] === "string" ? record["code_unchanged"] : undefined;
+    if (body === undefined || body === "") continue;
+    const span = demotionLineSpan(record["range"]);
+    if (span === undefined || own === undefined) return true;
+    if (span[0] <= own[1] && own[0] <= span[1]) return true;
+  }
+  return false;
+}
+
+/**
+ * True only when `surface` was marked by this module's own pass AND still
+ * satisfies the whole predicate against its pack's live SF state (SF-8).
+ */
+export function isSemanticFrontierDemotionEligible(surface: object): boolean {
+  const mark = sfDemotionMarks.get(surface);
+  if (mark === undefined) return false;
+  return demotionEligibleNow(mark.result, surface);
+}
+
+/**
+ * SF-8 ORDERING. `applyCanonicalTaskDecision` runs EARLY inside
+ * `dedupeTrimAndPersist`, at a point where this pack's SF context has not been
+ * opened yet — so `sfPackContextFor(result)` is `undefined` there, the
+ * demotion marking pass marks nothing, and the `next` arbitration sees no
+ * snapshot and returns the legacy decision untouched.
+ *
+ * This is the re-application that closes it: the same canonical exit, run once
+ * more now that the context exists. It is called TWICE by design — from
+ * readCodeTaskPack.ts's `applySemanticFrontierPreBookingSeam` (so the demoted
+ * pack's decision is the one every serve-booking producer downstream sees) and
+ * again from `buildTaskPack`, after the continuation bundle has appended its
+ * bodyless rows (so the decision describes the pack as it SHIPS). Idempotent
+ * by construction: `applyCanonicalTaskDecision` re-derives rather than
+ * accumulates.
+ *
+ * It is gated on `TL_SF_DEMOTE` — with the flag off it is never called at all,
+ * and with the flag on but no context it returns before doing anything, so a
+ * flag-off pack is byte-identical by construction.
+ */
+export function reapplySemanticFrontierDecision(result: TaskPackResult): void {
+  if (!sfDemoteEnabled()) return;
+  if (sfPackContextFor(result) === undefined) return;
+  applyCanonicalTaskDecision(result);
+}
+
+// ---------------------------------------------------------------------------
+// W-DEMOTE APPLICATION (§3.5.1's `supporting` tier) — the body actually comes
+// off HERE, on the surface, not later on the wire.
+//
+// WHY NOT IN `projectEvidence`. Several producers read `surface.code` as the
+// truth about what this response sent: `recordServedEditAdmissibility` (the
+// edit gate's admissible union), the cumulative `recordServedSurfaces` log
+// (which `priorEpochActionFrontier` lifts into the NEXT same-epoch
+// certificate's `action_frontier`), `rememberCertifiedWorkingSet`,
+// `captureServedPack`'s `recordPackServedRanges` (the byte-residency ledger
+// `sfByteResidency`/`hasServedPath` answers D4 from, and the one a later
+// `code-unchanged` receipt is issued against), and server.ts's
+// `recordTaskPackSurfaceReads`. Those five are the ones the single booking
+// pass owns; THE LIST IS NOT THE WHOLE STORY (round-15 finding 4). Three more
+// writers in `readCodeTaskPack.ts` assert served-ness from a position the seam
+// cannot reach, all of them over the POST-`trimToCap` `trimmed` pack:
+// `recordEpochTaskContract` (a `servedRoles` proof of type "served"),
+// `reconcileEpochTaskContract` (coverage disclosure, which re-reads the body
+// from disk rather than asserting wire delivery), and, under
+// `TL_COVERAGE_PACKER=v2`, `recordPriorPackObligations` (whose paths reach the
+// next certificate's `action_frontier` as explicit action paths). They must
+// precede the seam because the contract and the wire are rebuilt from their
+// output; a seam-demoted surface can never be a role's sole evidence, because
+// demotion requires it NOT to be `semanticPrimary` — its handle is in neither
+// `action_frontier` nor `evidence_handles`. `sfBookingOrderFence.spec.ts`
+// enumerates every one of them with its justification, and fails on any call
+// site it has not been told about. Stripping a body only at wire-projection time
+// would leave every one of them asserting the caller holds bytes that never
+// left the process — the exact serve-honesty class of defect this codebase has
+// paid for twice (F1, 2026-08-02). Removing `code` from the surface itself
+// keeps all of them honest for free, and leaves `projectEvidence`'s own
+// conservative "never demote a row that still carries a body" gate untouched.
+//
+// WHERE THIS RUNS (FX-I-A/FX-J, 2026-09-03). "Before all of them" is a claim
+// about ORDER, and it has been wrong twice. FX-H ran this pass from
+// `buildTaskPack` AFTER `buildTaskPackCore` returned, while the producers run
+// inside `dedupeTrimAndPersist`, inside that core (round-13 finding 1). FX-I-A
+// moved it into `dedupeTrimAndPersist` at
+// `applySemanticFrontierPreBookingSeam` and split the admissible union into a
+// nominate/book pair — but left `recordServedSurfaces` upstream and unfiltered,
+// so the demoted handle still reached the next pack's frontier (round-14
+// finding 1). FX-J closes it structurally: the seam still runs where FX-I-A
+// put it — AFTER `finalizePackServeState`, which the classifier needs for the
+// finalized `execution_contract` — and every `TL_SF_DEMOTE` booking now
+// happens in ONE pass at `dedupeTrimAndPersist`'s exit
+// (`bookShippedPackServeState`), off one `shippedSurfaces` projection over the
+// pack that ships. FX-K (round-15 finding 1) made that pass UNCONDITIONAL:
+// FX-J had left the flag-off path booking pre-trim, and one production
+// `budget:{bytes}` read plus one `edit_file` proved that grants write
+// authority over a file the response sent no bytes for. There is now exactly
+// one booking position in both flag states.
+// `sfBookingOrderFence.spec.ts` holds the ordering by parsing
+// the source, so the next mis-ordering fails a test instead of a review.
+// ---------------------------------------------------------------------------
+
+/** `"<start>-<end>"` → `[start, end]`; `undefined` for anything else. */
+function parseLineSpan(value: unknown): [number, number] | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^(\d+)-(\d+)$/.exec(value.trim());
+  if (match === null) return undefined;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < start) return undefined;
+  return [start, end];
+}
+
+/**
+ * The union of `spans`, merged over touching/overlapping neighbours, as
+ * `"<start>-<end>"` strings. A demoted row's `remaining` must cover the window
+ * whose body this pass just withheld PLUS whatever was already undelivered —
+ * otherwise the row is bare and unreachable (A.8 E-8), which is the legacy
+ * deletion behaviour W-DEMOTE exists to retire.
+ */
+function mergeLineSpans(spans: readonly [number, number][]): string[] {
+  const sorted = [...spans].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out: [number, number][] = [];
+  for (const [start, end] of sorted) {
+    const last = out[out.length - 1];
+    if (last !== undefined && start <= last[1] + 1) {
+      if (end > last[1]) last[1] = end;
+      continue;
+    }
+    out.push([start, end]);
+  }
+  return out.map(([start, end]) => `${start}-${end}`);
+}
+
+/**
+ * Withhold the body of every demotion-eligible surface of `result`, leaving it
+ * addressable: `handle` + `path` + `role` + a `remaining` window that covers
+ * what was withheld (DESIGN-v0.15-semantic-frontier-plan.md §3.5.1's
+ * `supporting` tier — "`body` なし、`prior` なし").
+ *
+ * FLOOR. Never withholds the LAST FRESH body in the pack: §2.1.1's answer floor
+ * (`answerFloorHolds`) refuses a response whose every evidence row is bodyless,
+ * and degrading a ready `act.answer` into `await_input` would cost the very
+ * turn this lever is buying. In practice the classifier already guarantees a
+ * survivor (`semanticPrimary` treats index 0 as primary), so this is a
+ * belt-and-braces invariant, not the common path.
+ *
+ * FX-I-A (2026-09-03), round-13 finding 5: the survivor count is over FRESH
+ * bodies (`code`) ONLY. It used to include `code_unchanged` restatements,
+ * which the loop can never demote — so on a pack with one fresh body and N
+ * restatements the count read `N+1 > 1` and the one body this response would
+ * actually have SENT was demotable, producing a response that serves no new
+ * bytes. `answerFloorHolds` accepts `prior`, so nothing degraded; the floor
+ * simply did not implement the invariant its own doc states. It does now.
+ *
+ * Returns the number of surfaces whose body was withheld.
+ */
+export function applySemanticFrontierDemotion(result: TaskPackResult): number {
+  if (!sfDemoteEnabled()) return 0;
+  if (sfPackContextFor(result) === undefined) return 0;
+  if (!Array.isArray(result.surfaces)) return 0;
+  const bodied = result.surfaces.filter(
+    (surface) => surface !== null && typeof surface === "object"
+      && typeof (surface as unknown as Record<string, unknown>)["code"] === "string",
+  );
+  let survivors = bodied.length;
+  let demoted = 0;
+  for (const surface of result.surfaces) {
+    if (surface === null || typeof surface !== "object") continue;
+    const record = surface as unknown as Record<string, unknown>;
+    if (typeof record["code"] !== "string") continue;
+    if (survivors <= 1) break; // answer floor: keep at least one body.
+    if (!isSemanticFrontierDemotionEligible(surface)) continue;
+    const spans: [number, number][] = [];
+    const own = parseLineSpan(record["range"]);
+    if (own !== undefined) spans.push(own);
+    if (Array.isArray(record["remaining_ranges"])) {
+      for (const entry of record["remaining_ranges"]) {
+        const span = parseLineSpan(entry);
+        if (span !== undefined) spans.push(span);
+      }
+    }
+    // No addressable window at all ⇒ withholding the body would produce a bare
+    // row. Fail closed and keep serving it (I-1: SF never degrades a pack).
+    if (spans.length === 0) continue;
+    delete record["code"];
+    // FX-R3d (D10): the ONE authoritative record that THIS pass — not the
+    // byte cap, not D8's join bound, not the shedder — is why this row ships
+    // bodyless. `protocol/envelope.ts` intersects these marks with the final
+    // wire to compute `demoted_count`, so engagement can no longer be claimed
+    // by a row nothing here ever touched.
+    markSemanticFrontierWithheldBody(surface);
+    // `anchors_served` claims this surface's decision-critical lines are
+    // INSIDE the served window (readiness risk stops charging the
+    // partial-content factor on the strength of it). Nothing is served here
+    // any more, so the claim goes with the body.
+    delete record["anchors_served"];
+    record["content_completeness"] = "partial";
+    record["remaining_ranges"] = mergeLineSpans(spans);
+    survivors -= 1;
+    demoted += 1;
+  }
+  // The decision was derived against a pack that still carried these bodies.
+  // `applyCanonicalTaskDecision` re-derives rather than accumulates, so one
+  // more pass restates it over what this response actually sends.
+  if (demoted > 0) applyCanonicalTaskDecision(result);
+  return demoted;
+}
+
+/** Mark every eligible surface of `result` ahead of decisionWire.ts's read. */
+function markSemanticFrontierDemotionEligibility(result: TaskPackResult): void {
+  if (!sfDemoteEnabled()) return;
+  if (!Array.isArray(result.surfaces)) return;
+  for (const surface of result.surfaces) {
+    if (surface === null || typeof surface !== "object") continue;
+    if (!demotionEligibleNow(result, surface)) continue;
+    sfDemotionMarks.set(surface, { result });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// W-NEXT-ARBITER (v0.15 §10.0, DC2) — this module owns `decision.next`.
+//
+// Three sibling designs want a say in `next`'s contents; §10.0 hands the
+// arbitration seat to `selectCanonicalNext` (a pure, sibling-agnostic
+// function) and requires every existing derivation to route through it
+// rather than special-case each concern. Priority 1 (explicit targets) is
+// intentionally passed as `[]` here: by the time `deriveCanonicalTaskDecision`
+// has produced a decision, an unresolved caller-named target has already
+// been surfaced through an EARLIER branch of that function (the required
+// zoom / stale-obligation / epoch-contract demotions above) — passing the
+// live `snapshot.requiredAddresses` ledger here instead would make
+// `selectCanonicalNext`'s own `explicit-target-pending` closure fire on
+// every task that has EVER named an address, which is not what "pending"
+// means in §10.0's priority-1 sense.
+// ---------------------------------------------------------------------------
+
+/**
+ * The `cwd` / `task.handle` / `qref` the replaced call already carried (SF-2).
+ * Nothing is invented: a field absent from BOTH the legacy call and the pack
+ * stays absent, so an arbitrated call is never more scoped than its input.
+ */
+function legacyCallIdentity(
+  result: TaskPackResult,
+  legacy: ToolCall | undefined,
+): { cwd?: string; taskHandle?: string; qref?: string } {
+  const args = (legacy?.arguments ?? {}) as unknown as Record<string, unknown>;
+  const task = args["task"];
+  const handle = task !== null && typeof task === "object"
+    ? (task as Record<string, unknown>)["handle"]
+    : undefined;
+  const legacyQref = args["qref"];
+  const qref = typeof legacyQref === "string" && legacyQref !== ""
+    ? legacyQref
+    : typeof result.qref === "string" && result.qref !== "" ? result.qref : undefined;
+  return {
+    ...(typeof args["cwd"] === "string" && args["cwd"] !== "" ? { cwd: args["cwd"] as string } : {}),
+    ...(typeof handle === "string" && handle !== "" ? { taskHandle: handle } : {}),
+    ...(qref === undefined ? {} : { qref }),
+  };
+}
+
+/**
+ * D8 (FX-R3c, 2026-09-04) — WHY THE ARBITRATED CALL NEEDED A CARRIER.
+ *
+ * `applyCanonicalTaskDecision` returns EARLY when the pack is already
+ * internally coherent (`if (!needsRepair) return decision;`), which is the
+ * common case for a `discover` pack. Everything §10.0's arbiter decided was
+ * therefore computed and thrown away: `contract.next_call` kept whatever the
+ * legacy derivation had put there (usually nothing), and
+ * `decisionWire.discoverNext` fell through to `servedEvidenceZoom` — the
+ * codeless-row gap fallback the sealed SF05 replay shipped, pointing at a
+ * firmware file's unserved prefix instead of the file the caller named.
+ *
+ * A change to `needsRepair` itself would re-run the whole discovery
+ * projection on every coherent SF pack. This carries the ONE field that
+ * actually differs instead: the arbiter records the call it selected, and the
+ * exit assigns exactly that, only on the `discover` arm, only under
+ * `TL_SF_DEMOTE` (the flag that gates arbitration at all), so a flag-off pack
+ * is byte-identical by construction.
+ */
+const sfArbitratedNextCall = new WeakMap<object, ToolCall>();
+
+/**
+ * The call §10.0's arbiter selected for `result`, if any. Exported so a spec
+ * can prove the exit ASSIGNED it (`contract.next_call`) rather than computing
+ * and discarding it, which is what the coherence gate below used to do.
+ */
+export function sfArbitratedNextCallFor(result: object): ToolCall | undefined {
+  if (result === null || typeof result !== "object") return undefined;
+  return sfArbitratedNextCall.get(result);
+}
+
+/**
+ * D9 (ruling (cc)): the same-basename choices the arbiter surfaced for this
+ * pack, published for `decisionWire.ts`'s `await_input` projection. Empty (or
+ * absent) means this pack carries no ambiguous basename.
+ */
+const sfAwaitInputCandidatePaths = new WeakMap<object, readonly string[]>();
+
+/** The ambiguous-basename choices `result`'s concerns carry (D9). */
+export function sfAwaitInputCandidatePathsFor(result: object): readonly string[] {
+  if (result === null || typeof result !== "object") return [];
+  return sfAwaitInputCandidatePaths.get(result) ?? [];
+}
+
+function applySemanticFrontierNextArbitration(
+  result: TaskPackResult,
+  decision: CanonicalTaskDecision | undefined,
+): CanonicalTaskDecision | undefined {
+  if (decision === undefined || !sfDemoteEnabled()) return decision;
+  if (decision.kind !== "discover" && decision.kind !== "act-answer" && decision.kind !== "act-edit") {
+    return decision;
+  }
+  const ctx = sfPackContextFor(result);
+  if (ctx === undefined || ctx.observationOnly || !ctx.snapshot.active) return decision;
+  // SF-2: an arbitrated `next` REPLACES the legacy one, so it must carry the
+  // legacy call's identity — `cwd` (a worktree caller gets `cwd-required-*`
+  // without it), `task.handle` (without it the caller starts a new task), and
+  // `qref` (without it a bounded re-pack becomes a fresh unscoped one). Read
+  // off the call being replaced, with `result.qref` as the fallback for a
+  // legacy call that carried none.
+  const identity = legacyCallIdentity(result, decision.next_call);
+  const arbitration = selectCanonicalNext({
+    explicitTargets: [],
+    concerns: ctx.concerns,
+    snapshot: ctx.snapshot,
+    continuation: undefined,
+    // SF-6: batch FOLDING is the turn-economy read-batching lever
+    // (`TL_BATCH_HINTS`), not the edit-frontier batching one — folding several
+    // concerns' addresses into one `read_file` is a read-side transform and
+    // has nothing to do with `TL_BATCH_EDIT_FRONTIER`'s prepared-phase
+    // multi-target edit fence.
+    batchFold: { enabled: batchHintsEnabled(), maxTargets: DISCOVERY_BUNDLE_PATH_CAP },
+    currentNext: decision.next_call ?? null,
+    // F9 (ruling (a)): the named-frontier join's per-path direct-read window
+    // map (`readCodeTaskPack.ts`'s `applySemanticFrontierNamedFrontier`), so
+    // a path-anchored concern's `next` can be a direct, bounded `content:
+    // "full"` read instead of the whole-file/`qref` shape that forced
+    // `server.ts`'s `normalizeCanonicalRequest` into an extra, empty
+    // task_pack re-pack hop on the sealed SF05 replay.
+    pathDirectReadWindows: ctx.namedFrontierDirectWindows,
+    ...identity,
+  });
+  // D9 (ruling (cc)): publish the ambiguous-basename choice for the
+  // `await_input` projection, on every arm — the decision that ends up
+  // carrying it is `decisionWire.ts`'s to make, not this function's.
+  const candidatePaths = arbitration.candidates
+    .map((address) => address.path)
+    .filter((path): path is string => typeof path === "string" && path !== "");
+  if (candidatePaths.length > 0) sfAwaitInputCandidatePaths.set(result, candidatePaths);
+  if (decision.kind === "act-answer" || decision.kind === "act-edit") {
+    // P-4 (§6): an open non-advisory concern this arbiter can see must not
+    // stand behind a stale certificate. This only ever DOWNGRADES `act.*` —
+    // a true `canAct` never promotes a lesser decision on its own (§10.0).
+    if (arbitration.closure.canAct) return decision;
+    if (arbitration.next !== null) {
+      return { kind: "discover", next_call: arbitration.next, reason: arbitration.closure.reason };
+    }
+    // FX-Y1 (round-23B finding 1, HIGH, ruling (cc)): the arbiter can name
+    // NEITHER a call to close the open concern NOR a `next` to discover it
+    // with. That is the bare `{await-input, no next}` dead end the review
+    // reported — see this function's own header comment above. A concern
+    // this layer cannot even name a call for cannot be the thing standing
+    // between the caller and the decision this pack already proved, so fail
+    // closed toward that decision rather than manufacture a dead end.
+    traceSfAwaitInputInvariantFallback(result, arbitration.closure.reason);
+    return decision;
+  }
+  // decision.kind === "discover": the top unsatisfied concern this module's
+  // own concern graph ranked may name a different address than the legacy
+  // derivation did; §10.0 gives this call the arbitration seat over it.
+  if (arbitration.next === null || arbitration.next === undefined) return decision;
+  // D8: record it, so the exit can assign it even when the pack is otherwise
+  // coherent and `applyCanonicalTaskDecision` returns before its projectors.
+  sfArbitratedNextCall.set(result, arbitration.next);
+  return { ...decision, next_call: arbitration.next };
+}
+
+type CompletionObligation = Omit<TaskReadinessObligation, "required"> & { required: boolean };
+
+export interface CompletionProjection {
+  blocking: TaskReadinessObligation[];
+  openBlocking: TaskReadinessObligation[];
+  complete: boolean;
+  coverage: TaskPackResult["coverage"];
+}
+
+/** Project coverage and blocking completion from one obligation snapshot. */
+export function projectCompletion(
+  result: Pick<TaskPackResult, "coverage">,
+  obligations: readonly CompletionObligation[],
+  options: { promoteWhenComplete?: boolean } = {},
+): CompletionProjection {
+  const blocking = obligations.filter(
+    (obligation): obligation is TaskReadinessObligation => obligation.required !== false,
+  );
+  const openBlocking = blocking.filter((obligation) => obligation.status !== "proved");
+  // The obligation snapshot can invalidate structural coverage, but an empty
+  // or fully proved snapshot cannot manufacture scope proof the locator never
+  // established. Preserve focused/partial here; only an open blocker demotes
+  // an otherwise-complete result.
+  const coverage = openBlocking.length > 0
+    ? "partial"
+    : options.promoteWhenComplete === true ? "complete" : result.coverage;
+  return {
+    blocking,
+    openBlocking,
+    complete: openBlocking.length === 0,
+    coverage,
+  };
+}
+
 /** Returns a bounded re-pack using only paths already related by this pack. */
-export function discoveryBundleNext(result: TaskPackResult): ToolCall | undefined {
-  if (result.coverage === "complete" || typeof result.qref !== "string" || result.qref === "") return undefined;
+export function discoveryBundleNext(
+  result: TaskPackResult,
+  guardEnabled = semanticFrontierGuardEnabled(),
+): ToolCall | undefined {
+  if (!semanticFrontierNextAllowed(result, guardEnabled) || result.coverage === "complete" || typeof result.qref !== "string" || result.qref === "") return undefined;
+  const surfaces = semanticSurfaces(result);
   const paths: string[] = [];
   const add = (value: unknown): void => {
     if (typeof value === "string" && value !== "" && !paths.includes(value) && paths.length < DISCOVERY_BUNDLE_PATH_CAP) paths.push(value);
   };
   if (result.coverage_reason === "candidate-list") {
-    for (const surface of result.surfaces) add((surface as { path?: unknown }).path);
+    for (const surface of surfaces) {
+      if (guardEnabled && isSemanticFrontierContinuationOptional(surface)) continue;
+      add((surface as { path?: unknown }).path);
+    }
   } else {
     const graph = result.wiring?.evidence_graph;
     if (graph === undefined || graph.relations.length === 0) return undefined;
+    // A mixed graph may contain lexical-only nodes. An address is optional only
+    // when every surface for it carries the explicit internal annotation.
+    const optionalPaths = !guardEnabled ? new Set<string>() : new Set(surfaces
+      .filter((surface) => isSemanticFrontierContinuationOptional(surface))
+      .map((surface) => surface.path as string)
+      .filter((path) => !surfaces.some((surface) => {
+        return surface.path === path && !isSemanticFrontierContinuationOptional(surface);
+      })));
     const relatedIds = new Set(graph.relations.flatMap((relation) => [relation.from, relation.to]));
-    for (const node of graph.nodes) if (relatedIds.has(node.id)) add(node.path);
+    // E2: never re-request what an EARLIER call in this epoch already served
+    // (`pathServedInEarlierCall`), or what THIS SAME pack already proved a
+    // re-pack would only reproduce (`surfaceExceedsRepackBudgetInThisPack` —
+    // the original r9 SF13 self-loop this rule exists for). A path this same
+    // pack fully covers WITHOUT that proof (C1: a small, already-complete
+    // whole-file embed) still belongs in the bundle once firing is
+    // justified — dropping it would shrink a legitimate single-gap bundle
+    // below the 2-path floor and silence it entirely (the sf-flag-control/
+    // treatment regression); `hasUnservedRelatedNode` gates firing instead.
+    const servedInEpoch = epochServedPaths(result);
+    let hasUnservedRelatedNode = false;
+    for (const node of graph.nodes) {
+      if (!relatedIds.has(node.id)) continue;
+      if (optionalPaths.has(node.path)) continue;
+      if (pathServedInEarlierCall(servedInEpoch, node.path)) continue;
+      if (surfaceExceedsRepackBudgetInThisPack(result, node.path)) continue;
+      if (!surfaceFullyCoversPathInThisPack(result, node.path)) hasUnservedRelatedNode = true;
+      add(node.path);
+    }
+    // Nothing in the related cluster is worth another round trip: every node
+    // this response could name already amounts to a whole-file serve.
+    if (!hasUnservedRelatedNode) return undefined;
   }
   return paths.length < 2 ? undefined : { tool: "read_file", arguments: { mode: "task_pack", qref: result.qref, paths } };
 }
@@ -79,6 +927,7 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
     }))
     .filter((item): item is { surface: TaskPackResult["surfaces"][number]; range: unknown[] } =>
       Array.isArray(item.range)
+      && (!semanticFrontierGuardEnabled() || !isSemanticFrontierContinuationOptional(item.surface))
       && typeof (item.surface as { handle?: unknown }).handle === "string"
       && item.range.some((value) =>
         typeof value === "string"
@@ -219,6 +1068,7 @@ function requiredAnswerDocumentZoom(result: TaskPackResult): ContinuationCall | 
   const surface = result.surfaces.find((candidate) => {
     const value = candidate as { path?: unknown; handle?: unknown; remaining_ranges?: unknown };
     return typeof value.path === "string"
+      && (!semanticFrontierGuardEnabled() || !isSemanticFrontierContinuationOptional(candidate))
       && /\.(?:md|markdown|mdx)$/iu.test(value.path)
       && typeof value.handle === "string"
       && Array.isArray(value.remaining_ranges)
@@ -274,11 +1124,48 @@ function isReadOnlyAnswerPack(result: TaskPackResult): boolean {
   return result.task_profile === "answer" || result.profile_binding?.selected === "answer";
 }
 
+/** Exhaustive literal absence is decision-grade without inventing an evidence surface. */
+export function decisionGradeLiteralAbsenceSubject(
+  result: Pick<TaskPackResult, "coverage" | "literal_source_absence">,
+  contract: TaskExecutionContract,
+): string | undefined {
+  const absence = result.literal_source_absence;
+  const workspace = contract.workspace_state;
+  const evidenceModel = contract.evidence_model;
+  if (result.coverage !== "complete" || absence === undefined || workspace === undefined || evidenceModel === undefined) return undefined;
+  const subject = absence.subject.trim();
+  if (subject === ""
+    || absence.role_source.trim() === ""
+    || absence.scope.trim() === ""
+    || !Number.isInteger(absence.scanned_paths)
+    || absence.scanned_paths < 0
+    || !Number.isInteger(absence.universe_paths)
+    || absence.universe_paths < 0
+    || !Number.isInteger(absence.excluded_paths)
+    || absence.excluded_paths < 0
+    || !Number.isInteger(absence.destination_occurrences)
+    || absence.destination_occurrences < 0
+    || !/^sha256:[a-f0-9]{64}$/.test(absence.universe_fingerprint)) return undefined;
+  if (absence.universe_complete !== true
+    || absence.scanned_paths !== absence.universe_paths
+    || workspace.inventory_complete !== true
+    || absence.universe_paths !== workspace.inventory_files) return undefined;
+  const obligation = `literal-source-absent:${subject}`;
+  if (!evidenceModel.claims.some((claim) => claim.id === obligation && claim.status === "supported")) return undefined;
+  if (evidenceModel.unresolved.length > 0 || (contract.falsification?.unresolved.length ?? 0) > 0) return undefined;
+  return subject;
+}
+
 /**
  * Derive one decision from contract evidence. In particular, an
  * `answer_from_handles` route can never promote a pack by itself.
  */
-export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTaskDecision | undefined {
+/**
+ * The pre-W-DEMOTE derivation, unchanged. `deriveCanonicalTaskDecision`
+ * below wraps it with the §10.0 `next` arbitration seat; every early-return
+ * branch and its reasoning here stays exactly as written.
+ */
+function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDecision | undefined {
   const contract = result.execution_contract;
   if (contract === undefined) return undefined;
 
@@ -286,10 +1173,19 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
     return { kind: "terminal-closed", reason: "semantic closure receipt is closed" };
   }
 
+  // Canonical decision construction is a producer-side, guard-neutral
+  // statement of the available work.  Semantic-frontier suppression belongs
+  // to the final wire projector, where it can compare the selected raw and
+  // guarded calls and register a structured witness against the actual wire.
+  // Applying it here can turn a viable raw bundle into await-input before that
+  // attribution point, yielding neither an executable primary continuation
+  // nor an honest suppression attestation.
+  const canonicalNextAllowed = semanticFrontierNextAllowed(result, false);
+
   // A stale ready certificate must not hide the one remaining document range
   // that the answer route explicitly says is needed. This is intentionally
   // before certificate promotion, and intentionally Markdown-only.
-  const requiredZoom = requiredAnswerDocumentZoom(result);
+  const requiredZoom = canonicalNextAllowed ? requiredAnswerDocumentZoom(result) : undefined;
   if (requiredZoom !== undefined) {
     return {
       kind: "discover",
@@ -306,7 +1202,7 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
   // `requiredAnswerDocumentZoom` uses for the same reason: a stale ready
   // certificate must not hide evidence this same response already disclosed
   // as unserved.
-  const staleObligationZoom = contract.typestate.phase === "prepared"
+  const staleObligationZoom = canonicalNextAllowed && contract.typestate.phase === "prepared"
     ? unservedPriorPackObligationZoom(result)
     : undefined;
   if (staleObligationZoom !== undefined) {
@@ -331,7 +1227,7 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
   // costs exactly one turn in the worst case — the re-pack it names is either
   // satisfied or comes back uncertified, and an uncertified pack is not
   // demoted again.
-  const epochContractZoom = hasCertificateBinding(contract)
+  const epochContractZoom = canonicalNextAllowed && hasCertificateBinding(contract)
     ? unservedEpochContractZoom(result)
     : undefined;
   if (epochContractZoom !== undefined) {
@@ -339,6 +1235,13 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
       kind: "discover",
       next_call: epochContractZoom,
       reason: "an earlier pack in this task established a requirement no served evidence covers; close it against the task's own query before certifying this narrowed pack",
+    };
+  }
+
+  if (decisionGradeLiteralAbsenceSubject(result, contract) !== undefined) {
+    return {
+      kind: "act-answer",
+      reason: "the inventory-complete workspace proves the directed literal source is absent",
     };
   }
 
@@ -389,7 +1292,7 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
     && contract.await_input_code === "choose-candidate"
     && isReadOnlyAnswerPack(result)
   ) {
-    const bundle = discoveryBundleNext(result);
+    const bundle = canonicalNextAllowed ? discoveryBundleNext(result, false) : undefined;
     if (bundle !== undefined) {
       return {
         kind: "discover",
@@ -409,7 +1312,7 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
   }
 
   const routeClaimsAnswer = result.route?.action === "answer_from_handles";
-  const zoom = servedDocumentZoom(result);
+  const zoom = canonicalNextAllowed ? servedDocumentZoom(result) : undefined;
   // The certified gate above is where the sanctioned served-zoom affordance
   // (hasServedZoomAffordance) is meant to land `act-answer` — with a real
   // certificate. Reaching here means it did not (no certificate, or the
@@ -425,10 +1328,11 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
     };
   }
 
-  const next = discoveryBundleNext(result)
-    ?? (isReadOnlyCall(contract.next_call)
-    ? contract.next_call
-    : firstReadOnlyContinuation(result));
+  const next = canonicalNextAllowed ? discoveryBundleNext(result, false)
+    ?? sanitizeSemanticFrontierNext(result, isReadOnlyCall(contract.next_call)
+      ? contract.next_call
+      : firstReadOnlyContinuation(result), false)
+    : undefined;
   if (next !== undefined) {
     return { kind: "discover", next_call: next, reason: contract.reason };
   }
@@ -436,6 +1340,16 @@ export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTa
   // Missing proof without a bounded evidence call must never fall through to
   // answer/edit. Asking for a decision is the conservative, fail-closed exit.
   return { kind: "await-input", reason: contract.reason };
+}
+
+/**
+ * The canonical decision, with the §10.0 `next` arbitration seat applied.
+ * `sfDemoteEnabled()` off (the default) makes this byte-identical to
+ * `deriveCanonicalTaskDecisionRaw` — `applySemanticFrontierNextArbitration`'s
+ * first statement is that exact flag check.
+ */
+export function deriveCanonicalTaskDecision(result: TaskPackResult): CanonicalTaskDecision | undefined {
+  return applySemanticFrontierNextArbitration(result, deriveCanonicalTaskDecisionRaw(result));
 }
 
 function planFor(call: ContinuationCall): ContinuationPlan | undefined {
@@ -456,7 +1370,7 @@ function clearDiscoveryProjection(result: TaskPackResult, contract: TaskExecutio
     };
   }
   delete result.continuation;
-  if (result.next?.startsWith("read_file ") === true || result.next?.startsWith("search_files ") === true) {
+  if (result.next?.tool === "read_file" || result.next?.tool === "search_files") {
     delete result.next;
   }
 }
@@ -471,8 +1385,7 @@ function applyDiscoverDecision(
   const plan = planFor(call);
   if (plan === undefined) return;
   result.continuation = plan;
-  const next = deriveNextFromPlan(plan);
-  if (next !== undefined) result.next = next;
+  result.next = call;
   contract.state = "needs-followup";
   contract.readiness = "needs-followup";
   contract.discovery_complete = false;
@@ -649,7 +1562,6 @@ function repairCompleteCoverageWithGaps(
 ): void {
   if (
     result.coverage === "complete"
-    && Array.isArray(result.missing) && result.missing.length > 0
     && (contract.capability_gaps?.length ?? 0) > 0
     && decision.kind === "discover"
   ) {
@@ -689,9 +1601,25 @@ function repairCompleteCoverageWithGaps(
 
 /** Apply the canonical decision at the shared task-pack exit. */
 export function applyCanonicalTaskDecision(result: TaskPackResult): CanonicalTaskDecision | undefined {
+  // W-DEMOTE: mark demotion-eligible surfaces BEFORE this task-pack response
+  // reaches server.ts's decisionWire.ts projectEvidence call, which reads
+  // these marks off the same surface objects but cannot derive them itself
+  // (it never receives the whole `result`, only `result.surfaces`).
+  markSemanticFrontierDemotionEligibility(result);
   const decision = deriveCanonicalTaskDecision(result);
   const contract = result.execution_contract;
   if (decision === undefined || contract === undefined) return decision;
+
+  // D8 (FX-R3c): the arbitrated call is assigned BEFORE the coherence gate
+  // below, because a coherent pack is exactly the case where that gate
+  // discards it. Only the one field moves — no discovery re-projection, no
+  // typestate change — and only for a `discover` decision under the same flag
+  // that gated arbitration in the first place.
+  const arbitrated = sfArbitratedNextCall.get(result);
+  if (arbitrated !== undefined && decision.kind === "discover" && decision.next_call === arbitrated) {
+    contract.next_call = arbitrated;
+    result.next = arbitrated;
+  }
 
   // Most established exits are already internally coherent. Restrict mutation
   // to an actual control-plane contradiction so compact legacy receipts retain
@@ -886,9 +1814,8 @@ export function canonicalTaskDecisionInvariantViolations(result: TaskPackResult)
   // the real projector is how F-A1-1 happened in the first place).
   if (
     result.coverage === "complete"
-    && Array.isArray(result.missing) && result.missing.length > 0
     && (contract.capability_gaps?.length ?? 0) > 0
-    && deriveCanonicalTaskDecision(result)?.kind === "discover"
+    && phase === "discovery"
   ) {
     violations.push("complete-coverage-forbids-discover-gaps");
   }
@@ -905,7 +1832,6 @@ export function canonicalTaskDecisionInvariantViolations(result: TaskPackResult)
   if (
     phase === "prepared"
     && hasUnservedPriorPackObligation(result)
-    && deriveCanonicalTaskDecision(result)?.kind === "discover"
   ) {
     violations.push("prepared-certificate-forbids-unserved-obligation");
   }
@@ -918,7 +1844,6 @@ export function canonicalTaskDecisionInvariantViolations(result: TaskPackResult)
   if (
     hasCertificateBinding(contract)
     && hasUnservedEpochContract(result)
-    && deriveCanonicalTaskDecision(result)?.kind === "discover"
   ) {
     violations.push("certificate-forbids-unserved-epoch-contract");
   }

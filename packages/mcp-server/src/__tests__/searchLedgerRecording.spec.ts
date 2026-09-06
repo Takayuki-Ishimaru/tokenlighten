@@ -22,6 +22,7 @@ import * as path from "node:path";
 
 import { callTool } from "../server.js";
 import { resetAll as resetAllSessions } from "../util/session.js";
+import { TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "../tools/walkRepo.js";
 import {
   bindTaskContractHandle,
   executableNextScope,
@@ -55,11 +56,18 @@ async function dispatch(args: Record<string, unknown>): Promise<Record<string, u
   return JSON.parse(text) as Record<string, unknown>;
 }
 
-/** Seed a scope with a taskHandle (registerExecutableNextScope is a no-op without one) and one unproven concern-token obligation for `token`. */
-function seedConcern(root: string, lane: string, taskHandle: string, token: string): TaskContractScope {
+/** Seed a scope with a taskHandle (registerExecutableNextScope is a no-op without one) and unproven concern-token obligations. */
+function seedConcerns(root: string, lane: string, taskHandle: string, tokens: string[]): TaskContractScope {
+  recordTaskContract(root, tokens.map((token) => token.toLowerCase()), {
+    query: `find ${tokens.join(" OR ")}`,
+    concernTokens: tokens,
+  }, { lane });
   const scope = bindTaskContractHandle(root, { lane }, taskHandle);
-  recordTaskContract(root, [token.toLowerCase()], { query: `find ${token}`, concernTokens: [token] }, scope);
   return scope;
+}
+
+function seedConcern(root: string, lane: string, taskHandle: string, token: string): TaskContractScope {
+  return seedConcerns(root, lane, taskHandle, [token]);
 }
 
 function concernObligation(root: string, scope: TaskContractScope, token: string) {
@@ -88,6 +96,46 @@ describe("search_files dispatch ledger recording (P1-d)", () => {
     expect(JSON.stringify(body)).not.toContain("\"absence\"");
 
     expect(concernObligation(root, scope, "computeTotal")?.proof).toEqual({ type: "served", witness: "computeTotal" });
+  });
+
+  it("find queries[]: records matched and complete-absent terms without proving unknown terms", async () => {
+    const root = mkWorkspace("find-batch");
+    writeFile(root, "src/util.ts", "export function computeBatchTotal() { return 1; }\n");
+    // Force the second term's result to remain unknown: an oversize file was
+    // not scanned, so the first term's hit cannot certify the second's absence.
+    writeFile(root, "src/huge.ts", "x".repeat(TEXT_SCAN_MAX_FILE_SIZE_BYTES + 1));
+    const lane = "v014-find-batch";
+    const terms = ["computeBatchTotal", "missingBatchTerm"];
+    const scope = seedConcerns(root, lane, "task-find-batch", terms);
+    registerExecutableNextScope(root, scope, {
+      tool: "search_files",
+      arguments: { action: "find", queries: terms },
+    });
+
+    await dispatch({ action: "find", queries: terms, cwd: root, lane });
+
+    expect(concernObligation(root, scope, "computeBatchTotal")?.proof)
+      .toEqual({ type: "served", witness: "computeBatchTotal" });
+    expect(concernObligation(root, scope, "missingBatchTerm")?.proof).toBeUndefined();
+  });
+
+  it("find queries[]: records a complete per-term miss as authoritative absence", async () => {
+    const root = mkWorkspace("find-batch-absent");
+    writeFile(root, "src/util.ts", "export function computeBatchTotal() { return 1; }\n");
+    const lane = "v014-find-batch-absent";
+    const terms = ["computeBatchTotal", "missingBatchTerm"];
+    const scope = seedConcerns(root, lane, "task-find-batch-absent", terms);
+    registerExecutableNextScope(root, scope, {
+      tool: "search_files",
+      arguments: { action: "find", queries: terms },
+    });
+
+    await dispatch({ action: "find", queries: terms, cwd: root, lane });
+
+    expect(concernObligation(root, scope, "computeBatchTotal")?.proof)
+      .toEqual({ type: "served", witness: "computeBatchTotal" });
+    expect(concernObligation(root, scope, "missingBatchTerm")?.proof)
+      .toEqual({ type: "authoritative-absent", witness: "missingBatchTerm" });
   });
 
   it("references: a HIT proves the scoped concern-token obligation, an authoritative absence discharges it as absent", async () => {

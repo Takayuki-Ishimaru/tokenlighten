@@ -128,6 +128,16 @@ export type AppliedEntry = {
   lines?: string;
   /** `"+N/-M"` (`EditFileResult.delta`). */
   delta?: string;
+  /**
+   * INV-I-5 / FX-P2 (2026-09-03, additive/optional — same convention as
+   * `EditApplied.replayed`): `true` iff this edit was addressed by a
+   * `handle` that turned out to be stale/unknown, and `allowPathFallback:
+   * true` let it land anyway through `path`+`search` (a unique match,
+   * subject to the same admissibility checks any ordinary path edit gets —
+   * never a bypass). Absent on every edit that did not take this path,
+   * never emitted as `false`.
+   */
+  path_fallback?: boolean;
 };
 
 /**

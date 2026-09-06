@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,9 +8,13 @@ import {
   getExecutionFence,
   getSession,
   guardExecutionDiscovery,
+  guardExecutionEdit,
   otherActiveRoots,
   recordExecutionContract,
   recordReadMode,
+  recordServedEditAdmissibility,
+  recordServedRange,
+  recordWithheldEditAddresses,
   resetAll,
   runWithSessionLane,
   type WorkspaceSession,
@@ -28,6 +32,7 @@ import {
   type PriorObligationRecord,
 } from "../features/task-pack/priorPackStore.js";
 import { clearPackDedupeForWorkspace } from "../features/task-pack/readCodeTaskPack.js";
+import { buildVerificationManifest, resetVerificationKitDedupeForTest } from "../util/verificationPack.js";
 
 /**
  * Concurrent-agent session lanes (2026-08-07).
@@ -348,6 +353,38 @@ describe("F-V13-3: task-pack stores partition by lane", () => {
     ).toEqual([]);
   });
 
+  /**
+   * FX-L (2026-09-03, ruling (r)): per-address byte residency is the new
+   * permission input, so it inherits the lane contract or it becomes a
+   * cross-agent authority leak in BOTH directions — lane A's withheld row
+   * refusing lane B's certificate, or lane A's serve authorising lane B's
+   * blind edit. It lives on WorkspaceSession, which `getSession` already
+   * lane-scopes; this pins that it stays there.
+   */
+  it("FX-L: withheld/shipped byte residency is lane-scoped in both directions", () => {
+    const ws = workspaceWith("a.ts", "b.ts");
+    // Lane A: the file was EMITTED with no body (a capped pack).
+    runWithSessionLane("canon-ledger", () =>
+      recordWithheldEditAddresses(ws, { handles: ["h-a"], paths: ["a.ts"] }));
+    // Lane B: the same file's bytes genuinely shipped.
+    runWithSessionLane("canon-plan", () =>
+      recordServedEditAdmissibility(ws, { handles: ["h-b"], paths: ["a.ts"] }));
+
+    // Lane A's certificate over that address installs an EMPTY frontier and
+    // records the recovery target; lane B's is unaffected by A's withholding.
+    runWithSessionLane("canon-ledger", () =>
+      recordExecutionContract(ws, "edit a.ts", laneCert("cert-a", "h-a", "a.ts")));
+    runWithSessionLane("canon-plan", () =>
+      recordExecutionContract(ws, "edit a.ts", laneCert("cert-b", "h-b", "a.ts")));
+
+    expect(runWithSessionLane("canon-ledger", () => getExecutionFence(ws)))
+      .toMatchObject({ actionFrontier: [], withheldTargets: [{ handle: "h-a", path: "a.ts" }] });
+    expect(runWithSessionLane("canon-plan", () => getExecutionFence(ws)))
+      .toMatchObject({ actionFrontier: ["h-b"], actionPaths: ["a.ts"] });
+    expect(runWithSessionLane("canon-plan", () => getExecutionFence(ws))?.withheldTargets)
+      .toBeUndefined();
+  });
+
   it("clearServedSurfaces clears only the calling lane", () => {
     const ws = workspaceWith("a.ts", "b.ts");
     runWithSessionLane("canon-ledger", () =>
@@ -364,5 +401,323 @@ describe("F-V13-3: task-pack stores partition by lane", () => {
     expect(
       runWithSessionLane("canon-plan", () => queryServedSurfaces(ws, ws, { epochTokens: EPOCH })),
     ).toEqual([]);
+  });
+
+  /**
+   * FX-M1/B3 (INV-B-3): `util/verificationPack.ts`'s `kitDedupeCache` is a
+   * FOURTH module-level, workspace-keyed cache of this exact same shape
+   * (`packServeLog.ts`, `priorPackStore.ts`, and `readCodeTaskPack.ts`'s
+   * three task_pack caches were the first three named under F-V13-3) — it
+   * was simply missed by that remediation pass because it predates
+   * `laneKey.ts` itself by a month. Pinned here, alongside its siblings,
+   * so this file stays the one place that enumerates every lane-scoped
+   * cache in the codebase.
+   */
+  it("FX-M1/B3: the verification-kit consecutive-dedupe cache partitions by lane", () => {
+    resetVerificationKitDedupeForTest();
+    // Nested dirs, so a plain workspaceWith (flat filenames only) will not
+    // do — matching verificationPack.spec.ts's own K3 fixture shape.
+    const ws = realpathSync(mkdtempSync(path.join(tmpdir(), "tl-lane-kit-")));
+    mkdirSync(path.join(ws, "src", "mode"), { recursive: true });
+    mkdirSync(path.join(ws, "test"), { recursive: true });
+    writeFileSync(path.join(ws, "src/mode/mode_manager.cpp"), "void request() {}\n");
+    writeFileSync(
+      path.join(ws, "test/test_mode_manager.cpp"),
+      '#include "mode/mode_manager.hpp"\nvoid t() {}\n',
+    );
+
+    const build = () => buildVerificationManifest(ws, ["src/mode/mode_manager.cpp"], { dedupeConsecutive: true });
+    const laneAFirst = runWithSessionLane("canon-ledger", build);
+    expect(laneAFirst!.kit_unchanged).toBeUndefined();
+
+    // `canon-plan`'s FIRST call in this workspace — must not collapse to
+    // kit_unchanged purely because `canon-ledger`'s last kit (never seen by
+    // `canon-plan`) fingerprints identically.
+    const laneBFirst = runWithSessionLane("canon-plan", build);
+    expect(
+      laneBFirst!.kit_unchanged,
+      "a lane's first-ever verification kit must never read kit_unchanged from another lane's history",
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * FX-P1 (INV-I-2, 2026-09-03) — THE WRITE HALF OF THE LANE CONTRACT.
+ *
+ * Every store above is lane-partitioned; handle-gated write authority was not.
+ * `HandleEntry` carried no lane, so lane B — with zero reads in the workspace,
+ * and therefore a lane-scoped session that correctly held no fence, no
+ * admissible union and no residency — redeemed lane A's handle string and
+ * overwrote content only lane A had ever been served (INV-I's
+ * `p10_lane_isolation`, reconfirmed at write-time as `kind=edit.applied`).
+ *
+ * THE RULING: lanes ARE an isolation boundary for writes. Reads are NOT
+ * restricted — a read is not write authority and it stages what it serves
+ * under the READING lane, so a cross-lane zoom is how a lane earns its own
+ * authority over the same bytes (asserted end-to-end in
+ * `fxp1EditAdmissibilityPredicate.spec.ts`).
+ *
+ * WITHOUT THE FIX: the first case reports `{ allowed: true }`.
+ */
+describe("FX-P1 / INV-I-2: handle write authority is lane-scoped", () => {
+  afterEach(() => resetAll());
+
+  const root = "/workspace/fxp1-lane-handles";
+  const mintedInA = (handle: string): string | undefined =>
+    handle === "h-lane-a" ? "agent-A" : handle === "h-lane-b" ? "agent-B" : undefined;
+  const pathOf = (handle: string): string | undefined =>
+    handle === "h-lane-a" || handle === "h-lane-b" ? "src/shared.ts" : undefined;
+  const editVia = (handle: string): Record<string, unknown> => ({
+    edits: [{ handle, content: "// replaced\n" }],
+  });
+
+  it("lane B redeeming lane A's handle for a WRITE refuses, with an executable recovery and no false `capped` diagnosis", () => {
+    const refused = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root, editVia("h-lane-a"), pathOf, { resolveHandleLane: mintedInA }));
+    expect(
+      refused.allowed,
+      "lane B was never served src/shared.ts; possession of a peer lane's handle is not authority",
+    ).toBe(false);
+    if (refused.allowed !== false) return;
+    expect(refused.refusal["reason"]).toBe("execution-typestate");
+    expect(
+      refused.refusal["cause"],
+      "`capped` is the byte-budget diagnosis; a lane refusal must not borrow it",
+    ).toBeUndefined();
+    const next = refused.refusal["next_call"] as { tool: string; arguments: Record<string, unknown> };
+    expect(next.tool, "not refuse-only: lane B is told how to earn the bytes").toBe("read_file");
+    expect(next.arguments["targets"]).toEqual([{ path: "src/shared.ts" }]);
+    expect(next.arguments["content"], "the re-read must BOOK what it serves").toBe("full");
+  });
+
+  it("a lane's OWN handle writes, and so does an unstamped (lane-less) one — positive evidence only", () => {
+    expect(
+      runWithSessionLane("agent-B", () =>
+        guardExecutionEdit(root, editVia("h-lane-b"), pathOf, { resolveHandleLane: mintedInA })),
+      "lane B's own handle is exactly the authority it earned",
+    ).toEqual({ allowed: true });
+    expect(
+      runWithSessionLane("agent-B", () =>
+        guardExecutionEdit(root, editVia("h-unstamped"), pathOf, { resolveHandleLane: mintedInA })),
+      "an unknown/lane-less mint (including one rehydrated from a pre-FX-P1 store) has no "
+      + "provenance to refuse on",
+    ).toEqual({ allowed: true });
+  });
+
+  it("CONTROL: the lane-less session is unchanged — no lane is bound, no handle carries one", () => {
+    expect(
+      guardExecutionEdit(root, editVia("h-unstamped"), pathOf, { resolveHandleLane: () => undefined }),
+    ).toEqual({ allowed: true });
+  });
+
+  it("round-18A finding 6, negative control: shipping a DIFFERENT path in the redeeming lane does not admit the foreign handle", () => {
+    runWithSessionLane("agent-B", () => {
+      recordServedEditAdmissibility(root, { paths: ["src/other.ts"] });
+    });
+    const refused = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root, editVia("h-lane-a"), pathOf, { resolveHandleLane: mintedInA }));
+    expect(
+      refused.allowed,
+      "shipping an unrelated path must not launder authority over src/shared.ts",
+    ).toBe(false);
+  });
+});
+
+/**
+ * FX-Q2 (ruling (w), round-19A, 2026-09-03) — THE FOREIGN-LANE EXCEPTION IS
+ * RANGE-GRANULAR, NOT FILE-GRANULAR (REVOKES FX-Q1's exception above).
+ *
+ * MEASURED, live (`scratchpad/r19a/a1_range_foreign.mts`,
+ * `a3_range_foreign_searchreplace.mts`, both SF-flag arms): lane A reads only
+ * lines 500-510 of a 700-line file and mints a range-scoped handle; lane B,
+ * having read only lines 1-10 of the SAME file (so it already held FX-Q1's
+ * file-granular "shipped" residency), redeemed lane A's handle and
+ * blind-overwrote lines 500-510 — bytes lane B never received — for both
+ * `{handle,content}` and `{handle,search,replace}`. The suite above's own
+ * "round-18A finding 6 / ruling (r)-(u-2)" test used to PIN this as intended
+ * behavior (mark the path shipped via `recordServedEditAdmissibility`, expect
+ * admission); ruling (w) retracts that pin and replaces it with the tests
+ * below.
+ *
+ * THE FIX: the exception now asks the redeeming lane's own SETTLED
+ * `servedRangeLedger` (the same per-address ledger `servedRangeReceipt`
+ * answers same-lane receipts from) whether it covers the handle's own line
+ * `range` in full — not merely whether SOME part of the file shipped. A
+ * whole-file handle (no `range` on its table entry) needs whole-file
+ * coverage. `recordServedRange` is the ledger's real writer (what an honest
+ * `read_file` serve — including the cross-lane refusal's own `content:"full"`
+ * recovery — actually calls), so these tests use it directly instead of the
+ * coarser `recordServedEditAdmissibility` helper the retired test used.
+ *
+ * WITHOUT THE FIX (verified by temporarily reverting `guardExecutionEdit`'s
+ * foreign-lane filter to the FX-Q1 `_editAddressResidency(...) === "shipped"`
+ * check): the "does NOT admit … disjoint range" test below reports
+ * `{allowed:true}` from a lane that read only lines 1-10, exactly reproducing
+ * `a1_range_foreign.mts`'s live `edit.applied`.
+ */
+describe("FX-Q2 / ruling (w): foreign-lane handle admission is RANGE-granular", () => {
+  afterEach(() => resetAll());
+
+  const root2 = "/workspace/fxq2-range-handles";
+  const mintedInA2 = (handle: string): string | undefined =>
+    handle.startsWith("h-lane-a") ? "agent-A" : undefined;
+  const pathOf2 = (): string | undefined => "src/big.ts";
+  const rangeOf2 = (handle: string): string | undefined =>
+    handle === "h-lane-a-range" ? "500-510" : undefined; // "h-lane-a-whole" -> undefined (whole-file)
+  const editVia2 = (handle: string): Record<string, unknown> => ({
+    edits: [{ handle, content: "// replaced\n" }],
+  });
+  const opts2 = { resolveHandleLane: mintedInA2, resolveHandleRange: rangeOf2 };
+
+  it("does NOT admit a foreign RANGE handle merely because the redeeming lane shipped a DISJOINT range of the same file (the FX-Q1 exception is revoked)", () => {
+    runWithSessionLane("agent-B", () => {
+      // Lane B genuinely read lines 1-10 — real ledger bytes, not merely a
+      // file-granular admissibility mark.
+      recordServedRange(root2, "src/big.ts", "sha-big", 1, 10, 700);
+    });
+    const refused = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root2, editVia2("h-lane-a-range"), pathOf2, opts2));
+    expect(
+      refused.allowed,
+      "lane B never received lines 500-510; its own unrelated 1-10 serve must not launder a "
+      + "foreign handle naming a disjoint range",
+    ).toBe(false);
+    if (refused.allowed !== false) return;
+    expect(refused.refusal["reason"]).toBe("execution-typestate");
+  });
+
+  it("admits a foreign RANGE handle once the redeeming lane's own ledger genuinely covers that EXACT range", () => {
+    runWithSessionLane("agent-B", () => {
+      recordServedRange(root2, "src/big.ts", "sha-big", 495, 520, 700);
+    });
+    const admitted = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root2, editVia2("h-lane-a-range"), pathOf2, opts2));
+    expect(
+      admitted,
+      "lane B's own 495-520 serve fully covers the foreign handle's 500-510 — this is the same "
+      + "authority an honest lane-B read of that span would have earned under its own handle",
+    ).toEqual({ allowed: true });
+  });
+
+  it("a PARTIAL overlap is not enough — the redeeming lane's ledger must cover the handle's FULL range", () => {
+    runWithSessionLane("agent-B", () => {
+      recordServedRange(root2, "src/big.ts", "sha-big", 495, 505, 700); // covers 500-505, not 506-510
+    });
+    const refused = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root2, editVia2("h-lane-a-range"), pathOf2, opts2));
+    expect(refused.allowed, "half of the requested range is not the whole of it").toBe(false);
+  });
+
+  it("a WHOLE-FILE foreign handle (no `range` on its entry) is refused after only a partial serve, even a large one", () => {
+    runWithSessionLane("agent-B", () => {
+      recordServedRange(root2, "src/big.ts", "sha-big", 1, 699, 700); // one line short of complete
+    });
+    const refused = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root2, editVia2("h-lane-a-whole"), pathOf2, opts2));
+    expect(
+      refused.allowed,
+      "a whole-file handle names the WHOLE file; 699 of 700 lines is still not whole-file coverage",
+    ).toBe(false);
+  });
+
+  it("a WHOLE-FILE foreign handle is admitted once the redeeming lane's ledger shows COMPLETE coverage", () => {
+    runWithSessionLane("agent-B", () => {
+      recordServedRange(root2, "src/big.ts", "sha-big", 1, 700, 700); // the whole file
+    });
+    const admitted = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root2, editVia2("h-lane-a-whole"), pathOf2, opts2));
+    expect(
+      admitted,
+      "a real content:\"full\" serve (or a code_unchanged restatement of one) leaves nothing "
+      + "unserved, which is exactly what a whole-file handle requires",
+    ).toEqual({ allowed: true });
+  });
+
+  it("CONTROL: no ledger entry at all for the path refuses the foreign handle, same as before", () => {
+    const refused = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root2, editVia2("h-lane-a-range"), pathOf2, opts2));
+    expect(refused.allowed, "lane B has never touched this file").toBe(false);
+  });
+});
+
+/**
+ * FX-V1 (ruling (x), round-20A adversarial review finding 1, 2026-09-04) —
+ * `_foreignHandleRangeCovered` MUST ALSO ACCEPT SHIPPED ∪ ELIDED.
+ *
+ * FX-Q2's own suite above never exercises a file `elideDocComments`
+ * (`util/formatCompress.ts`) actually collapses anything in — every fixture
+ * is `bigFileWorkspace`, plain `export const V<n> = <n>;` lines with zero
+ * comments. Round-20A's live finding: for ANY file containing a 2+-line
+ * doc-comment block, a whole-file foreign handle could never be redeemed —
+ * not even by a lane that read the ENTIRE file itself — because the elided
+ * lines never rode the wire and `recordServedRange` never booked them, so
+ * whole-file `servedRangeReceipt` subsumption over `1..totalLines` was
+ * permanently unreachable. The fix: `_stageElisionGap` (called from
+ * `recordServedRange`) detects the gap between the caller's declared window
+ * and each surviving shipped span and stages it into
+ * `ServedRangeLedgerState.elided`; `_foreignHandleRangeCovered` (ONLY that
+ * predicate — `servedRangeReceipt` stays elision-blind) now accepts
+ * `spans ∪ elided` as covering the requested range.
+ *
+ * End-to-end (`callTool`, both write forms, `ranges[]` handles, both env
+ * arms) and the fuller ledger-mechanics matrix (settle confirm/retract,
+ * receipt-blindness, cross-window non-contamination) live in
+ * `fxv1ElidedWindowForeignHandleCoverage.spec.ts`. This suite adds the ONE
+ * case that belongs beside FX-Q2's own tests above: the fix benefits the
+ * RANGE-scoped branch of the SAME predicate, not merely the whole-file one.
+ */
+describe("FX-V1 / ruling (x): whole-file AND range-scoped coverage extend to TL's own elided windows", () => {
+  afterEach(() => resetAll());
+
+  const root3 = "/workspace/fxv1-elision-lanes";
+  const mintedInA3 = (handle: string): string | undefined => (handle.startsWith("h-a") ? "agent-A" : undefined);
+  const pathOf3 = (): string | undefined => "src/tiny.ts";
+  const editVia3 = (handle: string): Record<string, unknown> => ({ edits: [{ handle, content: "// replaced\n" }] });
+
+  it("a WHOLE-FILE foreign handle admits on shipped(4-4) ∪ elided(1-3) — the r20a minimal 2-line-JSDoc shape", () => {
+    runWithSessionLane("agent-B", () => {
+      // The exact shape `readCodeSmallFile.ts`'s small_file serve (the
+      // plain DEFAULT read mode) records for a 4-line file whose lines 1-3
+      // are one elided JSDoc block: only line 4 ever reaches the wire.
+      recordServedRange(root3, "src/tiny.ts", "sha-tiny", 4, 4, 4, { mode: "small_file", range: "1-4", call: 1 });
+    });
+    const admitted = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root3, editVia3("h-a-whole"), pathOf3, {
+        resolveHandleLane: mintedInA3, resolveHandleRange: () => undefined,
+      }));
+    expect(admitted).toEqual({ allowed: true });
+  });
+
+  it("a RANGE-scoped foreign handle whose range straddles a genuinely-elided sub-block is admitted once shipped ∪ elided covers that EXACT range (not merely the whole file)", () => {
+    runWithSessionLane("agent-B", () => {
+      // `appendFresh`'s own real shape: ONE fresh window (8-16 of a 20-line
+      // file) whose interior lines 11-14 are a single elided comment block —
+      // two recordServedRange calls sharing one (call, range) pair.
+      recordServedRange(root3, "src/mid.ts", "sha-mid", 8, 10, 20, { mode: "slice", range: "8-16", call: 5 });
+      recordServedRange(root3, "src/mid.ts", "sha-mid", 15, 16, 20, { mode: "slice", range: "8-16", call: 5 });
+    });
+    const rangeOpts = {
+      resolveHandleLane: mintedInA3,
+      resolveHandleRange: (h: string): string | undefined => (h === "h-a-mid" ? "8-16" : undefined),
+    };
+    const admitted = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root3, { edits: [{ handle: "h-a-mid", content: "// replaced\n" }] }, () => "src/mid.ts", rangeOpts));
+    expect(
+      admitted,
+      "shipped 8-10 + 15-16 plus the staged elision gap 11-14 together cover the handle's own "
+      + "8-16 range — this is the RANGE branch of the same predicate the whole-file test above "
+      + "exercises",
+    ).toEqual({ allowed: true });
+
+    // CONTROL: a foreign handle naming a WIDER range than what was actually
+    // covered (17-16 -> 8-17, one line past the shipped+elided union) still
+    // refuses — the fix does not silently widen coverage past its own union.
+    const wideOpts = {
+      resolveHandleLane: mintedInA3,
+      resolveHandleRange: (h: string): string | undefined => (h === "h-a-wide" ? "8-17" : undefined),
+    };
+    const refusedWide = runWithSessionLane("agent-B", () =>
+      guardExecutionEdit(root3, { edits: [{ handle: "h-a-wide", content: "// replaced\n" }] }, () => "src/mid.ts", wideOpts));
+    expect(refusedWide.allowed, "line 17 was never shipped or elided by the 8-16 window").toBe(false);
   });
 });

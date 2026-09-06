@@ -21,8 +21,9 @@
  * GraphIndex (so a workspace with no `.tokenlighten/index/` graph gets ZERO
  * new candidates and an empty ranked list — also byte-identical to pre-F-A5
  * output, since fusing an empty list changes no fused score for any key —
- * see rrf.ts's weightedReciprocalRankFusion). TL_RRF_PROFILES is NOT an
- * additional gate here: with profiles off, `retrieverWeights.graph` is
+ * see rrf.ts's weightedReciprocalRankFusion). The profiles mode
+ * (TL_RRF_FUSION=profiles) is NOT an additional gate here: with profiles off,
+ * `retrieverWeights.graph` is
  * simply NEUTRAL_WEIGHTS.graph (=1, profiles.ts), so the graph list still
  * joins fusion at the same implicit weight every other list gets when
  * profiles are inactive — exactly how `bm25f`/`heuristic` already behave.

@@ -4,6 +4,8 @@ import type { ReadCodePackInput, ReadCodePackOutput, ReadCodePackResponseItem } 
 import { locateTaskContext } from "../features/locator/locateTaskContext.js";
 import { buildSmallFile } from "./readCodeSmallFile.js";
 import { escapeRegExp, MAX_REGEX_QUERY_CHARS } from "../features/search/find/findText.js";
+import { estimateBytesFromTokens, BYTES_PER_TOKEN_ESTIMATE } from "../protocol/budget/wireBudget.js";
+import { measureResponseBytes } from "../protocol/budget/measure.js";
 
 // A7: raised from 1600 — the query-pack code-bearing path and paths[]-driven
 // packs both needed more headroom to close multi-surface tasks in one call
@@ -11,7 +13,73 @@ import { escapeRegExp, MAX_REGEX_QUERY_CHARS } from "../features/search/find/fin
 export const PACK_DEFAULT_MAX_TOKENS = 4000;
 export const QUERY_PACK_DEFAULT_MAX_TOKENS = 1400;
 export const QUERY_PACK_HARD_CAP_TOKENS = 2400;
-const CHARS_PER_TOKEN = 4;
+
+// ---------------------------------------------------------------------------
+// FX-U3 (2026-09-04, round-19A informational finding) — the WIRE budget for
+// mode=pack, not a raw-content-chars proxy for it.
+//
+// Both admission loops below used to compare RAW CONTENT CHARS
+// (`content.length`) against `maxTokens * 4`, entirely ignoring the wire
+// envelope every admitted item actually costs once
+// `protocol/readFamily.ts`'s `projectBatch` wraps it for the wire
+// (`{form:"range",path,range,truncated,[purpose,]content}`, `readFamily.ts`
+// ~:1226, `keep(entry, raw, ["purpose","content"])`) and the whole
+// `read.batch` payload is JSON-serialized. Measured live (`mode=pack`,
+// `TL_LEGACY_INPUT=accept`, 40 tiny files): 5.8x-13.5x the caller's declared
+// `maxTokens * 4` byte ceiling. A caller-declared token budget is a WIRE
+// budget everywhere else in this server (`estimateBytesFromTokens`,
+// `protocol/budget/wireBudget.ts`, the same 4 B/token ratio) — mode=pack must
+// budget the same quantity, not raw content chars, so a partial `read.batch`
+// with `omitted[]` fits the declared budget BY CONSTRUCTION (the funnel's own
+// `emit.ts` ladder no longer needs to special-case `mode=pack`; see the
+// exclusion removed there in the same change).
+//
+// `packItemWireBytes` mirrors the exact downstream item shape above BYTE FOR
+// BYTE (key order does not affect serialized length, only the key/value SET
+// does, so the mirror does not need to match `projectBatch`'s literal
+// insertion order) — it exists purely to size an admission decision, not to
+// duplicate protocol-layer logic; the actual item pushed into `items` below
+// is unchanged (still `{path,range,purpose?,content,truncated}`, no `form`
+// key — `readFamily.ts` adds that independently).
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire-envelope bytes ONE admitted pack item costs on the actual
+ * `read.batch` response, mirroring `protocol/readFamily.ts`'s `projectBatch`
+ * range-item shape exactly. Pack items here never carry `truncated:true` (no
+ * producer in this file truncates an admitted item), so this is always the
+ * untruncated arm's byte cost.
+ *
+ * A "Class C pre-shed content budget" site (`wireBudgetG8Fence.spec.ts`'s own
+ * framing): this producer, WHILE CONSTRUCTING a candidate pack, decides
+ * whether ONE candidate item fits this call's feature-local `maxTokens`
+ * allowance — a different thing from the funnel's single RESPONSE-level
+ * measurement (`protocol/emit.ts` -> `measureResponseBytes`, taken once, on
+ * the already-decided final payload). Reuses that same canonical byte-count
+ * primitive (rather than a second, ad-hoc `Buffer.byteLength` fused directly
+ * onto a fresh `JSON.stringify` call) so there is exactly one counting
+ * routine in this server, not two that could drift.
+ */
+function packItemWireBytes(path: string, range: string, content: string, purpose: string | undefined): number {
+  const mirrored: Record<string, unknown> = { form: "range", path, range, truncated: false };
+  if (purpose !== undefined) mirrored["purpose"] = purpose;
+  mirrored["content"] = content;
+  return measureResponseBytes(JSON.stringify(mirrored));
+}
+
+/**
+ * Bytes for `{"v":1,"kind":"read.batch","entries":[]}` — the fixed
+ * `read.batch` skeleton every admitted item (joined by one comma byte each,
+ * beyond the first) is wrapped into. Measured directly
+ * (`JSON.stringify({v:1,kind:"read.batch",entries:[]}).length === 40`); this
+ * intentionally does NOT reserve for the `limit`/`next` recovery block a
+ * partial pack may additionally carry (that block's size depends on the
+ * caller's `cwd` path length and the omitted-path list, neither of which
+ * this producer controls or can see in advance) — `emit.ts`'s funnel, no
+ * longer excluding `mode=pack`, is the backstop for that remaining variable
+ * cost, exactly as it already is for every other response kind.
+ */
+const PACK_FIXED_ENVELOPE_BYTES = 40;
 
 // CWE-400/409 caller-value hard clamp (TL-V0.9-RELEASE-STRATEGY-2026-08-12.md
 // §6.6-2 item 3, shipped 2026-08-13): the path-pack branch below used to take
@@ -91,7 +159,8 @@ export async function readCodePack(
   // Path-pack (v0.4 behavior).
   const paths = input.paths ?? [];
   const maxTokens = clampPackMaxTokens(input.maxTokens);
-  let budget = maxTokens * CHARS_PER_TOKEN;
+  const budgetBytes = estimateBytesFromTokens(maxTokens) ?? maxTokens * BYTES_PER_TOKEN_ESTIMATE;
+  let usedBytes = PACK_FIXED_ENVELOPE_BYTES;
 
   const items: ReadCodePackResponseItem[] = [];
   const omitted: ReadCodePackOutput["omitted"] = [];
@@ -171,9 +240,11 @@ export async function readCodePack(
     const sliceLines = lines.slice(sliceStart, sliceEnd + 1);
     const content = sliceLines.join("\n");
 
-    const entireBudget = maxTokens * CHARS_PER_TOKEN;
-    if (content.length <= budget) {
-      budget -= content.length;
+    const itemBytes = packItemWireBytes(entry.path, rangeStr, content, entry.purpose);
+    const separatorBytes = items.length > 0 ? 1 : 0;
+    const projectedBytes = usedBytes + separatorBytes + itemBytes;
+    if (projectedBytes <= budgetBytes) {
+      usedBytes = projectedBytes;
       items.push({
         path: entry.path,
         range: rangeStr,
@@ -181,8 +252,8 @@ export async function readCodePack(
         content,
         truncated: false,
       });
-    } else if (content.length > entireBudget) {
-      // This single item is larger than the entire pack budget — cap-exceeded.
+    } else if (PACK_FIXED_ENVELOPE_BYTES + itemBytes > budgetBytes) {
+      // This single item's own wire cost is larger than the entire pack budget — cap-exceeded.
       omitted.push({ path: entry.path, range: rangeStr, reason: "cap-exceeded" });
     } else {
       // Item would fit in a fresh budget but not in the remaining budget — cap-exhausted.
@@ -240,7 +311,8 @@ async function assemblePack(
   maxTokens: number,
   readFileSafe: (relPath: string) => Promise<string | null>,
 ): Promise<{ items: ReadCodePackResponseItem[]; omitted: ReadCodePackOutput["omitted"]; completeness: "complete" | "partial" | "empty" }> {
-  let budget = maxTokens * CHARS_PER_TOKEN;
+  const budgetBytes = estimateBytesFromTokens(maxTokens) ?? maxTokens * BYTES_PER_TOKEN_ESTIMATE;
+  let usedBytes = PACK_FIXED_ENVELOPE_BYTES;
   const items: ReadCodePackResponseItem[] = [];
   const omitted: ReadCodePackOutput["omitted"] = [];
   let capExhausted = false;
@@ -272,16 +344,18 @@ async function assemblePack(
     const sliceLines = lines.slice(sliceStart, sliceEnd + 1);
     const content = sliceLines.join("\n");
 
-    const entireBudget = maxTokens * CHARS_PER_TOKEN;
-    if (content.length <= budget) {
-      budget -= content.length;
+    const itemBytes = packItemWireBytes(entry.path, entry.range, content, undefined);
+    const separatorBytes = items.length > 0 ? 1 : 0;
+    const projectedBytes = usedBytes + separatorBytes + itemBytes;
+    if (projectedBytes <= budgetBytes) {
+      usedBytes = projectedBytes;
       items.push({
         path: entry.path,
         range: entry.range,
         content,
         truncated: false,
       });
-    } else if (content.length > entireBudget) {
+    } else if (PACK_FIXED_ENVELOPE_BYTES + itemBytes > budgetBytes) {
       omitted.push({ path: entry.path, range: entry.range, reason: "cap-exceeded" });
     } else {
       omitted.push({ path: entry.path, range: entry.range, reason: "cap-exhausted" });

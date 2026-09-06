@@ -17,7 +17,7 @@ import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/te
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 export type RangeEditResult =
-  | { ok: true; path: string; lines: string; delta: string }
+  | { ok: true; path: string; lines: string; delta: string; replacements?: number }
   | ({ ok: false; error: string; code: string } & NearestMatchInfo);
 
 export interface RangeEditInput {
@@ -87,7 +87,10 @@ function countLogicalLines(text: string): number {
   return trimmedTrailingNewline.split("\n").length;
 }
 
-function resolveExistingFile(relPath: string, workspace: string): { abs: string; workspaceReal: string } | RangeEditResult {
+function resolveExistingFile(
+  relPath: string,
+  workspace: string,
+): { abs: string; workspaceReal: string } | Extract<RangeEditResult, { ok: false }> {
   if (!relPath) return { ok: false, error: "path is required", code: "invalid-input" };
   if (looksLikeSecretFile(relPath)) {
     return { ok: false, error: `Refusing to write to secret/credential file: ${relPath}`, code: "secret-file" };
@@ -140,13 +143,39 @@ function writeExistingFile(
  * would silently corrupt such a file (see util/textDecode.ts's doc comment).
  * Full UTF-16 round-trip editing is out of scope; refusal is correct.
  */
-function readExistingTextOrEncodingRefusal(abs: string, relPath: string): { text: string } | RangeEditResult {
+function readExistingTextOrEncodingRefusal(
+  abs: string,
+  relPath: string,
+): { text: string } | Extract<RangeEditResult, { ok: false }> {
   const buf = fs.readFileSync(abs);
   const risk = detectWriteEncodingRisk(buf);
   if (risk) {
     return { ok: false, error: writeEncodingRefusalMessage(relPath, risk), code: "unsupported-encoding" };
   }
   return { text: buf.toString("utf8") };
+}
+
+export type RangeEditInspection =
+  | { ok: true; text: string }
+  | Extract<RangeEditResult, { ok: false }>;
+
+export function inspectRangeEditTarget(
+  relPath: string,
+  workspace: string,
+  allowWrite: boolean,
+): RangeEditInspection {
+  if (!allowWrite) {
+    return { ok: false, error: "Write tools are disabled. Restart the server with --allow-write.", code: "write-not-enabled" };
+  }
+  const resolved = resolveExistingFile(relPath, workspace);
+  if ("ok" in resolved) return resolved;
+  const stat = fs.statSync(resolved.abs);
+  if (stat.size > MAX_FILE_BYTES) {
+    return { ok: false, error: "File exceeds 5 MB limit (" + stat.size + " bytes): " + relPath, code: "file-too-large" };
+  }
+  const readResult = readExistingTextOrEncodingRefusal(resolved.abs, relPath);
+  if ("ok" in readResult) return readResult;
+  return { ok: true, text: readResult.text };
 }
 
 export function replaceRangeContent(
@@ -251,6 +280,7 @@ export function replaceAllInRange(
   }
 
   const replaced = segment.split(search).join(replace);
+  const replacements = segment.split(search).length - 1;
   const next = normalized.slice(0, startIndex) + replaced + normalized.slice(endIndex);
   const restored = restoreLineEnding(next, lineEnding);
   const writeError = writeExistingFile(resolved.abs, restored, stat.mode, {
@@ -266,5 +296,6 @@ export function replaceAllInRange(
     path: input.path,
     lines: formatLines(range.start, range.end),
     delta: formatDelta(countLogicalLines(replaced), range.end - range.start + 1),
+    replacements,
   };
 }

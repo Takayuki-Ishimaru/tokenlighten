@@ -47,6 +47,9 @@ import {
   rrfProfilesEnabled,
   graphEvidenceEnabled,
   compoundRetrievalEnabled,
+  literalFirstRoutingEnabled,
+  semanticFrontierGuardEnabled,
+  sfStructuralConcernsEnabled,
 } from "../../util/flags.js";
 import { fileNamesInPathSpans, isEnumLikeQuery, stripPathSpans } from "../../util/queryShape.js";
 import { extractCjkTokens } from "../../util/cjkSpans.js";
@@ -1546,6 +1549,46 @@ function addCandidateOnce(candidates: Candidate[], candidate: Candidate): void {
  */
 const MARKDOWN_CONTRACT_MIN_BYTES = 4096;
 
+// Large Markdown is expensive and often contains generic protocol vocabulary.
+// Admit it as a primary candidate only when the request itself names document
+// work, including an explicit Markdown path (English and Japanese forms).
+export function markdownContractIntent(query: string): boolean {
+  // FX-M6 (2026-09-03): this discrimination was gated solely on the legacy
+  // TL_SEMANTIC_FRONTIER_GUARD, which defaulted ON when it was introduced
+  // (b44ab01e) but was later flipped OFF by default (2b406d62, paired paid
+  // evidence showed no consistent cost benefit) — leaving this function a
+  // permanent no-op (`return true` for every query) in the now-default
+  // configuration, with the exploratory-word discrimination it exists for
+  // never running in production. Same pattern as
+  // `annotateSemanticFrontierContinuation` (semanticFrontier.ts): open the
+  // gate on EITHER lever, so a caller running only the newer
+  // TL_SF_STRUCTURAL_CONCERNS experiment (which itself requires
+  // TL_SF_STATEFUL, enforced by assertSemanticFrontierV2FlagConsistency)
+  // also exercises this logic. The flag-off early return is unchanged, so
+  // the default wire stays byte-identical.
+  if (!semanticFrontierGuardEnabled() && !sfStructuralConcernsEnabled()) return true;
+  const documentIntent = /\b(?:doc(?:ument)?|design|spec(?:ification)?|contract|guide|template|generated|output)\b|(?:仕様|設計|契約|ガイド|テンプレート|生成|出力|文書)/iu.test(query);
+  const markdownPath = /(?:^|[\s"'`「『（(])[^\s"'`「『」』（）()【】,，。:：;；!?！？]*\.md(?:own|x)?(?=$|[\s"'`」』）),，。:：;；!?！？]|を|に|の|で|へ|から|まで)/iu.test(query);
+  // A terse keyword-style request can ground a Markdown section even when it
+  // does not literally say “document” (for example an operational runbook
+  // lookup). This deliberately is NOT a generic “three long words” escape:
+  // natural-language exploration requests such as “inspect candidate ranking
+  // threshold continuation” would otherwise re-admit every large Markdown
+  // decoy. The scanner still requires these terms in one heading-governed
+  // section, so this admits evidence rather than an inventory.
+  const terms = (query.match(/\b[A-Za-z][A-Za-z0-9_-]*\b/g) ?? [])
+    .map((term) => term.toLowerCase());
+  const exploratoryWords = new Set([
+    "analyze", "change", "check", "debug", "explore", "find", "fix", "inspect",
+    "locate", "review", "search", "trace", "update", "verify",
+  ]);
+  const concreteKeywordLookup = terms.length >= 3
+    && terms.length <= 6
+    && terms.every((term) => term.length >= 5)
+    && !terms.some((term) => exploratoryWords.has(term));
+  return documentIntent || markdownPath || concreteKeywordLookup;
+}
+
 /**
  * Scan markdown files for query-term matches and add them as low-cost
  * "doc" candidates. Generic: matches purely on how many of the query's own
@@ -2783,9 +2826,12 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // -------------------------------------------------------------------------
   // Layer 4: Reference search for identifier-like tokens
   // -------------------------------------------------------------------------
-  const refTokens = extractIdentifiers(input.query).slice(0, 2);
+  // Filter before the two-token cap: a short ALLCAPS/acronym must not consume
+  // a reference-search slot ahead of the first usable identifiers.
+  const refTokens = (semanticFrontierGuardEnabled()
+    ? extractIdentifiers(input.query).filter((token) => token.length >= 4)
+    : extractIdentifiers(input.query)).slice(0, 2);
   for (const token of refTokens) {
-    if (token.length < 4) continue; // skip trivially short tokens
     const refResult = await findReferences(
       {
         symbol: token,
@@ -2883,7 +2929,9 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   addStructuralCandidates(workspace, input, candidates, scope, queryContext, walkCache);
   addSiblingValueStructuralCandidates(workspace, input, candidates, scope, queryContext, walkCache);
   await addSiblingValueInitializerCandidates(workspace, input, candidates, scope, queryContext, walkCache);
-  addMarkdownContractCandidates(workspace, input, candidates, scope, queryContext, walkCache);
+  if (markdownContractIntent(input.query)) {
+    addMarkdownContractCandidates(workspace, input, candidates, scope, queryContext, walkCache);
+  }
 
   // -------------------------------------------------------------------------
   // Layer 5 walk (shared): the filename-match passes below both scan the
@@ -3302,11 +3350,11 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
         ...(input.symbol ? { symbol: input.symbol } : {}),
         codeFiles: getCodeFiles(),
         walkCache,
-        // V11-02 (flag: TL_RRF_PROFILES): thread the caller's explicit scope
-        // as profile-inference context ONLY under the flag. index.ts's own
-        // profilesOn gate (TL_RRF_PROFILES && TL_RRF_FUSION) is the real
+        // V11-02 (TL_RRF_FUSION=profiles since the v0.14 consolidation):
+        // thread the caller's explicit scope as profile-inference context
+        // ONLY in profiles mode. index.ts's own profilesOn gate is the real
         // safety backstop; this just avoids building an unused object on the
-        // hot path when the flag is off.
+        // hot path when profiles are off.
         ...(rrfProfilesEnabled() ? { profileContext: { ...(requestedScope ? { explicitPath: requestedScope } : {}) } } : {}),
       },
       filteredCandidates,
@@ -3644,7 +3692,7 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
       }
 
       // -----------------------------------------------------------------------
-      // V11-05 (TL_COMPOUND_RETRIEVAL, composes with TL_GRAPH_EVIDENCE): a
+      // V11-05 (TL_GRAPH_EVIDENCE=compound since the v0.14 consolidation): a
       // bounded read-only hop closure over graph evidence — definition ->
       // references -> representative consumers -> tests/config, realized in
       // ONE analyzeImpact call (features/compound/). Purely ADDITIVE to
@@ -4223,9 +4271,22 @@ function abstain(
     ...(candidateDetails && candidateDetails.length > 0 ? { candidateDetails } : {}),
     ...(deadEnd ? { scope: deadEnd.workspace, note: NOT_FOUND_SCOPE_NOTE } : {}),
     ...(recoveryHandles.length > 0
-      ? { next: `read_file handles=${JSON.stringify(recoveryHandles)}` }
+      ? {
+          next: {
+            tool: "read_file",
+            arguments: {
+              targets: recoveryHandles.map((handle) => ({ handle })),
+              content: "full",
+            },
+          },
+        }
       : probeToken !== null
-        ? { next: `search_files action=find query=${probeToken}` }
+        ? {
+            next: {
+              tool: "search_files",
+              arguments: { action: "find", queries: [probeToken] },
+            },
+          }
         : {}),
     ...(rootSuggestion !== undefined ? { rootSuggestion } : {}),
   };
@@ -5227,7 +5288,7 @@ const TASK_MANAGEMENT_WORDS = new Set([
   "priority", "role", "permission", "feature", "behavior", "option",
 ]);
 
-function scoreQueryToken(token: string, query: string): number {
+export function scoreQueryToken(token: string, query: string): number {
   let score = 1.0;
   // High value: all-caps enum-like tokens
   if (/^[A-Z][A-Z0-9_]{2,}$/.test(token)) score += 2.0;
@@ -5240,8 +5301,12 @@ function scoreQueryToken(token: string, query: string): number {
   if (actionVerbs.some((v) => query.toLowerCase().includes(v))) score += 0.3;
   // Lower value: task-management words
   if (TASK_MANAGEMENT_WORDS.has(token.toLowerCase())) score -= 1.5;
-  // Lower value: very generic nouns
-  if (GENERIC_NOUNS.has(token.toLowerCase())) score -= 0.5;
+  // The structured generic-noun exemption belongs to the literal-first
+  // experiment. With the flag OFF, keep the legacy locator penalty even for
+  // dotted identifiers so the default arm remains behaviorally identical.
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const structuredUse = new RegExp(`(?:[._]|[a-z0-9])${escaped}\\b`, "i").test(query);
+  if (GENERIC_NOUNS.has(token.toLowerCase()) && (!literalFirstRoutingEnabled() || !structuredUse)) score -= 0.5;
   return score;
 }
 
@@ -5434,7 +5499,7 @@ function findSymbolEnd(lines: string[], startLine: number, lang: string): number
  * admission path and for exact/whole-name matches, both stronger signals
  * than a single generic-word substring hit.
  */
-const GENERIC_NOUNS = new Set(["status", "issue", "health", "state", "value", "data", "info", "name", "code"]);
+const GENERIC_NOUNS = new Set(["issue", "health", "status", "state", "value", "data", "info", "name", "code"]);
 
 /** Common English stop words to skip in identifier extraction. */
 const STOP_WORDS = new Set([

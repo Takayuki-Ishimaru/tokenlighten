@@ -14,21 +14,27 @@ describe("medium guide profile (E8)", () => {
   it("keeps the exercised v75 rules", () => {
     const medium = renderMediumBlock();
     for (const rule of [
-      "mode=task_pack",
+      "read_file {query",
       "decision.kind",
       "refusal",
       "retry",
       "edits[]",
       "remaining",
       "next",
+      "read.receipt",
+      "hints are advisory",
       "verification kit",
       "create:true",
       "queries=[",
       "cwd",
       "SAFE-STOP",
+      "native-bypass",
     ]) {
       expect(medium, rule).toContain(rule);
     }
+    expect(medium).not.toContain("mode=task_pack");
+    expect(medium).toContain("<!-- tl-legacy-compat:start -->");
+    expect(medium).toContain("<!-- tl-legacy-compat:end -->");
   });
 
   it("does not change the full default renderer", () => {
@@ -48,15 +54,18 @@ describe("medium guide profile (E8)", () => {
   it("JP: keeps the same protocol-directive vocabulary as EN medium (translation parity, not identical text)", () => {
     const mediumJp = renderMediumBlock("jp");
     for (const rule of [
-      "mode=task_pack",
+      "read_file {query",
       "decision.kind",
       "next",
+      "read.receipt",
       "cwd",
       "SAFE-STOP",
+      "native-bypass",
       "edits[]",
     ]) {
       expect(mediumJp, rule).toContain(rule);
     }
+    expect(mediumJp).not.toContain("mode=task_pack");
   });
 
   it("does not change the EN default when JP is requested, and both locales route through renderBlock identically", () => {

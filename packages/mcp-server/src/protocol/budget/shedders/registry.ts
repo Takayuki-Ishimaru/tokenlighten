@@ -195,15 +195,15 @@ export function withoutKeys(
 ): { next: Record<string, unknown>; dropped: string[] } | undefined {
   const remove = new Set(keys);
   const dropped: string[] = [];
-  const next: Record<string, unknown> = {};
+  const candidate: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(source)) {
     if (remove.has(key) && value !== undefined) {
       dropped.push(key);
       continue;
     }
-    next[key] = value;
+    candidate[key] = value;
   }
-  return dropped.length === 0 ? undefined : { next, dropped };
+  return dropped.length === 0 ? undefined : { next: candidate, dropped };
 }
 
 /**

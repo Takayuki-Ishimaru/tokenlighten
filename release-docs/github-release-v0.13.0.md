@@ -11,7 +11,7 @@
 - **Updated agent guidance.** The managed v80 guide documents the canonical surface, refusal transitions, receipts, range continuation, batching, and verification behavior.
 - **Safer default rollout.** Proof completion is enabled by default in v0.13.0. Tool-local `$defs` emission remains disabled by default while client compatibility continues to be evaluated.
 
-See the [changelog](../CHANGELOG.md) for the complete v0.13.0 change inventory.
+See the [changelog](../CHANGELOG.md) for release highlights.
 
 ## Compatibility
 
@@ -19,30 +19,7 @@ See the [changelog](../CHANGELOG.md) for the complete v0.13.0 change inventory.
 - Writes still require explicit `--allow-write`.
 - The legacy v0.12 field spellings are compatibility-only in v0.13.x and are scheduled for removal in v0.14.
 - `TL_PROOF_COMPLETION` defaults to on; `TL_SCHEMA_DEFS` defaults to off.
-- The desktop application and private benchmark harness are not included in the public source release.
-
-## Validation summary
-
-The release candidate passed the at-head follower matrix in all three configurations: baseline proof completion on (8/8), Tier-3 proof completion on (8/8), and baseline proof completion off (8/8). The release rehearsal passed 7/7.
-
-The clean public-source staging tree built successfully and passed 283 test files: 4,008 tests passed and 2 were skipped. Bundled-CLI integration, dependency-license checks, generated notices, runtime and full dependency audits, and VSIX packaging also passed.
-
-## Benchmark disclosure
-
-The v0.13 developer benchmark produced a TokenLighten/native aggregate cost ratio of **0.735**. This point estimate means the evaluated work cost **26.5% less with TokenLighten**.
-
-v0.12.1 was a maintenance release with no performance change, so v0.12.0 is the relevant historical comparison. Its overall point estimate was approximately **28% lower**, while v0.11.1 measured approximately **21% lower**. v0.13 therefore remained close to v0.12 overall and was about 5.5 percentage points better than v0.11.1. Different source revisions and evaluation windows make these descriptive comparisons, not causal release-over-release measurements.
-
-| Task pattern | v0.13 vs native | Historical context |
-|---|---:|---|
-| Cross-module telemetry-health decision and downstream wiring | **42.5% lower** | The advantage widened from 19.6% lower in v0.12 by 22.9 percentage points. |
-| Related multi-bug fix across control and mode transitions | **20.3% lower** | Favorable, but below v0.12's 29.7%. |
-| Priority behavior spanning related feature paths | **12.0% lower** | Below v0.12's 24.9%. |
-| Spreadsheet-driven rating-rule implementation | **18.0% lower** | Below the more variable v0.12 result of 56.8%. |
-| Localized orchestration explanation | **4.1% higher** | A near-parity small task. |
-| Narrow calculation or data-integrity fix | **1.1% higher** | v0.12 measured 17.9% lower; v0.13 showed no advantage. |
-
-The clearest v0.13 strength is tracing a decision across components and connecting it to downstream consumers. Multi-location fixes and rule implementations also benefit, but less consistently. Small known-location changes, localized explanations, and narrow calculations remain the weak area because fixed MCP, guidance, and verification overhead can outweigh saved discovery. These are developer-run observations, not guaranteed savings; outcomes vary by repository, task, client, model behavior, evaluation window, and provider pricing.
+- The desktop application is not included in the public source release.
 
 ## Install the VS Code extension
 
@@ -69,11 +46,9 @@ npm run doctor
 
 See [Getting started](getting-started.md) for workspace setup.
 
-## Dependency security snapshot
+## Dependency updates
 
-For the v0.13.0 release candidate audited on **2026-08-30**, both `npm audit --omit=dev --audit-level=high` and the full `npm audit` reported **0 vulnerabilities**.
-
-These counts are a dated snapshot, not a guarantee that future advisory data will remain unchanged. Rerun the audits against the exact release or checkout you use.
+Use the latest released version for dependency security fixes. Advisory information can change; run `npm audit --omit=dev` or `npm audit` against the exact checkout you use.
 
 ## Privacy and permissions
 
@@ -88,7 +63,6 @@ The MCP server is read-only by default. Start it with `--allow-write` only when 
 - Concurrent agents must pass distinct `lane` values. Omitting lanes can let one agent's frontier influence another agent's same-session decision.
 - Rename and reference edits remain conservative and lexical rather than language-server semantic operations.
 - Scanned or image-only PDFs require OCR elsewhere; TAR, TAR.GZ/TGZ, 7Z, and RAR containers remain read-only.
-- Benchmark outcomes vary by workload and evaluation window; do not advertise a guaranteed saving.
 
 ## License and support
 

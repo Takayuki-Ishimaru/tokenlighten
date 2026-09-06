@@ -296,8 +296,7 @@ describe("intent: remove-duplicate-branch", () => {
     // since nextText's return type is always `string` regardless of `data`'s
     // content, so it never actually checked anything. Empirically the wire
     // body carries a genuine `next` ToolCall (removeDuplicateBranch.ts emits
-    // a legacy `read_file mode=slice handle=...` string with no range, which
-    // the D-4 parser resolves to a bare re-read of that same handle); assert
+    // the canonical handle-targeted read directly); assert
     // on the real structure instead: it points the caller back at the exact
     // handle they submitted.
     const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
@@ -700,11 +699,12 @@ describe("intent: rename-symbol-references", () => {
 
     expect(data["kind"]).toBe("refusal");
     expect(data["code"]).toBe("intent-unsupported");
-    // D-4: was `expect(typeof nextText(data)).toBe("string")` — a tautology
-    // (see the 296 note above for why). Empirically this refusal carries no
-    // `next` at all, only `detail`; assert both facts directly.
-    expect(data["next"], JSON.stringify(data)).toBeUndefined();
-    expect(data["detail"], JSON.stringify(data)).toContain("set precondition=references-reviewed after running search_files action=references");
+    // Missing proof is recoverable by running the exact reference search.
+    const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
+    expect(next?.tool, JSON.stringify(data)).toBe("search_files");
+    expect(next?.arguments?.["action"], JSON.stringify(data)).toBe("references");
+    expect(next?.arguments?.["queries"], JSON.stringify(data)).toEqual(["oldName"]);
+    expect(data["detail"], JSON.stringify(data)).toContain("set precondition=references-reviewed");
 
     // File must be unmodified.
     expect(readFile(wsDir, "src/fn.ts")).toBe(fixture);
@@ -869,18 +869,10 @@ describe("intent dispatch: unknown intent name returns intent-unknown", () => {
 
     expect(data["kind"]).toBe("refusal");
     expect(data["code"]).toBe("intent-unknown");
-    // D-4: was `expect(typeof nextText(data)).toBe("string")` — a tautology
-    // (see the 296 note above). Empirically the wire body carries a genuine
-    // `next` ToolCall: `intents/index.ts`'s default case hardcodes the legacy
-    // string `"edit_file search=... replace=..."`, which the D-4 parser
-    // resolves to an `edit_file` call with one `edits[]` entry whose
-    // search/replace are literally the filler text "..." (a generic
-    // illustrative shape, not a caller-specific fix). Assert on that
-    // structure directly.
-    const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
-    expect(next?.tool, JSON.stringify(data)).toBe("edit_file");
-    const edits = next?.arguments?.["edits"] as Array<Record<string, unknown>> | undefined;
-    expect(edits?.[0]?.["search"], JSON.stringify(data)).toBe("...");
-    expect(edits?.[0]?.["replace"], JSON.stringify(data)).toBe("...");
+    // An illustrative prose suggestion is advisory, not an executable call.
+    expect(data["next"], JSON.stringify(data)).toBeUndefined();
+    expect(data["detail"], JSON.stringify(data)).toContain(
+      "Use edit_file with an exact search/replace edit instead.",
+    );
   }, 35000);
 });

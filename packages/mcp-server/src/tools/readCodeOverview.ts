@@ -8,6 +8,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import type { ToolCall } from "@tokenlighten/types";
 import { handleTable } from "../util/handles.js";
 import { isSourceOnlyExcludedPath } from "./walkRepo.js";
 import { safeResolve, resolveReal, isWithin } from "../util/safePath.js";
@@ -59,7 +60,7 @@ export interface ReadCodeOverviewOutput {
   /** Retry guidance when the scoped path resolved to no package map. */
   hint?: string;
   /** Concrete next TL call to run when this overview is empty. */
-  next?: string;
+  next?: ToolCall;
   /**
    * Set only when the effective scope silently diverged from the requested
    * `path`: the path did not exist, or it had no package.json of its own and
@@ -546,9 +547,23 @@ function sectionScore(section: OverviewSection, rel: string, pkg?: PackageInfo):
   const lower = rel.toLowerCase();
   const pkgText = `${pkg?.path ?? ""} ${pkg?.pkg?.name ?? ""} ${pkg?.pkg?.description ?? ""} ${pkg?.role ?? ""}`.toLowerCase();
   if (section === "bench") {
-    if (lower === "bench/workflows/scenarios.workflow.js") return 100;
+    // FX-N0 (2026-09-03): the exact literal `bench/workflows/scenarios.workflow.js`
+    // path was TokenLighten-repository-specific product logic. Removed —
+    // the generic keyword rule two lines down already scores this same
+    // file (it contains both "bench" and "workflow"), and `sectionCandidates`
+    // below now discovers ANY workspace's own `bench/`/`benchmarks/`
+    // directory generically instead of seeding fixed TokenLighten paths.
+    //
+    // FX-O3 (2026-09-03, round-17 review finding 5): a second TokenLighten
+    // literal survived FX-N0 three lines below the one it removed —
+    // `tokenlighten_bench/bench_` names this repository's own
+    // `bench/workflows/lib/tokenlighten_bench/` package by its exact
+    // directory/module-prefix shape. Removed with no replacement: the
+    // generic keyword rule immediately below already scores any file whose
+    // path contains "bench" (score 45), so TokenLighten's own
+    // `tokenlighten_bench/bench_*.py` modules are still discovered —
+    // generically, not by name.
     if (lower.includes("/commands/bench.") || lower.endsWith("/bench.ts")) return 80;
-    if (lower.includes("tokenlighten_bench/bench_")) return 70;
     if (lower.includes("bench") || lower.includes("workflow") || lower.includes("score") || lower.includes("aggregate")) return 45;
   }
   if (section === "write-safety") {
@@ -581,10 +596,21 @@ function sectionCandidates(workspace: string, packages: PackageInfo[], sections:
   };
 
   if (sections.has("bench")) {
-    add("bench/workflows/scenarios.workflow.js", "bench", 100, "workflow runner");
-    add("bench/workflows/record_run.mjs", "bench", 75, "billing capture");
-    add("bench/workflows/lib/tokenlighten_bench/bench_aggregate.py", "bench", 70, "aggregation");
-    add("bench/workflows/lib/tokenlighten_bench/bench_score.py", "bench", 65, "scoring");
+    // FX-N0 (2026-09-03): these four `add()` calls used to hardcode exact
+    // TokenLighten-repository paths with fixed scores. `existsFile`-guarded
+    // them into being inert for any OTHER repository, but they were still
+    // repo-specific product logic. Generalized: walk whichever of a
+    // top-level `bench/` or `benchmarks/` directory the workspace actually
+    // has (any repository may name its own benchmark-orchestration
+    // directory either way) and score each file with the same generic
+    // `sectionScore` rule used for every package's own source tree below —
+    // no repository name or exact filename baked in.
+    for (const benchDirName of ["bench", "benchmarks"]) {
+      for (const rel of collectSourceFiles(workspace, benchDirName, 120)) {
+        const score = sectionScore("bench", rel);
+        if (score > 0) add(rel, "bench", score, "focused source surface");
+      }
+    }
   }
 
   for (const pkg of packages) {
@@ -843,8 +869,8 @@ export function buildOverview(
       packages: [],
       recommended_reading_order: [],
       truncated: false,
-      hint: "no package.json found at or above this path; retry read_file mode=overview with a shallower path (a package or repo root)",
-      next: "read_file mode=overview",
+      hint: "no package.json found at or above this path; retry read_file with content=outline at a shallower package or repo root",
+      next: { tool: "read_file", arguments: { content: "outline" } },
     };
   }
 

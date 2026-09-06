@@ -29,6 +29,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import type { ToolCall } from "@tokenlighten/types";
 import { walkCodeFiles, isWalkIgnoredPath } from "../tools/walkRepo.js";
 import { searchSymbols } from "../tools/searchSymbols.js";
 import { searchReplaceEdit } from "../tools/searchReplaceEdit.js";
@@ -69,7 +70,7 @@ export type PathlessEditResult =
       nested_workspace?: string;
       paths?: string[];
       detail?: string;
-      next?: string;
+      next?: ToolCall;
     };
 
 // ---------------------------------------------------------------------------
@@ -131,6 +132,7 @@ function firstOccurrenceLine(text: string, needle: string): number {
 function pathlessWorkspaceBoundaryRefusal(
   relPath: string,
   workspace: GuardedWorkspaceRoot,
+  edit: { search: string; replace: string },
 ): PathlessEditResult | null {
   const resolvedWorkspace = path.resolve(workspace);
   let workspaceReal: string;
@@ -156,7 +158,19 @@ function pathlessWorkspaceBoundaryRefusal(
     nested_workspace: foreign,
     paths: [relPath],
     detail,
-    next: `re-issue with cwd=${foreign} and a path relative to it`,
+    next: {
+      tool: "edit_file",
+      arguments: {
+        cwd: foreign,
+        edits: [{
+          path: path.relative(foreign, absTarget).split(path.sep).join("/"),
+          search: edit.search,
+          replace: edit.replace,
+          precondition: "unique-match",
+          allowPathFallback: false,
+        }],
+      },
+    },
   };
 }
 
@@ -247,7 +261,7 @@ export async function pathlessExactEdit(
   const target = matches[0]!;
 
   // Post-selection workspace-boundary check — see pathlessWorkspaceBoundaryRefusal.
-  const boundaryRefusal = pathlessWorkspaceBoundaryRefusal(target.relPath, workspace);
+  const boundaryRefusal = pathlessWorkspaceBoundaryRefusal(target.relPath, workspace, input);
   if (boundaryRefusal !== null) return boundaryRefusal;
 
   // Delegate to the full safety-chain edit (allowWrite check redundant but harmless).
@@ -393,7 +407,7 @@ export async function pathlessSymbolEdit(
   const target = hits[0]!;
 
   // Post-selection workspace-boundary check — see pathlessWorkspaceBoundaryRefusal.
-  const boundaryRefusal = pathlessWorkspaceBoundaryRefusal(target.relPath, workspace);
+  const boundaryRefusal = pathlessWorkspaceBoundaryRefusal(target.relPath, workspace, input);
   if (boundaryRefusal !== null) return boundaryRefusal;
 
   const result = await searchReplaceEdit(

@@ -165,7 +165,7 @@ export interface WalkOptions {
    * legitimately-named source (e.g. `src/build/utils.ts`,
    * `src/codegen/generated/schema.ts`) is not silently dropped.
    *
-   * The bench-runs / .tokenlighten cache+index / coverage exclusions are NOT
+   * The runs-dir / .tokenlighten cache+index / coverage exclusions are NOT
    * relaxed — those are never source. Default false keeps the noise-filtering
    * used by orientation callers (task_pack / overview / find) unchanged.
    */
@@ -190,15 +190,43 @@ export interface WalkOptions {
   sizeCapBytes?: number;
 }
 
+// FX-R1 (2026-09-03, round-18B review finding 1): FX-O3's generalization of
+// `bench/workflows/runs/` (a TokenLighten-repository-specific literal) to a
+// bare leaf-named `runs/` at ANY depth was worse than the literal it
+// replaced. `runs/` is an ordinary production directory name — a REST
+// resource (`src/api/runs/`), a domain package (`internal/runs/`,
+// `app/models/runs/`), an orchestration store — so the generalized rule
+// hid real source in every OTHER caller repository, silently (no
+// `WalkOmissions` counter fired — the call sites below were a bare
+// `continue`/`return`), and BEFORE the `fullRecall` bypass, so `find`/
+// `references` certified scope-complete `absence` over files they never
+// scanned. REMOVED from product code entirely: a run-archive exclusion is
+// repository configuration, not a general source-only rule —
+// TokenLighten's own `bench/workflows/runs/` is now excluded via a
+// root-anchored line in THIS repo's `.tokenlightenignore` instead (an
+// ordinary, disclosed `tokenlighten_ignored` omission, ignore-layer honesty
+// included).
+//
+// The remaining entries below (`.tokenlighten/cache|index/`, `coverage/`)
+// stay — they are genuinely never source in ANY repository — but every
+// call site now increments `WalkOmissions.source_only_excluded` when one of
+// them fires, so they are (a) disclosed exactly like every other skip class
+// via `omitted`/`scope_report.excluded_by_reason`, and (b) NEVER
+// absence-certificate-compatible (`buildAbsenceExtra`/`withAbsence` withhold
+// entirely while it is > 0), same treatment an oversize file or an
+// unreadable directory already gets. In practice these three entries are
+// already caught earlier by `classifyIgnored`'s shared `DEFAULT_IGNORE`
+// layer (skeleton-engine's own `.tokenlighten/` and `coverage/` patterns),
+// which discloses them as `ignored` before this function is ever reached —
+// this counter is defense-in-depth for the `fullRecall` path and any future
+// drift, not a live silent gap the way the removed `runs/` entry was.
 const SOURCE_ONLY_EXCLUDED_PREFIXES = [
-  "bench/workflows/runs/",
   ".tokenlighten/cache/",
   ".tokenlighten/index/",
   "coverage/",
 ];
 
 const SOURCE_ONLY_EXCLUDED_SEGMENTS = [
-  "/bench/workflows/runs/",
   "/.tokenlighten/cache/",
   "/.tokenlighten/index/",
   "/coverage/",
@@ -304,14 +332,54 @@ export interface WalkOmissions {
    * absence while this is > 0 (see findText.ts's buildAbsenceExtra gate).
    */
   unreadable_dirs: number;
+  /**
+   * Finding 1 (2026-09-03, INV-H): `opts.subPath` lexically escaped the
+   * workspace root (an absolute path outside it, or a relative `../..`
+   * climb) — the walk touched zero files, and this is NOT the same as a
+   * genuinely empty or fully-ignored in-workspace directory. Counted here so
+   * a caller that reaches `walkCodeFiles` directly (no prior boundary check
+   * of its own) still gets an honest `omitted` disclosure instead of a
+   * confidence-shaped 0-match indistinguishable from a real exhaustive scan.
+   * `search_files action=find` additionally hard-refuses this case before
+   * ever reaching this function (`findText.ts`'s `findScopeBoundaryRefusal`),
+   * so this counter fires for find's escape only via defense-in-depth (e.g.
+   * a future call site that bypasses that guard); it is the FIRST and ONLY
+   * disclosure for any caller that has no such guard.
+   */
+  outside_workspace: number;
+  /**
+   * FX-R1 (2026-09-03, round-18B review finding 1): a path excluded by
+   * `isSourceOnlyExcludedPath` — EVERY class that function covers, not only
+   * the never-source `SOURCE_ONLY_EXCLUDED_PREFIXES`/`_SEGMENTS` literals
+   * (`.tokenlighten/cache|index/`, `coverage/`): on the non-fullRecall
+   * (orientation) path it ALSO covers the build-dir/generated noise class
+   * (`/dist/`, `/build/`, `/generated/`, `/__generated__/`, and
+   * `looksGeneratedFile` — `.d.ts`, `.map`, `.min.js`, `.min.css`,
+   * `.generated.*`, `.pb.*`), which `fullRecall` callers (findReferences,
+   * renameSymbol) relax and therefore never hit this counter for. The
+   * review's own ruling names "coverage/dist/build/out/etc." together as
+   * needing the SAME treatment, and this single function already unified
+   * both classes — so one counter, one gate, covers the whole ruling rather
+   * than requiring a second one for the noise class.
+   *
+   * A DELIBERATE, policy-driven exclusion like `ignored`, but counted in its
+   * own bucket rather than folded into it because these rules live in
+   * product code, not `.tokenlightenignore`/`DEFAULT_IGNORE`, and because a
+   * zero-match search over ANY nonzero count here must withhold its absence
+   * certificate entirely (see `buildAbsenceExtra`/`withAbsence`) rather than
+   * merely caveat it the way `ignored`/`gitignored` do — this is the fix for
+   * the exact silent-hiding class the `runs/` generalization introduced (see
+   * the doc comment above `SOURCE_ONLY_EXCLUDED_PREFIXES`).
+   */
+  source_only_excluded: number;
 }
 
 export function createWalkOmissions(): WalkOmissions {
-  return { ignored: 0, gitignored: 0, tokenlighten_ignored: 0, oversize: 0, symlinks: 0, non_text: 0, secrets: 0, unreadable_dirs: 0 };
+  return { ignored: 0, gitignored: 0, tokenlighten_ignored: 0, oversize: 0, symlinks: 0, non_text: 0, secrets: 0, unreadable_dirs: 0, outside_workspace: 0, source_only_excluded: 0 };
 }
 
 export function anyWalkOmission(o: WalkOmissions): boolean {
-  return o.ignored > 0 || o.gitignored > 0 || o.tokenlighten_ignored > 0 || o.oversize > 0 || o.symlinks > 0 || o.non_text > 0 || o.secrets > 0 || o.unreadable_dirs > 0;
+  return o.ignored > 0 || o.gitignored > 0 || o.tokenlighten_ignored > 0 || o.oversize > 0 || o.symlinks > 0 || o.non_text > 0 || o.secrets > 0 || o.unreadable_dirs > 0 || o.outside_workspace > 0 || o.source_only_excluded > 0;
 }
 
 const gitignorePatternsCache = new Map<string, string[]>();
@@ -596,7 +664,10 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
 
   if (opts.subPath) {
     const abs = path.resolve(workspace, opts.subPath);
-    if (!isWithin(abs, workspaceResolved)) return out;
+    if (!isWithin(abs, workspaceResolved)) {
+      if (om) om.outside_workspace += 1;
+      return out;
+    }
     let resolvedAbs = abs;
     let workspaceReal = workspaceResolved;
     let stat: fs.Stats;
@@ -620,7 +691,10 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
         if (om) om[layer] += 1;
         return out;
       }
-      if (isSourceOnlyExcludedPath(relPath, opts.subPath, fullRecall)) return out;
+      if (isSourceOnlyExcludedPath(relPath, opts.subPath, fullRecall)) {
+        if (om) om.source_only_excluded += 1;
+        return out;
+      }
       const base = path.basename(abs);
       const ext = extOf(base);
       const artifactMatch = includeArtifacts && ARTIFACT_EXT_SET.has(ext);
@@ -706,7 +780,10 @@ function walkDir(
         if (om) om[layer] += 1;
         continue;
       }
-      if (isSourceOnlyExcludedPath(relPath + "/", explicitSubPath, fullRecall)) continue;
+      if (isSourceOnlyExcludedPath(relPath + "/", explicitSubPath, fullRecall)) {
+        if (om) om.source_only_excluded += 1;
+        continue;
+      }
       walkDir(workspace, absPath, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, sizeCapBytes, explicitSubPath, fullRecall);
     } else if (entry.isFile()) {
       if (isInternalStateStorePath(relPath)) continue;
@@ -715,7 +792,10 @@ function walkDir(
         if (om) om[layer] += 1;
         continue;
       }
-      if (isSourceOnlyExcludedPath(relPath, explicitSubPath, fullRecall)) continue;
+      if (isSourceOnlyExcludedPath(relPath, explicitSubPath, fullRecall)) {
+        if (om) om.source_only_excluded += 1;
+        continue;
+      }
       const ext = extOf(name);
       const trackedByDefault = allowedExts !== null ? allowedExts.has(ext) : ALL_TRACKED_EXTS.has(ext);
       const extraExtMatch = extraExts?.has(ext) ?? false;

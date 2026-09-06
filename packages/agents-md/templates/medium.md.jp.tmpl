@@ -3,18 +3,24 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (medium)
 
-TLは必要slice+edit handleを安価に返す. 全file作業はTLから開始 — Read/Grep/catやExplore系subagentより先に: 既知`targets`と共に`read_file {query:"<依頼全文>",task:{epoch:"new"}}`を使用; nativeへのfan outは非complete scopeか確実な不在の後のみ. 全callに`cwd`を渡す; 共有workspaceでは固定`lane`を渡す. `task.profile`: `answer`=read-only, `generic`=change; 不明なら省略. epoch内要件は変更まで持続し、絞ったre-packは正直にincomplete足り得る.
+root `AGENTS.md`がactive-design/plan-of-recordを正典管理;正準templateを編集し全AI target再生成、生成blockは直接編集しない。
 
-互換性(v0.13.xのみ、v0.14で削除): `mode=task_pack`、裸の`paths`/`handles`/`maxBytes`/`maxTokens`、`taskProfile`/`taskEpoch`は互換normalizer経由で引き続き動作する — 新規callでは発行禁止; 返却される`next`は既に正準形。
+TLは必要slice+edit handleを返す. 全file作業をnative read/Explore系subagentより先にTLから開始: 既知`targets`と`read_file {query:"<依頼全文>",task:{epoch:"new"}}`. nativeは非complete scope/確実な不在後、またはTL非提供/hostのnative-bypass時のみ; task途中でTLを有効化しない. 全callに自分の`cwd`; 共有workspaceは固定`lane`. `task.profile`: `answer`=read-only, `generic`=change; 不明なら省略、種別が分かっているなら宣言する. 同epoch要件は持続し、絞ったre-packはincomplete足り得る.
+
+<!-- tl-legacy-compat:start -->
+旧v0.14入力(`mode`/`paths`/`handles`/`maxBytes`/`maxTokens`/`taskProfile`/`taskEpoch`)はTL_LEGACY_INPUT=accept時のみ受理(RC=refuse); 発行禁止 — `next`は正準形。
+<!-- tl-legacy-compat:end -->
 
 応答は必ず`{v:1,kind,...}`; field有無でなく`kind`で分岐. 未知の`kind`はSAFE-STOP: 報告のみでeditを発行せず、fieldからの推測禁止.
 
 - `read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`はdiscovery閉鎖、配信済み証拠で即行動. 独立した変更は一回の`edit_file`(`edits[]`、各item自前`path`/`handle`)にbatch. `discover`=>その`next`を実行; `await_input`=>携行`next`を実行、無ければcandidate`targets`で一度だけre-pack; `done`=>停止.
-- `refusal`は`retry`だけが有効な遷移: `call`=名指しfieldを修正, `new-task`=re-pack, `none`=このcall形は閉鎖. 広告済み`next`は常に逐語実行可能かつ全queryを運ぶ; 続きの自作禁止.
+- `refusal`では`retry`だけが有効な遷移. 携行`next`はcall全体として逐語実行し、無ければ`retry`に従って続きの自作は禁止. hintは助言、callでない.
+- `read.receipt`はre-packの合図ではない: `next`があれば従い、無ければ再掲された証拠/certificateで行動または停止.
 - bytesが部分的ならまず同一handleをzoom: `remaining` range(有界)を要求. 上限応答後は`next`に従う; `full`再試行や新queryでのre-pack禁止. 読みは`budget.bytes`/`budget.tokens`でも上限可.
 - Searchは`action:"find",queries:["<識別子1語>"]`; 複数識別子は一回の`queries=[…]`、逐次禁止. 呼出箇所は`references`、一覧は`tree`.
 - path+識別子+変更が平易なら単一値editは高速close. それ以外はTL handle経由で`allowPathFallback:false`によりedit; 新規fileは`create:true`+明示`cwd`. create応答の`sha`/`bytes`/`total_lines`が書込内容を証明; 読み返し不要. `operation_id`で再試行が安全化しreplayも明示.
 - edit後は最初のcompile/testコマンド前に返却済みverification kitを実行. `code`=配信済み証拠; `omitted`=`next`で名指し`targets`を一括読込; `verification.status:"not-applicable"`=編集を参照するtest/mock無し. testか`git diff`で終え、関連checkが通れば停止.
+- Flag限定・既定OFF: TL_CWD_NEAR_MISSは`read_file`/`search_files`でsibling `cwd`を自動採用しうる(`cwd_corrected.reason`: `separator-class|sibling-edit-distance|prefix-truncation|segment-duplication`で開示); `edit_file`は自動解決せず、invalid-cwd refusalでは`cwd_candidates`/`did_you_mean`を使う. TL_SEARCH_DEDUPは同一repeat searchに`receipt.tag:"query-unchanged"`を付加しうる(依然complete、再発行禁止; `task.force_serve:true`で回避可). TL_RECEIPT_COVERAGEは既保持covered_by spanをreceipt/partial readに付加しうる. TL_BATCH_HINTSは同一fileの2回目連続sliceでhint、任意ledger入力で保持span宣言. SF v2 flag(既定OFF)群は: demote/structural-fill候補をbodyless `evidence[]`行として`remaining`+`handle`で保持しうる; closureは`remaining`/`gaps`で留保、TLが観測できないrunの消化を待つ; 関係を`plan.wiring.evidence_graph`: 定義(+callers/calleesは`unavailable`次第)で提示しうる; frontierの根拠を限定Class::methodに置く.
 
 それ以外 — wiring、archive、資格情報、kind別詳細field — は必要な応答内でon-demand配信.
 <!-- tokenlighten:mcp-instructions:end -->

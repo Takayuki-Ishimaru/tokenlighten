@@ -1222,6 +1222,7 @@ export function summarizeUsage(
     measuredBaselineTokens,
     measuredResponseBytes,
     measuredBaselineBytes: measuredBaselineTokens * 4,
+    method: "file-bytes",
     estimatedSavedTokens,
     estimatedReductionPercent: estimatedTokenReductionPercent,
     estimatedTokenReductionPercent,

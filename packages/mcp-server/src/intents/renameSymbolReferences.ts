@@ -11,6 +11,7 @@
  *   - renameSymbol returns an error
  */
 
+import type { ToolCall } from "@tokenlighten/types";
 import { renameSymbol } from "../tools/renameSymbol.js";
 import type { HandleEntry } from "../util/handles.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
@@ -19,7 +20,7 @@ const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export type RenameSymbolReferencesResult =
   | { ok: true; from: string; to: string; changed_files: unknown[]; total_replacements: number; skipped: unknown[]; checkpoint: string | null }
-  | { ok: false; reason: string; next?: string };
+  | { ok: false; reason: string; next?: ToolCall; detail?: string };
 
 export async function applyRenameSymbolReferences(
   handle: HandleEntry,
@@ -34,7 +35,7 @@ export async function applyRenameSymbolReferences(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: "handle must be kind=symbol — use read_file mode=slice with symbol= to get one",
+      detail: "handle must be kind=symbol — use read_file with a symbol target to get one",
     };
   }
 
@@ -43,7 +44,10 @@ export async function applyRenameSymbolReferences(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: "set precondition=references-reviewed after running search_files action=references",
+      ...(handle.symbol
+        ? { next: { tool: "search_files", arguments: { action: "references", queries: [handle.symbol] } } }
+        : {}),
+      detail: "set precondition=references-reviewed after reviewing the emitted reference search",
     };
   }
 
@@ -51,7 +55,7 @@ export async function applyRenameSymbolReferences(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: "target must be a valid identifier [A-Za-z_][A-Za-z0-9_]*",
+      detail: "target must be a valid identifier [A-Za-z_][A-Za-z0-9_]*",
     };
   }
 
@@ -60,7 +64,7 @@ export async function applyRenameSymbolReferences(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: "handle has no symbol name",
+      detail: "handle has no symbol name",
     };
   }
 
@@ -80,7 +84,7 @@ export async function applyRenameSymbolReferences(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: result.error,
+      detail: result.error,
     };
   }
 

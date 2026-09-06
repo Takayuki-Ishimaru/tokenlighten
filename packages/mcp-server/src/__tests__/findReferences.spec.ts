@@ -30,6 +30,7 @@ import {
 } from "../tools/findReferences.js";
 import type { LangKey } from "../tools/walkRepo.js";
 import { TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "../tools/walkRepo.js";
+import { budgetFor } from "../protocol/budget/wireBudget.js";
 
 const tmpDirs: string[] = [];
 
@@ -292,18 +293,57 @@ describe("findReferences — C7 grouping by file", () => {
 });
 
 describe("findReferences — C7 byte cap", () => {
-  it("exports MAX_RESPONSE_BYTES = 2048 (unchanged cap)", () => {
-    expect(MAX_RESPONSE_BYTES).toBe(2048);
+  // FX-G13 G1 (2026-09-04): MAX_RESPONSE_BYTES is now the calibrated protocol
+  // wire-budget frame for search.references (16 KiB), not a private 2048
+  // literal — see the constant's own doc comment. The tests below that exist
+  // specifically to exercise byte-fit TRUNCATION mechanics now pass an
+  // explicit `maxBytes: 2048` to reproduce that exact pre-fix page width
+  // (G1's own sanctioned way to keep pinning multi-page chain behavior);
+  // tests with no cap-driven assertion are untouched.
+  it("MAX_RESPONSE_BYTES is the protocol wire-budget frame for search.references, not a private literal", () => {
+    expect(MAX_RESPONSE_BYTES).toBe(budgetFor("search.references"));
+    expect(MAX_RESPONSE_BYTES).toBe(16384);
   });
 
-  it("stays within the 2048-byte cap on a many-reference case, with a foothold line per file surviving", async () => {
+  it("a caller with no explicit budget.bytes gets the full 16 KiB default frame: 40 single-line references fit on ONE page", async () => {
     const ws = mkWorkspace();
-    // 11 files x 3 references each = 33 total references. At findReferences'
-    // 2048-byte cap, the full 3-line-per-file payload measures well over
-    // cap, while 11 single-line footholds (plus the fixed-size `references`
-    // peek) measure ~2.0KB — comfortably under. This forces real truncation
-    // while keeping the foothold guarantee provable: every matched file
-    // must still surface at least 1 line with its snippet.
+    for (let i = 0; i < 40; i++) writeFile(ws, `src/dir${i}/file.ts`, `frameFitTarget(${i});\n`);
+
+    const result = await findReferences({ symbol: "frameFitTarget" }, ws);
+
+    expect(result.total).toBe(40);
+    expect(result.files).toHaveLength(40);
+    expect(result.truncated).toBe(false);
+    expect(result.next_call).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+  });
+
+  it("an explicit maxBytes NARROWS the default frame, never widens past it", async () => {
+    const ws = mkWorkspace();
+    for (let i = 0; i < 40; i++) writeFile(ws, `src/dir${i}/file.ts`, `hugeBudgetTarget(${i});\n`);
+
+    // A caller-declared ceiling far above the frame is clamped DOWN to the
+    // frame — the response is unaffected either way at this small scale, but
+    // this pins that no over-declaration can ever widen a page.
+    const wide = await findReferences({ symbol: "hugeBudgetTarget", maxBytes: 999_999 }, ws);
+    expect(Buffer.byteLength(JSON.stringify(wide), "utf8")).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+
+    // A caller-declared ceiling BELOW the frame narrows the page for real.
+    const NARROW_CAP = 1024;
+    const narrow = await findReferences({ symbol: "hugeBudgetTarget", maxBytes: NARROW_CAP }, ws);
+    expect(Buffer.byteLength(JSON.stringify(narrow), "utf8")).toBeLessThanOrEqual(NARROW_CAP);
+    expect(narrow.files.length).toBeLessThan(40);
+    expect(narrow.truncated).toBe(true);
+  });
+
+  it("stays within an explicit 2048-byte cap on a many-reference case, with a foothold line per file surviving (pins the pre-G1 default page width)", async () => {
+    const ws = mkWorkspace();
+    // 11 files x 3 references each = 33 total references. At a 2048-byte cap,
+    // the full 3-line-per-file payload measures well over cap, while 11
+    // single-line footholds (plus the fixed-size `references` peek) measure
+    // ~2.0KB — comfortably under. This forces real truncation while keeping
+    // the foothold guarantee provable: every matched file must still surface
+    // at least 1 line with its snippet.
     const FILE_COUNT = 11;
     for (let i = 0; i < FILE_COUNT; i++) {
       const lines = [
@@ -314,11 +354,12 @@ describe("findReferences — C7 byte cap", () => {
       writeFile(ws, `src/dir${i}/file.ts`, lines.join("\n"));
     }
 
-    const result = await findReferences({ symbol: "refTarget" }, ws);
+    const CAP = 2048;
+    const result = await findReferences({ symbol: "refTarget", maxBytes: CAP }, ws);
 
     expect(result.total).toBe(FILE_COUNT * 3);
     const bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
-    expect(bytes).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+    expect(bytes).toBeLessThanOrEqual(CAP);
     // L4 (2026-08-01 references-cursor v2): the foothold-per-file breadth
     // policy this test used to pin was DELIBERATELY traded away — sampling a
     // bit of every file is incompatible with a scalar cursor, and the
@@ -350,13 +391,16 @@ describe("findReferences — C7 byte cap", () => {
     expect(servedLineCount).toBe(FILE_COUNT * 3);
   });
 
-  it("guarantees every matched file gets a foothold even with a much larger fan-out (40 files)", async () => {
+  it("guarantees every matched file gets a foothold even with a much larger fan-out (40 files, pinned to the pre-G1 default page width)", async () => {
     const ws = mkWorkspace();
     // A more extreme fan-out than the cap can give full footholds to (see
     // the byte-math in the module doc comment) — files must still be
     // dropped from the TAIL deterministically (alphabetical), never
     // silently, and `truncated` must say so; every SURVIVING file entry
     // must still be well-formed (foothold line + aligned parallel arrays).
+    // FX-G13 G1: the default frame (16 KiB) comfortably fits all 40 of these
+    // short groups, so an explicit `maxBytes` reproduces the byte-pressured
+    // shape this test exists to exercise.
     for (let i = 0; i < 40; i++) {
       const lines = [
         `const wideTarget${i}_a = 1;`,
@@ -365,10 +409,11 @@ describe("findReferences — C7 byte cap", () => {
       writeFile(ws, `src/dir${i}/file.ts`, lines.join("\n"));
     }
 
-    const result = await findReferences({ symbol: "wideTarget" }, ws);
+    const CAP = 2048;
+    const result = await findReferences({ symbol: "wideTarget", maxBytes: CAP }, ws);
 
     const bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
-    expect(bytes).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+    expect(bytes).toBeLessThanOrEqual(CAP);
     expect(result.truncated).toBe(true);
     // Fewer than all 40 files fit — but at least several do, and every one
     // that survives has a well-formed foothold.
@@ -448,6 +493,9 @@ function nextCallInput(nc: NonNullable<FindReferencesResult["next_call"]>): Find
     ...(typeof a["path"] === "string" ? { path: a["path"] } : {}),
     ...(typeof a["lang"] === "string" ? { lang: a["lang"] as LangKey } : {}),
     ...(typeof a["limit"] === "number" ? { limit: a["limit"] } : {}),
+    // FX-G13 G1: an explicit page-width ceiling propagates through the
+    // continuation chain the same way `limit` already does.
+    ...(typeof a["maxBytes"] === "number" ? { maxBytes: a["maxBytes"] } : {}),
   };
 }
 
@@ -460,8 +508,10 @@ describe("findReferences — L2 truncation_reason", () => {
   it("(a) byte fit with total well under limit: reason 'bytes' + files_omitted + a `next` that walks EVERY dropped group to exhaustion", async () => {
     const ws = mkWorkspace();
     // 40 files x 2 references = 80 matches, against a limit of 100 — nothing
-    // is match-capped, so `truncated` can ONLY be the 2048-byte fit. This is
+    // is match-capped, so `truncated` can ONLY be the byte fit. This is
     // the shape the live probe hit (total <= limit, truncated:true).
+    // FX-G13 G1: an explicit `maxBytes` reproduces the pre-fix default page
+    // width — at the new (16 KiB) default frame this fixture fits on one page.
     for (let i = 0; i < 40; i++) {
       writeFile(ws, `src/dir${i}/file.ts`, [
         `contractTarget(${i});`,
@@ -469,8 +519,9 @@ describe("findReferences — L2 truncation_reason", () => {
       ].join("\n"));
     }
     const allPaths = Array.from({ length: 40 }, (_, i) => `src/dir${i}/file.ts`).sort();
+    const CAP = 2048;
 
-    const first = await findReferences({ symbol: "contractTarget", limit: 100 }, ws);
+    const first = await findReferences({ symbol: "contractTarget", limit: 100, maxBytes: CAP }, ws);
 
     expect(first.total).toBe(80);
     expect(first.total).toBeLessThanOrEqual(100);
@@ -491,7 +542,7 @@ describe("findReferences — L2 truncation_reason", () => {
     let calls = 1;
     const MAX_PAGES = 90; // 80 matches + slack; a non-advancing cursor trips this
     for (;;) {
-      expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+      expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(CAP);
       expect(page.total, "total stays the TRUE match count on every page").toBe(80);
       const pageLines = servedLineKeys(page);
       expect(pageLines.length, "every page must make progress").toBeGreaterThan(0);
@@ -508,6 +559,7 @@ describe("findReferences — L2 truncation_reason", () => {
       const args = nextCallInput(page.next_call!);
       expect(args.symbol).toBe("contractTarget");
       expect(args.limit).toBe(100);                        // original scoping echoed back
+      expect(args.maxBytes).toBe(CAP);                      // the caller's page-width ceiling propagates too
       // The opaque cursor decodes to the exact last (path,line) this page served.
       const pos = decodeReferencesCursor(args.cursor!);
       const lastKey = pageLines[pageLines.length - 1]!;
@@ -596,18 +648,21 @@ describe("findReferences — L2 truncation_reason", () => {
 
   it("(a4) P1 regression — a byte-cut INSIDE one huge file resumes inside that file, recovering every line", async () => {
     const ws = mkWorkspace();
-    // One file whose grouped rendering alone exceeds MAX_RESPONSE_BYTES: long
-    // snippet lines force a mid-file byte cut on page 1.
+    // One file whose grouped rendering alone exceeds the cap: long snippet
+    // lines force a mid-file byte cut on page 1. FX-G13 G1: an explicit
+    // `maxBytes` reproduces the pre-fix default page width — 60 lines this
+    // wide comfortably fit inside the new (16 KiB) default frame.
+    const CAP = 2048;
     const wide = Array.from({ length: 60 }, (_, i) =>
       `bigCutTarget(${i}, "${"x".repeat(60)}");`).join("\n") + "\n";
     writeFile(ws, "src/huge.ts", wide);
 
     const servedLines: string[] = [];
-    let page = await findReferences({ symbol: "bigCutTarget" }, ws);
+    let page = await findReferences({ symbol: "bigCutTarget", maxBytes: CAP }, ws);
     let sawMidFileCut = false;
     for (let calls = 1; ; calls++) {
       expect(calls).toBeLessThanOrEqual(10);
-      expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+      expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(CAP);
       const keys = servedLineKeys(page);
       for (const k of keys) expect(servedLines, "no line is ever re-served").not.toContain(k);
       servedLines.push(...keys);
@@ -743,6 +798,108 @@ describe("findReferences — L2 absence certificate", () => {
 
     expect(result.total).toBe(0);
     expect(result.absence).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FX-OH F7 (2026-09-04): a QUALIFIED `Class::method` used to return a bare
+// `{total:0, references:[], files:[]}` in 97 B — `IDENT_RE` rejected it, the
+// walk never ran, and `withAbsence`'s `scannedFiles === 0` gate therefore
+// withheld the certificate. Indistinguishable from a certified absence
+// WITHOUT the certificate, so the caller had to re-search.
+// ---------------------------------------------------------------------------
+describe("findReferences — qualified Class::method (FX-OH F7)", () => {
+  function cppWorkspace(): string {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/estimator.hpp", [
+      "class Estimator {",
+      "public:",
+      "  bool isSettled() const;",
+      "};",
+      "",
+    ].join("\n"));
+    writeFile(ws, "src/estimator.cpp", [
+      "#include \"estimator.hpp\"",
+      "bool Estimator::isSettled() const { return true; }",
+      "",
+    ].join("\n"));
+    writeFile(ws, "src/loop.cpp", [
+      "#include \"estimator.hpp\"",
+      "static Estimator est;",
+      "void tick() { if (est.isSettled()) { return; } }",
+      "",
+    ].join("\n"));
+    return ws;
+  }
+
+  it("resolves the qualified name to its member and returns the member's references", async () => {
+    const ws = cppWorkspace();
+
+    const result = await findReferences({ symbol: "Estimator::isSettled" }, ws);
+
+    expect((result as unknown as { ok?: boolean }).ok).not.toBe(false);
+    expect(result.total).toBeGreaterThan(0);
+    const paths = result.files.map((g) => g.path).sort();
+    expect(paths).toContain("src/estimator.cpp");
+    expect(paths).toContain("src/loop.cpp");
+    // Every field on the wire names the symbol that was actually scanned.
+    expect(result.symbol).toBe("isSettled");
+  });
+
+  it("a qualified name whose member exists nowhere earns a real absence certificate over scanned_files > 0", async () => {
+    const ws = cppWorkspace();
+
+    const result = await findReferences({ symbol: "Estimator::noSuchMember" }, ws);
+
+    expect(result.total).toBe(0);
+    expect(result.absence).toBeDefined();
+    expect(result.absence?.scanned_files ?? 0).toBeGreaterThan(0);
+    expect(result.absence?.symbol).toBe("noSuchMember");
+  });
+
+  it("no references response is ever {total:0} with neither absence nor omitted nor a refusal", async () => {
+    const ws = cppWorkspace();
+    const inputs: FindReferencesInput[] = [
+      { symbol: "Estimator::isSettled" },
+      { symbol: "Estimator::noSuchMember" },
+      { symbol: "isSettled" },
+      { symbol: "noSuchMemberAtAll" },
+      { symbol: "Estimator::not-an-identifier" },
+      { symbol: "not-an-identifier" },
+      { symbol: "" },
+    ];
+    for (const input of inputs) {
+      const result = await findReferences(input, ws);
+      if (result.total > 0) continue;
+      const record = result as unknown as Record<string, unknown>;
+      const disclosed = record["absence"] !== undefined
+        || record["omitted"] !== undefined
+        || record["ok"] === false;
+      expect(disclosed, `bare zero for ${JSON.stringify(input.symbol)}`).toBe(true);
+    }
+  });
+
+  it("an unresolvable qualified form refuses with retry-by-call shape and did_you_mean naming the unqualified symbol", async () => {
+    const ws = cppWorkspace();
+
+    const result = await findReferences({ symbol: "Estimator::is-Settled::isSettled" }, ws);
+    const record = result as unknown as Record<string, unknown>;
+
+    expect(record["ok"]).toBe(false);
+    expect(record["reason"]).toBe("invalid-input");
+    expect(record["field"]).toBe("query");
+    expect(record["did_you_mean"]).toBe("isSettled");
+    expect(result.absence).toBeUndefined();
+  });
+
+  it("an unqualified non-identifier refuses without inventing a did_you_mean out of prose", async () => {
+    const ws = cppWorkspace();
+
+    const result = await findReferences({ symbol: "not-an-identifier" }, ws);
+    const record = result as unknown as Record<string, unknown>;
+
+    expect(record["ok"]).toBe(false);
+    expect(record["did_you_mean"]).toBeUndefined();
   });
 });
 
@@ -955,8 +1112,12 @@ describe("findReferences — ND-2 page/cursor agreement", () => {
   it("(nd2-a) verbatim exhaustion serves EVERY reference exactly once, contiguously, keeping the definition site (live pre-fix: 80/122 via the peek)", async () => {
     const { ws, truth, definition } = mkNd2Workspace();
 
+    // FX-G13 G1: an explicit `maxBytes` reproduces the pre-fix default page
+    // width — this fixture's 82 references fit the new (16 KiB) default
+    // frame in far fewer than 3 pages, which would defeat this test's own
+    // purpose (multi-page peek/cursor agreement).
     const pages: FindReferencesResult[] = [];
-    let page = await findReferences({ symbol: "clampMotor" }, ws);
+    let page = await findReferences({ symbol: "clampMotor", maxBytes: 2048 }, ws);
     for (let calls = 1; ; calls++) {
       pages.push(page);
       expect(calls, "the continuation must terminate").toBeLessThan(120);
@@ -1045,8 +1206,11 @@ describe("findReferences — ND-2 page/cursor agreement", () => {
         "  overrunTarget(1);\n");
     }
 
+    // FX-G13 G1: an explicit `maxBytes` reproduces the pre-fix default page
+    // width — these 12 long-path groups fit the new (16 KiB) default frame
+    // on one page, which would defeat this test's overrun-shape purpose.
     const seen: string[] = [];
-    let page = await findReferences({ symbol: "overrunTarget" }, ws);
+    let page = await findReferences({ symbol: "overrunTarget", maxBytes: 2048 }, ws);
     let sawOverrunShape = false;
     for (let calls = 1; ; calls++) {
       const emitted = emittedKeys(page);
@@ -1068,7 +1232,10 @@ describe("findReferences — ND-2 page/cursor agreement", () => {
   it("(nd2-d) the cursor stays opaque and server-issued — a hand-built token is still refused and disclosed", async () => {
     const { ws } = mkNd2Workspace();
 
-    const first = await findReferences({ symbol: "clampMotor" }, ws);
+    // FX-G13 G1: an explicit `maxBytes` reproduces the pre-fix default page
+    // width — this fixture fits the new (16 KiB) default frame in one page,
+    // which would leave no `next_call` for this test to read a cursor off.
+    const first = await findReferences({ symbol: "clampMotor", maxBytes: 2048 }, ws);
     const token = first.next_call!.arguments["cursor"] as string;
     // Opaque: base64url only — no path bytes, no separators a consumer could
     // parse or forge by hand (the v2 wire contract, unchanged by ND-2).
@@ -1083,5 +1250,171 @@ describe("findReferences — ND-2 page/cursor agreement", () => {
     expect(forged.cursor_note).toContain("invalid cursor");
     expect(emittedKeys(forged)[0]).toBe("include/ctl/util.hpp#5");
     expect(forged.total).toBe(82);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FX-R1 (2026-09-03, round-18B review finding 1): FX-O3's generic `runs/`
+// source-only exclusion (walkRepo.ts, removed by this fix) hid a symbol
+// defined/called only inside a `runs/`-named source directory from
+// `references`, and certified a false scope-complete `absence` over it (the
+// review's exact repro: `scheduleRun` defined in `src/api/runs/handler.ts`,
+// `references scheduleRun` -> `total:0` with `absence`). Pre-fix (with
+// `"runs/"`/`"/runs/"` still in `SOURCE_ONLY_EXCLUDED_PREFIXES`/`_SEGMENTS`),
+// the first test's `total` assertion fails and its `absence` assertion
+// instead succeeds with a FALSE absence certificate — verified manually by
+// re-adding those two literals locally and re-running this file, then
+// reverting (not left in the suite as a runtime toggle).
+// ---------------------------------------------------------------------------
+describe("findReferences — a runs/-named source directory is no longer invisible (FX-R1, finding 1)", () => {
+  it("finds a caller of a symbol defined only inside src/api/runs/ — previously hidden and falsely certified absent", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/api/runs/handler.ts", "export function scheduleRun() { return 1; }\n");
+    writeFile(ws, "src/app.ts", "import { scheduleRun } from \"./api/runs/handler.js\";\nscheduleRun();\n");
+
+    const result = await findReferences({ symbol: "scheduleRun" }, ws);
+
+    expect(result.total).toBeGreaterThan(0);
+    expect(result.files.map((f) => f.path)).toContain("src/api/runs/handler.ts");
+    expect(result.files.map((f) => f.path)).toContain("src/app.ts");
+    expect(result.absence).toBeUndefined();
+  });
+
+  it("a symbol that genuinely does not exist anywhere still gets absence certified — the fix does not just widen matches, the walk itself now covers runs/", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/api/runs/handler.ts", "export function scheduleRun() { return 1; }\n");
+    writeFile(ws, "src/real.ts", "export const real = 1;\n");
+
+    const result = await findReferences({ symbol: "zzqx_nowhere_zzqx" }, ws);
+
+    expect(result.total).toBe(0);
+    expect(result.absence).toBeDefined();
+    // Both files (including the one under runs/) were actually scanned — no
+    // caveat naming an excluded path, since none was excluded.
+    expect(result.absence?.scanned_files).toBe(2);
+    expect(result.absence?.caveat).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FX-R1 (2026-09-03, round-18B review finding 5): `search_files
+// action=references` had no not-found/outside-workspace refusal parity with
+// `find`/`tree` — a nonexistent `path` returned a bare
+// `{total:0,references:[],files:[]}` with zero disclosure of any kind, and
+// an out-of-workspace `path` only reached a disclosed-but-unrefused
+// `omitted.outside_workspace` after a real (zero-file) walk. Reuses `find`'s
+// own `findScopeBoundaryRefusal` (now exported) verbatim.
+// ---------------------------------------------------------------------------
+describe("findReferences — not-found / path-outside-workspace parity with find/tree (FX-R1, finding 5)", () => {
+  it("a nonexistent path refuses ok:false/reason:not-found/did_you_mean, not a bare 0-match", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/services/userService.ts", "export function needleFn() {}\n");
+    writeFile(ws, "src/utils/format.ts", "export const f = 1;\n");
+
+    const r = (await findReferences({ symbol: "needleFn", path: "src/service" }, ws)) as unknown as {
+      ok?: boolean;
+      reason?: string;
+      did_you_mean?: { path: string; children: string[] };
+      total?: number;
+      omitted?: unknown;
+      absence?: unknown;
+    };
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("not-found");
+    expect(r.did_you_mean).toBeDefined();
+    expect(r.did_you_mean!.path).toBe("src");
+    expect(r.did_you_mean!.children).toContain("services");
+    expect(r.did_you_mean!.children).toContain("utils");
+    // Never a false confidence-shaped 0-match riding alongside the refusal.
+    expect(r.omitted).toBeUndefined();
+    expect(r.absence).toBeUndefined();
+  });
+
+  it("an absolute path outside the workspace refuses ok:false/reason:path-outside-workspace, not a silent omitted.outside_workspace", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/alpha.ts", "export function alphaFn() {}\n");
+    const outside = path.dirname(ws);
+
+    const r = (await findReferences({ symbol: "alphaFn", path: outside }, ws)) as unknown as {
+      ok?: boolean;
+      reason?: string;
+      omitted?: unknown;
+      absence?: unknown;
+    };
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("path-outside-workspace");
+    expect(r.omitted).toBeUndefined();
+    expect(r.absence).toBeUndefined();
+  });
+
+  it("a relative '../..' escape gets the identical refusal", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/beta.ts", "export function betaFn() {}\n");
+
+    const r = (await findReferences({ symbol: "betaFn", path: "../.." }, ws)) as unknown as {
+      ok?: boolean;
+      reason?: string;
+    };
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("path-outside-workspace");
+  });
+
+  it("a path that resolves to a real FILE inside the workspace is unaffected (references can scope to a single file)", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/single.ts", "export function needleFnGamma() { needleFnGamma(); }\n");
+
+    const r = await findReferences({ symbol: "needleFnGamma", path: "src/single.ts" }, ws);
+    expect((r as unknown as { ok?: boolean }).ok).toBeUndefined();
+    expect(r.total).toBeGreaterThan(0);
+  });
+
+  it("RPC boundary: search_files references on a nonexistent path refuses not-found, same as find/tree", async () => {
+    const ws = fs.realpathSync(fs.mkdtempSync(path.join(process.env["HOME"] ?? os.homedir(), ".tl-fr-f5-")));
+    tmpDirs.push(ws);
+    writeFile(ws, "src/a.ts", "export function needleFnDelta() {}\n");
+
+    const { callTool } = await import("../server.js");
+    async function invoke(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const response = await callTool("search_files", args);
+      const first = (response as { content: Array<{ type: string; text?: string }> }).content[0];
+      const text = first?.type === "text" && typeof first.text === "string" ? first.text : "{}";
+      return JSON.parse(text) as Record<string, unknown>;
+    }
+
+    const refResult = await invoke({ action: "references", query: "needleFnDelta", path: "srcc", cwd: ws });
+    expect(refResult["kind"], JSON.stringify(refResult)).toBe("refusal");
+    expect(refResult["code"]).toBe("not-found");
+    expect(refResult["did_you_mean"]).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FX-R1 (2026-09-03, round-18B review finding 1, part (a)/(b)): a remaining
+// `SOURCE_ONLY_EXCLUDED_*` skip (`.tokenlighten/cache|index/`, `coverage/`)
+// must be disclosed via `omitted.source_only_excluded` and must NEVER back
+// an `absence` certificate — same treatment `omitted.oversize` already gets
+// (see the F-W2D-1 describe block above for that precedent). `coverage/` is
+// reachable through the public `findReferences` surface via the workspace's
+// own `.tokenlightenignore` negating it back out of the shared
+// DEFAULT_IGNORE layer (it is not in skeleton-engine's PROTECTED_IGNORE) —
+// exactly when the product-code floor has to hold.
+// ---------------------------------------------------------------------------
+describe("findReferences — source_only_excluded is disclosed and never backs an absence certificate (FX-R1)", () => {
+  it("a coverage/ file re-admitted from DEFAULT_IGNORE by the workspace's own .tokenlightenignore negation still withholds absence, disclosed via omitted.source_only_excluded", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, ".tokenlightenignore", "!coverage/\n!coverage/**\n");
+    writeFile(ws, "coverage/report.ts", "export const cov = 1;\n");
+    writeFile(ws, "src/real.ts", "export const real = 1;\n");
+
+    const result = (await findReferences({ symbol: "zzqx_source_only_zzqx" }, ws)) as unknown as {
+      absence?: unknown;
+      omitted?: { source_only_excluded?: number };
+    };
+
+    expect(result.absence).toBeUndefined();
+    expect(result.omitted?.source_only_excluded).toBeGreaterThanOrEqual(1);
   });
 });

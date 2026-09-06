@@ -6,6 +6,8 @@ import {
   readUsageEvents,
   resetUsageWindow,
   summarizeUsage,
+  buildMeasurementDisplay,
+  computeMeasurementDecomposition,
   usageLogDirectory,
   usageWindowStart,
   usageWorkspaceId,
@@ -129,9 +131,29 @@ export async function runLogs(args: string[]): Promise<void> {
       (sum, entry) => sum + entry.responseBytes,
       0,
     );
+    const canonicalSummary = summarizeUsage(events, price, aiLogs, { scope });
+    const savingEventIndex = canonicalSummary.measuredBaselineCalls > 0
+      ? events.findIndex((event) => event.outcome === "ok")
+      : -1;
+    const measurementEvents = events.map((_event, callIndex) => ({
+      event: "usage_call",
+      call_id: callIndex + 1,
+      ...(callIndex === savingEventIndex
+        ? { estimatedSavedTokens: canonicalSummary.estimatedSavedTokens }
+        : {}),
+    }));
+    const decomposition = computeMeasurementDecomposition(measurementEvents);
+    if (savingEventIndex >= 0) {
+      decomposition.direct_context_saving.provenance.basis =
+        "canonical task-grouped baseline minus successful responses in "
+        + "baseline-anchored task groups; errors and unanchored task groups "
+        + `excluded (${canonicalSummary.measuredBaselineCalls} baseline-bearing call(s))`;
+    }
     const summary = {
-      ...summarizeUsage(events, price, aiLogs, { scope }),
+      ...canonicalSummary,
       totalResponseBytes,
+      method: "file-bytes" as const,
+      measurementDisplay: buildMeasurementDisplay(decomposition),
       ...(measurementUnavailableReason ? { measurementUnavailableReason } : {}),
     };
     if (rest.includes("--json")) {
@@ -175,6 +197,9 @@ export async function runLogs(args: string[]): Promise<void> {
         + `MCP calls: ${summary.eventCount}\n`
         + `TL response bytes: ${summary.totalResponseBytes}\n`
         + `TL response tokens: ~${summary.estimatedResponseTokens} (est.)\n`
+        + `TL response measurement method: ${summary.method}\n`
+        + `Context avoided: ${summary.measurementDisplay.contextAvoided.tokens === null ? "unavailable" : `${summary.measurementDisplay.contextAvoided.tokens} tokens`} (${summary.measurementDisplay.contextAvoided.status}; basis: ${summary.measurementDisplay.contextAvoided.basis})\n`
+        + `Session net: ${summary.measurementDisplay.session.net.tokens === null ? "unavailable" : `${summary.measurementDisplay.session.net.tokens} tokens`} (${summary.measurementDisplay.session.net.status}; basis: ${summary.measurementDisplay.session.net.basis})\n`
         + `By tool: read_file ${summary.byTool.read_file}, `
         + `search_files ${summary.byTool.search_files}, `
         + `edit_file ${summary.byTool.edit_file}\n`

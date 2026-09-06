@@ -721,13 +721,28 @@ export const REQUIRED_SETS: Readonly<Record<Kind, ShapeEntry>> = {
         ],
         source: "DESIGN §4.3:1983 + [R5-10a]; receipts.ts Receipt arm `decision-unchanged`",
       },
-      /** Non-residency. A.4 — `kit_ref`; the kit is addressed by ref, not by a file handle. */
+      /**
+       * Non-residency. A.4 — `kit_ref`; the kit is addressed by ref, not by
+       * a file handle.
+       *
+       * FX-N0 (2026-09-03): this row's `Receipt` arm is declared and typed
+       * (`packages/types/src/mcp/receipts.ts`'s `Receipt` union), so the
+       * required-set stays — but no producer anywhere in `src/` currently
+       * builds a `receipt: "kit-unchanged"` body (grep-verified); this form
+       * is exercised only by direct/synthetic tests of the wire projector
+       * and budget-sweep machinery (e.g. `servedReceiptElisionHonesty.spec.ts`,
+       * `wireBudgetSweep.spec.ts`), never by a live request/response.  The
+       * bare `receipts.ts` citation below — the same convention every row in
+       * this table uses — names that types-package file, not a (nonexistent)
+       * `protocol/receipts.ts`; spelled out fully here because this is the
+       * one arm a reader cannot also verify by finding a live emitter.
+       */
       "kit-unchanged": {
         kind: "read.receipt",
         form: "kit-unchanged",
         keys: ["kit_ref"],
         predicates: [],
-        source: "DESIGN §4.3:1983; receipts.ts Receipt arm `kit-unchanged`",
+        source: "DESIGN §4.3:1983; packages/types/src/mcp/receipts.ts Receipt arm `kit-unchanged` (declared, currently unproduced)",
       },
       /** Non-residency. A.4 — `done` + `total`. There is no file this claim is about. */
       "closure-complete": {

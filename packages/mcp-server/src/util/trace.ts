@@ -72,7 +72,7 @@
  * no side-effecting import was added to either pure module.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -82,14 +82,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
   activeExperimentFlags,
-  adaptiveWholeFileEnabled,
-  evidenceCompletionEnabled,
-  evidenceCompletionShadowEnabled,
+  graphEvidenceMode,
   graphIndexMode,
-  hop1ClosureEnabled,
+  semanticFrontierGuardEnabled,
+  semanticFrontierV2FlagValues,
   traceEnabled,
-  verificationRecipeEnabled,
-  writeCapabilityEnabled,
 } from "./flags.js";
 import { deriveServerBuildId } from "./serverBuild.js";
 import { workspaceRefOf } from "../state/handleCodec.js";
@@ -237,6 +234,24 @@ function sha8(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 8);
 }
 
+/**
+ * FX-R3 (2026-09-03, round-18B finding 7): hash an absolute filesystem path
+ * (or any other caller-shaped string a call site would otherwise put verbatim
+ * into a trace payload) before it reaches a `trace()` event. Same convention
+ * as `handleCodec.ts`'s `workspaceRefOf` — a truncated sha256, never the raw
+ * value — deliberately NOT applied generically to every trace payload:
+ * `p1CausalAttestationPayload`'s `workspace_root` field carries the raw
+ * canonical path ON PURPOSE (`record_run.mjs` joins a trace file to a bench
+ * cell by matching it exactly; see this module's header doc), so a blanket
+ * redaction over all payloads would silently break that join. Call sites that
+ * would otherwise emit a raw path in a NEW event (e.g. `server.ts`'s
+ * `cwd_near_miss_resolved`/`cwd_near_miss_pool_too_large`) hash it through
+ * this at the call site instead.
+ */
+export function hashedTraceValue(value: string): string {
+  return createHash("sha256").update(`trace-value:${value}`).digest("hex").slice(0, 16);
+}
+
 const CONFIG_SHA256_RE = /^[0-9a-f]{64}$/;
 const RUN_NONCE_RE = /^[A-Za-z0-9_.-]{1,200}$/;
 
@@ -318,17 +333,26 @@ export function canonicalizeWorkspaceRoot(workspaceRoot: string): string {
  */
 function resolvedFlagValues(): ReadonlyArray<readonly [string, string]> {
   const bool = (on: boolean): string => (on ? "1" : "0");
+  // v0.14 flag inventory (2026-08-31): the six expired-experiment entries
+  // left this list with their readers, same rule as D10's fifteen — a deleted
+  // behaviour contributes nothing to a digest of what the operator chose.
   return [
-    ["TL_ADAPTIVE_WHOLE_FILE", bool(adaptiveWholeFileEnabled())],
-    ["TL_EVIDENCE_COMPLETION", bool(evidenceCompletionEnabled())],
-    ["TL_EVIDENCE_SHADOW", bool(evidenceCompletionShadowEnabled())],
     ["TL_GRAPH_INDEX", graphIndexMode()],
-    ["TL_HOP1_CLOSURE", bool(hop1ClosureEnabled())],
+    ["TL_SEMANTIC_FRONTIER_GUARD", bool(semanticFrontierGuardEnabled())],
+    // FX-R3 D5 (2026-09-04): THE PAID A/B ARMS MUST BE DISTINGUISHABLE. The
+    // list above predates v0.15, so a treatment server (the ten Semantic
+    // Frontier v2 flags plus TL_GRAPH_EVIDENCE, all on) and a control server
+    // (all off) hashed to the SAME `config_sha256` — the p1 causal
+    // attestation could not tell the two arms apart, which is exactly what
+    // that digest exists to prove. `semanticFrontierV2FlagValues()` walks the
+    // frozen registry through the accessors (see its own doc in flags.ts):
+    // effective values, registry order, and a compile error rather than a
+    // silent omission if a future flag is added without an accessor.
+    ["TL_GRAPH_EVIDENCE", graphEvidenceMode()],
+    ...semanticFrontierV2FlagValues(),
     // The raw env-resolved value, NOT the test override: an override is not
     // configuration and must not move a production digest.
     ["TL_TRACE", bool(traceEnabled())],
-    ["TL_VERIFICATION_RECIPE", bool(verificationRecipeEnabled())],
-    ["TL_WRITE_CAPABILITY", bool(writeCapabilityEnabled())],
   ];
 }
 
@@ -435,11 +459,14 @@ function p1CausalAttestationPayload(
     workspace_root: workspaceRoot,
     trace_file: path.basename(filePath),
     run_nonce: runNonce,
-    effective_flags: {
-      TL_EVIDENCE_COMPLETION: evidenceCompletionEnabled() ? "1" : "0",
-      TL_EVIDENCE_SHADOW: evidenceCompletionShadowEnabled() ? "1" : "0",
-      TL_WRITE_CAPABILITY: writeCapabilityEnabled() ? "1" : "0",
-    },
+    // v0.14 flag inventory (2026-08-31): the P1 evidence-completion lever and
+    // its two siblings were deleted with their experiment, so a live server
+    // has no ablation flags left to attest. The key stays (consumers validate
+    // "must be an object"); a NEW manifest analyzed by the retired
+    // p1_causal.py analyzer now fails its flag-match loudly, which is the
+    // correct fail-closed posture for a lever that no longer exists.
+    // Historical run artifacts keep their recorded values and stay analyzable.
+    effective_flags: {},
   };
 }
 
@@ -515,6 +542,107 @@ export function trace(event: string, payload: object, workspaceRoot: string): vo
     // an unrelated payload field a call site happens to name the same way.
     [{ event, ts: tsClock++, ...payload, ...traceEnvelope(workspaceRoot) }],
   );
+}
+
+/** Maximum bytes for a single trace JSONL record, including its envelope. */
+export const TRACE_RECORD_BYTE_CAP = 12 * 1024;
+
+type TraceRecord = Record<string, unknown>;
+
+function traceRecordFor(event: string, payload: TraceRecord, workspaceRoot: string): TraceRecord {
+  // Keep this construction byte-for-byte equivalent to trace()'s record
+  // shape: the common envelope is part of the budget, not an afterthought.
+  return { event, ts: tsClock, ...payload, ...traceEnvelope(workspaceRoot) };
+}
+
+function jsonCloneRecord(record: TraceRecord): TraceRecord {
+  return JSON.parse(JSON.stringify(record)) as TraceRecord;
+}
+
+function arraySlots(value: unknown, found: unknown[][] = []): unknown[][] {
+  if (Array.isArray(value)) {
+    found.push(value);
+    for (const item of value) arraySlots(item, found);
+  } else if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value as TraceRecord)) arraySlots(item, found);
+  }
+  return found;
+}
+
+function noteTraceArrayTruncation(payload: TraceRecord, count: number): void {
+  if (count <= 0) return;
+  const prior = payload["truncated_count"];
+  if (prior !== null && typeof prior === "object" && !Array.isArray(prior)) {
+    const counts = prior as TraceRecord;
+    const existing = typeof counts["trace_arrays"] === "number" ? counts["trace_arrays"] : 0;
+    counts["trace_arrays"] = existing + count;
+  } else {
+    payload["truncated_count"] = { trace_arrays: count };
+  }
+}
+
+/**
+ * Emit an event with a real JSONL record cap.  Unlike trace(), this is for a
+ * bounded shadow whose rich payload contains arrays that may need shaving;
+ * trace() remains intentionally unchanged for existing observation records.
+ */
+export function traceBounded(
+  event: string,
+  payload: TraceRecord,
+  workspaceRoot: string,
+  minimumPayload: TraceRecord,
+  cap = TRACE_RECORD_BYTE_CAP,
+): boolean {
+  if (!isTraceEnabled()) return false;
+  traceCausalAttestation(workspaceRoot);
+
+  const fits = (candidate: TraceRecord): boolean =>
+    Buffer.byteLength(JSON.stringify(traceRecordFor(event, candidate, workspaceRoot)), "utf8") <= cap;
+  let bounded = jsonCloneRecord(payload);
+  let shaved = 0;
+  while (!fits(bounded)) {
+    const slots = arraySlots(bounded).filter((slot) => slot.length > 0);
+    if (slots.length === 0) break;
+    // Remove from the heaviest currently-present array first.  Recompute each
+    // pass because a nested candidate can disappear with its parent.
+    const slot = slots.sort((left, right) => JSON.stringify(right).length - JSON.stringify(left).length)[0]!;
+    slot.pop();
+    shaved += 1;
+    noteTraceArrayTruncation(bounded, 1);
+  }
+  if (!fits(bounded)) {
+    bounded = jsonCloneRecord(minimumPayload);
+    // The fallback itself proves that rich fields were omitted, even when
+    // every array had already been shaved before a scalar forced fallback.
+    noteTraceArrayTruncation(bounded, Math.max(1, shaved));
+  }
+  if (!fits(bounded)) {
+    // The supplied minimum is designed to fit for Semantic Frontier.  Keep a
+    // final cap-preserving escape hatch for future callers with pathological
+    // scalar input; observability must never create an over-cap JSONL line.
+    bounded = { trace_truncated: true, truncated_count: { trace_arrays: Math.max(1, shaved) } };
+  }
+  const record = traceRecordFor(event, bounded, workspaceRoot);
+  if (Buffer.byteLength(JSON.stringify(record), "utf8") > cap) return false;
+  const wrote = appendTraceRecords(getTracePath(workspaceRoot), [record]);
+  if (wrote) tsClock += 1;
+  return wrote;
+}
+
+/**
+ * A compact binding to the exact final MCP response bytes.  The nonce is
+ * supplied only by the P1 runner and is never copied into the response or a
+ * semantic record.  This deliberately hashes the complete final text rather
+ * than a parsed projection: codec/shedding/fail-closed changes therefore
+ * cannot be hidden behind an equivalent-looking body.  It is a correlation
+ * witness, not a capability or a secret-bearing protocol field.
+ */
+export function responseWitnessHmac(finalResponseText: string, runNonce = process.env["TL_P1_CAUSAL_RUN_NONCE"]): string | undefined {
+  if (typeof runNonce !== "string" || !RUN_NONCE_RE.test(runNonce)) return undefined;
+  return `hmac-sha256:${createHmac("sha256", runNonce)
+    .update("tokenlighten.semantic-frontier.response.v1\\0", "utf8")
+    .update(finalResponseText, "utf8")
+    .digest("hex")}`;
 }
 
 /** Force the channel on/off for a test; pass `undefined` to restore env control. */

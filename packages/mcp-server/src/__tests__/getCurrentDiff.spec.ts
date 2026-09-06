@@ -124,6 +124,46 @@ describe("getCurrentDiff — added file", () => {
   });
 });
 
+describe("getCurrentDiff — untracked file", () => {
+  it("returns status=created for a newly created untracked file", async () => {
+    const dir = mkDir();
+    initGitRepo(dir);
+    writeFile(dir, "README.md", "initial\n");
+    gitCommit(dir, "init");
+
+    writeFile(dir, "src/untracked.ts", "export const UNTRACKED = 1;\n");
+
+    const result = await getCurrentDiff({}, dir);
+
+    expect(result.error).toBeUndefined();
+    expect(result.files).toContainEqual({
+      path: "src/untracked.ts",
+      status: "created",
+      hunks: [],
+    });
+    expect(result.totalFiles).toBe(1);
+    expect(result.truncated).toBe(false);
+    expect(result.untrackedOmitted).toBeUndefined();
+  });
+
+  it("discloses how many untracked files the response cap omitted", async () => {
+    const dir = mkDir();
+    initGitRepo(dir);
+    writeFile(dir, "README.md", "initial\n");
+    gitCommit(dir, "init");
+    for (let i = 0; i < 80; i += 1) {
+      writeFile(dir, `untracked/${String(i).padStart(3, "0")}-${"x".repeat(80)}.ts`, `export const V${i} = ${i};\n`);
+    }
+
+    const result = await getCurrentDiff({}, dir);
+
+    expect(result.truncated).toBe(true);
+    expect(result.untrackedOmitted).toBeGreaterThan(0);
+    expect(result.files.length + result.untrackedOmitted!).toBe(result.totalFiles);
+    expect(result.files.every((file) => file.status === "created")).toBe(true);
+  });
+});
+
 describe("getCurrentDiff — path filter", () => {
   it("returns diff only for specified path", async () => {
     const dir = mkDir();

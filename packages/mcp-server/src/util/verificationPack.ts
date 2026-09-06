@@ -17,9 +17,9 @@ import * as crypto from "node:crypto";
 import { walkCodeFiles } from "../tools/walkRepo.js";
 import { classifySurface } from "./impact.js";
 import { handleTable, shaOfText } from "./handles.js";
+import { laneScopedKey } from "./laneKey.js";
 import { countLines } from "./countLines.js";
 import { projectRootOf } from "../features/locator/locateTaskContext.js";
-import { verificationRecipeEnabled } from "./flags.js";
 import type { TaskVerificationRecipe } from "@tokenlighten/types";
 
 /**
@@ -1348,6 +1348,21 @@ interface KitDedupeState {
 const kitDedupeCache = new Map<string, KitDedupeState>();
 
 /**
+ * FX-M1/B3 (F-V13-3 class, 4th instance): keyed by (workspace root, CALLER'S
+ * LANE), not the root alone — `laneScopedKey` returns the root string itself
+ * when no lane is bound, so a single lane-less agent keys byte-identical to
+ * before this fix. Mirrors the exact fix `packServeLog.ts`'s `_logKey` and
+ * `priorPackStore.ts` already apply for the same reason: a root-only key
+ * pooled every concurrent lane's most-recently-served kit fingerprint, so
+ * lane B's OWN first-ever kit could collapse to `kit_unchanged:true` purely
+ * because lane A's last kit (never seen by B) happened to fingerprint
+ * identically — a false "already in your context" claim.
+ */
+function _kitDedupeKey(workspaceRoot: string): string {
+  return laneScopedKey(workspaceRoot);
+}
+
+/**
  * K3: true when `sha12` matches the fingerprint this function last recorded
  * for `workspaceRoot` (i.e. the immediately-preceding kit for this
  * workspace was byte-identical). Always (re)records `sha12` as the newest
@@ -1355,10 +1370,11 @@ const kitDedupeCache = new Map<string, KitDedupeState>();
  * least-recently-touched workspace is the one evicted once the bound is hit.
  */
 function checkAndRememberKitFingerprint(workspaceRoot: string, sha12: string): boolean {
-  const prior = kitDedupeCache.get(workspaceRoot);
+  const key = _kitDedupeKey(workspaceRoot);
+  const prior = kitDedupeCache.get(key);
   const unchanged = prior !== undefined && prior.sha12 === sha12;
-  kitDedupeCache.delete(workspaceRoot);
-  kitDedupeCache.set(workspaceRoot, { sha12 });
+  kitDedupeCache.delete(key);
+  kitDedupeCache.set(key, { sha12 });
   if (kitDedupeCache.size > KIT_DEDUPE_CACHE_MAX_WORKSPACES) {
     const oldest = kitDedupeCache.keys().next().value;
     if (oldest !== undefined) kitDedupeCache.delete(oldest);
@@ -1863,7 +1879,11 @@ export function buildVerificationManifest(
       : undefined;
 
   let recipe: TaskVerificationRecipe | undefined;
-  if (verificationRecipeEnabled() || options.forceRecipe === true) {
+  // v0.14 flag inventory (2026-08-31): the response-wide TL_VERIFICATION_RECIPE
+  // experiment was deleted (bench-inconclusive since the 2026-08-14 freeze).
+  // The recipe machinery itself stays: the semantic-wiring completion contract
+  // is its non-experimental consumer and forces it explicitly.
+  if (options.forceRecipe === true) {
     const assertions = assertionRefs(selected, options.behaviorAnchors ?? []);
     const contracts = contractRefs(workspace, editedRoots, needles);
     const mockControls = mockControlRefs(workspace, selected, mockHeaders, buildCommand);

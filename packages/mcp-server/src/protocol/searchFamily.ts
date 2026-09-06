@@ -46,8 +46,43 @@ import { emittableToolCall } from "./refusal.js";
 // table findScopedNext/symbolsNext now defer to (thin adapters over
 // absentTermsOf/sanctionSearchContinuation).
 import { absentTermsOf, NO_ABSENT_TERMS, sanctionSearchContinuation } from "../features/search/nextActionPolicy.js";
+// W-T-D (DESIGN-v0.15-sf-turn-economy.md §4, default OFF): the search-dedup
+// wave's session-state and flag hooks. `state/session.ts` imports only
+// `util/laneKey.js`/`util/flags.js` (see its own header), so importing it
+// here from `protocol/*` introduces no cycle.
+import { searchDedupEnabled } from "../util/flags.js";
+import { beginSearchDedupServeCall, recordSearchDedupEntry, searchDedupLookup } from "../state/session.js";
+// F3 (2026-09-02 review fix): sha256 of a fresh body's canonical JSON, used
+// as `applySearchDedup`'s content-identity check (see its module header).
+import { createHash } from "crypto";
 
 type Body = Record<string, unknown>;
+
+/**
+ * FX-R1 (2026-09-03, round-18B review finding 10, additive): the CANONICAL
+ * `search_files action` values — the six the server actually dispatches
+ * (`server.ts`'s `case "search_files"` `if (action === …)` chain plus the
+ * `DIAG_SEARCH_FILES_ACTIONS` diagnostics allowlist, kept in sync by hand
+ * since neither can import the other without a cycle). This is deliberately
+ * NOT the advertised JSON-Schema `action.enum` (`["find","references","diff",
+ * "tree"]`, pinned by `exploreOffice.spec.ts`'s own "compat redirect only"
+ * assertion) — widening THAT enum is a schema-shape change with its own
+ * blast radius (wireBaselines/schemaSize/discoveryBundle pins) and is out of
+ * scope for this additive fix. This constant exists so the unknown-`action`
+ * refusal can name what IS accepted (`field:"action"`, `keys`) without
+ * hand-typing the list a second time at the refusal site, and without
+ * touching the advertised schema at all.
+ *
+ * Separately, seven UNDOCUMENTED aliases normalize onto these six before
+ * dispatch ever sees them (`server.ts`'s `canonical === "search_files"`
+ * argument-normalization block): `grep`/`search` -> `find`, `list` -> `tree`,
+ * `def`/`definitions` -> `symbols`, `usages`/`callers` -> `references`.
+ * Aliases stay accepted (this is additive, not a narrowing) but are
+ * deliberately absent from `keys` — an alias is a compatibility spelling,
+ * not a canonical value, so advertising it here would tell a caller to type
+ * `action:"grep"` when the schema's own `enum` still refuses it verbatim.
+ */
+export const SEARCH_FILES_CANONICAL_ACTIONS = ["find", "symbols", "references", "diff", "locate", "tree"] as const;
 
 function isRecord(value: unknown): value is Body {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -189,7 +224,6 @@ const FIND_FIELDS = [
   // like `absence`'s own optional-omission contract.
   "term_results",
   "member_sweep", "related_lookups",
-  "hop1", "hop1_omitted",
   "partially_served", "partial_served_note",
   "all_served", "all_served_occurrence", "served_note",
 ] as const;
@@ -504,6 +538,10 @@ function projectDiff(body: Body): Body {
   const matches: Body = { form: "diff" };
   matches["files"] = Array.isArray(body["files"]) ? body["files"] : [];
   matches["total_files"] = num(body["totalFiles"]) ?? num(body["total_files"]) ?? 0;
+  const untrackedOmitted = num(body["untrackedOmitted"]) ?? num(body["untracked_omitted"]);
+  if (untrackedOmitted !== undefined && untrackedOmitted > 0) {
+    matches["untracked_omitted"] = untrackedOmitted;
+  }
 
   const projected: Body = { matches };
   const limit = foldLimit({
@@ -546,7 +584,7 @@ const KEPT_ON_REFERENCES = ["cursor_note", "omitted"] as const;
 
 const REFERENCES_FIELDS = [
   "symbol", "references", "files", "total",
-  "absence", "member_sweep", "hint", "hop1", "hop1_omitted",
+  "absence", "member_sweep", "hint",
 ] as const;
 
 /**
@@ -740,4 +778,277 @@ export function projectSearchBody(kind: Kind, body: Body, action: string, args: 
     case "diff":    return projectDiff(body);
     default:        return body;
   }
+}
+
+// ---------------------------------------------------------------------------
+// TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, W-T-D wave, default
+// OFF) — the same-request wire dedup this module's `applySearchDedup` adds
+// AFTER `projectSearchBody` has already run, additively, on its output.
+//
+// SCOPE. This is a WIRE optimisation, not a scan-avoidance one: the server
+// still runs the full search every time (dispatch already happened by the
+// time this module ever sees a body — `protocol/envelope.ts`'s
+// `projectSuccessBody` calls `projectSearchBody` after `server.ts`'s
+// dispatcher has produced its result). What repeats is the BYTES the wire
+// carries for an identical request the caller already holds the answer to.
+//
+// NO ELISION (2026-09-02 review fix, F3 — REVISES the wave's original
+// design). The first cut of this module elided the one bulky per-match field
+// each form carries (`find`'s `files[]`, `symbols`'s `locations[]`,
+// `references`'s `references[]`/`files[]`, `tree`'s rendered `tree` text)
+// while leaving `find`'s `inventory_complete`/`tree`'s `scope_report.
+// completeness` untouched — but "untouched" next to an EMPTIED array is
+// itself the false-absence claim `AGENTS.md`'s receipt-honesty rule forbids
+// (`inventory_complete:true` beside `files:[]` reads as "confirmed zero"),
+// and this module does not own the field whose value set would need a new,
+// honest "this is an elided view" member to fix that (`inventory_complete`'s
+// `true | "by-directory"` union lives in features/search/find/findText.ts,
+// outside this wave's file scope). So: NOTHING is elided any more. A repeat
+// gets the SAME full body a first call would, plus an additive `receipt`
+// telling the caller it already holds this exact result — the byte saving
+// this wave originally chased is secondary to that honesty guarantee.
+//
+// CONTENT IDENTITY, NOT JUST NO-WRITE-SINCE (F3). A recorded entry's
+// `writeEventSerial` only proves no write went through THIS server's own
+// edit path since it was recorded — it cannot see an external (non-TL) edit
+// to the same files. So a `receipt` is now attached ONLY when the freshly
+// recomputed body's digest (`searchDedupDigest`, sha256 over the same
+// canonical JSON the fingerprint uses) matches the digest recorded with the
+// prior entry. Any mismatch — TL-originated or external — means the answer
+// actually changed, so the fresh body is passed through with NO receipt, and
+// the ledger entry is replaced with the new baseline.
+//
+// SCOPE OF FORMS. `find`, `symbols`, `search.references` and `search.tree`
+// are covered (the four shapes DESIGN-v0.14 §4's forensics measured — e.g.
+// `search.references` for the same symbol repeated up to 5x/cell). `locate`
+// (a `{hit, ...}` discriminated union) and `diff` (already `A.5.8`'s minimal
+// transcription) are left OUT of dedup eligibility entirely — with no
+// elision at all, attaching a `receipt` to either would add bytes for zero
+// saving, for two forms this wave's evidence never named.
+// ---------------------------------------------------------------------------
+
+/**
+ * Arguments a request's IDENTITY must never turn on for this purpose —
+ * exactly the fields that select WHICH SESSION/TASK/REPLAY the call runs in,
+ * never which bytes come back. Mirrors `state/session.ts`'s own
+ * `SIGNATURE_IGNORED_ARGS` cwd/lane/task rationale, narrowed to what THIS
+ * fingerprint needs excluded (unlike the discovery-loop-brake signature,
+ * every byte-selecting argument — `query`/`queries`/`path`/`regex`/... —
+ * stays IN this fingerprint; nothing here is "already carried by the tuple"
+ * the way it is there).
+ *
+ * F6 (2026-09-02 review fix): the canonical `task` object (`task.epoch`,
+ * `task.handle`, `task.profile`, `task.challenge`, `task.force_serve`,
+ * `task.expected_state_version`, `task.pull` — see server.ts's
+ * `CANONICAL_TASK`) is excluded WHOLE, not by trying to enumerate its
+ * fields under their old flat spellings: two calls differing only in, say,
+ * `task.handle` (resuming vs. starting a pack) are still the identical
+ * `search_files` request. `qref` joins `cwd`/`lane` as a replay-identity
+ * carrier, same reasoning. The legacy (`TL_LEGACY_INPUT=accept`) flat
+ * spellings are ALSO excluded, since `ProtocolCallContext.args` is the
+ * inbound call as received — a legacy caller's args reach this fingerprint
+ * before any canonical normalization; a canonical caller never sets any of
+ * these, so excluding them is a no-op for it.
+ */
+const SEARCH_DEDUP_FINGERPRINT_EXCLUDED_ARGS: ReadonlySet<string> = new Set([
+  "cwd", "lane", "qref", "task",
+  // Legacy flat spellings of the same carriers (TL_LEGACY_INPUT=accept only).
+  "taskEpoch", "task_handle", "taskProfile", "challenge", "force_serve",
+  "expected_state_version", "operation_id",
+]);
+
+/** Key-sorted at every object level; array ORDER is preserved (see below). */
+function canonicalDedupJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalDedupJson).join(",")}]`;
+  const record = value as Body;
+  return `{${Object.keys(record).sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalDedupJson(record[key])}`)
+    .join(",")}}`;
+}
+
+/**
+ * The canonical fingerprint of one `search_files` request: the resolved
+ * `action` plus every argument that can select different bytes, with
+ * `SEARCH_DEDUP_FINGERPRINT_EXCLUDED_ARGS` removed first.
+ *
+ * ORDER-SENSITIVE AND CASE-SENSITIVE ON PURPOSE — the one place
+ * DESIGN-v0.15-sf-turn-economy.md §4.2 left open ("正規化・ソート済み" is
+ * the design NOTE, not a mandate; the more conservative reading is taken
+ * here). `queries:["a","b"]` and `queries:["b","a"]` fingerprint as
+ * DIFFERENT requests: an OR-search is very likely order-independent in its
+ * result MEMBERSHIP, but this module has no proof it is order-independent in
+ * every current and future rendering of that result (a ranked
+ * `did_you_mean` tie-break, an ordering-sensitive future feature), and
+ * asserting "these are the same call" is a stronger, unverifiable claim this
+ * wave declines to make. The cost is a small number of missed dedups for a
+ * caller that re-orders its own `queries[]` between calls; the benefit is
+ * that every dedup this module DOES fire is provably a byte-for-byte
+ * identical request, never an inferred equivalence. Two requests differing
+ * only in JS object KEY order (not array order) still fingerprint identically
+ * — key order is never semantic in this protocol.
+ */
+export function searchDedupFingerprint(action: string, args: Body): string {
+  const filtered: Body = {};
+  for (const key of Object.keys(args)) {
+    if (SEARCH_DEDUP_FINGERPRINT_EXCLUDED_ARGS.has(key)) continue;
+    filtered[key] = args[key];
+  }
+  return canonicalDedupJson({ action, args: filtered });
+}
+
+/** Forms whose wire body carries a per-match array/string worth eliding. */
+function searchDedupEligible(kind: Kind, action: string): boolean {
+  if (kind === "search.references" || kind === "search.tree") return true;
+  return kind === "search.matches" && (action === "find" || action === "symbols");
+}
+
+/** The result's own count field — never modified, only read for the receipt. */
+function searchDedupFilesCount(kind: Kind, action: string, body: Body): number {
+  if (kind === "search.references") return num(body["total"]) ?? 0;
+  if (kind === "search.tree") return 0;
+  const matches = isRecord(body["matches"]) ? body["matches"] : undefined;
+  if (matches === undefined) return 0;
+  if (action === "find") return num(matches["total_files"]) ?? 0;
+  if (action === "symbols") return num(matches["total"]) ?? 0;
+  return 0;
+}
+
+/**
+ * Recursively removes any `handle` property. Every form this module covers
+ * mints a FRESH, randomized per-match handle on every serving call
+ * (`util/handles.ts`'s `HandleTable`/`state/handleCodec.ts`'s `mintHandle`
+ * embed replay-distinguishing randomness by design — see their own doc
+ * comments), so two calls over byte-identical content NEVER carry the same
+ * handle string. A digest that included it would treat every repeat as
+ * content drift and never dedup at all.
+ */
+function omitHandles(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitHandles);
+  if (value !== null && typeof value === "object") {
+    const record = value as Body;
+    const out: Body = {};
+    for (const key of Object.keys(record)) {
+      if (key === "handle") continue;
+      out[key] = omitHandles(record[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * F3: the digest BASIS for one search form — a deliberate WHITELIST of
+ * exactly the fields the task's own instruction names (files/locations/tree
+ * text, every count, `term_results`, `absence`), never the raw body.
+ * Hashing the raw body would also fold in advisory fields that legitimately
+ * differ call-to-call with no change to the SEARCH RESULT itself — e.g. the
+ * one-shot "batch related tokens" `hint` that fires on a 2nd single-token
+ * find, or `related_lookups`' embedded `cwd` — which would make every
+ * repeat register as drift and defeat dedup entirely. `omitHandles` then
+ * strips the one remaining always-different field (see its own doc
+ * comment).
+ */
+function searchDedupDigestBasis(kind: Kind, action: string, body: Body): unknown {
+  if (kind === "search.matches" && action === "find") {
+    const matches = isRecord(body["matches"]) ? body["matches"] : {};
+    return omitHandles({
+      files: matches["files"],
+      total_files: matches["total_files"],
+      total_matches: matches["total_matches"],
+      term_results: matches["term_results"],
+      absence: matches["absence"],
+      inventory: matches["inventory"],
+      inventory_complete: matches["inventory_complete"],
+    });
+  }
+  if (kind === "search.matches" && action === "symbols") {
+    const matches = isRecord(body["matches"]) ? body["matches"] : {};
+    return omitHandles({ locations: matches["locations"], total: matches["total"] });
+  }
+  if (kind === "search.references") {
+    return omitHandles({ references: body["references"], files: body["files"], total: body["total"] });
+  }
+  if (kind === "search.tree") {
+    return omitHandles({ tree: body["tree"], scope_report: body["scope_report"] });
+  }
+  return omitHandles(body);
+}
+
+/**
+ * sha256 over the SAME canonical JSON `searchDedupFingerprint` uses, taken
+ * of `searchDedupDigestBasis`. Two fresh scans over the same fingerprint
+ * that produce the identical digest are provably the same result by
+ * CONTENT, not merely by an in-process write counter that cannot see an
+ * external (non-TL) edit.
+ */
+function searchDedupDigest(kind: Kind, action: string, body: Body): string {
+  return createHash("sha256").update(canonicalDedupJson(searchDedupDigestBasis(kind, action, body))).digest("hex");
+}
+
+/**
+ * F6: true iff this call carries `task.force_serve:true` (canonical) or the
+ * legacy flat `force_serve:true`. "Bodies come back, dedup bypassed; it
+ * never returns less" (AGENTS.md) — the search-side mirror of the read
+ * family's `force_serve` contract: skip the lookup entirely rather than risk
+ * attaching even an additive `receipt` to a call whose whole point is a
+ * guaranteed-full re-serve.
+ */
+function isSearchDedupForceServe(args: Body): boolean {
+  const task = isRecord(args["task"]) ? args["task"] : undefined;
+  if (task !== undefined && task["force_serve"] === true) return true;
+  return args["force_serve"] === true;
+}
+
+/**
+ * The TL_SEARCH_DEDUP entry point — called from `protocol/envelope.ts` on the
+ * OUTPUT of `projectSearchBody`, for one already-resolved workspace root.
+ *
+ * With the flag off, for a form outside `searchDedupEligible`, or when the
+ * call carries `force_serve` (F6), this is the identity function and touches
+ * no session state at all — flag-off byte identity holds by construction
+ * (`searchDedupLookup`/`recordSearchDedupEntry` are simply never called),
+ * not by a check inside them.
+ *
+ * On the FIRST occurrence of a fingerprint this task, OR whenever the fresh
+ * digest no longer matches the previously recorded one (F3 — a write of any
+ * kind, TL-originated or external), this records the new baseline and
+ * returns `body` completely UNTOUCHED — the caller gets the real, full
+ * result. Only when the fresh digest matches a live prior entry does this
+ * attach an additive `receipt`; the body itself is NEVER elided (see the
+ * module header's "NO ELISION" note) — every field, including a genuine
+ * `limit` from real truncation, is passed through unchanged either way.
+ */
+export function applySearchDedup(
+  kind: Kind,
+  body: Body,
+  action: string,
+  args: Body,
+  workspaceRoot: string,
+): Body {
+  if (!searchDedupEnabled()) return body;
+  if (!searchDedupEligible(kind, action)) return body;
+  if (isSearchDedupForceServe(args)) return body;
+
+  const fingerprint = searchDedupFingerprint(action, args);
+  const digest = searchDedupDigest(kind, action, body);
+  const files = searchDedupFilesCount(kind, action, body);
+  const prior = searchDedupLookup(workspaceRoot, fingerprint);
+
+  if (prior !== undefined && prior.digest === digest) {
+    return { ...body, receipt: { tag: "query-unchanged", served_by: prior.servedBy, files } };
+  }
+
+  // Either a genuine first occurrence, or the prior entry's content no
+  // longer matches the fresh scan (F3) — record this call as the new
+  // baseline and pass the fresh body through untouched.
+  const ordinal = beginSearchDedupServeCall(workspaceRoot);
+  recordSearchDedupEntry(workspaceRoot, fingerprint, {
+    kind,
+    action,
+    servedBy: `search ${action} (call #${ordinal})`,
+    files,
+    digest,
+  });
+  return body;
 }

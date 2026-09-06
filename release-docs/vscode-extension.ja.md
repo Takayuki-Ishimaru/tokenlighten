@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、�
 
 ## ビルドせずにインストールする
 
-v0.13.1のGitHub Releaseから**[tokenlighten-vscode-extension-0.13.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.1/tokenlighten-vscode-extension-0.13.1.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
+v0.14.0のGitHub Releaseから**[tokenlighten-vscode-extension-0.14.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.0/tokenlighten-vscode-extension-0.14.0.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
 2. **VSIXからのインストール…**を選びます。
@@ -14,7 +14,7 @@ v0.13.1のGitHub Releaseから**[tokenlighten-vscode-extension-0.13.1.vsix](http
 4. 求められた場合はVS Codeを再読み込みします。
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.13.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.0.vsix
 ~~~
 
 ソースからビルドする場合:
@@ -46,7 +46,7 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 
 ## 使用量と校正
 
-サイドバーは、paired calibrationによる実測とフォールバック推定を区別し、medium（12 paired samples）／high（24）信頼度までの進捗を表示します。これらはローカル推定値であり、プロバイダーの請求記録ではありません。
+サイドバーはローカルの使用量を表示し、計測値と代替の推定値を区別します。これらの推定値はプロバイダーの請求記録ではありません。
 
 ## プライバシーと適用範囲
 
@@ -60,4 +60,4 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 | `tokenlighten.updateCheck.enabled` | `true` | 起動時に新しいVSIXの公開を確認します。インストールには常にユーザー操作が必要です。 |
 | `tokenlighten.language` | `auto` | VS Codeの表示言語を自動使用するか、英語／日本語を選択します。 |
 
-デスクトップアプリケーションは公開v0.13.1リリースに含まれません。
+デスクトップアプリケーションは公開v0.14.0リリースに含まれません。

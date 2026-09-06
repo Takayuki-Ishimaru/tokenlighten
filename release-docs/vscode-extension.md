@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.13.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.1/tokenlighten-vscode-extension-0.13.1.vsix)** from the v0.13.1 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.14.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.0/tokenlighten-vscode-extension-0.14.0.vsix)** from the v0.14.0 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,7 +14,7 @@ Download **[tokenlighten-vscode-extension-0.13.1.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.13.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.0.vsix
 ~~~
 
 To build from source:
@@ -46,7 +46,7 @@ The diagnostics ring is local and excludes query text, paths, handles, and conte
 
 ## Usage and calibration
 
-The sidebar distinguishes measured paired calibration from fallback estimates and shows progress toward medium (12 paired samples) and high (24) confidence. These figures are local estimates, not provider billing records.
+The sidebar shows local usage information and distinguishes measurements from fallback estimates. These estimates are not provider billing records.
 
 ## Privacy and scope
 
@@ -60,4 +60,4 @@ Repository indexing and context selection run locally. The extension does not ad
 | `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases for a newer VSIX at startup; installation always requires user action. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically or selects English/Japanese explicitly. |
 
-The desktop application is not included in the public v0.13.1 release.
+The desktop application is not included in the public v0.14.0 release.

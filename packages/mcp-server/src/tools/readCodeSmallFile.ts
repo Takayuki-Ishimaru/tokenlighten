@@ -19,9 +19,11 @@ import {
   recordFullExpansion,
   recordTinyFullExpansion,
   recordReadPath,
+  beginServeCall,
+  recordServedRange,
 } from "../state/session.js";
 import { TINY_BYTES, TINY_LINES } from "../util/fullGovernor.js";
-import { elideDocCommentsForDisplay } from "../util/formatCompress.js";
+import { elideDocCommentsForDisplay, spansExcludingWindows } from "../util/formatCompress.js";
 import { languageForPath } from "../util/languages.js";
 import { safeResolve, safeRealPath, resolveReal, isWithin, checkReadTarget } from "../util/safePath.js";
 import { decodeTextBuffer } from "../util/textDecode.js";
@@ -87,7 +89,7 @@ export interface SmallFileResult {
   lines?: number;
   outline?: string[];
   edit_hints?: SmallFileEditHint[];
-  next?: string;
+  next?: ToolCall;
   /**
    * 2026-07-16a bench forensics: present only when elideDocCommentsForDisplay
    * fell back to raw (comments-kept) content because eliding this doc-only
@@ -131,7 +133,7 @@ export interface SmallFileRefusal {
    */
   handle?: string;
   skeleton?: string;
-  next?: string | ToolCall;
+  next?: ToolCall;
 }
 
 export interface SmallFileBuildOptions {
@@ -388,7 +390,13 @@ export async function buildSmallFile(
       sha: notTinySha,
     });
     const rangeEnd = Math.max(1, Math.min(lineCount, 50));
-    const nextStr = `read_file mode=slice handle=${notTinyHandle.id} range=1-${rangeEnd}`;
+    const nextCall: ToolCall = {
+      tool: "read_file",
+      arguments: {
+        targets: [{ handle: notTinyHandle.id, range: `1-${rangeEnd}` }],
+        content: "auto",
+      },
+    };
 
     // Compact skeleton — best-effort; a skeleton failure (unsupported
     // language, parse error) must not turn an already-informative refusal
@@ -412,7 +420,7 @@ export async function buildSmallFile(
       reason: "not-tiny",
       handle: notTinyHandle.id,
       ...(skeleton ? { skeleton } : {}),
-      next: nextStr,
+      next: nextCall,
       alternatives: [
         { mode: "slice", range: "1-50", handle: notTinyHandle.id },
         { mode: "skeleton", handle: notTinyHandle.id },
@@ -485,7 +493,7 @@ export async function buildSmallFile(
   // 2026-07-16a bench forensics: elideDocCommentsForDisplay falls back to raw
   // content + a note when elision would empty a doc-only file — see its doc
   // comment in util/formatCompress.ts.
-  const { content: displayContent, note: elisionNote } = elideDocCommentsForDisplay(
+  const { content: displayContent, note: elisionNote, elided } = elideDocCommentsForDisplay(
     content,
     languageForPath(resolvedPath),
     options.keepComments === true,
@@ -496,6 +504,41 @@ export async function buildSmallFile(
   // read (no concern_note needed here, mirroring buildConcernNote's slice
   // path: a full-file serve has nothing left "unseen" to warn about).
   recordReadPath(workspace, resolvedPath);
+
+  // FX-M1/P2: this is a real, content-bearing serve of the WHOLE file — book
+  // it into the served-range ledger exactly like every other full-file serve
+  // does (mode=full's `fullFileExpansion` branch in server.ts is the sibling
+  // this mirrors: same `beginServeCall` + `spansExcludingWindows` +
+  // `recordServedRange` triad, booking only the spans that survived comment
+  // elision). Before this fix, NEITHER of small_file's two callers in
+  // server.ts (mode=auto's tiny-file branch, which returns this result
+  // directly, and its own small-but-not-tiny sibling branch) ever called
+  // `recordServedRange` for this path — the one production-reachable
+  // content-bearing read that left the served-range ledger, `editPathResidency`,
+  // and `admissibleEditPaths` untouched. The practical harm: a later,
+  // unrelated capped task_pack naming this same path as a bodyless/withheld
+  // row could flip it to "withheld" from a cold `undefined` start
+  // (`_markEditResidency`'s "shipped always wins" protection never arms),
+  // producing a false, but recoverable, `edit_file` refusal for a file whose
+  // full body the caller is holding right now.
+  //
+  // FX-X3 (round-22B review, ruling (aa)): books from `elided` — the exact
+  // file-line windows `elideDocCommentsForDisplay`'s OWN scan removed (a fact
+  // of the renderer) — via `spansExcludingWindows`'s pure arithmetic
+  // complement, never by re-parsing `displayContent` for marker-shaped lines
+  // (`servedSpansOfDisplayedText`, the producer every OTHER content-bearing
+  // serve site already migrated off of). A literal, single-line marker-shaped
+  // string in ordinary source (never actually elided — a same-line open/close
+  // block is never collapsed) is byte-identical to a genuine marker and would
+  // fool a text re-parse into booking a gap around lines that were, in fact,
+  // shipped verbatim.
+  const smallFileServeCall = beginServeCall(workspace);
+  for (const [spanStart, spanEnd] of spansExcludingWindows(1, lineCount, elided)) {
+    recordServedRange(
+      workspace, resolvedPath, sha, spanStart, spanEnd, lineCount,
+      { mode: "small_file", range: `1-${lineCount}`, call: smallFileServeCall },
+    );
+  }
 
   return {
     mode: "small_file",
@@ -537,7 +580,13 @@ function buildOutlineResult(
     content_mode: contentMode,
     bytes: byteSize,
     lines: lineCount,
-    next: `read_file mode=slice handle=${handleId} range=1-${rangeEnd}`,
+    next: {
+      tool: "read_file",
+      arguments: {
+        targets: [{ handle: handleId, range: `1-${rangeEnd}` }],
+        content: "auto",
+      },
+    },
   };
   if (contentMode === "outline") {
     result.outline = deriveOutline(content);

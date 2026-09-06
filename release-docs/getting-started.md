@@ -4,7 +4,7 @@ TokenLighten runs locally and provides an MCP server for coding agents.
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.13.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.13.1/tokenlighten-vscode-extension-0.13.1.vsix)** from the v0.13.1 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.14.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.0/tokenlighten-vscode-extension-0.14.0.vsix)** from the v0.14.0 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 ## Build from source
 
@@ -35,9 +35,7 @@ tl workspace setup
 
 The setup flow configures supported clients for the workspace and manages TokenLighten's own instruction blocks. Content outside TokenLighten-managed blocks is preserved.
 
-This natural-autoload path — `tl workspace setup` plus the managed AGENTS.md/CLAUDE.md guide block it maintains — is the canonical way to run TokenLighten in production. Developer comparisons found that it performed about the same as manually injecting the same guide text into every prompt.
-
-Keep the TokenLighten-managed guide block after setup. Removing it materially increased measured cost, and the managed block prevents instruction drift across sessions. Results still vary by task and evaluation window.
+`tl workspace setup` configures workspace MCP access and maintains the TokenLighten guide blocks in AGENTS.md/CLAUDE.md. Keep these blocks so supported agents can follow the current tool instructions across sessions.
 
 To register TokenLighten with Claude Code and/or Codex on this machine, so every repository you open — not only this one — picks it up automatically:
 
@@ -74,4 +72,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - Learn the available operations in [MCP tools](mcp-tools.md).
 - If you use VS Code, see [VS Code extension](vscode-extension.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
-- Read the [v0.13.1 release notes](github-release-v0.13.1.md) for the current compatibility, known limitations, and benchmark disclosure.
+- Read the [v0.14.0 release notes](github-release-v0.14.0.md) for the current changes, compatibility, and known limitations.

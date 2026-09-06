@@ -137,6 +137,8 @@ export interface TokenLightenUsageSummary {
   measuredBaselineTokens: number;
   measuredResponseBytes: number;
   measuredBaselineBytes: number;
+  /** Method used for the response/baseline token estimate. */
+  method: "file-bytes";
   measurementUnavailableReason?: "recorder-off" | "log-dir-unavailable" | "scope-mismatch";
   /** Net signed savings after subtracting calls where TL added tokens. */
   estimatedSavedTokens: number;

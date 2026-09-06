@@ -100,6 +100,13 @@ describe("tl logs summary scoping", () => {
     totalResponseBytes: number;
     estimatedResponseTokens: number;
     byTool: Record<"read_file" | "search_files" | "edit_file", number>;
+    method: "file-bytes";
+    measurementDisplay: {
+      wire: { status: string; calls: number; events: number };
+      mcpResponse: { status: string };
+      contextAvoided: { status: string; tokens: number | null; basis: string };
+      session: { status: string; net: { status: string; tokens: number | null } };
+    };
   };
 
   it("reports machine scope over all events and workspace scope over its own", async () => {
@@ -183,6 +190,11 @@ describe("tl logs summary scoping", () => {
     expect(json.totalResponseBytes).toBe(400);
     expect(json.estimatedResponseTokens).toBe(100);
     expect(json.byTool).toEqual({ read_file: 2, search_files: 1, edit_file: 1 });
+    expect(json.method).toBe("file-bytes");
+    expect(json.measurementDisplay.wire).toMatchObject({ status: "measured", calls: 4, events: 4 });
+    expect(json.measurementDisplay.mcpResponse.status).toBe("estimated");
+    expect(json.measurementDisplay.contextAvoided.status).toBe("unavailable");
+    expect(json.measurementDisplay.session.net.status).toBe("estimated");
 
     writes.length = 0;
     await runLogs(["summary", "--workspace-root", toolRoot]);
@@ -190,6 +202,9 @@ describe("tl logs summary scoping", () => {
     expect(text).toContain("MCP calls: 4\n");
     expect(text).toContain("TL response bytes: 400\n");
     expect(text).toContain("TL response tokens: ~100 (est.)\n");
+    expect(text).toContain("TL response measurement method: file-bytes\n");
+    expect(text).toContain("Context avoided: unavailable (unavailable; basis:");
+    expect(text).toContain("Session net: -600 tokens (estimated; basis:");
     expect(text).toContain("By tool: read_file 2, search_files 1, edit_file 1\n");
     // The measured block above comes only from local TL usage events, never
     // from AI-provider session logs, so it renders even though this fresh
@@ -199,6 +214,61 @@ describe("tl logs summary scoping", () => {
     expect(text).toContain("Predicted no-TL tokens: unavailable\n");
     expect(text).toContain("Full-session token reduction: unavailable\n");
     expect(text).toContain("Full-session cost reduction: unavailable\n");
+  });
+
+  it("feeds the display from task-grouped successful totals and excludes errors", async () => {
+    const root = join(logDirectory, "ws-task-group");
+    mkdirSync(root, { recursive: true });
+    const workspaceId = usageWorkspaceId(root, logDirectory)!;
+    const rows = [
+      {
+        ...toolEvent(workspaceId, 0, "read_file", 400),
+        schemaVersion: 2,
+        taskRef: "q-task",
+        estimatedResponseTokens: 100,
+      },
+      {
+        ...event(workspaceId, 1, 1_000),
+        schemaVersion: 2,
+        taskRef: "q-task",
+        responseBytes: 400,
+        estimatedResponseTokens: 100,
+        estimatedSavedTokens: 900,
+      },
+      {
+        ...event(workspaceId, 2, 500),
+        schemaVersion: 2,
+        taskRef: "q-task",
+        outcome: "error",
+        responseBytes: 400,
+        estimatedResponseTokens: 100,
+        estimatedSavedTokens: 400,
+      },
+      {
+        ...toolEvent(workspaceId, 3, "read_file", 200),
+        schemaVersion: 2,
+        taskRef: "q-unanchored",
+        estimatedResponseTokens: 50,
+      },
+    ];
+    writeFileSync(
+      join(logDirectory, "usage-2026-08-11.ndjson"),
+      `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    );
+
+    await runLogs(["summary", "--json", "--workspace-root", root]);
+    const json = lastJson();
+    expect(json.estimatedSavedTokens).toBe(800);
+    expect(json.measurementDisplay.contextAvoided).toMatchObject({
+      status: "estimated",
+      tokens: 800,
+    });
+    expect(json.measurementDisplay.contextAvoided.basis).toContain(
+      "canonical task-grouped baseline minus successful responses in baseline-anchored task groups; errors and unanchored task groups excluded",
+    );
+    expect(json.measurementDisplay.contextAvoided.basis).toContain(
+      "1 baseline-bearing call(s)",
+    );
   });
 
   it("shows sane zeros for the measured block on an empty store, without crashing", async () => {

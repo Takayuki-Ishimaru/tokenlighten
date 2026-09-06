@@ -25,7 +25,7 @@ import * as os from "os";
 import * as path from "path";
 
 import { callTool } from "../server.js";
-import { buildTaskPack } from "../tools/readCodeTaskPack.js";
+import { buildTaskPack, type TaskPackResult } from "../tools/readCodeTaskPack.js";
 import { resetRootResolverCache, setActiveRootWorkspace } from "../tools/locateTaskContext.js";
 import { nextStringToCall, callToNextString, type ContinuationCall } from "../util/continuation.js";
 
@@ -49,10 +49,8 @@ afterEach(() => {
 });
 
 /** Pull every surfaceRoles entry out of whatever follow-up the pack named. */
-function surfaceRolesNamed(next: string | undefined): string[] {
-  if (next === undefined) return [];
-  const call = nextStringToCall(next);
-  const roles = call?.arguments["surfaceRoles"];
+function surfaceRolesNamed(next: TaskPackResult["next"]): string[] {
+  const roles = next?.arguments["surfaceRoles"];
   return Array.isArray(roles) ? roles.map(String) : [];
 }
 
@@ -106,10 +104,13 @@ describe("next_call progress — unresolvable caller inputs stay out of role fil
     // INVENTORY step on the unusable dir — the old path-scoped re-seed
     // degenerated into an identity re-call whenever the invocation WAS
     // query+that dir, and an obedient caller looped on it.
-    expect(result.next).toBe("search_files action=tree path=packages/desktop-app");
-    // And it must survive the string<->call encoding, or the execution contract
-    // silently drops the one follow-up that would have worked.
-    const call = nextStringToCall(result.next!);
+    expect(result.next).toEqual({
+      tool: "search_files",
+      arguments: { action: "tree", path: "packages/desktop-app" },
+    });
+    // The canonical ToolCall itself is the executable follow-up; no prose
+    // decoding step may stand between the pack and the execution contract.
+    const call = result.next;
     expect(call?.tool).toBe("search_files");
     expect(call?.arguments["action"]).toBe("tree");
     expect(call?.arguments["path"]).toBe("packages/desktop-app");
@@ -195,7 +196,7 @@ describe("next_call progress — no follow-up re-reads served bytes", () => {
     );
 
     const served = new Map(result.surfaces.map((s) => [s.handle, s]));
-    const call = result.next ? nextStringToCall(result.next) : undefined;
+    const call = result.next;
     const handle = call?.arguments["handle"];
     if (typeof handle === "string" && call?.arguments["range"] === undefined) {
       // A rangeless re-slice of an already-embedded handle returns the identical
@@ -276,4 +277,64 @@ describe("next_call progress — 2026-07-31 self-loop regression (exact call sha
       expect(servedHandles.has(String(nextCall["arguments"]["handle"]))).toBe(false);
     }
   }, 60000);
+});
+
+// ---------------------------------------------------------------------------
+// P2#5 (v0.14 review): a rootSuggestion must survive the wire as an
+// executable re-scope call. The internal route field is intentionally not a
+// wire affordance, so relying on it alone strands the caller at await_input.
+// ---------------------------------------------------------------------------
+
+describe("rootSuggestion progress — canonical re-scope next", () => {
+  it("replays the suggested nested-project cwd verbatim without refusal", async () => {
+    resetRootResolverCache();
+    const workspace = mkDir("root-suggestion-replay");
+    writeFile(workspace, "package.json", '{"name":"root"}\n');
+    writeFile(workspace, "src/a/status.ts", [
+      "export function updateStatus(): string {",
+      "  return 'set the badge level to paramount';",
+      "}",
+    ].join("\n") + "\n");
+    writeFile(
+      workspace,
+      "src/b/render.ts",
+      "export function renderRow(): string { return 'badge paramount'; }\n",
+    );
+    writeFile(workspace, "apps/tracker/package.json", '{"name":"tracker"}\n');
+    writeFile(
+      workspace,
+      "apps/tracker/web/PriorityChip.tsx",
+      "export function PriorityChip(): unknown { return null; }\n",
+    );
+
+    const query = "add a paramount badge level to PriorityChip";
+    const firstResponse = await callTool("read_file", {
+      cwd: workspace,
+      query,
+      task: { epoch: "new", profile: "generic" },
+    });
+    const firstText = firstResponse.content[0]?.type === "text" ? firstResponse.content[0].text : "";
+    const first = JSON.parse(firstText) as Record<string, any>;
+    expect(first["kind"], firstText.slice(0, 1200)).toBe("read.task_pack");
+    const decision = first["decision"] as Record<string, any>;
+    expect(decision["kind"], firstText.slice(0, 1200)).toBe("discover");
+    expect(Array.isArray(decision["next"])).toBe(false);
+
+    const next = decision["next"] as { tool: string; arguments: Record<string, any> };
+    const suggestedCwd = fs.realpathSync(path.join(workspace, "apps/tracker"));
+    expect(next).toMatchObject({
+      tool: "read_file",
+      arguments: {
+        cwd: suggestedCwd,
+        query,
+        task: { epoch: "new" },
+      },
+    });
+    expect(next.arguments["task"]?.["handle"]).toBeUndefined();
+
+    const replayResponse = await callTool(next.tool, next.arguments);
+    const replayText = replayResponse.content[0]?.type === "text" ? replayResponse.content[0].text : "";
+    const replay = JSON.parse(replayText) as Record<string, unknown>;
+    expect(replay["kind"], replayText.slice(0, 1200)).not.toBe("refusal");
+  }, 120000);
 });

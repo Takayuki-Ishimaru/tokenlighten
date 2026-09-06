@@ -91,9 +91,10 @@ describe("computeMemberSweep — resolution and shape", () => {
     // — the private-looking (leading underscore) member must be pushed
     // after every public-looking one, not left in source order.
     expect(sweep?.members).toEqual(["constructor", "getUser", "saveUser", "_validateInternal"]);
-    expect(sweep?.next).toBe(
-      'search_files action=find queries=["constructor","getUser","saveUser","_validateInternal"]',
-    );
+    expect(sweep?.next).toEqual({
+      tool: "search_files",
+      arguments: { action: "find", queries: ["constructor", "getUser", "saveUser", "_validateInternal"] },
+    });
   });
 
   it("abstains when the definition appears in MORE THAN ONE file (ambiguous)", async () => {
@@ -159,7 +160,7 @@ describe("computeMemberSweep — resolution and shape", () => {
     expect(sweep?.members.length).toBe(12);
     expect(sweep?.members[0]).toBe("m0");
     // `next` is the first <=5 of the (already capped) members list.
-    expect(sweep?.next).toContain('["m0","m1","m2","m3","m4"]');
+    expect(sweep?.next.arguments.queries).toEqual(["m0", "m1", "m2", "m3", "m4"]);
   });
 
   it("keeps the attachment within the ~600 byte budget by trimming members[], never by omitting the whole attachment when it can still fit >=2", async () => {
@@ -183,7 +184,10 @@ describe("computeMemberSweep — resolution and shape", () => {
     const untrimmedBytes = Buffer.byteLength(JSON.stringify({
       symbol: "Oversized",
       members: untrimmedNames,
-      next: `search_files action=find queries=${JSON.stringify(untrimmedNames.slice(0, 5))}`,
+      next: {
+        tool: "search_files",
+        arguments: { action: "find", queries: untrimmedNames.slice(0, 5) },
+      },
     }), "utf8");
     expect(untrimmedBytes).toBeGreaterThan(MEMBER_SWEEP_MAX_BYTES);
 
@@ -235,9 +239,10 @@ describe("findReferences — member_sweep attachment", () => {
     expect(result.member_sweep).toBeDefined();
     expect(result.member_sweep?.symbol).toBe("Widget");
     expect(result.member_sweep?.members).toEqual(["render", "destroy", "_cleanup"]);
-    expect(result.member_sweep?.next).toBe(
-      'search_files action=find queries=["render","destroy","_cleanup"]',
-    );
+    expect(result.member_sweep?.next).toEqual({
+      tool: "search_files",
+      arguments: { action: "find", queries: ["render", "destroy", "_cleanup"] },
+    });
     expect(result.hint).toBe(MEMBER_SWEEP_HINT_TEXT);
     // The attachment's own byte budget, independent of the 2048-byte
     // response-wide cap.
@@ -275,7 +280,7 @@ describe("findReferences — member_sweep attachment", () => {
     expect(result.member_sweep).toBeUndefined();
   });
 
-  it("still respects the existing 2048-byte response cap when member_sweep is attached", async () => {
+  it("still respects an explicit 2048-byte response cap when member_sweep is attached (pins the pre-G1 default page width)", async () => {
     const ws = mkWorkspace();
     writeFile(ws, "src/Widget.ts", [
       "export class Widget {",
@@ -286,14 +291,61 @@ describe("findReferences — member_sweep attachment", () => {
     // Enough call sites that fitReferencesToCap's trim loop actually runs
     // while member_sweep is present, proving it was baked into the same
     // cap trial rather than appended after files[] was already finalized.
+    // FX-G13 G1: the default frame is now 16 KiB, under which all 40 files
+    // fit — an explicit `maxBytes` reproduces the byte-pressured shape this
+    // test exists to exercise.
     for (let i = 0; i < 40; i++) {
       writeFile(ws, `src/consumer${i}.ts`, `import { Widget } from "../Widget";\nconst w${i} = new Widget();\nw${i}.render();\n`);
     }
 
-    const result = await findReferences({ symbol: "Widget" }, ws);
+    const result = await findReferences({ symbol: "Widget", maxBytes: 2048 }, ws);
 
     expect(result.member_sweep).toBeDefined();
     expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(2048);
+  });
+
+  // ---------------------------------------------------------------------------
+  // FX-G13 G1(b) (2026-09-04): member_sweep (and its `hint`) is recomputed
+  // identically on EVERY page of a references chain — the walk is stateless,
+  // so a continuation page re-derives the SAME attachment a caller already
+  // received on page 1. Measured, this was 569 B of a 1,886 B control page —
+  // pure per-page constant-material repetition. It now rides ONLY on the
+  // first page of a chain (no cursor, or an undecodable one); a genuine
+  // continuation (a resolved resume cursor) never recomputes or re-attaches
+  // it.
+  // ---------------------------------------------------------------------------
+  it("member_sweep and hint ride ONLY on the first page of a chain — a continuation page never repeats them", async () => {
+    const ws = mkWorkspace();
+    writeFile(ws, "src/Widget.ts", [
+      "export class Widget {",
+      "  render() { return 1; }",
+      "  destroy() { return 2; }",
+      "}",
+    ].join("\n") + "\n");
+    for (let i = 0; i < 40; i++) {
+      writeFile(ws, `src/consumer${i}.ts`, `import { Widget } from "../Widget";\nconst w${i} = new Widget();\nw${i}.render();\n`);
+    }
+
+    // A tight explicit cap forces a real multi-page chain.
+    let page = await findReferences({ symbol: "Widget", maxBytes: 1024 }, ws);
+    expect(page.member_sweep, "page 1 must still carry the attachment").toBeDefined();
+    expect(page.hint).toBeDefined();
+    expect(page.next_call, "fixture must actually force a continuation").toBeDefined();
+
+    let pages = 1;
+    while (page.next_call !== undefined) {
+      expect(pages, "the continuation must terminate").toBeLessThan(120);
+      const a = page.next_call.arguments;
+      page = await findReferences({
+        symbol: a["query"] as string,
+        cursor: a["cursor"] as string,
+        ...(typeof a["maxBytes"] === "number" ? { maxBytes: a["maxBytes"] } : {}),
+      }, ws);
+      pages++;
+      expect(page.member_sweep, `page ${pages} repeated member_sweep`).toBeUndefined();
+      expect(page.hint, `page ${pages} repeated hint`).toBeUndefined();
+    }
+    expect(pages).toBeGreaterThan(1);
   });
 });
 

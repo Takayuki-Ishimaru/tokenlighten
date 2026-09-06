@@ -17,8 +17,10 @@ import {
   trace,
   traceCausalAttestation,
   getTracePath,
+  isTraceEnabled,
   setTraceEnabledForTest,
 } from "../util/trace.js";
+import { SEMANTIC_FRONTIER_V2_FLAG_REGISTRY, traceEnabled } from "../util/flags.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,13 +33,24 @@ let origCausalEnv: Record<string, string | undefined>;
 const CAUSAL_ENV_KEYS = [
   "TL_MCP_CONFIG_SHA256",
   "TL_P1_CAUSAL_RUN_NONCE",
-  "TL_EVIDENCE_COMPLETION",
-  "TL_EVIDENCE_SHADOW",
-  "TL_WRITE_CAPABILITY",
-  // Touched only by the computed-digest tests below; listed here so the
-  // beforeEach/afterEach save-restore covers them like every other TL_* input.
-  "TL_ADAPTIVE_WHOLE_FILE",
-  "TL_HOP1_CLOSURE",
+  // v0.14 flag inventory (2026-08-31): the former digest-movement flags
+  // (TL_EVIDENCE_COMPLETION/TL_EVIDENCE_SHADOW/TL_WRITE_CAPABILITY/
+  // TL_ADAPTIVE_WHOLE_FILE/TL_HOP1_CLOSURE) were deleted with their
+  // experiments. resolvedFlagValues() now covers exactly TL_GRAPH_INDEX,
+  // TL_SEMANTIC_FRONTIER_GUARD, and TL_TRACE, so those are what the digest
+  // tests below toggle. Touched only by the computed-digest tests below;
+  // listed here so the beforeEach/afterEach save-restore covers them like
+  // every other TL_* input (TL_SEMANTIC_FRONTIER_GUARD's own default
+  // flipped to OFF 2026-09-02 — see util/flags.ts — but it still moves the
+  // digest whenever it is explicitly set, which is what these tests pin).
+  "TL_TRACE",
+  "TL_GRAPH_INDEX",
+  "TL_SEMANTIC_FRONTIER_GUARD",
+  // FX-R3 D5 (2026-09-04): the arm-defining v0.15 flags. They now move the
+  // digest (util/trace.ts's `resolvedFlagValues`), so the save/restore must
+  // cover them like every other TL_* input.
+  "TL_GRAPH_EVIDENCE",
+  ...(Object.keys(SEMANTIC_FRONTIER_V2_FLAG_REGISTRY) as Array<keyof typeof SEMANTIC_FRONTIER_V2_FLAG_REGISTRY>),
 ] as const;
 
 /**
@@ -274,23 +287,83 @@ describe("trace() when enabled", () => {
 
     const baseline = emitAttestation(WS_ROOT)["computed_config_sha256"];
 
-    // The arm-defining flag.
-    process.env["TL_EVIDENCE_COMPLETION"] = "1";
-    const withP1 = emitAttestation(WS_ROOT)["computed_config_sha256"];
-    expect(withP1).not.toBe(baseline);
+    // v0.14 flag inventory (2026-08-31): resolvedFlagValues() now covers
+    // exactly TL_GRAPH_INDEX and TL_TRACE (util/trace.ts), so those are the
+    // two flags left that can move this digest. The arm-defining flag.
+    process.env["TL_TRACE"] = "1";
+    const withTrace = emitAttestation(WS_ROOT)["computed_config_sha256"];
+    expect(withTrace).not.toBe(baseline);
 
-    // A flag with nothing to do with P1: the digest covers the WHOLE resolved
-    // flag set, not just the three the attestation reports in effective_flags.
-    delete process.env["TL_EVIDENCE_COMPLETION"];
-    process.env["TL_ADAPTIVE_WHOLE_FILE"] = "1";
+    // A flag with nothing to do with TL_TRACE: the digest covers the WHOLE
+    // resolved flag set, not just one entry.
+    delete process.env["TL_TRACE"];
+    process.env["TL_GRAPH_INDEX"] = "on";
     const withUnrelated = emitAttestation(WS_ROOT)["computed_config_sha256"];
     expect(withUnrelated).not.toBe(baseline);
-    expect(withUnrelated).not.toBe(withP1);
+    expect(withUnrelated).not.toBe(withTrace);
 
     // Equivalent spellings resolve to the same effective value, so the digest
     // is over RESOLVED config, not over raw env strings.
-    process.env["TL_ADAPTIVE_WHOLE_FILE"] = "TRUE";
+    process.env["TL_GRAPH_INDEX"] = "TRUE";
     expect(emitAttestation(WS_ROOT)["computed_config_sha256"]).toBe(withUnrelated);
+  });
+
+  // -------------------------------------------------------------------------
+  // FX-R3 D5 (2026-09-04) — THE PAID A/B ARMS MUST BE DISTINGUISHABLE.
+  //
+  // `resolvedFlagValues()` listed only TL_GRAPH_INDEX /
+  // TL_SEMANTIC_FRONTIER_GUARD / TL_TRACE, so a v2 TREATMENT server (the ten
+  // Semantic Frontier v2 flags plus TL_GRAPH_EVIDENCE, all on) and a CONTROL
+  // server (all off) computed the SAME `computed_config_sha256` — measured by
+  // the deterministic-bench agent under arm-set v2, and exactly the claim the
+  // causal attestation exists to make.
+  // -------------------------------------------------------------------------
+  const V2_TREATMENT_KEYS = [
+    "TL_GRAPH_EVIDENCE",
+    ...(Object.keys(SEMANTIC_FRONTIER_V2_FLAG_REGISTRY) as string[]),
+  ];
+
+  function clearV2Flags(): void {
+    for (const key of V2_TREATMENT_KEYS) delete process.env[key];
+  }
+
+  it("FX-R3 D5: the v2 treatment env and the all-off control env compute DIFFERENT digests", () => {
+    process.env["TL_MCP_CONFIG_SHA256"] = "a".repeat(64);
+    process.env["TL_P1_CAUSAL_RUN_NONCE"] = "fxr3-d5-arms";
+
+    clearV2Flags();
+    const control = emitAttestation(WS_ROOT)["computed_config_sha256"];
+    // The all-off digest is stable call to call.
+    expect(emitAttestation(WS_ROOT)["computed_config_sha256"]).toBe(control);
+
+    for (const key of V2_TREATMENT_KEYS) process.env[key] = "1";
+    const treatment = emitAttestation(WS_ROOT)["computed_config_sha256"];
+
+    expect(treatment).toMatch(/^[0-9a-f]{64}$/);
+    // PRE-FIX these were EQUAL: none of the eleven flags entered the digest.
+    expect(treatment).not.toBe(control);
+  });
+
+  it("FX-R3 D5: EVERY v0.15 registry flag (and TL_GRAPH_EVIDENCE) moves the digest on its own", () => {
+    process.env["TL_MCP_CONFIG_SHA256"] = "a".repeat(64);
+    process.env["TL_P1_CAUSAL_RUN_NONCE"] = "fxr3-d5-each";
+
+    for (const key of V2_TREATMENT_KEYS) {
+      clearV2Flags();
+      const baseline = emitAttestation(WS_ROOT)["computed_config_sha256"];
+      // TL_SF_VERIFY_FIRST's accessor degrades to `false` without
+      // TL_SF_STATEFUL (flags.ts documents that as the EFFECTIVE value the
+      // trace must report), so its own effect is asserted with its dependency
+      // met — the digest is over effective configuration, not raw env.
+      if (key === "TL_SF_VERIFY_FIRST") process.env["TL_SF_STATEFUL"] = "1";
+      const withDependency = emitAttestation(WS_ROOT)["computed_config_sha256"];
+      process.env[key] = "1";
+      const moved = emitAttestation(WS_ROOT)["computed_config_sha256"];
+      expect(moved, `${key} must move the config digest`).not.toBe(
+        key === "TL_SF_VERIFY_FIRST" ? withDependency : baseline,
+      );
+    }
+    clearV2Flags();
   });
 
   it("excludes the per-run nonce and the injected digest from its input", () => {
@@ -350,12 +423,9 @@ describe("trace() when enabled", () => {
     expect(attestation["trace_file"]).toBe(path.basename(getTracePath(missing)));
   });
 
-  it("prepends one normalized server-observed P1 causal attestation per trace path", () => {
+  it("prepends one server-observed P1 causal attestation per trace path", () => {
     process.env["TL_MCP_CONFIG_SHA256"] = "a".repeat(64);
     process.env["TL_P1_CAUSAL_RUN_NONCE"] = "n10-v07-natural-normalize";
-    process.env["TL_EVIDENCE_COMPLETION"] = "TRUE";
-    process.env["TL_EVIDENCE_SHADOW"] = "off";
-    process.env["TL_WRITE_CAPABILITY"] = "0";
 
     trace("event_a", { n: 1 }, WS_ROOT);
     trace("event_b", { n: 2 }, WS_ROOT);
@@ -370,11 +440,11 @@ describe("trace() when enabled", () => {
       workspace_root: WS_ROOT,
       trace_file: path.basename(getTracePath(WS_ROOT)),
       run_nonce: "n10-v07-natural-normalize",
-      effective_flags: {
-        TL_EVIDENCE_COMPLETION: "1",
-        TL_EVIDENCE_SHADOW: "0",
-        TL_WRITE_CAPABILITY: "0",
-      },
+      // v0.14 flag inventory (2026-08-31): the P1 evidence-completion lever
+      // and its two siblings were deleted with their experiment, so a live
+      // server has no ablation flags left to attest — effective_flags is now
+      // ALWAYS an empty object (util/trace.ts's p1CausalAttestationPayload).
+      effective_flags: {},
     });
     expect(parsed.map((record) => record.event)).toEqual([
       "p1_causal_attestation",
@@ -390,7 +460,6 @@ describe("trace() when enabled", () => {
       if (configSha === undefined) delete process.env["TL_MCP_CONFIG_SHA256"];
       else process.env["TL_MCP_CONFIG_SHA256"] = configSha;
       process.env["TL_P1_CAUSAL_RUN_NONCE"] = "n10-v07-natural-invalid-sha";
-      process.env["TL_EVIDENCE_COMPLETION"] = "1";
 
       trace("ordinary", {}, WS_ROOT);
 
@@ -423,6 +492,51 @@ describe("trace() when enabled", () => {
 });
 
 // ---------------------------------------------------------------------------
+// TL_TRACE — the real env var, not the setTraceEnabledForTest() override.
+//
+// Rescued from evidenceShadow.spec.ts (deleted in the v0.14 flag-inventory
+// surgery — these two pinned util/trace.ts's OWN TL_TRACE handling, nothing
+// evidence-shadow-specific).
+// ---------------------------------------------------------------------------
+
+describe("TL_TRACE — real env-var reads", () => {
+  it("is read at CALL time, not at module load", () => {
+    // trace.ts once cached process.env.TL_TRACE in a module-level binding,
+    // which contradicts flags.ts's documented "reads process.env at call
+    // time so tests can manipulate env per-test" contract and made the
+    // channel untestable without setTraceEnabledForTest.
+    setTraceEnabledForTest(undefined); // clear the outer beforeEach's override
+    try {
+      delete process.env["TL_TRACE"];
+      trace("unit_probe", { a: 1 }, WS_ROOT);
+      const traceDir = path.join(tmpHome, ".tokenlighten", "trace");
+      expect(fs.existsSync(traceDir), "wrote while TL_TRACE was unset").toBe(false);
+
+      process.env["TL_TRACE"] = "1";
+      trace("unit_probe", { a: 2 }, WS_ROOT);
+      expect(fs.existsSync(getTracePath(WS_ROOT)), "did not write after TL_TRACE was set").toBe(true);
+    } finally {
+      delete process.env["TL_TRACE"];
+      setTraceEnabledForTest(false);
+    }
+  });
+
+  it("agrees with flags.ts's traceEnabled() on every TL_TRACE spelling (one predicate, not two)", () => {
+    setTraceEnabledForTest(undefined); // clear the outer beforeEach's override
+    try {
+      for (const value of ["1", "true", "on", "yes", "0", "false", "off", ""]) {
+        process.env["TL_TRACE"] = value;
+        expect(isTraceEnabled(), `disagreement on TL_TRACE=${JSON.stringify(value)}`)
+          .toBe(traceEnabled());
+      }
+    } finally {
+      delete process.env["TL_TRACE"];
+      setTraceEnabledForTest(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // computedConfigSha256 (exported) — P1 causal window launch wiring (2026-08-06).
 // Exported so a CLI (bin.ts --print-config-digest) and the bench runner
 // (run_oneshot_ab.mjs computeP1ConfigDigests) can ask the server what
@@ -432,17 +546,26 @@ describe("trace() when enabled", () => {
 
 describe("computedConfigSha256 (exported)", () => {
   it("is deterministic under identical env, called directly with no trace file involved", () => {
-    process.env["TL_EVIDENCE_COMPLETION"] = "1";
     const first = computedConfigSha256();
     const second = computedConfigSha256();
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(second).toBe(first);
   });
 
-  it("changes when TL_EVIDENCE_COMPLETION toggles 1 <-> 0", () => {
-    process.env["TL_EVIDENCE_COMPLETION"] = "0";
+  it("changes when TL_TRACE toggles 1 <-> 0", () => {
+    process.env["TL_TRACE"] = "0";
     const off = computedConfigSha256();
-    process.env["TL_EVIDENCE_COMPLETION"] = "1";
+    process.env["TL_TRACE"] = "1";
+    const on = computedConfigSha256();
+    expect(on).toMatch(/^[0-9a-f]{64}$/);
+    expect(off).toMatch(/^[0-9a-f]{64}$/);
+    expect(on).not.toBe(off);
+  });
+
+  it("changes when the semantic-frontier guard rolls back", () => {
+    process.env["TL_SEMANTIC_FRONTIER_GUARD"] = "0";
+    const off = computedConfigSha256();
+    process.env["TL_SEMANTIC_FRONTIER_GUARD"] = "1";
     const on = computedConfigSha256();
     expect(on).toMatch(/^[0-9a-f]{64}$/);
     expect(off).toMatch(/^[0-9a-f]{64}$/);
@@ -452,7 +575,6 @@ describe("computedConfigSha256 (exported)", () => {
   it("agrees with p1_causal_attestation.computed_config_sha256 for the SAME process env (parity)", () => {
     process.env["TL_MCP_CONFIG_SHA256"] = "7".repeat(64);
     process.env["TL_P1_CAUSAL_RUN_NONCE"] = "n-parity-export-vs-attestation";
-    process.env["TL_EVIDENCE_COMPLETION"] = "1";
 
     const direct = computedConfigSha256();
     const attestation = emitAttestation(WS_ROOT);

@@ -94,6 +94,32 @@ export interface ServedFindOutcome {
 const RECEIPT_LINES_PER_FILE = 12;
 
 /**
+ * C1 (2026-09-03 plain-mode ladder). `recordAllServedFind`'s ledger is keyed
+ * purely on whatever string it is given — it has no idea whether that string
+ * names a real task-pack certificate. Before this fix, a session that had
+ * NEVER opened a task pack (plain `read_file targets:[...]` + `search_files
+ * find`, no certificate ever minted) left `certificateId` `undefined` inside
+ * `applyServedFindProtocol`, which took a dead-end branch that returned
+ * `all_served:true` unconditionally and NEVER called `recordAllServedFind` —
+ * so the exact same repeated-all-served-find loop the certificate path
+ * escalates on the 2nd occurrence repeated forever in plain mode, always
+ * landing on occurrence 1 with a fresh dead-end response and no `next`.
+ *
+ * This constant gives plain mode its own stable ladder key so it steps
+ * through the identical noted -> escalated state machine as the certificate
+ * path, using the SAME served-range ledger (`getReadPaths` /
+ * `servedFindMatchLinesOutsideServed`) the certificate path already reads.
+ * It is deliberately never a real certificate id: `servedFindCertificateUnlock`
+ * still returns `undefined` when there is no live execution fence, so no
+ * `challenge` transition is ever advertised against it, and every existing
+ * reset path (a find that reaches an unserved location, a successful edit, a
+ * new task epoch) already clears `session.servedFindLedger` unconditionally —
+ * none of them are keyed on the certificate id — so the plain-mode ladder
+ * resets on exactly the same events a certificate-mode ladder does.
+ */
+const PLAIN_MODE_LADDER_ID = "plain-find-ladder";
+
+/**
  * The byte-selecting identity of a find call. Same principle as
  * discoveryCallSignature: every argument that changes WHICH bytes come back is
  * in, everything else (cwd/lane select the session, taskProfile is a routing
@@ -247,9 +273,35 @@ export function applyServedFindProtocol(
       return { body: record, escalated: false };
     }
 
-    const served = new Set(getReadPaths(workspace));
-    if (served.size === 0) return { body: record, escalated: false };
-    const servedFiles = files.filter((file) => served.has(String(file["path"])));
+    const addressed = new Set(getReadPaths(workspace));
+    if (addressed.size === 0) return { body: record, escalated: false };
+    // FX-O2 (ruling (s), 2026-09-03, round-17 finding 7a / INV-G row 14):
+    // `getReadPaths` (state/session.ts's `readPaths` Set) records every path
+    // a read/search call ADDRESSED, including one that shed to a ZERO-BYTE
+    // refusal — `recordReadPath` is a plain unconditional `Set.add` at each
+    // of server.ts's many read call sites, with no staging/retraction of its
+    // own (unlike the served-range ledger `recordServedRange` now stages and
+    // settles per FX-N). Trusting `addressed` alone here mislabeled a
+    // refused, zero-byte read `served_this_session:true` (r16_w/r17_s): the
+    // field's own name promises BYTES were served, not merely that some call
+    // once named the path.
+    //
+    // `servedPathProvenance` answers the honest FILE-level question instead —
+    // does the servedRangeLedger (staged/settled, FX-N) hold ANY genuinely
+    // corroborated span for this path at all? A zero-byte refusal never
+    // stages a span that survives settlement, so a path never or no-longer
+    // present there fails this check even though `addressed` still names it.
+    // Deliberately NOT the LINE-level check the escalation gate a few lines
+    // below uses (`servedFindMatchLinesOutsideServed`, gated on the SPECIFIC
+    // matched lines) — a doc-sliver serve that put SOME bytes on the wire
+    // (just not at the matched line) is still a genuine, non-zero serve, and
+    // `served_this_session` stays file-level provenance exactly as designed
+    // (see the C3 test fixture: CONTRACT.md served 1514-1514 of 1514 lines
+    // stays `served_this_session:true` with `lines_held:false` alongside it —
+    // two different, both-true facts, not one collapsing into the other).
+    const isGenuinelyServed = (file: Record<string, unknown>): boolean =>
+      addressed.has(String(file["path"])) && servedPathProvenance(workspace, String(file["path"])) !== undefined;
+    const servedFiles = files.filter(isGenuinelyServed);
 
     if (servedFiles.length === 0) {
       // Nothing held — a pure discovery result. Progress, so the ledger goes.
@@ -258,7 +310,7 @@ export function applyServedFindProtocol(
     }
 
     const annotated = files.map((file) =>
-      served.has(String(file["path"])) ? { ...file, served_this_session: true } : file,
+      isGenuinelyServed(file) ? { ...file, served_this_session: true } : file,
     );
 
     if (servedFiles.length < files.length) {
@@ -312,15 +364,16 @@ export function applyServedFindProtocol(
     // this session actually served — today's behaviour, unchanged.
     const totalMatches = typeof record["total_matches"] === "number" ? record["total_matches"] : 0;
     const fence = getExecutionFence(workspace);
-    const certificateId = certificateIdOverride ?? fence?.certificateId ?? getLastExecutionCertificateId(workspace);
+    // C1: fall back to the plain-mode ladder key only when NO certificate has
+    // ever existed this session — see PLAIN_MODE_LADDER_ID above. Once any
+    // certificate has existed, getLastExecutionCertificateId keeps returning
+    // it (provenance for already-served bytes survives closure), so this
+    // fallback only ever fires for a session that truly never opened a task
+    // pack.
+    const certificateId =
+      certificateIdOverride ?? fence?.certificateId ?? getLastExecutionCertificateId(workspace) ?? PLAIN_MODE_LADDER_ID;
     const servedNote =
       "every matching file was already served to you this session — the matches sit inside content you hold; check your context before re-reading";
-    if (certificateId === undefined) {
-      return {
-        body: { ...record, files: annotated, all_served: true, served_note: servedNote },
-        escalated: false,
-      };
-    }
 
     const verdict = recordAllServedFind(
       workspace,
@@ -403,12 +456,20 @@ function buildEscalation(
         },
       };
 
+  // C1: the plain-mode ladder key is not a real certificate — never claim one
+  // on the wire, since a caller cannot `challenge` (or otherwise address) an
+  // id that names no certificate. `servedFindCertificateUnlock` already keeps
+  // the `challenge` transition itself off `unlock` whenever there is no live
+  // fence (plain mode always), so this only affects the descriptive fields.
+  const isPlainModeLadder = certificateId === PLAIN_MODE_LADDER_ID;
+  const ladderLabel = isPlainModeLadder ? "this session (no certificate)" : `certificate ${certificateId.slice(0, 8)}`;
+
   const duplicate = verdict.repeatedCall || verdict.duplicateOfQuery !== undefined;
   const terminalReason = duplicate
     ? verdict.duplicateOfQuery !== undefined && !verdict.repeatedCall
       ? `this query returns the SAME ${totalMatches} match(es) in the same file(s) that "${verdict.duplicateOfQuery}" already returned this session, and every one of those files was already served to you — a differently-spelled query over served scope cannot surface a new location`
       : `this exact find already ran this session over scope that was already served to you — re-running it cannot surface a location you do not already hold`
-    : `every file this query matches was already served to you this session, and this is the ${verdict.occurrence}${ordinalSuffix(verdict.occurrence)} such find under certificate ${shortId(workspace)} — locating inside content you already hold cannot advance the task`;
+    : `every file this query matches was already served to you this session, and this is the ${verdict.occurrence}${ordinalSuffix(verdict.occurrence)} such find under ${ladderLabel} — locating inside content you already hold cannot advance the task`;
 
   return {
     ok: false,
@@ -423,7 +484,12 @@ function buildEscalation(
     // id was already the identity this escalation was recorded under
     // (`recordAllServedFind` above); it was simply never on the wire, so the
     // one transition worth taking here would have degraded to a re-pack.
-    certificate_id: certificateId,
+    //
+    // C1: omitted entirely under the plain-mode ladder key — it names no
+    // certificate a `challenge` (or anything else) could address, and
+    // `servedFindCertificateUnlock` never offers `challenge` without a live
+    // fence, so plain mode never needs this field to resolve `retry`.
+    ...(isPlainModeLadder ? {} : { certificate_id: certificateId }),
     terminal: true,
     terminal_reason: terminalReason,
     // A terminal all-served escalation has no productive byte-identical retry.
@@ -442,8 +508,9 @@ function buildEscalation(
     unlock: {
       accepted_transitions: acceptedTransitions,
       ...(unlock?.challenge !== undefined ? { challenge: unlock.challenge } : {}),
-      note:
-        "find over already-served scope is refused for this certificate; take a transition above — zoom an UNSERVED window, edit through the frontier, `challenge` if new evidence changes the certified decision, or search unserved scope",
+      note: isPlainModeLadder
+        ? "find over already-served scope is refused for this session; take a transition above — zoom an UNSERVED window, or search unserved scope"
+        : "find over already-served scope is refused for this certificate; take a transition above — zoom an UNSERVED window, edit through the frontier, `challenge` if new evidence changes the certified decision, or search unserved scope",
     },
     next_call: nextCall,
     ...(nextCall.tool === "edit_file" || nextCall.tool === "search_files"
@@ -460,8 +527,4 @@ function ordinalSuffix(n: number): string {
     case 3: return "rd";
     default: return "th";
   }
-}
-
-function shortId(workspace: string): string {
-  return getExecutionFence(workspace)?.certificateId.slice(0, 8) ?? "<none>";
 }

@@ -24,6 +24,10 @@ import { SHEDDERS } from "../protocol/budget/shedders/index.js";
 import { mergeWireLimit, RUNG_OMITTED_CLASS } from "../protocol/budget/wireLimit.js";
 import type { ShedRecord } from "../protocol/budget/wireBudget.js";
 import { emitFinalizedPayload } from "../protocol/emit.js";
+import {
+  canonicalizeEmittedToolCalls,
+  runWithProtocolCall,
+} from "../protocol/envelope.js";
 import type { ProtocolCallContext } from "../protocol/envelope.js";
 
 type Body = Record<string, unknown>;
@@ -253,7 +257,9 @@ describe("erratum E5 — which rungs may emit a `limit`", () => {
     expect(withDepth.shed.some((record) => record.rung === 6)).toBe(true);
     const limit = withDepth.body["limit"] as Body;
     expect(limit["cause"]).toBe("wire");
-    expect((limit["next"] as Body)["arguments"]).toMatchObject({ action: "tree", depth: 2 });
+    expect((limit["next"] as Body)["arguments"]).toMatchObject({
+      action: "tree", scope: { depth: 2 },
+    });
   });
 });
 
@@ -387,7 +393,9 @@ describe("the evidence rungs (R6 / erratum E4)", () => {
     expect(String(entry["body"]).split("\n")).toHaveLength(4);
     const limit = out.body["limit"] as Body;
     expect(limit["cause"]).toBe("wire");
-    expect((limit["next"] as Body)["arguments"]).toMatchObject({ handle: "h1", range: "5-8" });
+    expect((limit["next"] as Body)["arguments"]).toMatchObject({
+      targets: [{ handle: "h1", range: "5-8" }], content: "auto",
+    });
   });
 });
 
@@ -556,5 +564,58 @@ describe("§4.3's fail-closed tail", () => {
     expect(out.body["did_you_mean"]).toBe("precondition");
     expect(out.body["field"]).toBe("search");
     expect(out.shed.every((record) => record.rung === 1 || record.rung === 3)).toBe(true);
+  });
+});
+
+describe("P2 #3 — attribution growth re-enters the wire cap", () => {
+  it("re-sheds a post-attribution overage while retaining an executable continuation", () => {
+    const raw = pagedReferences();
+    const context: ProtocolCallContext = {
+      tool: "read_file",
+      args: {
+        cwd: "/workspace/project",
+        lane: "lane-with-attribution",
+        task: { handle: "continuation-handle-1234567890" },
+      },
+    };
+    const beforeAttribution = bytesOf(raw);
+    const attributed = runWithProtocolCall(context, () =>
+      canonicalizeEmittedToolCalls(raw),
+    ) as Body;
+    const afterAttribution = bytesOf(attributed);
+
+    // The continuation gains cwd + lane + handle attribution. Choose a cap
+    // between the two measured payloads so this assertion stays tied to the
+    // actual wire shape instead of a brittle 4,174B fixture constant.
+    expect(afterAttribution).toBeGreaterThan(beforeAttribution);
+    const cap = beforeAttribution + Math.floor(
+      (afterAttribution - beforeAttribution) / 2,
+    );
+    expect(afterAttribution).toBeGreaterThan(cap);
+
+    const result = runWithProtocolCall(context, () =>
+      emitFinalizedPayload(
+        attributed,
+        "search.references",
+        context,
+        { budgetOverrideBytes: cap },
+      ),
+    );
+    const wireText = result.content[0]?.text ?? "";
+    const wire = JSON.parse(wireText) as Body;
+    expect(Buffer.byteLength(wireText, "utf8")).toBeLessThanOrEqual(cap);
+    expect(wire["kind"]).toBe("search.references");
+
+    const limit = wire["limit"] as Body;
+    const next = limit["next"] as Body;
+    expect(limit["cause"]).toBeDefined();
+    expect(next).toMatchObject({ tool: "search_files" });
+    expect(next["arguments"] as Body).toMatchObject({
+      action: "references",
+      cwd: "/workspace/project",
+      lane: "lane-with-attribution",
+      task: { handle: "continuation-handle-1234567890" },
+    });
+    expect(context.shedRecords?.length ?? 0).toBeGreaterThan(0);
   });
 });

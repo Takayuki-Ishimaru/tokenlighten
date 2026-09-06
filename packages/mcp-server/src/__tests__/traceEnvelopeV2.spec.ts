@@ -111,16 +111,36 @@ describe("trace envelope — always-present fields", () => {
   });
 
   it("flags_active reflects the D10 (B) flags currently on, matching activeExperimentFlags()", () => {
-    const orig = process.env["TL_HOP1_CLOSURE"];
-    process.env["TL_HOP1_CLOSURE"] = "1";
+    const orig = process.env["TL_DELTA_CONTEXT"];
+    process.env["TL_DELTA_CONTEXT"] = "1";
     try {
       trace("some_event", {}, WS_ROOT);
       const [record] = readEventRecords();
       expect(record!["flags_active"]).toEqual(activeExperimentFlags());
-      expect(record!["flags_active"]).toContain("TL_HOP1_CLOSURE");
+      expect(record!["flags_active"]).toContain("TL_DELTA_CONTEXT");
     } finally {
-      if (orig === undefined) delete process.env["TL_HOP1_CLOSURE"];
-      else process.env["TL_HOP1_CLOSURE"] = orig;
+      if (orig === undefined) delete process.env["TL_DELTA_CONTEXT"];
+      else process.env["TL_DELTA_CONTEXT"] = orig;
+    }
+  });
+
+  it("flags_active reports the consolidated env assignment for a tri-state flag (TL_GRAPH_EVIDENCE=compound)", () => {
+    // v0.14 flag inventory (2026-08-31): TL_COMPOUND_RETRIEVAL was folded into
+    // TL_GRAPH_EVIDENCE=compound. activeExperimentFlags() reports the exact
+    // env assignment for a consolidated tri-state flag, not just its base
+    // name, so a trace diff can distinguish the base capability from its
+    // folded-in extension.
+    const orig = process.env["TL_GRAPH_EVIDENCE"];
+    process.env["TL_GRAPH_EVIDENCE"] = "compound";
+    try {
+      trace("some_event", {}, WS_ROOT);
+      const [record] = readEventRecords();
+      expect(record!["flags_active"]).toEqual(activeExperimentFlags());
+      expect(record!["flags_active"]).toContain("TL_GRAPH_EVIDENCE=compound");
+      expect(record!["flags_active"]).not.toContain("TL_GRAPH_EVIDENCE");
+    } finally {
+      if (orig === undefined) delete process.env["TL_GRAPH_EVIDENCE"];
+      else process.env["TL_GRAPH_EVIDENCE"] = orig;
     }
   });
 

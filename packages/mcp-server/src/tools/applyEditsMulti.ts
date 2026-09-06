@@ -247,6 +247,15 @@ export interface EditEntry {
    * check.
    */
   create?: boolean;
+  // R29-FIX (2026-09-05, D2): set by server.ts's edits[] mapping loop ONLY for
+  // a single-item batch whose per-item precondition:"expected-hash" already
+  // passed enforcePreconditions there -- the same acknowledgment contract the
+  // top-level {handle,content} dispatch branches already honor (see their own
+  // `args["precondition"] !== "expected-hash"` guards). Without this, a
+  // caller who did everything the blast-radius refusal's own hint said still
+  // got refused a second time, byte-identically, because this per-item
+  // acknowledgment never reached applyEditStep's blast-radius check below.
+  blastAcknowledged?: boolean;
 }
 
 export interface ApplyEditsMultiInput {
@@ -582,12 +591,30 @@ export async function applyEditsMulti(
     // currentText is the pre-step text, so the hinted expectedSha is only
     // valid verbatim for a first/solo step — exactly the shape being
     // redirected to a single call anyway.
-    const blastStepRefusal = (blast: BlastRadiusMeasure): StepResult => ({
-      ok: false,
-      error: `this single hunk replaces ${blast.replacedLines} of the file's ${blast.fileLines} lines (${blast.replacedPercent}%) and would leave ${blast.resultingLines} lines — a whole-file-scale replacement must be explicitly acknowledged`,
-      code: "blast-radius-precondition-required",
-      hint: `issue this hunk as its own single edit_file call {handle, content, precondition:"expected-hash", expectedSha:${shortSha(shaOfText(currentText))}}, or narrow the range to the lines that actually change`,
-    });
+    // R29-FIX (2026-09-05, D2): the hint used to say "issue this hunk as its
+    // own single edit_file call {handle, content, precondition, expectedSha}"
+    // without saying WHERE those fields go — a caller that wrapped the exact
+    // recommended fields inside edits:[{...}] (a one-item array) was refused
+    // AGAIN, byte-identically, because a per-item precondition/expectedSha
+    // used to be accepted as schema-valid but functionally ignored here. A
+    // single-item batch now DOES honor it (see EditEntry.blastAcknowledged),
+    // so the hint is now shape-aware: a single-item batch gets the accurate
+    // "retry this same edits[] item" instruction, a multi-item batch (which
+    // still cannot carry a per-item acknowledgment for THIS specific hunk
+    // among others) gets the explicit top-level-or-split-out instruction.
+    const blastStepRefusal = (blast: BlastRadiusMeasure): StepResult => {
+      const shaHint = shortSha(shaOfText(currentText));
+      const ackFields = `precondition:"expected-hash", expectedSha:${shaHint}`;
+      const hint = edits.length === 1
+        ? `retry this SAME edits[] call with ${ackFields} added to this one item — a single-item edits[] batch honors a per-item acknowledgment — or issue {handle, content, ${ackFields}} as TOP-LEVEL edit_file args with no edits[] wrapper, or narrow the range to the lines that actually change`
+        : `a multi-item edits[] batch does not honor a per-item acknowledgment for this hunk — issue it as its OWN single edit_file call, either edits:[{handle, content, ${ackFields}}] (one item only, no other items in the same call) or the same fields as TOP-LEVEL args {handle, content, ${ackFields}} with no edits[] wrapper — or narrow the range to the lines that actually change`;
+      return {
+        ok: false,
+        error: `this single hunk replaces ${blast.replacedLines} of the file's ${blast.fileLines} lines (${blast.replacedPercent}%) and would leave ${blast.resultingLines} lines — a whole-file-scale replacement must be explicitly acknowledged`,
+        code: "blast-radius-precondition-required",
+        hint,
+      };
+    };
     // P0 (2026-07-12a2 forensics): defense-in-depth mirror of server.ts's
     // dispatch-level search+content guard. server.ts's edits[] entry
     // resolution should already refuse this shape before an EditEntry ever
@@ -665,7 +692,8 @@ export async function applyEditsMulti(
           spanEnd: range.end,
           replacementText: replacement,
         });
-        if (blast !== null) return blastStepRefusal(blast);
+        // R29-FIX (2026-09-05, D2): see EditEntry.blastAcknowledged's doc comment.
+        if (!edit.blastAcknowledged && blast !== null) return blastStepRefusal(blast);
         const next = normalized.slice(0, startIndex) + replacement + normalized.slice(endIndex);
         const restored = restoreLineEndingEntry(next, lineEnding);
         const added = countLogicalLinesEntry(replacement);
@@ -818,7 +846,8 @@ export async function applyEditsMulti(
           spanEnd: totalLines,
           replacementText: replacement,
         });
-        if (wholeFileBlast !== null) return blastStepRefusal(wholeFileBlast);
+        // R29-FIX (2026-09-05, D2): see EditEntry.blastAcknowledged's doc comment.
+        if (!edit.blastAcknowledged && wholeFileBlast !== null) return blastStepRefusal(wholeFileBlast);
         const restored = restoreLineEndingEntry(replacement, lineEnding);
         const added = countLogicalLinesEntry(replacement);
         return {

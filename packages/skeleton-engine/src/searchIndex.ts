@@ -78,12 +78,29 @@ export function isTestPath(path: string): boolean {
   return /(?:^|\/)(?:test|tests|__tests__|spec|__spec__)(?:\/|$)|(?:\.test\.|\.spec\.)/.test(path);
 }
 
+/**
+ * A `fixtures` path SEGMENT, at any depth — deliberately generic (any
+ * caller repository's own test-fixture convention), not this repo's own
+ * `bench/fixtures/` layout. FX-R3 (2026-09-03, round-18B review finding 9):
+ * was `path.includes("bench/fixtures/")`, an unanchored TWO-segment literal
+ * that only ever matched TokenLighten's own fixture corpus by construction —
+ * any caller repository with an unrelated `bench/fixtures/` (or any other
+ * `.../fixtures/...`) directory got no ranking signal from it at all, while a
+ * caller with a bare `fixtures/` directory under a differently-named parent
+ * (the overwhelmingly common shape — `test/fixtures/`, `src/fixtures/`,
+ * `__fixtures__` aside) got none either. Segment-anchored like `isTestPath`
+ * above, so `prefixtures/` or `latest/fixtures-old/` still doesn't match.
+ */
+function isFixturePath(path: string): boolean {
+  return /(?:^|\/)fixtures(?:\/|$)/.test(path);
+}
+
 function isGeneratedOrFixture(path: string): boolean {
   return (
     path.includes("node_modules/") ||
     path.includes("dist/") ||
     path.includes(".tokenlighten/cache/") ||
-    path.includes("bench/fixtures/")
+    isFixturePath(path)
   );
 }
 

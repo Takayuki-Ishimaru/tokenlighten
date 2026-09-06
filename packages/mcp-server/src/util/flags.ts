@@ -42,18 +42,62 @@
  *       TL_REFUSAL_PROGRESS, TL_CONSTRUCT_RECEIVER, TL_QUERY_BEHAVIOR_PROOF,
  *       TL_HUB_PUBLISH_ANCHOR, TL_SERVED_RANGE_LEDGER, TL_CREATE_REQUIRES_CWD.
  *
- * The flags that REMAIN in this file are out of the v1 wire contract. The
- * contract does not describe, and conformance does not cover, behaviour with
- * any of them enabled:
+ * The flags that REMAIN in this file either select supported content policy
+ * within the frozen response families or remain outside the v1 wire contract.
+ * None changes the canonical kind/field/tool-argument surface:
+ *
+ *   (D) EXPIRED EXPERIMENTS, DELETED (v0.14 flag inventory, 2026-08-31).
+ *       The mirror image of (A): these flags' experiments concluded AGAINST
+ *       adoption (or were superseded), so their readers, env reads, guarded
+ *       branches, and — where the whole module existed only for the flag —
+ *       the modules themselves are DELETED. OFF (the recorded production
+ *       posture for every one of them) is now unconditional. Listed by name
+ *       so a reintroduced env read is visibly a regression, same contract as
+ *       the (A) list above; protocolVersionBranch.spec.ts enforces it:
+ *         TL_INTERFACE_AUTHORITY (T-L1; Probe-2 adjudication 2026-08-26:
+ *           prereg PASS overturned by attribution audit, adoption declined),
+ *         TL_POST_READY_TRIM + TL_POST_READY_TRIM_N (W5; Probe-2: silent
+ *           null — 1 of 5 resolveFullReadForPath sites wired; retired),
+ *         TL_OVERLAP_TRIM (W7; Probe-2: non-discriminating, retired. The
+ *           segments[]/code_unchanged projector it shared is UNFLAGGED
+ *           general machinery and still serves TL_DELTA_CONTEXT),
+ *         TL_ADAPTIVE_WHOLE_FILE (measured 2026-08-14: fails recorded
+ *           replay-corpus cases seh1/seh2; never repaired),
+ *         TL_VERIFICATION_RECIPE, TL_HOP1_CLOSURE (bench-inconclusive since
+ *           the 2026-08-14 freeze; superseded by the unconditional
+ *           verification-kit manifest),
+ *         TL_EVIDENCE_SHADOW, TL_EVIDENCE_COMPLETION (D7 rollout stalled at
+ *           shadow — the paired ablation never ran; superseded by v0.13
+ *           proof-carrying completion, and the serving-lever family was
+ *           closed by Probe-2. features/task-pack/evidenceShadow.ts deleted
+ *           with them),
+ *         TL_WRITE_CAPABILITY (D5-era staged-rollout label; telemetry-only,
+ *           zero behavioral consumers ever — see
+ *           DESIGN-v0.10-write-capability-RFC.md §9),
+ *         TL_SCHEMA_DEFS (F-1 $defs/$ref schema compression; the
+ *           pre-registered 3-real-client gate never passed and
+ *           DESIGN-v0.14-proposal §5 adjudicated the line dead — retirement
+ *           stamp executed).
+ *       Consolidated the same day (env surface merged, accessors kept):
+ *         TL_RRF_PROFILES        -> TL_RRF_FUSION=profiles
+ *         TL_COVERAGE_PACKER_V2  -> TL_COVERAGE_PACKER=v2
+ *         TL_COMPOUND_RETRIEVAL  -> TL_GRAPH_EVIDENCE=compound
+ *
+ *   (S) supported v0.14 content policy (default ON, explicit rollback):
+ *       TL_LITERAL_FIRST_ROUTING selects source-literal-first task-pack seeds
+ *       inside the existing response families. The paired v3 decision run
+ *       adopted it as the supported default; exact `0`/`off` remains a v0.14
+ *       rollback switch while broader task-shape evidence accumulates.
  *
  *   (B) out-of-contract, experiment-only (default OFF; D10(b)). Turning one on
- *       is an unfrozen capability addition, not a supported posture — and
- *       TL_ADAPTIVE_WHOLE_FILE=1 demonstrably fails the recorded corpus, which
- *       is why these were NOT permanent-on'd:
- *       TL_VERIFICATION_RECIPE, TL_HOP1_CLOSURE, TL_ADAPTIVE_WHOLE_FILE,
- *       TL_POST_READY_TRIM (threshold: TL_POST_READY_TRIM_N), TL_OVERLAP_TRIM,
- *       TL_INTERFACE_AUTHORITY, TL_DELTA_CONTEXT,
- *       TL_EVIDENCE_SHADOW, TL_EVIDENCE_COMPLETION, TL_WRITE_CAPABILITY,
+ *       is an unfrozen capability addition, not a supported posture:
+ *       TL_DELTA_CONTEXT,
+ *       TL_BATCH_EDIT_FRONTIER (requires the first prepared edit to cover every
+ *       ready edit obligation and closes unsanctioned pre-edit discovery),
+ *       TL_LEGACY_INPUT (v0.14 migration-only input-dialect escape hatch;
+ *       canonical refusal is the default, and only the exact value `accept`
+ *       enables the legacy normalizer; canonical calls and response families
+ *       are unchanged),
  *       TL_BM25F_CANDIDATE, TL_RRF_FUSION (v0.10 beta.2, V10-08 Hybrid
  *       Retrieval v1 — see features/retrieval/; candidate-generation-stage
  *       only, never read by a known-local dispatch path),
@@ -63,28 +107,32 @@
  *       kind, field, or tool argument — but "fewer/different surfaces" is
  *       still observable content, so it stays default-OFF and outside the
  *       frozen contract until a decision-scale run adjudicates it),
+ *       TL_SEMANTIC_FRONTIER_GUARD (paired-run semantic-frontier treatment;
+ *       it reuses existing kinds and fields but changes which continuation
+ *       carriers/surfaces ship. It therefore belongs to D10(B), not the
+ *       supported-policy bucket. DEFAULT FLIPPED TO OFF (2026-09-02): the
+ *       paired paid smoke evidence (smoke-v2/v3) showed no consistent cost
+ *       benefit and quality parity between the guard's ON and OFF treatment,
+ *       so default-ON was unjustified; opt in with
+ *       TL_SEMANTIC_FRONTIER_GUARD=1. Trace still records the effective
+ *       treatment for paired billing whichever way it is set),
  *       TL_GRAPH_EVIDENCE (v0.11 wave A, V11-01: the derived graph-evidence /
  *       impact-analysis overlay in features/graph-evidence/. Wave A shipped
  *       that tree as a PURE library with ZERO production importers, so OFF
  *       was byte-identical BY CONSTRUCTION. Wave B (V11-05, below) is the
  *       first production importer — OFF is now byte-identical by ordinary
  *       branch discipline instead: locateTaskContext.ts's compound-retrieval
- *       seam requires this flag AND TL_COMPOUND_RETRIEVAL both on before it
- *       ever calls into features/compound/, which is the only production
- *       caller of features/graph-evidence/ today. V11-06's write/
- *       impactGuard.ts remains a second intended wave-B consumer, not yet
- *       wired),
- *       TL_COMPOUND_RETRIEVAL (v0.11 wave B, V11-05: the bounded read-only
- *       hop closure in features/compound/, wired at ONE seam in
- *       locateTaskContext.ts's candidate generation. COMPOSES with
- *       TL_GRAPH_EVIDENCE rather than standing alone — the seam calls
- *       applyCompoundRetrieval() only when BOTH flags are on; with either
- *       off the seam's `if` never runs, so `related` gets exactly its
- *       pre-V11-05 entries. Even fully on, the module only ever ADDS
- *       `related` candidates (never touches `primary` or reorders/evicts an
- *       existing entry) and rides the existing `ImpactCandidate` shape — no
- *       new kind, field, or tool argument. Default off; holdout/decision-
- *       scale adjudication is a later cycle's job, same posture as every
+ *       seam runs only at TL_GRAPH_EVIDENCE=compound (V11-05, the bounded
+ *       read-only hop closure in features/compound/ — since the v0.14
+ *       consolidation the former TL_COMPOUND_RETRIEVAL pair var is this
+ *       flag's "compound" value), which is the only production caller of
+ *       features/graph-evidence/ today. V11-06's write/impactGuard.ts
+ *       remains a second intended wave-B consumer, not yet wired. Even at
+ *       "compound", the module only ever ADDS `related` candidates (never
+ *       touches `primary` or reorders/evicts an existing entry) and rides
+ *       the existing `ImpactCandidate` shape — no new kind, field, or tool
+ *       argument. Default off; holdout/decision-scale adjudication is a
+ *       later cycle's job, same posture as every
  *       other v0.11 wave-B retrieval flag here),
  *       TL_REASONING_IR_V2 (v0.11 wave B, V11-04: Task Reasoning IR v2 —
  *       reasoning_delta / obligation DAG / hypothesis tombstones / SHADOW Stop
@@ -93,6 +141,17 @@
  *       seam is wrapped so any IR failure degrades to a trace line. With the
  *       flag unset the seam is not entered at all, so the pack bytes are
  *       identical).
+ *
+ *       v0.15 W-CORE-FLAGS (2026-09-02): the Semantic Frontier v2 program's
+ *       ten registered flags -- TL_SF_STATEFUL, TL_SF_DEMOTE,
+ *       TL_SF_STRUCTURAL_CONCERNS, TL_SF_RELATION_PACKETS, TL_SF_VERIFY_FIRST,
+ *       TL_SF_CONTINUATION_BUNDLE, TL_CWD_NEAR_MISS, TL_RECEIPT_COVERAGE,
+ *       TL_BATCH_HINTS, TL_SEARCH_DEDUP -- registered together (all default
+ *       OFF) as unfrozen capability additions for a later decision-scale run
+ *       to adjudicate. See the "v0.15 W-CORE-FLAGS" doc block further down
+ *       this file for which of the ten a production branch actually reads as
+ *       of any given commit -- that block, not this one, is required to stay
+ *       current with wiring changes.
  *
  *   (C) out-of-contract, non-wire operational/diagnostic (D10(b)). These
  *       select trace, indexing, CI strictness, or bounded production policy;
@@ -264,16 +323,17 @@
  * V11-02 addendum -- Task-aware Weighted RRF v2 / Query Precision (2026-08-21)
  * ---------------------------------------------------------------------------
  *
- * TL_RRF_PROFILES joins class (B): out-of-contract, default OFF.
+ * Profile weighting is class (B): out-of-contract, default OFF. Since the
+ * v0.14 consolidation it is `TL_RRF_FUSION=profiles` (the former
+ * TL_RRF_PROFILES pair var is this flag's "profiles" value — profiles always
+ * implied fusion, so the pair was one three-valued choice).
  *
  * DESIGN-v0.10-expansion-plan-v1.3.md V11-02 adds task-family-aware RRF
  * fusion weights (features/retrieval/profiles.ts, taskFamily.ts,
- * qualityGate.ts) ON TOP OF the existing V10-08 fusion path. It COMPOSES
- * with TL_RRF_FUSION rather than standing alone: profile resolution and the
- * weak-retriever quality gate only ever run when BOTH flags are on
- * (features/retrieval/index.ts's `profilesOn = rrfProfilesEnabled() &&
- * rrfFusionEnabled()`). With either flag off, every fusion list keeps its
- * pre-V11-02 implicit weight of 1 -- the same output
+ * qualityGate.ts) ON TOP OF the existing V10-08 fusion path. Profile
+ * resolution and the weak-retriever quality gate run only at "profiles"
+ * (features/retrieval/index.ts's `profilesOn`). At plain "on", every fusion
+ * list keeps its pre-V11-02 implicit weight of 1 -- the same output
  * weightedReciprocalRankFusion (rrf.ts) produces for reciprocalRankFusion's
  * original callers, by construction (multiplying by 1 changes no bit of the
  * IEEE754 result). Default off; profile weights are holdout-tuned
@@ -284,13 +344,13 @@
  * V11-03 addendum -- Coverage Packer v2 (2026-08-21)
  * ---------------------------------------------------------------------------
  *
- * TL_COVERAGE_PACKER_V2 joins class (B): out-of-contract, default OFF, and
- * COMPOSES with TL_COVERAGE_PACKER rather than standing alone -- v2 selection
- * (features/task-pack/coveragePackerV2.ts) only runs where v1 selection
+ * Coverage Packer v2 is class (B): out-of-contract, default OFF. Since the
+ * v0.14 consolidation it is `TL_COVERAGE_PACKER=v2` (the former
+ * TL_COVERAGE_PACKER_V2 pair var is this flag's "v2" value) -- v2 selection
+ * (features/task-pack/coveragePackerV2.ts) only ever ran where v1 selection
  * would have (readCodeTaskPack.ts's ONE V10-09 seam, gated on
- * `coveragePackerEnabled()`); with TL_COVERAGE_PACKER off, this flag gates
- * nothing and the pack is byte-identical to both flags off. With both flags
- * on, the seam calls `coveragePackerV2.ts` instead of `coveragePacker.ts`
+ * `coveragePackerEnabled()`), so the pair was one three-valued choice. At
+ * "v2", the seam calls `coveragePackerV2.ts` instead of `coveragePacker.ts`
  * (v1 stays untouched and is v2's own low-confidence fallback target, so v1's
  * specs/behavior are unaffected either way).
  *
@@ -324,17 +384,18 @@
  * V11-05 addendum -- Compound Retrieval / Bounded Hop Closure (2026-08-21)
  * ---------------------------------------------------------------------------
  *
- * TL_COMPOUND_RETRIEVAL joins class (B): out-of-contract, default OFF.
+ * Compound retrieval is class (B): out-of-contract, default OFF. Since the
+ * v0.14 consolidation it is `TL_GRAPH_EVIDENCE=compound` (the former
+ * TL_COMPOUND_RETRIEVAL pair var is this flag's "compound" value — the seam
+ * always required both, so compound-without-graph was inexpressible).
  *
  * DESIGN-v0.10-expansion-plan-v1.3.md V11-05 folds the
  * definition -> references -> representative consumers -> tests/config hop
  * chain into ONE bounded, read-only graph-evidence expansion
  * (features/compound/compoundRetrieval.ts) seeded from the locator's own
- * already-resolved `primary`. It COMPOSES with TL_GRAPH_EVIDENCE exactly like
- * TL_RRF_PROFILES composes with TL_RRF_FUSION above: the seam in
- * locateTaskContext.ts only calls `applyCompoundRetrieval()` when BOTH flags
- * are on; with either off, `related` is built by exactly the pre-V11-05 code
- * path, byte-identical.
+ * already-resolved `primary`. The seam in locateTaskContext.ts calls
+ * `applyCompoundRetrieval()` only at "compound"; at "on"/"off", `related` is
+ * built by exactly the pre-V11-05 code path, byte-identical.
  *
  * Even fully enabled, the module can only ADD `related` candidates, appended
  * strictly after every pre-existing entry — it never touches `primary`,
@@ -377,14 +438,6 @@ export const PROOF_COMPLETION_FLAG_REGISTRY = Object.freeze({
   off_compatibility: true,
   engagement_trace_env: "TL_PROOF_COMPLETION_TRACE_PATH",
   wire_effect: "decision-distribution+certificate-id-shape",
-});
-
-/** F-1: fail-closed registry row for the real tool-local $defs/$ref surface. */
-export const SCHEMA_DEFS_FLAG_REGISTRY = Object.freeze({
-  flag: "TL_SCHEMA_DEFS",
-  default: "off",
-  off_compatibility: true,
-  wire_effect: "tools/list-inputSchema-$defs/$ref",
 });
 
 // ---------------------------------------------------------------------------
@@ -447,11 +500,6 @@ export function proofCompletionEnabled(): boolean {
   return parseBool(process.env["TL_PROOF_COMPLETION"], true);
 }
 
-/** F-1: opt-in only until all three real client probes pass. */
-export function schemaDefsEnabled(): boolean {
-  return parseBool(process.env["TL_SCHEMA_DEFS"], false);
-}
-
 // Process-local diagnostic only.  The counter is deliberately incremented by
 // readCodeTaskPack's proof gate, not by flag lookup, so it measures live pack
 // decisions and remains zero when the compatibility switch is OFF.
@@ -488,83 +536,6 @@ export function proofCompletionLiveCounterForTest(): number {
 
 export function resetProofCompletionLiveCounterForTest(): void {
   proofCompletionLiveCounter = 0;
-}
-
-/**
- * Compact, provenance-only executable verification recipe enrichment.
- *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled. Experimental capability addition,
- * bench-inconclusive so far; default off pending evidence it earns its keep.
- */
-export function verificationRecipeEnabled(): boolean {
-  return parseBool(process.env["TL_VERIFICATION_RECIPE"], false);
-}
-
-/**
- * Bounded call-site/definition context attached to find/references results.
- *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled. Experimental capability addition,
- * bench-inconclusive so far; default off pending evidence it earns its keep.
- */
-export function hop1ClosureEnabled(): boolean {
-  return parseBool(process.env["TL_HOP1_CLOSURE"], false);
-}
-
-/** T-L1: direct C/C++ interface-authority evidence; default OFF. */
-export function interfaceAuthorityEnabled(): boolean {
-  return parseBool(process.env["TL_INTERFACE_AUTHORITY"], false);
-}
-
-/**
- * Escalate repeated non-contiguous slices to one governed whole-file serve.
- *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled. Measured 2026-08-14: enabling it
- * fails two recorded replay-corpus cases (`seh1`/`seh2`, elided-window zoom),
- * so it is an unfrozen capability addition rather than a supported posture.
- */
-export function adaptiveWholeFileEnabled(): boolean {
-  return parseBool(process.env["TL_ADAPTIVE_WHOLE_FILE"], false);
-}
-
-/**
- * P1 evidence completion (DESIGN-v0.10 D7), SHADOW half: resolve per-concern
- * decision-authority evidence and write it to the trace channel, changing
- * NOTHING in responses.
- *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled. Default off — an unproven
- * capability addition, and shadow mode's whole point is that flipping it on is
- * observationally inert on the wire (evidenceShadow.spec.ts pins that). D7's
- * rollout order is shadow -> paired ablation -> defaults, and the paired
- * ablation hasn't run yet.
- */
-export function evidenceCompletionShadowEnabled(): boolean {
-  return parseBool(process.env["TL_EVIDENCE_SHADOW"], false);
-}
-
-/**
- * P1 evidence completion, ACTIVE half: serve the resolved evidence in the pack.
- *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled. Default off; this is the arm the
- * D7 paired ablation turns on. Not yet wired to a serving path — shadow ships
- * first by design.
- */
-export function evidenceCompletionEnabled(): boolean {
-  return parseBool(process.env["TL_EVIDENCE_COMPLETION"], false);
-}
-
-/**
- * D5/W2/W3: scoped write-capability grants remain default-off.
- *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled.
- */
-export function writeCapabilityEnabled(): boolean {
-  return parseBool(process.env["TL_WRITE_CAPABILITY"], false);
 }
 
 /**
@@ -614,26 +585,32 @@ export function bm25fCandidateEnabled(): boolean {
  * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
  * not cover behavior with this flag enabled. Default off.
  */
+export function rrfFusionMode(): "off" | "on" | "profiles" {
+  const raw = process.env["TL_RRF_FUSION"];
+  if (raw?.toLowerCase() === "profiles") return "profiles";
+  return parseBool(raw, false) ? "on" : "off";
+}
+
 export function rrfFusionEnabled(): boolean {
-  return parseBool(process.env["TL_RRF_FUSION"], false);
+  return rrfFusionMode() !== "off";
 }
 
 /**
  * V11-02 Task-aware Weighted RRF v2: per-task-profile RRF retriever weights
  * (features/retrieval/profiles.ts / taskFamily.ts) plus the weak-retriever
- * quality gate (qualityGate.ts). Composes with TL_RRF_FUSION -- profile
- * resolution and the quality gate only run when BOTH this flag and
- * TL_RRF_FUSION are on; with either off, fusion keeps its pre-V11-02
- * implicit per-list weight of 1 (byte-identical output). See this file's
- * "V11-02 addendum" doc block above for the full disposition.
+ * quality gate (qualityGate.ts). CONSOLIDATED (v0.14 flag inventory,
+ * 2026-08-31): the former TL_RRF_PROFILES env var is folded into
+ * `TL_RRF_FUSION=profiles` — profiles always implied fusion (either-off was
+ * byte-identical), so the pair was one three-valued choice wearing two env
+ * vars. This accessor keeps its name and exact semantics: true iff fusion
+ * runs WITH profile weights.
  *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled. Default off; weights are
- * holdout-tuned (bench/workflows/retrieval/TUNING-PROFILES-2026-08-21.md)
- * but not yet adjudicated by a decision-scale run.
+ * D10 (B): out-of-contract; weights are holdout-tuned
+ * (bench/workflows/retrieval/TUNING-PROFILES-2026-08-21.md) but not yet
+ * adjudicated by a decision-scale run.
  */
 export function rrfProfilesEnabled(): boolean {
-  return parseBool(process.env["TL_RRF_PROFILES"], false);
+  return rrfFusionMode() === "profiles";
 }
 
 /**
@@ -645,21 +622,45 @@ export function rrfProfilesEnabled(): boolean {
  * routes the ranked pool through `features/task-pack/coveragePacker.ts` at the
  * single seam in `readCodeTaskPack.ts`.
  */
+export function coveragePackerMode(): "off" | "v1" | "v2" {
+  const raw = process.env["TL_COVERAGE_PACKER"];
+  if (raw?.toLowerCase() === "v2") return "v2";
+  return parseBool(raw, false) ? "v1" : "off";
+}
+
 export function coveragePackerEnabled(): boolean {
-  return parseBool(process.env["TL_COVERAGE_PACKER"], false);
+  return coveragePackerMode() !== "off";
 }
 
 /**
- * V11-03 (Coverage Packer v2, v0.11 wave B). See this file's "V11-03
- * addendum" doc block above for the composition rule with
- * `coveragePackerEnabled()` -- this reader only reports the env var's own
- * value; the seam is the one place that enforces the composition.
- *
- * D10 (B): out-of-contract, debug/experiment-only; the v1 wire contract does
- * not cover behavior with this flag enabled. Default off.
+ * V11-03 (Coverage Packer v2, v0.11 wave B). CONSOLIDATED (v0.14 flag
+ * inventory, 2026-08-31): the former TL_COVERAGE_PACKER_V2 env var is folded
+ * into `TL_COVERAGE_PACKER=v2` — v2 only ever ran where v1 selection would
+ * have (the one V10-09 seam), so the pair was one three-valued choice.
+ * Accessor name and semantics preserved: true iff the seam routes through
+ * coveragePackerV2.ts instead of coveragePacker.ts.
  */
 export function coveragePackerV2Enabled(): boolean {
-  return parseBool(process.env["TL_COVERAGE_PACKER_V2"], false);
+  return coveragePackerMode() === "v2";
+}
+
+/** v0.14 supported literal-first policy; explicit OFF is the rollback path. */
+export function literalFirstRoutingEnabled(): boolean {
+  return parseBool(process.env["TL_LITERAL_FIRST_ROUTING"], true);
+}
+
+/**
+ * D10(B) paired-run treatment. It never changes advertised protocol kinds,
+ * but it can change response content by suppressing optional carriers; keep
+ * it explicitly trace-classified rather than treating it as supported policy.
+ *
+ * Default OFF (2026-09-02): paired paid evidence (smoke-v2/v3) showed no
+ * consistent cost benefit and quality parity, so default-ON was unjustified.
+ * Opt in with TL_SEMANTIC_FRONTIER_GUARD=1; the unset default and explicit
+ * `0`/`off` are byte-identical.
+ */
+export function semanticFrontierGuardEnabled(): boolean {
+  return parseBool(process.env["TL_SEMANTIC_FRONTIER_GUARD"], false);
 }
 
 /**
@@ -714,24 +715,36 @@ export function wireShadowEnabled(): boolean {
  */
 export function activeExperimentFlags(): readonly string[] {
   const active: string[] = [];
-  if (verificationRecipeEnabled()) active.push("TL_VERIFICATION_RECIPE");
-  if (hop1ClosureEnabled()) active.push("TL_HOP1_CLOSURE");
-  if (interfaceAuthorityEnabled()) active.push("TL_INTERFACE_AUTHORITY");
-  if (adaptiveWholeFileEnabled()) active.push("TL_ADAPTIVE_WHOLE_FILE");
-  if (evidenceCompletionShadowEnabled()) active.push("TL_EVIDENCE_SHADOW");
-  if (evidenceCompletionEnabled()) active.push("TL_EVIDENCE_COMPLETION");
-  if (writeCapabilityEnabled()) active.push("TL_WRITE_CAPABILITY");
   if (bm25fCandidateEnabled()) active.push("TL_BM25F_CANDIDATE");
-  if (rrfFusionEnabled()) active.push("TL_RRF_FUSION");
-  if (rrfProfilesEnabled()) active.push("TL_RRF_PROFILES");
-  if (coveragePackerEnabled()) active.push("TL_COVERAGE_PACKER");
-  if (coveragePackerV2Enabled()) active.push("TL_COVERAGE_PACKER_V2");
-  if (graphEvidenceEnabled()) active.push("TL_GRAPH_EVIDENCE");
+  // Consolidated tri-state flags report their exact env assignment so a trace
+  // diff distinguishes the base capability from its folded-in extension.
+  const rrf = rrfFusionMode();
+  if (rrf !== "off") active.push(rrf === "profiles" ? "TL_RRF_FUSION=profiles" : "TL_RRF_FUSION");
+  const packer = coveragePackerMode();
+  if (packer !== "off") active.push(packer === "v2" ? "TL_COVERAGE_PACKER=v2" : "TL_COVERAGE_PACKER");
+  const graph = graphEvidenceMode();
+  if (graph !== "off") active.push(graph === "compound" ? "TL_GRAPH_EVIDENCE=compound" : "TL_GRAPH_EVIDENCE");
   if (fastPathV2Enabled()) active.push("TL_FAST_PATH_V2");
-  if (postReadyTrimEnabled()) active.push("TL_POST_READY_TRIM");
-  if (overlapTrimEnabled()) active.push("TL_OVERLAP_TRIM");
   if (deltaContextEnabled()) active.push("TL_DELTA_CONTEXT");
-  if (compoundRetrievalEnabled()) active.push("TL_COMPOUND_RETRIEVAL");
+  if (batchEditFrontierEnabled()) active.push("TL_BATCH_EDIT_FRONTIER");
+  // Default OFF since 2026-09-02 (paired paid evidence showed no consistent
+  // cost benefit). It remains a D10(B) treatment because its carrier
+  // selection is observable content.
+  if (semanticFrontierGuardEnabled()) active.push("TL_SEMANTIC_FRONTIER_GUARD");
+  // v0.15 W-CORE-FLAGS: Semantic Frontier v2 program flags -- registration
+  // only today (no production branch reads them yet, see their own doc
+  // blocks above); reported here for trace-inventory parity with every
+  // other (B) flag while wiring is pending.
+  if (sfStatefulEnabled()) active.push("TL_SF_STATEFUL");
+  if (sfDemoteEnabled()) active.push("TL_SF_DEMOTE");
+  if (sfStructuralConcernsEnabled()) active.push("TL_SF_STRUCTURAL_CONCERNS");
+  if (sfRelationPacketsEnabled()) active.push("TL_SF_RELATION_PACKETS");
+  if (sfVerifyFirstEnabled()) active.push("TL_SF_VERIFY_FIRST");
+  if (sfContinuationBundleEnabled()) active.push("TL_SF_CONTINUATION_BUNDLE");
+  if (cwdNearMissEnabled()) active.push("TL_CWD_NEAR_MISS");
+  if (receiptCoverageEnabled()) active.push("TL_RECEIPT_COVERAGE");
+  if (batchHintsEnabled()) active.push("TL_BATCH_HINTS");
+  if (searchDedupEnabled()) active.push("TL_SEARCH_DEDUP");
   return active;
 }
 
@@ -750,12 +763,18 @@ export function contextAttestationEnabled(): boolean {
  * reason than usual in wave A alone: `features/graph-evidence/` had NO
  * production importer, so there was no branch for this flag to select. Wave B
  * (V11-05, this file's "V11-05 addendum" above) is the first production
- * importer; OFF is now byte-identical by the ordinary composed-flag branch at
- * locateTaskContext.ts's compound-retrieval seam, which requires this flag
- * AND TL_COMPOUND_RETRIEVAL both on.
+ * importer; OFF is now byte-identical by the ordinary flag branch at
+ * locateTaskContext.ts's compound-retrieval seam, which runs only at this
+ * flag's "compound" mode.
  */
+export function graphEvidenceMode(): "off" | "on" | "compound" {
+  const raw = process.env["TL_GRAPH_EVIDENCE"];
+  if (raw?.toLowerCase() === "compound") return "compound";
+  return parseBool(raw, false) ? "on" : "off";
+}
+
 export function graphEvidenceEnabled(): boolean {
-  return parseBool(process.env["TL_GRAPH_EVIDENCE"], false);
+  return graphEvidenceMode() !== "off";
 }
 
 /** V11-07 addendum above (this file's top doc comment) explains this flag's scope. */
@@ -771,22 +790,6 @@ export function reasoningIrV2Enabled(): boolean {
 /** V11-06 addendum above (this file's top doc comment) explains this flag's scope. */
 export function fastPathV2Enabled(): boolean {
   return parseBool(process.env["TL_FAST_PATH_V2"], false);
-}
-
-/** W5: reduce pre-edit discovery only when explicitly enabled. */
-export function postReadyTrimEnabled(): boolean {
-  return parseBool(process.env["TL_POST_READY_TRIM"], false);
-}
-
-/** W5: configurable first trimmed post-ready read/search ordinal; invalid values fail closed to 6. */
-export function postReadyTrimThreshold(): number {
-  const value = Number.parseInt(process.env["TL_POST_READY_TRIM_N"] ?? "6", 10);
-  return Number.isSafeInteger(value) && value >= 1 && value <= 32 ? value : 6;
-}
-
-/** W7: avoid re-sending the held portion of a partially overlapping read. */
-export function overlapTrimEnabled(): boolean {
-  return parseBool(process.env["TL_OVERLAP_TRIM"], false);
 }
 
 /**
@@ -821,11 +824,299 @@ export function deltaContextEnabled(): boolean {
   return parseBool(process.env["TL_DELTA_CONTEXT"], false);
 }
 
+/** Experimental one-shot boundary for multi-target prepared edits. */
+export function batchEditFrontierEnabled(): boolean {
+  return parseBool(process.env["TL_BATCH_EDIT_FRONTIER"], false);
+}
+
 /**
- * D10 (B): V11-05's compound retrieval (v0.11 wave B). See this file's
- * "V11-05 addendum" doc block above for the full disposition and its
- * composition with TL_GRAPH_EVIDENCE.
+ * D10 (B): V11-05's compound retrieval (v0.11 wave B). CONSOLIDATED (v0.14
+ * flag inventory, 2026-08-31): the former TL_COMPOUND_RETRIEVAL env var is
+ * folded into `TL_GRAPH_EVIDENCE=compound` — the seam always required BOTH
+ * flags, so compound-without-graph was inexpressible and the pair was one
+ * three-valued choice. Accessor name and semantics preserved: true iff the
+ * locateTaskContext.ts seam may call applyCompoundRetrieval() (which still
+ * implies graphEvidenceEnabled()).
  */
 export function compoundRetrievalEnabled(): boolean {
-  return parseBool(process.env["TL_COMPOUND_RETRIEVAL"], false);
+  return graphEvidenceMode() === "compound";
+}
+
+// ---------------------------------------------------------------------------
+// v0.15 W-CORE-FLAGS: Semantic Frontier v2 program flags (2026-09-02)
+// ---------------------------------------------------------------------------
+//
+// The Semantic Frontier v2 program registers ten flags here, ALL DEFAULT OFF,
+// per D10(B): each is an unfrozen capability addition for a later
+// decision-scale run to adjudicate, not supported policy. Registration
+// happened first; wiring is landing incrementally across waves, so "no
+// production branch reads it" is NOT true of every one of the ten below --
+// keep this paragraph current in the SAME commit that wires (or unwires) an
+// accessor (protocolVersionBranch.spec.ts's F1 fix depends on this file and
+// that spec's CLASSIFIED_ENV staying in sync, not on this prose, but stale
+// prose here is still a lie the next reader inherits):
+//
+//   WIRED (a production branch reads the accessor, as of 2026-09-03):
+//   sfStatefulEnabled / sfStructuralConcernsEnabled
+//   (features/task-pack/readCodeTaskPack.ts, the task-state SF adapter,
+//   features/task-pack/sfConcerns.ts), cwdNearMissEnabled /
+//   receiptCoverageEnabled / batchHintsEnabled (server.ts, plus
+//   protocol/readFamily.ts and protocol/coverageReceipt.ts for
+//   receiptCoverageEnabled specifically), searchDedupEnabled
+//   (protocol/searchFamily.ts, state/session.ts, protocol/envelope.ts), and
+//   sfVerifyFirstEnabled (round-11 fix, 2026-09-03 — this doc block was
+//   stale: the accessor already had two real production readers before this
+//   correction, it was simply never moved out of the list below):
+//   protocol/readFamily.ts's `verifyClosureGate`/`receiptOf`'s
+//   `closure-complete` arm (gates whether a `read.closure` may claim `done`),
+//   and features/task-pack/sfVerifyObligations.ts's `deriveVerifyObligations`
+//   via readCodeTaskPack.ts's `buildTaskChangeContract` (attaches
+//   `TaskChangeContract.verify_obligations` only while the flag is on), and
+//   sfDemoteEnabled (third-inertness-layer fix, 2026-09-03 — this doc block
+//   was stale: canonicalDecision.ts/decisionWire.ts/envelope.ts already read
+//   it, but nothing ever populated the continuation-optional marking those
+//   branches demote FROM unless the mutually-exclusive legacy guard was also
+//   on, making the accessor's own reads inert whenever it was the only lever
+//   enabled): features/task-pack/semanticFrontier.ts's
+//   `annotateSemanticFrontierContinuation` now also gates open on this flag
+//   (previously gated solely on the legacy `guardEnabled` parameter).
+//   FOURTH inertness layer (FX-H, 2026-09-03): even after the third fix the
+//   reads stayed byte-inert because canonicalDecision.ts's eligibility gate
+//   refused every surface that still carried `code` — i.e. every body the
+//   budget had not already shed — so the flag could only reorder rows. Now
+//   only `code_unchanged` disqualifies (D4 "already held" is proven by the
+//   per-address served-range ledger), `applySemanticFrontierDemotion`
+//   withholds the body on the surface itself (never the last body in the
+//   pack), and the served-range booking is deferred under this flag so a
+//   withheld window is never booked as `prior`.
+//
+//   sfRelationPacketsEnabled (wave-4 relation seam, features/task-pack/
+//   sfRelationSeam.ts via readCodeTaskPack.ts): compiles a bounded relation
+//   packet into `plan.wiring.evidence_graph` for grounded relational concerns;
+//   requires graph evidence (see the consistency check below).
+//   sfContinuationBundleEnabled (wave-4 structural continuation seam,
+//   features/task-pack/sfContinuationBundle.ts via readCodeTaskPack.ts):
+//   appends bodyless structural fills (counterpart header/impl, declaration,
+//   named test) to `evidence[]` only in slack left by explicit targets and
+//   unsatisfied concerns (DC2). Neither has a "registration only" exemption
+//   any more: both are pinned by the flag-off byte-identity corpus like every
+//   other lever above.
+//
+// `assertSemanticFrontierV2FlagConsistency` below encodes the program's
+// documented cross-flag dependencies in one place so a later wiring wave
+// inherits the check instead of re-deriving the rules per call site.
+
+/** v0.15 (B): carries frontier state across turns within a task epoch. */
+export function sfStatefulEnabled(): boolean {
+  return parseBool(process.env["TL_SF_STATEFUL"], false);
+}
+
+/** v0.15 (B): demotes stale frontier entries instead of discarding them outright. Requires TL_SF_STATEFUL. */
+export function sfDemoteEnabled(): boolean {
+  return parseBool(process.env["TL_SF_DEMOTE"], false);
+}
+
+/** v0.15 (B): surfaces structural (non-textual) concerns in the served frontier. */
+export function sfStructuralConcernsEnabled(): boolean {
+  return parseBool(process.env["TL_SF_STRUCTURAL_CONCERNS"], false);
+}
+
+/** v0.15 (B): packages graph-evidence relations as discrete frontier packets. Requires graph evidence not disabled. */
+export function sfRelationPacketsEnabled(): boolean {
+  return parseBool(process.env["TL_SF_RELATION_PACKETS"], false);
+}
+
+/**
+ * v0.15 (B): orders verification obligations ahead of new discovery.
+ * Requires TL_SF_STATEFUL — VF-11 (round-11, 2026-09-03): unlike the other
+ * "Requires TL_SF_STATEFUL" flags below, this one is WIRED into production
+ * reads (see the WIRED list above) that run on every request, not just at
+ * server boot. `assertSemanticFrontierV2FlagConsistency` below still throws
+ * at boot for an inconsistent operator configuration, but a per-call reader
+ * must never throw mid-request — so this accessor ALSO enforces the
+ * dependency itself, gracefully: the effective value silently drops to
+ * `false` (verify-first gate never engages) when TL_SF_STATEFUL is off,
+ * whatever TL_SF_VERIFY_FIRST says. That degraded effective value is what
+ * `activeExperimentFlags()` reports for paired-billing trace purposes too
+ * (mirroring the "trace still records the effective treatment" convention
+ * documented above for TL_SEMANTIC_FRONTIER_GUARD) — the trace never shows
+ * TL_SF_VERIFY_FIRST active while its dependency is unmet.
+ */
+export function sfVerifyFirstEnabled(): boolean {
+  if (!parseBool(process.env["TL_SF_VERIFY_FIRST"], false)) return false;
+  return sfStatefulEnabled();
+}
+
+/** v0.15 (B): bundles continuation state for a resumed frontier session. Requires TL_SF_STATEFUL. */
+export function sfContinuationBundleEnabled(): boolean {
+  return parseBool(process.env["TL_SF_CONTINUATION_BUNDLE"], false);
+}
+
+/** v0.15 (B): suggests near-miss cwd candidates on a worktree-root refusal. */
+export function cwdNearMissEnabled(): boolean {
+  return parseBool(process.env["TL_CWD_NEAR_MISS"], false);
+}
+
+/** v0.15 (B): adds coverage accounting to read receipts. */
+export function receiptCoverageEnabled(): boolean {
+  return parseBool(process.env["TL_RECEIPT_COVERAGE"], false);
+}
+
+/** v0.15 (B): adds batching hints to multi-target read/edit responses. */
+export function batchHintsEnabled(): boolean {
+  return parseBool(process.env["TL_BATCH_HINTS"], false);
+}
+
+/** v0.15 (B): deduplicates near-identical search matches before serving. */
+export function searchDedupEnabled(): boolean {
+  return parseBool(process.env["TL_SEARCH_DEDUP"], false);
+}
+
+/**
+ * Registry of the ten v0.15 Semantic Frontier v2 flags, one-line purpose
+ * each. Frozen so a later wave cannot silently mutate the inventory; extend
+ * by adding a new entry (and a matching accessor) in the same commit that
+ * introduces the flag, same discipline as PROOF_COMPLETION_FLAG_REGISTRY.
+ */
+export const SEMANTIC_FRONTIER_V2_FLAG_REGISTRY = Object.freeze({
+  TL_SF_STATEFUL: "Carries frontier state across turns within a task epoch.",
+  TL_SF_DEMOTE: "Withholds supporting frontier bodies (bodyless rows with remaining + handle) instead of dropping them; requires TL_SF_STATEFUL, and (FX-R3b) TL_SF_STRUCTURAL_CONCERNS — after FX-R3 D4 the marking source is the grounded structural concern state, so TL_SF_DEMOTE without it is fully inert.",
+  TL_SF_STRUCTURAL_CONCERNS: "Surfaces structural (non-textual) concerns in the served frontier. Requires TL_SF_STATEFUL — the only production caller (readCodeTaskPack.ts's applySemanticFrontierState) returns before ever reaching the extractor when TL_SF_STATEFUL is off, so this flag alone is a silent no-op, not trace-only.",
+  TL_SF_RELATION_PACKETS: "Packages graph-evidence relations as discrete frontier packets. Requires TL_SF_STATEFUL for the same reason as TL_SF_STRUCTURAL_CONCERNS above (applySemanticFrontierState gates the seam), in addition to requiring graph evidence not disabled (see the consistency check below).",
+  TL_SF_VERIFY_FIRST: "Orders verification obligations ahead of new discovery.",
+  TL_SF_CONTINUATION_BUNDLE: "Bundles continuation state for a resumed frontier session.",
+  TL_CWD_NEAR_MISS: "Suggests near-miss cwd candidates on a worktree-root refusal.",
+  TL_RECEIPT_COVERAGE: "Adds coverage accounting to read receipts.",
+  TL_BATCH_HINTS: "Adds batching hints to multi-target read/edit responses.",
+  TL_SEARCH_DEDUP: "Deduplicates near-identical search matches before serving.",
+} as const);
+
+/**
+ * Reads every registry flag through its own accessor, so `TRUE`, `on` and
+ * `1` all fold to the same answer. That is NOT the same claim for every
+ * entry, though: the registry's "Requires TL_SF_STATEFUL" wording on several
+ * flags (TL_SF_DEMOTE, TL_SF_STRUCTURAL_CONCERNS, TL_SF_RELATION_PACKETS,
+ * TL_SF_CONTINUATION_BUNDLE) describes a startup-time CONSISTENCY CHECK
+ * (`assertSemanticFrontierV2FlagConsistency` below) and/or a downstream
+ * production gate — their own accessors do not read `TL_SF_STATEFUL` and
+ * return the RAW env bit exactly as set. `sfVerifyFirstEnabled()` is the
+ * ONLY accessor of the ten that actually degrades: it reads `false` whenever
+ * `TL_SF_STATEFUL` is off even if `TL_SF_VERIFY_FIRST` itself is "1" — the one
+ * case where "the value production actually uses" differs from the raw bit.
+ * `semanticFrontierV2FlagValues()` below, and the `config_sha256` digest it
+ * feeds, therefore fold nine raw bits and one STATEFUL-degraded bit — never
+ * ten degraded values. This is a documentation fix only: no accessor's
+ * behaviour changes, so the digest does not move.
+ *
+ * FX-R3 D5 (2026-09-04): `util/trace.ts`'s p1 causal `config_sha256` listed
+ * only TL_GRAPH_INDEX / TL_SEMANTIC_FRONTIER_GUARD / TL_TRACE, so a v2
+ * TREATMENT server (all ten of these on) and a CONTROL server (all off)
+ * produced the SAME configuration digest — the causal attestation could not
+ * tell the paid A/B arms apart. The digest now folds in this table.
+ *
+ * TYPE-ENFORCED COMPLETENESS: the accessor map is keyed by
+ * `keyof typeof SEMANTIC_FRONTIER_V2_FLAG_REGISTRY`, so adding a flag to the
+ * registry without adding its accessor here fails `tsc`, and the iteration
+ * below walks the REGISTRY — never a hand-copied list that could drift.
+ */
+const SEMANTIC_FRONTIER_V2_FLAG_ACCESSORS: Readonly<
+  Record<keyof typeof SEMANTIC_FRONTIER_V2_FLAG_REGISTRY, () => boolean>
+> = {
+  TL_SF_STATEFUL: sfStatefulEnabled,
+  TL_SF_DEMOTE: sfDemoteEnabled,
+  TL_SF_STRUCTURAL_CONCERNS: sfStructuralConcernsEnabled,
+  TL_SF_RELATION_PACKETS: sfRelationPacketsEnabled,
+  TL_SF_VERIFY_FIRST: sfVerifyFirstEnabled,
+  TL_SF_CONTINUATION_BUNDLE: sfContinuationBundleEnabled,
+  TL_CWD_NEAR_MISS: cwdNearMissEnabled,
+  TL_RECEIPT_COVERAGE: receiptCoverageEnabled,
+  TL_BATCH_HINTS: batchHintsEnabled,
+  TL_SEARCH_DEDUP: searchDedupEnabled,
+};
+
+/** `[env var, "1"|"0"]` for every v0.15 registry flag, in registry order. */
+export function semanticFrontierV2FlagValues(): ReadonlyArray<readonly [string, string]> {
+  return (Object.keys(SEMANTIC_FRONTIER_V2_FLAG_REGISTRY) as Array<
+    keyof typeof SEMANTIC_FRONTIER_V2_FLAG_REGISTRY
+  >).map((key) => [key, SEMANTIC_FRONTIER_V2_FLAG_ACCESSORS[key]() ? "1" : "0"] as const);
+}
+
+/**
+ * v0.15 startup-time (and test-time) consistency check over the
+ * SEMANTIC_FRONTIER_V2_FLAG_REGISTRY dependencies. Called from
+ * `server.ts`'s startup path (see that file's own call site) — this is no
+ * longer a test-only export waiting on a future wiring wave; a
+ * misconfigured operator gets a loud boot-time failure today. Throws an
+ * Error naming BOTH flags on the first violation found; a caller that wants
+ * every violation reported at once should catch, fix, and re-invoke, since
+ * later checks are never reached once an earlier one throws.
+ */
+export function assertSemanticFrontierV2FlagConsistency(): void {
+  if (sfDemoteEnabled() && !sfStatefulEnabled()) {
+    throw new Error(
+      "TL_SF_DEMOTE requires TL_SF_STATEFUL: TL_SF_DEMOTE is enabled but TL_SF_STATEFUL is not.",
+    );
+  }
+  if (sfDemoteEnabled() && semanticFrontierGuardEnabled()) {
+    throw new Error(
+      "TL_SF_DEMOTE and TL_SEMANTIC_FRONTIER_GUARD are mutually exclusive: both are enabled.",
+    );
+  }
+  // FX-R3b item 2 (2026-09-04): after FX-R3 D4 the v2 marking source is the
+  // pack's GROUNDED STRUCTURAL CONCERN state and nothing else — "zero grounded
+  // structural concerns => mark nothing" is the ratified contract
+  // (`annotateSemanticFrontierContinuation`, semanticFrontier.ts). With
+  // TL_SF_STRUCTURAL_CONCERNS off, `extractStructuralConcerns` returns `[]` as
+  // its FIRST statement, so there is no grounded source, nothing is ever
+  // marked continuation-optional, and TL_SF_DEMOTE is FULLY INERT — the same
+  // silent-no-op class as TL_SF_STRUCTURAL_CONCERNS-without-TL_SF_STATEFUL
+  // caught just below. Fail closed at boot rather than let an operator (or a
+  // paid arm) believe the lever is on.
+  if (sfDemoteEnabled() && !sfStructuralConcernsEnabled()) {
+    throw new Error(
+      "TL_SF_DEMOTE requires TL_SF_STRUCTURAL_CONCERNS: TL_SF_DEMOTE is enabled but TL_SF_STRUCTURAL_CONCERNS is not (after FX-R3 D4 the demotion marking source is the grounded structural concern state, so TL_SF_DEMOTE alone marks nothing).",
+    );
+  }
+  // FX-G-B (round 12, finding 3): `readCodeTaskPack.ts`'s
+  // `applySemanticFrontierState` is the ONLY production caller of both the
+  // structural-concern extractor and the relation-packet seam, and it opens
+  // with `if (!sfStatefulEnabled()) return;` — before either is ever
+  // reached. So TL_SF_STRUCTURAL_CONCERNS or TL_SF_RELATION_PACKETS enabled
+  // alone (without TL_SF_STATEFUL) boots clean today and is a TOTAL no-op:
+  // not the "trace only" degradation the v0.15 plan's §7 used to document
+  // (that prose has been corrected — see DESIGN-v0.15-semantic-frontier-
+  // plan.md §7 and §5.1.1), no trace, no concern, nothing. Catch it here,
+  // the same way TL_SF_DEMOTE/TL_SF_CONTINUATION_BUNDLE/TL_SF_VERIFY_FIRST
+  // already catch their own STATEFUL dependency below.
+  if (sfStructuralConcernsEnabled() && !sfStatefulEnabled()) {
+    throw new Error(
+      "TL_SF_STRUCTURAL_CONCERNS requires TL_SF_STATEFUL: TL_SF_STRUCTURAL_CONCERNS is enabled but TL_SF_STATEFUL is not (readCodeTaskPack.ts's applySemanticFrontierState never reaches the extractor otherwise).",
+    );
+  }
+  if (sfRelationPacketsEnabled() && !sfStatefulEnabled()) {
+    throw new Error(
+      "TL_SF_RELATION_PACKETS requires TL_SF_STATEFUL: TL_SF_RELATION_PACKETS is enabled but TL_SF_STATEFUL is not (readCodeTaskPack.ts's applySemanticFrontierState never reaches the relation seam otherwise).",
+    );
+  }
+  if (sfRelationPacketsEnabled() && !graphEvidenceEnabled()) {
+    throw new Error(
+      "TL_SF_RELATION_PACKETS requires TL_GRAPH_EVIDENCE not to be disabled: TL_SF_RELATION_PACKETS is enabled but graph evidence is off.",
+    );
+  }
+  if (sfContinuationBundleEnabled() && !sfStatefulEnabled()) {
+    throw new Error(
+      "TL_SF_CONTINUATION_BUNDLE requires TL_SF_STATEFUL: TL_SF_CONTINUATION_BUNDLE is enabled but TL_SF_STATEFUL is not.",
+    );
+  }
+  // NOTE: `sfVerifyFirstEnabled()` itself already folds in the
+  // `sfStatefulEnabled()` check (VF-11) and silently degrades to `false`
+  // rather than ever throwing mid-request — so it can never observe this
+  // inconsistency to report it. This boot-time check reads the RAW env var
+  // instead, specifically so a misconfigured operator still gets a loud
+  // failure at startup rather than a silent no-op.
+  if (parseBool(process.env["TL_SF_VERIFY_FIRST"], false) && !sfStatefulEnabled()) {
+    throw new Error(
+      "TL_SF_VERIFY_FIRST requires TL_SF_STATEFUL: TL_SF_VERIFY_FIRST is enabled but TL_SF_STATEFUL is not.",
+    );
+  }
 }

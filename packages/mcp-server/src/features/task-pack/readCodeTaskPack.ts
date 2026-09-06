@@ -32,24 +32,23 @@ import {
 } from "../../tools/walkRepo.js";
 import { buildCompactTree } from "../../tools/exploreTree.js";
 import { getCurrentDiff } from "../../tools/getCurrentDiff.js";
-import { handleTable, shaOfBytes, shaOfText } from "../../util/handles.js";
+import { callWorkspace, handleTable, shaOfBytes, shaOfText } from "../../util/handles.js";
 import { classifySurface, surfaceInventory, deriveTokenVariants } from "../../util/impact.js";
 import { readFileSafe, safeResolve, isWithin, resolveReal, statReadTargetSync } from "../../util/safePath.js";
 import { decodeTextBuffer } from "../../util/textDecode.js";
 import { languageForPath } from "../../util/languages.js";
 import { elideDocComments } from "../../util/formatCompress.js";
-import {
-  attachEvidenceCompletion,
-  calleesOf,
-  emitEvidenceShadow,
-} from "./evidenceShadow.js";
 import { isEnumLikeQuery, stripPathSpans, tokenizeQuery } from "../../util/queryShape.js";
+import { maskCommentsAndStrings } from "./sfCodeMask.js";
 import { expandOneHop } from "./openUniverseExpansion.js";
 import {
   createScanContentCache,
+  createScanCoverage,
   deriveIdentifierVariantProbes,
+  enumerateFindTextUniverse,
   escapeRegExp,
   scanLiteral,
+  type FindTextUniverse,
 } from "../search/find/findText.js";
 import { extractSymbolsFromFile, extractSymbolsFromLines, resolveCallerByteCeiling, DEFAULT_RESPONSE_BYTE_FLOOR } from "../../tools/readCodeModes.js";
 import { queryRequestsTestEvidence, selectQueryEvidence } from "../../tools/queryEvidence.js";
@@ -70,6 +69,7 @@ import {
   markdownOutline,
   markdownSectionAtLine,
   parseMarkdownHeadings,
+  type MarkdownHeading,
 } from "../../util/markdownSections.js";
 import {
   attachDocSliverNavigation,
@@ -77,26 +77,29 @@ import {
   attachDocSliverZoom,
   buildDocSliverHeadingIndex,
   clearDocSliverNavigation,
+  docQueryTokens,
   docSliverFocusFromSurface,
   docSliverRouteClause,
+  mostSpecificDocHeadingMatch,
   planDocSliver,
+  rankDocHeadingMatches,
+  DOC_ANCHOR_SECTION_MAX_LINES,
   DOC_SLIVER_HEADINGS_CAP_BYTES,
   DOC_SLIVER_ROUTE_MARKER,
   type DocSliverPlan,
 } from "./docSliver.js";
 import {
-  deriveNextFromPlan,
   enforceContinuationBudget,
   MAX_STAGE_CALLS,
   nextStringToCall,
-  type ContinuationCall,
   type ContinuationPlan,
 } from "../../util/continuation.js";
 import { collectSymbols, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
-import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, type PackCheckRecord } from "../../state/session.js";
+import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, recordWithheldEditAddresses, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, servedClusterRanges, getIntentEditObserved, type PackCheckRecord } from "../../state/session.js";
 import {
   recordServedSurfaces,
   queryServedSurfaces,
+  stampEpochServedPaths,
   statKindCached,
   anyFileExistsCached,
   shouldAttachVerification,
@@ -109,6 +112,7 @@ import {
   getFunctionalValidationObligation,
   consultExecutedLocate,
   consultExecutedSearch,
+  hasExecutedSearchAction,
   hasExecutedNext,
   nextFingerprint,
   normalizeContractLane,
@@ -123,17 +127,73 @@ import {
   type AwaitingInputLatch,
 } from "../../util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "../../util/laneKey.js";
+import { surfaceAlreadyCoversWholeFile } from "../../util/surfaceServedCoverage.js";
 import { computeClosureStateSafe } from "../../util/closureTracking.js";
 import { mustFetchPackCap } from "../../util/mustFetch.js";
 import {
   coveragePackerEnabled,
   coveragePackerV2Enabled,
-  interfaceAuthorityEnabled,
+  graphEvidenceEnabled,
+  literalFirstRoutingEnabled,
   noteProofCompletionPack,
   proofCompletionEnabled,
+  semanticFrontierGuardEnabled,
+  sfContinuationBundleEnabled,
+  sfDemoteEnabled,
+  sfRelationPacketsEnabled,
+  sfStatefulEnabled,
+  sfStructuralConcernsEnabled,
+  sfVerifyFirstEnabled,
 } from "../../util/flags.js";
+import { createSessionLedgerReader } from "../../task-state/sfLedgerReader.js";
+import {
+  markConcernSatisfied,
+  openSfTask,
+  recordDecision,
+  recordServed,
+  sfEvidenceIdFor,
+  type SfServedEvidence,
+  type SfSnapshot,
+  type SfTaskContext,
+} from "../../task-state/sfState.js";
+import {
+  extractStructuralConcerns,
+  sfConcernGrounding,
+  sfObservationOnly,
+  sfQueryFileAnchors,
+  type SfAnchorResolution,
+  type SfAnchorResolver,
+  type SfExplicitTarget,
+  type SfStructuralConcern,
+  type SfWorkspaceIndex,
+} from "./sfConcerns.js";
+import { resolveIntent } from "./sfIntent.js";
+import {
+  deriveVerifyObligations,
+  verifyObligationsToSfConcerns,
+} from "./sfVerifyObligations.js";
+import {
+  applyResponseToConcerns,
+  attachSfPackContext,
+  concernsAddressedByEvidence,
+  sfPackContextFor,
+  type SfResponseEvidence,
+  type SfSatisfactionResult,
+} from "./sfSatisfaction.js";
+import {
+  compileSfRelationPackets,
+  mergeSfSatisfactionResults,
+  type SfRelationSeamOutcome,
+} from "./sfRelationSeam.js";
+import {
+  attachSfContinuationFills,
+  buildStructuralContinuation,
+  type SfContinuationAddress,
+  type SfContinuationFill,
+  type SfContinuationNamedTest,
+  type SfContinuationWorkspaceIndex,
+} from "./sfContinuationBundle.js";
 import { selectCoverageOrderedEntries, estimateBodyBytes } from "./coveragePacker.js";
-import { buildInterfaceAuthoritySurfaces } from "./interfaceAuthority.js";
 import { selectCoverageOrderedEntriesV2, type CoverageObligationV2 } from "./coveragePackerV2.js";
 import {
   clearPriorPackObligations,
@@ -157,6 +217,8 @@ import {
 } from "./taskContractStore.js";
 import { hasOpenUniverseIntent, isAdditiveEnumIntent } from "./openUniverseIntent.js";
 import { trace, isTraceEnabled, currentTraceCallId } from "../../util/trace.js";
+import { noteSemanticFrontierTraceSeed } from "../../protocol/semanticFrontierTraceContext.js";
+import { annotateSemanticFrontierContinuation, prepareSemanticFrontierTraceSeed } from "./semanticFrontier.js";
 import { xlsxRoster, xlsxTable } from "../../office/xlsx.js";
 import { docxSections } from "../../office/docx.js";
 import { pptxSlides } from "../../office/pptx.js";
@@ -193,7 +255,9 @@ import type {
   TaskReadinessObligation,
   TaskReadinessRisk,
   TaskSemanticClosure,
+  ToolCall,
   TaskVerificationRecipe,
+  TaskVerifyObligation,
   TaskWorkspaceState,
   TaskWiringEndpoint,
   TaskWiringEvidence,
@@ -231,7 +295,26 @@ import {
   isArtifactTaskPackSurface,
 } from "./artifactSections.js";
 export { isArtifactTaskPackSurface } from "./artifactSections.js";
-import { applyCanonicalTaskDecision, discoveryBundleNext, hasServedZoomAffordance } from "./canonicalDecision.js";
+import { applyCanonicalTaskDecision, discoveryBundleNext, hasServedZoomAffordance, projectCompletion } from "./canonicalDecision.js";
+
+type ContinuationCall = ToolCall & { purpose?: string };
+type ContinuationLike = {
+  readonly tool: string;
+  readonly arguments: { readonly [key: string]: unknown };
+  readonly purpose?: string;
+};
+
+function canonicalContinuationCall(call: ContinuationLike | undefined): ContinuationCall | undefined {
+  return call as ContinuationCall | undefined;
+}
+
+function deriveNextFromPlan(plan: ContinuationPlan): ContinuationCall | undefined {
+  return plan.stages[0]?.calls[0] as ContinuationCall | undefined;
+}
+
+import { applySemanticFrontierDemotion, attachSfDemotionResidency, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
+import { markSemanticFrontierNamedJoin } from "./sfWithholdingMarks.js";
+
 export {
   applyCanonicalTaskDecision,
   canonicalTaskDecisionInvariantViolations,
@@ -239,6 +322,7 @@ export {
   enforceCanonicalTaskDecisionAtExit,
   hasCertificateBinding,
   hasServedZoomAffordance,
+  projectCompletion,
   type CanonicalDecisionFenceReport,
   type CanonicalTaskDecision,
   type CanonicalTaskDecisionKind,
@@ -262,6 +346,36 @@ export {
  * Code-bearing tiers remain independently bounded by capForResult().
  */
 export const MAX_TASK_PACK_BYTES = 22 * 1024;
+
+/** Minimum caller budget that can carry the smallest honest task-pack envelope. */
+export const REQUIRED_MIN_TASK_PACK_BYTES = 6144;
+
+export function admitTaskPackBudget(args: Pick<TaskPackArgs, "maxBytes" | "maxTokens">): Record<string, unknown> | undefined {
+  const requested = resolveCallerByteCeiling(args.maxBytes, args.maxTokens, undefined);
+  return requested !== undefined && requested < REQUIRED_MIN_TASK_PACK_BYTES
+    ? taskPackBudgetRefusal(requested, REQUIRED_MIN_TASK_PACK_BYTES)
+    : undefined;
+}
+
+/** Internal-only proof fence: caller budgets below the construction floor are
+ * refused before this builder, so reaching a failed assertion is a programming
+ * error rather than a wire-visible task-pack outcome. */
+function assertTaskPackConstructionInvariant(condition: unknown, detail: string): asserts condition {
+  if (!condition) throw new Error(`unreachable task-pack construction invariant: ${detail}`);
+}
+
+function taskPackBudgetRefusal(requested: number, requiredMin: number): Record<string, unknown> {
+  return {
+    kind: "refusal",
+    code: "budget-below-minimum",
+    field: "budget.bytes",
+    required_min_bytes: requiredMin,
+    retry: "call",
+    ...(requested < DEFAULT_RESPONSE_BYTE_FLOOR
+      ? { budget_floor_applied: { requested, applied: DEFAULT_RESPONSE_BYTE_FLOOR } }
+      : {}),
+  };
+}
 
 /**
  * Upper bound of the confidence-scaled cap (see capForResult()). Kept at the
@@ -431,6 +545,22 @@ const MAX_SURFACE_CODE_BYTES = 12288;
 
 /** Maximum surfaces when all roles are distinct. */
 const MAX_SURFACES_DISTINCT = 6;
+
+/**
+ * Literal-first admits a source only while it remains rare in the exact
+ * ordinary-find universe. The floor preserves bounded multi-surface renames
+ * in small repositories; the ratio scales the same policy for monorepos.
+ */
+export const LITERAL_SOURCE_RARITY_RATIO = 0.02;
+export const LITERAL_SOURCE_RARITY_FLOOR = MAX_SURFACES_DISTINCT * 2;
+
+export function literalSourceRarityLimit(universePaths: number): number {
+  const boundedUniverse = Math.max(0, Math.floor(universePaths));
+  return Math.max(
+    LITERAL_SOURCE_RARITY_FLOOR,
+    Math.ceil(boundedUniverse * LITERAL_SOURCE_RARITY_RATIO),
+  );
+}
 // Serve-honesty (2026-08-01): enrichment passes (query-named files, header/
 // source pairs) on a multi_concern pack may fill past the base surface cap —
 // a 3-concern fix pack legitimately owns 3 primaries + pairs + a named
@@ -475,7 +605,8 @@ type ParsedSymbols = Awaited<ReturnType<typeof collectSymbols>>;
 /** Sentinel distinguishing "read, but failed" from "not yet read". */
 const READ_FAILED = Symbol("read-failed");
 
-class FileReadCache {
+// Exported alongside `sfNamedFrontierRow` for the FX-OH F1 pin.
+export class FileReadCache {
   private readonly content = new Map<string, string | typeof READ_FAILED>();
   private readonly symbols = new Map<string, ParsedSymbols | null>();
 
@@ -1049,9 +1180,44 @@ function buildContractDocOutline(workspace: string, relPath: string, cache?: Fil
  * (`typeof p === "object" && p !== null ? String(p.path) : String(p)`), which
  * task_pack's own dispatch had not applied, silently turning a supplied bare
  * string into an empty path (see TaskPackArgs.paths's doc comment).
+ *
+ * FX-M1/E1: also resolves a HANDLE-only entry (no `path` at all) — the shape
+ * `server.ts`'s `legacyPathTarget` now preserves (rather than collapsing to
+ * `{}`) for a bare `{handle}` target riding in a mixed
+ * `targets:[{handle},{path}]` `read_file` batch. `handleTable.get` is scoped
+ * to THIS call's workspace via `callWorkspace()` — safe to read here with no
+ * extra parameter because every caller of `buildTaskPack`/`buildSeededTaskPack`
+ * runs inside `runWithCallWorkspace` (server.ts's dispatch wrapper), the same
+ * ambient scoping `handleTable.get`'s own persistence-rehydrate path already
+ * relies on. An entry whose handle cannot be resolved (unknown, or minted
+ * against a different workspace) keeps `path:""` — unrepresentable as a real
+ * TaskPackPathEntry, so it stays `""` deliberately, and the ONE call site
+ * that gates on that emptiness (buildSeededTaskPack's malformed-entry check,
+ * "invalid paths[] entry") reports the handle by name instead of a bare
+ * "missing path" — see that gate for the disclosure. Threading `handle`
+ * through on that failure path only (never on a successful resolve, where the
+ * plain `{path}` shape callers already expect is unchanged byte-for-byte) is
+ * why the return type carries an intersection cast rather than a
+ * `TaskPackPathEntry.handle` field: no other reader of this type needs to
+ * know about it, and the one that does reads it defensively.
  */
 function normalizePathEntry(p: TaskPackPathEntry | string): TaskPackPathEntry {
-  return typeof p === "string" ? { path: p } : p;
+  if (typeof p === "string") return { path: p };
+  const asRecord = p as unknown as Record<string, unknown>;
+  if (typeof asRecord["path"] === "string" && asRecord["path"].length > 0) return p;
+  const handle = typeof asRecord["handle"] === "string" ? asRecord["handle"] : undefined;
+  if (handle === undefined) return p;
+  const workspace = callWorkspace();
+  const hEntry = handleTable.get(handle);
+  const resolvedPath = hEntry !== undefined && workspace !== undefined && hEntry.workspaceRoot === workspace
+    ? hEntry.path
+    : undefined;
+  if (resolvedPath !== undefined && resolvedPath.length > 0) {
+    return { ...(p as TaskPackPathEntry), path: resolvedPath };
+  }
+  // Unresolved: keep `path:""` (the existing empty-path contract) but carry
+  // the handle along so the malformed-entry gate can name it.
+  return { ...(p as TaskPackPathEntry), path: "", handle } as unknown as TaskPackPathEntry;
 }
 
 type DiscoveredArtifactFile = ReturnType<typeof discoverArtifactFiles>[number];
@@ -1359,22 +1525,25 @@ function remainingArtifactSectionsCall(
   surface: ArtifactTaskPackSurface,
   section: ArtifactTaskPackSection,
   remaining: readonly string[],
-): string {
-  const base = `read_file mode=artifact handle=${surface.handle}`;
-  if ("sheet" in section) return `${base} sheet=${section.sheet} as=json`;
-  if (section.kind === "docx") return `${base} sections=${JSON.stringify(remaining.slice(0, MAX_REMAINING_SECTION_IDS))}`;
+): ContinuationCall {
+  const call = (extra: ToolCall["arguments"] = {}): ContinuationCall => ({
+    tool: "read_file",
+    arguments: { mode: "artifact", handle: surface.handle, ...extra },
+  });
+  if ("sheet" in section) return call({ sheet: section.sheet, as: "json" });
+  if (section.kind === "docx") return call({ sections: remaining.slice(0, MAX_REMAINING_SECTION_IDS) });
   if (section.kind === "pptx") {
     const slides = remaining
       .map((id) => /^Slide\s+(\d+)/.exec(id)?.[1])
       .filter((slide): slide is string => slide !== undefined)
       .slice(0, MAX_REMAINING_SECTION_IDS);
-    return slides.length > 0 ? `${base} slides=${JSON.stringify(slides)}` : base;
+    return call(slides.length > 0 ? { slides } : {});
   }
   const pages = remaining
     .map((id) => /^page-(\d+)$/.exec(id)?.[1])
     .filter((page): page is string => page !== undefined)
     .slice(0, MAX_REMAINING_SECTION_IDS);
-  return pages.length > 0 ? `${base} pages=${JSON.stringify(pages)}` : base;
+  return call(pages.length > 0 ? { pages } : {});
 }
 
 /** Bound the id list so `remaining_sections` stays a pointer, not an inventory. */
@@ -1638,11 +1807,1356 @@ export async function buildTaskPack(
       artifactSectionPrefetch.delete(workspace);
     }
     try {
-      return await buildTaskPackCore(args, workspace);
+      const built = await buildTaskPackCore(args, workspace);
+      const explicitBudget = resolveCallerByteCeiling(args.maxBytes, args.maxTokens, undefined);
+      if (explicitBudget !== undefined && explicitBudget < DEFAULT_RESPONSE_BYTE_FLOOR) {
+        (built as unknown as Record<string, unknown>).budget_floor_applied = {
+          requested: explicitBudget,
+          applied: DEFAULT_RESPONSE_BYTE_FLOOR,
+        };
+      }
+      // FX-I-A: W-SATISFACTION's state and W-DEMOTE's body withholding have
+      // ALREADY run, inside the core, at `applySemanticFrontierPreBookingSeam`
+      // — before the first producer that books a served byte, so the pack that
+      // was booked is the pack that ships. What is left here is the part that
+      // cannot be synchronous (the relation-packet port build) and the part
+      // that must see the final pack (the continuation bundle's extra bodyless
+      // rows, and the decision restated over them). None of the three can
+      // withhold a body, so none of them can invalidate a booking.
+      await applySemanticFrontierRelationPackets(args, workspace, built);
+      applySfContinuationBundle(built, workspace);
+      try {
+        // The decision must describe the pack as it SHIPS: the continuation
+        // bundle may have appended addressable bodyless rows since the
+        // pre-booking seam restated it. `applyCanonicalTaskDecision`
+        // re-derives rather than accumulates, and this is flag- and
+        // context-gated inside, so a flag-off pack never reaches it.
+        reapplySemanticFrontierDecision(built);
+      } catch (err) {
+        // I-1: an SF defect is a trace line, never a degraded pack.
+        try {
+          trace(
+            "sf_pack_seam_error",
+            { message: err instanceof Error ? err.message : String(err) },
+            workspace,
+          );
+        } catch {
+          /* the trace channel is best-effort too */
+        }
+      }
+      return built;
     } finally {
       artifactSectionPrefetch.delete(workspace);
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Semantic Frontier v0.15 — the task_pack state seam (W-SATISFACTION).
+//
+// DESIGN-v0.15-semantic-frontier-plan.md §3.2 (context/keying), §3.3
+// (lifecycle: record what was served, then apply the kind table), §11 Wave 3.
+//
+// WHAT THIS WAVE DOES AND DOES NOT DO. It builds the `SfTaskContext` from what
+// the pack already holds, extracts the task's structural concerns, opens the
+// IR v2 record, catalogs the surfaces this pack SERVED, discharges the
+// concerns those bodies actually cover, records the decision state, and
+// publishes the resulting snapshot on a `WeakMap` side table for W-DEMOTE and
+// W-NEXT-ARBITER. It changes NO EMITTED BYTE — not with the flags off, and not
+// with them on. `sfSatisfaction.ts`'s `attachSfPackContext` is a side table
+// precisely so that is a structural fact rather than a review promise: no
+// serializer, fingerprinter, or wire baseline can reach a WeakMap, and
+// `sfSatisfaction.spec.ts` pins flag-on/flag-off byte identity anyway.
+//
+// FAIL-OPEN, TWICE (invariant I-1). `sfState.ts` is already total — every
+// exported function returns an inert snapshot instead of throwing. This
+// wrapper adds a second try/catch anyway, because the things it does OUTSIDE
+// the adapter (reading `result.surfaces`, parsing a range, building a ledger
+// reader) belong to the read path and must not be able to fail it either. An
+// SF defect degrades to a trace line and an unchanged pack.
+//
+// PRIVACY. The verbatim query is used in-process for concern EXTRACTION (that
+// is the extractor's whole input) but never enters the `SfTaskContext`. The
+// identity chain hashes whatever it is given (`deriveIrTaskRef`), so passing
+// the fingerprint instead of the text is identity-preserving and keeps request
+// text out of a persisted record and out of every SF trace line.
+// ---------------------------------------------------------------------------
+
+/** `EvidenceRole`'s closed member list, checked without importing the guard. */
+const SF_EVIDENCE_ROLES: ReadonlySet<string> = new Set([
+  "target",
+  "definition",
+  "consumer",
+  "test",
+  "config",
+  "build",
+  "doc",
+]);
+
+function sfLineRange(range: string | undefined): { startLine: number; endLine: number } | undefined {
+  if (typeof range !== "string") return undefined;
+  const match = /^(\d+)-(\d+)$/.exec(range.trim());
+  if (match === null) return undefined;
+  const startLine = Number(match[1]);
+  const endLine = Number(match[2]);
+  if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) return undefined;
+  return { startLine, endLine };
+}
+
+/** The caller's `paths[]`, in the extractor's target shape. ORDER IS KEPT (I-2). */
+function sfExplicitTargets(paths: TaskPackArgs["paths"]): SfExplicitTarget[] {
+  const out: SfExplicitTarget[] = [];
+  for (const entry of paths ?? []) {
+    if (typeof entry === "string") {
+      if (entry !== "") out.push({ path: entry });
+      continue;
+    }
+    if (entry === null || typeof entry !== "object") continue;
+    const target: SfExplicitTarget = {
+      ...(typeof entry.path === "string" && entry.path !== "" ? { path: entry.path } : {}),
+      ...(typeof entry.symbol === "string" && entry.symbol !== "" ? { symbol: entry.symbol } : {}),
+    };
+    if (target.path !== undefined || target.symbol !== undefined) out.push(target);
+  }
+  return out;
+}
+
+/**
+ * The surfaces this pack SERVED, as both a catalog record and a satisfaction
+ * input. A bodyless supporting line is still cataloged (the caller was told
+ * the address is reachable) but carries `body:false`, which is what stops it
+ * from closing anything (§3.3: "bodyless supporting 行は evidence を追加しない"
+ * — here it is recorded as reachability and excluded from closure, which is
+ * the same guarantee with an auditable record).
+ */
+function sfServedFromPack(
+  result: TaskPackResult,
+  namedPaths: ReadonlySet<string>,
+  concerns: readonly SfStructuralConcern[],
+  workspace: string,
+): SfResponseEvidence[] {
+  const out: SfResponseEvidence[] = [];
+  // SF-F3: one file-sha per distinct path, computed at most once. `surfaceFileSha`
+  // opens the file, so a pack with many surfaces of one file must not pay for it
+  // repeatedly.
+  const shaCache = new Map<string, string | undefined>();
+  const fileShaOf = (relPath: string): string | undefined => {
+    if (!shaCache.has(relPath)) shaCache.set(relPath, surfaceFileSha(workspace, relPath));
+    return shaCache.get(relPath);
+  };
+  for (const surface of result.surfaces ?? []) {
+    if (surface === null || typeof surface !== "object") continue;
+    if (typeof surface.path !== "string" || surface.path === "") continue;
+    const body = typeof surface.code === "string" && surface.code.length > 0;
+    const lineRange = sfLineRange(surface.range);
+    const roles = (typeof surface.role === "string" && SF_EVIDENCE_ROLES.has(surface.role)
+      ? [surface.role]
+      : []) as NonNullable<SfServedEvidence["roles"]>;
+    // SF-F3: a freshly computed pack carries no `sha` on its surfaces (`sha`
+    // rides the pack_unchanged re-serve), and this seam used to record such a
+    // body as `evidenceClass:"direct"` with an EMPTY `contentHash` and an
+    // EMPTY `validityKeys` — an entry nothing could ever invalidate, so a
+    // later edit to the file never made the closure stale. Derive the file sha
+    // instead (the same `surfaceFileSha` the pack fingerprint uses, so the two
+    // agree on what "unchanged" means), and fall back to the served bytes'
+    // own hash for a file too large or unreadable to fingerprint — never to
+    // an empty hash.
+    const sha = (typeof surface.sha === "string" && surface.sha !== "" ? surface.sha : undefined)
+      ?? fileShaOf(surface.path)
+      ?? (body ? shaOfText(surface.code as string) : undefined);
+    const entry: SfResponseEvidence = {
+      path: surface.path,
+      ...(sha === undefined ? {} : { sha }),
+      ...(lineRange === undefined ? {} : { lineRange }),
+      ...(typeof surface.symbol === "string" && surface.symbol !== "" ? { symbol: surface.symbol } : {}),
+      // A BODY went out AND something binds it to bytes: that is what `direct`
+      // claims. With no derivable hash the honest class is `structural`.
+      evidenceClass: body && sha !== undefined ? "direct" : "structural",
+      roles,
+      concernIds: concernsAddressedByEvidence(concerns, {
+        path: surface.path,
+        ...(typeof surface.symbol === "string" && surface.symbol !== "" ? { symbol: surface.symbol } : {}),
+      }),
+      // I-2: "required" means the CALLER named this address, not that the pack
+      // marked the surface required. A caller-named address is permanently
+      // out of reach of demotion.
+      required: namedPaths.has(surface.path),
+      body,
+    };
+    // SF-F10: stamp the CATALOG's evidence id, so the ids `recordServed`
+    // catalogs and the ids the satisfaction updater names in its proofs are
+    // the same strings. Without it the updater fell back to its own
+    // `path:start-end` spelling, every proof ref dangled, and the closure the
+    // seam nominated was refused for want of evidence it had just served.
+    out.push({ ...entry, evidenceId: sfEvidenceIdFor(entry) });
+  }
+  return out;
+}
+
+/**
+ * The decision state this pack represents, derived from the pack ALONE.
+ *
+ * `TaskPackResult` carries no `decision`: the canonical decision is projected
+ * at the wire choke point (`protocol/decisionWire.ts`), which this seam must
+ * not reach into and must not duplicate. `coverage` plus `missing` is what the
+ * pack itself proved, so that is what is recorded — `prepared` when discovery
+ * closed, `pending` otherwise. W-NEXT-ARBITER owns the decision projection and
+ * may refine this; nothing downstream of the wire reads it today.
+ */
+/**
+ * Bound on BARE identifiers this seam will resolve through the workspace in
+ * one call. `sfConcerns.ts` already stops opening identifier concerns at
+ * `SF_IDENTIFIER_CONCERNS_MAX` (6), and each lookup here costs one literal
+ * scan plus a bounded content probe, so the two ceilings match deliberately:
+ * the extractor can never ask for a lookup this budget would refuse.
+ */
+const SF_INDEX_LOOKUPS_MAX = 6;
+
+/** D6: files visited when building the per-call basename index. */
+const SF_BASENAME_INDEX_MAX_FILES = 20000;
+/** D6: same-basename paths retained per basename. */
+const SF_BASENAME_MATCHES_MAX = 8;
+
+/**
+ * Build-output directory segments, mirroring `tools/findReferences.ts`'s
+ * `GENERATED_SEGMENTS`. The basename is skipped on purpose: `src/out.ts` is
+ * source, `src/out/x.ts` is build output.
+ */
+const SF_GENERATED_SEGMENTS: ReadonlySet<string> = new Set([
+  "dist", "build", "out", "coverage", ".next", "target", "generated", "__generated__",
+]);
+
+/**
+ * SF-1 — the two workspace capabilities `extractStructuralConcerns` is
+ * INJECTED with, and without which every concern it mints is advisory.
+ *
+ * This is the defect the round-11 review found: the seam called the extractor
+ * with neither an `anchorResolver` nor a `workspaceIndex`, so a
+ * `Class::member` anchor resolved to nothing (`definitions.length === 0` =>
+ * `advisory: true`) and a bare identifier opened no concern at all — which
+ * makes the whole concerns -> arbiter -> demote chain inert with every flag
+ * on, because I-3 says an advisory concern closes nothing, blocks nothing and
+ * is never selected.
+ *
+ * Both capabilities are the EXISTING D5 machinery, not new logic:
+ * `resolveQualifiedSymbolAnchors` (definition/declaration/counterpart sites
+ * for a qualified anchor) and `workspaceCallableDefinitionPaths` (the
+ * definition sites of a bare callable token). Every result is memoized per
+ * call and the identifier path is budgeted, so the extractor cannot turn a
+ * long query into an unbounded number of workspace scans.
+ */
+function sfWorkspaceCapabilities(workspace: string): {
+  readonly anchorResolver: SfAnchorResolver;
+  readonly workspaceIndex: SfWorkspaceIndex;
+} {
+  const cache = new FileReadCache();
+  const anchorMemo = new Map<string, SfAnchorResolution>();
+  const definitionMemo = new Map<string, readonly string[]>();
+  const existsMemo = new Map<string, boolean>();
+  let lookups = 0;
+  // D6: basename -> workspace paths, built at most ONCE per call and only if a
+  // query actually contains a bare filename token (the extractor calls
+  // `pathsForBasename` lazily, so a query without one pays nothing).
+  let basenameIndex: Map<string, string[]> | undefined;
+
+  const anchorResolver: SfAnchorResolver = (anchor) => {
+    const key = anchor.raw.toLowerCase();
+    const memo = anchorMemo.get(key);
+    if (memo !== undefined) return memo;
+    let resolved: SfAnchorResolution;
+    try {
+      const found = resolveQualifiedSymbolAnchors(anchor.raw, workspace, cache);
+      resolved = {
+        definitions: [...found.definitions],
+        declarations: [...found.declarations],
+        counterparts: [...found.counterparts],
+      };
+    } catch {
+      // I-1: a resolver defect degrades this anchor to advisory, never fails
+      // the read.
+      resolved = {};
+    }
+    anchorMemo.set(key, resolved);
+    return resolved;
+  };
+
+  const workspaceIndex: SfWorkspaceIndex = {
+    definitionPathsFor(identifier: string): readonly string[] {
+      const key = identifier.toLowerCase();
+      const memo = definitionMemo.get(key);
+      if (memo !== undefined) return memo;
+      if (lookups >= SF_INDEX_LOOKUPS_MAX) return [];
+      lookups += 1;
+      let paths: readonly string[] = [];
+      try {
+        const candidates: string[] = [];
+        for (const match of scanLiteral(identifier, workspace, { caseInsensitive: false })) {
+          if (!candidates.includes(match.path)) candidates.push(match.path);
+        }
+        paths = workspaceCallableDefinitionPaths(identifier, candidates, workspace, cache);
+        // D7 (FX-R3b): a callable resolver cannot see a constant, class, type,
+        // enum or module-level value. Falling back keeps `ENGAGEMENT_WITNESS`
+        // (and every other non-callable the caller names) groundable, which is
+        // what the D4 marking source needs to be non-empty at all.
+        if (paths.length === 0) {
+          paths = workspaceValueDefinitionPaths(identifier, candidates, workspace, cache);
+        }
+      } catch {
+        paths = [];
+      }
+      definitionMemo.set(key, paths);
+      return paths;
+    },
+    /**
+     * D6: every workspace path whose basename equals `basename`. One bounded
+     * walk (the same `walkCodeFiles` the discovery lanes use, generic text and
+     * artifacts included so `CONTRACT.md` / `pyproject.toml` / a `.zip` are
+     * addressable), memoized for the whole call.
+     */
+    pathsForBasename(basename: string): readonly string[] {
+      if (basenameIndex === undefined) {
+        const built = new Map<string, string[]>();
+        try {
+          let seen = 0;
+          for (
+            const file of walkCodeFiles(workspace, {
+              includeGenericText: true,
+              includeArtifacts: true,
+              respectGitignore: true,
+            })
+          ) {
+            if (seen >= SF_BASENAME_INDEX_MAX_FILES) break;
+            seen += 1;
+            const base = (file.relPath.split(/[\\/]/).at(-1) ?? "").toLowerCase();
+            if (base === "") continue;
+            const bucket = built.get(base);
+            if (bucket === undefined) built.set(base, [file.relPath]);
+            else if (bucket.length < SF_BASENAME_MATCHES_MAX) bucket.push(file.relPath);
+          }
+        } catch {
+          // I-1: a walk defect degrades the rule to "no match", never fails.
+        }
+        basenameIndex = built;
+      }
+      return basenameIndex.get(basename.toLowerCase()) ?? [];
+    },
+    hasPath(relPath: string): boolean {
+      const memo = existsMemo.get(relPath);
+      if (memo !== undefined) return memo;
+      let exists = false;
+      try {
+        const abs = safeResolve(relPath, workspace);
+        if (abs !== undefined) {
+          const real = fs.realpathSync(abs);
+          exists = isWithin(real, resolveReal(workspace)) && fs.statSync(real).isFile();
+        }
+      } catch {
+        exists = false;
+      }
+      existsMemo.set(relPath, exists);
+      return exists;
+    },
+    roleFor(relPath: string): "template" | "generated" | undefined {
+      const segments = relPath.split(/[\\/]/);
+      for (let i = 0; i < segments.length - 1; i += 1) {
+        if (SF_GENERATED_SEGMENTS.has(segments[i]!)) return "generated";
+      }
+      // `template` has no directory-segment authority in this codebase, so it
+      // is left to `sfConcerns.ts`'s own path patterns (an index that returns
+      // `undefined` falls through to them by contract).
+      return undefined;
+    },
+    counterpartsFor(relPath: string): readonly string[] {
+      // The header/impl rule, reusing the bounded same-stem probe the
+      // continuation seam already runs (`x.hpp` -> `x.cpp`, `x.d.ts` -> `x.ts`).
+      try {
+        return sfContinuationCandidatePathsNear(relPath, workspace);
+      } catch {
+        return [];
+      }
+    },
+  };
+
+  return { anchorResolver, workspaceIndex };
+}
+
+/**
+ * D8 (FX-R3c, 2026-09-04): ONE set of SF workspace capabilities per CALL.
+ *
+ * `sfWorkspaceCapabilities` memoizes a symbol-resolution cache AND (since D6)
+ * a whole-workspace basename index. D8 needs the basename resolution twice in
+ * one call — once early, to join the caller-named file to the frontier before
+ * surface selection is booked, and once at the pre-booking seam, to extract
+ * the full concern set — and building it twice would mean two workspace walks
+ * AND two authorities that can disagree about which file the caller named.
+ * Keyed on the request `args`, which is the one object that survives every
+ * `result` copy `dedupeTrimAndPersist` makes (trim, fallback, receipt).
+ */
+const sfCallCapabilities = new WeakMap<object, {
+  readonly anchorResolver: SfAnchorResolver;
+  readonly workspaceIndex: SfWorkspaceIndex;
+}>();
+
+function sfCapabilitiesFor(args: TaskPackArgs | undefined, workspace: string): {
+  readonly anchorResolver: SfAnchorResolver;
+  readonly workspaceIndex: SfWorkspaceIndex;
+} {
+  if (args === undefined) return sfWorkspaceCapabilities(workspace);
+  const memo = sfCallCapabilities.get(args);
+  if (memo !== undefined) return memo;
+  const built = sfWorkspaceCapabilities(workspace);
+  sfCallCapabilities.set(args, built);
+  return built;
+}
+
+/** Caller-named workspace FILES `query` grounds, through the shared index (D8). */
+function sfGroundedQueryFilePaths(
+  query: string,
+  index: SfWorkspaceIndex,
+  namedPaths: ReadonlySet<string>,
+): string[] {
+  const out: string[] = [];
+  for (const anchor of sfQueryFileAnchors(query, index, namedPaths)) {
+    if (anchor.kind !== "path" || !anchor.proven) continue;
+    if (!out.includes(anchor.path)) out.push(anchor.path);
+  }
+  return out;
+}
+
+function sfDecisionStateOf(result: TaskPackResult): "pending" | "prepared" {
+  const complete = result.coverage === "complete" || result.coverage === "focused";
+  const missing = Array.isArray(result.missing) ? result.missing.length : 0;
+  return complete && missing === 0 ? "prepared" : "pending";
+}
+
+/**
+ * The sync half of the SF lifecycle's state, carried from
+ * `openSemanticFrontierPackState` to the async relation-packet continuation
+ * so the two never re-derive (and so cannot disagree about) the task context,
+ * the concern set, or the snapshot they are both advancing.
+ */
+interface SfPackSeamState {
+  readonly ctx: SfTaskContext;
+  readonly concerns: readonly SfStructuralConcern[];
+  readonly groundingOf: ReadonlyMap<string, "direct" | "structural">;
+  snapshot: SfSnapshot;
+  satisfaction: SfSatisfactionResult;
+}
+
+const sfPackSeamStates = new WeakMap<object, SfPackSeamState>();
+
+/**
+ * FX-I-A (2026-09-03) — WHY THIS IS SYNC AND WHY IT RUNS INSIDE THE CORE.
+ *
+ * Every serve-booking producer (the edit gate's admissible union,
+ * `rememberCertifiedWorkingSet`, `captureServedPack`'s
+ * `recordPackServedRanges`) lives inside `dedupeTrimAndPersist`, which is
+ * inside `buildTaskPackCore`. W-DEMOTE may still WITHHOLD a body, so it has to
+ * run BEFORE all of them or those producers book bytes the response never
+ * sends — the round-13 finding-1 widening, where a demoted file's handle drove
+ * `edit.applied` under `workspace.scope:"served-evidence"`.
+ *
+ * Demotion eligibility needs this pack's SF context, so the context has to
+ * exist that early too. Everything the context needs is synchronous; only the
+ * relation-packet compilation (`compileSfRelationPackets`, a workspace-wide
+ * tree-sitter port build) is async, and it feeds `plan.wiring.evidence_graph`
+ * and concern satisfaction — never demotion eligibility. So the lifecycle is
+ * split: this sync opener runs at the pre-booking seam, and
+ * `applySemanticFrontierRelationPackets` continues it after the core returns,
+ * advancing the SAME record through the state stashed here.
+ *
+ * Total, like its predecessor: it returns `void`, cannot fail the pack, and
+ * never mutates `result` beyond the two WeakMap side tables.
+ */
+function openSemanticFrontierPackState(
+  args: TaskPackArgs,
+  workspace: string,
+  result: TaskPackResult,
+  extraConcerns: readonly SfStructuralConcern[] = [],
+): void {
+  if (!sfStatefulEnabled()) return;
+  if (sfPackSeamStates.has(result)) return;
+  try {
+    const query = typeof args.query === "string" ? args.query : "";
+    const targets = sfExplicitTargets(args.paths);
+    const profile = result.profile_binding?.selected ?? result.task_profile ?? "generic";
+
+    // W-VERIFY-GEN hook: `extraConcerns` (verify concerns derived from
+    // `result.change_contract.verify_obligations` at this function's call
+    // site) is additive, pure data passed in by the caller — this seam adds
+    // no new satisfaction logic of its own, per W-VERIFY-GEN's file scope.
+    // See sfVerifyObligations.ts's `verifyObligationsToSfConcerns`.
+    // SF-1: the extractor's two workspace capabilities are built HERE and
+    // passed in. Built only when the extraction flag is on, so a flag-off call
+    // pays nothing at all — not even the `FileReadCache` allocation.
+    const capabilities = sfStructuralConcernsEnabled()
+      ? sfCapabilitiesFor(args, workspace)
+      : undefined;
+    const concerns: SfStructuralConcern[] = [
+      ...(capabilities !== undefined
+        ? extractStructuralConcerns({
+          query,
+          targets,
+          profile,
+          writeAllowed: args.writeAllowed,
+          // §4.4(a) (IL-W3 landed the field/OR-logic; this is the production
+          // wire): has THIS task already issued a `references` search, by any
+          // query? Injected here, never read inside sfConcerns.ts itself —
+          // keeps the extractor pure.
+          referencesObserved: hasExecutedSearchAction(workspace, "references"),
+          // §4.2 (IL-W2): the same task already landed an edit — injected, never
+          // read inside sfConcerns.ts.
+          editObserved: getIntentEditObserved(workspace),
+          anchorResolver: capabilities.anchorResolver,
+          workspaceIndex: capabilities.workspaceIndex,
+        })
+        : []),
+      ...extraConcerns,
+    ];
+    // SF-F2: the grounding class each concern's claim demands, by id. A body
+    // claim (`definition`, `template`, `generated`, `verify`, `answer`) may
+    // not be closed by a structural catalog entry.
+    const groundingOf = new Map(concerns.map((concern) => [concern.id, sfConcernGrounding(concern.kind)] as const));
+
+    const ctx: SfTaskContext = {
+      workspaceRoot: workspace,
+      ...(typeof args.lane === "string" ? { lane: args.lane } : {}),
+      ...(typeof args.taskBinding === "string" && args.taskBinding !== ""
+        ? { taskId: args.taskBinding }
+        : {}),
+      ...(typeof result.qref === "string" && result.qref !== "" ? { qref: result.qref } : {}),
+      // The FINGERPRINT, never the text — see this section's PRIVACY note.
+      ...(query === "" ? {} : { query: shaOfText(query) }),
+      ...(args.taskEpoch === "new" ? { epochNew: true } : {}),
+      ...(args.forceServe === true ? { forceServe: true } : {}),
+      ledger: createSessionLedgerReader(workspace),
+    };
+
+    let latest: SfSnapshot = openSfTask(ctx, concerns);
+
+    const namedPaths = new Set(
+      targets.map((t) => t.path).filter((p): p is string => typeof p === "string" && p !== ""),
+    );
+    // D8 (FX-R3c), I-2: a file the caller NAMED IN THE REQUEST TEXT is a
+    // caller-named address exactly like one passed through structured
+    // `targets`. Adding it here is what puts it in `snapshot.requiredAddresses`
+    // once served, so W-DEMOTE can never withhold the body of the very file
+    // the query is about — and, symmetrically, is what lets demotion act on
+    // the UNBOUND candidates that are not serving any open concern.
+    if (capabilities !== undefined) {
+      for (const groundedPath of sfGroundedQueryFilePaths(query, capabilities.workspaceIndex, namedPaths)) {
+        namedPaths.add(groundedPath);
+      }
+    }
+    const served = sfServedFromPack(result, namedPaths, concerns, workspace);
+    if (served.length > 0) {
+      const after = recordServed(ctx, served);
+      if (after.active) latest = after;
+    }
+
+    let satisfaction = applyResponseToConcerns({
+      snapshot: latest,
+      concerns,
+      response: {
+        kind: "read.task_pack",
+        evidence: served,
+        decision: { state: sfDecisionStateOf(result) },
+      },
+      // R27b-FIX F9 (2026-09-05): a path-anchored concern closes on a served
+      // body only when that body COVERS the bounded window F9's own `next`
+      // asks for. `applySemanticFrontierNamedFrontier` already published the
+      // map for this exact `result` (see `attachSfPackContext` below).
+      directReadWindows: sfNamedFrontierDirectWindowsFor(result),
+    });
+    for (const concernId of satisfaction.satisfied) {
+      // The closure GATE has the last word (§3.4 I-4): a nomination this seam
+      // gets wrong is refused inside `markConcernSatisfied`, never applied.
+      const after = markConcernSatisfied(ctx, concernId, {
+        ...(satisfaction.proofs[concernId] ?? {}),
+        grounding: groundingOf.get(concernId) ?? "structural",
+      });
+      if (after.active) latest = after;
+    }
+
+    const decided = recordDecision(ctx, { state: sfDecisionStateOf(result) });
+    if (decided.active) latest = decided;
+
+    // NOT `closeSfTask`. A pack that closed DISCOVERY has not ended the task —
+    // the caller still has to edit and verify — and dropping the record's LRU
+    // entry here would forget a graph the very next call needs. Closing is
+    // W-VERIFY-CLOSURE's, on the verification path.
+    //
+    // `result` is this seam's own mutable pack object, returned as-is by
+    // `buildTaskPack`, but `server.ts`'s production dispatch shallow-copies it
+    // (`attachSupply`) before the decision the context below feeds into is
+    // ever derived (round-22B finding 2). `attachSfPackContext` stamps a
+    // token onto `result` that survives that copy — see `sfSatisfaction.ts`'s
+    // block comment — so this call site needs no change beyond calling it
+    // exactly as before.
+    attachSfPackContext(result, {
+      snapshot: latest,
+      concerns,
+      satisfaction,
+      observationOnly: sfObservationOnly(result.profile_binding),
+      // F9 (ruling (a)): `applySemanticFrontierNamedFrontier` runs earlier in
+      // `dedupeTrimAndPersist` (before this pre-booking seam), so its window
+      // map — if any — is already published for this exact `result` object.
+      namedFrontierDirectWindows: sfNamedFrontierDirectWindowsFor(result),
+    });
+    // SF-8 / D4: W-DEMOTE must ask the served ledger about a SPECIFIC ADDRESS,
+    // not settle for the pack-wide `ledgerWired` boolean the snapshot carries.
+    // Publish the very context this seam drove the record with — never a
+    // second, re-derived reader.
+    attachSfDemotionResidency(result, ctx);
+    sfPackSeamStates.set(result, { ctx, concerns, groundingOf, snapshot: latest, satisfaction });
+  } catch (err) {
+    // I-1: an SF defect is a trace line, never a degraded pack.
+    try {
+      trace(
+        "sf_pack_seam_error",
+        { message: err instanceof Error ? err.message : String(err) },
+        workspace,
+      );
+    } catch {
+      /* the trace channel is best-effort too */
+    }
+  }
+}
+
+/**
+ * The ASYNC continuation of the lifecycle `openSemanticFrontierPackState`
+ * opened: W-RELATION-SEAM (DESIGN-v0.15 §3.7). It compiles at most
+ * SF_RELATION_CONCERN_MAX relation packets for this pack's grounded relation
+ * concerns and projects them into the EXISTING `plan.wiring.evidence_graph`
+ * field (§4.2: no new wire field), then advances the same SF record with what
+ * those packets satisfied.
+ *
+ * Deliberately OUTSIDE the pre-booking seam: `compileSfRelationPackets` is a
+ * workspace-wide tree-sitter port build, it is the only async step in the
+ * lifecycle, and nothing it produces can make a surface demotion-eligible
+ * (eligibility reads `requiredAddresses`, the residency ledger and the
+ * surface's own body — never a relation packet). Running it after the pack has
+ * been booked therefore changes no booking, and running it before would force
+ * the whole synchronous core to become async.
+ *
+ * Skipped entirely under an observation-only profile binding (§3.6.2) — SF may
+ * record concerns there, but must not spend a workspace-wide port build on a
+ * profile that cannot use the result for decision/next/rank anyway.
+ */
+async function applySemanticFrontierRelationPackets(
+  args: TaskPackArgs,
+  workspace: string,
+  result: TaskPackResult,
+): Promise<void> {
+  if (!sfStatefulEnabled()) return;
+  if (!sfRelationPacketsEnabled() || !graphEvidenceEnabled()) return;
+  if (sfObservationOnly(result.profile_binding)) return;
+  const state = sfPackSeamStates.get(result);
+  if (state === undefined) return;
+  try {
+    const { ctx, concerns, groundingOf } = state;
+    let latest = state.snapshot;
+    let satisfaction = state.satisfaction;
+    // ROUND-24 FINDING 1 / RULING (dd), 2026-09-04 (FX-Y2): this pass runs
+    // strictly AFTER `applySemanticFrontierPreBookingSeam`'s demotion step
+    // (this function's own doc comment; `buildTaskPack` awaits this only once
+    // `buildTaskPackCore` — and therefore the pre-booking seam — has already
+    // returned), so `result.surfaces` here is the POST-SEAM, POST-DEMOTION
+    // truth: a surface `TL_SF_DEMOTE` withheld already reads bodyless. Recompute
+    // served evidence fresh from THAT state (never reuse the sync pass's
+    // pre-demotion `served` list, which is exactly the stale, too-generous
+    // input the finding traced) and hand it to `applyResponseToConcerns` as
+    // this response's own `evidence`, so `relationAnchorGroundingServed`'s
+    // sibling check can tell a genuinely-served definition/declaration from a
+    // demoted, bodyless one instead of trusting the persisted "satisfied"
+    // mark alone.
+    const namedPaths = new Set(
+      sfExplicitTargets(args.paths)
+        .map((t) => t.path)
+        .filter((p): p is string => typeof p === "string" && p !== ""),
+    );
+    const groundingEvidence = sfServedFromPack(result, namedPaths, concerns, workspace);
+    const relationOutcome: SfRelationSeamOutcome = await compileSfRelationPackets({
+      workspaceRoot: workspace,
+      ...(typeof args.lane === "string" ? { lane: args.lane } : {}),
+      concerns,
+      ...(result.wiring?.evidence_graph !== undefined
+        ? { existingGraph: result.wiring.evidence_graph }
+        : {}),
+    });
+    if (relationOutcome.evidenceGraph !== undefined) {
+      result.wiring = result.wiring !== undefined
+        ? { ...result.wiring, evidence_graph: relationOutcome.evidenceGraph }
+        : {
+          version: 1,
+          status: "needs-followup",
+          connections: [],
+          missing: [],
+          edit_frontier: [],
+          review_frontier: [],
+          evidence_graph: relationOutcome.evidenceGraph,
+          note: "relation packet(s) merged for grounded relation concern(s) (W-RELATION-SEAM)",
+        };
+    }
+    // `applyResponseToConcerns` accepts exactly one `relationPacket` per
+    // call (§4.2), so a second compiled packet (a different anchor) needs
+    // its own pass — merged via `mergeSfSatisfactionResults`, never a new
+    // satisfaction rule.
+    for (const { view } of relationOutcome.packets) {
+      const relationPass = applyResponseToConcerns({
+        snapshot: latest,
+        concerns,
+        response: { kind: "read.task_pack", relationPacket: view, evidence: groundingEvidence },
+        directReadWindows: sfNamedFrontierDirectWindowsFor(result),
+      });
+      for (const concernId of relationPass.satisfied) {
+        const after = markConcernSatisfied(ctx, concernId, {
+          ...(relationPass.proofs[concernId] ?? {}),
+          grounding: groundingOf.get(concernId) ?? "structural",
+        });
+        if (after.active) latest = after;
+      }
+      satisfaction = mergeSfSatisfactionResults(satisfaction, relationPass, concerns);
+    }
+    state.snapshot = latest;
+    state.satisfaction = satisfaction;
+    attachSfPackContext(result, {
+      snapshot: latest,
+      concerns,
+      satisfaction,
+      observationOnly: sfObservationOnly(result.profile_binding),
+      // F9 (ruling (a)): carry the same window map forward on this re-attach
+      // — see the sync seam's own attach call for why it is already published.
+      namedFrontierDirectWindows: sfNamedFrontierDirectWindowsFor(result),
+    });
+  } catch (err) {
+    // I-1: an SF defect is a trace line, never a degraded pack.
+    try {
+      trace(
+        "sf_pack_seam_error",
+        { message: err instanceof Error ? err.message : String(err) },
+        workspace,
+      );
+    } catch {
+      /* the trace channel is best-effort too */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// D8 (FX-R3c, 2026-09-04) — THE CALLER-NAMED FRONTIER JOIN.
+//
+// THE DEFECT, LIVE. On the sealed SF05 replay the query named a file twice.
+// D6 resolved it to one real workspace address and minted a GROUNDED,
+// non-advisory structural concern for it — and the pack served seven other
+// files, listed those same seven in `frontier_index`, pointed `next` at a
+// codeless row of one of them, and demoted nothing. The concern was correct
+// and completely inert.
+//
+// THE CAUSE. Concern extraction runs at the PRE-BOOKING seam
+// (`openSemanticFrontierPackState`, above), which `dedupeTrimAndPersist`
+// reaches long AFTER the locator has fixed `result.surfaces` and
+// `attachFrontierIndex` has inventoried them. Nothing ever fed a grounded
+// concern's address back into surface selection, so "the caller named this
+// file" could influence `next` at best and the served bytes never.
+//
+// THE FIX. Resolve the caller-named file anchors HERE — before
+// `finalizePackServeState`/`attachFrontierIndex`, before the contract build,
+// before `trimToCap`, and therefore before every booking producer (FX-J/FX-K:
+// they all run at `dedupeTrimAndPersist`'s exit over the FINAL pack, so this
+// join is booked exactly like any other surface and `sfBookingOrderFence`'s
+// ordering claim is unaffected). The row carries the file's BODY when it is
+// small enough to inline (`SF_NAMED_FRONTIER_MAX_BODY_BYTES` — a JOIN bound,
+// so one caller-named file can never dominate the pack before the real
+// shedder sees it); either way `trimToCap` Phase E is what decides whether the
+// body survives the pack's own byte cap, and a stripped row keeps its handle
+// plus `remaining_ranges`. That is exactly ruling (q)/(t)'s "served body
+// within caps, else bodyless row with handle + remaining", with no second
+// shedding POLICY invented here.
+//
+// GENERALITY. The rule is "an explicitly named file that grounds a
+// non-advisory structural path concern is a caller-named target". It reads no
+// fixture, no path pattern, no task id: `sfQueryFileAnchors` (sfConcerns.ts)
+// is the ONE authority, the same one `extractStructuralConcerns` consumes, and
+// it is inert without the injected index.
+//
+// D9: an AMBIGUOUS basename (several same-basename files, no family token to
+// disambiguate) joins its candidates as BODYLESS rows — addressable handles
+// the caller can pick between — and `selectCanonicalNext` surfaces the same
+// set as `candidates` so an `await_input` carries a choice (ruling (cc))
+// rather than a dead end.
+// ---------------------------------------------------------------------------
+
+/** Largest body D8 will inline itself; beyond it the row joins bodyless. */
+const SF_NAMED_FRONTIER_MAX_BODY_BYTES = 32 * 1024;
+/** Caller-named files (and, for D9, ambiguous candidates) joined in one call. */
+const SF_NAMED_FRONTIER_MAX_ROWS = 4;
+const SF_NAMED_FRONTIER_MAX_CANDIDATE_ROWS = 8;
+/**
+ * F9 (2026-09-04, ruling (a)): the bound a FOLLOW-UP `next` call's bounded
+ * window is sized against for an over-bound caller-named file. Reuses ruling
+ * F1's own retired constant value (FX-OH, 636fc67e) — that ruling's mistake
+ * was inlining the window's bytes into the pack itself (measured as a new
+ * early-byte cost, ruling F1'); sizing a call the CALLER makes next carries no
+ * such cost, so the same "~8 KiB is a useful window" judgment still applies.
+ */
+const SF_NAMED_FRONTIER_ANCHORED_MAX_BODY_BYTES = 8 * 1024;
+
+// ---------------------------------------------------------------------------
+// FX-OH F1 (2026-09-04), SUPERSEDED BY RULING F1' (FX-OH2, 2026-09-04) --
+// AN UNAFFORDABLE CALLER-NAMED FILE IS NOT A WHOLE-FILE OBLIGATION, AND NOT AN
+// EARLY-BYTE OBLIGATION EITHER.
+//
+// THE DEFECT, MEASURED (FX-OH). A caller-named file OVER the join bound used
+// to join BODYLESS with `remaining_ranges:["1-<EOF>"]` -- the entire file
+// minted as an addressable, unserved obligation. On the sealed SF05 replay
+// that row was a 1,514-line, ~50 KB document, and following the wire's own
+// continuations took the opening from 2 calls / 30,759 B to 4 calls /
+// 82,934 B -- 3,491,284 byte-turns, 39.2 % of that 56-turn cell's whole
+// resident cost. The flag withheld ZERO bytes it would otherwise have sent
+// and ADDED 50 KB of reads.
+//
+// FX-OH's FIX (RETIRED). The row stayed and carried a BOUNDED, query-anchored
+// window (never more than 8 KiB) with `remaining_ranges` set to the exact
+// complement. That closed the whole-file obligation, but the deterministic
+// replay gate (ruling (mm), build 6ab07eaf) then measured the WINDOW ITSELF as
+// a NEW early-byte cost: SF05 all-nine rose to 40,887 B against an all-off
+// baseline of 31,832 B -- the inline window is bytes the all-off arm never
+// sent at all, and the row it produced still had a `remaining_ranges` other
+// continuation heuristics could follow.
+//
+// THE RULE NOW (ruling F1'). An over-bound caller-named file adds NO evidence
+// row -- neither the pre-FX-OH bodyless whole-file row nor FX-OH's windowed
+// one. It is caller-named and belongs in `snapshot.requiredAddresses` (I-2)
+// unconditionally (that ledger is untouched by this change: see
+// `openSemanticFrontierPackState`'s `sfGroundedQueryFilePaths` join, which
+// reads the query text and the workspace index directly, never this row), so
+// dropping the ROW does not make the caller's own words inert -- only the
+// EAGER, UNASKED-FOR shipment of bytes toward it. What the caller gets instead
+// is a `frontier_index` entry (path + handle, no body, no `remaining`, ~100 B)
+// so the file stays addressable by handle on the very first response: a
+// FOLLOW-UP call the caller chooses to make, never a body or a continuation
+// this response pushes on its own.
+//
+// Files within `SF_NAMED_FRONTIER_MAX_BODY_BYTES` (32 KiB) are UNCHANGED --
+// FX-OH F1 never touched them, and this ruling doesn't either.
+// ---------------------------------------------------------------------------
+
+/**
+ * The result of joining an over-bound caller-named file (ruling F1', FX-OH2):
+ * addressable by handle, but no evidence row -- no body, no `remaining`, and
+ * therefore nothing a continuation heuristic (the gap fallback, `TL_SF_DEMOTE`'s
+ * `limit.next`) could ever point `next` at. The caller adds this to
+ * `frontier_index` alone.
+ */
+export interface SfNamedFrontierIndexOnly {
+  readonly frontierOnly: true;
+  readonly path: string;
+  readonly handle: string;
+}
+
+/**
+ * A row for `relPath`.
+ *
+ * - `withBody` and the whole file fits the JOIN bound -> the whole body.
+ * - `withBody` and it does not -> ruling F1' (FX-OH2): NO evidence row at
+ *   all -- an {@link SfNamedFrontierIndexOnly} address for `frontier_index`.
+ * - not `withBody` (D9's ambiguous candidates) -> addressable only, unchanged:
+ *   those rows are a CHOICE offered, not a body withheld.
+ */
+// Exported for the FX-OH/FX-OH2 F1 pin (fxR3cNamedFrontier.spec.ts): the
+// join's behaviour on an OVERSIZED caller-named file is a property of this
+// function alone, and pinning it through a whole pack would depend on whether
+// the locator happened to surface the same document by another route.
+export function sfNamedFrontierRow(
+  relPath: string,
+  workspace: string,
+  cache: FileReadCache,
+  withBody: boolean,
+): TaskPackSurface | SfNamedFrontierIndexOnly | undefined {
+  const text = readCached(workspace, relPath, cache);
+  if (text === undefined) return undefined;
+  // A binary payload has no line body to serve; it stays out of the join
+  // rather than shipping mojibake (the artifact lanes own those formats).
+  if (text.includes("\u0000")) return undefined;
+  const totalLines = Math.max(1, countLines(text));
+  const range = `1-${totalLines}`;
+  const handle = handleTable.upsert({ kind: "range", path: relPath, range, workspaceRoot: workspace }).id;
+  const base = {
+    role: "domain",
+    handle,
+    path: relPath,
+    range,
+    why: "caller-named in the request",
+  };
+  if (!withBody) {
+    return { ...base, content_completeness: "partial" as const, remaining_ranges: [range] };
+  }
+  if (Buffer.byteLength(text, "utf8") <= SF_NAMED_FRONTIER_MAX_BODY_BYTES) {
+    return { ...base, code: text };
+  }
+  // Ruling F1' (FX-OH2): over the join bound. No evidence row -- addressable
+  // only, via `frontier_index`.
+  return { frontierOnly: true, path: relPath, handle };
+}
+
+/**
+ * Ruling F1' (FX-OH2, 2026-09-04): over-bound caller-named files the join
+ * could not afford an evidence row for -- path + handle only. Populated by
+ * `applySemanticFrontierNamedFrontier`, consumed and cleared by
+ * `attachFrontierIndex` (both run inside the same `buildTaskPackCore` call),
+ * so these addresses reach `frontier_index` without ever becoming a surface
+ * a `next`/`limit.next` heuristic could target.
+ */
+const pendingNamedFrontierOnlyEntries = new WeakMap<
+  TaskPackResult,
+  Array<{ path: string; handle: string }>
+>();
+
+/**
+ * F9 (2026-09-04, ruling (a)): every caller-named path this join touched,
+ * keyed by workspace-relative path, `undefined` when no bounded window is
+ * needed (the file joined within `SF_NAMED_FRONTIER_MAX_BODY_BYTES`, or a
+ * window could not be computed). Read by `openSemanticFrontierPackState` /
+ * `applySemanticFrontierRelationPackets` and folded into `SfPackContext`
+ * (`sfSatisfaction.ts`) for `selectCanonicalNext.ts` alone — never consumed
+ * or cleared, since (unlike `pendingNamedFrontierOnlyEntries`) nothing about
+ * it is wire-shaped and more than one attach site reads it.
+ */
+const pendingNamedFrontierWindows = new WeakMap<TaskPackResult, Map<string, string | undefined>>();
+
+/** The F9 direct-read window map `applySemanticFrontierNamedFrontier` built for `result`, if any. */
+export function sfNamedFrontierDirectWindowsFor(
+  result: TaskPackResult,
+): ReadonlyMap<string, string | undefined> | undefined {
+  return pendingNamedFrontierWindows.get(result);
+}
+
+/**
+ * F9 (2026-09-04, ruling (a)): the bounded, query-anchored line range for a
+ * FOLLOW-UP call's target — reusing ruling F1's retired anchor-line finder
+ * and `centeredSliceForCap`'s window-growth algorithm (FX-OH, 636fc67e),
+ * without inlining the resulting bytes anywhere: ruling F1' retired that
+ * half of F1 (the early-byte cost), so this keeps only the "which window"
+ * arithmetic, for a call the CALLER makes next rather than a body this pack
+ * ships now. `undefined` on a genuine read/parse failure, or when the window
+ * would cover the whole file anyway (no bound is needed) — the caller then
+ * falls back to a plain whole-file direct read rather than a guessed range.
+ */
+function sfNamedFrontierWindowRange(
+  relPath: string,
+  workspace: string,
+  cache: FileReadCache,
+  query: string,
+): string | undefined {
+  const text = readCached(workspace, relPath, cache);
+  if (text === undefined) return undefined;
+  const totalLines = Math.max(1, countLines(text));
+  const tokens = concernAnchorTokens(query, 8)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length >= 3);
+  let anchorLine: number | undefined;
+  if (tokens.length > 0) {
+    const lines = text.split(/\r?\n/);
+    let bestScore = 0;
+    for (let index = 0; index < lines.length; index++) {
+      const lower = lines[index]!.toLowerCase();
+      if (lower === "") continue;
+      let score = 0;
+      for (const token of tokens) if (lower.includes(token)) score += 1;
+      if (score > bestScore) {
+        bestScore = score;
+        anchorLine = index + 1;
+      }
+    }
+  }
+  const centre = anchorLine ?? 1;
+  const slice = centeredSliceForCap(
+    workspace,
+    relPath,
+    `1-${totalLines}`,
+    cache,
+    centre,
+    SF_NAMED_FRONTIER_ANCHORED_MAX_BODY_BYTES,
+  );
+  if (slice === undefined) return undefined;
+  // Recover the served bounds by POSITION relative to the centre — the same
+  // pattern `singleSiteShortCircuitSeed` and the retired F1 window branch
+  // both use: `centeredSliceForCap` caps each disclosed side
+  // (MAX_REMAINING_RANGE_CHUNK_LINES), so matching on boundary VALUES would
+  // silently mis-read the served window on a large file.
+  let start = 1;
+  let end = totalLines;
+  for (const remaining of slice.remaining_ranges) {
+    const bounds = /^(\d+)-(\d+)$/.exec(remaining);
+    if (bounds === null) continue;
+    const remStart = Number(bounds[1]);
+    const remEnd = Number(bounds[2]);
+    if (remEnd < centre) start = remEnd + 1;
+    else if (remStart > centre) end = remStart - 1;
+  }
+  if (start <= 1 && end >= totalLines) return undefined;
+  return `${start}-${end}`;
+}
+
+/**
+ * Join every caller-named workspace file (and every ambiguous candidate) that
+ * this pack does not already carry. Additive only: never removes, reorders or
+ * rewrites an existing surface. Fails open — an SF defect is a trace line.
+ */
+function applySemanticFrontierNamedFrontier(
+  workspace: string,
+  result: TaskPackResult,
+  args: TaskPackArgs | undefined,
+  effectiveQuery: string,
+): void {
+  if (!sfStatefulEnabled() || !sfStructuralConcernsEnabled()) return;
+  if (effectiveQuery === "" || !Array.isArray(result.surfaces)) return;
+  try {
+    const held = new Set<string>();
+    for (const surface of result.surfaces) {
+      const path = (surface as { path?: unknown }).path;
+      if (typeof path === "string" && path !== "") held.add(path);
+    }
+    const namedPaths = new Set(
+      sfExplicitTargets(args?.paths)
+        .map((t) => t.path)
+        .filter((p): p is string => typeof p === "string" && p !== ""),
+    );
+    const { workspaceIndex } = sfCapabilitiesFor(args, workspace);
+    const anchors = sfQueryFileAnchors(effectiveQuery, workspaceIndex, namedPaths);
+    const cache = new FileReadCache();
+    const joined: string[] = [];
+    const frontierOnly: Array<{ path: string; handle: string }> = [];
+    // F9 (ruling (a)): the direct-read window map for this pack, populated
+    // for every PATH anchor this loop touches (not the D9 ambiguous
+    // candidates below — those are a choice offered, never a single grounded
+    // target `next` could read directly).
+    const directWindows = new Map<string, string | undefined>();
+    let named = 0;
+    let ambiguous = 0;
+    let withBody = 0;
+    for (const anchor of anchors) {
+      if (anchor.kind === "path") {
+        if (!anchor.proven || held.has(anchor.path) || named >= SF_NAMED_FRONTIER_MAX_ROWS) continue;
+        const row = sfNamedFrontierRow(anchor.path, workspace, cache, true);
+        if (row === undefined) continue;
+        held.add(anchor.path);
+        joined.push(anchor.path);
+        named += 1;
+        // Ruling F1' (FX-OH2): an over-bound file. No evidence row -- an
+        // address for `frontier_index` alone, never `result.surfaces` and
+        // never marked (nothing here for W-DEMOTE/`withheld_named_count` to
+        // have withheld).
+        if ("frontierOnly" in row) {
+          frontierOnly.push({ path: row.path, handle: row.handle });
+          // F9 (ruling (a)): the bounded window this file's OWN `next` (once
+          // this concern is selected) should target — never the whole file.
+          directWindows.set(row.path, sfNamedFrontierWindowRange(row.path, workspace, cache, effectiveQuery));
+          continue;
+        }
+        // FX-R3d (D10): a GROUNDED caller-named row that DID ship (whether a
+        // whole-file body). The mark is taken unconditionally and the final
+        // wire decides what survives `trimToCap`. It is what keeps a
+        // bodyless caller-named row visible as `withheld_named_count` instead
+        // of counting as a W-DEMOTE engagement it had no part in. D9's
+        // ambiguous CANDIDATE rows below are deliberately bodyless by design
+        // — a choice offered, not a body withheld — so they are NOT marked.
+        markSemanticFrontierNamedJoin(row);
+        result.surfaces.push(row);
+        if (typeof row.code === "string") withBody += 1;
+        // F9 (ruling (a)): within the join bound, this pack already inlined
+        // the body (Fix (b), sfSatisfaction.ts, closes the concern from it
+        // directly) — recorded with no window so a residual open concern
+        // still gets the safe direct-read shape rather than the pre-F9
+        // whole-file/`qref` one.
+        directWindows.set(anchor.path, undefined);
+        continue;
+      }
+      // D9: an ambiguous basename. Every candidate becomes addressable, none
+      // gets a body — binding one at random is the masquerade D6 retired.
+      for (const candidate of anchor.candidates) {
+        if (held.has(candidate) || ambiguous >= SF_NAMED_FRONTIER_MAX_CANDIDATE_ROWS) continue;
+        const row = sfNamedFrontierRow(candidate, workspace, cache, false);
+        if (row === undefined || "frontierOnly" in row) continue; // withBody:false never mints this shape.
+        held.add(candidate);
+        result.surfaces.push(row);
+        joined.push(candidate);
+        ambiguous += 1;
+      }
+    }
+    if (frontierOnly.length > 0) pendingNamedFrontierOnlyEntries.set(result, frontierOnly);
+    if (directWindows.size > 0) pendingNamedFrontierWindows.set(result, directWindows);
+    if (joined.length === 0) return;
+    // `with_body` counts rows this join could afford to inline; the rest joined
+    // addressably (handle + `remaining`, or ruling F1' frontier-index-only for
+    // an over-bound file) and `trimToCap` may still strip more.
+    trace(
+      "sf_named_frontier_join",
+      { joined, named, ambiguous, with_body: withBody, frontier_only: frontierOnly.length },
+      workspace,
+    );
+  } catch (err) {
+    try {
+      trace(
+        "sf_named_frontier_error",
+        { message: err instanceof Error ? err.message : String(err) },
+        workspace,
+      );
+    } catch {
+      /* the trace channel is best-effort too */
+    }
+  }
+}
+
+/**
+ * FX-I-A — the PRE-BOOKING seam: the last pass that can shed a body, run
+ * before the first producer that books one.
+ *
+ * Called from `dedupeTrimAndPersist` right after
+ * `annotateSemanticFrontierContinuation` has classified the FINAL pack (the
+ * earliest point at which a surface can be known SF-supporting) and before
+ * `bookServedEditAdmissibility`, `rememberCertifiedWorkingSet` and
+ * `captureServedPack`/`recordPackServedRanges`. Opens this pack's SF context,
+ * restates the canonical decision against it, and applies W-DEMOTE. With
+ * `TL_SF_STATEFUL` off it returns immediately, so a flag-off pack is byte- and
+ * state-identical by construction.
+ */
+function applySemanticFrontierPreBookingSeam(
+  workspace: string,
+  result: TaskPackResult,
+  args: TaskPackArgs | undefined,
+  // D4 (FX-R3): the SAME query string the pre-seam
+  // `annotateSemanticFrontierContinuation` call used, so the marking pass this
+  // seam re-runs cannot diverge from it on its legacy half.
+  effectiveQuery: string,
+): void {
+  if (!sfStatefulEnabled() || args === undefined) return;
+  try {
+    // W-VERIFY-GEN: fold `verify_obligations` (already attached to
+    // `result.change_contract` by the contract builder) into `verify`
+    // concerns for the same call — a purely additive, data-only extra
+    // argument; see `openSemanticFrontierPackState`'s own doc for why this is
+    // a hook, not new satisfaction logic.
+    let verifyConcerns: SfStructuralConcern[] = [];
+    if (sfVerifyFirstEnabled()) {
+      try {
+        const editObligations = (result.change_contract?.obligations ?? []).filter(
+          (o) => o.action === "edit",
+        );
+        verifyConcerns = verifyObligationsToSfConcerns(
+          editObligations,
+          result.change_contract?.verify_obligations ?? [],
+        );
+      } catch {
+        verifyConcerns = [];
+      }
+    }
+    openSemanticFrontierPackState(args, workspace, result, verifyConcerns);
+    // D4 (FX-R3, 2026-09-04): THE MARKING PASS, RE-RUN WITH THE V2 SOURCE.
+    //
+    // `annotateSemanticFrontierContinuation` runs once BEFORE this seam (it
+    // needs the finalized `execution_contract` to tell a required surface from
+    // a supporting one) — and at that point this pack's structural concerns do
+    // not exist yet, so under `TL_SF_DEMOTE` that call marks nothing. The
+    // concerns exist now: `openSemanticFrontierPackState` just extracted them
+    // ONCE and published them on the pack context. Re-running the classifier
+    // with them is what makes demotion structural rather than
+    // vocabulary-driven. Marking is a monotone WeakSet add, so the earlier
+    // (no-op under DEMOTE) call cannot contradict this one, and the legacy
+    // guard arm never reaches here (`sfDemoteEnabled()` and the guard are
+    // mutually exclusive; this call passes `guardEnabled:false`).
+    if (sfDemoteEnabled()) {
+      annotateSemanticFrontierContinuation(
+        result,
+        effectiveQuery,
+        false,
+        sfPackContextFor(result)?.concerns,
+      );
+    }
+    // SF-8: the canonical exit that ran earlier in this build saw no SF
+    // context, so W-DEMOTE's marking pass and W-NEXT-ARBITER's seat did
+    // nothing. Re-run it now that the context exists, then withhold the
+    // §3.5.1 `supporting` bodies. Both are flag- and context-gated inside.
+    reapplySemanticFrontierDecision(result);
+    applySemanticFrontierDemotion(result);
+  } catch (err) {
+    // I-1: an SF defect is a trace line, never a degraded pack.
+    try {
+      trace(
+        "sf_pack_seam_error",
+        { message: err instanceof Error ? err.message : String(err) },
+        workspace,
+      );
+    } catch {
+      /* the trace channel is best-effort too */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// W-CONT-BUNDLE (2026-09-02): the structural continuation bundle wiring
+// seam. DESIGN-v0.15-sf-continuation-and-metrics.md §3.1 / ratified DC2 — a
+// prediction may ONLY fill `evidence[]`/`remaining` slack under budget, and
+// must NEVER construct or override `decision.next` (that stays
+// `selectCanonicalNext`'s, W-DEMOTE). Runs strictly AFTER
+// `applySemanticFrontierState` — it needs that call's `attachSfPackContext`
+// to know this pack's concerns — and mutates `result.surfaces` ADDITIVELY
+// only: it appends bodyless rows and never removes, reorders, or rewrites an
+// existing entry. Fails open like its neighbor above: any error is a trace
+// line, never a degraded pack.
+// ---------------------------------------------------------------------------
+
+const SF_CONTINUATION_CANDIDATE_EXTS: readonly string[] = [
+  ".c", ".cc", ".cpp", ".cxx", ".m", ".mm",
+  ".ts", ".tsx", ".js", ".jsx",
+  ".go", ".java", ".kt", ".py", ".rb", ".rs", ".swift", ".php",
+];
+
+function sfContinuationRoleForSurface(role: SfContinuationFill["role"]): string {
+  switch (role) {
+    case "declaration":
+      return "contract";
+    case "test":
+      return "test";
+    case "definition":
+    case "counterpart":
+    default:
+      return "domain";
+  }
+}
+
+/**
+ * A SMALL, bounded same-stem probe near `declarationPath` (never a directory
+ * walk or a content search): the same basename under a fixed list of
+ * implementation extensions, each checked with the same safe-path pattern
+ * `singleSiteShortCircuitSeed` already uses (`safeResolve` + `realpathSync`
+ * + `isWithin` against the resolved real workspace root).
+ */
+function sfContinuationCandidatePathsNear(declarationPath: string, workspace: string): string[] {
+  const slash = Math.max(declarationPath.lastIndexOf("/"), declarationPath.lastIndexOf("\\"));
+  const dir = slash === -1 ? "" : declarationPath.slice(0, slash);
+  const base = slash === -1 ? declarationPath : declarationPath.slice(slash + 1);
+  const stem = base.replace(/\.d\.(?:[cm]?ts|tsx)$/i, "").replace(/\.[^.]+$/, "");
+  const out: string[] = [];
+  let root: string;
+  try {
+    root = resolveReal(workspace);
+  } catch {
+    return out;
+  }
+  for (const ext of SF_CONTINUATION_CANDIDATE_EXTS) {
+    const candidate = dir === "" ? `${stem}${ext}` : `${dir}/${stem}${ext}`;
+    const abs = safeResolve(candidate, workspace);
+    if (abs === undefined) continue;
+    try {
+      const real = fs.realpathSync(abs);
+      if (!isWithin(real, root) || !fs.statSync(real).isFile()) continue;
+      out.push(candidate);
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+/** A real handle + total line count for `relPath`, or undefined when unreadable. Never a partial read. */
+function sfContinuationResolveAddress(
+  relPath: string,
+  workspace: string,
+  cache: FileReadCache,
+): SfContinuationAddress | undefined {
+  const text = readCached(workspace, relPath, cache);
+  if (text === undefined) return undefined;
+  const totalLines = Math.max(1, countLines(text));
+  const handle = handleTable.upsert({
+    kind: "range",
+    path: relPath,
+    range: `1-${totalLines}`,
+    workspaceRoot: workspace,
+  }).id;
+  return { handle, totalLines };
+}
+
+/**
+ * A verification-manifest-named referencing test for `relPath`, when
+ * `TL_SF_VERIFY_FIRST` already populated `change_contract.verify_obligations`
+ * with one. This module never derives a test surface itself — it only reads
+ * an obligation another wave already proved.
+ */
+function sfContinuationNamedTestFor(
+  relPath: string,
+  result: TaskPackResult,
+  workspace: string,
+  cache: FileReadCache,
+): SfContinuationNamedTest | undefined {
+  const obligations = result.change_contract?.verify_obligations ?? [];
+  for (const obligation of obligations) {
+    if (obligation.kind !== "referencing-test") continue;
+    if (!obligation.targets.includes(relPath)) continue;
+    for (const proof of obligation.evidence ?? []) {
+      if (typeof proof.path !== "string" || proof.path === "") continue;
+      if (typeof proof.handle !== "string" || proof.handle === "") continue;
+      const address = sfContinuationResolveAddress(proof.path, workspace, cache);
+      if (address === undefined) continue;
+      return { path: proof.path, handle: proof.handle, totalLines: address.totalLines };
+    }
+  }
+  return undefined;
+}
+
+function applySfContinuationBundle(result: TaskPackResult, workspace: string): void {
+  if (!sfStatefulEnabled() || !sfContinuationBundleEnabled()) return;
+  try {
+    const ctx = sfPackContextFor(result);
+    if (ctx === undefined || ctx.observationOnly) return;
+
+    const servedPaths = new Set<string>();
+    for (const surface of result.surfaces ?? []) {
+      if (typeof surface.path === "string" && surface.path !== "") servedPaths.add(surface.path);
+    }
+    for (const entry of result.frontier_index ?? []) {
+      if (typeof entry.path === "string" && entry.path !== "") servedPaths.add(entry.path);
+    }
+
+    const cache = new FileReadCache();
+    const ledger = createSessionLedgerReader(workspace);
+    const workspaceIndex: SfContinuationWorkspaceIndex = {
+      resolveAddress: (relPath) => sfContinuationResolveAddress(relPath, workspace, cache),
+      candidatePathsNear: (declarationPath) => sfContinuationCandidatePathsNear(declarationPath, workspace),
+      namedTestFor: (relPath) => sfContinuationNamedTestFor(relPath, result, workspace, cache),
+      isServed: (relPath) => ledger.hasServedPath(relPath),
+    };
+
+    const fills = buildStructuralContinuation({
+      concerns: ctx.concerns,
+      servedPaths,
+      workspaceIndex,
+    });
+    attachSfContinuationFills(result, fills);
+    if (fills.length === 0) return;
+
+    for (const fill of fills) {
+      result.surfaces.push({
+        role: sfContinuationRoleForSurface(fill.role),
+        handle: fill.handle,
+        path: fill.path,
+        range: fill.remaining[0] ?? "",
+        remaining_ranges: [...fill.remaining],
+      });
+    }
+  } catch (err) {
+    // I-1: an SF defect is a trace line, never a degraded pack.
+    try {
+      trace(
+        "sf_continuation_seam_error",
+        { message: err instanceof Error ? err.message : String(err) },
+        workspace,
+      );
+    } catch {
+      /* the trace channel is best-effort too */
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1845,7 +3359,7 @@ async function buildTaskPackCore(
   const cleanedEntries = (args.paths ?? [])
     .map(normalizePathEntry)
     .filter((entry) => normalizedRequestPath(entry.path) !== "auto");
-  const cleanedProfile = bindTaskProfile(args.taskProfile, query).selected;
+  const cleanedProfile = bindTaskProfile(args.taskProfile, query, args.writeAllowed).selected;
   const directoryLike = (candidatePath: string): boolean =>
     isDirectoryWithin(candidatePath, workspace) || path.extname(candidatePath) === "";
   const directoryEntries = cleanedEntries.filter((entry) => directoryLike(entry.path));
@@ -1957,7 +3471,7 @@ async function buildTaskPackCore(
       missing: [],
       ok: false,
       reason: "broad-overview-query",
-      next: "read_file mode=overview",
+      next: { tool: "read_file", arguments: { mode: "overview" } },
       alternatives: [
         "read_file mode=overview",
         "read_file mode=map query=<specific subsystem>",
@@ -1987,16 +3501,29 @@ async function buildTaskPackCore(
   const fingerprint = computePackFingerprint(args, workspace);
   const forceServe = args.forceServe === true;
   const cached = forceServe ? undefined : tryServeCachedPack(workspace, args, fingerprint);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    // Receipt/qref exits bypass the common build tail, but they still crossed
+    // this call's task-pack producer.  Register the same opaque seed here so
+    // funnel finalization records exactly one honest receipt attestation.
+    noteSemanticFrontierTraceSeed(
+      prepareSemanticFrontierTraceSeed(cached, query, semanticFrontierGuardEnabled()),
+    );
+    return cached;
+  }
   // iter-3 F2: the exact-fingerprint dedup misses a re-issue that was merely
   // truncated mid-word (or tokenizes slightly differently) though it names the
   // same working set. Recognize such a near-identical re-ask and serve the same
   // compact receipt, gated on path-subset ∧ high token overlap ∧ unchanged
   // workspace so distinct-concern packs never collapse into one another.
   const semanticDup = forceServe ? undefined : tryServeSemanticDuplicatePack(workspace, args);
-  if (semanticDup !== undefined) return semanticDup;
+  if (semanticDup !== undefined) {
+    noteSemanticFrontierTraceSeed(
+      prepareSemanticFrontierTraceSeed(semanticDup, query, semanticFrontierGuardEnabled()),
+    );
+    return semanticDup;
+  }
 
-  const initialProfile = bindTaskProfile(args.taskProfile, query).selected;
+  const initialProfile = bindTaskProfile(args.taskProfile, query, args.writeAllowed).selected;
 
   if (!args.path && !args.symbol && !(args.paths?.length)) {
     const docPath = rootMarkdownTitleMatch(workspace, query);
@@ -2027,7 +3554,10 @@ async function buildTaskPackCore(
   // per-concern contract and can collapse several independent defects into one
   // role-ranked surface set. Try the specialized builder before path seeding;
   // it applies the supplied paths as a hard file scope below.
-  if (initialProfile === "multi_concern") {
+  if (
+    initialProfile === "multi_concern"
+    || (literalFirstRoutingEnabled() && literalFirstMultipleRelations(query))
+  ) {
     const multiConcernPack = await buildMultiConcernTaskPack(args, query, workspace);
     if (multiConcernPack !== undefined) return multiConcernPack;
   }
@@ -2052,6 +3582,9 @@ async function buildTaskPackCore(
   // propagation is unconditional.
   if (
     initialProfile === "change_propagation"
+    // Directed relations are propagation work even when profile inference does
+    // not know the verb (notably Japanese リネーム); still fully flag-gated.
+    || (literalFirstRoutingEnabled() && literalFirstRelation(query, args.symbol) !== undefined)
     || (
       (!(args.paths?.length) || directoryScopesOnly)
       && initialProfile === "wiring"
@@ -2138,6 +3671,67 @@ async function buildTaskPackCore(
     limit: Math.min(args.limit ?? MAX_SURFACES_DISTINCT, MAX_SURFACES_DISTINCT),
   });
 
+  const rootSuggestion = locateResult.rootSuggestion;
+  let rootSuggestionCwd: string | undefined;
+  if (rootSuggestion !== undefined) {
+    const candidate = safeResolve(rootSuggestion, workspace);
+    if (candidate !== undefined) {
+      try {
+        const real = fs.realpathSync(candidate);
+        if (isWithin(real, resolveReal(workspace)) && fs.statSync(real).isDirectory()) {
+          rootSuggestionCwd = real;
+        }
+      } catch {
+        // The suggested project moved after locator enumeration. Fall through
+        // to the ordinary locate result instead of emitting a stale cwd.
+      }
+    }
+  }
+  // A marker root is an executable workspace transition. A manifest-less
+  // common directory is only a ranking hint: keep the locator's useful
+  // surfaces in this call instead of discarding them for a premature re-scope.
+  const rootSuggestionIsMarkerRoot = rootSuggestion !== undefined
+    && projectRootOf(rootSuggestion, workspace) === rootSuggestion;
+  if (rootSuggestionCwd !== undefined && rootSuggestionIsMarkerRoot) {
+    const requiredRoles = requiredSurfacesForTask(locatingQuery, workspace, args.surfaceRoles);
+    const suggestedMissing = locateResult.hit
+      ? locateResult.missingSurfaces
+      : locateResult.missing;
+    const missingRoles = suggestedMissing ?? args.surfaceRoles ?? ["contract", "api"];
+    const noSurfaceMissing = mergeUnique(missingRoles.map(String), requiredRoles);
+    const { lines: checkLines, records: checkRecords } = buildCompletionChecks(
+      locatingQuery,
+      [],
+      noSurfaceMissing,
+      workspace,
+    );
+    const base: TaskPackResult = {
+      mode: "task_pack",
+      coverage: "partial",
+      coverage_reason: "missing-roles",
+      surfaces: [],
+      missing: noSurfaceMissing,
+      required_surfaces: requiredRoles,
+      missing_required_surfaces: requiredRoles,
+      route: {
+        action: "locate_missing_surfaces",
+        reason: `strong query tokens matched only outside the current scope; re-scope to ${rootSuggestion}`,
+        max_additional_tl_calls: 1,
+      },
+      checks: checkLines,
+      verify: discoverVerificationHints(workspace, locatingQuery, []),
+      next: {
+        tool: "read_file",
+        arguments: {
+          query: continuationQuery(query),
+          task: { epoch: "new" },
+          cwd: rootSuggestionCwd,
+        },
+      },
+    };
+    return dedupeTrimAndPersist(workspace, base, { query, checkRecords, args });
+  }
+
   if (!locateResult.hit) {
     const requiredRoles = requiredSurfacesForTask(locatingQuery, workspace, args.surfaceRoles);
     // M3: a pathless request can leave the locator with only weak
@@ -2189,7 +3783,7 @@ async function buildTaskPackCore(
     // query is a create/placement request, whose answer is the create ROUTE that
     // the bare envelope resolves downstream in dedupeTrimAndPersist (seeding
     // unrelated files would bury it under noise surfaces).
-    if (!locateResult.rootSuggestion && !hasCreateOrPlacementIntent(locatingQuery)) {
+    if (!hasCreateOrPlacementIntent(locatingQuery)) {
       const weakPaths: string[] = [];
       const seenWeak = new Set<string>();
       for (const cand of locateResult.candidates ?? []) {
@@ -2229,11 +3823,9 @@ async function buildTaskPackCore(
     // re-scope (cwd or paths) at that project root instead of re-running the
     // same pathless locate, which would just return the same junk.
     const fallbackQuery = (genericFallback.probe ?? query).replace(/\"/g, "").slice(0, 80);
-    const next = locateResult.rootSuggestion
-      ? `re-scope to ${locateResult.rootSuggestion} (cwd or paths=[...]) then read_file mode=task_pack query="${continuationQuery(query)}"`
-      : genericFallback.attempted
-        ? `search_files action=find query="${fallbackQuery}"`
-        : `search_files action=locate query="${continuationQuery(query)}"`;
+    const next: ContinuationCall | undefined = genericFallback.attempted
+      ? { tool: "search_files", arguments: { action: "find", query: fallbackQuery } }
+      : { tool: "search_files", arguments: { action: "locate", query: continuationQuery(query) } };
     const base: TaskPackResult = {
       mode: "task_pack",
       coverage: "partial",
@@ -2244,12 +3836,10 @@ async function buildTaskPackCore(
       missing: noSurfaceMissing,
       required_surfaces: requiredRoles,
       missing_required_surfaces: requiredRoles,
-      route: locateResult.rootSuggestion
-        ? { action: "locate_missing_surfaces", reason: `strong query tokens matched only outside the current scope; re-scope to ${locateResult.rootSuggestion}`, max_additional_tl_calls: 1 }
-        : buildRoute([], requiredRoles, "partial", noSurfaceMissing, locatingQuery, "missing-roles"),
+      route: buildRoute([], requiredRoles, "partial", noSurfaceMissing, locatingQuery, "missing-roles"),
       checks: checkLines,
       verify: discoverVerificationHints(workspace, locatingQuery, []),
-      next,
+      ...(next !== undefined ? { next } : {}),
     };
     return dedupeTrimAndPersist(workspace, base, { query, checkRecords, args });
   }
@@ -2434,7 +4024,7 @@ async function buildAnswerTaskPack(
     limit: Math.min(args.limit ?? MAX_SURFACES_DISTINCT, MAX_SURFACES_DISTINCT),
   });
   let rankingQuery = query;
-  if (!locateResult.hit) {
+  if (!locateResult.hit && !requiresRelatedAnswerContext(query)) {
     const recoveryQuery = answerRecoveryQuery(query);
     if (recoveryQuery !== undefined && recoveryQuery.toLowerCase() !== query.trim().toLowerCase()) {
       const recovered = await locateTaskContext(workspace, {
@@ -2474,7 +4064,7 @@ async function buildAnswerTaskPack(
   // `locateResult` so the primary + required-related handling below runs
   // exactly as it would for a query the locator resolved cleanly on the
   // first try.
-  if (!locateResult.hit) {
+  if (!locateResult.hit && !requiresRelatedAnswerContext(query)) {
     const anchor = pickNamedFileAbstainAnchor(locateResult.candidateDetails ?? [], query);
     if (anchor !== undefined && anchor.symbol !== undefined) {
       const anchorSymbol = anchor.symbol;
@@ -2625,8 +4215,10 @@ async function buildAnswerTaskPack(
       || !responsibilityRunnerUp.strongEvidence
       || topResponsibility.score - responsibilityRunnerUp.score >= 1
     );
-  const strongRecoveredAnswer = responsibilityResolved || strongEvidenceAnswer
-    || (!locateResult.hit && isStrongRecoveredAnswerCandidate(rankedAnswerCandidates, rankingEvidenceQuery));
+  const strongRecoveredAnswer = !requiresRelatedAnswerContext(query) && (
+    responsibilityResolved || strongEvidenceAnswer
+      || (!locateResult.hit && isStrongRecoveredAnswerCandidate(rankedAnswerCandidates, rankingEvidenceQuery))
+  );
   const exactLocatedPaths = new Set(
     rankedAnswerCandidates
       .filter((entry) => entry.exactIdentifier)
@@ -2639,12 +4231,20 @@ async function buildAnswerTaskPack(
       ))
     : "";
   const exactIdentifierNames = new Set(explicitCodeIdentifiers(query).map(normIdent));
+  // Naming one symbol makes its own definition an exact answer, but it does
+  // not make a request to trace a relation or retain supporting context a
+  // single-surface question.  Collapsing that shape here prevented the
+  // producer from ever emitting the optional context which the semantic
+  // frontier is meant to suppress only from continuations.  Keep this a
+  // bounded answer-pack concern (rather than an open-universe obligation):
+  // the caller asked for the named answer plus one contextual relationship,
+  // not every consumer or reference in the repository.
   const exactNamedFileAnswer = exactIdentifierNames.has(topAnswerPathStem)
     && rankedAnswerCandidates[0] !== undefined
     && !isNonImplementationAnswerCandidate(rankedAnswerCandidates[0].candidate);
   // An exact identifier locates the start of an exhaustive scan; it cannot
   // collapse the open universe to one answer surface.
-  const exactLocatedAnswer = !hasOpenUniverseIntent(query) && (exactNamedFileAnswer
+  const exactLocatedAnswer = !hasOpenUniverseIntent(query) && !requiresRelatedAnswerContext(query) && (exactNamedFileAnswer
     || (recoveredExactAnswer && exactLocatedPaths.size === 1)
     || (locateResult.hit
       && rankedAnswerCandidates[0]?.exactIdentifier === true
@@ -2932,9 +4532,16 @@ async function buildAnswerTaskPack(
       : { coverage: "partial" as const, reason: "candidate-list" as const, dominancePromoted: undefined };
   const needsConfirmation = !locateResult.hit && !strongRecoveredAnswer;
   const topRange = surfaces[0]!.range.match(/^(\d+)-(\d+)$/);
-  const confirmationNext = topRange
-    ? `read_file mode=slice handle=${surfaces[0]!.handle} range=${Math.max(1, Number(topRange[1]) - 40)}-${Number(topRange[2]) + 40}`
-    : `read_file mode=slice handle=${surfaces[0]!.handle}`;
+  const confirmationNext: ContinuationCall = {
+    tool: "read_file",
+    arguments: {
+      mode: "slice",
+      handle: surfaces[0]!.handle,
+      ...(topRange
+        ? { range: `${Math.max(1, Number(topRange[1]) - 40)}-${Number(topRange[2]) + 40}` }
+        : {}),
+    },
+  };
   if (responsibilityResolved && surfaces[0]) {
     surfaces[0].symbol = path.basename(
       surfaces[0].path,
@@ -2980,11 +4587,164 @@ async function buildAnswerTaskPack(
 
   const evidenceExpansion = await importEvidenceExpansion(workspace, locateResult.hit ? locateResult.primary : [], query, surfaces);
   const finalResult = dedupeTrimAndPersist(workspace, result, { args, evidenceExpansion });
+  // Post-trim is the only safe point to add explicit relation providers: the
+  // generic answer admission filter may legitimately discard a weak locator
+  // candidate, but it must not discard an observed import target the caller
+  // named.  These helpers never grow beyond direct imports or guess endpoints.
+  await augmentExplicitAnswerImportSurfaces(finalResult.surfaces, query, workspace, cache);
+  materializeExplicitAnswerAnchorEvidence(finalResult.surfaces, query, workspace, cache);
+  // Keep answer packs read-only while still preserving an explicit, observed
+  // import relation for the semantic-frontier trace.  This runs after trim so
+  // every graph endpoint is guaranteed to be present in the actual pack.
+  attachAnswerImportEvidenceGraph(finalResult, query, workspace, cache);
+  // dedupeTrimAndPersist registers its seed before this answer-only final
+  // projection.  Replace it with the final, graph-bearing snapshot so the
+  // attestation cannot report a stale pre-provider candidate set.
+  const semanticGuard = semanticFrontierGuardEnabled();
+  // D4 (FX-R3): under TL_SF_DEMOTE the marking source is this pack's grounded
+  // structural concerns, published by the pre-booking seam that already ran
+  // inside `dedupeTrimAndPersist` above. Absent (flag off / no context) it is
+  // `undefined`, and the v2 arm then marks nothing — the conservative answer.
+  annotateSemanticFrontierContinuation(
+    finalResult,
+    query,
+    semanticGuard,
+    sfPackContextFor(finalResult)?.concerns,
+  );
+  noteSemanticFrontierTraceSeed(prepareSemanticFrontierTraceSeed(finalResult, query, semanticGuard));
   if (verifiedAbsentIdentifiers.length > 0) {
     verifiedAbsentIdentifiersByResult.set(finalResult, verifiedAbsentIdentifiers);
     if (result !== finalResult) verifiedAbsentIdentifiersByResult.set(result, verifiedAbsentIdentifiers);
   }
   return finalResult;
+}
+
+/**
+ * H1 (review R26): remove `line` (1-based, file coordinates) from every
+ * "<start>-<end>" window in `ranges`, dropping a window it fully covers and
+ * splitting one it bisects into its two remaining halves. Malformed entries
+ * pass through unchanged rather than being silently discarded.
+ */
+function subtractServedLineFromRanges(ranges: readonly string[], line: number): string[] {
+  const out: string[] = [];
+  for (const entry of ranges) {
+    const match = /^(\d+)-(\d+)$/.exec(entry);
+    if (match === null) {
+      out.push(entry);
+      continue;
+    }
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (line < start || line > end) {
+      out.push(entry);
+      continue;
+    }
+    if (start < line) out.push(`${start}-${line - 1}`);
+    if (end > line) out.push(`${line + 1}-${end}`);
+  }
+  return out;
+}
+
+function materializeExplicitAnswerAnchorEvidence(
+  surfaces: readonly TaskPackSurface[],
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): void {
+  const anchors = [...new Set(explicitCodeIdentifiers(query))]
+    .filter((anchor) => anchor.length >= 3);
+  if (anchors.length === 0) return;
+  for (const surface of surfaces) {
+    const full = readCached(workspace, surface.path, cache);
+    if (full === undefined) continue;
+    const lines = full.split(/\r?\n/);
+    for (const anchor of anchors) {
+      const served = surface.code ?? surface.code_unchanged ?? "";
+      if (hasIdentifierSegment(served, anchor) || !hasIdentifierSegment(full, anchor)) continue;
+      const declarationLine = lines.findIndex((line) =>
+        !/^\s*(?:\/\/|\/\*|\*)/.test(line) && hasIdentifierSegment(line, anchor));
+      if (declarationLine < 0) continue;
+      const declaration = lines[declarationLine]!;
+      const next = `${served}${served === "" ? "" : "\n"}${declaration}`;
+      if (Buffer.byteLength(next, "utf8") > MAX_SURFACE_CODE_BYTES) continue;
+      surface.code = next;
+      surface.required = true;
+      // Rule T (decisionWire.ts): per-source truncation IS `remaining`; one
+      // fact, one field. A pre-existing `remaining_ranges` (e.g. an
+      // ambiguous-candidate row `sfNamedFrontierRow` minted bodyless, with
+      // `remaining_ranges:[range]`) must be reconciled against the line just
+      // served here, in file coordinates — drop it when fully covered, narrow
+      // it otherwise — mirroring `ensureWiringEndpointSurface`'s
+      // `widenToWhole` branch. Without this, `code` and `remaining_ranges`
+      // both describe the identical window and `projectEvidence` ships a
+      // wire row that simultaneously claims and denies the same bytes.
+      const before = surface.remaining_ranges;
+      if (before === undefined || before.length === 0) {
+        surface.content_completeness = "partial";
+      } else {
+        const narrowed = subtractServedLineFromRanges(before, declarationLine + 1);
+        if (narrowed.length === 0) {
+          delete surface.remaining_ranges;
+          delete surface.content_completeness;
+        } else {
+          surface.remaining_ranges = narrowed;
+          surface.content_completeness = "partial";
+        }
+      }
+    }
+  }
+}
+
+/**
+ * A relation answer can name a renderer plus its providers.  The normal
+ * answer profile intentionally does not take generic import closure, but in
+ * this exact shape an already-resolved relative import is the requested
+ * evidence.  Admit only neighbour files whose body proves one of the
+ * caller's explicit identifiers or whose complete basename was named; this
+ * avoids turning "imports" into a broad dependency walk.
+ */
+async function augmentExplicitAnswerImportSurfaces(
+  surfaces: TaskPackSurface[],
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<void> {
+  if (!requiresRelatedAnswerContext(query) || surfaces.length >= MAX_SURFACES_DISTINCT) return;
+  const anchors = [...new Set(explicitCodeIdentifiers(query))]
+    .filter((anchor) => anchor.length >= 3);
+  if (anchors.length === 0) return;
+  const seen = new Set(surfaces.map((surface) => surface.path));
+  for (const source of [...surfaces]) {
+    if (surfaces.length >= MAX_SURFACES_DISTINCT) return;
+    // Answer surfaces are often a function-sized slice that begins after the
+    // import block.  Resolve neighbours from the full, already-readable file
+    // so an observed import is not lost merely because its body was focused.
+    const fullSource = readCached(workspace, source.path, cache);
+    const importSource = fullSource === undefined ? source : { ...source, code: fullSource };
+    for (const importedPath of directImportNeighbors(workspace, [importSource], seen)) {
+      if (surfaces.length >= MAX_SURFACES_DISTINCT) return;
+      const content = readCached(workspace, importedPath, cache);
+      if (content === undefined) continue;
+      const basename = path.basename(importedPath, path.extname(importedPath));
+      const explicit = anchors.find((anchor) => hasIdentifierSegment(content, anchor))
+        ?? (query.includes(importedPath) || query.includes(path.basename(importedPath)) ? basename : undefined);
+      if (explicit === undefined) continue;
+      const lines = content.split(/\r?\n/);
+      const line = Math.max(1, lines.findIndex((candidate) => hasIdentifierSegment(candidate, explicit)) + 1);
+      const range = `${line}-${line}`;
+      const surface = await candidateToSurface({
+        path: importedPath,
+        line,
+        range,
+        surface: classifySurface(importedPath),
+        why: "answer-explicit-import-provider",
+        confidence: 0.98,
+      }, workspace, [], query, cache, { answerProfile: true });
+      surface.required = true;
+      surfaces.push(surface);
+      seen.add(importedPath);
+    }
+  }
 }
 
 function isTestConcernPath(relPath: string): boolean {
@@ -3392,20 +5152,310 @@ interface PropagationSeedHit {
   definitionScore: number;
 }
 
-export async function propagationSeedPaths(
+type LiteralFrontierRole = "subject" | "destination" | "measurement-only";
+interface LiteralFrontierTerm {
+  value: string;
+  role: LiteralFrontierRole;
+  /** Grammar pattern plus source span: absence is never inferred without it. */
+  roleSource: string;
+}
+
+/**
+ * Directed routing is an ordering hint, never a general-language edit parser.
+ * A quoted sentence or a conceptual phrase must fall back to the ordinary
+ * locator rather than becoming an edit-ready source/destination relation.
+ */
+function literalFrontierAtom(value: string): string | undefined {
+  const trimmed = value.trim().replace(/^[`"'「『]+|[`"'」』]+$/gu, "");
+  if (trimmed.length < 2 || /\s/u.test(trimmed)) return undefined;
+  if (!/^[A-Za-z0-9_./:-]+$/u.test(trimmed)) return undefined;
+  // Bare prose words ("status", "green", "default") are concepts, not
+  // literal code evidence. Require an identifier/path signal even when the
+  // relation grammar itself is otherwise unambiguous.
+  return /[A-Z0-9_./:-]/u.test(trimmed) ? trimmed : undefined;
+}
+
+interface LiteralSourceWitness {
+  path: string;
+  line: number;
+  root: string;
+  implementation: boolean;
+}
+
+function isLiteralImplementationPath(relPath: string): boolean {
+  const lower = relPath.toLowerCase();
+  if (isTestConcernPath(relPath)) return false;
+  return !(
+    /(?:^|\/)(?:readme|changelog|contributing|license)(?:\.|$)/.test(lower)
+    || /(?:^|\/)(?:docs?|examples?|fixtures?|__mocks__|mocks?)(?:\/|$)/.test(lower)
+    || /\.(?:md|mdx|txt)$/u.test(lower)
+  );
+}
+
+function literalFirstMultipleRelations(query: string): boolean {
+  const atom = "(?:`[^`]+`|[\"'][^\"']+[\"']|「[^」]+」|『[^』]+』|[A-Za-z0-9_./-]+)";
+  const english = new RegExp(`\\b(?:replace|rename|change)\\s+(${atom})\\s+(?:with|to|into)\\s+(${atom})`, "giu");
+  const japanese = /(?:「([^」]+)」|『([^』]+)』|([A-Za-z0-9_./-]+))\s*(?:を|から)\s*(?:「([^」]+)」|『([^』]+)』|([A-Za-z0-9_./-]+))\s*(?:に|へ)(?:変更|置換|改名|リネーム)/gu;
+  return [...query.matchAll(english)].length + [...query.matchAll(japanese)].length > 1;
+}
+
+/** Extract a directed change relation without applying identifier-shape filters. */
+function literalFirstRelation(query: string, symbol?: string): LiteralFrontierTerm[] | undefined {
+  const terms: LiteralFrontierTerm[] = [];
+  const add = (value: string, role: LiteralFrontierRole, source: string): void => {
+    if (literalFrontierAtom(value) === undefined) return;
+    const trimmed = value.trim().replace(/^[`"'「『]+|[`"'」』]+$/gu, "");
+    if (trimmed === "" || terms.some((term) => term.value === trimmed && term.role === role)) return;
+    terms.push({ value: trimmed, role, roleSource: source });
+  };
+  const atom = "(?:`[^`]+`|[\"'][^\"']+[\"']|「[^」]+」|『[^』]+』|[A-Za-z0-9_./-]+)";
+  const english = new RegExp(`\\b(?:replace|rename|change)\\s+(${atom})\\s+(?:with|to|into)\\s+(${atom})`, "iu").exec(query);
+  const englishInsertRemove = new RegExp(`\\b(?:insert|add)\\s+(${atom}).*?\\b(?:remove|delete)\\s+(${atom})`, "iu").exec(query);
+  const japanese = /(?:「([^」]+)」|『([^』]+)』|([A-Za-z0-9_./-]+))\s*(?:を|から)\s*(?:「([^」]+)」|『([^』]+)』|([A-Za-z0-9_./-]+))\s*(?:に|へ)(?:変更|置換|改名|リネーム)/u.exec(query);
+  const japaneseInsertRemove = /(?:「([^」]+)」|『([^』]+)』|([A-Za-z0-9_./-]+))\s*を\s*(?:削除|remove).{0,40}?(?:「([^」]+)」|『([^』]+)』|([A-Za-z0-9_./-]+))\s*を\s*(?:挿入|insert)/iu.exec(query);
+  // A conjunction of several directed edits is a multi-concern request. Do
+  // not silently select the first relation and call it a pure rename; the
+  // ordinary multi-concern/propagation flow keeps every clause visible.
+  if (literalFirstMultipleRelations(query)) return undefined;
+  if (english) {
+    add(english[1]!, "subject", `english-directed:${english.index ?? 0}`);
+    add(english[2]!, "destination", `english-directed:${english.index ?? 0}`);
+  } else if (japanese) {
+    add(japanese[1] ?? japanese[2] ?? japanese[3] ?? "", "subject", `japanese-directed:${japanese.index ?? 0}`);
+    add(japanese[4] ?? japanese[5] ?? japanese[6] ?? "", "destination", `japanese-directed:${japanese.index ?? 0}`);
+  } else if (englishInsertRemove) {
+    add(englishInsertRemove[2]!, "subject", `english-insert-remove:${englishInsertRemove.index ?? 0}`);
+    add(englishInsertRemove[1]!, "destination", `english-insert-remove:${englishInsertRemove.index ?? 0}`);
+  } else if (japaneseInsertRemove) {
+    add(japaneseInsertRemove[1] ?? japaneseInsertRemove[2] ?? japaneseInsertRemove[3] ?? "", "subject", `japanese-insert-remove:${japaneseInsertRemove.index ?? 0}`);
+    add(japaneseInsertRemove[4] ?? japaneseInsertRemove[5] ?? japaneseInsertRemove[6] ?? "", "destination", `japanese-insert-remove:${japaneseInsertRemove.index ?? 0}`);
+  } else {
+    return undefined;
+  }
+  if (symbol) add(symbol, "subject", "args.symbol");
+  // Compound segments are measured for collision/absence evidence only; the
+  // whole dotted/slashed form above remains the sole propagation seed.
+  for (const term of [...terms]) {
+    if (term.role === "measurement-only") continue;
+    for (const part of term.value.split(/[./]/u)) {
+      if (part.length >= 2 && part !== term.value) add(part, "measurement-only", `segment-of:${term.roleSource}`);
+    }
+  }
+  return terms;
+}
+
+/**
+ * R-DEST: the replacement token is measured for collision/verification only.
+ * It must never become a concern seed or a standing task obligation.
+ */
+function literalFirstDestinationNorms(query: string): ReadonlySet<string> {
+  if (!literalFirstRoutingEnabled()) return new Set<string>();
+  return new Set(
+    (literalFirstRelation(query) ?? [])
+      .filter((term) => term.role === "destination")
+      .map((term) => normIdent(term.value))
+      .filter((term) => term.length > 0),
+  );
+}
+
+interface LiteralFirstMeasurement {
+  /** `partial` is deliberately non-terminal: it cannot prove source absence. */
+  kind: "present" | "absent" | "partial";
+  source: LiteralFrontierTerm;
+  seedTokens: string[];
+  /** Destination already exists beside the exact source; never fast-edit it. */
+  destinationCollision: boolean;
+  /** Exact source occurrences retained internally for deterministic anchoring. */
+  sourceWitnesses: readonly LiteralSourceWitness[];
+  sourceImplementationPaths: number;
+  sourceRootCount: number;
+  scannedPaths: number;
+  sourcePaths: number;
+  destinationOccurrences: number;
+  universePaths: number;
+  universeFingerprint: string;
+  universeComplete: boolean;
+  universeScope: string;
+  excludedPaths: number;
+  universe: FindTextUniverse;
+}
+
+function literalUniverseFingerprint(universe: FindTextUniverse): string {
+  const files = universe.files.map((file) => {
+    try {
+      const stat = fs.statSync(file.absPath);
+      return [file.relPath, stat.size, stat.mtimeMs] as const;
+    } catch {
+      return [file.relPath, -1, -1] as const;
+    }
+  });
+  return shaOfText(JSON.stringify({
+    policy: "ordinary-find-primary-v1",
+    scopes: universe.scopes,
+    files,
+  }));
+}
+
+function literalFirstMeasurement(
   args: TaskPackArgs,
   query: string,
   workspace: string,
-): Promise<string[]> {
-  const newValues = new Set(extractEnumValueTokens(query).map(normIdent));
-  const identifiers = orderedUniqueTokens([
-    ...(args.symbol ? [args.symbol] : []),
-    ...concreteIdentifierTokens(query),
-  ])
-    .filter((token) => token.length >= 4 && !newValues.has(normIdent(token)))
-    .slice(0, 6);
-  if (identifiers.length === 0) return [];
+  scopes: readonly string[] | undefined,
+): LiteralFirstMeasurement | undefined {
+  const terms = literalFirstRelation(query, args.symbol);
+  if (terms === undefined) return undefined;
+  const source = terms.find((term) => term.role === "subject" && term.roleSource !== "args.symbol");
+  if (source === undefined) return undefined;
+  const universe = enumerateFindTextUniverse(workspace, {
+    ...(scopes && scopes.length > 0 ? { paths: scopes } : {}),
+  });
+  const contentCache = createScanContentCache();
+  const coverage = createScanCoverage();
+  const presentSubjects: string[] = [];
+  const sourceRoots = new Set<string>();
+  const destinationRoots = new Set<string>();
+  const sourceWitnesses = new Map<string, LiteralSourceWitness>();
+  let directSourceOccurrences = 0;
+  let destinationOccurrences = 0;
+  for (const term of terms) {
+    const paths = new Set<string>();
+    for (const match of scanLiteral(term.value, workspace, {
+      caseInsensitive: true,
+      files: universe.files,
+      contentCache,
+      coverage,
+    })) {
+      paths.add(match.path);
+      if (term === source) {
+        const root = projectRootOf(match.path, workspace);
+        sourceRoots.add(root);
+        if (!sourceWitnesses.has(match.path)) {
+          sourceWitnesses.set(match.path, {
+            path: match.path,
+            line: match.line,
+            root,
+            implementation: isLiteralImplementationPath(match.path),
+          });
+        }
+      }
+      if (term.role === "destination") destinationRoots.add(projectRootOf(match.path, workspace));
+    }
+    if (term === source) directSourceOccurrences = paths.size;
+    if (term.role === "destination") destinationOccurrences += paths.size;
+    if (term.role === "subject" && paths.size > 0) presentSubjects.push(term.value);
+  }
+  const excludedPaths = Object.values(universe.omissions)
+    .reduce((total, count) => total + count, 0);
+  const universeComplete = coverage.scanned.size === universe.files.length
+    && coverage.unscanned.size === 0
+    && coverage.undecodable.size === 0
+    && universe.omissions.unreadable_dirs === 0
+    && universe.omissions.oversize === 0;
+  return {
+    kind: directSourceOccurrences === 0
+      ? universeComplete ? "absent" : "partial"
+      : "present",
+    source,
+    seedTokens: orderedUniqueTokens(presentSubjects).slice(0, 6),
+    destinationCollision: [...destinationRoots].some((root) => sourceRoots.has(root)),
+    sourceWitnesses: [...sourceWitnesses.values()].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line),
+    sourceImplementationPaths: [...sourceWitnesses.values()].filter((witness) => witness.implementation).length,
+    sourceRootCount: sourceRoots.size,
+    scannedPaths: coverage.scanned.size,
+    sourcePaths: directSourceOccurrences,
+    destinationOccurrences,
+    universePaths: universe.files.length,
+    universeFingerprint: literalUniverseFingerprint(universe),
+    universeComplete,
+    universeScope: universe.scopes.join(","),
+    excludedPaths,
+    universe,
+  };
+}
 
+/**
+ * Diagnostic-only route evidence.  It is intentionally not copied to the MCP
+ * wire result: callers must opt in when they need to audit literal routing.
+ */
+export interface LiteralFirstRouteAttestation {
+  kind: LiteralFirstMeasurement["kind"];
+  source: string;
+  sourcePaths: number;
+  sourceImplementationPaths: number;
+  sourceRootCount: number;
+  destinationCollision: boolean;
+  universeComplete: boolean;
+  witnesses: readonly LiteralSourceWitness[];
+}
+
+export function literalFirstRouteAttestation(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+): LiteralFirstRouteAttestation | undefined {
+  if (!literalFirstRoutingEnabled()) return undefined;
+  const literal = literalFirstMeasurement(args, query, workspace, undefined);
+  if (!literal) return undefined;
+  return {
+    kind: literal.kind,
+    source: literal.source.value,
+    sourcePaths: literal.sourcePaths,
+    sourceImplementationPaths: literal.sourceImplementationPaths,
+    sourceRootCount: literal.sourceRootCount,
+    destinationCollision: literal.destinationCollision,
+    universeComplete: literal.universeComplete,
+    witnesses: literal.sourceWitnesses,
+  };
+}
+
+type LiteralFirstRouteOutcome = "source-absent" | "safeguarded" | "abstained" | "committed";
+
+function traceLiteralFirstRouteDecision(
+  literal: LiteralFirstMeasurement | undefined,
+  selectedPaths: readonly string[],
+  routeOutcome: LiteralFirstRouteOutcome,
+  workspace: string,
+  remainingCountOverride?: number,
+): void {
+  if (!literal) return;
+  const selected = new Set(selectedPaths);
+  trace("literal_first_route_attestation", {
+    schema_version: 1,
+    eligible: true,
+    attempted: true,
+    committed: routeOutcome === "committed",
+    route_outcome: routeOutcome,
+    kind: literal.kind,
+    source: literal.source.value,
+    source_paths: literal.sourcePaths,
+    source_implementation_paths: literal.sourceImplementationPaths,
+    source_root_count: literal.sourceRootCount,
+    destination_collision: literal.destinationCollision,
+    universe_complete: literal.universeComplete,
+    universe_fingerprint: literal.universeFingerprint,
+    selected_count: selectedPaths.length,
+    selected_paths: selectedPaths,
+    remaining_count: remainingCountOverride ?? literal.sourceWitnesses.filter((witness) => !selected.has(witness.path)).length,
+    witnesses: literal.sourceWitnesses.map((witness) => ({
+      path: witness.path,
+      line: witness.line,
+      root: witness.root,
+      implementation: witness.implementation,
+    })),
+  }, workspace);
+}
+
+interface PropagationSeedResolution {
+  paths: string[];
+  literal?: LiteralFirstMeasurement;
+}
+
+async function propagationSeedResolution(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+): Promise<PropagationSeedResolution> {
+  const newValues = new Set(extractEnumValueTokens(query).map(normIdent));
   // An explicit path remains a hard scope. Without one, exact identifier
   // matches are safe to follow across package roots: cross-layer propagation
   // commonly spans shared contracts, services, and frontends in a monorepo.
@@ -3413,15 +5463,51 @@ export async function propagationSeedPaths(
     ? normalizedRequestPath(args.path).replace(/\/$/, "")
     : undefined;
   const explicitPathUnion = (args.paths ?? []).map(normalizePathEntry).map((entry) => entry.path);
-  const allowedPathUnion = explicitPathUnion.length > 0
-    ? new Set(explicitPathUnion.flatMap((scope) =>
-        walkCodeFiles(workspace, { subPath: scope }).map((file) => file.relPath)
-      ))
+  const literalScopes = explicitPathUnion.length > 0
+    ? explicitPathUnion
+    : explicitScope
+      ? [explicitScope]
+      : undefined;
+  const literalFirst = literalFirstRoutingEnabled()
+    ? literalFirstMeasurement(args, query, workspace, literalScopes)
     : undefined;
+  // Grammar-assigned literal sources must not be erased by the legacy
+  // destination/enum shape filter (for example MAX_SIZE during a rename).
+  // Literal-first is precision routing. A broad source token is not a safe
+  // seed merely because it is present; leave the normal locator to abstain
+  // rather than turning 60 noise files into six arbitrary edits.
+  if (
+    literalFirst?.kind === "present"
+    && (
+      literalFirst.sourcePaths > literalSourceRarityLimit(literalFirst.universePaths)
+      || literalFirst.sourceImplementationPaths === 0
+      || literalFirst.sourceRootCount !== 1
+    )
+  ) {
+    return { paths: [], literal: literalFirst };
+  }
+  const identifiers = literalFirst !== undefined
+    ? literalFirst.seedTokens.slice(0, 6)
+    : orderedUniqueTokens([
+        ...(args.symbol ? [args.symbol] : []),
+        ...concreteIdentifierTokens(query),
+      ])
+        .filter((token) => token.length >= 4 && !newValues.has(normIdent(token)))
+        .slice(0, 6);
+  if (identifiers.length === 0) {
+    return { paths: [], ...(literalFirst !== undefined ? { literal: literalFirst } : {}) };
+  }
+  // Reuse the find-equivalent universe for literal seeds as well as the
+  // measurement. Otherwise a manifest can be measured but silently dropped
+  // by the later legacy code-only scan.
+  const literalSeedFiles = literalFirst?.universe.files;
   const byPath = new Map<string, PropagationSeedHit>();
 
   for (const token of identifiers) {
-    for (const match of scanLiteral(token, workspace, { caseInsensitive: true })) {
+    for (const match of scanLiteral(token, workspace, {
+      caseInsensitive: true,
+      ...(literalSeedFiles ? { files: literalSeedFiles } : {}),
+    })) {
       if (
         explicitScope
         && match.path !== explicitScope
@@ -3429,7 +5515,6 @@ export async function propagationSeedPaths(
       ) {
         continue;
       }
-      if (allowedPathUnion && !allowedPathUnion.has(match.path)) continue;
       if (!hasIdentifierSegment(match.text ?? "", token)) continue;
       const current = byPath.get(match.path) ?? {
         path: match.path,
@@ -3455,6 +5540,19 @@ export async function propagationSeedPaths(
     ["contract", "api", "domain", "data", "ui", "style", "config", "test", "doc", "unknown"]
       .map((role, index) => [role, index]),
   );
+  // D5 (2026-09-02): resolve a `Class::method` anchor as a UNIT before the flat
+  // tokens rank anything. Without it the last tie-break was
+  // `path.localeCompare`, so two sibling headers that merely DECLARE a bare
+  // same-named member outranked the class the caller actually named.
+  const qualifiedAnchors = resolveQualifiedSymbolAnchors(query, workspace);
+  const qualifiedAnchorRank = (candidatePath: string): number =>
+    qualifiedAnchors.definitions.includes(candidatePath)
+      ? 0
+      : qualifiedAnchors.counterparts.includes(candidatePath)
+        ? 1
+        : qualifiedAnchors.declarations.includes(candidatePath)
+          ? 2
+          : 3;
   const ranked = [...byPath.values()].sort((a, b) => {
     const tokenDelta = b.tokens.size - a.tokens.size;
     if (tokenDelta !== 0) return tokenDelta;
@@ -3464,6 +5562,11 @@ export async function propagationSeedPaths(
     if (testDelta !== 0) return testDelta;
     const roleDelta = (roleOrder.get(a.role) ?? 99) - (roleOrder.get(b.role) ?? 99);
     if (roleDelta !== 0) return roleDelta;
+    // (a) the file that DEFINES the anchored member, then (b) a declaring
+    // header's implementation counterpart, then the declaring header itself —
+    // all before the alphabetical fallback below.
+    const anchorDelta = qualifiedAnchorRank(a.path) - qualifiedAnchorRank(b.path);
+    if (anchorDelta !== 0) return anchorDelta;
     return a.line - b.line || a.path.localeCompare(b.path);
   });
 
@@ -3483,6 +5586,37 @@ export async function propagationSeedPaths(
     selected.push(hit);
     selectedPaths.add(hit.path);
   };
+
+  // D5: an explicitly qualified `Class::method` is the most precise anchor a
+  // caller can type, and it names exactly ONE definition site. Claim its seed
+  // slot before any cap-bounded fill can shed it — the SF13 failure was the
+  // definition file never reaching the frontier NOR the disclosure list.
+  for (const definitionPath of qualifiedAnchors.definitions) {
+    add(ranked.find((hit) => hit.path === definitionPath) ?? {
+      path: definitionPath,
+      line: qualifiedAnchors.lines.get(definitionPath) ?? 1,
+      role: classifySurface(definitionPath),
+      tokens: new Set<string>(),
+      definitionScore: 0,
+    });
+  }
+
+  // A directed source is a hard anchor, not merely one weighted identifier
+  // among documentation and destination matches.  Keep only implementation
+  // witnesses here: README, fixtures, and tests can enrich the ordinary
+  // frontier later, but never stand in for the change-owning source.
+  if (literalFirst?.kind === "present") {
+    const anchorPriority = (path: string): number => {
+      if (/\.(?:[cm]?[jt]sx?|vue|svelte|py|go|rs|java|rb|php|cs|cpp?|h)$/iu.test(path)) return 0;
+      if (/(?:^|\/)(?:package|tsconfig|vite|webpack|eslint|prettier)\.[^/]+$/iu.test(path)) return 1;
+      return 2;
+    };
+    for (const witness of [...literalFirst.sourceWitnesses].sort((a, b) =>
+      anchorPriority(a.path) - anchorPriority(b.path) || a.path.localeCompare(b.path) || a.line - b.line,
+    )) {
+      if (witness.implementation) add(ranked.find((hit) => hit.path === witness.path));
+    }
+  }
 
   // Enum members usually co-locate in one definition. Spend one slot on that
   // definition rather than allowing every old member to select a different
@@ -3570,7 +5704,9 @@ export async function propagationSeedPaths(
         });
       }
     }
-    if (selected.length >= 2) return selected.map((hit) => hit.path);
+    if (selected.length >= 2) {
+      return { paths: selected.map((hit) => hit.path), ...(literalFirst !== undefined ? { literal: literalFirst } : {}) };
+    }
   }
   for (const token of identifiers) add(ranked.find((hit) => hit.tokens.has(token)));
   for (const role of roleOrder.keys()) {
@@ -3578,7 +5714,180 @@ export async function propagationSeedPaths(
   }
   for (const hit of ranked) add(hit);
 
-  return selected.length >= 2 ? selected.map((hit) => hit.path) : [];
+  const minimumPaths = literalFirst?.kind === "present" ? 1 : 2;
+  return {
+    paths: selected.length >= minimumPaths ? selected.map((hit) => hit.path) : [],
+    ...(literalFirst !== undefined ? { literal: literalFirst } : {}),
+  };
+}
+
+export async function propagationSeedPaths(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+): Promise<string[]> {
+  return (await propagationSeedResolution(args, query, workspace)).paths;
+}
+
+/**
+ * A partial universe or an already-present destination is not a failed rename;
+ * it is an unproved discovery state. Keep it in protocol-v1 `discover` space
+ * with an executable find continuation instead of minting a fast edit from a
+ * lexical witness.
+ */
+function literalFirstRemainingCall(
+  literal: LiteralFirstMeasurement,
+  selectedPaths: readonly string[],
+): { call?: ContinuationCall; remaining: readonly LiteralSourceWitness[] } {
+  const selected = new Set(selectedPaths);
+  const remaining = literal.sourceWitnesses.filter((witness) => !selected.has(witness.path));
+  return {
+    remaining,
+    ...(remaining.length > 0 ? {
+      call: {
+        tool: "read_file" as const,
+        arguments: {
+          targets: remaining.map((witness) => ({ path: witness.path, range: `${witness.line}-${witness.line}` })),
+        },
+      },
+    } : {}),
+  };
+}
+
+/**
+ * A directed `everywhere` request has a stronger proof than the generic
+ * one-hop dependency expansion: an ordinary-find scan has already enumerated
+ * the entire source universe, and every exact source witness is resident in
+ * this pack.  This predicate is intentionally stricter than route selection;
+ * it is used only to write a normal ledger proof, never to force a decision.
+ */
+function literalSourceUniverseProved(
+  result: TaskPackResult,
+  literal: LiteralFirstMeasurement | undefined,
+  context?: { workspace: string; args: TaskPackArgs },
+): boolean {
+  if (
+    literal?.kind !== "present"
+    || !literal.universeComplete
+    || literal.destinationCollision
+    || literal.sourceRootCount !== 1
+    || literal.sourceImplementationPaths === 0
+    || literal.sourcePaths > literalSourceRarityLimit(literal.universePaths)
+  ) return false;
+  const servedPaths = new Set(codeTaskPackSurfaces(result.surfaces)
+    .filter(hasServedCode)
+    .map((surface) => surface.path));
+  const remainingCall = literalFirstRemainingCall(literal, [...servedPaths]).call;
+  if (remainingCall === undefined) return true;
+  // The source witness outside this capped pack was supplied by the exact
+  // continuation. Its authenticated ledger record is the proof, rather than a
+  // generic re-pack or an untyped occurrence flag.
+  return context !== undefined && hasExecutedNext(
+    context.workspace,
+    normalizeContractLane(context.args.lane),
+    remainingCall.tool,
+    remainingCall.arguments as Record<string, unknown>,
+    context.args.taskBinding,
+  );
+}
+
+function literalFirstSafeguardPack(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  literal: LiteralFirstMeasurement,
+  selectedPaths: readonly string[] = [],
+): TaskPackResult {
+  const collision = literal.destinationCollision === true;
+  const overCap = literal.sourcePaths > literalSourceRarityLimit(literal.universePaths);
+  const overSurfaceCap = literal.sourcePaths > MAX_SURFACES_DISTINCT;
+  const missingImplementation = literal.kind === "present" && literal.sourceImplementationPaths === 0;
+  const rootAmbiguous = literal.kind === "present" && literal.sourceRootCount !== 1;
+  const { call: remainingCall } = literalFirstRemainingCall(literal, selectedPaths);
+  const remainingContinuation: ContinuationPlan | undefined = remainingCall
+    ? { version: 1, stages: [{ execution: "parallel", calls: [remainingCall] }] }
+    : undefined;
+  const missing = [collision
+    ? "destination-collision"
+    : overCap ? "source-cohort-over-cap"
+      : overSurfaceCap ? "source-cohort-remaining"
+      : missingImplementation ? "source-implementation-witness-missing"
+        : rootAmbiguous ? "source-root-ambiguous"
+          : "literal-universe-partial"];
+  const result: TaskPackResult = {
+    mode: "task_pack",
+    coverage: "partial",
+    coverage_reason: "missing-roles",
+    surfaces: [],
+    missing,
+    required_surfaces: ["implementation"],
+    missing_required_surfaces: ["implementation"],
+    route: {
+      action: "locate_missing_surfaces",
+      reason: collision
+        ? "directed destination is already present in the source root; resolve rename/migration intent before editing"
+        : overCap
+          ? "directed source cohort exceeds the surface cap; inspect the complete candidate set before editing"
+          : overSurfaceCap
+            ? "directed source cohort has exact witnesses beyond the initial surface cap; serve every remaining witness before editing"
+          : missingImplementation
+            ? "exact source occurs only in non-implementation surfaces; locate its implementation owner before editing"
+            : rootAmbiguous
+              ? "exact source spans multiple project roots; choose the intended root before editing"
+              : "directed literal universe was incomplete; source absence is not proven",
+      max_additional_tl_calls: 1,
+    },
+    checks: [],
+    verify: [],
+    ...(remainingContinuation ? { continuation: remainingContinuation, next: remainingCall } : {}),
+    ...(!remainingContinuation ? {
+      next: {
+        tool: "search_files",
+        arguments: { action: "find", queries: [literal.source.value] },
+      },
+    } : {}),
+  };
+  const persisted = dedupeTrimAndPersist(workspace, result, { query, args });
+  // The generic shrinker derives a next hint from missing *roles* and does
+  // not know that an exact literal cohort is an indivisible obligation. Put
+  // this capability-relative continuation back after shrinking, and make the
+  // ledger/typestate advertise the same follow-up. Repacking remeasures the
+  // entire cohort, so a consumed target can never silently discharge siblings.
+  if (remainingCall && remainingContinuation) {
+    persisted.continuation = remainingContinuation;
+    persisted.next = remainingCall;
+    const contract = persisted.execution_contract;
+    if (contract) {
+      persisted.execution_contract = {
+        ...contract,
+        next_action: "followup",
+        max_additional_discovery_calls: 1,
+        reason: "exact literal source witnesses remain outside the initial surface cap",
+        typestate: {
+          phase: "discovery",
+          allowed_actions: ["read", "search"],
+          challenge_required_for: [],
+        },
+        ...(contract.call_budget ? {
+          call_budget: {
+            ...contract.call_budget,
+            discovery_allowed: true,
+            candidate_call: remainingCall,
+            reason: "serve the remaining exact literal source witnesses before editing",
+          },
+        } : {}),
+        next_call: remainingCall,
+        ...(contract.semantic_closure ? {
+          semantic_closure: {
+            ...contract.semantic_closure,
+            state: "open",
+            unresolved: [...new Set([...contract.semantic_closure.unresolved, "literal-source-cohort-remaining"])],
+          },
+        } : {}),
+      };
+    }
+  }
+  return persisted;
 }
 
 async function buildPropagationTaskPack(
@@ -3586,13 +5895,77 @@ async function buildPropagationTaskPack(
   query: string,
   workspace: string,
 ): Promise<TaskPackResult | undefined> {
-  const paths = await propagationSeedPaths(args, query, workspace);
-  if (paths.length < 2) return undefined;
+  const resolution = await propagationSeedResolution(args, query, workspace);
+  if (resolution.literal?.kind === "absent") {
+    const result: TaskPackResult = {
+      mode: "task_pack",
+      coverage: "complete",
+      surfaces: [],
+      missing: [],
+      required_surfaces: [],
+      route: {
+        action: "answer_from_handles",
+        reason: `directed literal source ${resolution.literal.source.value} has zero occurrences in the measured scope`,
+        max_additional_tl_calls: 0,
+      },
+      checks: [],
+      verify: [],
+      literal_source_absence: {
+        subject: resolution.literal.source.value,
+        role_source: resolution.literal.source.roleSource,
+        scanned_paths: resolution.literal.scannedPaths,
+        universe_paths: resolution.literal.universePaths,
+        universe_fingerprint: resolution.literal.universeFingerprint,
+        universe_complete: resolution.literal.universeComplete,
+        scope: resolution.literal.universeScope,
+        excluded_paths: resolution.literal.excludedPaths,
+        destination_occurrences: resolution.literal.destinationOccurrences,
+      },
+    };
+    traceLiteralFirstRouteDecision(resolution.literal, [], "source-absent", workspace);
+    return dedupeTrimAndPersist(workspace, result, { query, args });
+  }
+  const literalRemainingCall = resolution.literal?.kind === "present"
+    ? literalFirstRemainingCall(resolution.literal, resolution.paths).call
+    : undefined;
+  const literalContinuationConsumed = literalRemainingCall !== undefined
+    && hasExecutedNext(
+      workspace,
+      normalizeContractLane(args.lane),
+      literalRemainingCall.tool,
+      literalRemainingCall.arguments as Record<string, unknown>,
+      args.taskBinding,
+    );
+  if (
+    resolution.literal?.kind === "partial"
+    || resolution.literal?.destinationCollision === true
+    || (
+      resolution.literal?.kind === "present"
+      && resolution.literal.sourcePaths > MAX_SURFACES_DISTINCT
+      && !literalContinuationConsumed
+    )
+    || (resolution.literal?.kind === "present" && resolution.paths.length === 0)
+  ) {
+    traceLiteralFirstRouteDecision(resolution.literal, resolution.paths, "safeguarded", workspace);
+    return literalFirstSafeguardPack(args, query, workspace, resolution.literal, resolution.paths);
+  }
+  const paths = resolution.paths;
+  if (paths.length < (resolution.literal?.kind === "present" ? 1 : 2)) {
+    traceLiteralFirstRouteDecision(resolution.literal, paths, "abstained", workspace);
+    return undefined;
+  }
   const result = await buildSeededTaskPack({ ...args, paths }, query, workspace);
   // buildSeededTaskPack captures the internal seeded request. Replace that
   // cache key with the caller's original pathless request so an exact retry
   // still receives the compact pack-unchanged response.
   captureServedPack(workspace, args, computePackFingerprint(args, workspace), result);
+  traceLiteralFirstRouteDecision(
+    resolution.literal,
+    paths,
+    result.execution_contract?.typestate.phase === "prepared" ? "committed" : "abstained",
+    workspace,
+    literalContinuationConsumed ? 0 : undefined,
+  );
   return result;
 }
 
@@ -3612,6 +5985,45 @@ async function buildMultiConcernTaskPack(
   }
 
   const cache = new FileReadCache();
+  // A multi-concern request may include one exact directed relation plus
+  // independent documentation/test/manifest duties.  Do not let the latter
+  // route erase the relation's complete source cohort merely because the
+  // multi-concern builder runs first.  This is deliberately a *hard union*,
+  // not a score bonus: every exact ordinary-find witness is an edit-grade
+  // required surface before concern ranking/deduplication begins.
+  const literal = literalFirstRoutingEnabled()
+    ? literalFirstMeasurement(args, query, workspace, undefined)
+    : undefined;
+  const literalSafeguardReason = literal === undefined || literal.kind !== "present"
+    ? undefined
+    : literal.destinationCollision
+      ? "destination-collision"
+      : literal.sourcePaths > literalSourceRarityLimit(literal.universePaths)
+        ? "source-cohort-over-cap"
+        : literal.sourcePaths > MAX_SURFACES_DISTINCT
+          ? "source-cohort-remaining"
+          : literal.sourceImplementationPaths === 0
+            ? "source-implementation-witness-missing"
+            : literal.sourceRootCount !== 1
+              ? "source-root-ambiguous"
+              : !literal.universeComplete
+                ? "literal-universe-partial"
+                : undefined;
+  const literalHardSurfaces = literal?.kind === "present" && literalSafeguardReason === undefined
+    ? await Promise.all(literal.sourceWitnesses.map((witness) => candidateToSurface({
+        path: witness.path,
+        line: witness.line,
+        range: `${witness.line}-${witness.line}`,
+        surface: classifySurface(witness.path),
+        why: "literal-first-source",
+        confidence: 1,
+        required: true,
+        // Exact witness lines are an indivisible proof obligation.  The
+        // normal candidate widening is useful for concern ranking, but must
+        // not substitute a different window for this source occurrence.
+        callerRange: true,
+      }, workspace, [], query, cache)))
+    : [];
   const explicitPaths = (args.paths ?? [])
     .map(normalizePathEntry)
     .map((entry) => entry.path)
@@ -3741,13 +6153,27 @@ async function buildMultiConcernTaskPack(
     `${surface.path}\0${surface.symbol ?? ""}\0${surface.range}`;
   const surfaces: TaskPackSurface[] = [];
   const selectedKeys = new Set<string>();
+  const literalSourcePaths = new Set(literal?.sourceWitnesses.map((witness) => witness.path) ?? []);
+  // The multi-concern builder already has an eight-surface enrichment budget.
+  // A bounded exact cohort (at most six) plus independently required facets
+  // must use that same bounded envelope; otherwise a docs/tests concern could
+  // displace an exact source witness or vice versa.
+  const surfaceLimit = literalHardSurfaces.length > 0
+    ? MULTI_CONCERN_ENRICHMENT_MAX_SURFACES
+    : MAX_SURFACES_DISTINCT;
   const addSurface = (surface: TaskPackSurface): void => {
-    if (surfaces.length >= MAX_SURFACES_DISTINCT) return;
+    if (surfaces.length >= surfaceLimit) return;
     const key = surfaceKey(surface);
     if (selectedKeys.has(key)) return;
     selectedKeys.add(key);
     surfaces.push(surface);
   };
+
+  // Hard sources precede every ranked concern candidate.  Keep one witness
+  // per path: scanLiteral supplies a deterministic first occurrence, and the
+  // obligation is the file-level source cohort rather than duplicate text in
+  // the same file.
+  for (const surface of literalHardSurfaces) addSurface(surface);
 
   // Preserve one edit-grade surface per covered concern by default. A
   // stateful saturation defect is the bounded exception: the externally
@@ -3898,8 +6324,28 @@ async function buildMultiConcernTaskPack(
     },
   };
 
+  // Preserve the normal multi-concern evidence and contracts, but downgrade
+  // the final route whenever the exact cohort cannot be proved safe.  In
+  // particular, never turn the set-cover projection into an edit decision;
+  // the continuation carries the omitted exact witnesses canonically.
+  if (literal?.kind === "present" && literalSafeguardReason !== undefined) {
+    const { call: remainingCall } = literalFirstRemainingCall(literal, []);
+    result.coverage = "partial";
+    result.coverage_reason = "missing-roles";
+    result.missing = [...new Set([...result.missing, literalSafeguardReason])];
+    result.route = {
+      action: "locate_missing_surfaces",
+      reason: `literal-first safeguard: ${literalSafeguardReason}`,
+      max_additional_tl_calls: remainingCall ? 1 : 0,
+    };
+    if (remainingCall) {
+      result.continuation = { version: 1, stages: [{ execution: "parallel", calls: [remainingCall] }] };
+      result.next = remainingCall;
+    }
+  }
+
   if (discoverableUnresolved.length > 0) {
-    const calls: ContinuationCall[] = discoverableUnresolved.map(({ coverage, group }) => {
+    const calls: ContinuationCall[] = discoverableUnresolved.map(({ coverage, group }): ContinuationCall => {
       if (coverage.handles.length > 0) {
         return { tool: "read_file", arguments: { handles: coverage.handles } };
       }
@@ -3924,16 +6370,34 @@ async function buildMultiConcernTaskPack(
     }
   }
 
-  return dedupeTrimAndPersist(workspace, result, {
+  const persisted = dedupeTrimAndPersist(workspace, result, {
     protectedSurfaces: new Set(surfaces),
     args,
   });
+  if (literal?.kind === "present") {
+    const representedSourcePaths = codeTaskPackSurfaces(persisted.surfaces)
+      .map((surface) => surface.path)
+      .filter((entryPath) => literalSourcePaths.has(entryPath));
+    const remaining = literalFirstRemainingCall(literal, representedSourcePaths).remaining;
+    const prepared = persisted.execution_contract?.typestate.phase === "prepared";
+    const committed = literalSafeguardReason === undefined
+      && remaining.length === 0
+      && prepared;
+    traceLiteralFirstRouteDecision(
+      literal,
+      representedSourcePaths,
+      committed ? "committed" : literalSafeguardReason !== undefined ? "safeguarded" : "abstained",
+      workspace,
+      remaining.length,
+    );
+  }
+  return persisted;
 }
 
 interface ArtifactBuildExtraction {
   section?: ArtifactTaskPackSection;
   sectionId?: string;
-  next: string;
+  next: ContinuationCall;
 }
 
 function artifactBuildRelevance(file: DiscoveredArtifactFile, args: TaskPackArgs, query: string): number {
@@ -4007,11 +6471,16 @@ async function extractArtifactBuildSection(
   query: string,
 ): Promise<ArtifactBuildExtraction> {
   const artifactPath = artifact.surface.path;
-  const baseNext = `read_file mode=artifact path=${artifactPath}${
-    artifact.credentialRef !== undefined
-      ? ` credentialRef=${JSON.stringify(artifact.credentialRef)}`
-      : ""
-  }`;
+  const artifactCall = (selection: ToolCall["arguments"] = {}): ContinuationCall => ({
+    tool: "read_file",
+    arguments: {
+      mode: "artifact",
+      path: artifactPath,
+      ...(artifact.credentialRef !== undefined ? { credentialRef: artifact.credentialRef } : {}),
+      ...selection,
+    },
+  });
+  const baseNext = artifactCall();
   const maxChars = mustFetchPackCap(MAX_TASK_PACK_BYTES);
   let artifactBytes: Uint8Array = artifact.bytes;
 
@@ -4067,7 +6536,7 @@ async function extractArtifactBuildSection(
         next: baseNext,
       };
     }
-    const next = `${baseNext} sheet=${sheet} as=json`;
+    const next = artifactCall({ sheet, as: "json" });
     const table = await xlsxTable(artifactBytes, { sheet, as: "json" });
     if (!table.ok) return { next };
     return {
@@ -4122,7 +6591,7 @@ async function extractArtifactBuildSection(
         ...visualFields,
       },
       sectionId,
-      next: `${baseNext} sections=${JSON.stringify([sectionId])}`,
+      next: artifactCall({ sections: [sectionId] }),
     };
   }
 
@@ -4156,7 +6625,7 @@ async function extractArtifactBuildSection(
         ...visualFields,
       },
       sectionId,
-      next: slide ? `${baseNext} slides=${JSON.stringify([slide])}` : baseNext,
+      next: slide ? artifactCall({ slides: [slide] }) : baseNext,
     };
   }
 
@@ -4206,7 +6675,7 @@ async function extractArtifactBuildSection(
   return {
     section: { kind: "pdf", pages: extracted.pages, truncated: extracted.truncated },
     sectionId,
-    next: `${baseNext} pages=${JSON.stringify([String(extracted.pages[0]!.page)])}`,
+    next: artifactCall({ pages: [String(extracted.pages[0]!.page)] }),
   };
 }
 
@@ -4373,7 +6842,7 @@ async function attachArtifactBuildSections(
   const selected = selectArtifactBuildInputs(artifacts, query, args);
   result.artifact_requirements = selected.map((artifact) => artifact.surface.path);
   const extracted: ExtractedArtifactSection[] = [];
-  let firstMissingNext: string | undefined;
+  let firstMissingNext: ContinuationCall | undefined;
   for (const artifact of selected) {
     const extraction = await extractArtifactBuildSection(artifact, query);
     if (extraction.section && extraction.sectionId) {
@@ -4598,7 +7067,7 @@ async function buildArtifactTaskPack(
     },
     ...(createNote ? { create_note: createNote } : {}),
     ...(createTarget ? { create_target: createTarget } : {}),
-    next: artifacts[0]!.surface.extract,
+    next: { tool: "read_file", arguments: { mode: "artifact", handle: artifacts[0]!.surface.handle } },
   };
   (result.surfaces as TaskPackResultSurface[]).push(...artifacts.map((artifact) => artifact.surface));
 
@@ -4688,7 +7157,7 @@ async function buildSeededTaskPack(
   query: string,
   workspace: string,
 ): Promise<TaskPackResult> {
-  const selectedProfile = bindTaskProfile(args.taskProfile, query).selected;
+  const selectedProfile = bindTaskProfile(args.taskProfile, query, args.writeAllowed).selected;
   const answerProfile = selectedProfile === "answer";
   // FIX-B3: normalize every entry to the canonical {path,...} shape ONCE —
   // downstream code (SeedInfo.entry, toRead, seeds, prioritized) can then
@@ -4731,8 +7200,21 @@ async function buildSeededTaskPack(
     // P4: a malformed paths[] entry (missing/empty path) must SURFACE in
     // `missing` so the caller sees the entry was dropped — silently
     // `continue`ing left the agent believing a supplied path was honored.
+    //
+    // FX-M1/E1: an entry that named a `handle` (normalizePathEntry's own
+    // unresolved-handle marker, threaded through with `path:""`) is reported
+    // by that handle, never by the internal "paths[] entry" wire-dialect
+    // name — the caller sent a canonical `targets:[{handle}]` batch, not a
+    // legacy `paths[]` one, and naming OUR internal projection back to them
+    // would both mean nothing to them and leak legacy vocabulary onto the
+    // wire (AGENTS.md: "never emit legacy input").
     if (relPath.length === 0) {
-      missing.push("(invalid paths[] entry: missing path)");
+      const unresolvedHandle = typeof (entry as unknown as Record<string, unknown>)["handle"] === "string"
+        ? (entry as unknown as Record<string, unknown>)["handle"] as string
+        : undefined;
+      missing.push(unresolvedHandle !== undefined
+        ? `handle:${unresolvedHandle} did not resolve to a servable path in this workspace`
+        : "(invalid paths[] entry: missing path)");
       continue;
     }
     // Distinct symbols/ranges in one file are distinct caller requirements.
@@ -4861,7 +7343,9 @@ async function buildSeededTaskPack(
         ...(seed.entry.range !== undefined ? { callerRange: true } : {}),
         ...(symbol ? { symbol } : {}),
         surface: seed.role,
-        why: seed.entry.purpose ?? (identifierContext ? "query-identifier-test-match" : "caller-supplied"),
+        why: seed.entry.purpose === undefined
+          ? (identifierContext ? "query-identifier-test-match" : "caller-supplied")
+          : `${seed.entry.purpose}; caller-supplied`,
         confidence: wantsEmbed ? 0.85 : 0.3,
         required: requiredSet.has(seed.role),
       };
@@ -5065,7 +7549,11 @@ async function buildSeededTaskPack(
             if (content === undefined) continue;
             const symbols = await extractSymbolsFromFile(content, relPath, 256, [identifier]);
             for (const symbol of symbols) {
-              if (normIdent(symbol.name) !== normIdent(identifier)) continue;
+              // E3: `extractSymbolsFromFile` names a C++ member QUALIFIED
+              // (`EKF::isHealthy`) while `identifier` is the bare token the
+              // query spelled, so the exact-name test dropped every qualified
+              // definition. See `unqualifiedSymbolTail`.
+              if (!identifierNamesSymbol(symbol.name, identifier)) continue;
               const classified = classifySurface(relPath, symbol.name);
               definitions.push({
                 path: relPath,
@@ -5414,8 +7902,8 @@ async function buildSeededTaskPack(
   // that is an identity next_call, and an obedient agent loops on it. A dir
   // that contributed nothing needs an INVENTORY step, not a re-scan: name the
   // tree call for the first unresolved dir instead.
-  const unexpandedDirNext = unresolvedDirs.length > 0
-    ? `search_files action=tree path=${unresolvedDirs[0]}`
+  const unexpandedDirNext: ContinuationCall | undefined = unresolvedDirs.length > 0
+    ? { tool: "search_files", arguments: { action: "tree", path: unresolvedDirs[0] } }
     : undefined;
   const nextHint = nextHintForCoverage(
     seededSurfaces, coverageStr, coverageReason, query, missingRequired, unmatchedConcern,
@@ -5596,6 +8084,15 @@ const ANCHOR_FOCUS_CALLABLE_WEIGHT = 2;
 /** An identifier explicitly written in the query outranks incidental prose overlap. */
 const ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT = 100;
 
+/**
+ * E3: a symbol whose FULLY QUALIFIED name is the one the query spelled
+ * (`EKF::isHealthy`) outranks a same-tail member of a different class, which
+ * only earns the plain explicit-identifier weight. Larger than the maximum
+ * lexical score (NAME 3 + COVERAGE 5 + BODY 1 + CALLABLE 2) so class identity
+ * — not shared prose — decides between two same-named members.
+ */
+const ANCHOR_FOCUS_QUALIFIED_MATCH_WEIGHT = 50;
+
 /** MCP protocol vocabulary is not a request to locate a same-named code symbol. */
 const PROTOCOL_IDENTIFIERS = new Set([
   "mcp",
@@ -5679,8 +8176,12 @@ interface AnchorFocusCandidate {
    * D2 (2026-08-07): set when this candidate is the file's LEADING comment
    * block rather than a parsed symbol. Only affects display wording — the
    * candidate competes on the ordinary lexical score like any other.
+   *
+   * 2026-09-05: `"doc-section"` marks a MARKDOWN heading section picked by
+   * `markdownAnchorFocus`. It never reaches the symbol-scoring path below, so
+   * it changes only the `why` wording attachAnchorFocusAffordance emits.
    */
-  kind?: CollectedSymbolKind | "module-header";
+  kind?: CollectedSymbolKind | "module-header" | "doc-section";
 }
 
 interface AnchorFocusResult {
@@ -5734,6 +8235,79 @@ function explicitCodeIdentifiers(query: string): string[] {
     out.push(token);
   }
   return out;
+}
+
+/**
+ * E3 (2026-09-05, measured on paid smoke r9 / SF13): the UNQUALIFIED TAIL of a
+ * parsed symbol name — its last `::` / `.` / `#` segment, or the name itself
+ * when it carries no qualifier.
+ *
+ * `explicitCodeIdentifiers` tokenizes on the identifier alphabet, so a query
+ * that spells `EKF::isHealthy` contributes the two SEPARATE identities `EKF`
+ * and `isHealthy` — never the joined form. Every C++ parse (and
+ * `extractSymbolsFromLines`' own C/C++ fallback pattern
+ * `([a-zA-Z_]\w*::[a-zA-Z_]\w*)`, so both the parsed and the regex path agree)
+ * names a member QUALIFIED: `EKF::isHealthy`. A raw
+ * `explicitIdentifierSet.has(symbol.name.toLowerCase())` test therefore could
+ * never be true for a qualified member, and the explicit-identifier weight was
+ * silently unreachable for exactly the queries that name a member most
+ * precisely. Live (r9/SF13): the query named `EKF::isHealthy` (ekf.cpp:592) and
+ * the pack anchored on `EKF::updateGps` (255-412) on GPS/covariance lexical
+ * overlap alone, leaving the named member inside `remaining`.
+ *
+ * Deliberately a NAME-side normalization only: query tokenization is unchanged
+ * everywhere, so an unqualified symbol compares exactly as it always did and
+ * the default wire for every query naming no qualified member is untouched.
+ */
+function unqualifiedSymbolTail(name: string): string {
+  const match = /(?:::|[.#])([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(name);
+  return match?.[1] ?? name;
+}
+
+/**
+ * Does `symbolName` (possibly qualified) name one of the identifiers the query
+ * spelled explicitly? Whole name first — an unqualified symbol is unchanged —
+ * then its unqualified tail. See `unqualifiedSymbolTail`.
+ */
+function symbolNameIsExplicitIdentifier(
+  symbolName: string,
+  explicitIdentifierSet: ReadonlySet<string>,
+): boolean {
+  if (explicitIdentifierSet.has(symbolName.toLowerCase())) return true;
+  const tail = unqualifiedSymbolTail(symbolName);
+  return tail !== symbolName && explicitIdentifierSet.has(tail.toLowerCase());
+}
+
+/** True when `identifier` names `symbolName` outright or names its unqualified tail. */
+function identifierNamesSymbol(symbolName: string, identifier: string): boolean {
+  const wanted = normIdent(identifier);
+  if (wanted.length === 0) return false;
+  if (normIdent(symbolName) === wanted) return true;
+  const tail = unqualifiedSymbolTail(symbolName);
+  return tail !== symbolName && normIdent(tail) === wanted;
+}
+
+/**
+ * `Qualifier<sep>member` pairs the QUERY itself spells, keyed
+ * `qualifier\0member`. Accepts `::`, `.` and `#`, so `EKF::isHealthy`,
+ * `Class.method` and `Class#method` all bind.
+ *
+ * Used only to PREFER the exactly-qualified symbol over a same-tail member of a
+ * different class (two classes can both declare `isHealthy`); it never demotes
+ * a tail match, so a query that names only the bare member is unaffected.
+ */
+function queryQualifiedSymbolKeys(query: string): Set<string> {
+  const out = new Set<string>();
+  for (const match of query.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)(?:::|[.#])([A-Za-z_$][A-Za-z0-9_$]*)\b/g)) {
+    out.add(`${match[1]!.toLowerCase()}\u0000${match[2]!.toLowerCase()}`);
+  }
+  return out;
+}
+
+/** `qualifier\0member` key of a qualified symbol name; undefined when unqualified. */
+function symbolQualifiedKey(symbolName: string): string | undefined {
+  const match = /([A-Za-z_$][A-Za-z0-9_$]*)(?:::|[.#])([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(symbolName);
+  return match === null ? undefined : `${match[1]!.toLowerCase()}\u0000${match[2]!.toLowerCase()}`;
 }
 
 /** Identities whose code intent is explicit rather than inferred from shape. */
@@ -5808,6 +8382,136 @@ function refocusCandidateForQuery(
 }
 
 /**
+ * One MARKDOWN section as an anchor-focus candidate, or undefined when its
+ * bounded window would not fit MAX_SURFACE_CODE_BYTES.
+ *
+ * The window is `docAnchorRange` — docSliver.ts's own section+context span,
+ * capped at DOC_ANCHOR_SECTION_MAX_LINES — so a doc anchored HERE and a doc
+ * zoomed to by the sliver affordance land on exactly the same lines.
+ */
+function markdownSectionCandidate(
+  heading: MarkdownHeading,
+  lines: readonly string[],
+  totalLines: number,
+  score: number,
+): AnchorFocusCandidate | undefined {
+  const end = Math.min(heading.endLine, totalLines);
+  const sectionLines = end - heading.line + 1;
+  if (sectionLines <= 0) return undefined;
+  // Past docSliver's own section ceiling a heading stops being a servable unit
+  // (that is exactly where `docAnchorRange` gives up on the section and returns
+  // a ±radius window at its HEAD instead). Serving a long parent chapter's
+  // opening lines and CALLING it the matched section would rebuild this
+  // branch's own defect — a bounded window chosen by a token hit that is not
+  // inside it. Skipping lets the caller fall to the next-ranked section, which
+  // in a structured document is the subsection that actually carries the match.
+  if (sectionLines > DOC_ANCHOR_SECTION_MAX_LINES) return undefined;
+  const body = lines.slice(heading.line - 1, end).join("\n");
+  if (Buffer.byteLength(body, "utf8") > MAX_SURFACE_CODE_BYTES) return undefined;
+  // The served span IS the section — not `docAnchorRange`'s section+context
+  // window. Two reasons, both load-bearing: the `why` this mints claims "the
+  // query-matched section", and a span spilling ±20 lines into its NEIGHBOURS
+  // is not that; and a doc anchor is competing for the pack's byte budget
+  // against required code bodies, where a 4x-wider window is what gets the
+  // whole doc surface dropped by the cap ladder (measured on the T05c
+  // multi_concern pack). `isDocSliverSurface` + `servedSpanIsSection` already
+  // recognize an exact section serve as the coherent unit it is and leave it
+  // alone.
+  return { name: heading.text, range: `${heading.line}-${end}`, score, kind: "doc-section" };
+}
+
+/**
+ * Anchor focus for a MARKDOWN file: pick the SECTION the query is about.
+ *
+ * Markdown has no parser, so before this existed `selectAnchorFocus` scored a
+ * doc with `extractSymbolsFromFile`'s code-declaration regex — a scan that
+ * cannot describe prose and, on the measured defect, minted a phantom symbol
+ * from the document's LAST line. See `selectAnchorFocus`'s Markdown guard for
+ * the full chain; the repair is to score the structure the format actually has.
+ *
+ * Two picks, in priority order:
+ *
+ *  1. LITERAL-FIRST, the F-V13-8 rule applied to prose. A query naming an
+ *     exact, unique quoted/diff-style replacement (`exactReplacementFromQuery`
+ *     — the same parser the single-site fast path and the T2 short circuit
+ *     already trust) is unambiguous positional evidence, and the section
+ *     containing that ONE occurrence is an anchor no lexical score should be
+ *     allowed to outvote. Zero or multiple occurrences fall through, exactly as
+ *     on the code path: uniqueness is the only signal trusted here.
+ *
+ *  2. The best-scoring section from `rankDocHeadingMatches` — heading-text hits
+ *     at weight 3, word-boundary body hits up to DOC_SLIVER_MAX_BODY_HITS, ties
+ *     to the shorter section then document order — over `docQueryTokens`, whose
+ *     stopword list already drops the generic doc vocabulary ("contract", "md",
+ *     "doc", ...) that made the file's own basename stem look like a target.
+ *     A section whose bounded window overflows MAX_SURFACE_CODE_BYTES is
+ *     skipped for the next-ranked one rather than served truncated.
+ *
+ * Returns undefined when the file has no headings or nothing clears
+ * DOC_SLIVER_MIN_MATCH_SCORE: not knowing where the answer is means keeping
+ * today's whole-file default, never guessing a window.
+ *
+ * NO RUNNER-UPS. The symbol path spends a minted handle and an `outline` line
+ * per runner-up; `outline` is not on the v1 evidence allow-list
+ * (`protocol/decisionWire.ts`), so for a doc those bytes buy the caller nothing
+ * and only push the pack toward the cap. The doc-sliver heading INDEX is the
+ * navigation affordance for this file shape.
+ *
+ * EXPORTED for `docAnchorMarkdown.spec.ts`. `selectAnchorFocus` itself is
+ * reachable only through the locator's candidate pipeline, whose routing
+ * depends on the whole workspace shape; pinning the SELECTION rule directly is
+ * what keeps the regression checkable without a fixture that also has to
+ * reproduce candidate ranking. The end-to-end shape is pinned separately by the
+ * replay corpus's `dam` group.
+ */
+export function markdownAnchorFocus(content: string, query: string): AnchorFocusResult | undefined {
+  const headings = parseMarkdownHeadings(content);
+  if (headings.length === 0) return undefined;
+  const lines = content.split(/\r?\n/);
+  const totalLines = countLines(content);
+
+  const literalExact = exactReplacementFromQuery(query);
+  const literalText = literalExact === undefined
+    ? undefined
+    : "identifierOldValue" in literalExact
+    ? literalExact.identifierOldValue
+    : literalExact.search;
+  if (literalText !== undefined && literalText.length > 0) {
+    const firstIdx = content.indexOf(literalText);
+    if (firstIdx !== -1 && content.indexOf(literalText, firstIdx + 1) === -1) {
+      const matchLine = content.slice(0, firstIdx).split(/\r?\n/).length;
+      let enclosing: MarkdownHeading | undefined;
+      let enclosingSpan = Infinity;
+      for (const heading of headings) {
+        if (heading.line > matchLine || heading.endLine < matchLine) continue;
+        const span = heading.endLine - heading.line;
+        if (span < enclosingSpan) {
+          enclosing = heading;
+          enclosingSpan = span;
+        }
+      }
+      const literalCandidate = enclosing === undefined
+        ? undefined
+        : markdownSectionCandidate(enclosing, lines, totalLines, ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT);
+      if (literalCandidate !== undefined) return { best: literalCandidate, runnerUps: [] };
+    }
+  }
+
+  // `mostSpecificDocHeadingMatch` first — the same pick docSliver.ts's own
+  // `selectTargetHeading` makes, so the section a pack ANCHORS on and the
+  // section it would offer to zoom to are literally one choice — then the rest
+  // of the ranking as fallbacks for a window that cannot be served whole.
+  const ranked = rankDocHeadingMatches(headings, lines, docQueryTokens(query));
+  const specific = mostSpecificDocHeadingMatch(ranked);
+  const ordered = specific === undefined ? ranked : [specific, ...ranked.filter((m) => m !== specific)];
+  for (const match of ordered) {
+    const candidate = markdownSectionCandidate(match.heading, lines, totalLines, match.score);
+    if (candidate !== undefined) return { best: candidate, runnerUps: [] };
+  }
+  return undefined;
+}
+
+/**
  * Score `filePath`'s top-level symbols (extractSymbolsFromFile — the same
  * symbol-listing helper resolveDigest already uses) by lexical overlap
  * against `query`, and pick the top-scoring symbol whose body fits
@@ -5825,7 +8529,13 @@ function refocusCandidateForQuery(
  * one then would still ship no code — never guess); the caller keeps
  * today's whole-file-range default in both cases.
  */
-async function selectAnchorFocus(
+/**
+ * EXPORTED for focused SELECTION pins, the same precedent `markdownAnchorFocus`
+ * (2026-09-05 doc anchor-focus) set: an end-to-end pack assertion cannot say
+ * WHICH symbol the anchor scorer chose, only which bytes survived every later
+ * trim/route stage, so the E3 qualified-anchor regression is taken here.
+ */
+export async function selectAnchorFocus(
   content: string,
   filePath: string,
   query: string,
@@ -5833,8 +8543,35 @@ async function selectAnchorFocus(
 ): Promise<AnchorFocusResult | undefined> {
   const queryTokens = tokenizeForEpoch(query);
   if (queryTokens.length === 0) return undefined;
+  // 2026-09-05 doc anchor-focus (measured on paid smoke r9 / SF05, and first
+  // measured 2026-08-08 — see docSliver.ts's header for the same shape).
+  // A MARKDOWN file has no parser, so everything below fell through to
+  // `extractSymbolsFromFile`'s CODE-DECLARATION regex scan over prose. On
+  // `bench/fixtures/aeroctl/CONTRACT.md` that scan minted a phantom symbol
+  // `contract` from the file's LAST line — "  to deviate from this contract
+  // (e.g., if `requires` is unavailable in the parser)." matches the C/C++
+  // `(?:\w+[\s*&]+)+([A-Za-z_]\w*)\s*\(` pattern — and, because
+  // `explicitCodeIdentifiers` admits the ALL-CAPS stem `CONTRACT` of the file's
+  // own NAME as an explicit code identifier, that phantom collected
+  // ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT and beat every real section. The
+  // pack then served line 1514/1514 of the one authority document the query
+  // named, while the answer sat in "### 7.6 `<control/mixer.hpp>`".
+  //
+  // Markdown has real structure, so use it: score the document's own SECTIONS
+  // with the SAME query-term scoring docSliver.ts already applies when it
+  // chooses a zoom target (`docQueryTokens` — whose stopword list already drops
+  // "contract"/"md"/"doc" — plus `rankDocHeadingMatches`'s word-boundary body
+  // hits, which is what lets 2-char identifiers like FR/BL/FL/BR count). One
+  // vocabulary, so the section a pack ANCHORS on and the section it would offer
+  // to zoom to can never name different places. No section clearing
+  // DOC_SLIVER_MIN_MATCH_SCORE means we do not know where the answer is: return
+  // undefined and keep today's whole-file default rather than guess.
+  if (isMarkdownPath(filePath)) return markdownAnchorFocus(content, query);
   const explicitIdentifiers = explicitCodeIdentifiers(query);
   const explicitIdentifierSet = new Set(explicitIdentifiers.map((name) => name.toLowerCase()));
+  // E3 (see `unqualifiedSymbolTail`): the query's own `Class::member` spellings,
+  // used below only to break a tie between two same-tail members.
+  const queryQualifiedKeys = queryQualifiedSymbolKeys(query);
   const lang = languageForPath(filePath);
   const parsed = lang
     ? cache
@@ -5934,12 +8671,21 @@ async function selectAnchorFocus(
     const declaration = body.split(/\r?\n/, 1)[0] ?? "";
     const callable = /\b(function|method|def|fn|fun)\b|=>/.test(declaration) ? 1 : 0;
     const typeOnly = /\b(interface|type|enum)\b/.test(declaration) ? 1 : 0;
-    const explicitIdentifier = explicitIdentifierSet.has(sym.name.toLowerCase());
+    // E3: match the query's explicit identities against the symbol's
+    // UNQUALIFIED TAIL as well as its whole name — a parsed C++ member is named
+    // `EKF::isHealthy` while the query contributes `EKF` and `isHealthy`
+    // separately, so the whole-name test alone made the +100 weight unreachable
+    // for every qualified member. See `unqualifiedSymbolTail`.
+    const explicitIdentifier = symbolNameIsExplicitIdentifier(sym.name, explicitIdentifierSet);
+    const symbolKey = symbolQualifiedKey(sym.name);
+    const qualifiedMatch = symbolKey !== undefined && queryQualifiedKeys.has(symbolKey);
     const lexicalScore = nameOverlap * ANCHOR_FOCUS_NAME_WEIGHT
       + symbolCoverage * ANCHOR_FOCUS_SYMBOL_COVERAGE_WEIGHT
       + bodyOverlap * ANCHOR_FOCUS_BODY_WEIGHT;
     const score = explicitIdentifier
-      ? ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT + lexicalScore + callable * ANCHOR_FOCUS_CALLABLE_WEIGHT - typeOnly
+      ? ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT
+        + (qualifiedMatch ? ANCHOR_FOCUS_QUALIFIED_MATCH_WEIGHT : 0)
+        + lexicalScore + callable * ANCHOR_FOCUS_CALLABLE_WEIGHT - typeOnly
       : lexicalScore <= 0
       ? 0
       : lexicalScore + callable * ANCHOR_FOCUS_CALLABLE_WEIGHT - typeOnly;
@@ -6181,8 +8927,17 @@ function attachAnchorFocusAffordance(
   filePath: string,
   workspace: string,
 ): void {
-  const callerScoped = /^caller-supplied(?:-dir)?$/.test(surface.why ?? "");
-  const focusWhy = focus.best.kind === "module-header"
+  const callerScoped = /(?:^|; )caller-supplied(?:-dir)?$/.test(surface.why ?? "");
+  // A doc-section pick is checked FIRST: its literal-first arm carries the same
+  // ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT score the code path uses, and a
+  // Markdown heading is not a code identifier. The distinct wording also keeps
+  // it out of the two "explicit query identifier" readers
+  // (suppressFragmentOnlyFilenameMatches' workspace-unique symbol anchors and
+  // reconcileContentSufficiency's runner-up exemption), both of which reason
+  // about resolved CODE symbols.
+  const focusWhy = focus.best.kind === "doc-section"
+    ? `anchor-focus: query-matched section ${JSON.stringify(focus.best.name)}`
+    : focus.best.kind === "module-header"
     ? `anchor-focus: query-matched module header of ${focus.best.name}`
     : focus.best.score >= ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT
     ? `anchor-focus: explicit query identifier ${focus.best.name}`
@@ -6416,7 +9171,7 @@ async function buildDiffTaskPack(query: string, workspace: string): Promise<Task
       "confirm each drift surface's change matches the reported symptom, then re-run `search_files action=diff` to confirm no new regression",
     ],
     verify: discoverVerificationHints(workspace, query, surfaces),
-    next: `read_file mode=slice handle=${primaryHandle}`,
+    next: { tool: "read_file", arguments: { mode: "slice", handle: primaryHandle } },
   };
 }
 
@@ -6772,8 +9527,8 @@ async function buildPartialPack(
     const functionalValidationObligation = validation !== undefined
       ? [{ id: "functional-validation", open: true, required: true, paths: [validation.targetPath] }]
       : [];
-    // V11-03 (requires TL_COVERAGE_PACKER also on — see util/flags.ts's
-    // "V11-03 addendum"): coveragePackerV2 additionally folds in the OPEN
+    // V11-03 (TL_COVERAGE_PACKER=v2 — see util/flags.ts's "V11-03
+    // addendum"): coveragePackerV2 additionally folds in the OPEN
     // change_contract obligations the SECOND seam (dedupeTrimAndPersist,
     // below) recorded for this task from a PRIOR pack, via priorPackStore.
     // This is the read half of the obligation-threading loop the second seam
@@ -6930,7 +9685,7 @@ async function buildPartialPack(
   // exists at all.
   const next = nextHintForCoverage(
     surfaces, coverageStr, coverageReason, query, missingRequired, unmatchedConcern,
-  ) ?? `search_files action=locate query="${continuationQuery(query)}"`;
+  ) ?? { tool: "search_files", arguments: { action: "locate", query: continuationQuery(query) } };
   // blocking_next_steps was previously ALWAYS dropped here (item 3): route
   // honesty (A4) now populates it, but ONLY when the route actually flipped
   // to locate_missing_surfaces AND there is real per-token content (the
@@ -7809,8 +10564,10 @@ export function concernAnchorTokens(text: string, limit = 6): string[] {
   // Query-derived only. Repository vocabulary grounding happens after the
   // walk/symbol evidence is available; production code carries no benchmark-
   // or domain-specific translation table here.
+  const destinationNorms = literalFirstDestinationNorms(text);
   return orderedUniqueTokens([...compounds, ...concrete, ...simple, ...compactCodeTerms])
     .filter(isConcernAnchorable)
+    .filter((token) => !destinationNorms.has(normIdent(token)))
     .slice(0, limit);
 }
 
@@ -8112,13 +10869,69 @@ interface RankedAnswerEvidenceCandidate {
   strongEvidence: boolean;
 }
 
-function isNonImplementationAnswerCandidate(candidate: ImpactCandidate): boolean {
+export function isNonImplementationAnswerCandidate(candidate: ImpactCandidate): boolean {
   // `classifySurface` intentionally labels anything under a fixture root as
   // test data. That is correct for TokenLighten's own repository, but wrong
   // when the caller explicitly scopes the target application under a bench
   // fixture. Use the candidate's repository-relative path semantics here;
   // only actual test directories/files are non-implementation evidence.
-  return /(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:^|\/)bench\/workflows(?:\/|$)|\.spec\.[^.]+$/i.test(candidate.path);
+  if (
+    /(?:^|\/)(?:__tests__|test|tests|decoy|decoys)(?:\/|$)|(?:^|\/)(?:changelog|changes)\.[^/]+$|\.spec\.[^.]+$/i.test(
+      candidate.path,
+    )
+  ) {
+    return true;
+  }
+  // `example(s)`/`fixture(s)` are leaf-scoped, mirroring the identical
+  // precedent already established for `classifySurface`'s "data" role
+  // (util/impact.ts's `dataKeyword`): the keyword only counts when it names
+  // the file itself (basename) or its immediate parent directory — NEVER a
+  // distant ancestor segment. An any-segment check let ANY caller-scoped
+  // root that happens to carry a "fixtures"/"examples" ancestor above the
+  // real implementation tree (a bench-harness scope like
+  // `bench/fixtures/<repo>/...`, or a workspace whose own filesystem
+  // location simply sits under such a directory) misclassify every real
+  // implementation file beneath it as decoy/non-implementation evidence —
+  // that ancestor segment describes where the tree is rooted, not what the
+  // file is. A genuine `fixtures/`/`examples/` directory *inside* the
+  // target tree (e.g. `src/test/fixtures/SampleData.java`) still matches,
+  // because there the segment names the file's own immediate parent.
+  //
+  // FX-O3 (2026-09-03, round-17 review finding 4): FX-N0 folded
+  // `bench`/`benchmarks`/`workflow(s)` into this same leaf/parent rule,
+  // reasoning it mirrored `example(s)`/`fixture(s)`. It does not:
+  // "fixtures"/"examples" name test-data conventions with no legitimate
+  // production-code meaning, but "workflow"/"bench" are ordinary words for
+  // real implementation — a workflow engine, a workflow orchestrator, a
+  // benchmark/rating engine — and the leaf/parent scoping does not save
+  // this, because it demotes exactly the files that legitimately carry
+  // those words as their own basename or directory name:
+  // `src/workflow/engine.ts`, `internal/workflow/executor.go`,
+  // `app/workflows/order_fulfillment.py`, `src/benchmark.rs`,
+  // `lib/workflow_engine/step.rb` were all wrongly demoted on the default,
+  // flags-off path in ANY repository, not just TokenLighten's own. These
+  // terms were a TokenLighten-specific hack (this repo's own
+  // `bench/workflows/` harness) dressed up as a generic rule; removed
+  // entirely rather than re-scoped. Only `example(s)`/`fixture(s)` remain
+  // leaf-scoped here.
+  const segments = candidate.path.toLowerCase().split("/").filter((s) => s.length > 0);
+  const basename = segments[segments.length - 1] ?? "";
+  const parentSegment = segments.length >= 2 ? segments[segments.length - 2] : "";
+  const leafDecoyKeyword = /(^|[^a-z])(examples?|fixtures?)([^a-z]|$)/;
+  return leafDecoyKeyword.test(basename) || leafDecoyKeyword.test(parentSegment);
+}
+
+/**
+ * A named implementation may answer a direct lookup alone.  A request that
+ * explicitly asks for a relationship or supporting context cannot: collapsing
+ * the locator's bounded candidate set to the named symbol would erase the
+ * very context the caller asked to retain.  This is deliberately narrower
+ * than open-universe intent; it preserves a small, ranked companion set and
+ * never asks for an exhaustive repository scan.
+ */
+function requiresRelatedAnswerContext(query: string): boolean {
+  return /\b(?:continuations?|relations?|graphs?|edges?|wiring|imports?|references?)\b|\bsupporting\s+context\b/iu.test(query)
+    || /(?:関係|接続|参照|継続)/u.test(query);
 }
 
 function answerEvidencePathPenalty(candidate: ImpactCandidate, query: string): number {
@@ -9180,7 +11993,7 @@ const MAX_BATCH_NEXT_HANDLES = 6;
  * whenever the shape is NOT a two-domain wiring dead end, so every non-wiring
  * partial keeps nextHintForCoverage's existing branches untouched.
  */
-function wiringConsumerNext(query: string, surfaces: TaskPackSurface[]): string | undefined {
+function wiringConsumerNext(query: string, surfaces: TaskPackSurface[]): ContinuationCall | undefined {
   if (surfaces.length === 0) return undefined;
   const valueTokens = new Set(extractEnumValueTokens(query).map((t) => normIdent(t)));
   // Concrete identifier tokens in query order, minus enum new-value tokens.
@@ -9220,12 +12033,12 @@ function wiringConsumerNext(query: string, surfaces: TaskPackSurface[]): string 
   if (covered(source)) {
     // (a) references sweep on the destination-side token: find where the
     // consumer that should receive the wire lives / is referenced.
-    return `search_files action=references query=${dest}`;
+    return { tool: "search_files", arguments: { action: "references", query: dest } };
   }
   // (b) neither end located cleanly: point at the second domain's strongest
   // distinct token (the first query concern with no surface match).
   const unmatched = unmatchedConcernTokens(query, surfaces);
-  if (unmatched.length > 0) return `search_files action=find query=${unmatched[0]}`;
+  if (unmatched.length > 0) return { tool: "search_files", arguments: { action: "find", query: unmatched[0] } };
   return undefined;
 }
 
@@ -9288,7 +12101,7 @@ function nextHintForCoverage(
   query: string,
   missingRoles: string[],
   unmatchedTokens: string[],
-): string | undefined {
+): ContinuationCall | undefined {
   const primary = surfaces[0];
   if (!primary) return undefined;
 
@@ -9299,13 +12112,10 @@ function nextHintForCoverage(
       .filter((s) => s.code === undefined && s.code_unchanged === undefined)
       .map((s) => s.handle);
     if (codeless.length >= 2) {
-      const list = codeless.slice(0, MAX_BATCH_NEXT_HANDLES).map((h) => `"${h}"`).join(",");
-      return `read_file handles=[${list}]`;
+      return { tool: "read_file", arguments: { handles: codeless.slice(0, MAX_BATCH_NEXT_HANDLES) } };
     }
-    if (primary.code !== undefined) {
-      return `edit_file handle=${primary.handle}`;
-    }
-    return `read_file mode=slice handle=${primary.handle}`;
+    if (primary.code !== undefined) return undefined;
+    return { tool: "read_file", arguments: { mode: "slice", handle: primary.handle } };
   }
 
   if (reason === "candidate-list") {
@@ -9321,10 +12131,10 @@ function nextHintForCoverage(
         .map((surface) => surface.handle),
     )].slice(0, MAX_BATCH_NEXT_HANDLES);
     if (codeless.length > 1) {
-      return `read_file handles=${JSON.stringify(codeless)}`;
+      return { tool: "read_file", arguments: { handles: codeless } };
     }
     if (codeless.length === 1) {
-      return `read_file mode=slice handle=${codeless[0]}`;
+      return { tool: "read_file", arguments: { mode: "slice", handle: codeless[0] } };
     }
     // B1c (2026-08-01 retrieval-scope): with every candidate body served the
     // choice IS the next act, so there is still no `next` here — the EXECUTABLE
@@ -9356,11 +12166,13 @@ function nextHintForCoverage(
   if (wiringNext) return wiringNext;
 
   if (reason === "missing-roles" && missingRoles.length > 0) {
-    const roles = missingRoles.map((r) => `"${r}"`).join(",");
-    return `read_file mode=task_pack query="${continuationQuery(query)}" surfaceRoles=[${roles}]`;
+    return {
+      tool: "read_file",
+      arguments: { mode: "task_pack", query: continuationQuery(query), surfaceRoles: missingRoles },
+    };
   }
   if (reason === "concerns-uncovered" && unmatchedTokens.length > 0) {
-    return `search_files action=find query=${unmatchedTokens[0]}`;
+    return { tool: "search_files", arguments: { action: "find", query: unmatchedTokens[0] } };
   }
 
   // Any other partial (e.g. diff-truncated) keeps a single-slice fallback — but
@@ -9377,10 +12189,10 @@ function nextHintForCoverage(
   // a call that cannot advance discovery.
   const remainingWindow = primary.remaining_ranges?.[0];
   if (remainingWindow) {
-    return `read_file mode=slice handle=${primary.handle} range=${remainingWindow}`;
+    return { tool: "read_file", arguments: { mode: "slice", handle: primary.handle, range: remainingWindow } };
   }
   if (primary.code === undefined && primary.code_unchanged === undefined) {
-    return `read_file mode=slice handle=${primary.handle}`;
+    return { tool: "read_file", arguments: { mode: "slice", handle: primary.handle } };
   }
   return undefined;
 }
@@ -9732,10 +12544,25 @@ function hasInterrogativeAnswerMarker(query: string): boolean {
 
 /**
  * An explicit profile is the caller's structured semantic declaration.  The
- * server only overrides it for the two operation-level safety contradictions:
- * answer + a request-shaped mutation, or a change profile + explicit no-edit.
- * It does not use incidental analysis/wiring words to choose between declared
- * change shapes.
+ * server does not use incidental analysis/wiring words to choose between
+ * declared change shapes, and — since DESIGN-v0.15-sf-intent-layers.md §3
+ * (2026-09-05) — it does not use them to override a declared
+ * `taskProfile:"answer"` into a change profile either (the retired V4
+ * override; see the `request === "answer"` branch below).
+ *
+ * NOTE on §4.1 scope: `profile_binding.selected` here classifies the SHAPE of
+ * the request (a planning/certification question the caller may legitimately
+ * ask with `--allow-write` absent — the replay corpus's many spawned-server
+ * and in-process groups that omit `--allow-write` and still expect a
+ * `wiring`/`change_propagation`/`multi_concern`/`artifact_build` profile with
+ * a prepared `change_contract` are exactly this). §4.1's actual write veto is
+ * wired at the two places an unwritable "edit" would otherwise be acted on or
+ * certified: `extractConcerns`'s per-concern disposition (`sfConcerns.ts`,
+ * downgrading `edit` to `review` with `dispositionDowngradedFrom`) and the
+ * real `edit_file` dispatch (already gated on `ALLOW_WRITE` independently of
+ * this module). `writeAllowed` is still threaded into `resolveIntent` below
+ * (via the `request === "answer"` branch) for `IntentDecision` parity with
+ * that consumer — it does not change `selected` here.
  *
  * 2026-08-21: `auto`'s §14 misfire guardrail below honors an inferred
  * "answer" only when the query carries an interrogative/comprehension
@@ -9743,7 +12570,17 @@ function hasInterrogativeAnswerMarker(query: string): boolean {
  * analysis-intent wording (hasAnalysisIntentMarker) stays on the §14
  * fallback.
  */
-function bindTaskProfile(requested: TaskProfileRequest | undefined, query: string): TaskProfileBinding {
+function bindTaskProfile(
+  requested: TaskProfileRequest | undefined,
+  query: string,
+  writeAllowed = true,
+  // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): optional so every existing
+  // call site keeps compiling without an audit; omitted only means "this
+  // caller has no workspace root to ask" (never observed), not "definitely
+  // not observed" — see the `request === "answer"` branch's `resolveIntent`
+  // call below, the sole place this parameter is read.
+  workspace?: string,
+): TaskProfileBinding {
   const request = requested ?? "auto";
   const inferred = classifyTaskProfile(query);
   if (request === "auto") {
@@ -9785,37 +12622,73 @@ function bindTaskProfile(requested: TaskProfileRequest | undefined, query: strin
     };
   }
 
-  // taskProfile is a structured declaration derived from the user's request,
-  // not an authority to contradict the verbatim request itself. A stale or
-  // mis-copied `answer` hint on an unmistakable mutation request used to
-  // produce a prepared answer pack, after which the caller necessarily edited
-  // and counted as an answer-profile misfire. Refine that contradiction using
-  // only request-shaped language; repository names, paths, task IDs, and
-  // benchmark membership never participate. An explicit no-edit declaration
-  // remains authoritative for read-only reviews that discuss possible fixes.
-  if (
-    request === "answer"
-    && !hasExplicitNoEditDeclaration(query)
-    && hasRequestedMutationIntent(query)
-  ) {
+  // DESIGN-v0.15-sf-intent-layers.md §3 (2026-09-05): V4 retired. A declared
+  // taskProfile:"answer" used to be overridden to generic/change_propagation
+  // HERE when the query also carried an unmistakable, non-negated mutation
+  // command (the "stale or mis-copied answer hint" rationale below, kept for
+  // history) — the declaration lost to the query's own vocabulary. Layer 1 of
+  // the intent model (`sfIntent.ts`'s `resolveIntent`) makes the declaration
+  // win outright instead: mutation wording is recorded in `reason` only,
+  // never used to flip `selected`. An edit that actually arrives opens the
+  // write frontier at layer 2 (§4.2, W2's `editObserved`) rather than being
+  // guessed from words at profile-binding time.
+  if (request === "answer") {
+    // `extractConcerns` (sfConcerns.ts) reads the identical `IntentDecision`
+    // for its own "is edit permitted" question — this call keeps the two
+    // consumers answering from one decision, per DESIGN-v0.15 §2. Its
+    // disposition is not consulted for `selected` below: a declared "answer"
+    // is unconditionally honored (that IS the fix, both directions), while
+    // `resolveIntent`'s finer edit/verify/measure/review classification
+    // serves a different, per-CONCERN question `extractConcerns` owns.
+    const decision = resolveIntent({
+      declaredProfile: "answer",
+      // A declared "answer" alone forbids a LEXICAL guess of "edit"
+      // (`resolveIntent`'s `editForbidden`), so absent an observed edit
+      // `writeFrontier` comes out "closed" regardless of `writeAllowed` —
+      // threaded through anyway for an accurate `reason`. §4.2 is the one
+      // exception: an edit that has ALREADY passed `guardExecutionEdit` this
+      // task epoch (`editObserved` below) opens the frontier even here,
+      // per DESIGN-v0.15 §3's 「edit が本当に来るなら層2で開く」.
+      writeAllowed,
+      // §4.2 (W2): has an edit_file call already passed guardExecutionEdit
+      // this task epoch? `workspace` is undefined only for a caller that has
+      // none to ask (never observed, safe default).
+      editObserved: workspace !== undefined && getIntentEditObserved(workspace),
+      referencesObserved: false, // TODO(W3): thread executedLocates' "references" flag (§4.4)
+      qualifiedAnchorResolved: false, // TODO(W3): thread sfQualifiedAnchors + anchorResolver hit (§4.4)
+      explicitTargets: [], // TODO(W3): thread args.paths as SfExplicitTarget[] (§4.3)
+      query,
+    });
+    const mutationWordSeen = !hasExplicitNoEditDeclaration(query) && hasRequestedMutationIntent(query);
     return {
       requested: request,
-      selected: inferred === "answer" ? "generic" : inferred,
-      source: "evidence",
-      confidence: inferred === "generic" ? 0.85 : 0.9,
-      reason: `explicit mutation request contradicts answer hint; refined to ${
-        inferred === "answer" ? "generic" : inferred
-      }`,
+      selected: "answer",
+      source: "explicit",
+      confidence: 0.98,
+      reason: decision.writeFrontier === "open"
+        ? `caller supplied validated ${request} task shape; an edit_file call already passed guardExecutionEdit this task epoch, so the write frontier stays open (§4.2) even though the declared profile is unchanged`
+        : mutationWordSeen
+          ? `caller supplied validated ${request} task shape; mutation wording present but the declaration is authoritative (write frontier: ${decision.writeFrontier})`
+          : `caller supplied validated ${request} task shape`,
     };
   }
 
   // The caller supplies taskProfile only for user-declared operation intent.
   // Lexical mutation/no-edit phrases are weaker evidence and must not reverse
-  // that declaration. Evidence may still refine one change subtype into
-  // another without changing the read-only-versus-write operation.
+  // that declaration — this already holds below for the reverse direction
+  // (a declared non-answer profile plus no-edit-shaped wording, e.g. inferred
+  // "answer" from `classifyTaskProfile`): the guard immediately below only
+  // fires when `inferred` is itself a DIFFERENT change subtype (never
+  // "answer", never "generic"), so `inferred === "answer"` here falls
+  // straight through to the final `source:"explicit"` return, keeping the
+  // declared profile — DESIGN-v0.15 §3's "declaration wins in both
+  // directions" invariant, confirmed rather than newly coded. Evidence may
+  // still refine one change subtype into another without changing the
+  // read-only-versus-write operation. (`request === "answer"` always
+  // returned above, so `request` can no longer be "answer" here — narrowed
+  // out by the compiler, not re-checked.)
   if (
-    request !== "answer"
-    && inferred !== "answer"
+    inferred !== "answer"
     && inferred !== "generic"
     && inferred !== request
   ) {
@@ -10488,7 +13361,7 @@ async function augmentStyleSurface(
  * to name (style covered, or not an enum value we can derive a stem from), so
  * the caller keeps nextHintForCoverage's own hint.
  */
-function styleNextForMissingRole(query: string, surfaces: TaskPackSurface[]): string | undefined {
+function styleNextForMissingRole(query: string, surfaces: TaskPackSurface[]): ContinuationCall | undefined {
   if (surfaces.some((s) => s.role === "style")) return undefined;
   const valueTokens = extractEnumValueTokens(query);
   if (valueTokens.length === 0) return undefined;
@@ -10502,7 +13375,7 @@ function styleNextForMissingRole(query: string, surfaces: TaskPackSurface[]): st
     probes[0] ??
     kebabTokenVariant(valueTokens[0]!) ??
     valueTokens[0]!.toLowerCase();
-  return `search_files action=find query=${stem}`;
+  return { tool: "search_files", arguments: { action: "find", query: stem } };
 }
 
 // ---------------------------------------------------------------------------
@@ -10824,11 +13697,18 @@ async function augmentQueryNamedFileSurfaces(
   for (const rel of named) {
     if (already.has(rel)) continue;
     if (surfaces.length >= maxSurfaces) {
+      // A query-explicit file is an obligation, not another lexical-rank
+      // contender. Prefer evicting an ungrounded surface, but when every
+      // non-required candidate has a lexical anchor, evict one of those too:
+      // lexical relevance must never exempt a surface from a named-file duty.
       const evictIndex = surfaces.findIndex((s) =>
         !s.required && !protectedSurfaces?.has(s) && !surfaceGroundedInQuery(s, query)
-      );
-      if (evictIndex === -1) continue;
-      const [evicted] = surfaces.splice(evictIndex, 1);
+      ) ?? -1;
+      const fallbackEvictIndex = evictIndex === -1
+        ? surfaces.findIndex((s) => !s.required && !protectedSurfaces?.has(s))
+        : evictIndex;
+      if (fallbackEvictIndex === -1) continue;
+      const [evicted] = surfaces.splice(fallbackEvictIndex, 1);
       if (evicted) already.delete(evicted.path);
     }
     const content = readCached(workspace, rel, cache);
@@ -11369,7 +14249,7 @@ export function assertCreateRoute(result: TaskPackResult, profile: TaskProfile, 
   result.missing = [];
   result.content_sufficiency = undefined;
   result.blocking_next_steps = undefined;
-  result.next = `edit_file create:true path=${result.create_target.path}`;
+  delete result.next;
   // Existing surfaces are reference context for create-only tasks. Keep a
   // frontier only when the request also proves an independent edit target —
   // F-V13-7 (2026-08-30, independent-verification remediation): and even
@@ -12745,6 +15625,55 @@ function hasServedCode(surface: TaskPackSurface): boolean {
   return (surface.code?.length ?? 0) > 0 || (surface.code_unchanged?.length ?? 0) > 0;
 }
 
+/**
+ * FX-J (2026-09-03) — THE ONE ANSWER to "which surfaces does this response
+ * actually ship bytes for", computed over the FINAL pack object, after every
+ * shedding phase (`trimToCap` Phase E's body strip, Phase F's whole-surface
+ * splice, and the SF pre-booking seam's withholding).
+ *
+ * FX-K (2026-09-03, round-15 finding 1) — this is now the projection for BOTH
+ * flag states. Round-15 demonstrated the pre-trim booking end to end on the
+ * shipped default path: `budget.bytes` is an advertised `read_file` input, so
+ * one production call can ship a Phase-E-stripped survivor with no body and
+ * `limit.cause:"capped"`, and the next `edit_file` by path lands
+ * `edit.applied` against a file whose bytes the response never sent (a
+ * never-packed control refuses at the same fence). Gap (o)'s
+ * "Phase-E-on-survivor は本番入口から到達不能" was false. The invariant is now
+ * unconditional: NO WRITE AUTHORITY WITHOUT SHIPPED BYTES.
+ *
+ * Every booking producer routes through this: the served-range ledger, the
+ * edit gate's admissible union, the cumulative served-surface log (and
+ * therefore the next pack's `priorEpochActionFrontier` and its certificate
+ * `action_frontier`), the certified working set, and the served pack record.
+ * One function so the next producer added downstream cannot disagree with the
+ * others about what shipped — round-14 found three independently-derived
+ * answers to this question, two of them wrong.
+ *
+ * `hasServedCode` (not `code !== undefined`) is deliberate: a
+ * `code_unchanged` restatement is a legitimate "you already hold these exact
+ * bytes" claim, and demotion never applies to one (`demotionEligibleNow`
+ * refuses a surface carrying `code_unchanged`).
+ */
+function shippedSurfaces(result: TaskPackResult): TaskPackSurface[] {
+  return codeTaskPackSurfaces(result.surfaces).filter(hasServedCode);
+}
+
+/**
+ * FX-J/FX-K — the state `finalizePackServeState` hands forward to the single
+ * post-trim booking pass. Created (and threaded through this one synchronous
+ * call) by `dedupeTrimAndPersist`, UNCONDITIONALLY since FX-K: there is no
+ * longer a flag-selected pre-seam booking position, so this object is never
+ * `undefined`. Deliberately NOT module state: FX-H's module-global
+ * deferred-booking queue, flushed by whichever handler exited first, was
+ * round-13 finding 3.
+ */
+interface PendingPackBookings {
+  epochTokens: string[];
+  cumulativeEligible: boolean;
+  /** The pack object whose own surfaces were handed to the contract build in place of the deferred log write; cleared once the bookings land. */
+  pack?: TaskPackResult;
+}
+
 function hasSufficientEditContent(surface: TaskPackSurface): boolean {
   // anchors_served (2026-07-25 honest-hub fix): a partial hub whose decision
   // anchors are all inside the served ranges is edit-sufficient — without this
@@ -12777,6 +15706,71 @@ function endpointFromSurface(
     role: asImpactSurface(surface.role),
     evidence: [...new Set(evidence)],
   };
+}
+
+/**
+ * D2 (2026-09-05, measured on paid smoke r10 / SF13 call 2): a wiring endpoint
+ * whose file an EARLIER call in this epoch already served.
+ *
+ * The wiring builder resolves both endpoints out of THIS pack's `surfaces`
+ * alone. Live: call 1 served the producer (`…/ekf.cpp` 592-595) and the
+ * caller's own bundle `next` then asked for the five OTHER files — so the
+ * producer was, correctly, not re-served, and the follow-up pack reported
+ * `missing:["source","destination"]` with a `wiring-source` gap for bytes the
+ * caller was holding the whole time. The caller's only move is to ask again
+ * for what it already has, which is the loop.
+ *
+ * The epoch ledger is the existing seam for exactly this question
+ * (`queryServedSurfaces`, already consulted by `reconcileCallerPathCoverage`
+ * for the sibling "named but unserved" defect): it is epoch-gated by token
+ * overlap and revalidates each entry by content fingerprint, so a file EDITED
+ * since it was served drops out and is honestly re-reported as missing.
+ * The endpoint minted here is BODYLESS by construction — it names the handle
+ * the caller already holds, and this pack spends no bytes re-serving it.
+ *
+ * The token must still be DEFINED in that file (`implementsCallableToken`,
+ * the same test the readiness proof uses), so a file that merely mentions the
+ * word can never stand in as an endpoint. Returns `undefined` — the ordinary
+ * case — when no served file defines the token, leaving the wire unchanged.
+ */
+function epochServedWiringEndpoint(
+  token: string | undefined,
+  query: string,
+  surfaces: readonly TaskPackSurface[],
+  workspace: string,
+  cache: FileReadCache | undefined,
+): TaskWiringEndpoint | undefined {
+  if (token === undefined || token.length === 0) return undefined;
+  const epochTokens = tokenizeForEpoch(query);
+  if (epochTokens.length === 0) return undefined;
+  const inPack = new Set(surfaces.map((surface) => surface.path));
+  let fallback: TaskWiringEndpoint | undefined;
+  for (const entry of queryServedSurfaces(workspace, workspace, { epochTokens })) {
+    if (entry.handle === undefined || inPack.has(entry.path)) continue;
+    // C1's range-aware verdict: only a serve that already amounted to the whole
+    // file lets this name a whole-file range as the caller's resident bytes.
+    // `undefined` keeps the ledger's original path-only semantics (see
+    // `ServedSurfaceEntry.fullyServed`).
+    if (entry.fullyServed === false) continue;
+    const content = readCached(workspace, entry.path, cache);
+    if (content === undefined) continue;
+    if (!implementsCallableToken(content, token)) continue;
+    const endpoint: TaskWiringEndpoint = {
+      token,
+      handle: entry.handle,
+      path: entry.path,
+      range: `1-${Math.max(1, countLines(content))}`,
+      role: asImpactSurface(entry.role ?? classifySurface(entry.path)),
+      // The definition is what was proved here; "located-surface" would claim a
+      // surface THIS pack served, which it deliberately did not.
+      evidence: ["query-token", "workspace-definition"],
+    };
+    // An implementation outranks a declaration for either endpoint, exactly as
+    // the in-pack resolution does; ledger order (servedAt) breaks ties.
+    if (isImplementationPath(entry.path)) return endpoint;
+    fallback ??= endpoint;
+  }
+  return fallback;
 }
 
 function firstNonCommentTokenLine(text: string, token: string): number {
@@ -12817,6 +15811,13 @@ function ensureWiringEndpointSurface(
    */
   completeUnderBytes = TINY_FILE_MAX_BYTES,
   completeUnderLines = TINY_FILE_MAX_LINES,
+  /**
+   * E1 (2026-09-05): an honesty clause appended to a REQUIRED destination's
+   * `why` — set only when the query named a destination domain this endpoint
+   * does not belong to, so "use this handle as the insertion site" can never
+   * read as a domain-matched claim it is not.
+   */
+  whyNote?: string,
 ): { surface: TaskPackSurface; discovered: boolean } | undefined {
   let surface = surfaces.find((candidate) => candidate.path === endpoint.path);
   if (surface !== undefined) {
@@ -12902,6 +15903,7 @@ function ensureWiringEndpointSurface(
     ...(required ? { required: true } : {}),
     why: required
       ? "wiring destination for " + endpoint.token + "; use this handle as the insertion site"
+        + (whyNote === undefined ? "" : "; " + whyNote)
       : "wiring source for " + endpoint.token + "; review before editing the consumer",
     ...(embedded ? { code: embedded.code } : {}),
     ...(embedded && embedded.remaining_ranges.length > 0
@@ -12948,6 +15950,246 @@ function declaredCallableNames(content: string): string[] {
     if (!/^(?:if|for|while|switch|catch|return|sizeof)$/.test(name)) names.push(name);
   }
   return [...new Set(names)].slice(0, 16);
+}
+
+/**
+ * D5 (2026-09-02, SF13 forensics): a `Class::method` anchor typed in a query is
+ * ONE address, not two flat tokens.
+ *
+ * `wiringCandidateTokens`/`concreteIdentifierTokens` tokenize on identifier
+ * boundaries, so `EKF::isHealthy` reached every downstream resolver as
+ * ["EKF","isHealthy"], and `definedCallableNames` threw the qualifier away
+ * (`split("::").at(-1)`). Three sibling headers each declaring a bare
+ * `isHealthy()` were therefore indistinguishable from the one class the caller
+ * named: the file that actually DEFINES `EKF::isHealthy` lost a same-role
+ * `path.localeCompare` tie to `altitude_estimator.hpp` and was shed by the seed
+ * cap with no disclosure at all.
+ *
+ * Only `::` is admitted as a member separator. `.` is ambiguous with a filename
+ * (`ekf.cpp` is a path, not `ekf::cpp`) and `#` carries no member-anchor
+ * meaning anywhere else in this file, so neither is treated as a qualified
+ * anchor: an anchor must be unmistakable before it is allowed to outrank the
+ * ordinary ranking.
+ */
+interface QualifiedSymbolAnchor {
+  readonly raw: string;
+  readonly qualifier: string;
+  readonly member: string;
+}
+
+/** Bound on qualified anchors honored from one query (each costs one literal scan). */
+const MAX_QUALIFIED_ANCHORS = 3;
+/** Bound on files content-scanned while resolving one qualified anchor. */
+const QUALIFIED_ANCHOR_MAX_FILES = 64;
+/** Bound on bytes read while resolving one qualified anchor. */
+const QUALIFIED_ANCHOR_MAX_BYTES = 512 * 1024;
+/** Bound on qualified-anchor definition sites that may claim a seed slot or a disclosure line. */
+const MAX_QUALIFIED_ANCHOR_DEFINITIONS = 3;
+
+/**
+ * `Class::method` pairs named by `query`, in query order, deduped and bounded.
+ * A deeper chain (`Outer::Inner::method`) yields its INNERMOST pair — that is
+ * the pair a definition site actually spells.
+ */
+export function qualifiedSymbolAnchors(query: string): QualifiedSymbolAnchor[] {
+  const out: QualifiedSymbolAnchor[] = [];
+  const seen = new Set<string>();
+  for (const match of query.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)\b(?!::)/g)) {
+    const key = match[0]!.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ raw: match[0]!, qualifier: match[1]!, member: match[2]! });
+    if (out.length >= MAX_QUALIFIED_ANCHORS) break;
+  }
+  return out;
+}
+
+/** Brace-matched body text starting at the `{` at `openIndex`. Bounded; comment-stripped input only. */
+function bracedBodyText(code: string, openIndex: number, maxLength = 200_000): string {
+  let depth = 0;
+  const limit = Math.min(code.length, openIndex + maxLength);
+  for (let index = openIndex; index < limit; index += 1) {
+    const ch = code[index];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return code.slice(openIndex + 1, index);
+    }
+  }
+  return code.slice(openIndex + 1, limit);
+}
+
+/**
+ * How `content` relates to `anchor`:
+ * - "definition" — it carries the member's BODY: an out-of-line
+ *   `Qualifier::member(...) { … }` (C++/Rust-style), or a member with a brace
+ *   body inside the `class`/`struct`/`interface` named `qualifier` (how TS, JS,
+ *   Java and in-class C++ spell the same thing);
+ * - "declaration" — that class body declares `member(...)` with no body;
+ * - undefined — neither (a call site, a same-named member of a DIFFERENT class,
+ *   or prose). The qualifier gate is what the flat-token path never applied.
+ */
+export function qualifiedAnchorSiteKind(
+  content: string,
+  anchor: QualifiedSymbolAnchor,
+  /**
+   * File-extension hint ("rs"/"swift"/"scala"/"kt", etc — whatever the
+   * caller's path extension is, case-insensitive), forwarded verbatim to
+   * `maskCommentsAndStrings`'s `language` option (sfCodeMask.ts). Only the
+   * nested-block-comment languages act on it; every other extension (or no
+   * extension at all) keeps this predicate's pre-existing, byte-identical
+   * default (first-`*\/`-closes) masking.
+   */
+  language?: string,
+): "definition" | "declaration" | undefined {
+  // R9 / review R7-1: `relationCodeOnly` leaves a trailing `//` that follows a
+  // non-space character, a trailing `#`, a `--` comment, and EVERY string
+  // literal intact — so a commented-out or quoted `Qualifier::member(...) { }`
+  // used to answer "definition" here (DESIGN-v0.14-plan.md:104). This is the
+  // one predicate that asserts a file DEFINES the anchored member, and a false
+  // definition seeds a pack with a file that cannot answer the question, so it
+  // gets the strict, length-preserving mask instead of the token-census one.
+  const code = maskCommentsAndStrings(content, { language });
+  const qualifier = anchor.qualifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const member = anchor.member.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`\\b${qualifier}::${member}\\s*\\([^;{}]*\\)[^;{}]*\\{`).test(code)) return "definition";
+  const head = new RegExp(
+    `\\b(?:class|struct|interface)\\s+(?:[A-Za-z_][A-Za-z0-9_]*\\s+)*${qualifier}\\b[^;{]{0,200}\\{`,
+    "g",
+  );
+  // Not preceded by `.`, `->`, `::` or a word character: a CALL to the member
+  // inside the same class body is not a declaration of it.
+  const memberSite = new RegExp(`(?:^|[^.\\w>:])${member}\\s*\\([^;{}]*\\)[^;{}]*?(\\{|;)`);
+  for (let match = head.exec(code); match !== null; match = head.exec(code)) {
+    const site = memberSite.exec(bracedBodyText(code, match.index + match[0]!.length - 1));
+    if (site === null) continue;
+    return site[1] === "{" ? "definition" : "declaration";
+  }
+  return undefined;
+}
+
+/**
+ * `x.hpp`/`x.h`/`x.d.ts` ↔ `x.cpp`/`x.cc`/`x.cxx`/`x.c`/`x.ts`/`x.js`: the
+ * implementation counterpart of a declaring header, matched on the basename
+ * STEM rather than an exact sibling path (`include/**\/y.hpp` beside
+ * `src/**\/y.cpp` is the dominant C/C++ split). Sound because every candidate
+ * offered to this predicate already mentions the anchored member, so a stem
+ * match cannot promote an unrelated same-named file.
+ */
+function isImplementationCounterpartOf(candidatePath: string, declarationPath: string): boolean {
+  if (candidatePath === declarationPath) return false;
+  const stemOf = (value: string): string =>
+    path.basename(value).replace(/\.d\.(?:[cm]?ts|tsx)$/i, "").replace(/\.[^.]+$/, "").toLowerCase();
+  if (stemOf(candidatePath) !== stemOf(declarationPath)) return false;
+  const declaresSide = /\.d\.(?:[cm]?ts|tsx)$/i.test(declarationPath)
+    || [".h", ".hh", ".hpp", ".hxx"].includes(path.extname(declarationPath).toLowerCase());
+  return declaresSide && isImplementationPath(candidatePath);
+}
+
+interface QualifiedAnchorResolution {
+  /** Files that DEFINE a qualified anchor named by the query (authoritative, not lexical). */
+  readonly definitions: readonly string[];
+  /** Files whose `class <Qualifier>` body declares the anchored member without a body. */
+  readonly declarations: readonly string[];
+  /** Implementation counterparts of `declarations` that also mention the member. */
+  readonly counterparts: readonly string[];
+  /** First observed line of the anchored member per candidate path. */
+  readonly lines: ReadonlyMap<string, number>;
+}
+
+const EMPTY_QUALIFIED_ANCHOR_RESOLUTION: QualifiedAnchorResolution = {
+  definitions: [],
+  declarations: [],
+  counterparts: [],
+  lines: new Map<string, number>(),
+};
+
+/**
+ * Resolve every qualified anchor in `query` as a UNIT, before any flat-token
+ * fallback: definition sites first, then the declaring class body, then that
+ * header's implementation counterpart. Bounded (`MAX_QUALIFIED_ANCHORS` scans,
+ * `QUALIFIED_ANCHOR_MAX_FILES`/`_BYTES` per scan) and a zero-cost no-op for the
+ * overwhelmingly common query that names no `Class::method` at all.
+ */
+export function resolveQualifiedSymbolAnchors(
+  query: string,
+  workspace: string,
+  cache?: FileReadCache,
+): QualifiedAnchorResolution {
+  const anchors = qualifiedSymbolAnchors(query);
+  if (anchors.length === 0) return EMPTY_QUALIFIED_ANCHOR_RESOLUTION;
+  const definitions: string[] = [];
+  const declarations: string[] = [];
+  const lines = new Map<string, number>();
+  const candidatePaths: string[] = [];
+  for (const anchor of anchors) {
+    const seenHere: string[] = [];
+    for (const match of scanLiteral(anchor.member, workspace, { caseInsensitive: false })) {
+      if (!lines.has(match.path)) lines.set(match.path, match.line);
+      if (!seenHere.includes(match.path)) seenHere.push(match.path);
+      if (!candidatePaths.includes(match.path)) candidatePaths.push(match.path);
+    }
+    let filesRead = 0;
+    let bytesRead = 0;
+    for (const relPath of [...seenHere].sort((a, b) => a.localeCompare(b))) {
+      if (filesRead >= QUALIFIED_ANCHOR_MAX_FILES || bytesRead >= QUALIFIED_ANCHOR_MAX_BYTES) break;
+      const content = readCached(workspace, relPath, cache);
+      if (content === undefined) continue;
+      filesRead += 1;
+      bytesRead += Buffer.byteLength(content, "utf8");
+      // Default wire for every non-nested-comment extension stays
+      // byte-identical: `extensionOfRelPath` is a plain suffix read, and
+      // `qualifiedAnchorSiteKind`'s own `language` param is a no-op for any
+      // value NESTING_BLOCK_COMMENT_LANGUAGES (sfCodeMask.ts) does not list.
+      const dotIndex = relPath.lastIndexOf(".");
+      const extensionOfRelPath = dotIndex === -1 ? undefined : relPath.slice(dotIndex + 1).toLowerCase();
+      const kind = qualifiedAnchorSiteKind(content, anchor, extensionOfRelPath);
+      if (kind === "definition") {
+        if (!definitions.includes(relPath)) definitions.push(relPath);
+      } else if (kind === "declaration") {
+        if (!declarations.includes(relPath)) declarations.push(relPath);
+      }
+    }
+  }
+  const counterparts: string[] = [];
+  for (const declarationPath of declarations) {
+    for (const candidate of candidatePaths) {
+      if (definitions.includes(candidate) || declarations.includes(candidate)) continue;
+      if (!isImplementationCounterpartOf(candidate, declarationPath)) continue;
+      if (!counterparts.includes(candidate)) counterparts.push(candidate);
+    }
+  }
+  return {
+    definitions: definitions.slice(0, MAX_QUALIFIED_ANCHOR_DEFINITIONS),
+    declarations,
+    counterparts,
+    lines,
+  };
+}
+
+/**
+ * Definition sites of the qualified anchors whose QUALIFIER or MEMBER is
+ * `token` — the authoritative binding for a wiring endpoint the caller wrote as
+ * `Class::method`. Empty for a bare token, which keeps the
+ * `ambiguousUnlinkedSource` abstention intact for genuinely ambiguous names.
+ */
+function qualifiedAnchorDefinitionPathsForToken(
+  token: string,
+  query: string,
+  workspace: string,
+  cache?: FileReadCache,
+): string[] {
+  const matched = qualifiedSymbolAnchors(query).filter((anchor) =>
+    normIdent(anchor.qualifier) === normIdent(token) || normIdent(anchor.member) === normIdent(token)
+  );
+  if (matched.length === 0) return [];
+  return [
+    ...resolveQualifiedSymbolAnchors(
+      matched.map((anchor) => anchor.raw).join(" "),
+      workspace,
+      cache,
+    ).definitions,
+  ];
 }
 
 function implementsCallableToken(content: string, token: string): boolean {
@@ -13025,6 +16267,64 @@ function workspaceCallableDefinitionPaths(
     filesRead += 1;
     bytesRead += Buffer.byteLength(content, "utf8");
     if (definedCallableNames(content).some((name) => normIdent(name) === wanted)) {
+      matches.push(relPath);
+      if (matches.length > 3) break;
+    }
+  }
+  return matches;
+}
+
+/**
+ * D7 (FX-R3b, 2026-09-04) — NON-CALLABLE DEFINITION SITES.
+ *
+ * `workspaceCallableDefinitionPaths` above answers only for CALLABLES
+ * (`definedCallableNames` matches `def`/`fn`/`function` and `name(...) {`).
+ * The SF structural extractor's `definitionPathsFor` capability was wired to
+ * it alone, so a constant, class, type, enum, struct or module-level value —
+ * `ENGAGEMENT_WITNESS` in the deterministic bench's own engagement fixture —
+ * resolved to ZERO paths, opened only an ADVISORY concern, and therefore left
+ * `annotateSemanticFrontierContinuation`'s D4 source empty: with the ten v2
+ * flags on, nothing was ever marked and `demoted_count` was structurally 0
+ * for every query naming a non-callable identifier. That is the same
+ * inertness class D4 closed for query PHRASING, reopened by symbol KIND.
+ *
+ * Purely lexical, like every other probe in this family, and bounded by the
+ * same readiness budgets. It is a FALLBACK: the callable resolver still wins
+ * when it answers, so no existing resolution changes.
+ */
+const VALUE_DEFINITION_KEYWORDS =
+  "const|constexpr|let|var|val|static|final|class|interface|type|enum|struct|union|trait|namespace|module|object|record|protocol|typedef|def";
+
+function workspaceValueDefinitionPaths(
+  token: string,
+  walked: ReadonlyArray<string>,
+  workspace: string,
+  cache: FileReadCache | undefined,
+): string[] {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // A keyword-led declaration: `export const X =`, `class X {`, `enum X {`,
+  // `pub static X:`, `typedef struct X;`, `type X = ...`.
+  const declaration = new RegExp(
+    "^[ \\t]*(?:(?:export|public|private|protected|internal|declare|pub|open|abstract|final|static|readonly|inline|extern|constexpr|const|local)\\s+)*"
+      + `(?:${VALUE_DEFINITION_KEYWORDS})\\s+(?:[A-Za-z_][A-Za-z0-9_<>,:\\[\\]*&.]*\\s+)?`
+      + escaped + "\\b\\s*(?:[:=<({;]|$)",
+    "m",
+  );
+  // A column-0 assignment (Python/Ruby/shell/Make module constants) and the C
+  // preprocessor's own definition form.
+  const assignment = new RegExp(`^${escaped}\\s*(?::[^=\\n]+)?=`, "m");
+  const define = new RegExp(`^[ \\t]*#\\s*define\\s+${escaped}\\b`, "m");
+  const matches: string[] = [];
+  let filesRead = 0;
+  let bytesRead = 0;
+  for (const relPath of walked) {
+    if (filesRead >= READINESS_PROBE_MAX_FILES || bytesRead >= READINESS_PROBE_MAX_BYTES) break;
+    const content = readCached(workspace, relPath, cache);
+    if (content === undefined) continue;
+    filesRead += 1;
+    bytesRead += Buffer.byteLength(content, "utf8");
+    const code = relationCodeOnly(content);
+    if (declaration.test(code) || assignment.test(code) || define.test(code)) {
       matches.push(relPath);
       if (matches.length > 3) break;
     }
@@ -13338,6 +16638,95 @@ function buildWiringEvidenceGraph(
 }
 
 /**
+ * A read-only answer may explicitly ask how already-served files are related.
+ * The mutation-oriented wiring profile is deliberately not appropriate there:
+ * it infers an insertion contract and may grow the frontier.  This projection
+ * is narrower.  It only records a TypeScript/JavaScript-style import when the
+ * importer and its resolved, already-served target are both in the answer
+ * pack.  In particular, it never creates an edge from stems, path proximity,
+ * or identifier co-occurrence.
+ */
+const ANSWER_IMPORT_GRAPH_EXT = /\.(?:[cm]?ts|tsx|[cm]?js|jsx)$/i;
+
+function buildAnswerImportEvidenceGraph(
+  surfaces: readonly TaskPackSurface[],
+  workspace: string,
+  cache: FileReadCache | undefined,
+): TaskEvidenceGraph | undefined {
+  const byPath = new Map<string, TaskPackSurface>();
+  for (const surface of surfaces) {
+    if (!byPath.has(surface.path) && ANSWER_IMPORT_GRAPH_EXT.test(surface.path)) byPath.set(surface.path, surface);
+  }
+  if (byPath.size < 2) return undefined;
+
+  const roles = new Map<string, Set<TaskEvidenceNode["roles"][number]>>();
+  const relations: TaskEvidenceRelation[] = [];
+  const addRole = (surface: TaskPackSurface, role: TaskEvidenceNode["roles"][number]): void => {
+    const current = roles.get(surface.path) ?? new Set<TaskEvidenceNode["roles"][number]>();
+    current.add(role);
+    roles.set(surface.path, current);
+  };
+  for (const importer of byPath.values()) {
+    const body = readCached(workspace, importer.path, cache)
+      ?? importer.code
+      ?? importer.code_unchanged
+      ?? "";
+    if (body === "") continue;
+    for (const imported of byPath.values()) {
+      if (imported.path === importer.path) continue;
+      const hasExactImport = body.split(/\r?\n/).some((line) =>
+        importLineTargetsPath(importer.path, line, imported.path));
+      if (!hasExactImport) continue;
+      const from = evidenceNodeId("file", importer.path);
+      const to = evidenceNodeId("file", imported.path);
+      const id = evidenceRelationId("imports", from, to);
+      if (relations.some((relation) => relation.id === id)) continue;
+      addRole(importer, "consumer");
+      addRole(imported, "producer");
+      relations.push({ id, kind: "imports", from, to, provenance: "lexical", confidence: 0.98 });
+    }
+  }
+  if (relations.length === 0) return undefined;
+  const nodes = [...roles.entries()]
+    .map(([surfacePath, nodeRoles]) => {
+      const surface = byPath.get(surfacePath)!;
+      return {
+        id: evidenceNodeId("file", surface.path),
+        kind: "file" as const,
+        path: surface.path,
+        handle: surface.handle,
+        range: surface.range,
+        roles: [...nodeRoles].sort(),
+      };
+    })
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return { version: 1, nodes, relations: relations.sort((left, right) => left.id.localeCompare(right.id)) };
+}
+
+function attachAnswerImportEvidenceGraph(
+  result: TaskPackResult,
+  query: string,
+  workspace: string,
+  cache: FileReadCache | undefined,
+): void {
+  if (!requiresRelatedAnswerContext(query) || result.wiring !== undefined) return;
+  const graph = buildAnswerImportEvidenceGraph(result.surfaces, workspace, cache);
+  if (graph === undefined) return;
+  // This graph attests to an observed answer relationship only.  It is not a
+  // writable wiring contract, so keep the answer profile and its route intact.
+  result.wiring = {
+    version: 1,
+    status: "needs-followup",
+    connections: [],
+    missing: [],
+    edit_frontier: [],
+    review_frontier: [],
+    evidence_graph: graph,
+    note: "read-only graph over exact imports between served answer surfaces",
+  };
+}
+
+/**
  * Prefer a callable consumer implementation over a declaration-only endpoint.
  * Wiring discovery often grounds a destination token in an API/header first
  * (for example MAVLink -> mavlink.hpp), even though the safe insertion site is
@@ -13379,6 +16768,323 @@ function bestServedWiringConsumer(
   return candidates.find((candidate) => candidate.score > 0)?.surface;
 }
 
+/** E1: minimum length of a query token allowed to name a destination-domain family. */
+const WIRING_DOMAIN_MIN_TOKEN_LEN = 4;
+/** E1: bound on the walked paths scanned for family segments. */
+const WIRING_DOMAIN_MAX_SEGMENT_FILES = 4000;
+/** E1: bound on family files whose BODY is read and scored. */
+const WIRING_DOMAIN_MAX_SCORED_FILES = 48;
+/** E1: bound on declarations scanned when naming the domain destination's endpoint token. */
+const WIRING_DOMAIN_MAX_SYMBOLS = 256;
+/**
+ * R31 finding #2 (P1, 2026-09-05): generic path/build vocabulary that must
+ * never, by itself, name a destination-domain family. These words are common
+ * enough to appear as a path segment in almost any repository (an entry
+ * point, a test/build directory, a vendored dependency) without the query
+ * actually intending to name a module family -- "main"/"test" are exactly
+ * `WIRING_DOMAIN_MIN_TOKEN_LEN` (4) characters and so were not excluded by
+ * the length floor alone. Applied ON TOP OF, never instead of, that floor.
+ * Kept deliberately generic: no project-specific word belongs here.
+ */
+const WIRING_DOMAIN_GENERIC_VOCAB = new Set([
+  "main", "test", "tests", "spec", "specs", "src", "source", "app", "apps",
+  "lib", "libs", "util", "utils", "common", "core", "base", "shared", "index",
+  "config", "include", "internal", "impl", "pkg", "cmd", "bin", "dist",
+  "build", "docs", "examples", "sample", "samples", "tools", "scripts",
+  "vendor", "third_party", "node_modules", "target", "out", "tmp",
+]);
+
+/**
+ * Lower-cased naming pieces of a path: every directory segment, the final
+ * segment's extension-stripped stem, and each `_`/`-`/`.`-separated piece of
+ * both. `firmware/src/telemetry/mavlink_dialect.cpp` yields `firmware`, `src`,
+ * `telemetry`, `mavlink_dialect`, `mavlink`, `dialect`.
+ */
+function pathFamilyPieces(relPath: string): string[] {
+  const out: string[] = [];
+  const parts = relPath.split("/");
+  for (let index = 0; index < parts.length; index++) {
+    const raw = parts[index]!;
+    const base = index === parts.length - 1 ? raw.replace(/\.[^.]*$/, "") : raw;
+    if (base.length === 0) continue;
+    out.push(base.toLowerCase());
+    for (const piece of base.split(/[_\-.]+/)) {
+      if (piece.length > 0) out.push(piece.toLowerCase());
+    }
+  }
+  return out;
+}
+
+/**
+ * E1 (2026-09-05, measured on paid smoke r9 / SF13): the DESTINATION DOMAIN a
+ * query names, expressed as WORKSPACE FILES rather than as words.
+ *
+ * A query token is admitted only when the repository itself already spells it
+ * as a path segment — a directory name, a basename stem, or a `_`/`-`-separated
+ * piece of one. Nothing is hardcoded: the workspace's own naming supplies the
+ * vocabulary, so this is inert for any query whose words name no module family.
+ *
+ * THE SINGLE VOCABULARY SEAM. Every step that asks "does this path belong to
+ * the domain the query named?" — the family builder below AND the
+ * already-in-domain abstention in `wiringDestinationDomainEndpoint` — resolves
+ * its words HERE, so a word rejected as non-discriminating is rejected
+ * everywhere a destination endpoint or insertion surface is chosen.
+ */
+function wiringQueryDomainWords(query: string, walked: readonly string[]): Set<string> {
+  const workspaceWide = workspaceWidePathPieces(walked);
+  return new Set(
+    tokenizeForEpoch(query).filter((term) =>
+      term.length >= WIRING_DOMAIN_MIN_TOKEN_LEN
+      && !WIRING_DOMAIN_GENERIC_VOCAB.has(term)
+      && !workspaceWide.has(term)
+    ),
+  );
+}
+
+/**
+ * D3' (2026-09-05, measured on paid smoke r10 / SF13): path pieces that EVERY
+ * walked file spells — the workspace's own naming, not a module family inside
+ * it.
+ *
+ * A "family" is only useful because it PARTITIONS the workspace: `inFamily`
+ * has to be able to say some file is OUTSIDE the domain the query named. When
+ * the server is rooted ABOVE the project it is reading (live r10: the solver
+ * worktree held the project under `<fixtures>/<project>/<firmware>/…`, so the
+ * project directory was a path piece of all 125 walked files) every ancestor
+ * segment is spelled by every file. A query that merely NAMES the project then
+ * admitted that segment as a family, `inFamily` became true for every path
+ * including the destination already chosen, and the whole domain rule
+ * short-circuited to "already in domain" — silently inert exactly where the
+ * layout made it matter. The same word over a project-rooted workspace (no
+ * such shared ancestor) kept working, which is why this only ever showed up
+ * under a deeper root.
+ *
+ * R32 finding #2 (P1): rejecting ONLY the literally-universal piece (spelled
+ * by every walked file) is one file-count short of the real failure mode. An
+ * ordinary monorepo shape — one dominant project directory plus a single
+ * shared/legacy file living just outside it — leaves the project segment at
+ * (N-1)/N, never literally 100%, while it remains exactly as uninformative
+ * about any PARTICULAR file as the universal case: a piece a MAJORITY of the
+ * walked files share still cannot tell the files that matter apart, and
+ * re-seating "into" it moves the destination toward the workspace's own
+ * center of mass, not toward a real subsystem. The rule therefore generalizes
+ * from "spelled by every file" to "spelled by a STRICT MAJORITY of files"
+ * (strictly more than half) — 100% is always a majority, so this subsumes the
+ * universal case outright, and "more than half" is the only threshold with no
+ * tunable fraction to pick: below it, at least as many files lack the piece
+ * as have it, so the piece still discriminates; at a bare half split it need
+ * not, but a piece at EXACTLY half remains eligible to name a family — the
+ * boundary is "more than half", never "half or more".
+ *
+ * Rejecting universal/majority pieces costs nothing anywhere else: a piece
+ * that covers most or all of the walked set carries little to no information
+ * about any one path, so no correct decision could ever have depended on it.
+ * Applied ON TOP OF, never instead of, the length floor, the generic denylist
+ * and the >=2-file multiplicity floor. Tuning-free by construction — there is
+ * no coverage fraction to pick, only the structural "more than half" bound.
+ */
+function workspaceWidePathPieces(walked: readonly string[]): Set<string> {
+  const universal = new Set<string>();
+  const fileCountByPiece = new Map<string, number>();
+  let scanned = 0;
+  for (const rel of walked) {
+    if (scanned >= WIRING_DOMAIN_MAX_SEGMENT_FILES) break;
+    scanned++;
+    for (const piece of new Set(pathFamilyPieces(rel))) {
+      fileCountByPiece.set(piece, (fileCountByPiece.get(piece) ?? 0) + 1);
+    }
+  }
+  // A one-file walk has no partition to speak of; the >=2-file family floor
+  // already refuses it, so claim nothing here.
+  if (scanned < 2) return universal;
+  // R32 finding #2: strictly more than half, not "every file" — a piece a
+  // bare majority of the walk shares is exactly as uninformative about which
+  // file is the destination as one every file shares. Exactly half is NOT a
+  // majority and remains eligible to name a family (decide-and-document: the
+  // boundary is ">", never ">=").
+  for (const [piece, count] of fileCountByPiece) {
+    if (count * 2 > scanned) universal.add(piece);
+  }
+  return universal;
+}
+
+function wiringDestinationDomainTokens(
+  query: string,
+  walked: readonly string[],
+): Set<string> {
+  const wanted = wiringQueryDomainWords(query, walked);
+  const found = new Set<string>();
+  if (wanted.size === 0) return found;
+  // R31 finding #2 (b): a family must be a directory segment or stem/piece
+  // shared by AT LEAST TWO workspace files -- a single file can never be a
+  // "family" on its own (e.g. one incidentally-named `*_test_*.cpp` file).
+  const fileCountByPiece = new Map<string, number>();
+  let scanned = 0;
+  for (const rel of walked) {
+    if (++scanned > WIRING_DOMAIN_MAX_SEGMENT_FILES) break;
+    const piecesInFile = new Set(pathFamilyPieces(rel));
+    for (const piece of piecesInFile) {
+      if (!wanted.has(piece)) continue;
+      fileCountByPiece.set(piece, (fileCountByPiece.get(piece) ?? 0) + 1);
+    }
+  }
+  for (const [piece, count] of fileCountByPiece) {
+    if (count >= 2) found.add(piece);
+  }
+  return found;
+}
+
+/**
+ * D3': the disclosure a domain-seated destination carries in its own `why`.
+ *
+ * PROVENANCE, not a re-derived property. `buildTaskWiringProfile` runs more
+ * than once per request (a probe pass and a final pass); by the second run the
+ * re-seated destination is already this pack's retained
+ * "wiring destination for …" surface, so `wiringDestinationDomainEndpoint`
+ * correctly abstains — it IS in domain now — and a flag recomputed per
+ * invocation reads false on exactly the profile that reaches the wire.
+ *
+ * Asking instead "is this destination in the named family?" would be WRONG in
+ * the other direction: it would also fire for a destination the domain rule
+ * never chose (a shape-chosen consumer that merely happens to sit in a family
+ * the query names a property of), and grant it insertion-readiness with no
+ * call edge. Measured: `semanticWiringResolver.spec.ts`'s
+ * "no executable health-like producer" fixture, where `health` is a real
+ * two-file path family but the query names its destination explicitly.
+ *
+ * So the marker rides the SURFACE the first pass created, which is the same
+ * object the later pass reuses.
+ */
+const DOMAIN_SEATED_WHY_NOTE = "seated inside the module family this query named";
+
+/**
+ * E1: re-seat a wiring DESTINATION that landed outside the domain the query
+ * named.
+ *
+ * Live (paid smoke r9 / SF13): the query's destination domain was telemetry —
+ * `telemetry`, `mavlink`, `dialect`, `status`, `encoder`, every one of them a
+ * real segment of `firmware/{src,include}/telemetry/mavlink_dialect.*` — and the
+ * pack nonetheless named `hardware_init` (later `task_estimator_entry`) in
+ * `firmware/src/app/tasks_init.cpp` as "the insertion site", because the
+ * destination is chosen from callable-insertion-site shape alone and no step
+ * ever asked whether the callable sits in the family the caller described. The
+ * telemetry encoder was never served and never entered `frontier_index`.
+ *
+ * Ranked with EXACTLY `bestServedWiringConsumer`'s scoring (query-term hits in
+ * body ×4 + in path ×2) so one vocabulary decides both promotions. Returns
+ * `endpoint` when a domain-matched callable implementation exists, or `note`
+ * when the family is real but contains no eligible destination — the caller
+ * then keeps its own choice and DISCLOSES that it is out-of-domain. `undefined`
+ * (the overwhelmingly common case) means the query named no family, or the
+ * destination already sits inside it: the wire is byte-identical.
+ */
+export function wiringDestinationDomainEndpoint(
+  query: string,
+  walked: readonly string[],
+  workspace: string,
+  cache: FileReadCache | undefined,
+  current: WiringEndpoint,
+): { endpoint?: WiringEndpoint; note?: string } | undefined {
+  const familyTokens = wiringDestinationDomainTokens(query, walked);
+  if (familyTokens.size === 0) return undefined;
+  const inFamily = (relPath: string): boolean =>
+    pathFamilyPieces(relPath).some((piece) => familyTokens.has(piece));
+  if (current.path !== undefined && inFamily(current.path)) return undefined;
+  // R31 finding #2 follow-up: the >=2-file multiplicity requirement above is
+  // about ADMITTING a family as grounds to move the destination TO one of its
+  // files -- a single incidentally-named file must never be strong enough
+  // evidence for that. But the ALREADY-CHOSEN `current` destination's own
+  // name matching a query word it is the only file to spell (e.g. a query
+  // naming "transmitPacket" over a destination already named
+  // `packet_sender.ts`) is not a re-seat candidate at all -- it is exactly
+  // the caller's own choice already looking right, which one file's own name
+  // is sufficient evidence for. Skipping this would re-seat a shape-correct
+  // destination onto an unrelated real family (e.g. a source-side helper the
+  // query also happens to mention) purely because the query's OWN vocabulary
+  // for the current destination failed the multiplicity floor.
+  if (
+    current.path !== undefined
+    && pathFamilyPieces(current.path).some((piece) => wiringQueryDomainWords(query, walked).has(piece))
+  ) {
+    return undefined;
+  }
+  const queryTerms = tokenizeForEpoch(query)
+    .filter((term) => term.length >= WIRING_DOMAIN_MIN_TOKEN_LEN)
+    .slice(0, 32);
+  const eligible = walked
+    .filter((relPath) => relPath !== current.path && isImplementationPath(relPath) && inFamily(relPath))
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, WIRING_DOMAIN_MAX_SCORED_FILES);
+  const familyNote = `no destination-domain match for ${[...familyTokens].sort().slice(0, 4).join(", ")}`;
+  if (eligible.length === 0) return { note: familyNote };
+  // R31 finding #2 (c): the family token itself must never be the ONLY
+  // evidence that seats the destination inside this domain -- every eligible
+  // file already contains a family piece BY CONSTRUCTION (that is what makes
+  // it eligible), so scoring with the family token(s) included would let a
+  // single generic word corroborate itself. A candidate is only ACCEPTED when
+  // at least one further, non-family query token also hits its path or body:
+  // the total score must exceed what the family token(s) alone contribute.
+  const familyOnlyTerms = queryTerms.filter((term) => familyTokens.has(term));
+  let best: { path: string; content: string; score: number } | undefined;
+  for (const relPath of eligible) {
+    const content = readCached(workspace, relPath, cache);
+    if (content === undefined) continue;
+    const body = normIdent(content);
+    const pathText = normIdent(relPath);
+    const bodyHits = queryTerms.filter((term) => body.includes(normIdent(term))).length;
+    const pathHits = queryTerms.filter((term) => pathText.includes(normIdent(term))).length;
+    const score = bodyHits * 4 + pathHits * 2;
+    if (score <= 0) continue;
+    const familyOnlyBodyHits = familyOnlyTerms.filter((term) => body.includes(normIdent(term))).length;
+    const familyOnlyPathHits = familyOnlyTerms.filter((term) => pathText.includes(normIdent(term))).length;
+    const familyOnlyScore = familyOnlyBodyHits * 4 + familyOnlyPathHits * 2;
+    if (score <= familyOnlyScore) continue;
+    if (best === undefined || score > best.score) best = { path: relPath, content, score };
+  }
+  if (best === undefined) return { note: familyNote };
+  // The endpoint TOKEN centres the served window and names the insertion site,
+  // so pick the declaration in this file the query's own terms describe best:
+  // its NAME counts double and its BODY once, which is what separates two
+  // same-suffixed encoders (`encodeSysStatus`, whose body carries the sensor
+  // health words, from `encodeBatteryStatus`, whose body does not).
+  // `definedCallableNames` is deliberately NOT used here — it caps at 12 names,
+  // which on a codec file is spent entirely on its pack/unpack helpers.
+  const bestLines = best.content.split(/\r?\n/);
+  // Term matching is SEGMENTED, never raw substring: `tokenizeForEpoch` splits
+  // camelCase, so the query term "encoder" no longer matches `encodeRcChannels`
+  // by accident while "sensor" still matches the `sensors` a body spells
+  // (prefix rule, the same grounding `wiringCandidateTokens` uses).
+  const hitsIn = (text: string): number => {
+    const tokens = new Set(tokenizeForEpoch(text));
+    return queryTerms.filter((term) =>
+      tokens.has(term) || [...tokens].some((candidate) => candidate.startsWith(term))
+    ).length;
+  };
+  let token: string | undefined;
+  let tokenScore = 0;
+  for (const symbol of extractSymbolsFromLines(best.content, WIRING_DOMAIN_MAX_SYMBOLS)) {
+    const bounds = symbol.range.split("-");
+    const start = Number.parseInt(bounds[0] ?? "", 10);
+    const end = Number.parseInt(bounds[1] ?? "", 10);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
+    // An insertion site is CALLABLE; a namespace/class/struct header is not.
+    if (!(bestLines[start - 1] ?? "").includes("(")) continue;
+    const name = unqualifiedSymbolTail(symbol.name);
+    const score = hitsIn(name) * 2 + hitsIn(bestLines.slice(start - 1, end).join("\n"));
+    if (score > tokenScore) {
+      tokenScore = score;
+      token = name;
+    }
+  }
+  return {
+    endpoint: {
+      token: token ?? definedCallableNames(best.content)[0] ?? current.token,
+      path: best.path,
+      role: structuralWiringDestinationRole(best.path, asImpactSurface(classifySurface(best.path))) ?? "api",
+    },
+  };
+}
+
 function buildLegacyTaskWiringProfile(
   query: string,
   surfaces: TaskPackSurface[],
@@ -13400,28 +17106,34 @@ function buildLegacyTaskWiringProfile(
       : surfaceIndexForToken(destinationToken, surfaces);
     const sourceSurface = sourceIndex >= 0 ? surfaces[sourceIndex] : undefined;
     const destinationSurface = destinationIndex >= 0 ? surfaces[destinationIndex] : undefined;
+    // D2: an endpoint this pack did not serve may still be one the caller
+    // already holds from an earlier call in this epoch. Consulted ONLY where
+    // the in-pack resolution came up empty, so a resolved endpoint's wire is
+    // untouched.
+    const sourceEndpointResolved = sourceToken !== undefined && sourceSurface !== undefined
+      ? endpointFromSurface(sourceToken, sourceSurface, ["query-token", "located-surface"])
+      : epochServedWiringEndpoint(sourceToken, query, surfaces, workspace, cache);
+    const destinationEndpointResolved = destinationToken !== undefined && destinationSurface !== undefined
+      ? endpointFromSurface(destinationToken, destinationSurface, ["query-token", "located-surface"])
+      : epochServedWiringEndpoint(destinationToken, query, surfaces, workspace, cache);
     const missing: Array<"source" | "destination"> = [];
-    if (sourceSurface === undefined) missing.push("source");
-    if (destinationSurface === undefined) missing.push("destination");
+    if (sourceEndpointResolved === undefined) missing.push("source");
+    if (destinationEndpointResolved === undefined) missing.push("destination");
     return {
       version: 1,
       status: "needs-followup",
       connections: [{
         id: "w1",
         status: "needs-followup",
-        ...(sourceToken !== undefined && sourceSurface !== undefined
-          ? { source: endpointFromSurface(sourceToken, sourceSurface, ["query-token", "located-surface"]) }
-          : {}),
-        ...(destinationToken !== undefined && destinationSurface !== undefined
-          ? { destination: endpointFromSurface(destinationToken, destinationSurface, ["query-token", "located-surface"]) }
-          : {}),
+        ...(sourceEndpointResolved !== undefined ? { source: sourceEndpointResolved } : {}),
+        ...(destinationEndpointResolved !== undefined ? { destination: destinationEndpointResolved } : {}),
         supporting_handles: [],
         confidence: 0.4,
         evidence: ["query-token"],
       }],
       missing: missing.length > 0 ? missing : ["destination"],
       edit_frontier: [],
-      review_frontier: [sourceSurface?.handle, destinationSurface?.handle]
+      review_frontier: [sourceEndpointResolved?.handle, destinationEndpointResolved?.handle]
         .filter((handle): handle is string => handle !== undefined),
     };
   }
@@ -13518,7 +17230,7 @@ function buildLegacyTaskWiringProfile(
   const destinationSurface = closureConsumer === undefined
     ? provisionalDestinationSurface
     : surfaces.find((candidate) => candidate.path === closureConsumer.path);
-  const destinationEndpoint: WiringEndpoint = {
+  const shapeDestinationEndpoint: WiringEndpoint = {
     token: destinationSurface === undefined
       ? closureConsumer?.token ?? destinationToken!
       : wiringConsumerToken(query, destinationSurface, closureConsumer?.token ?? destinationToken!),
@@ -13528,6 +17240,48 @@ function buildLegacyTaskWiringProfile(
         ?? asImpactSurface(destinationSurface.role)
       : closureConsumer?.role ?? asImpactSurface(check.role ?? classifySurface(check.glob)),
   };
+  // E1: everything above chooses the destination on callable-insertion-site
+  // SHAPE. When the query named a destination DOMAIN that the workspace really
+  // spells as a module family, the endpoint must come from that family — and
+  // when it cannot, the out-of-domain site says so in its own `why`.
+  //
+  // SUITEFIX (2026-09-05): E1 must never re-seat a destination the shape
+  // logic already proved with a real consumer relation freshly computed FOR
+  // THIS query. `promotedDestinationSurface` (bestServedWiringConsumer, a
+  // served surface the query's own evidence already ranked above the bare
+  // declaration) and a `closureConsumer` produced by `workspaceCallConsumer`
+  // (a direct-call hop from the shape destination's own definition to
+  // whoever actually calls it) are both concrete, query-fresh call/import
+  // relations, not the callable-insertion-site FALLBACK E1 is meant to
+  // correct. Without this guard, a query word that is merely a path piece of
+  // the family (e.g. "MAVLink" naming `mavlink.cpp`) out-ranks a destination
+  // the workspace already proves calls the source, silently trading a
+  // verified consumer for an unrelated same-family file.
+  //
+  // `retainedConsumer` is EXCLUDED from this guard even though it also feeds
+  // `closureConsumer` (`closureConsumer = retainedConsumer ?? workspaceCallConsumer(...)`):
+  // it recovers a surface an EARLIER stage already tagged "wiring destination
+  // for <token>" and says nothing about whether that stage's token/source
+  // matches THIS one — reproduced live on SF13 (aeroctl), where a stale
+  // "wiring destination for start" tag on `tasks_init.cpp` (unrelated to
+  // isHealthy) short-circuited the guard and blocked the correct re-seat onto
+  // `mavlink_dialect.cpp`. Only a closure/promotion hop computed fresh from
+  // THIS call's own tokens counts as proof.
+  //
+  // The fallback case — no relation, just a bare declaration or `check.glob`
+  // match — is exactly when E1 must still apply.
+  const shapeDestinationIsRelationBacked = (closureConsumer !== undefined && retainedConsumer === undefined)
+    || promotedDestinationSurface !== undefined;
+  const domainDestination = shapeDestinationIsRelationBacked
+    ? undefined
+    : wiringDestinationDomainEndpoint(
+        query,
+        walked,
+        workspace,
+        cache,
+        shapeDestinationEndpoint,
+      );
+  const destinationEndpoint: WiringEndpoint = domainDestination?.endpoint ?? shapeDestinationEndpoint;
 
   const ensuredDestination = ensureWiringEndpointSurface(
     surfaces,
@@ -13535,6 +17289,13 @@ function buildLegacyTaskWiringProfile(
     workspace,
     cache,
     true,
+    MAX_SURFACES_DISTINCT,
+    MAX_SURFACE_CODE_BYTES,
+    TINY_FILE_MAX_BYTES,
+    TINY_FILE_MAX_LINES,
+    // Either disclosure, never both: the endpoint is EITHER in the family the
+    // query named (seated there by the rule) or provably out of it.
+    domainDestination?.endpoint !== undefined ? DOMAIN_SEATED_WHY_NOTE : domainDestination?.note,
   );
   if (
     closureConsumer !== undefined
@@ -13565,9 +17326,20 @@ function buildLegacyTaskWiringProfile(
     workspace,
     cache,
   );
-  const sourceDefinitionPaths = importedSource === undefined
-    ? workspaceCallableDefinitionPaths(sourceToken!, walked, workspace, cache)
+  // D5 (2026-09-02): when the caller wrote the endpoint as `Class::method`,
+  // the qualifier is part of the address. `workspaceCallableDefinitionPaths`
+  // compares BARE names (definedCallableNames discards the qualifier), so every
+  // sibling class with a same-named member looked like the same definition.
+  // Resolve the anchor as a unit first; a bare token still falls through to the
+  // flat lookup, keeping the `ambiguousUnlinkedSource` abstention below intact.
+  const qualifiedSourceDefinitions = importedSource === undefined
+    ? qualifiedAnchorDefinitionPathsForToken(sourceToken!, query, workspace, cache)
     : [];
+  const sourceDefinitionPaths = importedSource !== undefined
+    ? []
+    : qualifiedSourceDefinitions.length > 0
+      ? qualifiedSourceDefinitions
+      : workspaceCallableDefinitionPaths(sourceToken!, walked, workspace, cache);
   const ambiguousUnlinkedSource = importedSource === undefined && sourceDefinitionPaths.length > 1;
   const uniqueDefinitionSource: WiringEndpoint | undefined = importedSource === undefined
     && sourceDefinitionPaths.length === 1
@@ -13727,11 +17499,38 @@ function buildLegacyTaskWiringProfile(
   })();
   const adapterInsertion = supportingHandles.length > 0
     && hasEditGradeCallArgument(query, destinationCode, supportingSurfaces);
+  // D3' (2026-09-05, live r10 follow-up): the two tests above both ask whether
+  // the destination ALREADY calls something — a shape-chosen destination is
+  // normally an existing consumer, and the edit tightens a call it already
+  // makes. A destination the DOMAIN rule seated is the opposite case by
+  // construction: the query named a module family precisely because the call
+  // it wants does NOT exist there yet ("reuse the existing encoder"), so
+  // demanding a pre-existing call would report `missing:["insertion"]` for
+  // every re-seat — a SEMANTIC gap no further reading can close, which is
+  // exactly the re-read loop the re-seat was meant to end. The re-seat is not
+  // a guess: the family is a real multi-file module the query named, a
+  // non-family query term corroborated this file, and the token below is the
+  // callable in it the query's own words describe best — all of which is
+  // strictly more grounding than `adapterInsertion`. It still has to BE a
+  // callable (`hasCallableBody`, unchanged).
+  //
+  // Asked STATELESSLY, of the destination that actually stands, rather than of
+  // this invocation's re-seat: `buildTaskWiringProfile` runs more than once per
+  // request (the probe pass and the final pass), and by the second run the
+  // re-seated destination is already retained as the pack's own
+  // "wiring destination for …" surface — so `wiringDestinationDomainEndpoint`
+  // correctly abstains (it is already in domain) and a provenance flag would
+  // read false on exactly the profile that reaches the wire.
+  const domainSeatedInsertion = destination !== undefined
+    && (
+      domainDestination?.endpoint !== undefined
+      || ensuredDestination?.surface.why?.includes(DOMAIN_SEATED_WHY_NOTE) === true
+    );
   const hasCallableInsertionSite = endpointsReady
     && destination !== undefined
     && ensuredDestination !== undefined
     && hasCallableBody(ensuredDestination.surface)
-    && (sourceCalledDirectly || adapterInsertion);
+    && (sourceCalledDirectly || adapterInsertion || domainSeatedInsertion);
   if (endpointsReady && !hasCallableInsertionSite) missing.push("insertion");
   const ready = missing.length === 0;
   const evidenceGraph = buildWiringEvidenceGraph(source, destination, surfaces, workspace, cache);
@@ -13753,6 +17552,13 @@ function buildLegacyTaskWiringProfile(
         "closure-check",
         "project-family",
         ...(hasCallableInsertionSite ? ["callable-insertion-site" as const] : []),
+        // D3': disclosed ONLY when the domain rule is what makes this the
+        // insertion site. When the destination already calls the producer (or
+        // an adapter), the plain proof above stands alone and the wire is
+        // byte-identical.
+        ...(hasCallableInsertionSite && domainSeatedInsertion && !sourceCalledDirectly && !adapterInsertion
+          ? ["domain-insertion-site" as const]
+          : []),
       ],
       ...(evidenceIds.length > 0 ? { evidence_ids: evidenceIds } : {}),
     }],
@@ -14464,9 +18270,10 @@ function buildSemanticTaskWiringProfile(
   // precision.
   // A semantic wiring frontier is actionable only when every edit site has
   // been resolved, regardless of whether its receiver already exists or must
-  // be constructed. This compact, server-internal completion contract needs
-  // recipe discovery even when the experimental response-wide recipe flag is
-  // off; only a recipe with a workspace-proven entry reaches the wire below.
+  // be constructed. This compact, server-internal completion contract forces
+  // recipe discovery explicitly (it survived the deleted response-wide
+  // TL_VERIFICATION_RECIPE experiment as the machinery's one real consumer);
+  // only a recipe with a workspace-proven entry reaches the wire below.
   const completionManifest = buildVerificationManifest(workspace, resolution.editPaths, {
     forceRecipe: true,
     behaviorAnchors: [
@@ -14768,6 +18575,56 @@ function suppressFragmentOnlyFilenameMatches(
   surfaces.push(...kept);
 }
 
+/**
+ * W-VERIFY-GEN seam: attaches `TaskChangeContract.verify_obligations` from
+ * the existing `buildVerificationManifest`'s own output (see
+ * sfVerifyObligations.ts's file doc for exactly which fields are reused and
+ * why no new discovery logic is added here). Flag-gated
+ * (`TL_SF_VERIFY_FIRST`, default OFF) and fail-open: a derivation defect
+ * must never break the change_contract itself, mirroring
+ * `applySemanticFrontierState`'s own I-1 contract.
+ *
+ * Ruling F8 (FX-OH2, 2026-09-04): `ready` is the caller's own
+ * `phase:"prepared"` readiness (`buildTaskChangeContract`'s `ready`, which is
+ * exactly what `phase:"prepared"` reads back as `status === "ready"`) — a
+ * `discover`/`await_input` pack short-circuits here, before
+ * `buildVerificationManifest` even walks the workspace.
+ */
+// Exported for the ruling F8 pin (sfVerifyObligations.spec.ts): the
+// `ready` gate's effect is a property of this seam alone, and pinning it
+// through a whole discover-shaped pack would require constructing a fixture
+// whose incompleteness is otherwise irrelevant to what F8 changed.
+export function deriveTaskChangeContractVerifyObligations(
+  obligations: readonly TaskChangeObligation[],
+  workspace: string,
+  ready: boolean,
+): TaskVerifyObligation[] | undefined {
+  if (!sfVerifyFirstEnabled() || !ready) return undefined;
+  try {
+    const editPaths = [...new Set(
+      obligations.filter((o) => o.action === "edit").map((o) => o.path),
+    )];
+    const manifest = editPaths.length > 0 ? buildVerificationManifest(workspace, editPaths) : undefined;
+    const derived = deriveVerifyObligations({
+      changeContract: { obligations },
+      verificationManifest: manifest,
+      ready,
+    });
+    return derived.length > 0 ? derived : undefined;
+  } catch (err) {
+    try {
+      trace(
+        "sf_verify_gen_error",
+        { message: err instanceof Error ? err.message : String(err) },
+        workspace,
+      );
+    } catch {
+      /* the trace channel is best-effort too */
+    }
+    return undefined;
+  }
+}
+
 function buildTaskChangeContract(
   query: string,
   result: TaskPackResult,
@@ -14889,6 +18746,15 @@ function buildTaskChangeContract(
   const ready = uniqueMissing.length === 0
     && result.route?.action === "edit_from_handles"
     && obligations.some((item) => item.action === "edit");
+  // Ruling F8 (FX-OH2, 2026-09-04): `verify_obligations` ride only a pack
+  // whose readiness ("ready" here IS `phase:"prepared"` -- see
+  // `buildTaskExecutionContract`'s `result.change_contract?.status === "ready"`
+  // read) will project to `decision.kind:"act.edit"`. A `discover`/`await_input`
+  // pack (readiness false) derives none: the closure/verify-first withholding
+  // logic (sfSatisfaction.ts's `read.closure` branch, `applySemanticFrontierPreBookingSeam`'s
+  // W-VERIFY-GEN fold) is unaffected -- obligations are still derived at
+  // closure time, from the change_contract a PREPARED pack carried.
+  const verify_obligations = deriveTaskChangeContractVerifyObligations(obligations, workspace, ready);
   return {
     version: 1,
     status: ready ? "ready" : "needs-followup",
@@ -14899,6 +18765,7 @@ function buildTaskChangeContract(
     max_additional_tl_calls: ready
       ? 0
       : Math.max(1, result.route?.max_additional_tl_calls ?? 1),
+    ...(verify_obligations !== undefined ? { verify_obligations } : {}),
   };
 }
 const READINESS_FALSE_READY_LIMIT = 0.05;
@@ -15020,14 +18887,101 @@ function surfaceBodyContainsToken(surface: TaskPackSurface, token: string | unde
   return haystack.includes(token.toLowerCase());
 }
 
+/**
+ * Proof source for finite named requirements. Kept pure and exported so the
+ * complete-vs-partial authority boundary is regression-testable without
+ * coupling the test to route/certificate rendering.
+ */
+function isWholeAuthoritySurface(surface: TaskPackSurface, workspace?: string): boolean {
+  if (surface.content_completeness === "partial" || (surface.remaining_ranges?.length ?? 0) > 0) return false;
+  const range = /^(\d+)-(\d+)$/.exec(surface.range);
+  if (range === null || Number(range[1]) !== 1) return false;
+  const content = workspace === undefined ? undefined : readCached(workspace, surface.path);
+  const total = content === undefined
+    ? servedSurfaceText(surface).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").length
+    : countLines(content);
+  return Number(range[2]) >= total;
+}
+
+function surfaceDeclaresNamedAuthority(surface: TaskPackSurface, identifier: string): boolean {
+  const normalized = normIdent(identifier);
+  // E3: a surface's `symbol` can be a QUALIFIED member name (`EKF::isHealthy`)
+  // while `identifier` is the bare token the query spelled.
+  if (surface.symbol !== undefined && identifierNamesSymbol(surface.symbol, identifier)) return true;
+  if (normIdent(path.basename(surface.path, path.extname(surface.path))) === normalized) return true;
+  const escaped = escapeRegExp(identifier);
+  return new RegExp(
+    `\\b(?:class|interface|type|enum|function|const|let|var|struct|trait|fn|func|def|module)\\s+${escaped}\\b`,
+    "iu",
+  ).test(servedSurfaceText(surface));
+}
+
+const LITERAL_SURFACE_DUTY_MANIFEST_BASENAMES: ReadonlySet<string> = new Set([
+  "package.json",
+  "pyproject.toml",
+  "cargo.toml",
+  "go.mod",
+  "pom.xml",
+  "composer.json",
+  "gemfile",
+  "build.gradle",
+  "build.gradle.kts",
+]);
+
+function literalSurfaceDutyMatchesPath(surfacePath: string, facet: string): boolean {
+  const lowerFacet = facet.toLowerCase();
+  const basenameLower = path.basename(surfacePath).toLowerCase();
+  if (lowerFacet === "manifest") {
+    return LITERAL_SURFACE_DUTY_MANIFEST_BASENAMES.has(basenameLower);
+  }
+  if (lowerFacet === "docs" || lowerFacet === "documentation") {
+    return /^(?:readme|changelog|contributing)(?:\.|$)/iu.test(basenameLower)
+      || /(?:^|\/)docs?(?:\/|$)/iu.test(surfacePath);
+  }
+  return false;
+}
+
+function isLiteralFirstSurfaceDuty(query: string): boolean {
+  return literalFirstRoutingEnabled() && literalFirstRelation(query) !== undefined;
+}
+
+function literalSurfaceDutyEvidence(
+  served: readonly TaskPackSurface[],
+  facet: string,
+): TaskPackSurface[] {
+  return served.filter((surface) =>
+    surfaceContainsToken(surface, facet)
+    || literalSurfaceDutyMatchesPath(surface.path, facet));
+}
+
+export function namedAuthorityFacetProofs(
+  served: readonly TaskPackSurface[],
+  queryIdentifiers: readonly string[],
+  facets: readonly string[],
+  workspace?: string,
+): Map<string, "served" | "authoritative-absent" | "uncovered"> {
+  const authorities = queryIdentifiers.length > 0
+    ? served.filter((surface) =>
+        isWholeAuthoritySurface(surface, workspace)
+        && queryIdentifiers.some((identifier) => surfaceDeclaresNamedAuthority(surface, identifier)))
+    : [];
+  const proofs = new Map<string, "served" | "authoritative-absent" | "uncovered">();
+  for (const facet of facets) {
+    if (served.some((surface) => surfaceBodyContainsToken(surface, facet))) proofs.set(facet, "served");
+    else if (authorities.length > 0) proofs.set(facet, "authoritative-absent");
+    else proofs.set(facet, "uncovered");
+  }
+  return proofs;
+}
+
 function exactIdentifierEvidence(
   surfaces: readonly TaskPackSurface[],
   identifier: string,
 ): TaskReadinessEvidence[] {
-  const needle = identifier.toLowerCase();
   return surfaces
     .filter((surface) =>
-      surface.symbol?.toLowerCase() === needle
+      // E3: a qualified `symbol` (`EKF::isHealthy`) is named by the bare token.
+      (surface.symbol !== undefined && identifierNamesSymbol(surface.symbol, identifier))
       || new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(servedSurfaceText(surface))
     )
     .map(readinessEvidence);
@@ -15149,10 +19103,17 @@ const ENUMERATED_ITEM_STOPWORDS: ReadonlySet<string> = new Set([
  * the transport delivers, and it is already this file's join separator
  * elsewhere. Written as an escape so the source stays NUL-free.
  */
-const ENUMERATION_SEPARATOR = "\u0000";
-const ENUMERATION_LIST_MARKER_RE = /(?:^|\n)[ \t]*(?:[-*•]|\(?\d{1,2}[.)])[ \t]+/g;
-const ENUMERATION_SEPARATOR_RE = /[,;、，・]|\band\b|\bor\b|や/gi;
+const ENUMERATION_LIST_MARKER_RE = /(?:^|\n)[ \t]*(?:[-*•]|\(?\d{1,2}[.)])[ \t]+/gu;
+const ENUMERATION_SEPARATOR_RE = /[,;、，・]|\band\b|\bor\b|や/giu;
 const ENUMERATION_LEADING_DETERMINER_RE = /^(?:the|a|an|its|their|this|that|these|those)\s+/i;
+const ENUMERATION_LEADING_KEYWORD_RE = /^(?:including|include|includes)\s+/iu;
+
+interface EnumeratedQueryItem {
+  facet: string;
+  id: string;
+  start: number;
+  end: number;
+}
 
 /**
  * The facet an item contributes, or undefined when it is not a short noun
@@ -15193,36 +19154,98 @@ function enumerationItemFacet(item: string, pick: "longest" | "last" = "longest"
  * false-positive boundary is the whole risk is worth testing directly, not
  * only through six layers of pack assembly.
  */
-export function enumeratedQueryFacets(query: string): string[] {
-  const items = stripPathSpans("", query)
-    .replace(ENUMERATION_LIST_MARKER_RE, ENUMERATION_SEPARATOR)
-    .replace(ENUMERATION_SEPARATOR_RE, ENUMERATION_SEPARATOR)
-    .split(ENUMERATION_SEPARATOR)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-  if (items.length < ENUMERATED_QUERY_MIN_FACETS) return [];
-  const trailing = items.slice(1)
-    .map((item) => enumerationItemFacet(item))
-    .filter((facet): facet is string => facet !== undefined);
-  // Rule 4's floor, applied to the items that had to earn it the hard way.
+function enumeratedItemFacetFromId(id: string): string | undefined {
+  if (!id.startsWith(ENUMERATED_ITEM_OBLIGATION_PREFIX)) return undefined;
+  const rest = id.slice(ENUMERATED_ITEM_OBLIGATION_PREFIX.length);
+  const separator = rest.indexOf(":");
+  return separator < 0 ? rest || undefined : rest.slice(separator + 1) || undefined;
+}
+
+function currentEnumeratedQueryItems(query: string): EnumeratedQueryItem[] {
+  const cleaned = stripPathSpans("", query);
+  const split = new RegExp(`${ENUMERATION_LIST_MARKER_RE.source}|${ENUMERATION_SEPARATOR_RE.source}`, "giu");
+  const segments: Array<{ text: string; start: number; end: number }> = [];
+  let cursor = 0;
+  for (const match of cleaned.matchAll(split)) {
+    const index = match.index ?? cursor;
+    const raw = cleaned.slice(cursor, index);
+    const leftTrim = raw.length - raw.trimStart().length;
+    const right = raw.trimEnd();
+    if (right.trim().length > 0) {
+      segments.push({ text: right.trimStart(), start: cursor + leftTrim, end: cursor + right.length });
+    }
+    cursor = index + match[0].length;
+  }
+  const raw = cleaned.slice(cursor);
+  const leftTrim = raw.length - raw.trimStart().length;
+  const right = raw.trimEnd();
+  if (right.trim().length > 0) {
+    segments.push({ text: right.trimStart(), start: cursor + leftTrim, end: cursor + right.length });
+  }
+  if (segments.length < ENUMERATED_QUERY_MIN_FACETS) return [];
+
+  const facetFor = (segment: { text: string }, leading: boolean): string | undefined => {
+    let phrase = segment.text.trim();
+    if (leading) {
+      const including = [...phrase.matchAll(/\bincluding\b/giu)].at(-1);
+      if (including?.index !== undefined) phrase = phrase.slice(including.index + including[0].length);
+      phrase = phrase.split(/[。.!?:：]/u).at(-1) ?? phrase;
+    }
+    phrase = phrase.trim().replace(ENUMERATION_LEADING_KEYWORD_RE, "");
+    phrase = phrase.replace(/\s+(?:を|の)?(?:どう|どの|含|説明|扱|教).*/u, "").trim();
+    const words = phrase.split(/\s+/);
+    return enumerationItemFacet(phrase)
+      ?? (leading ? enumerationItemFacet(words.slice(-ENUMERATED_ITEM_MAX_WORDS).join(" "), "last") : undefined);
+  };
+
+  const trailing = segments.slice(1)
+    .map((segment) => ({ segment, facet: facetFor(segment, false) }))
+    .filter((entry): entry is { segment: { text: string; start: number; end: number }; facet: string } => entry.facet !== undefined);
   if (trailing.length < ENUMERATED_QUERY_MIN_FACETS - 1) return [];
-  const leadWords = items[0]!.trim().split(/\s+/);
-  const lead = enumerationItemFacet(items[0]!)
-    ?? enumerationItemFacet(leadWords.slice(-ENUMERATED_ITEM_MAX_WORDS).join(" "), "last");
+  const leadFacet = facetFor(segments[0]!, true);
+  const candidates = leadFacet === undefined ? trailing : [{ segment: segments[0]!, facet: leadFacet }, ...trailing];
   const owned = new Set([
     ...requiredQueryFacets(query),
     ...explicitCodeIdentifiers(query).map((identifier) => identifier.toLowerCase()),
   ]);
-  const facets: string[] = [];
+  const items: EnumeratedQueryItem[] = [];
   const seen = new Set<string>();
-  for (const facet of lead !== undefined ? [lead, ...trailing] : trailing) {
+  for (const { segment, facet } of candidates) {
     if (owned.has(facet) || seen.has(facet)) continue;
     seen.add(facet);
-    facets.push(facet);
+    const spanHash = shaOfText(`${segment.start}:${segment.end}:${cleaned.slice(segment.start, segment.end)}`)
+      .replace(/^sha256:/u, "")
+      .slice(0, 12);
+    items.push({
+      facet,
+      id: `${ENUMERATED_ITEM_OBLIGATION_PREFIX}${spanHash}:${facet}`,
+      start: segment.start,
+      end: segment.end,
+    });
   }
-  return facets.length >= ENUMERATED_QUERY_MIN_FACETS
-    ? facets.slice(0, ENUMERATED_QUERY_MAX_FACETS)
-    : [];
+  return items.length >= ENUMERATED_QUERY_MIN_FACETS ? items.slice(0, ENUMERATED_QUERY_MAX_FACETS) : [];
+}
+
+function enumeratedQueryItemsForEpoch(query: string, workspace?: string): EnumeratedQueryItem[] {
+  const items = currentEnumeratedQueryItems(query);
+  if (workspace === undefined) return items;
+  const stored = queryTaskContract(workspace, tokenizeForEpoch(query));
+  if (stored === undefined) return items;
+  const byId = new Map(items.map((item) => [item.id, item]));
+  for (const id of stored.concernTokens) {
+    const facet = enumeratedItemFacetFromId(id);
+    if (facet === undefined || byId.has(id)) continue;
+    byId.set(id, { facet, id, start: -1, end: -1 });
+  }
+  return [...byId.values()].slice(0, ENUMERATED_QUERY_MAX_FACETS);
+}
+
+export function enumeratedQueryObligationIds(query: string, workspace?: string): string[] {
+  return enumeratedQueryItemsForEpoch(query, workspace).map((item) => item.id);
+}
+
+export function enumeratedQueryFacets(query: string): string[] {
+  return currentEnumeratedQueryItems(query).map((item) => item.facet);
 }
 
 function probeFileText(workspace: string, filePath: string): string | undefined {
@@ -15545,6 +19568,7 @@ function runInternalReadinessFalsification(
   const sameRootTestExists = ranked.some((candidate) => candidate.role === "test");
   let added = 0;
   const usedPaths = new Set<string>();
+  const admitted = new Map<string, { bytes: number; disposition: "required" | "supporting" }>();
   // Wire-baseline drift fix (2026-08-21, W7 integration): centeredSliceForCap
   // reads the file fresh from `workspace` (via `readCached`), bypassing the
   // `maskServedRanges` blanking this pass already applied to select
@@ -15605,6 +19629,10 @@ function runInternalReadinessFalsification(
     });
     existingKeys.add(`${candidate.path}:${candidate.range}`);
     usedPaths.add(candidate.path);
+    admitted.set(`${candidate.path}:${candidate.range}`, {
+      bytes: Buffer.byteLength(capped.code, "utf8"),
+      disposition: candidate.strong ? "required" : "supporting",
+    });
     added++;
   }
   return added;
@@ -15645,6 +19673,142 @@ function canonicalClosureValue(value: unknown): unknown {
   return value;
 }
 
+// ---------------------------------------------------------------------------
+// D1 (FX-R3, 2026-09-04) — A CALL THE SERVER ALREADY RAN IS NOT A `next`.
+//
+// The DEEP recursive read closure below (`runRecursiveReadOnlyClosure`)
+// EXECUTES the provisional contract's `next_call` itself to harvest surfaces
+// (`why:"recursive-read-closure"`). When the loop ends, that call is still
+// sitting on `result.next`, so `buildTaskExecutionContract`'s candidate chain
+// can hand it back to the caller as `decision.next` — an instruction to run
+// the very search this build already ran. Observed live (run
+// 2026-09-04-semantic-frontier-v2-paid-ab-smoke-r3, cell SF05 ... -r0, first
+// call): `decision.kind:"discover"` + `gaps:[missing-evidence surface-content]`
+// + `next: search_files find ["contract"]`, while the obligation actually open
+// was a codeless surface that `gapFallback` (a `read_file` of that exact
+// handle) would have closed.
+//
+// The fix is a per-build fingerprint set of the calls the loop ran, consulted
+// once — `parsedNextAfterProof` is dropped when it names an executed call, so
+// the chain falls through to the obligation-specific fallback. Deliberately
+// NOT recorded from the lean single-handle path or the candidate inline pass:
+// this closes the shape the forensics named (the deep loop's self-executed
+// search) without moving the far more common lean-profile packs' bytes.
+//
+// CARRIED BY TOKEN, NOT BY REFERENCE (ruling (bb)). `trimToCap` mutates and
+// returns the same object, but a receipt/copy path may not, so the set is
+// published both on a `WeakMap` keyed by the pack object and under an
+// ENUMERABLE symbol-keyed token that survives `{...result}` — the same
+// mechanism `sfSatisfaction.ts`'s `attachSfPackContext` uses, for the same
+// reason. A symbol key is structurally invisible to `JSON.stringify`, so
+// nothing here can reach the wire.
+// ---------------------------------------------------------------------------
+
+const closureExecutedCallsByPack = new WeakMap<object, Set<string>>();
+const CLOSURE_EXECUTED_TOKEN_KEY: unique symbol = Symbol("tokenlighten.closureExecutedCalls");
+const closureExecutedCallsByToken = new Map<string, Set<string>>();
+/** Upper bound on live tokens; oldest-first eviction (see the block above). */
+const CLOSURE_EXECUTED_TOKENS_MAX = 256;
+let closureExecutedTokenCounter = 0;
+
+/** The set this build already executed for `result`, minting one if needed. */
+function closureExecutedCallSet(result: object): Set<string> {
+  const existing = closureExecutedCallSignatures(result);
+  if (existing !== undefined) return existing;
+  const set = new Set<string>();
+  closureExecutedCallsByPack.set(result, set);
+  const token = `tlc${(closureExecutedTokenCounter += 1)}:${shaOfText(String(Date.now()))}`;
+  closureExecutedCallsByToken.set(token, set);
+  while (closureExecutedCallsByToken.size > CLOSURE_EXECUTED_TOKENS_MAX) {
+    const oldest = closureExecutedCallsByToken.keys().next();
+    if (oldest.done === true) break;
+    closureExecutedCallsByToken.delete(oldest.value);
+  }
+  try {
+    Object.defineProperty(result, CLOSURE_EXECUTED_TOKEN_KEY, {
+      value: token,
+      enumerable: true, // MUST be enumerable — this is what survives {...result}.
+      configurable: true,
+      writable: true,
+    });
+  } catch {
+    // A frozen pack keeps the WeakMap binding for THIS exact object.
+  }
+  return set;
+}
+
+/** The executed-call fingerprints of `result`, or `undefined` when none. */
+function closureExecutedCallSignatures(result: object): Set<string> | undefined {
+  if (result === null || typeof result !== "object") return undefined;
+  const token = (result as Record<symbol, unknown>)[CLOSURE_EXECUTED_TOKEN_KEY];
+  if (typeof token === "string") {
+    const viaToken = closureExecutedCallsByToken.get(token);
+    if (viaToken !== undefined) return viaToken;
+  }
+  return closureExecutedCallsByPack.get(result);
+}
+
+/**
+ * Record that the closure loop RAN `calls` for `result` — both the raw
+ * candidate (the shape `result.next` still holds) and the admitted shape the
+ * loop actually executed, because `admitReadOnlyNextCall` may rewrite the
+ * arguments and only one of the two will match at contract-build time.
+ */
+function noteClosureExecutedCalls(
+  result: object,
+  calls: readonly ({ readonly tool: string; readonly arguments: Readonly<Record<string, unknown>> } | undefined)[],
+): void {
+  if (result === null || typeof result !== "object") return;
+  const set = closureExecutedCallSet(result);
+  for (const call of calls) {
+    if (call === undefined) continue;
+    try {
+      set.add(closureCallSignature(call as unknown as ContinuationCall));
+    } catch {
+      // A signature this build cannot compute simply does not suppress a next.
+    }
+  }
+}
+
+/**
+ * True when the closure loop of THIS build already executed `call` itself.
+ *
+ * Structurally typed on purpose: the candidates this is asked about come from
+ * two different `ContinuationCall` spellings (`util/continuation`'s and the
+ * protocol `ToolCall`), and the fingerprint only ever reads `tool` +
+ * `arguments`.
+ */
+function closureAlreadyExecuted(
+  result: object,
+  call: { readonly tool: string; readonly arguments: Readonly<Record<string, unknown>> } | undefined,
+  query: string,
+): boolean {
+  if (call === undefined) return false;
+  const executed = closureExecutedCallSignatures(result);
+  if (executed === undefined || executed.size === 0) return false;
+  const raw = call as unknown as ContinuationCall;
+  const shapes: ContinuationCall[] = [raw];
+  try {
+    const admitted = admitReadOnlyNextCall(raw, query);
+    if (admitted !== undefined) shapes.push(admitted);
+  } catch {
+    // Admission is advisory here; the raw shape below still answers.
+  }
+  for (const shape of shapes) {
+    try {
+      if (executed.has(closureCallSignature(shape))) return true;
+    } catch {
+      // See noteClosureExecutedCalls.
+    }
+  }
+  return false;
+}
+
+/** Test-only: forget every executed-call token (specs start from a clean slate). */
+export function resetClosureExecutedCallsForTest(): void {
+  closureExecutedCallsByToken.clear();
+}
+
 function closureCallSignature(call: ContinuationCall): string {
   const args = call.arguments;
   const handleId = typeof args["handle"] === "string" ? args["handle"] : undefined;
@@ -15683,6 +19847,45 @@ function closureUnionRange(a: string, b: string): string | undefined {
   const bEnd = Number(mb[2]);
   if (aEnd + 1 < bStart || bEnd + 1 < aStart) return undefined;
   return `${Math.min(aStart, bStart)}-${Math.max(aEnd, bEnd)}`;
+}
+
+/**
+ * D2 (FX-R3, 2026-09-04) — INTRA-PACK RANGE IDENTITY.
+ *
+ * The closure's merge/dedup checks compared `range` STRINGS, so a narrower
+ * window of a path this pack already serves with a wider body read as a brand
+ * new surface: the loop minted a second `required:true` row for bytes already
+ * on the wire (observed live, smoke-r3 cell SF05 ... -r0: `drv_baro.h` served
+ * `1-49` WITH a body, plus a second `1-23` row for the same file). These two
+ * helpers answer the question the string compare could not — does this window
+ * already sit inside (or across) a window this pack serves?
+ *
+ * File coordinates per ruling (t): the spans are the surface's own served
+ * line range, never a wire display range.
+ */
+function closureLineSpan(range: string | undefined): [number, number] | undefined {
+  if (typeof range !== "string") return undefined;
+  const match = /^(\d+)-(\d+)$/.exec(range.trim());
+  if (match === null) return undefined;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < start) return undefined;
+  return [start, end];
+}
+
+/**
+ * Does an ALREADY-SERVED surface window subsume or overlap `candidate`?
+ *
+ * A served window with no parseable range is treated as covering the whole
+ * file (fail-closed toward "already on the wire": the alternative is minting a
+ * duplicate row for bytes the caller already has).
+ */
+function closureServedWindowCovers(servedRange: string | undefined, candidateRange: string | undefined): boolean {
+  const served = closureLineSpan(servedRange);
+  if (served === undefined) return true;
+  const candidate = closureLineSpan(candidateRange);
+  if (candidate === undefined) return true;
+  return served[0] <= candidate[1] && candidate[0] <= served[1];
 }
 
 function closureCanMerge(result: TaskPackResult, extraCode: string): boolean {
@@ -15730,12 +19933,24 @@ function executeClosureRead(
     if (content === undefined) continue;
     const served = closureSlice(content, target.range);
     if (!served || !closureCanMerge(result, served.code)) continue;
-    const existing = codeTaskPackSurfaces(result.surfaces).find((surface) =>
+    const packSurfaces = codeTaskPackSurfaces(result.surfaces);
+    const existing = packSurfaces.find((surface) =>
       surface.handle === target.handle || (
         surface.path === target.path
         && surface.range === served.range
       )
-    );
+    )
+      // D2 (FX-R3): the same path, at a window this pack ALREADY SERVES bytes
+      // for, is the same row — not a new one. Falling through to the `push`
+      // below minted a second `required:true` surface for bytes already on the
+      // wire. Resolving to that row instead means the branches below either
+      // widen it (when the window is an advertised `remaining_ranges` entry)
+      // or leave the pack exactly as it is.
+      ?? packSurfaces.find((surface) =>
+        surface.path === target.path
+        && hasServedCode(surface)
+        && closureServedWindowCovers(surface.range, served.range)
+      );
     if (existing) {
       if (existing.code === undefined) {
         existing.code = elideDocComments(served.code, languageForPath(target.path));
@@ -15831,6 +20046,23 @@ function executeClosureSearch(
   const existingKeys = new Set(
     codeTaskPackSurfaces(result.surfaces).map((surface) => `${surface.path}:${surface.range}`),
   );
+  // D2 (FX-R3): the exact `path:range` key above cannot see a NARROWER window
+  // of a path this pack already serves with a wider body — that is how a
+  // second, duplicate row for already-shipped bytes got minted. Track the
+  // served windows per path and treat any overlap as the same evidence.
+  const servedWindowsByPath = new Map<string, string[]>();
+  const noteServedWindow = (relPath: string, range: string | undefined): void => {
+    const windows = servedWindowsByPath.get(relPath);
+    if (windows === undefined) servedWindowsByPath.set(relPath, [range ?? ""]);
+    else windows.push(range ?? "");
+  };
+  const alreadyServedWindow = (relPath: string, range: string): boolean =>
+    (servedWindowsByPath.get(relPath) ?? []).some((served) =>
+      closureServedWindowCovers(served === "" ? undefined : served, range));
+  for (const surface of codeTaskPackSurfaces(result.surfaces)) {
+    if (!hasServedCode(surface)) continue;
+    noteServedWindow(surface.path, surface.range);
+  }
   const ranked: Array<{
     path: string;
     range: string;
@@ -15897,6 +20129,8 @@ function executeClosureSearch(
       score = hitCount;
     }
     if (existingKeys.has(`${file.relPath}:${range}`)) continue;
+    // D2 (FX-R3): merged into the row already carrying these bytes.
+    if (alreadyServedWindow(file.relPath, range)) continue;
     const contextHits = contextTerms.filter((term) => lower.includes(term.toLowerCase())).length;
     const basename = normIdent(path.basename(file.relPath, path.extname(file.relPath)));
     const endpointDefinitionPenalty = wiringReferenceSearch
@@ -15920,6 +20154,9 @@ function executeClosureSearch(
   let added = 0;
   for (const candidate of ranked) {
     if (added >= RECURSIVE_READ_CLOSURE_MAX_BRANCHES) break;
+    // D2 (FX-R3): re-checked here too — an earlier candidate of this same pass
+    // may have just served an overlapping window of the same file.
+    if (alreadyServedWindow(candidate.path, candidate.range)) continue;
     const code = elideDocComments(candidate.code, languageForPath(candidate.path));
     if (!closureCanMerge(result, code)) break;
     const handle = handleTable.upsert({
@@ -15941,6 +20178,7 @@ function executeClosureSearch(
       code,
     });
     existingKeys.add(`${candidate.path}:${candidate.range}`);
+    noteServedWindow(candidate.path, candidate.range);
     added += 1;
   }
   return added;
@@ -16188,6 +20426,67 @@ function resolveServedDuplicateCandidate(
   return true;
 }
 
+function admitLeanSameHandleClosure(
+  result: TaskPackResult,
+  candidate: ContinuationCall,
+  originalQuery: string,
+  workspace: string,
+): ContinuationCall | undefined {
+  const call = admitReadOnlyNextCall(candidate, originalQuery);
+  if (call?.tool !== "read_file") return undefined;
+  const args = call.arguments;
+  const disallowedSelectors = [
+    "ranges", "symbol", "path", "paths", "query", "qref", "targets",
+    "scope", "archive", "artifact", "select",
+  ];
+  if (disallowedSelectors.some((key) => Object.prototype.hasOwnProperty.call(args, key))) {
+    return undefined;
+  }
+  const handles: string[] = [];
+  if (typeof args["handle"] === "string") handles.push(args["handle"]);
+  if (Array.isArray(args["handles"])) {
+    if (args["handles"].some((item) => typeof item !== "string")) return undefined;
+    handles.push(...args["handles"] as string[]);
+  }
+  // Lean closure completes one surface that the pack already selected. It is
+  // not permission to discover by path/query/symbol, create a new surface, or
+  // choose among several handles.
+  if (handles.length !== 1) return undefined;
+  const handle = handles[0]!;
+  const entry = handleTable.get(handle);
+  if (!entry?.path || resolveReal(entry.workspaceRoot) !== resolveReal(workspace)) return undefined;
+  const requiredOpenSurfaces = codeTaskPackSurfaces(result.surfaces).filter((item) =>
+    item.required !== false && (!hasServedCode(item) || (item.remaining_ranges?.length ?? 0) > 0)
+  );
+  // A contract may nominate one of several open handles. Treat that as a
+  // hidden choice, not as permission to make the choice inside the server.
+  if (requiredOpenSurfaces.length !== 1) return undefined;
+  const surface = requiredOpenSurfaces[0]!;
+  if (
+    surface.handle !== handle
+    || surface.path !== entry.path
+    || surface.range !== entry.range
+  ) return undefined;
+
+  if (
+    Object.prototype.hasOwnProperty.call(args, "range")
+    && typeof args["range"] !== "string"
+  ) return undefined;
+  const requestedRange = typeof args["range"] === "string" ? args["range"] : undefined;
+  if (hasServedCode(surface)) {
+    if (requestedRange === undefined || !surface.remaining_ranges?.includes(requestedRange)) return undefined;
+  } else if (requestedRange !== undefined && requestedRange !== surface.range) {
+    return undefined;
+  }
+  return {
+    ...call,
+    arguments: {
+      handle,
+      ...(requestedRange ? { range: requestedRange } : {}),
+    },
+  };
+}
+
 export function runRecursiveReadOnlyClosure(
   result: TaskPackResult,
   profile: TaskProfile,
@@ -16213,6 +20512,47 @@ export function runRecursiveReadOnlyClosure(
       refreshAfterRecursiveClosure(result, profile, query, workspace, cache);
     }
     if (receipt.length > 0) result.internalized = receipt.slice(0, RECURSIVE_READ_CLOSURE_MAX_OPERATIONS);
+    return operations;
+  }
+
+  // Inferred lean profiles may close one predictable follow-up, but only by
+  // completing one already-selected required surface through its exact handle.
+  // Search, path discovery, new surfaces, and multi-handle choice stay external.
+  if (
+    result.profile_binding?.source === "inferred"
+    && result.profile_binding.selected === profile
+    && (profile === "generic" || profile === "answer")
+  ) {
+    const contract = buildTaskExecutionContract(
+      result, profile, query, buildTaskWorkspaceState(result), workspace,
+    );
+    if (
+      contract.typestate.phase === "discovery"
+      && contract.call_budget?.discovery_allowed === true
+      && contract.next_call !== undefined
+    ) {
+      const candidates: ContinuationCall[] = [
+        contract.next_call,
+        ...(result.continuation?.stages[0]?.calls ?? []),
+      ].map((call) => canonicalContinuationCall(call)!);
+      for (const candidate of candidates) {
+        const call = admitLeanSameHandleClosure(result, candidate, query, workspace);
+        if (!call) continue;
+        operations = 1;
+        const used = executeClosureRead(result, call, workspace);
+        if (used.evidence > 0) {
+          receipt.push({
+            op: "read",
+            status: "used",
+            evidence: used.evidence,
+            ...(used.handle ? { handle: used.handle } : {}),
+          });
+          refreshAfterRecursiveClosure(result, profile, query, workspace, cache);
+          result.internalized = receipt;
+        }
+        break;
+      }
+    }
     return operations;
   }
 
@@ -16244,23 +20584,26 @@ export function runRecursiveReadOnlyClosure(
       break;
     }
     const candidates: ContinuationCall[] = [
-      contract.next_call as ContinuationCall,
+      contract.next_call,
       ...(result.continuation?.stages[0]?.calls ?? []),
-    ];
-    const admitted: ContinuationCall[] = [];
+    ].map((call) => canonicalContinuationCall(call)!);
+    // D1 (FX-R3): the RAW candidate travels beside the admitted call, because
+    // `result.next` still holds the raw shape and the loop executes the
+    // admitted one — the fingerprint set has to answer for both.
+    const admitted: Array<{ raw: ContinuationCall; call: ContinuationCall }> = [];
     for (const candidate of candidates) {
       const call = admitReadOnlyNextCall(candidate, query);
       if (!call) continue;
       const signature = closureCallSignature(call);
       if (seen.has(signature)) continue;
       seen.add(signature);
-      admitted.push(call);
+      admitted.push({ raw: candidate, call });
       if (admitted.length >= RECURSIVE_READ_CLOSURE_MAX_BRANCHES) break;
     }
     if (admitted.length === 0) break;
 
     let stageEvidence = 0;
-    for (const call of admitted) {
+    for (const { raw, call } of admitted) {
       if (operations >= RECURSIVE_READ_CLOSURE_MAX_OPERATIONS) break;
       operations += 1;
       if (call.tool === "read_file") {
@@ -16273,12 +20616,19 @@ export function runRecursiveReadOnlyClosure(
             ...(used.handle ? { handle: used.handle } : {}),
           });
           stageEvidence += used.evidence;
+          // D1: recorded only for a call whose EVIDENCE IS NOW IN THIS PACK.
+          // A call the loop ran to no effect (its ranked harvest is bounded by
+          // depth/branch/byte caps that a caller's own call is not) leaves the
+          // pack exactly as it was, so restating it is still a real
+          // affordance — suppressing it there would strand the caller.
+          noteClosureExecutedCalls(result, [raw, call]);
         }
       } else if (call.tool === "search_files") {
         const evidence = executeClosureSearch(result, call, workspace, query, scopePaths);
         if (evidence > 0) {
           receipt.push({ op: "find", status: "used", evidence });
           stageEvidence += evidence;
+          noteClosureExecutedCalls(result, [raw, call]); // D1, see above.
         }
       }
     }
@@ -16364,6 +20714,10 @@ function hasExactNamedAnswerFacetEvidence(
  * in discovery and receives one bounded locate call instead of a false ready
  * certificate over arbitrary token matches.
  */
+function surfaceWhyHasMarker(why: string | undefined, marker: string): boolean {
+  return (why ?? "").split(";").some((segment) => segment.trim() === marker);
+}
+
 function groundedAnalysisEvidence(
   result: TaskPackResult,
   query: string,
@@ -16371,7 +20725,10 @@ function groundedAnalysisEvidence(
 ): TaskReadinessEvidence[] {
   const evidence: TaskReadinessEvidence[] = [];
   for (const surface of served) {
-    if (/(?:^|; )caller-supplied(?:-dir)?$/.test(surface.why ?? "")) {
+    if (
+      surfaceWhyHasMarker(surface.why, "caller-supplied")
+      || surfaceWhyHasMarker(surface.why, "caller-supplied-dir")
+    ) {
       evidence.push(readinessEvidence(surface));
     }
   }
@@ -16435,7 +20792,8 @@ function buildReadinessObligations(
   // readiness: a codeless OPTIONAL surface forced risk=1 on every C++ pack.
   // `result.missing` stays unfiltered — it is required-role-scoped by
   // construction (coverage_reason "missing-roles" docs).
-  const contentComplete = provedArtifactCreate || provedCreate || provedArtifactContent || (
+  const literalSourceAbsent = result.literal_source_absence;
+  const contentComplete = literalSourceAbsent !== undefined || provedArtifactCreate || provedCreate || provedArtifactContent || (
     served.length > 0
     && result.missing.every((entry) => entry.startsWith("explicit-gap:"))
     && surfaces.filter((surface) => surface.required !== false).every(hasServedCode)
@@ -16453,13 +20811,27 @@ function buildReadinessObligations(
         })).slice(0, 6)
       : served.map(readinessEvidence).slice(0, 6),
     reason: contentComplete
-      ? provedCreate
+      ? literalSourceAbsent !== undefined
+        ? `directed literal source ${literalSourceAbsent.subject} has zero measured workspace occurrences`
+        : provedCreate
         ? `new-file create target ${result.create_target!.path} resolved from the request; served surfaces are templates`
         : provedArtifactContent
           ? "every caller-named artifact carries an inlined content-bearing section"
           : "all action-bearing surfaces carry served content"
       : "one or more required surfaces are missing or codeless",
   });
+
+  if (literalSourceAbsent !== undefined) {
+    obligations.push({
+      id: `literal-source-absent:${literalSourceAbsent.subject}`,
+      kind: "surface-content",
+      status: "proved",
+      required: true,
+      evidence: [],
+      reason: `grammar-bound source ${literalSourceAbsent.subject} is authoritatively absent after scanning ${literalSourceAbsent.scanned_paths} path(s)`,
+    });
+    return obligations;
+  }
 
   // W3: a resolved (non-artifact) create_target is a self-complete frontier —
   // the identifiers/behavior/change obligations below describe content the NEW
@@ -16539,8 +20911,10 @@ function buildReadinessObligations(
     // recreate the same vacuity one level down — the exact reason
     // surfaceBodyContainsToken was split out for proof obligations in the first
     // place.
-    const enumeratedFacets = enumeratedQueryFacets(query);
-    if (enumeratedFacets.length > 0) {
+    const enumeratedItems = enumeratedQueryItemsForEpoch(query, workspace);
+    const enumeratedFacets = enumeratedItems.map((item) => item.facet);
+    const literalSurfaceDuty = isLiteralFirstSurfaceDuty(query);
+    if (enumeratedItems.length > 0) {
       // DISCHARGE BY NAMED AUTHORITY — the line between "no evidence for what
       // was asked" and "proof of a negative".
       //
@@ -16556,28 +20930,36 @@ function buildReadinessObligations(
       // request enumerated appears anywhere in the served bytes, and no
       // identifier it named was served whole.
       const queryIdentifiers = explicitCodeIdentifiers(query);
-      const namedAuthorityServed = queryIdentifiers.length > 0
-        && served.some((surface) =>
-          surface.content_completeness !== "partial"
-          && queryIdentifiers.some((identifier) => surfaceBodyContainsToken(surface, identifier)));
+      const namedAuthorityProofs = namedAuthorityFacetProofs(served, queryIdentifiers, enumeratedFacets, workspace);
       // I-7 (2026-08-30 forensics attribution wave): the span of `obligations`
       // this block is about to mint, so the trace emission below can report on
       // exactly those entries without touching the loop that mints them.
       const enumeratedObligationsStart = obligations.length;
-      for (const facet of enumeratedFacets) {
-        const evidence = served
-          .filter((surface) => surfaceBodyContainsToken(surface, facet))
-          .map(readinessEvidence);
+      for (const item of enumeratedItems) {
+        const facet = item.facet;
+        const evidenceSurfaces = literalSurfaceDuty
+          ? literalSurfaceDutyEvidence(served, facet)
+          : served.filter((surface) => surfaceBodyContainsToken(surface, facet));
+        const evidence = evidenceSurfaces.map(readinessEvidence);
+        // RV-10 surface duties are observational, not blocking. A proved
+        // lexical anchor can join the readiness certificate; an unserved
+        // named surface remains visible in trace/change_contract but does not
+        // become a false "must discover" obligation.
+        if (literalSurfaceDuty && evidence.length === 0) continue;
+        const authoritativeAbsent = !literalSurfaceDuty
+          && namedAuthorityProofs.get(facet) === "authoritative-absent";
         obligations.push({
-          id: `${ENUMERATED_ITEM_OBLIGATION_PREFIX}${facet}`,
+          id: item.id,
           kind: "concern",
-          status: evidence.length > 0 || namedAuthorityServed ? "proved" : "uncovered",
+          status: evidence.length > 0 || authoritativeAbsent ? "proved" : "uncovered",
           required: true,
           evidence: evidence.slice(0, 3),
           reason: evidence.length > 0
-            ? `enumerated item ${facet} appears in served evidence`
-            : namedAuthorityServed
-              ? `enumerated item ${facet} is answerable from the fully served implementation the request named`
+            ? literalSurfaceDuty
+              ? `literal-first surface duty ${facet} has a served lexical anchor`
+              : `enumerated item ${facet} is present in served evidence`
+            : authoritativeAbsent
+              ? `enumerated item ${facet} is authoritatively absent from the fully served implementation the request named`
               : `enumerated item ${facet} was named by the request but has no served evidence`,
         });
       }
@@ -16612,7 +20994,8 @@ function buildReadinessObligations(
           {
             facet_count: enumeratedFacets.length,
             unproved_count: minted.filter((obligation) => obligation.status === "uncovered").length,
-            named_authority_discharge: namedAuthorityServed,
+            named_authority_discharge: [...namedAuthorityProofs.values()]
+              .some((proof) => proof === "authoritative-absent"),
             facets: enumeratedFacets.map((facet) => ({
               hash: shaOfText(facet).slice(7, 15),
               chars: facet.length,
@@ -16748,7 +21131,7 @@ function buildReadinessObligations(
       surface.handle === connection?.insertion_handle
       && isImplementationPath(surface.path)
       && hasCallableBody(surface)
-      && connection?.evidence.includes("callable-insertion-site") === true
+      && connection?.evidence?.includes("callable-insertion-site") === true
     );
     const sourceNodeIds = new Set(evidenceGraph?.nodes
       .filter((node) => node.handle === connection?.source?.handle)
@@ -16811,41 +21194,99 @@ function buildReadinessObligations(
       )
       .map((relation) => relation.id) ?? [];
     const relationBacked = evidenceGraph !== undefined;
-    const sourceProved = sourceImpl.length > 0 && (!relationBacked || sourceDefineIds.length > 0);
-    const consumerProved = consumerImpl.length > 0 && (!relationBacked || consumerDefineIds.length > 0);
+    // D2: an endpoint the wiring profile resolved out of the EPOCH LEDGER has
+    // no surface in this pack by construction (that is the point — the caller
+    // already holds those bytes), so the served-surface filters above are
+    // empty for it and the obligation would read `uncovered` for evidence the
+    // caller has. Re-prove it the same way `epochServedWiringEndpoint` did:
+    // the ledger entry is fingerprint-revalidated, and the file must still
+    // DEFINE the endpoint token. Evidence is the bodyless handle+path pair,
+    // which is exactly what the endpoint itself carries.
+    const epochProvedEndpoint = (
+      endpoint: { handle?: string; path?: string; token?: string } | undefined,
+    ): TaskReadinessEvidence[] => {
+      if (workspace === undefined || endpoint?.path === undefined || endpoint.token === undefined) return [];
+      if (endpoint.handle === undefined) return [];
+      const handle = endpoint.handle;
+      if (!isImplementationPath(endpoint.path)) return [];
+      const epochTokens = tokenizeForEpoch(query);
+      if (epochTokens.length === 0) return [];
+      const entry = queryServedSurfaces(workspace, workspace, { epochTokens })
+        .find((candidate) => candidate.path === endpoint.path && candidate.handle === endpoint.handle);
+      if (entry === undefined) return [];
+      const content = readCached(workspace, endpoint.path, undefined);
+      if (content === undefined || !implementsCallableToken(content, endpoint.token)) return [];
+      return [{ handle, path: endpoint.path }];
+    };
+    const sourceEpochEvidence = sourceImpl.length > 0 ? [] : epochProvedEndpoint(connection?.source);
+    const consumerEpochEvidence = consumerImpl.length > 0 ? [] : epochProvedEndpoint(connection?.destination);
+    const sourceProved = sourceImpl.length > 0
+      ? (!relationBacked || sourceDefineIds.length > 0)
+      : sourceEpochEvidence.length > 0;
+    const consumerProved = consumerImpl.length > 0
+      ? (!relationBacked || consumerDefineIds.length > 0)
+      : consumerEpochEvidence.length > 0;
     const semanticInsertion = result.wiring?.strategy === "semantic-multihop";
+    // D3': the profile disclosed that this insertion site was chosen because it
+    // is the callable in the module family the query named. The call the task
+    // asks for does not exist yet BY CONSTRUCTION, so a `direct_calls` edge is
+    // not available as insertion proof and cannot be required — what IS proved
+    // is the served, definition-backed callable at which the edit lands.
+    const domainInsertion = connection?.evidence?.includes("domain-insertion-site") === true;
     const insertionProved = insertionImpl.length > 0
-      && directCallIds.length > 0
+      && (directCallIds.length > 0 || domainInsertion)
       && (!semanticInsertion || (insertionDefineIds.length > 0 && insertionConsumerRelationIds.length > 0));
     obligations.push({
       id: "wiring-source",
       kind: "wiring-source",
       status: sourceProved ? "proved" : "uncovered",
       required: true,
-      evidence: sourceImpl.map(readinessEvidence).slice(0, 4),
+      evidence: sourceImpl.length > 0
+        ? sourceImpl.map(readinessEvidence).slice(0, 4)
+        : sourceEpochEvidence,
       ...(sourceDefineIds.length > 0 ? { evidence_ids: sourceDefineIds } : {}),
-      reason: sourceProved ? "producer implementation is served and definition-backed" : "producer declaration lacks an implementation body or defines edge",
+      reason: sourceImpl.length > 0
+        ? (sourceProved
+          ? "producer implementation is served and definition-backed"
+          : "producer declaration lacks an implementation body or defines edge")
+        : sourceProved
+          ? "producer implementation was served earlier in this task epoch; its handle is already in your context"
+          : "producer declaration lacks an implementation body or defines edge",
     });
     obligations.push({
       id: "wiring-consumer",
       kind: "wiring-consumer",
       status: consumerProved ? "proved" : "uncovered",
       required: true,
-      evidence: consumerImpl.map(readinessEvidence).slice(0, 4),
+      evidence: consumerImpl.length > 0
+        ? consumerImpl.map(readinessEvidence).slice(0, 4)
+        : consumerEpochEvidence,
       ...(consumerDefineIds.length > 0 ? { evidence_ids: consumerDefineIds } : {}),
-      reason: consumerProved ? "consumer implementation is served and definition-backed" : "consumer implementation/call site or defines edge is missing",
+      reason: consumerImpl.length > 0
+        ? (consumerProved
+          ? "consumer implementation is served and definition-backed"
+          : "consumer implementation/call site or defines edge is missing")
+        : consumerProved
+          ? "consumer implementation was served earlier in this task epoch; its handle is already in your context"
+          : "consumer implementation/call site or defines edge is missing",
     });
     if (relationBacked) {
       obligations.push({
         id: "wiring-link",
         kind: "wiring-link",
-        status: linkRelationIds.length > 0 && insertionProved ? "proved" : "uncovered",
+        status: (linkRelationIds.length > 0 || domainInsertion) && insertionProved ? "proved" : "uncovered",
         required: true,
         evidence: [...sourceImpl, ...insertionImpl].map(readinessEvidence).slice(0, 4),
         evidence_ids: linkRelationIds,
         reason: linkRelationIds.length > 0 && insertionProved
           ? "consumer call path reaches the producer or review-only adapter at the insertion site"
-          : "consumer import/call relation or callable insertion proof is missing",
+          : domainInsertion && insertionProved
+            // D3': stated for what it is — the link is the EDIT, and what the
+            // pack proves is where it lands. Claiming a call path here would
+            // be a lie; reporting it uncovered would report the task itself as
+            // missing evidence and re-open discovery on served bytes.
+            ? "insertion site is the callable of the module family the query named; the producer call is the edit to make"
+            : "consumer import/call relation or callable insertion proof is missing",
       });
     }
     obligations.push({
@@ -16858,12 +21299,84 @@ function buildReadinessObligations(
       reason: insertionProved
         ? semanticInsertion
           ? "callable hub insertion site is definition-backed and directly calls the executable consumer"
-          : "callable consumer insertion site is backed by a direct producer or adapter call"
+          : directCallIds.length > 0
+            ? "callable consumer insertion site is backed by a direct producer or adapter call"
+            : "callable insertion site is the module family the query named; served body is the edit target"
         : "edit-grade consumer or hub insertion call is not proved",
     });
   }
 
   return obligations.slice(0, 12);
+}
+
+/**
+ * FX-J (2026-09-03) — THE EXPLICIT CANDIDATE FEED.
+ *
+ * Two contract-build consumers (`priorEpochActionFrontier` and
+ * `epochServedEvidence`) read the cumulative served-surface log, and until
+ * FX-J the log had already been written with THIS pack's own surfaces by the
+ * time they ran, so both saw them. FX-J defers that write past the SF
+ * pre-booking seam whenever `TL_SF_DEMOTE` is on, because a body the seam is
+ * still allowed to withhold must not be logged as served (round-14 finding 1:
+ * a demoted, never-served handle rode `priorEpochActionFrontier` into the NEXT
+ * same-epoch certificate's `action_frontier`, where the execution-typestate
+ * gate admitted a blind edit of it).
+ *
+ * Deferring the write must not silently NARROW the contract, so this is the
+ * ratified alternative (DESIGN-v0.15 §12 FX-J, orchestrator ruling R3 shape
+ * B): feed the pack's own candidate surfaces to those consumers EXPLICITLY
+ * instead of writing them to the log early. The emulation is exact — the log
+ * keys entries by path and orders them by serve sequence, so a pending surface
+ * REPLACES a same-path logged entry and sorts after every genuinely earlier
+ * one, which is precisely what `recordServedSurfaces` would have produced.
+ *
+ * FX-K (round-15 finding 5): the emulation must also match the log write's
+ * REFRESH semantics, not just its output. `recordServedSurfaces` rewrote each
+ * of this pack's own paths with a fresh fingerprint BEFORE this read, so
+ * `queryServedSurfaces`'s revalidation of those paths trivially passed. With
+ * the write deferred, revalidation runs first and is DESTRUCTIVE — a stale
+ * entry is deleted from `entries` and spliced out of `order`, changing that
+ * path's FIFO eviction position at `MAX_LOGGED_PATHS`. The fix is to not
+ * consult them at all: every pending path is supplied from `pending` below and
+ * is filtered out of `logged` anyway, so excluding it from the query is
+ * output-identical AND leaves the log entry exactly where the historical
+ * refresh left it. `sfEpochServedEntries.spec.ts` pins both halves.
+ *
+ * `pendingOwnServedSurfaces` is populated for every pack whose surfaces feed
+ * the booking pass; with no pending entry this function is
+ * `queryServedSurfaces` verbatim.
+ */
+const pendingOwnServedSurfaces = new WeakMap<TaskPackResult, TaskPackSurface[]>();
+
+
+function epochServedSurfaceEntries(
+  workspace: string,
+  epochTokens: readonly string[],
+  result?: TaskPackResult,
+): ServedSurfaceEntry[] {
+  const pending = result === undefined ? undefined : pendingOwnServedSurfaces.get(result);
+  if (pending === undefined || pending.length === 0) {
+    return queryServedSurfaces(workspace, workspace, { epochTokens });
+  }
+  const byPath = new Map<string, ServedSurfaceEntry>();
+  for (const surface of pending) {
+    if (typeof surface.path !== "string" || surface.path.length === 0) continue;
+    // Last occurrence wins AND moves to the end — `recordServedSurfaces`
+    // overwrites the entry and bumps its `servedAt`.
+    byPath.delete(surface.path);
+    byPath.set(surface.path, {
+      path: surface.path,
+      role: surface.role,
+      ...(surface.handle ? { handle: surface.handle } : {}),
+      fingerprint: "",
+      servedAt: 0,
+    });
+  }
+  const logged = queryServedSurfaces(workspace, workspace, {
+    epochTokens,
+    excludePaths: new Set(byPath.keys()),
+  });
+  return [...logged, ...byPath.values()];
 }
 
 /**
@@ -16885,10 +21398,14 @@ function buildReadinessObligations(
  */
 const PRIOR_EPOCH_FRONTIER_CAP = 32;
 
-function priorEpochActionFrontier(workspace: string, query: string): string[] {
+function priorEpochActionFrontier(
+  workspace: string,
+  query: string,
+  result?: TaskPackResult,
+): string[] {
   const epochTokens = tokenizeForEpoch(query);
   if (epochTokens.length === 0) return [];
-  const handles = queryServedSurfaces(workspace, workspace, { epochTokens })
+  const handles = epochServedSurfaceEntries(workspace, epochTokens, result)
     .map((entry) => entry.handle)
     .filter((handle): handle is string => typeof handle === "string" && handle.length > 0);
   const obligationPaths = queryPriorPackObligations(workspace, epochTokens)
@@ -16902,8 +21419,17 @@ function actionFrontierForCertificate(
   profile: TaskProfile,
   obligations: readonly TaskReadinessObligation[],
   priorEpoch: readonly string[] = [],
+  // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): an edit_file call that
+  // already passed `guardExecutionEdit` this task epoch opens the write
+  // frontier even for a "answer"-profile contract (§3's 「edit が本当に来る
+  // なら層2で開く」) — WITHOUT touching `profile` itself (the certificate's
+  // own fingerprint/obligations/theorem stay computed exactly as they were
+  // for the declared profile; only the SET OF HANDLES this contract may
+  // mutate widens to the same `provedImplementation` set a genuinely
+  // declared non-answer profile falls through to below).
+  editObserved = false,
 ): string[] {
-  if (profile === "answer") return [];
+  if (profile === "answer" && !editObserved) return [];
   if (profile === "wiring") {
     // A wiring certificate's writable set is its edit_frontier ALONE (the
     // wiring write protocol), so prior-epoch evidence is deliberately excluded.
@@ -17043,9 +21569,17 @@ function buildTaskWorkspaceState(
         : shaOfText(surface.code ?? surface.code_unchanged ?? `${surface.handle}:${surface.range}`);
       return [surface.path, diskState ?? servedState];
     });
-  const inventoryState = workspace
-    ? inventory ?? computeWorkspaceInventoryState(workspace)
-    : { fingerprint: "no-inventory", files: 0, complete: false };
+  const literalUniverseState = result.literal_source_absence === undefined
+    ? undefined
+    : {
+        fingerprint: result.literal_source_absence.universe_fingerprint,
+        files: result.literal_source_absence.universe_paths,
+        complete: result.literal_source_absence.universe_complete,
+      };
+  const inventoryState = literalUniverseState
+    ?? (workspace
+      ? inventory ?? computeWorkspaceInventoryState(workspace)
+      : { fingerprint: "no-inventory", files: 0, complete: false });
   const scope = inventoryState.complete ? "evidence-plus-inventory" : "served-evidence";
   return {
     version: 1,
@@ -17374,6 +21908,32 @@ function admitReadOnlyNextCall(call: ContinuationCall, originalQuery: string): C
         : "";
     return reference.length > 0 ? { ...call, arguments: args } : undefined;
   }
+  if (action === "symbols") {
+    // C2 (DESIGN-v0.15 §12 rows 82-84 wave B follow-up, 2026-09-05): the SAME
+    // symbol-sensitive class of bug the `references` branch above already
+    // guards against — splitting camelCase turns a resolved exact identifier
+    // into a broader, different query. Live: `nextCallForUnresolved`'s
+    // identifier-obligation branch built the exactly-correct
+    // `{action:"symbols", query:"renderInvoice"}` (the caller-named,
+    // uncovered `identifier:renderInvoice` obligation, verbatim), but the
+    // generic tail below — reachable because `action !== "find"` skips its
+    // OWN single-token exemption — reduced it to `repairedNextCallTerms`'
+    // first tokenized/lower-cased/camelCase-split word ("render"), a stem
+    // fragment that is not the gap's identifier and whose `search.matches`
+    // reply has no continuation. `symbols` takes exactly ONE exact name
+    // (never a `queries[]` array), so there is nothing here for tokenizing
+    // into terms to usefully repair; keep the producer's query (or `symbol`)
+    // verbatim, falling back to the whole original query only when the
+    // candidate carried neither.
+    const symbolQuery = typeof args["query"] === "string" && args["query"].trim() !== ""
+      ? args["query"].trim()
+      : typeof args["symbol"] === "string" && args["symbol"].trim() !== ""
+        ? args["symbol"].trim()
+        : originalQuery.trim();
+    if (symbolQuery === "") return undefined;
+    args["query"] = symbolQuery;
+    return { ...call, arguments: args };
+  }
 
   const suppliedQueries = Array.isArray(args["queries"])
     ? args["queries"].filter((item): item is string => typeof item === "string")
@@ -17442,8 +22002,8 @@ function enumeratedItemFindCall(
   for (const obligation of obligations) {
     if (obligation.status === "proved") continue;
     if (!obligation.id.startsWith(ENUMERATED_ITEM_OBLIGATION_PREFIX)) continue;
-    const facet = obligation.id.slice(ENUMERATED_ITEM_OBLIGATION_PREFIX.length);
-    if (facet.length === 0) continue;
+    const facet = enumeratedItemFacetFromId(obligation.id);
+    if (facet === undefined) continue;
     if (workspace !== undefined && consultExecutedSearch(workspace, "find", facet) !== undefined) continue;
     return { tool: "search_files", arguments: { action: "find", query: facet } };
   }
@@ -17479,7 +22039,27 @@ function nextCallForUnresolved(
   const cleanedQuery = stripPathSpans("", query);
   const queryIdentifiers = (cleanedQuery.match(/\b[A-Za-z_$][A-Za-z0-9_$-]*\b/g) ?? []).filter(isWiringIdentifierShape);
   if (unresolved.kind === "wiring-source") {
-    const token = connection?.source?.token ?? queryIdentifiers[0];
+    // E2 (2026-09-05, measured on paid smoke r9 / SF13): an owed wiring SOURCE
+    // must be chased on the identity the CALLER named. Live, the connection's
+    // source token had degraded to the unrelated `GPS` and the pack emitted
+    // `search_files find queries:["GPS"]` while the query had spelled
+    // `EKF::isHealthy`. When the query names a qualified anchor, that anchor's
+    // member is the source identity, and its resolved DEFINITION SITE — when
+    // the pack has not already served it — is a strictly better affordance
+    // than a repository-wide find: it addresses the one symbol directly.
+    const anchor = qualifiedSymbolAnchors(query)[0];
+    if (anchor !== undefined && workspace !== undefined) {
+      const servedPaths = new Set(result.surfaces.map((surface) => surface.path));
+      const definitionPath = resolveQualifiedSymbolAnchors(query, workspace)
+        .definitions.find((candidate) => !servedPaths.has(candidate));
+      if (definitionPath !== undefined) {
+        return {
+          tool: "read_file",
+          arguments: { targets: [{ path: definitionPath, symbol: anchor.raw }] },
+        };
+      }
+    }
+    const token = anchor?.member ?? connection?.source?.token ?? queryIdentifiers[0];
     return token === undefined
       ? undefined
       : { tool: "search_files", arguments: { action: "find", query: token } };
@@ -17640,6 +22220,8 @@ export function buildTaskExecutionContract(
   /** A verified expansion gap from this response, before its durable replay projection is consulted. */
   currentOpenUniverseExplicitGap = false,
   servedZoomScope?: ServedWindowScope,
+  /** Exact literal cohort evidence, admitted only after its bound continuation and ledger proof. */
+  literalSourceUniverse = false,
 ): TaskExecutionContract {
   const proofCompletion = proofCompletionEnabled();
   // P2(b) (2026-08-28 review-fix wave): this builder runs at least twice per
@@ -17735,8 +22317,11 @@ export function buildTaskExecutionContract(
   // never a wire effect. See enumeratedObligationSummaryCountedResults' doc
   // comment.
   const obligations = buildReadinessObligations(result, profile, query, openUniverseDischarged, workspace);
+  const completion = projectCompletion(result, obligations);
+  result.coverage = completion.coverage;
+  const blockingObligations = completion.blocking;
   const falsification = buildFalsificationReport(result, profile, obligations);
-  const risk = estimateReadinessRisk(result, profile, query, obligations, falsification);
+  const risk = estimateReadinessRisk(result, profile, query, blockingObligations, falsification);
   const focusedAnswerCandidate = profile === "answer"
     && result.route?.action === "confirm_candidates"
     && queryRequestsTestEvidence(query)
@@ -17818,12 +22403,21 @@ export function buildTaskExecutionContract(
     : profile === "artifact_build"
       ? hasRequiredArtifactSections(result, query)
       : profile === "change_propagation"
-        ? result.change_contract?.status === "ready"
+        // The normal change contract is normally the profile-specific edit
+        // proof. A capped literal cohort cannot retain a conventional contract
+        // for its continuation-only witness, so admit its equally strict
+        // authenticated source-universe proof here. This remains inside the
+        // ordinary readiness/rebuild gates (route, served content, theorem,
+        // ledger discharge, falsification, and risk); it is not a direct
+        // prepared-state override.
+        ? result.change_contract?.status === "ready" || literalSourceUniverse
         : profile === "multi_concern"
           ? (result.concerns?.length ?? 0) > 0 && result.concerns?.every((concern) => concern.status === "covered") === true
           : true;
-  const baseReady = answerCandidate || (routeCandidate && profileCandidate);
-  const proofComplete = obligations.every((obligation) => obligation.status === "proved");
+  const baseReady = result.literal_source_absence !== undefined
+    || answerCandidate
+    || (routeCandidate && profileCandidate);
+  const proofComplete = completion.complete;
   // D1's own comment says the quiet part: "a zoom affordance is not missing
   // evidence". The falsification/risk engine still (correctly) flags the
   // affordance surface's own undisclosed remainder as unresolved — that is
@@ -17857,7 +22451,34 @@ export function buildTaskExecutionContract(
   // What they may NOT do is claim a ledger discharge while doing it, and
   // `dischargeCertificate` now enforces that half: with no obligations there is
   // no certificate, so the id stays in the legacy single-segment form.
-  const ledgerEstablished = hasOpenUniverseIntent(query)
+  // Literal-first source=0 is a closed-world measurement, not an omitted
+  // open-universe expansion. Admit it without a durable expansion-ledger
+  // certificate only when all three recorded conditions agree: the raw
+  // grammar-bound absence marker is present, the workspace inventory snapshot
+  // count matches the measured count, and the readiness projection retained
+  // the matching proved obligation. These conditions are not independent
+  // witnesses; the flag remains OFF until one shared enumeration universe
+  // makes the absence proof self-contained. A scoped/truncated or merely
+  // empty ledger cannot satisfy this exception.
+  const literalAbsenceClosedWorld = result.literal_source_absence !== undefined
+    && result.literal_source_absence.universe_complete === true
+    && result.literal_source_absence.scanned_paths === result.literal_source_absence.universe_paths
+    && workspaceState.inventory_complete === true
+    && result.literal_source_absence.universe_paths === workspaceState.inventory_files
+    && /^sha256:[a-f0-9]{64}$/.test(result.literal_source_absence.universe_fingerprint)
+    && obligations.some((obligation) =>
+      obligation.status === "proved"
+      && obligation.id === `literal-source-absent:${result.literal_source_absence!.subject}`
+    );
+  // A completed literal cohort has its own authenticated ledger witness: the
+  // final source range was executed under the canonical task binding, and
+  // `literalSourceUniverseProved` admitted this branch only after the exact
+  // ordinary-find universe, root, collision, and every witness checks. The
+  // generic epoch certificate can be absent here because the capped pack does
+  // not retain the continuation-only surface as a conventional contract
+  // obligation. Treat that typed witness as an established ledger proof, not
+  // as a shortcut around the normal theorem/risk/route gates below.
+  const ledgerEstablished = literalAbsenceClosedWorld || literalSourceUniverse || (hasOpenUniverseIntent(query)
     ? ledgerCertificate !== undefined
     : workspace === undefined
       || taskContractDigest(workspace) === undefined
@@ -17866,7 +22487,7 @@ export function buildTaskExecutionContract(
       // durable ledger is its continuation/replay record, not a prerequisite
       // for recognizing this pack's own explicit capability gap.
       || currentOpenUniverseExplicitGap
-      || (ledger.open.length === 0 && ledger.explicitGaps.length === 0);
+      || (ledger.open.length === 0 && ledger.explicitGaps.length === 0));
   // -------------------------------------------------------------------------
   // A-F6 (2026-08-28): THE ACCEPTANCE LAYERS, and the OFF arm that is exactly
   // v0.12.
@@ -17909,9 +22530,32 @@ export function buildTaskExecutionContract(
   // serves the pack as generic; the terminal act must agree with it, or the
   // contract instructs an edit on a question.
   const answerShapedRoute = result.route?.action === "answer_from_handles";
-  const terminalAction: "answer" | "edit" = profile === "answer" || answerShapedRoute ? "answer" : "edit";
-  const continuationCall = result.continuation?.stages[0]?.calls[0];
-  const parsedNextCandidate = result.next ? nextStringToCall(result.next) : undefined;
+  // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): an edit_file call that
+  // already passed `guardExecutionEdit` THIS task epoch opens the write
+  // frontier for every later pack of the SAME task, even one whose declared
+  // `task.profile` stayed "answer" and even over `answerShapedRoute` — §3's
+  // 「edit が本当に来るなら層2(§4.2)で開く」, the exact shape V4 used to
+  // mishandle, generalized to this contract's own terminal action rather
+  // than only `bindTaskProfile`'s narrative `reason` text. `writeAllowed` is
+  // not re-checked here: `ALLOW_WRITE` is a module-level constant fixed at
+  // process start (server.ts:452) and cannot flip mid-session, and
+  // `getIntentEditObserved` can only ever be true via a call
+  // `guardWriteRouting` (server.ts) already required ALLOW_WRITE true for —
+  // see `state/session.ts`'s `guardExecutionEdit` wrapper.
+  const editObserved = workspace !== undefined && getIntentEditObserved(workspace);
+  const terminalAction: "answer" | "edit" =
+    editObserved ? "edit" : profile === "answer" || answerShapedRoute ? "answer" : "edit";
+  const continuationCallRaw = result.continuation?.stages[0]?.calls[0];
+  // D1 (FX-R3): the planned continuation is a PRE-closure artifact too — the
+  // deep loop reads its stage-0 calls as candidates and runs them. A call it
+  // ran is evidence already folded into this pack, never a follow-up for the
+  // caller. Same filter, same reason as `parsedNextAfterProof` below; the
+  // obligation-specific fallbacks and `proofNext` are re-derived against the
+  // CURRENT proof model and so are never filtered.
+  const continuationCall = closureAlreadyExecuted(result, continuationCallRaw, query)
+    ? undefined
+    : continuationCallRaw;
+  const parsedNextCandidate = result.next;
   const currentPackSpans = packServedSpans(result);
   // The route builder can publish a zoom before same-pack sibling evidence is
   // folded into the served-window ledger. Treat that parsed next as consumed
@@ -17921,14 +22565,25 @@ export function buildTaskExecutionContract(
     && nextCallCoveredBySpans(result, parsedNextCandidate, currentPackSpans)
     ? undefined
     : parsedNextCandidate;
-  const proofNext = nextCallForUnresolved(result, obligations, query, workspace);
+  const proofNext = nextCallForUnresolved(result, blockingObligations, query, workspace);
   // A pre-contract next can be stale after an authoritative absence has
   // discharged the open-universe axis. Keep it only when the current proof
   // model still has a matching unresolved call; otherwise the same search
   // would be emitted again despite the durable explicit-gap witness.
-  const parsedNextAfterProof = openUniverseDischarged && proofNext === undefined
+  const parsedNextAfterProofRaw = openUniverseDischarged && proofNext === undefined
     ? undefined
     : parsedNext;
+  // D1 (FX-R3, 2026-09-04): a `next` the DEEP recursive read closure of this
+  // build already EXECUTED itself is not an affordance — it is an instruction
+  // to re-run a call whose evidence is already folded into this pack. Dropping
+  // it here (and only here: `proofNext` is re-derived against the CURRENT
+  // proof model, and the fallbacks below are obligation-specific by
+  // construction) lets the chain fall through to the call that can actually
+  // close the open obligation. See the block comment on
+  // `closureExecutedCallSignatures`.
+  const parsedNextAfterProof = closureAlreadyExecuted(result, parsedNextAfterProofRaw, query)
+    ? undefined
+    : parsedNextAfterProofRaw;
   // No unconditional tree fallback: every fallback must name evidence that
   // can resolve the current proof gap. Codeless surfaces re-serve their handle;
   // partial surfaces request the first explicitly omitted range.
@@ -17952,7 +22607,7 @@ export function buildTaskExecutionContract(
   // never served — is a concrete read affordance. Without it, a pack whose
   // only gap sits in missing[] falls to awaiting-input and the observed caller
   // fallback is native IO on exactly that path.
-  const missingAffordance: ContinuationCall | undefined = (() => {
+  const missingAffordance: ContinuationCall | undefined = ((): ContinuationCall | undefined => {
     for (const item of result.missing) {
       const handleMatch = /read_file handle=(h[0-9a-z]+)/.exec(item);
       if (handleMatch) return { tool: "read_file", arguments: { handle: handleMatch[1]! } };
@@ -18087,7 +22742,8 @@ export function buildTaskExecutionContract(
     result,
     profile,
     obligations,
-    workspace !== undefined ? priorEpochActionFrontier(workspace, query) : [],
+    workspace !== undefined ? priorEpochActionFrontier(workspace, query, result) : [],
+    editObserved,
   );
   const certificate = accepted
     ? deterministicCertificate(query, profile, obligations, falsification, risk, actionFrontier, workspaceState, ledgerCertificate?.digest)
@@ -18143,7 +22799,7 @@ export function buildTaskExecutionContract(
           : "no-grounded-call-remains"
     : undefined;
   const evidenceModel = buildDecisionEvidenceModel(terminalAction, obligations, falsification, risk);
-  const capabilityGaps = buildCapabilityGaps(result, obligations, nextCall, awaitingUserInput);
+  const capabilityGaps = buildCapabilityGaps(result, blockingObligations, nextCall, awaitingUserInput);
   const semanticClosure: TaskSemanticClosure = {
     version: 1,
     state: accepted ? "closed" : awaitingUserInput ? "awaiting-input" : "open",
@@ -18410,7 +23066,7 @@ export function reconcileTaskPackExecutionContract(result: TaskPackResult): void
   if (!contract || contract.state === "ready") return;
 
   const hasTerminalContradiction = result.route?.action === "edit_from_handles"
-    || result.next?.startsWith("edit_file ") === true
+    || result.next?.tool === "edit_file"
     || result.wiring?.status === "ready"
     || result.change_contract?.status === "ready";
   if (!hasTerminalContradiction) return;
@@ -18452,13 +23108,13 @@ export function reconcileTaskPackExecutionContract(result: TaskPackResult): void
     // zero-call locate route strips every machine-executable action from the
     // response (observed live: T05c 2026-07-30 rep2, 16-escape desertion).
     result.route = preservedDiscoveryRoute;
-    if (result.next !== undefined && result.next.startsWith("edit_file")) delete result.next;
+    if (result.next?.tool === "edit_file") delete result.next;
     if (result.continuation?.stages[0]?.calls[0]?.tool === "edit_file") delete result.continuation;
   } else {
     // Strip only edit-flavored guidance — the contradiction being repaired is
     // the edit claim; a read/search-shaped next stays legal and keeps one
     // bounded call open.
-    if (result.next === undefined || result.next.startsWith("edit_file")) {
+    if (result.next === undefined || result.next.tool === "edit_file") {
       delete result.next;
       delete result.continuation;
     } else {
@@ -18558,7 +23214,7 @@ export function enforceNoDeadEndContract(
   ledger?: { workspace: string; lane: string },
 ): void {
   const contract = result.execution_contract;
-  if (contract === undefined) return;
+  if (contract === undefined || result.literal_source_absence !== undefined) return;
   const phase = contract.typestate.phase;
   if (phase === "prepared" || phase === "acting" || phase === "verifying" || phase === "done") return;
   if (result.route !== undefined && (result.route.reason === undefined || result.route.reason === "")) {
@@ -19103,7 +23759,10 @@ function attachPartialTree(result: TaskPackResult, workspace: string): void {
   // exactly parseable into one schema-valid execution_contract.next_call.
   // The compact tree is already present inline, so an existing primary next is
   // sufficient. Use tree only when no more specific follow-up exists.
-  const treeHint = `search_files action=tree${subPath ? ` path=${subPath}` : ""}`;
+  const treeHint: ContinuationCall = {
+    tool: "search_files",
+    arguments: { action: "tree", ...(subPath ? { path: subPath } : {}) },
+  };
   if (result.next === undefined) result.next = treeHint;
 }
 
@@ -19276,7 +23935,7 @@ export async function candidateToSurface(
   cache?: FileReadCache,
   options?: { answerProfile?: boolean; causalMultiMethod?: boolean },
 ): Promise<TaskPackSurface> {
-  const callerScoped = candidate.why === "caller-supplied";
+  const callerScoped = surfaceWhyHasMarker(candidate.why, "caller-supplied");
   candidate = refocusCandidateForQuery(candidate, workspace, query, cache);
   const role = candidate.surface as string;
   const rawRange = candidate.range ?? `${candidate.line}-${candidate.line}`;
@@ -19323,7 +23982,10 @@ export async function candidateToSurface(
   // pack-level pressure (unchanged, honest). A large file keeps its windowed
   // slice — tinyWholeRange === widenedRange there, so `range` is unchanged.
   let range =
-    !candidate.symbol && tinyWholeRange !== boundedRange && wholeTinyFileFitsCap(workspace, candidate.path, tinyWholeRange, cache)
+    !candidate.symbol
+    && candidate.callerRange !== true
+    && tinyWholeRange !== boundedRange
+    && wholeTinyFileFitsCap(workspace, candidate.path, tinyWholeRange, cache)
       ? tinyWholeRange
       : boundedRange;
 
@@ -19928,7 +24590,7 @@ interface ServedPackRecord {
   coverage: TaskPackResult["coverage"];
   coverageReason: TaskPackResult["coverage_reason"] | undefined;
   missing: string[];
-  next: string | undefined;
+  next: ContinuationCall | undefined;
   profileBinding: TaskProfileBinding | undefined;
   taskProfile: Exclude<TaskProfile, "generic"> | undefined;
   executionContract: TaskExecutionContract | undefined;
@@ -20087,6 +24749,58 @@ function surfaceFileSha(workspace: string, relPath: string): string | undefined 
 }
 
 /**
+ * B5 extension (2026-09-05, markdown anchor-focus): is THIS record's own DOC
+ * surface a partial serve of its file?
+ *
+ * `revalidateRecordToReceipt`'s B5 guard originally read one field —
+ * `content_completeness:"partial"` — because on the shape it was built for
+ * (a 1-line "sliver" of CONTRACT.md) that stamp was always there:
+ * `applyDocSliverHonesty`'s floor put it on. The Markdown anchor-focus fix
+ * removed the cause of those slivers, so an authority document is now served
+ * as a coherent SECTION and `servedSpanIsSection` deliberately leaves it
+ * alone — no stamp, and the guard went blind to the exact case it exists for.
+ * Measured on cumulativeReissueReceipt's B5 case: a qref replay holding 11 of
+ * a 1,514-line contract collapsed into a compact `pack-unchanged` receipt,
+ * which has no per-evidence slot to say so.
+ *
+ * The repair reads the FACT instead of the stamp: a doc surface whose served
+ * window provably does not cover its own file is partial, stamp or no stamp.
+ * Deliberately scoped to `role === "doc"` — the class the stamp used to
+ * cover — so an anchor-focused CODE symbol (a precise body, which is what
+ * task_pack is for, and never a stamped partial either) keeps its receipt on
+ * a replay exactly as before. Line count is read live from disk in the same
+ * pass that re-verifies the surface shas, and any file it cannot measure is
+ * treated as NOT partial: this guard may only ever DECLINE a receipt on
+ * evidence, never on a failed read.
+ */
+function recordDocSurfaceIsPartial(
+  workspace: string,
+  surface: ServedPackRecord["surfaces"][number],
+): boolean {
+  if (surface.content_completeness === "partial") return true;
+  if (surface.role !== "doc") return false;
+  const span = parseSurfaceSpan(surface.range);
+  if (span === undefined) return false;
+  const total = surface.total_lines ?? surfaceFileLineCount(workspace, surface.path);
+  if (total === undefined || total <= 0) return false;
+  return span.start > 1 || span.end < total;
+}
+
+/** Live line count for a workspace-relative path; undefined when unreadable. */
+function surfaceFileLineCount(workspace: string, relPath: string): number | undefined {
+  const abs = safeResolve(relPath, workspace);
+  if (abs === undefined) return undefined;
+  try {
+    const real = fs.realpathSync(abs);
+    if (!isWithin(real, resolveReal(workspace))) return undefined;
+    if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
+    return countLines(fs.readFileSync(real, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Capture the served pack's essentials + surface-file shas for a possible
  * future re-call dedup. Runs AFTER the full pack is built and trimmed, so the
  * captured surfaces/coverage/missing/next reflect exactly what shipped.
@@ -20153,7 +24867,7 @@ export function packServedSpans(result: TaskPackResult): Map<string, Array<[numb
 
 function nextCallCoveredBySpans(
   result: TaskPackResult,
-  call: ContinuationCall,
+  call: ContinuationLike,
   spans: ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>,
 ): boolean {
   if (call.tool !== "read_file") return false;
@@ -20290,7 +25004,7 @@ export function markServedZoomCandidates(
   // pack's served spans are booked. If that emitted zoom is already covered by
   // a sibling surface in this same response, remove it before canonical
   // projection and select the first genuinely unserved required window.
-  const parsedResultNext = result.next ? nextStringToCall(result.next) : undefined;
+  const parsedResultNext = result.next;
   const staleResultNext = parsedResultNext !== undefined
     && nextCallCoveredBySpans(result, parsedResultNext, currentPackSpans);
   const contractNext = result.execution_contract?.next_call;
@@ -20321,7 +25035,7 @@ export function markServedZoomCandidates(
         tool: "read_file",
         arguments: { handle: replacement.surface.handle, range: replacement.range },
       };
-      result.next = `read_file mode=slice handle=${replacement.surface.handle} range=${replacement.range}`;
+      result.next = replacementCall;
       if (result.execution_contract !== undefined) {
         result.execution_contract.next_call = replacementCall;
         if (result.execution_contract.call_budget !== undefined) {
@@ -20352,6 +25066,29 @@ export function markServedZoomCandidates(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// FX-I-A/FX-J (2026-09-03) — WHY THIS BOOKS IMMEDIATELY AGAIN.
+//
+// FX-H queued this booking in a module-global array and flushed it at
+// `buildTaskPack`'s exit, because the SF pass that may still WITHHOLD a body
+// (`applySemanticFrontierDemotion`, §3.5.1's supporting tier) ran only after
+// `buildTaskPackCore` returned. That deferral was both incomplete (the edit
+// admissibility union and the certified working set were booked pre-demotion
+// anyway — round-13 finding 1) and unsafe (an unkeyed global queue flushed by
+// whichever concurrent handler exited first — round-13 findings 3/4).
+//
+// The demotion now runs INSIDE `dedupeTrimAndPersist`, at
+// `applySemanticFrontierPreBookingSeam` — which is AFTER
+// `finalizePackServeState` (the classifier needs the finalized
+// `execution_contract`) and BEFORE `bookShippedPackServeState`, the one pass
+// that books. Under `TL_SF_DEMOTE` every booking producer, this one included,
+// reads a single `shippedSurfaces` projection over the final pack, so the pack
+// that gets booked IS the pack that ships. No queue, no flush, no cross-call
+// state — and flag-off is unchanged by construction, because the seam returns
+// before touching anything without `TL_SF_STATEFUL` and the two pre-seam
+// producers keep their historical position.
+// ---------------------------------------------------------------------------
 
 function recordPackServedRanges(
   workspace: string,
@@ -20650,9 +25387,10 @@ function suppressNonProgressingNextCall(
   // on "default" while the writer keyed on "" for every lane-less call, which
   // is exactly the default single-agent path, so the gate below never fired.
   const lane = normalizeContractLane(requestedLane?.lane);
-  if (hasExecutedNext(workspace, lane, nextCall.tool, ncArgs)) {
+  const taskBinding = requestedLane?.taskBinding;
+  if (hasExecutedNext(workspace, lane, nextCall.tool, ncArgs, taskBinding)) {
     // A-F2: suppression alone was a dead end. Try the deterministic axes first.
-    repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope);
+    repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope, taskBinding);
     return;
   }
 
@@ -20680,7 +25418,7 @@ function suppressNonProgressingNextCall(
         contract.next_call = { tool: "search_files", arguments: { action: "tree", path: dir } };
       } else {
         // A-F2: the dir arm's own else-branch was a second bare dead end.
-        repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope);
+        repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope, taskBinding);
       }
       return;
     }
@@ -20688,7 +25426,7 @@ function suppressNonProgressingNextCall(
 
   if (advanceExecutedLocateNextCall(workspace, contract) === "suppressed") {
     // A-F2: a locate that returned nothing is consumed work, not a terminus.
-    repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope);
+    repairSuppressedNextCall(workspace, lane, result, effectiveQuery, nextCall, servedZoomScope, taskBinding);
   }
 }
 
@@ -20933,6 +25671,7 @@ function alternativeProgressAxis(
   query: string,
   blocked: ContinuationCall,
   servedZoomScope?: ServedWindowScope,
+  taskBinding?: string,
 ): ContinuationCall | undefined {
   const blockedArgs = (blocked.arguments ?? {}) as Record<string, unknown>;
   const candidates: ContinuationCall[] = [];
@@ -21019,7 +25758,7 @@ function alternativeProgressAxis(
     if (nextFingerprint(candidate.tool, args) === blockedFingerprint) continue;
     // The predicate is RESULT CONSUMPTION, not byte novelty: an absent find and
     // an empty tree consumed their call just as much as a served slice did.
-    if (hasExecutedNext(workspace, lane, candidate.tool, args)) continue;
+    if (hasExecutedNext(workspace, lane, candidate.tool, args, taskBinding)) continue;
     const admitted = admitReadOnlyNextCall(candidate, query);
     if (admitted !== undefined) return admitted;
   }
@@ -21042,11 +25781,14 @@ export function repairSuppressedNextCall(
   lane: string,
   result: TaskPackResult,
   query: string,
-  blocked: ContinuationCall,
+  blocked: ContinuationLike,
   servedZoomScope?: ServedWindowScope,
+  taskBinding?: string,
 ): "advanced" | "disclosed" {
   const contract = result.execution_contract;
-  const alternative = alternativeProgressAxis(workspace, lane, result, query, blocked, servedZoomScope);
+  const alternative = alternativeProgressAxis(
+    workspace, lane, result, query, canonicalContinuationCall(blocked)!, servedZoomScope, taskBinding,
+  );
   (result as unknown as Record<string, unknown>)["retry_same_call"] = false;
   if (alternative !== undefined) {
     if (contract !== undefined) {
@@ -21115,6 +25857,53 @@ function capReasonAtClause(reason: string, cap: number): string {
   if (boundary > 0) return cut.slice(0, boundary);
   const wordSafe = cut.replace(/\s+\S*$/, "");
   return wordSafe.length > 0 ? wordSafe : cut;
+}
+
+/**
+ * FX-M4 (P1, 2026-09-03): does the session's OWN served-range ledger —
+ * `session.servedRangeLedger`, the exact structure `recordServedRange` writes
+ * and the SAME "shippedSurfaces-booked ranges" source FX-K/FX-L's
+ * `addressShipped` reads via `editPathResidency` (both are written together,
+ * atomically, by `recordServedRange`) — prove this row's declared `range` was
+ * put on the wire for `path` at some point this session?
+ *
+ * DELIBERATELY NOT `prev.surfaces[].content_completeness`. That field is the
+ * PACK RECORD's own memory of itself, captured once at serve time
+ * (`captureServedPack`) and never re-verified; P1 (round-16) proved a plain
+ * re-ask stamps `prior` on a Phase-E-stripped row using exactly that kind of
+ * unverified self-report. This function is the one place a compact receipt
+ * asks the ledger instead of the record — the read-side twin of ruling (r)'s
+ * write-side "the certificate is not write authority" (`addressShipped`
+ * reads `editPathResidency`, never the certificate's own evidence list). Both
+ * `revalidateRecordToReceipt`'s plain-re-ask path and its qref-replay path
+ * route through this one predicate (`compactReceiptFromRecord` is their only
+ * shared surfaces-builder), so `prior` eligibility is decided identically on
+ * both.
+ *
+ * `servedClusterRanges` returns the ledger's merged clusters for `path`
+ * regardless of the row's own `range` framing, so full coverage of
+ * `[start,end]` is checked here by interval union — a cluster gap anywhere
+ * inside the row's declared range means the row is NOT provably shipped.
+ * Fails closed (declares "not shipped") on an unparseable range, an evicted
+ * ledger entry (bounded FIFO cap), or a genuinely partial cluster set — the
+ * safe direction, since the fallback is an honest `remaining` + handle, never
+ * a wrongly withheld body.
+ */
+function surfaceRangeShipped(workspace: string, path: string, range: string): boolean {
+  const target = parseSurfaceSpan(range);
+  if (target === undefined) return false;
+  const clusters = servedClusterRanges(workspace, path)
+    .map(parseSurfaceSpan)
+    .filter((c): c is { start: number; end: number } => c !== undefined)
+    .sort((a, b) => a.start - b.start);
+  let cursor = target.start;
+  for (const cluster of clusters) {
+    if (cluster.end < cursor) continue;
+    if (cluster.start > cursor) return false;
+    cursor = Math.max(cursor, cluster.end + 1);
+    if (cursor > target.end) return true;
+  }
+  return cursor > target.end;
 }
 
 function compactReceiptFromRecord(
@@ -21225,14 +26014,24 @@ function compactReceiptFromRecord(
     receipt: "pack-unchanged",
     pack_unchanged: true,
     workspace_state: currentWorkspaceState,
+    // P1: `prior` on the wire is a claim "the caller already holds these
+    // bytes" — verifiable ONLY against the ledger the caller's earlier serves
+    // actually booked (surfaceRangeShipped), never against this record's own
+    // `content_completeness` self-report. A row the ledger cannot prove
+    // shipped carries `content_completeness:"partial"` + `remaining_ranges`
+    // instead (the model.ts convention pairing) so `projectEvidence`
+    // (protocol/decisionWire.ts) withholds `prior` and emits `remaining` —
+    // the same honest shape a fresh (non-receipt) partial pack would emit.
     surfaces: prev.surfaces.map((s) => {
       const sha = shaByPath.get(s.path);
+      const shipped = surfaceRangeShipped(workspace, s.path, s.range);
       return {
         handle: s.handle,
         path: s.path,
         range: s.range,
         role: s.role,
         ...(sha !== undefined ? { sha } : {}),
+        ...(shipped ? {} : { content_completeness: "partial" as const, remaining_ranges: [s.range] }),
       };
     }),
     missing: [...prev.missing],
@@ -21354,7 +26153,7 @@ function revalidateRecordToReceipt(
   // capture (a no-surface pack) has nothing to re-serve compactly and nothing
   // to prove unchanged — recompute rather than emit an empty acknowledgement.
   if (prev.fileShas.length === 0) return undefined;
-  if (isQueryRefReplay && prev.surfaces.some((s) => s.content_completeness === "partial")) {
+  if (isQueryRefReplay && prev.surfaces.some((s) => recordDocSurfaceIsPartial(workspace, s))) {
     return undefined;
   }
   for (const { path: p, sha } of prev.fileShas) {
@@ -21493,12 +26292,18 @@ function tryServeSubsetReceipt(
 ): TaskPackResult | undefined {
   if (result.pack_unchanged === true) return undefined;
   if ((result.surfaces as TaskPackResultSurface[]).some(isArtifactTaskPackSurface)) return undefined;
-  // Only collapse a COMPLETE/focused working set. A partial pack still carries
-  // load-bearing missing-role guidance (missing_required_surfaces /
-  // blocking_next_steps / concerns) that a body-stripped receipt would drop —
-  // and its bodies being resident does not make the pack redundant. This is
-  // exactly the D2 case (re-packs AFTER coverage already flipped complete).
-  if (result.coverage !== "complete" && result.coverage !== "focused") return undefined;
+  // Scope-incomplete packs still carry load-bearing role/concern guidance.
+  // A body-partial pack with no such disclosure is different: the completion
+  // projection correctly keeps its optional zoom open, while an unchanged
+  // plain re-ask may still receipt the exact resident window. qref replays are
+  // fenced separately below because they explicitly request that disclosure.
+  const contentOnlyPartial = result.coverage === "partial"
+    && result.coverage_reason === undefined
+    && result.missing.length === 0
+    && (result.missing_required_surfaces?.length ?? 0) === 0
+    && codeTaskPackSurfaces(result.surfaces)
+      .some((surface) => surface.content_completeness === "partial");
+  if (result.coverage !== "complete" && result.coverage !== "focused" && !contentOnlyPartial) return undefined;
   // C2 byte-cap-fix follow-up (2026-08-21): a qref REPLAY (taskQueryRefReplay)
   // whose carried-forward working set still holds a surface with
   // content_completeness:"partial" — the doc-sliver affordance's own honesty
@@ -21745,7 +26550,7 @@ function epochServedEvidence(
 ): TaskPackSurface[] {
   return [
     ...codeTaskPackSurfaces(result.surfaces),
-    ...queryServedSurfaces(workspace, workspace, { epochTokens }).map((entry) => ({
+    ...epochServedSurfaceEntries(workspace, epochTokens, result).map((entry) => ({
       role: entry.role,
       handle: entry.handle ?? "",
       path: entry.path,
@@ -21793,9 +26598,22 @@ function reconcileEpochTaskContract(
     .filter((role) => !covered.has(role) && !alreadyDisclosed.includes(role.toLowerCase()))
     .slice(0, MAX_EPOCH_CONTRACT_DISCLOSURES);
   const coveredConcerns = new Set(stored.coveredConcernTokens);
-  const newlyServedConcerns = stored.concernTokens.filter((token) =>
-    concernTokenMatchesSurfaces(token, evidence)
+  const contractQuery = stored.query !== "" ? stored.query : query;
+  const enumeratedItems = enumeratedQueryItemsForEpoch(contractQuery, workspace);
+  const enumeratedById = new Map(enumeratedItems.map((item) => [item.id, item]));
+  const enumeratedProofs = namedAuthorityFacetProofs(
+    evidence,
+    explicitCodeIdentifiers(contractQuery),
+    enumeratedItems.map((item) => item.facet),
+    workspace,
   );
+  const concernCoveredByEvidence = (token: string): boolean => {
+    const item = enumeratedById.get(token);
+    if (item === undefined) return concernTokenMatchesSurfaces(token, evidence);
+    const proof = enumeratedProofs.get(item.facet);
+    return proof === "served" || proof === "authoritative-absent";
+  };
+  const newlyServedConcerns = stored.concernTokens.filter(concernCoveredByEvidence);
   // Make the durable ledger agree with the evidence reconciliation before the
   // final contract is built.  A challenge may legitimately serve the second
   // of two same-epoch frontiers; retaining the first frontier's proof is what
@@ -21806,7 +26624,7 @@ function reconcileEpochTaskContract(
     .filter((token) =>
       !coveredConcerns.has(token)
       && !alreadyDisclosed.includes(token.toLowerCase())
-      && !concernTokenMatchesSurfaces(token, evidence))
+      && !concernCoveredByEvidence(token))
     .slice(0, MAX_EPOCH_CONTRACT_DISCLOSURES);
   if (unservedRoles.length === 0 && uncoveredConcerns.length === 0) {
     // `buildTaskExecutionContract` is evaluated once before this reconciliation
@@ -21824,7 +26642,7 @@ function reconcileEpochTaskContract(
       && result.missing.length === 0
       && (result.missing_required_surfaces?.length ?? 0) === 0
     ) {
-      result.coverage = "complete";
+      result.coverage = projectCompletion(result, [], { promoteWhenComplete: true }).coverage;
       delete result.coverage_reason;
     }
     return;
@@ -21832,7 +26650,7 @@ function reconcileEpochTaskContract(
 
   // The epoch's SOURCE query, not this narrowed call's — a continuation that
   // re-asks with the truncated text is the defect one file over.
-  const sourceQuery = continuationQuery(stored.query !== "" ? stored.query : query);
+  const sourceQuery = continuationQuery(contractQuery);
   result.missing = [...new Set([
     ...result.missing,
     ...unservedRoles.map((role) =>
@@ -21950,6 +26768,7 @@ function recordEpochTaskContract(
   result: TaskPackResult,
   query: string,
   expansion?: PersistedEvidenceExpansion,
+  literalSourceUniverse = false,
 ): boolean {
   const epochTokens = tokenizeForEpoch(query);
   if (epochTokens.length === 0) return false;
@@ -21960,9 +26779,6 @@ function recordEpochTaskContract(
   const shaped = identifierShapedConcernSet(query);
   const queryTokens = concernAnchorTokens(query, 8).filter((token) => shaped.has(token.toLowerCase()));
   const requestedSymbols = explicitCodeIdentifiers(query).slice(0, 1);
-  const oneHop = served.flatMap((surface) =>
-    calleesOf(servedSurfaceText(surface), surface.symbol ? [surface.symbol] : requestedSymbols),
-  );
   const localExpansions: PersistedEvidenceExpansion[] = !hasOpenUniverseIntent(query)
     || isAdditiveEnumIntent(query)
     ? []
@@ -21990,22 +26806,51 @@ function recordEpochTaskContract(
     remaining: [...new Set(expansionParts.flatMap((entry) => entry.remaining))].sort((a, b) => a.localeCompare(b)),
     gaps: [...new Set(expansionParts.flatMap((entry) => entry.gaps))].sort((a, b) => a.localeCompare(b)),
   } satisfies PersistedEvidenceExpansion;
+  const enumeratedItems = enumeratedQueryItemsForEpoch(query, workspace);
+  const literalSurfaceDuty = isLiteralFirstSurfaceDuty(query);
+  const enumeratedProofs = namedAuthorityFacetProofs(
+    served,
+    explicitCodeIdentifiers(query),
+    enumeratedItems.map((item) => item.facet),
+    workspace,
+  );
+  const coveredEnumeratedIds = enumeratedItems
+    .filter((item) => {
+      if (literalSurfaceDuty) {
+        return literalSurfaceDutyEvidence(served, item.facet).length > 0;
+      }
+      const proof = enumeratedProofs.get(item.facet);
+      return proof === "served" || proof === "authoritative-absent";
+    })
+    .map((item) => item.id);
   recordTaskContract(workspace, epochTokens, {
     query,
     requiredRoles: result.required_surfaces ?? [],
-    // Evidence-expansion targets are dependency obligations, never query
-    // concerns. recordEvidenceExpansion below owns their lifecycle.
-    concernTokens: epochConcernTokensFor(result, query),
-    servedRoles: served.map((surface) => surface.role),
-    coveredConcernTokens: queryTokens.filter((token) => concernTokenMatchesSurfaces(token, served)),
+    // Span-derived ids remain monotone epoch requirements. They become
+    // covered only from the same per-item proof used by readiness.
+    concernTokens: [
+      ...epochConcernTokensFor(result, query),
+      ...(literalSurfaceDuty ? [] : enumeratedItems.map((item) => item.id)),
+    ],
+    // Exact literal witnesses are implementation evidence even when their
+    // filesystem role is merely `unknown` (a common flat `src/foo.ts` shape).
+    // The authenticated cohort proof above is what permits this normalization;
+    // ordinary unknown surfaces retain their existing role accounting.
+    servedRoles: literalSourceUniverse ? ["implementation"] : served.map((surface) => surface.role),
+    coveredConcernTokens: [
+      ...queryTokens.filter((token) => concernTokenMatchesSurfaces(token, served)),
+      ...(literalSurfaceDuty ? [] : coveredEnumeratedIds),
+    ],
   });
   // One-hop dependency proof is the evidence model for an actual
   // open-universe request.  Applying it to a finite generic list manufactures
   // a new dependency requirement after all of that list's named roles have
   // been served, making a cumulative same-epoch pack impossible to close.
-  const expansionTargets = !hasOpenUniverseIntent(query) || isAdditiveEnumIntent(query)
+  const expansionTargets = literalSourceUniverse || !hasOpenUniverseIntent(query) || isAdditiveEnumIntent(query)
     ? []
-    : [...oneHop, ...(effectiveExpansion?.targets ?? [])];
+    // Every candidate must pass expandOneHop's language gate. Feeding the raw
+    // TS/JS call regex here made Go/Python keywords into false dependencies.
+    : [...(effectiveExpansion?.targets ?? [])];
   // -------------------------------------------------------------------------
   // R2 (2026-08-28): THE SERVED-DEFINITION WITNESS IS THE BODY, NOT THE LABEL.
   //
@@ -22037,7 +26882,21 @@ function recordEpochTaskContract(
     ).map((entry) => entry.name)),
   ])];
   recordEvidenceExpansion(workspace, expansionTargets, servedDefinitions);
-  const expansionGaps = hasOpenUniverseIntent(query)
+  // The exact literal cohort uses the same ledger proof channel as successful
+  // one-hop expansion.  Its synthetic target is a stable obligation label,
+  // while the admission predicate above proves the substantive facts: complete
+  // ordinary-find universe, one root, no collision, and every source witness
+  // served.  This lets the normal readiness rebuild discharge `everywhere`
+  // without deleting the open-universe obligation or manually minting a
+  // prepared contract.
+  if (literalSourceUniverse) {
+    recordEvidenceExpansion(
+      workspace,
+      ["literal-source-universe"],
+      ["literal-source-universe"],
+    );
+  }
+  const expansionGaps = !literalSourceUniverse && hasOpenUniverseIntent(query)
     ? [...new Set(effectiveExpansion?.gaps ?? [])].sort((a, b) => a.localeCompare(b))
     : [];
   if (expansionGaps.length > 0) {
@@ -22051,7 +26910,7 @@ function recordEpochTaskContract(
       expansionGaps.join("; "),
     );
   }
-  return expansionGaps.length > 0;
+  return expansionGaps.length > 0 || literalSourceUniverse;
 }
 /**
  * R2: bound on declarations scanned out of ONE served body when proving which
@@ -22097,7 +26956,10 @@ export function attachCandidateListRecovery(
     .filter((rel) => !served.has(rel));
   if (unresolved.length === 0) return;
   const paths = [...new Set([...unresolved, ...served])].slice(0, MAX_BATCH_NEXT_HANDLES);
-  result.next = `read_file mode=task_pack query="${continuationQuery(query)}" paths=${JSON.stringify(paths)}`;
+  result.next = {
+    tool: "read_file",
+    arguments: { mode: "task_pack", query: continuationQuery(query), paths },
+  };
 }
 
 /**
@@ -22177,10 +27039,25 @@ function rememberCertifiedWorkingSet(
   workspace: string,
   result: TaskPackResult,
   query: string,
+  /**
+   * FX-J (round-14 finding 4) / FX-K (round-15 finding 3): certify only the
+   * surfaces this response actually shipped, and take that list from THE one
+   * `shippedSurfaces(returned)` projection the single booking pass computed —
+   * never re-project here. `paths` is the set a qref replay may name WITHOUT
+   * failing closed ("every path this replay ADDS must be context"), so a
+   * bodyless row here let a replay claim a never-served file as
+   * already-certified context and clone the whole `execution_contract`
+   * forward. FX-J filtered under `TL_SF_DEMOTE` only, and did it by
+   * re-projecting over a DIFFERENT object (`trimmed`, whose bodies survive a
+   * receipt/awaiting-input downgrade of `returned`) — two independently
+   * derived answers to "what shipped", the exact hazard `shippedSurfaces`
+   * exists to remove. One list, passed in, both flag states.
+   */
+  shipped: readonly TaskPackSurface[],
 ): void {
   const contract = result.execution_contract;
   if (contract?.typestate?.phase !== "prepared") return;
-  const surfaces = codeTaskPackSurfaces(result.surfaces);
+  const surfaces = shipped;
   if (surfaces.length === 0) return;
   const fileShas: Array<{ path: string; sha: string }> = [];
   const seen = new Set<string>();
@@ -22331,6 +27208,22 @@ function reconcileCallerPathCoverage(
   // missing).
   const servedPaths = new Set(result.surfaces.map((s) => normalizedRequestPath(s.path)));
   const servedEarlier = new Set((result.served_earlier ?? []).map((entry) => normalizedRequestPath(entry.path)));
+  // E2 (2026-09-05, paid smoke r9 / SF13): `served_earlier` rides only the ONE
+  // cumulative flip call, so a path an earlier call in this epoch served was
+  // still being reported "named but unserved" on every later call — and each
+  // such entry also mints a `read_file {path}` affordance for bytes the caller
+  // already holds. Consult the epoch ledger itself; `queryServedSurfaces`
+  // revalidates by content fingerprint, so a file EDITED since it was served is
+  // dropped from the ledger and stays disclosed. Skipped when this call carries
+  // no query, where there is no epoch to gate on.
+  const reconcileQuery = typeof args?.query === "string" ? args.query : "";
+  if (reconcileQuery.length > 0) {
+    for (const entry of queryServedSurfaces(workspace, workspace, {
+      epochTokens: tokenizeForEpoch(reconcileQuery),
+    })) {
+      servedEarlier.add(normalizedRequestPath(entry.path));
+    }
+  }
   const unserved: string[] = [];
   for (const entry of entries) {
     const rel = normalizedRequestPath(entry.path);
@@ -22351,6 +27244,48 @@ function reconcileCallerPathCoverage(
   }
   if (unserved.length === 0) return;
   for (const rel of unserved) result.missing.push(`${rel} (named but unserved)`);
+}
+
+/**
+ * D5 (2026-09-02): a query that spells `Class::method` names exactly ONE
+ * definition site. When the pack cannot serve it — the seed cap, a trim pass,
+ * or a specialized builder that selected a different subset — SILENCE is the
+ * failure mode the SF13 forensics caught: the caller was handed three sibling
+ * headers that merely declare a same-named member and no hint that the
+ * definition existed at all, so it left TL to grep for it.
+ *
+ * Disclose it in the same "named but unserved" shape
+ * `reconcileCallerPathCoverage` uses for a caller-named path, so the file is
+ * one directly addressable read away. Additive only: never changes coverage,
+ * the route, or any served surface, and a zero-cost no-op for a query that
+ * names no qualified anchor.
+ */
+function discloseUnservedQualifiedAnchorDefinition(
+  result: TaskPackResult,
+  query: string,
+  workspace: string,
+): void {
+  const resolution = resolveQualifiedSymbolAnchors(query, workspace);
+  if (resolution.definitions.length === 0) return;
+  const served = new Set(result.surfaces.map((surface) => normalizedRequestPath(surface.path)));
+  for (const entry of result.served_earlier ?? []) served.add(normalizedRequestPath(entry.path));
+  // E2 (2026-09-05): a file an EARLIER call in this epoch served is not
+  // "unserved". `served_earlier` rides only the one cumulative flip call, so
+  // consult the epoch ledger itself — live (r9/SF13 call 3) ekf.cpp was
+  // disclosed as "named but unserved" two calls after its body was served.
+  for (const entry of queryServedSurfaces(workspace, workspace, { epochTokens: tokenizeForEpoch(query) })) {
+    served.add(normalizedRequestPath(entry.path));
+  }
+  for (const definitionPath of resolution.definitions) {
+    const rel = normalizedRequestPath(definitionPath);
+    if (rel.length === 0 || served.has(rel)) continue;
+    if (result.surfaces.some((surface) => normalizedRequestPath(surface.path) === rel)) continue;
+    if (result.missing.some((item) => {
+      const norm = item.toLowerCase();
+      return norm === rel || norm.startsWith(`${rel} `) || norm.startsWith(`${rel}/`);
+    })) continue;
+    result.missing.push(`${definitionPath} (named but unserved)`);
+  }
 }
 
 /**
@@ -22483,6 +27418,25 @@ export function applyDocSliverHonesty(
 ): DocSliverFloorRestore[] {
   if (result.coverage !== "complete" && result.coverage !== "focused") return [];
   const route = result.route;
+  // 2026-09-05, RECORDED SO THE NEXT READER DOES NOT RE-DIAGNOSE THIS.
+  //
+  // `route` is NOT a pre-v1 leftover and this guard is not why the pass looked
+  // dead on a decision-wire pack. `route` is still computed on every pack and
+  // still feeds `canonicalDecision.ts`'s oracle in-process; `protocol/
+  // envelope.ts`'s `projectSuccessBody` deletes it only at the WIRE (§3.4 E4
+  // row 1), which is why a served pack reads `route: null` while this function
+  // sees a populated one. The only way it is undefined HERE is `trimToCap`
+  // Phase 0 having shed it — a pack that has already proved it cannot transport
+  // its own route — and attaching a heading index to that pack would be exactly
+  // backwards, so the early return stays.
+  //
+  // What IS true of the decision wire, and is a protocol fact rather than a bug
+  // to fix here: `decisionWire.ts`'s `projectEvidence` allow-list is CLOSED at
+  // handle/path/range/body/prior/remaining/role plus sha/symbol/why/likely_edits,
+  // so `content_completeness`, `total_lines`, `headings`, `sections_hint` and
+  // the per-surface `next_call` this pass attaches never reach a caller. What
+  // survives to the wire is the surface's `remaining` (the partiality claim) and
+  // the effect this pass has on the CERTIFICATE via `servedDocSliverAffordance`.
   if (route === undefined) return [];
   if (route.action !== "edit_from_handles" && route.action !== "answer_from_handles") return [];
   // Idempotent: this pass can run twice over the same result (a cached re-serve
@@ -23525,7 +28479,7 @@ export function stampRollupContentCompleteness(result: TaskPackResult): void {
   }
 }
 
-function contentFollowupTarget(surface: TaskPackSurface, preferOutline = false): string | undefined {
+function contentFollowupTarget(surface: TaskPackSurface, preferOutline = false): ContinuationCall | undefined {
   const outlineTargets = surface.outline
     ?.map((line) => line.match(/:\s+(read_file\s+.+)$/)?.[1])
     .filter((target): target is string => target !== undefined) ?? [];
@@ -23534,23 +28488,25 @@ function contentFollowupTarget(surface: TaskPackSurface, preferOutline = false):
       .map((target) => target.match(/\bhandle=(h[0-9a-z]+)\b/)?.[1])
       .filter((handle): handle is string => handle !== undefined);
     if (handles.length === outlineTargets.length && handles.length > 1) {
-      return `read_file handles=${JSON.stringify(handles)}`;
+      return { tool: "read_file", arguments: { handles } };
     }
-    return outlineTargets[0]!;
+    return canonicalContinuationCall(nextStringToCall(outlineTargets[0]!));
   }
   const remaining = surface.remaining_ranges?.[0];
-  if (remaining) return `read_file mode=slice handle=${surface.handle} range=${remaining}`;
+  if (remaining) return { tool: "read_file", arguments: { mode: "slice", handle: surface.handle, range: remaining } };
   const runnerUp = outlineTargets[0];
-  if (runnerUp) return runnerUp;
+  if (runnerUp) return canonicalContinuationCall(nextStringToCall(runnerUp));
   const inspect = surface.likely_edits?.find((hint) => hint.kind === "inspect-slice")?.target;
-  if (inspect !== undefined && !inspect.includes(`handle=${surface.handle}`)) return inspect;
+  if (inspect !== undefined && !inspect.includes(`handle=${surface.handle}`)) {
+    return canonicalContinuationCall(nextStringToCall(inspect));
+  }
   // 2026-07-31: a same-handle re-slice only progresses when the caller does NOT
   // already hold the body. A fully-served surface reaches here through
   // hasSufficientEditContent's low-confidence branch (outline present,
   // inspect-slice confidence under the threshold) — and re-reading the identical
   // window cannot raise that confidence. Name no call at all rather than a
   // no-op read; the caller keeps the honest needs-followup verdict either way.
-  if (!hasServedCode(surface)) return `read_file mode=slice handle=${surface.handle}`;
+  if (!hasServedCode(surface)) return { tool: "read_file", arguments: { mode: "slice", handle: surface.handle } };
   return undefined;
 }
 
@@ -23699,6 +28655,8 @@ function rebuildFinalExecutionContract(
   workspace: string,
   workspaceInventory: WorkspaceInventoryState,
   proofTransition = false,
+  /** The complete exact literal cohort was persisted as a ledger proof. */
+  literalSourceUniverse = false,
   /** A-F2: the executed-next ledger lane, so the rebuilt contract's no-dead-end guard cannot re-open a consumed call. */
   lane: string = DEFAULT_CONTRACT_LANE,
 ): void {
@@ -23713,11 +28671,16 @@ function rebuildFinalExecutionContract(
   // the route at that provisional point; restore only this exact reversible
   // demotion before the proof-transition rebuild, never a general discovery
   // route. All required bodies and the explicit-gap-only missing projection
-  // remain the guards on the terminal edit grant below.
+  // remain the guards on the terminal edit grant below. Do not consult raw
+  // `coverage` here: the just-recorded capability gap temporarily stamps it
+  // partial, and projectCompletion has not yet projected the now-closed
+  // blocking set back to complete.
   const restoreOpenUniverseFrontier = proofTransition
     && result.route?.action === "locate_missing_surfaces"
-    && /^ready rejected: unresolved proof open-universe:/.test(result.route.reason ?? "")
-    && result.coverage === "complete"
+    && (
+      literalSourceUniverse
+      || /^ready rejected: unresolved proof open-universe:/.test(result.route.reason ?? "")
+    )
     && proofTransitionMissing.every((entry) => entry.startsWith("explicit-gap:"))
     && codeTaskPackSurfaces(result.surfaces)
       .filter((surface) => surface.required !== false)
@@ -23725,7 +28688,9 @@ function rebuildFinalExecutionContract(
   if (restoreOpenUniverseFrontier) {
     result.route = {
       action: "edit_from_handles",
-      reason: "current-pack evidence-expansion capability gap discharges the exhaustive frontier",
+      reason: literalSourceUniverse
+        ? "complete exact literal source universe discharges the exhaustive frontier through the task ledger"
+        : "current-pack evidence-expansion capability gap discharges the exhaustive frontier",
       max_additional_tl_calls: 0,
     };
     delete result.next;
@@ -23746,6 +28711,8 @@ function rebuildFinalExecutionContract(
     buildTaskWorkspaceState(result, workspace, workspaceInventory),
     workspace,
     proofTransition,
+    undefined,
+    literalSourceUniverse,
   );
   reconcileTaskPackExecutionContract(result);
   enforceNoDeadEndContract(result, query, { workspace, lane });
@@ -23927,7 +28894,7 @@ function applyCumulativeCoverage(
     .map((p) => ({ path: p.path, role: p.role, ...(p.handle ? { handle: p.handle } : {}) }));
   if (servedEarlier.length === 0) return false;
 
-  result.coverage = "complete";
+  result.coverage = projectCompletion(result, [], { promoteWhenComplete: true }).coverage;
   result.coverage_basis = "cumulative";
   result.served_earlier = servedEarlier;
   result.missing = (result.missing ?? []).filter((m) => !missingRequired.includes(m));
@@ -23981,10 +28948,16 @@ function directImportNeighbors(
       count++;
       const base = path.posix.normalize(path.posix.join(dir, spec));
       if (base.startsWith("..")) continue; // escaped the workspace root — ignore
+      // TypeScript projects commonly write runtime `.js` specifiers while
+      // keeping the source as `.ts`.  Probe from the module stem as well as
+      // the literal specifier; otherwise a real `./provider.js` ->
+      // `provider.ts` import is invisible to every bounded neighbour user.
+      const moduleBase = stripModuleExtension(base);
       const candidates = [
         base,
-        ...exts.map((e) => `${base}${e}`),
-        ...exts.map((e) => `${base}/index${e}`),
+        moduleBase,
+        ...exts.map((e) => `${moduleBase}${e}`),
+        ...exts.map((e) => `${moduleBase}/index${e}`),
       ];
       for (const cand of candidates) {
         if (seen.has(cand) || emitted.has(cand)) continue;
@@ -24059,6 +29032,14 @@ function attachFrontierIndex(
   for (const p of prior) add(p.path, p.role, p.handle);
   for (const t of result.trimmed ?? []) add(t, "candidate");
   for (const nb of directImportNeighbors(workspace, surfaces, seen)) add(nb, "import-neighbor");
+  // Ruling F1' (FX-OH2): an over-bound caller-named file joined with NO
+  // evidence row (`applySemanticFrontierNamedFrontier`) still needs to reach
+  // the caller as an address — this is the ONLY place it does.
+  const namedFrontierOnly = pendingNamedFrontierOnlyEntries.get(result);
+  if (namedFrontierOnly !== undefined) {
+    pendingNamedFrontierOnlyEntries.delete(result);
+    for (const entry of namedFrontierOnly) add(entry.path, "domain", entry.handle);
+  }
   if (entries.length === 0) return;
 
   const capped = capFrontierIndex(entries);
@@ -24079,18 +29060,47 @@ function attachFrontierIndex(
 }
 
 /**
- * IMPROVEMENT A orchestration — runs once at dedupeTrimAndPersist's exit
- * (before the contract build). (1) consults the served-surface log for
+ * IMPROVEMENT A orchestration — runs once inside dedupeTrimAndPersist, just
+ * BEFORE the contract build (not at the exit; the exit is
+ * `bookShippedPackServeState`). (1) consults the served-surface log for
  * still-valid prior surfaces of this task epoch, (2) flips to cumulative
- * coverage when the union closes the required roles, (3) records THIS call's
- * surfaces for future calls, (4) attaches frontier_index. Returns true when the
- * cumulative flip fired.
+ * coverage when the union closes the required roles, (3) hands THIS call's
+ * candidate surfaces to the contract build and to the single booking pass,
+ * (4) attaches frontier_index.
+ *
+ * FX-J/FX-K (2026-09-03) — WHY NOTHING IS BOOKED HERE, IN EITHER FLAG STATE.
+ * Two producers naturally belong here: the edit gate's admissible union and
+ * the cumulative served-surface log. Both read `surface.code` (directly or
+ * through `hasServedCode`) as the truth about what this response sends, and
+ * this function runs BEFORE `trimToCap` (Phase E strips a surviving surface's
+ * body; Phase F splices a whole surface out) and before the SF pre-booking
+ * seam. Booking here therefore asserts bytes the response may never send.
+ *
+ * FX-J left the flag-off path booking here, over the pre-trim list, to keep
+ * `8ea1eb52`'s session state byte-identical; gap (o) justified that partly on
+ * "Phase-E-on-survivor is unreachable from the production entrance".
+ * Round-15 falsified it with a one-call `budget:{bytes}` repro that ends in
+ * `edit.applied` against a bodyless-shipped file. FX-K therefore collapses the
+ * two sites into ONE unconditional post-trim pass
+ * (`bookShippedPackServeState`), and this function books nothing.
+ *
+ * What still happens here, in both flag states:
+ *   - the epoch bookkeeping half of `recordServedSurfaces` (reset on a
+ *     non-overlapping task, union the tokens), which `attachFrontierIndex`'s
+ *     attach-discipline latch and every same-call `queryServedSurfaces` epoch
+ *     gate depend on. It records no ENTRY, so nothing about what this response
+ *     served is asserted;
+ *   - the explicit candidate feed to the contract build
+ *     (`pendingOwnServedSurfaces` / `epochServedSurfaceEntries`). The contract
+ *     must see the pre-trim candidate list (FX-J), so deferring the log write
+ *     cannot narrow the certificate.
  */
 function finalizePackServeState(
   workspace: string,
   result: TaskPackResult,
   effectiveQuery: string,
   profile: TaskProfile,
+  bookings: PendingPackBookings,
 ): boolean {
   // Route classification is a response affordance, not the caller's task
   // identity. A generic task can temporarily route through answer handles and
@@ -24105,6 +29115,16 @@ function finalizePackServeState(
   const prior = (cumulativeEligible && surfaces.length > 0)
     ? queryServedSurfaces(workspace, workspace, { excludePaths: currentPaths, epochTokens })
     : [];
+  // E2 (2026-09-05): carry the epoch's served paths to the wire-side
+  // continuation projectors, which have no workspace handle of their own, so a
+  // `decision.next` can never re-request evidence this task already holds.
+  // Symbol-keyed, therefore invisible to JSON.stringify — zero wire bytes.
+  // C1 (DESIGN-v0.15 §12 rows 82-84, R31-FIX regression): a path an earlier
+  // call only partially (and re-packably) served — `fullyServed === false`,
+  // computed by `bookShippedPackServeState` via `surfaceAlreadyCoversWholeFile`
+  // — must NOT be treated as closed here; only `undefined` (a caller that
+  // never threaded the verdict through) or `true` counts as spent.
+  stampEpochServedPaths(result, prior.filter((entry) => entry.fullyServed !== false).map((entry) => entry.path));
   const flipped = applyCumulativeCoverage(result, prior, effectiveQuery);
 
   // iter-2 W3: served_earlier is attached ONCE — on the cumulative FLIP call —
@@ -24115,35 +29135,221 @@ function finalizePackServeState(
     delete result.served_earlier;
   }
 
+  bookings.epochTokens = [...epochTokens];
+  bookings.cumulativeEligible = cumulativeEligible;
+  // The contract build below reads the served-surface log for this epoch. The
+  // log write happens at the single post-trim booking pass, so hand it the
+  // same candidates explicitly.
+  if (cumulativeEligible && surfaces.length > 0) {
+    bookings.pack = result;
+    pendingOwnServedSurfaces.set(result, surfaces);
+    // FX-K: epoch bookkeeping ONLY, and deliberately NOT a booking — the empty
+    // entry list is what makes it one. `recordServedSurfaces` resets the log
+    // when this query's tokens do not overlap the stored epoch and then unions
+    // them in; `attachFrontierIndex` below, the receipt/attach latches and
+    // every same-call `queryServedSurfaces` epoch gate read that state. The
+    // guard is the historical one (`cumulativeEligible && surfaces.length > 0`)
+    // so the reset/union fires on exactly the calls it always did.
+    recordServedSurfaces(workspace, workspace, [], epochTokens);
+  }
+
+  attachFrontierIndex(workspace, result, prior);
+  return flipped;
+}
+
+/**
+ * FX-J/FX-K — THE SINGLE BOOKING PASS, run at `dedupeTrimAndPersist`'s exit,
+ * after the SF pre-booking seam and after every shedding phase, in BOTH flag
+ * states (FX-K collapsed the flag-selected pre-seam site into this one).
+ *
+ * Every producer that asserts something about what this response served reads
+ * ONE projection, `shippedSurfaces(returned)`, over the pack the caller
+ * actually receives. A surface whose body this response did not send —
+ * withheld by the SF seam, stripped by `trimToCap` Phase E, or spliced out by
+ * Phase F — therefore contributes no body, no edit authority (union, and so
+ * the NEXT pack's `priorEpochActionFrontier` and its certificate
+ * `action_frontier`), no certified-context claim, and no served-range
+ * coverage. It stays addressable by handle for READS — a zoom re-serves its
+ * bytes without a false `prior`, because nothing here booked them.
+ *
+ * FX-K's CARRIED-FORWARD GAP, CLOSED BY FX-L (2026-09-03, ruling (r)). The
+ * certificate is a SECOND write authority: `session.ts`'s
+ * `recordExecutionContract` lifts `action_frontier` ∪ `evidence_handles` (and
+ * the evidence paths) into the same admissible union, and the certificate is
+ * rebuilt post-`trimToCap` but before the last shedding rungs, so it could
+ * still name a surface this response did not send. MEASURED, flag off:
+ *
+ *   read_file { query:<generic pricing change>, budget:{bytes:6144} }
+ *     → five bodyless rows; one of them (`src/anchor.ts`) is in the certificate
+ *   edit_file { handle:<that row's handle>, … }        → edit.applied
+ *   edit_file { handle:<any other bodyless row>, … }   → refusal
+ *   edit_file { path:<any of them>, … }                → refusal
+ *
+ * FX-K closed the PATH form and every handle the certificate does not list; the
+ * remaining handle is closed at the GATE, not here, and this pass supplies the
+ * evidence it needs — `recordWithheldEditAddresses` below.
+ *
+ * WHY THE REPAIR IS NOT A FILTER IN THIS FUNCTION, with the attempt that was
+ * measured and reverted. Filtering the certificate's own entries down to
+ * `shipped` empties it whenever the pack shipped nothing — and an edit-terminal
+ * certificate with no handles, no action paths, no evidence and an empty union
+ * hits `recordExecutionContract`'s 2026-07-25 T13 escape hatch, which CLEARS
+ * the fence on the stated ground that "a refuse-only fence is strictly worse
+ * than no fence: leave edits ungated instead". End to end that turned four
+ * refusals into four `edit.applied`, including the never-packed control: the
+ * narrowing OPENS edits in exactly the case it was meant to close. FX-L
+ * therefore teaches the GATE the difference between "this session never served
+ * anything" (the hatch keeps reading the RAW certificate, so it fires exactly
+ * where it always did) and "this response emitted addresses and withheld their
+ * bytes" (per-address residency, written below; the fence stays and refuses,
+ * with a recoverable `next`).
+ *
+ * THE STATE CHANGE THIS MAKES ON THE DEFAULT PATH IS DELIBERATE (round-15
+ * finding 1). `8ea1eb52` booked the pre-trim list, so a cap-overflowing pack
+ * granted write authority over files it shipped no bytes for; a `budget.bytes`
+ * read plus one `edit_file` proved it end to end. The T09/T10 regression class
+ * ("the gate refuses a handle this server itself served") is guarded from the
+ * other side: `shippedSurfaces` keeps every surface that ships WITH a body,
+ * and `hasServedCode` deliberately counts a `code_unchanged` restatement,
+ * because the caller does hold those exact bytes.
+ */
+function bookShippedPackServeState(
+  workspace: string,
+  returned: TaskPackResult,
+  effectiveQuery: string,
+  bookings: PendingPackBookings,
+  /**
+   * The full working set the certificate was issued over, when this exit is
+   * the one that may retain it. `undefined` on the byte-budget fallback exit,
+   * which has never touched the certified working set (`8ea1eb52` did not
+   * either) — adding it there would be a state change on the default path.
+   */
+  certified: { trimmed: TaskPackResult } | undefined,
+  capture: { args: TaskPackArgs; captureTarget: TaskPackResult } | undefined,
+): void {
+  // THE projection. Computed once, from the final pack, and used by every
+  // producer below.
+  const shipped = shippedSurfaces(returned);
+  if (bookings.pack !== undefined) pendingOwnServedSurfaces.delete(bookings.pack);
+
+
+  // Record only CHANGE-pack surfaces (an answer pack has no edit closure to
+  // cumulatively complete a later change pack from, and its read-only surfaces
+  // should not stand in for edit-served roles).
+  if (bookings.cumulativeEligible && shipped.length > 0) {
+    recordServedSurfaces(
+      workspace,
+      workspace,
+      // C1 (DESIGN-v0.15 §12 rows 82-84, R31-FIX regression): thread the
+      // range-aware "already amounts to a whole-file re-pack" verdict onto
+      // the epoch ledger entry, computed once here where the full surface
+      // (range/content_completeness/remaining_ranges) is still at hand — see
+      // util/surfaceServedCoverage.ts. A LATER call's
+      // `finalizePackServeState` filters on it before stamping
+      // `epochServedPaths`, so a path an earlier call only partially (and
+      // re-packably) served is not mistaken for closed.
+      shipped.map((s) => ({
+        path: s.path,
+        role: s.role,
+        handle: s.handle,
+        fullyServed: surfaceAlreadyCoversWholeFile(s),
+      })),
+      bookings.epochTokens,
+    );
+  }
+
+  // Cache only after the final returned projection. An awaiting-input or
+  // receipt downgrade must never leave its earlier prepared certificate
+  // available for qref carry-forward; when the returned contract remains
+  // prepared, retain trimmed's full working set rather than a compact receipt.
+  if (certified !== undefined) {
+    if (returned.execution_contract?.typestate.phase === "prepared") {
+      // FX-K (round-15 finding 3): the SAME `shipped` list, never a second
+      // projection over `trimmed`. `certified.trimmed` supplies the contract
+      // and the coverage/route fields the replay restores; the certified PATHS
+      // are exactly what this response sent bytes for.
+      rememberCertifiedWorkingSet(workspace, certified.trimmed, effectiveQuery, shipped);
+    } else {
+      // The map is one certificate per workspace. A non-prepared final result
+      // supersedes any earlier certificate for this task/session; retaining it
+      // would let a later qref replay resurrect authority the current evidence
+      // just withdrew.
+      certifiedWorkingSets.delete(laneScopedKey(path.resolve(workspace)));
+    }
+  }
+
   // A1 (2026-08-01 signal5-2): EVERY content-bearing served surface — answer
   // packs included — grounds a later edit of that file. Feed the edit gate's
   // admissible union at serve time; ready-certificate install alone left
   // partial/discovery-pack surfaces permanently outside the frontier, so the
   // gate refused handles this server itself had served (T09 enums.ts).
-  const admissibleServed = surfaces.filter(hasServedCode);
-  if (admissibleServed.length > 0) {
+  if (shipped.length > 0) {
     recordServedEditAdmissibility(workspace, {
-      handles: admissibleServed
+      handles: shipped
         .map((s) => s.handle)
         .filter((h): h is string => typeof h === "string" && h.length > 0),
-      paths: admissibleServed.map((s) => s.path),
+      paths: shipped.map((s) => s.path),
     });
   }
 
-  // Record only CHANGE-pack surfaces (an answer pack has no edit closure to
-  // cumulatively complete a later change pack from, and its read-only surfaces
-  // should not stand in for edit-served roles).
-  if (cumulativeEligible && surfaces.length > 0) {
-    recordServedSurfaces(
-      workspace,
-      workspace,
-      surfaces.map((s) => ({ path: s.path, role: s.role, handle: s.handle })),
-      epochTokens,
-    );
+  // FX-L (2026-09-03, ruling (r)) — THE COMPLEMENT OF THE SAME PROJECTION.
+  //
+  // FX-K withdrew the union/log/certified-set bookings for a surface this
+  // response shipped no body for. The certificate is a SECOND write authority
+  // and the booking pass cannot narrow it (filtering it here empties it, which
+  // trips session.ts's 2026-07-25 T13 escape hatch and ungates every edit —
+  // measured and reverted; see this function's doc). What the booking pass CAN
+  // do is state the fact the gate was missing: these addresses were EMITTED and
+  // their bytes were WITHHELD. `recordExecutionContract` reads exactly that to
+  // tell "this session never served anything" (no residency ⇒ today's
+  // behaviour, T13 hatch intact) from "this response emitted addresses and
+  // withheld their bytes" (⇒ the certificate lift refuses, with a recovery
+  // `next`).
+  //
+  // Recorded AFTER the shipped booking above, deliberately: residency is
+  // monotone toward "shipped", so a path with one body-bearing row and one
+  // bodyless row (the ordinary multi-surface file) resolves to shipped, and a
+  // handle whose file shipped under a different id inherits that answer.
+  //
+  // THE `fast_path` EXCEPTION, AND WHY IT IS NOT A HOLE. A proved
+  // `single-site-unique-match` pack deliberately ships its surface WITHOUT a
+  // body (`readCodeTaskPack.spec.ts`: "emits an explicit guarded receipt only
+  // for one served, writable exact replacement" asserts `code` is undefined) —
+  // that IS the economy: the SERVER read the file, proved exactly one
+  // occurrence, and hands back the literal `search`/`replace` plus a content
+  // `sha` and `precondition:"unique-match"`, so the caller writes one proven
+  // edit without paying for the bytes. Calling that address "withheld" would
+  // refuse the very edit the same response certified, in one call, with no
+  // recovery worth the name. It is excluded, not marked shipped: residency
+  // stays `undefined`, which is the "no positive evidence either way" answer,
+  // and the write is still gated by the fast-path proof itself.
+  const fastPathHandle = returned.fast_path?.handle ?? "";
+  const fastPathPath = returned.fast_path?.path ?? "";
+  const withheldSurfaces = codeTaskPackSurfaces(returned.surfaces).filter((s) =>
+    !hasServedCode(s) && s.path !== fastPathPath && s.handle !== fastPathHandle);
+  if (withheldSurfaces.length > 0) {
+    recordWithheldEditAddresses(workspace, {
+      handles: withheldSurfaces
+        .map((s) => s.handle)
+        .filter((h): h is string => typeof h === "string" && h.length > 0),
+      paths: [...new Set(withheldSurfaces.map((s) => s.path))],
+    });
   }
 
-  attachFrontierIndex(workspace, result, prior);
-  return flipped;
+  if (capture !== undefined) {
+    // §3 residual: dedup baseline vs. wire — `captureTarget` is the fingerprint
+    // baseline (see dedupeTrimAndPersist), `returned` is what the caller
+    // actually receives and therefore what the served-range ledger may book
+    // (`packServedSpans` books a line only from a surface that still carries a
+    // body, so a withheld one contributes nothing by construction).
+    captureServedPack(
+      workspace,
+      capture.args,
+      computePackFingerprint(capture.args, workspace),
+      capture.captureTarget,
+      returned,
+    );
+  }
 }
 
 /**
@@ -24482,7 +29688,7 @@ function dedupeTrimAndPersist(
     ?? "";
   const servedZoomScope = servedZoomScopeForArgs(opts?.args, effectiveQuery);
   let semanticCheckRecords: PackCheckRecord[] = [];
-  let binding = bindTaskProfile(opts?.args?.taskProfile, effectiveQuery);
+  let binding = bindTaskProfile(opts?.args?.taskProfile, effectiveQuery, opts?.args?.writeAllowed);
   let profile = binding.selected;
   result.profile_binding = binding;
   if (profile !== "generic") result.task_profile = profile;
@@ -24623,7 +29829,7 @@ function dedupeTrimAndPersist(
       if (result.coverage_reason === "candidate-list" || result.coverage_reason === "concerns-uncovered") {
         // The graph resolved the locator tie with an observed directional
         // relation; keeping choose-candidate would discard that evidence.
-        result.coverage = "complete";
+        result.coverage = projectCompletion(result, [], { promoteWhenComplete: true }).coverage;
         delete result.coverage_reason;
         delete result.content_sufficiency;
         delete result.blocking_next_steps;
@@ -24661,7 +29867,7 @@ function dedupeTrimAndPersist(
       result.missing = [];
       delete result.missing_required_surfaces;
       if (result.coverage_reason === "candidate-list") {
-        result.coverage = "complete";
+        result.coverage = projectCompletion(result, [], { promoteWhenComplete: true }).coverage;
         delete result.coverage_reason;
         delete result.content_sufficiency;
       }
@@ -24808,7 +30014,9 @@ function dedupeTrimAndPersist(
       // check see that a facet's call sites are still in remaining_ranges.
       || hasExactNamedAnswerFacetEvidence(result, effectiveQuery, workspace)
     );
-  const falsificationAdded = exactArtifactTargetServed || exactAnswerTargetServed
+  const falsificationAdded = result.literal_source_absence !== undefined
+    || exactArtifactTargetServed
+    || exactAnswerTargetServed
     ? 0
     : runInternalReadinessFalsification(
         result,
@@ -24901,7 +30109,7 @@ function dedupeTrimAndPersist(
         reason: "requested new file resolved; create it with edit_file create:true, imitating the served sibling(s)/module",
         max_additional_tl_calls: 0,
       };
-      result.next = `edit_file create:true path=${createTarget.path}`;
+      delete result.next;
     }
   }
   // IMPROVEMENT A: consult/record the session-stateful served-surface log,
@@ -24916,33 +30124,29 @@ function dedupeTrimAndPersist(
   // B1b (2026-08-01 retrieval-scope): enforce the missing-roles naming
   // invariant BEFORE the contract/route machinery reads it, so a repaired
   // (or dropped) reason is what the readiness proof and `next` are built from.
+  // D8 (FX-R3c): the caller-named frontier join. Runs BEFORE the missing-roles
+  // reconciliation, `attachFrontierIndex`, the contract build, `trimToCap` and
+  // every booking producer, so a file the caller NAMED is inventoried, is
+  // certified over, is shed by the one shedding policy, and is booked exactly
+  // like any other surface. Flag-fenced inside; a flag-off pack never enters.
+  applySemanticFrontierNamedFrontier(workspace, result, opts?.args, effectiveQuery);
   reconcileMissingRolesContract(result);
   semanticCheckRecords = semanticCompletionCheckRecords(result.wiring, result.surfaces);
   if (semanticCheckRecords.length > 0) {
     result.checks = semanticCheckRecords.map((check) => check.desc);
   }
-  // T-L1: for change tasks only, enrich the already-selected C/C++ frontier
-  // with declaration authority from direct project-local includes. This runs
-  // before serve-state persistence and trimming so complete bodies are booked
-  // normally, while over-budget handle-only tails remain honestly unserved.
-  if (
-    interfaceAuthorityEnabled()
-    && profile !== "answer"
-    && result.route?.action !== "answer_from_handles"
-  ) {
-    const currentSurfaces = codeTaskPackSurfaces(result.surfaces);
-    const knownSurfaceKeys = new Set(
-      currentSurfaces.map((surface) => JSON.stringify([surface.path, surface.range ?? ""])),
-    );
-    const authoritySurfaces = buildInterfaceAuthoritySurfaces({
-      workspace,
-      frontier: currentSurfaces,
-    }).filter((surface) => !knownSurfaceKeys.has(JSON.stringify([surface.path, surface.range ?? ""])));
-    if (authoritySurfaces.length > 0) {
-      result.surfaces = [...result.surfaces, ...authoritySurfaces];
-    }
-  }
-  const cumulativeComplete = finalizePackServeState(workspace, result, effectiveQuery, profile);
+  // FX-J/FX-K (2026-09-03): every booking — the edit gate's admissible union,
+  // the cumulative served-surface log, the certified working set, the
+  // served-range ledger and the served-pack record — happens at this
+  // function's exit, from ONE `shippedSurfaces` projection over the FINAL
+  // pack: after every shedding phase and after the SF pre-booking seam has had
+  // its one chance to withhold a body. Unconditional since FX-K (round-15
+  // finding 1 proved the pre-trim flag-off booking grants write authority over
+  // bodyless-shipped files). See `finalizePackServeState`'s doc.
+  const pendingBookings: PendingPackBookings = { epochTokens: [], cumulativeEligible: false };
+  const cumulativeComplete = finalizePackServeState(
+    workspace, result, effectiveQuery, profile, pendingBookings,
+  );
   // IMPROVEMENT D: honest, machine-readable verification runnability verdict.
   attachVerificationVerdict(workspace, result);
   const workspaceInventory = computeWorkspaceInventoryState(workspace);
@@ -25221,12 +30425,20 @@ function dedupeTrimAndPersist(
     // internal byte budget into a user decision, and never bless an empty pack
     // as a terminal answer.
     const retained = trimmed.surfaces[0];
-    if (retained === undefined) {
-      throw new Error("task-pack invariant: byte-budget fallback has no evidence surface");
-    }
-    const next = isArtifactTaskPackSurface(retained)
-      ? retained.extract
-      : `read_file mode=slice handle=${retained.handle} range=${retained.remaining_ranges?.[0] ?? retained.range}`;
+    assertTaskPackConstructionInvariant(
+      retained !== undefined,
+      "byte-budget fallback has no evidence surface",
+    );
+    const next: ToolCall = isArtifactTaskPackSurface(retained)
+      ? { tool: "read_file", arguments: { mode: "artifact", handle: retained.handle } }
+      : {
+          tool: "read_file",
+          arguments: {
+            mode: "slice",
+            handle: retained.handle,
+            range: retained.remaining_ranges?.[0] ?? retained.range,
+          },
+        };
     const fallback: TaskPackResult = {
       mode: "task_pack",
       coverage: "partial",
@@ -25267,6 +30479,7 @@ function dedupeTrimAndPersist(
     // above (coverage_reason is already "single-site", not "missing-roles").
     reconcileMissingRolesContract(fallback);
     reconcileCallerPathCoverage(fallback, opts?.args, workspace);
+    discloseUnservedQualifiedAnchorDefinition(fallback, effectiveQuery, workspace);
     // This envelope is the last thing standing between the caller and a hard
     // invariant throw below, so keep the disclosure list at the same bounded
     // size the pre-B1b fallback shipped.
@@ -25286,18 +30499,60 @@ function dedupeTrimAndPersist(
     // that never proved route/contract/continuation agree. Applied before the
     // cap assertion so any continuation it stamps is inside the measured size.
     applyCanonicalTaskDecision(fallback);
-    if (!fitsInCap(fallback)) {
-      throw new Error("task-pack invariant: proof-preserving byte-budget fallback exceeds cap");
+    // This rebuilt envelope did not pass through the normal post-trim rollup.
+    // Preserve the wire-visible truncation marker before compacting metadata.
+    stampRollupContentCompleteness(fallback);
+    if (!fitsInCap(fallback) && !isArtifactTaskPackSurface(retained)) {
+      // The rebuilt canonical contract can add structural bytes after
+      // trimToCap's last fit check. Re-enter only its advisory rungs, in the
+      // same order, while retaining the body/address, canonical ToolCall, and
+      // execution proof. Stop as soon as the response fits.
+      if (retained.outline !== undefined) delete retained.outline;
+      if (!fitsInCap(fallback) && retained.facts !== undefined) delete retained.facts;
+      if (!fitsInCap(fallback) && retained.why !== undefined) delete retained.why;
+      if (!fitsInCap(fallback) && retained.likely_edits !== undefined) delete retained.likely_edits;
+      if (!fitsInCap(fallback) && retained.edit_intent !== undefined) delete retained.edit_intent;
+      if (!fitsInCap(fallback) && retained.done_check !== undefined) delete retained.done_check;
     }
+    if (!fitsInCap(fallback) && fallback.continuation !== undefined && fallback.next !== undefined) {
+      const planned = deriveNextFromPlan(fallback.continuation);
+      if (planned !== undefined && JSON.stringify(planned) === JSON.stringify(fallback.next)) {
+        // The canonical `next` and contract `next_call` remain executable and
+        // proof-bound; this plan wrapper is only a byte-for-byte duplicate.
+        delete fallback.continuation;
+      }
+    }
+    if (!fitsInCap(fallback) && fallback.execution_contract !== undefined) {
+      fallback.execution_contract = contractForTrim(fallback.execution_contract);
+    }
+    if (!fitsInCap(fallback) && fallback.execution_contract !== undefined) {
+      fallback.execution_contract = contractForEvidenceRetention(fallback.execution_contract);
+    }
+    assertTaskPackConstructionInvariant(
+      fitsInCap(fallback),
+      "proof-preserving byte-budget fallback exceeds cap",
+    );
     // W3: the create route is the final word even on the proof-preserving
     // fallback (its next is the edit action, not a dropped discovery call).
     assertCreateRoute(fallback, profile, workspace);
     // W2: bound the guidance-metadata inventory at ANY pack size.
     capGuidanceMetadata(fallback);
     persistPackFingerprints(workspace, fallback);
-    if (opts?.args !== undefined) {
-      captureServedPack(workspace, opts.args, computePackFingerprint(opts.args, workspace), fallback);
-    }
+    // FX-J/FX-K: this EARLY exit ships `fallback` and never reaches the seam,
+    // so nothing was withheld — but the bookings must still land, or a surface
+    // this response really served would be missing from the epoch's admissible
+    // union (the T09 "the gate refused handles this server itself had served"
+    // class). It is the SAME single pass, so `fallback` — not the pre-trim
+    // list — is what it books. The certified working set is deliberately left
+    // untouched here, exactly as it was before FX-J.
+    bookShippedPackServeState(
+      workspace,
+      fallback,
+      effectiveQuery,
+      pendingBookings,
+      undefined,
+      opts?.args !== undefined ? { args: opts.args, captureTarget: fallback } : undefined,
+    );
     return fallback;
   }
   // W3: re-assert the concrete create route as the FINAL word (the prepared
@@ -25361,6 +30616,7 @@ function dedupeTrimAndPersist(
   // share the same bounded guidance budget as every other unserved-file note.
   reconcileMissingRolesContract(trimmed);
   reconcileCallerPathCoverage(trimmed, opts?.args, workspace);
+  discloseUnservedQualifiedAnchorDefinition(trimmed, effectiveQuery, workspace);
   // B1c (2026-08-01 retrieval-scope): make a candidate list's own advice
   // runnable, and remember WHICH candidates are pending so a query-only re-pack
   // can bind them instead of re-deriving the same ambiguity.
@@ -25388,19 +30644,69 @@ function dedupeTrimAndPersist(
   const packLane = normalizeContractLane((opts?.args as { lane?: unknown } | undefined)?.lane);
   suppressNonProgressingNextCall(workspace, trimmed, opts?.args, effectiveQuery, servedZoomScope);
   enforceNoDeadEndContract(trimmed, effectiveQuery, { workspace, lane: packLane });
-  attachEvidenceCompletion({
-    workspace,
-    pack: trimmed as never,
-    tokensByConcern: concernTokensById(trimmed, effectiveQuery),
-    packCapBytes: capForResult(trimmed),
-  });
   // Evidence-expansion is a proof transition, not post-response bookkeeping.
   // Persist its explicit capability gap before the final contract rebuild so
   // this very pack can discharge its open-universe parent. Recording it below
   // the rebuild made the first fresh exhaustive Go pack emit `discover` and
   // only a later re-pack see the terminal explicit-gap proof.
   const importedEvidenceExpansionGaps = opts?.evidenceExpansion?.gaps ?? [];
-  const preFinalExpansionGap = hasCurrentEvidenceExpansionGap(
+  const literalSourceUniverse = literalFirstRoutingEnabled() && opts?.args !== undefined
+    ? literalSourceUniverseProved(
+        trimmed,
+        literalFirstMeasurement(opts.args, effectiveQuery, workspace, undefined),
+        { workspace, args: opts.args },
+      )
+    : false;
+  if (literalSourceUniverse) {
+    // `source-cohort-remaining` is discharged only by the exact, bound
+    // continuation witness above. Keeping the marker after that proof would
+    // rebuild the final contract as discovery despite every source witness
+    // being accounted for.
+    trimmed.missing = trimmed.missing.filter((entry) => entry !== "source-cohort-remaining");
+    // The cohort witness is an exact, content-bearing occurrence range for
+    // every source path, including the one served through the authenticated
+    // continuation.  The generic edit-content heuristic is intentionally
+    // conservative about a one-line slice, but retaining its
+    // `needs-followup` marker here would reject that already-proved exact
+    // frontier without offering any evidence-grounded call.  Clear only this
+    // stale heuristic result; the normal readiness rebuild below still checks
+    // every required body, the literal universe proof, ledger discharge, and
+    // risk before it can prepare an edit.
+    delete trimmed.content_sufficiency;
+    if (trimmed.missing.length === 0) {
+      trimmed.coverage = "complete";
+      delete trimmed.coverage_reason;
+    }
+    // A pure change-propagation relation has no independently requested API or
+    // test duty. Those generic role placeholders were useful before the exact
+    // source universe was proved, but must not keep a fully witnessed rename
+    // in discovery after its one sanctioned cohort continuation succeeds.
+    // `task.profile` is canonical wire input; server normalization keeps its
+    // selected value in `profile` even when no legacy `taskProfile` key is
+    // present in TaskPackArgs. Use that authoritative selected profile so a
+    // handle-based canonical re-pack gets the same cohort discharge as the
+    // initial pack.
+    if (profile === "change_propagation") {
+      const genericRoleMarkers = new Set([
+        "implementation",
+        "contract",
+        "api",
+        "test",
+        "unresolved-ledger:required-role:implementation",
+        "unresolved-ledger:required-role:contract",
+        "unresolved-ledger:required-role:api",
+        "unresolved-ledger:required-role:test",
+      ]);
+      trimmed.missing = trimmed.missing.filter((entry) => !genericRoleMarkers.has(entry));
+      trimmed.required_surfaces = ["implementation"];
+      trimmed.missing_required_surfaces = [];
+      if (trimmed.missing.length === 0) {
+        trimmed.coverage = "complete";
+        delete trimmed.coverage_reason;
+      }
+    }
+  }
+  const preFinalExpansionGap = !literalSourceUniverse && hasCurrentEvidenceExpansionGap(
     trimmed,
     effectiveQuery,
   );
@@ -25411,9 +30717,27 @@ function dedupeTrimAndPersist(
     trimmed.coverage = "partial";
     trimmed.coverage_reason ??= "concerns-uncovered";
   }
-  const recordedExpansionGap = preFinalExpansionGap
-    ? recordEpochTaskContract(workspace, trimmed, effectiveQuery, opts?.evidenceExpansion)
+  const recordedExpansionGap = preFinalExpansionGap || literalSourceUniverse
+    ? recordEpochTaskContract(
+        workspace,
+        trimmed,
+        effectiveQuery,
+        opts?.evidenceExpansion,
+        literalSourceUniverse,
+      )
     : false;
+  if (literalSourceUniverse && trimmed.change_contract !== undefined) {
+    const missing = trimmed.change_contract.missing.filter(
+      (entry) => entry !== "execution:open-universe:dependency-definitions",
+    );
+    trimmed.change_contract = {
+      ...trimmed.change_contract,
+      missing,
+      discovery_complete: missing.length === 0,
+      status: missing.length === 0 ? "ready" : trimmed.change_contract.status,
+      max_additional_tl_calls: missing.length === 0 ? 0 : trimmed.change_contract.max_additional_tl_calls,
+    };
+  }
   // The seams above can add a missing disclosure or retain a clipped range
   // after the first contract build. Rebuild and project together so the wire
   // never pairs that post-contract state with a stale prepared certificate.
@@ -25423,7 +30747,8 @@ function dedupeTrimAndPersist(
     effectiveQuery,
     workspace,
     workspaceInventory,
-    preFinalExpansionGap && recordedExpansionGap,
+    (preFinalExpansionGap || literalSourceUniverse) && recordedExpansionGap,
+    literalSourceUniverse,
     packLane,
   );
   attachSingleSiteUniqueMatchFastPath(trimmed, workspace, effectiveQuery, profile, opts?.cache);
@@ -25445,7 +30770,9 @@ function dedupeTrimAndPersist(
     recordPackChecks(workspace, opts.query, checkRecords);
   }
   // ---------------------------------------------------------------------
-  // V11-03 SECOND SEAM (TL_COVERAGE_PACKER_V2, requires TL_COVERAGE_PACKER) —
+  // V11-03 SECOND SEAM (TL_COVERAGE_PACKER=v2 since the v0.14 consolidation;
+  // the tri-state value now enforces by construction the base-flag conjunct
+  // this seam's old comment claimed but never checked) —
   // change_contract obligation threading, post-surfaces.
   //
   // WRITE: `trimmed.change_contract` is fully finalized by this point (every
@@ -25527,7 +30854,11 @@ function dedupeTrimAndPersist(
   // it must not suppress the initial authoritative discovery call for an
   // unresolved direct callee/value. Gap-bearing current evidence was recorded
   // above because it is terminal proof for this very response.
-  if (!preFinalExpansionGap) {
+  // A proved literal cohort was recorded before the final rebuild above. Do
+  // not run the ordinary post-decision expansion recorder a second time: that
+  // reconstruction lacks the continuation witness and would overwrite the
+  // just-certified literal profile proof with an awaiting-input contract.
+  if (!preFinalExpansionGap && !literalSourceUniverse) {
     recordEpochTaskContract(workspace, trimmed, effectiveQuery, opts?.evidenceExpansion);
     const persistedDischarge = taskContractDischargeCertificate(
       workspace,
@@ -25610,64 +30941,90 @@ function dedupeTrimAndPersist(
     opts?.args?.forceServe === true,
     servedZoomScope,
   );
+  annotateSemanticFrontierContinuation(returned, effectiveQuery, semanticFrontierGuardEnabled());
   applyCanonicalTaskDecision(returned);
+  // FX-I-A/FX-J (2026-09-03): THE SF PRE-BOOKING SEAM — the last pass that can
+  // shed a body, run before the one pass that books one.
+  //
+  // It cannot run earlier than this line: eligibility starts at
+  // `isSemanticFrontierContinuationOptional`, and the classification that
+  // marks a surface SF-supporting is `annotateSemanticFrontierContinuation`
+  // immediately above, which needs the finalized `execution_contract`
+  // (`contractEvidenceAddresses`) to tell a required surface from a supporting
+  // one. It must not run any later: `bookShippedPackServeState` below is the
+  // single booking pass, and it derives EVERY producer — the cumulative
+  // served-surface log (and so the next pack's `priorEpochActionFrontier` /
+  // certificate `action_frontier`), the edit gate's admissible union, the
+  // certified working set, the served-range ledger and the served-pack record
+  // — from one `shippedSurfaces` projection over `returned`, in BOTH flag
+  // states (FX-K). The pack that gets booked IS the pack that ships. The
+  // static ordering fence in `sfBookingOrderFence.spec.ts` holds this by
+  // parse, not by review.
+  applySemanticFrontierPreBookingSeam(workspace, returned, opts?.args, effectiveQuery);
+  noteSemanticFrontierTraceSeed(
+    prepareSemanticFrontierTraceSeed(returned, effectiveQuery, semanticFrontierGuardEnabled()),
+  );
   // A receipt can omit the body whose exact text this shortcut certifies. Never
   // carry it across an idempotent/subset downgrade or a non-ready exit.
   if (returned !== trimmed || returned.execution_contract?.typestate.phase !== "prepared") {
     delete returned.fast_path;
   }
-  // Cache only after the final returned projection. An awaiting-input or
-  // receipt downgrade must never leave its earlier prepared certificate
-  // available for qref carry-forward; when the returned contract remains
-  // prepared, retain trimmed's full working set rather than a compact receipt.
-  if (returned.execution_contract?.typestate.phase === "prepared") {
-    rememberCertifiedWorkingSet(workspace, trimmed, effectiveQuery);
-  } else {
-    // The map is one certificate per workspace. A non-prepared final result
-    // supersedes any earlier certificate for this task/session; retaining it
-    // would let a later qref replay resurrect authority the current evidence
-    // just withdrew.
-    certifiedWorkingSets.delete(laneScopedKey(path.resolve(workspace)));
-  }
-  if (opts?.args !== undefined) {
-    const captureTarget = idempotent ?? trimmed;
-    // §3 residual: dedup baseline vs. wire — `captureTarget` is the fingerprint
-    // baseline (see the comment block above), `returned` is what the caller
-    // actually receives and therefore what the served-range ledger may book.
-    captureServedPack(
-      workspace, opts.args, computePackFingerprint(opts.args, workspace), captureTarget, returned,
-    );
-  }
-  // P1 evidence completion shadow runs against the pack the caller actually
-  // receives. It remains a response no-op; evidenceShadow.spec.ts test 17
-  // pins normalized response equivalence with TL_EVIDENCE_SHADOW enabled.
-  emitEvidenceShadow({
+  // FX-J: THE SINGLE BOOKING PASS. Every producer that asserts what this
+  // response served runs inside it, downstream of the seam, off one
+  // `shippedSurfaces` projection over the pack that ships.
+  bookShippedPackServeState(
     workspace,
-    pack: returned as never,
-    ...(opts?.args?.evidenceShadowQref !== undefined
-      ? { qref: opts.args.evidenceShadowQref }
-      : {}),
-    tokensByConcern: concernTokensById(returned, effectiveQuery),
-    surfaceBytes: Buffer.byteLength(JSON.stringify(returned), "utf8"),
-    packCapBytes: capForResult(returned),
-  });
+    returned,
+    effectiveQuery,
+    pendingBookings,
+    { trimmed },
+    opts?.args !== undefined ? { args: opts.args, captureTarget: idempotent ?? trimmed } : undefined,
+  );
   return returned;
 }
 
+// ---------------------------------------------------------------------------
+// Lexical callee extraction (relocated from evidenceShadow.ts when the P1
+// evidence-completion experiment was deleted, v0.14 flag inventory 2026-08-31;
+// the one-hop proof expansion below was always its non-experimental consumer).
+// ---------------------------------------------------------------------------
+
+const CALL_RE = /\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(/g;
+const CALL_STOPWORDS = new Set([
+  "if", "for", "while", "switch", "catch", "return", "sizeof", "typeof",
+  "function", "constructor", "super", "await", "throw", "new", "delete",
+  "print", "assert", "expect", "require",
+]);
+const MAX_CALLEES_SCANNED = 8;
+
 /**
- * Concern id -> the significant tokens of its own query clause, for the P1
- * shadow resolver. Uses the SAME clause splitter the multi_concern builder
- * uses, so the anchors a concern is measured against are the ones it was
- * created from.
+ * R2 (2026-08-28): is this call RECEIVER-QUALIFIED (`Math.round(`, `a?.b(`,
+ * a fluent chain)? A qualified call is not a workspace-local definition the
+ * caller could serve, so counting it would claim the pack should have in
+ * fact served every real callee's definition.
+ *
+ * Whitespace is skipped so a fluent chain broken across lines is still seen as
+ * qualified; nothing else about the scan changes.
  */
-function concernTokensById(result: TaskPackResult, query: string): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  const concerns = result.concerns ?? [];
-  if (concerns.length === 0) return out;
-  const groups = concernGroupsForQuery(query);
-  concerns.forEach((concern, index) => {
-    out.set(concern.id, groups[index]?.tokens ?? concernAnchorTokens(query));
-  });
+function isReceiverQualified(code: string, matchIndex: number): boolean {
+  let cursor = matchIndex - 1;
+  while (cursor >= 0 && /\s/u.test(code[cursor]!)) cursor -= 1;
+  return cursor >= 0 && code[cursor] === ".";
+}
+
+/** Existing TS/JS call-form extractor, used by one-hop proof expansion. */
+function calleesOf(code: string, own: readonly string[]): string[] {
+  const out: string[] = [];
+  const ownLower = new Set(own.map((s) => s.toLowerCase()));
+  CALL_RE.lastIndex = 0;
+  for (let m = CALL_RE.exec(code); m !== null; m = CALL_RE.exec(code)) {
+    const name = m[1]!;
+    if (CALL_STOPWORDS.has(name.toLowerCase())) continue;
+    if (ownLower.has(name.toLowerCase())) continue;
+    if (isReceiverQualified(code, m.index)) continue;
+    if (!out.includes(name)) out.push(name);
+    if (out.length >= MAX_CALLEES_SCANNED) break;
+  }
   return out;
 }
 
@@ -25828,7 +31185,9 @@ function shrinkArtifactSections(
     entry.section = smaller.candidate;
     entry.content_completeness = "partial";
     entry.note = "artifact body reduced to fit the pack byte budget; fetch the full section with next";
-    if (entry.next === undefined) entry.next = `read_file mode=artifact path=${entry.path}`;
+    if (entry.next === undefined) {
+      entry.next = { tool: "read_file", arguments: { mode: "artifact", path: entry.path } };
+    }
     changed = true;
   }
   return changed;
@@ -25876,6 +31235,14 @@ export function trimToCap(
   protectedArtifactPaths?: ReadonlySet<string>,
 ): TaskPackResult {
   if (fitsInCap(result)) return result;
+
+  // RV-4(c): caller-supplied windows are independent targets, not a ranked
+  // discovery list. Remember them before Phase B sheds `why`, so a tight cap
+  // can share the inline budget between them instead of preserving only the
+  // first target's body by construction.
+  const callerRangeBodySurfaces = new Set(result.surfaces.filter((surface) =>
+    surface.why?.includes("caller-supplied") === true && surface.code !== undefined,
+  ));
 
   // DESIGN-v0.8 §A7: the partial-pack `tree` is a navigation convenience (find
   // replacement), not task-closing content — drop it first, before any
@@ -26029,6 +31396,32 @@ export function trimToCap(
   // branded complete packs partial and listed covered roles as "missing").
   // NOTE capForResult() SHRINKS as code is removed (32768→28672→24576), so
   // fitsInCap is re-evaluated against the LIVE cap after each strip.
+  // Before whole-body shedding, trim caller-pinned bodies in balanced rounds.
+  // This protects the independent multi-target contract at a tiny cap: each
+  // target retains a useful prefix (and an honest remainder) while there is
+  // budget for any body at all. Only once equal rounds cannot make the result
+  // fit does the ordinary body-removal ladder take over.
+  if (callerRangeBodySurfaces.size >= 2) {
+    for (;;) {
+      if (fitsInCap(result)) return result;
+      let changed = false;
+      for (const surf of result.surfaces) {
+        if (!callerRangeBodySurfaces.has(surf) || surf.code === undefined) continue;
+        const lines = surf.code.split("\n");
+        if (lines.length <= 2) continue;
+        const kept = Math.max(1, Math.ceil((lines.length - 1) / 2));
+        const reduced = lines.slice(0, kept).join("\n") + "\n";
+        if (reduced.length >= surf.code.length) continue;
+        surf.code = reduced;
+        surf.content_completeness = "partial";
+        surf.remaining_ranges = surf.range === undefined
+          ? surf.remaining_ranges
+          : [...new Set([...(surf.remaining_ranges ?? []), surf.range])];
+        changed = true;
+      }
+      if (!changed) break;
+    }
+  }
   for (let i = result.surfaces.length - 1; i >= 0; i--) {
     const surf = result.surfaces[i]!;
     if (surf.code !== undefined) {
@@ -26105,6 +31498,19 @@ export function trimToCap(
   return result;
 }
 
+/**
+ * The serialized size of the pack as it stands.
+ *
+ * Extracted from `fitsInCap` (2026-09-04, FX-OH F1) so the caller-named
+ * frontier join can size its bounded body against the pack's LIVE headroom
+ * through the SAME measurement the shedder itself uses — one Class-C
+ * pre-shed byte-measurement site for both, never a second one that could
+ * drift from it (see wireBudgetG8Fence.spec.ts's ratchet).
+ */
+function packWireBytes(result: TaskPackResult): number {
+  return Buffer.byteLength(JSON.stringify(result), "utf8");
+}
+
 function fitsInCap(result: TaskPackResult): boolean {
-  return Buffer.byteLength(JSON.stringify(result), "utf8") <= capForResult(result);
+  return packWireBytes(result) <= capForResult(result);
 }

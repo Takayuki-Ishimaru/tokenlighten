@@ -392,7 +392,7 @@ export type UnknownPropertyRefusal = {
    */
   retry: "call";
   error: string;
-  next: string;
+  detail: string;
 };
 
 /**
@@ -409,10 +409,10 @@ export function withinRefusalBudget(candidate: unknown): boolean {
   return Buffer.byteLength(JSON.stringify(candidate), "utf8") <= REFUSAL_MAX_BYTES;
 }
 
-const NEXT_WITH_KEYS = (tool: string) =>
+const DETAIL_WITH_KEYS = (tool: string) =>
   `re-issue the same call with only advertised ${tool} arguments`;
 
-const NEXT_WITHOUT_KEYS = (tool: string) =>
+const DETAIL_WITHOUT_KEYS = (tool: string) =>
   `re-issue the same call with only advertised ${tool} arguments; the advertised set did not fit this refusal — read it from tools/list`;
 
 /**
@@ -442,10 +442,10 @@ export function unknownPropertyRefusal(
   const withKeys: UnknownPropertyRefusal = {
     ...base,
     keys: [...first.advertisedKeysAtPath],
-    next: NEXT_WITH_KEYS(tool),
+    detail: DETAIL_WITH_KEYS(tool),
   };
   if (withinRefusalBudget(withKeys)) return withKeys;
-  return { ...base, next: NEXT_WITHOUT_KEYS(tool) };
+  return { ...base, detail: DETAIL_WITHOUT_KEYS(tool) };
 }
 
 /**

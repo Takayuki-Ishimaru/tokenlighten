@@ -56,6 +56,21 @@ vi.mock("../cli.js", () => ({
 
 vi.mock("../commands.js", () => ({
   loadUsageSummary: mockLoadUsageSummary,
+  formatUsageMeasurementStatus: (tier: { status: string; basis: string }, language: "en" | "ja") =>
+    language === "ja"
+      ? `${tier.status === "measured" ? "実測" : tier.status === "estimated" ? "推定" : "利用不可"}（根拠: ${tier.basis}）`
+      : `${tier.status} (basis: ${tier.basis})`,
+  formatUsageMeasurementTier: (tier: { status: string; basis: string; tokens: number | null }, language: "en" | "ja") => {
+    const tokens = tier.tokens === null
+      ? (language === "ja" ? "利用不可" : "unavailable")
+      : language === "ja" ? `${tier.tokens}トークン` : `${tier.tokens} tokens`;
+    const status = language === "ja"
+      ? tier.status === "measured" ? "実測" : tier.status === "estimated" ? "推定" : "利用不可"
+      : tier.status;
+    return language === "ja"
+      ? `${tokens}（${status}・根拠: ${tier.basis}）`
+      : `${tokens} (${status}; basis: ${tier.basis})`;
+  },
 }));
 
 vi.mock("../workspaceState.js", () => ({
@@ -149,6 +164,14 @@ describe("TokenLighten sidebar", () => {
       measuredBaselineCalls: 3,
       measuredResponseBytes: 400,
       measuredBaselineBytes: 800,
+      estimatedResponseTokens: 100,
+      method: "file-bytes",
+      measurementDisplay: {
+        wire: { status: "measured", basis: "test", tokens: null },
+        mcpResponse: { status: "estimated", basis: "test", tokens: 10 },
+        contextAvoided: { status: "estimated", basis: "test", tokens: -250 },
+        session: { status: "unavailable", basis: "test", tokens: null, net: { status: "estimated", basis: "test", tokens: -260 } },
+      },
       sessionEstimate: { status: "estimated", confidence: "low", calibration: { sampleCount: 0 }, warnings: [] },
     });
     mockRegisterProvider.mockReturnValue({ dispose: vi.fn() });
@@ -159,6 +182,7 @@ describe("TokenLighten sidebar", () => {
     provider.resolveWebviewView({ webview } as never);
     await vi.waitFor(() => expect(webview.html).toContain("Calibrating: 0/24 paired samples"));
     expect(webview.html).toContain("Measured calls: 3; response bytes vs baseline: 50.0%");
+    expect(webview.html).toContain("TL response total: ~100 tokens (file-bytes); observed usage: measured (basis: test); MCP response overhead: 10 tokens (estimated; basis: test); context avoided: -250 tokens (estimated; basis: test); session avoided-turn: unavailable (unavailable; basis: test); net: -260 tokens (estimated; basis: test)");
     expect(webview.html).toContain("Calibrating: 0/24 paired samples");
   });
 

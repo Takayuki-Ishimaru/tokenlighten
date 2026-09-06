@@ -115,6 +115,9 @@ describe("task_pack generic-text fallback", () => {
     );
 
     expect(result.surfaces.some((surface) => surface.path === "notes.disabledext")).toBe(false);
-    expect(result.next ?? "").toContain("search_files action=locate");
+    expect(result.next).toMatchObject({
+      tool: "search_files",
+      arguments: expect.objectContaining({ action: "locate" }),
+    });
   }, 30000);
 });

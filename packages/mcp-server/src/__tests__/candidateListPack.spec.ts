@@ -210,10 +210,11 @@ describe("candidate-list containment — choose-candidate close (fix 2)", () => 
     const codeless = surfaces.filter((surface) => surface.code === undefined);
     expect(codeless.length).toBe(1);
     // The recomputed `next` names ONLY the codeless remainder, never a served handle.
-    expect(result.next).toBeDefined();
-    expect(result.next).toContain(codeless[0]!.handle);
+    expect(result.next).toMatchObject({ tool: "read_file", arguments: expect.any(Object) });
+    const nextJson = JSON.stringify(result.next);
+    expect(nextJson).toContain(codeless[0]!.handle);
     for (const surface of surfaces.filter((s) => s.code !== undefined)) {
-      expect(result.next).not.toContain(surface.handle);
+      expect(nextJson).not.toContain(surface.handle);
     }
     const contract = buildTaskExecutionContract(result, "generic", QUERY);
     expect(contract.typestate.phase).toBe("discovery");
@@ -249,14 +250,99 @@ describe("deep-closure profile gate (fix 3)", () => {
       ],
       missing: [],
       route: { action: "edit_from_handles", reason: "test", max_additional_tl_calls: 1 },
+      profile_binding: {
+        requested: "auto", selected: "generic", source: "inferred", confidence: 0.8,
+        reason: "query matched generic",
+      },
     } as unknown as TaskPackResult;
     return { ws, result };
   }
 
-  it("skips the deep loop for an inferred lean profile (generic)", () => {
+  it.each(["generic", "answer"] as const)(
+    "closes one existing same-handle surface for an inferred lean profile (%s)",
+    (profile) => {
+      const { ws, result } = gateFixture();
+      result.profile_binding = {
+        requested: "auto", selected: profile, source: "inferred", confidence: 0.8,
+        reason: `query matched ${profile}`,
+      };
+      const ops = runRecursiveReadOnlyClosure(result, profile, QUERY, ws);
+      expect(ops).toBe(1);
+      expect(result.internalized).toEqual([
+        expect.objectContaining({ op: "read", status: "used", evidence: 1 }),
+      ]);
+      const consumer = (result.surfaces as Array<{ path: string; code?: string }>)
+        .find((surface) => surface.path === "src/consumer.ts");
+      expect(consumer?.code).toContain("consumer");
+    },
+  );
+
+  it("does not choose between multiple codeless handles for an inferred lean profile", () => {
     const { ws, result } = gateFixture();
+    delete (result.surfaces[0] as { code?: string }).code;
     const ops = runRecursiveReadOnlyClosure(result, "generic", QUERY, ws);
     expect(ops).toBe(0);
+    expect(result.internalized).toBeUndefined();
+    expect(result.surfaces.every((surface) => surface.code === undefined)).toBe(true);
+  });
+
+  it("treats omitted required as required when rejecting a hidden multi-handle choice", () => {
+    const { ws, result } = gateFixture();
+    for (const surface of result.surfaces) {
+      delete (surface as { code?: string }).code;
+      delete (surface as { required?: boolean }).required;
+    }
+    expect(runRecursiveReadOnlyClosure(result, "generic", QUERY, ws)).toBe(0);
+    expect(result.internalized).toBeUndefined();
+  });
+
+  it.each(["evidence", "fallback", undefined] as const)(
+    "keeps lean closure off for a non-inferred binding (%s)",
+    (source) => {
+      const { ws, result } = gateFixture();
+      if (source === undefined) delete result.profile_binding;
+      else result.profile_binding = {
+        requested: "auto", selected: "generic", source, confidence: 0.8,
+        reason: `test ${source} binding`,
+      };
+      expect(runRecursiveReadOnlyClosure(result, "generic", QUERY, ws)).toBe(0);
+      expect(result.internalized).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["ranges", { ranges: ["1-2"] }],
+    ["symbol", { symbol: "consumerHealth" }],
+    ["path", { path: "src/consumer.ts" }],
+    ["targets", { targets: [{ handle: "ignored" }] }],
+    ["numeric-range", { range: 42 }],
+    ["null-range", { range: null }],
+  ] as const)("rejects an extra or ill-typed %s selector instead of widening it", (_tag, extra) => {
+    const { ws, result } = gateFixture();
+    const consumer = result.surfaces[1]!;
+    const call = {
+      tool: "read_file" as const,
+      arguments: { handle: consumer.handle, ...extra } as Record<string, any>,
+    };
+    result.coverage_reason = "concerns-uncovered";
+    result.route = {
+      action: "locate_missing_surfaces", reason: "test bounded continuation",
+      max_additional_tl_calls: 1,
+    };
+    result.next = call;
+    result.continuation = {
+      version: 1,
+      stages: [{ execution: "parallel", calls: [call] }],
+    };
+    expect(runRecursiveReadOnlyClosure(result, "generic", QUERY, ws)).toBe(0);
+    expect((consumer as { code?: string }).code).toBeUndefined();
+    expect(consumer.range).toBe("1-6");
+  });
+
+  it("rejects a surface range that disagrees with its handle entry", () => {
+    const { ws, result } = gateFixture();
+    result.surfaces[1]!.range = "2-6";
+    expect(runRecursiveReadOnlyClosure(result, "generic", QUERY, ws)).toBe(0);
     expect(result.internalized).toBeUndefined();
   });
 
@@ -351,9 +437,11 @@ describe("query-named files are requirements, not candidates (B1c, 2026-08-01)",
     writeFile(fixture.ws, "docs/CONTRACT.md", "# Contract\n\nThe mixer must saturate.\n");
     const { attachCandidateListRecovery } = await import("../tools/readCodeTaskPack.js");
     attachCandidateListRecovery(fixture.result, "CONTRACT.md の規定どおり health を直す", fixture.ws);
-    expect(fixture.result.next, JSON.stringify(fixture.result)).toBeDefined();
-    expect(fixture.result.next).toMatch(/^read_file mode=task_pack /);
-    expect(fixture.result.next).toContain("docs/CONTRACT.md");
+    expect(fixture.result.next, JSON.stringify(fixture.result)).toMatchObject({
+      tool: "read_file",
+      arguments: expect.any(Object),
+    });
+    expect(JSON.stringify(fixture.result.next)).toContain("docs/CONTRACT.md");
   });
 
   it("a query-only re-pack while a candidate choice is pending converges instead of degrading", async () => {

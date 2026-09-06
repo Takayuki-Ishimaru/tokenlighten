@@ -125,7 +125,13 @@ export function actFloorHolds(candidate: ShedPayload, _kind: Kind): boolean {
   if (decision === undefined) return true;
 
   if (decision["kind"] === "act.answer") {
-    return answerFloorHolds(usableEvidenceView(candidate));
+    const certificate = isRecord(decision["certificate"])
+      ? decision["certificate"] as {
+          obligations?: readonly string[];
+          workspace?: { inventory_complete?: boolean };
+        }
+      : undefined;
+    return answerFloorHolds(usableEvidenceView(candidate), certificate);
   }
 
   if (decision["kind"] === "act.edit") {
@@ -208,6 +214,9 @@ function restoringCalls(candidate: ShedPayload, original: ShedPayload): ToolCall
     const range = windowFor(now, priorEntry);
     if (range === undefined) continue;
     seen.add(handle);
+    // The demotion helper stays a pure payload transform. The envelope-owned
+    // post-ladder canonicalization pass rewrites these calls before they are
+    // measured/emitted, preserving this helper's standalone contract.
     calls.push({ tool: "read_file", arguments: { handle, range } });
   }
   return calls;
@@ -245,6 +254,9 @@ function repackCall(payload: ShedPayload): ToolCall | undefined {
       ? payload["qref"] as string
       : undefined;
   if (qref === undefined) return undefined;
+  // This call is minted in the post-projection budget path. The envelope's
+  // post-ladder canonicalization pass rewrites it to the advertised shape
+  // before measurement/emission.
   return { tool: "read_file", arguments: { mode: "task_pack", qref } };
 }
 

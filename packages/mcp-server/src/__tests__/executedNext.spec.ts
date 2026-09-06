@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   clearExecutedNextForLane,
   clearExecutedNextForWorkspace,
@@ -10,9 +13,22 @@ import {
   recordExecutedNext,
   resetPackServeLogForTest,
 } from "../util/packServeLog.js";
+import {
+  bindTaskContractHandle,
+  recoverHandlelessTaskScope,
+  recordTaskContract,
+  resetTaskContractStoreForTest,
+} from "../features/task-pack/taskContractStore.js";
 
 describe("executed next result consumption", () => {
-  beforeEach(resetPackServeLogForTest);
+  const tempWorkspaces: string[] = [];
+  beforeEach(() => {
+    resetPackServeLogForTest();
+    resetTaskContractStoreForTest();
+  });
+  afterEach(() => {
+    for (const workspace of tempWorkspaces.splice(0)) fs.rmSync(workspace, { recursive: true, force: true });
+  });
   it("binds read and every search action to epoch and result digest, including empty results", () => {
     const workspace = "/workspace";
     const lane = "a3";
@@ -43,6 +59,10 @@ describe("executed next result consumption", () => {
     // an action-bearing call on the same tool.
     const noAction = nextFingerprint("search_files", { query: "REFUNDED" });
     expect(noAction).not.toBe(sameShapeCanonicalOrder);
+    // The internal canonical task partition is a ledger-key dimension, never
+    // a wire-call-shape dimension.
+    expect(nextFingerprint("internal_test", { value: 1, taskBinding: "task-a" }))
+      .toBe(nextFingerprint("internal_test", { value: 1, taskBinding: "task-b" }));
   });
 
   it("unifies legacy producer calls with their canonical wire forms", () => {
@@ -83,6 +103,49 @@ describe("executed next result consumption", () => {
       expect(recordExecutedNext("/workspace-canonical", "default", tool, canonical)).toBe(false);
       expect(hasExecutedNext("/workspace-canonical", "default", tool, legacy)).toBe(true);
     }
+  });
+
+  it("partitions identical executed next calls by canonical task binding while preserving unbound callers", () => {
+    const workspace = "/workspace-task-binding";
+    const lane = "shared";
+    const call = { action: "find", query: "REFUNDED" } as const;
+
+    // Two live task handles can prescribe byte-identical next calls on one
+    // lane. Spending task A's call must not make task B look complete.
+    expect(recordExecutedNext(workspace, lane, "search_files", call, undefined, "task-fingerprint-a")).toBe(false);
+    expect(hasExecutedNext(workspace, lane, "search_files", call, "task-fingerprint-a")).toBe(true);
+    expect(hasExecutedNext(workspace, lane, "search_files", call, "task-fingerprint-b")).toBe(false);
+    expect(hasExecutedNext(workspace, lane, "search_files", call)).toBe(false);
+
+    // Handle-free callers retain the old workspace/lane partition exactly.
+    expect(recordExecutedNext(workspace, lane, "search_files", call)).toBe(false);
+    expect(hasExecutedNext(workspace, lane, "search_files", call)).toBe(true);
+    expect(hasExecutedNext(workspace, lane, "search_files", call, "task-fingerprint-a")).toBe(true);
+
+    // A new epoch still removes both bound and unbound ledgers for its lane.
+    clearExecutedNextForLane(workspace, lane);
+    expect(hasExecutedNext(workspace, lane, "search_files", call)).toBe(false);
+    expect(hasExecutedNext(workspace, lane, "search_files", call, "task-fingerprint-a")).toBe(false);
+  });
+
+  it("recovers a handleless re-pack only for one exact task, never a new epoch or same-query collision", () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "tl-handleless-repack-"));
+    tempWorkspaces.push(workspace);
+    const lane = "shared";
+    const query = "explain clipboard, autosave and telemetry";
+    const seed = (handle: string): void => {
+      recordTaskContract(workspace, ["explain", "clipboard", "autosave", "telemetry"], { query }, { lane });
+      bindTaskContractHandle(workspace, { lane }, handle);
+    };
+
+    seed("task-a");
+    expect(recoverHandlelessTaskScope(workspace, lane, query)).toEqual({ lane, taskHandle: "task-a" });
+    // An explicit epoch boundary is never allowed to inherit task A.
+    expect(recoverHandlelessTaskScope(workspace, lane, query, "new")).toBeUndefined();
+
+    seed("task-b");
+    // Two same-query handles make provenance ambiguous; fail closed.
+    expect(recoverHandlelessTaskScope(workspace, lane, query)).toBeUndefined();
   });
 
   // P1-c(i): the real defect this closes — a stale fingerprint from an

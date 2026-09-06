@@ -153,6 +153,46 @@ describe("§2.1.1 act floor — the predicate", () => {
     expect(actFloorHolds(withDecision([]), "read.task_pack")).toBe(false);
   });
 
+  it("FLOOR-ANSWER: exhaustive literal-source absence is decision-grade without a fake surface", () => {
+    const absenceDecision = {
+      kind: "act.answer",
+      certificate: {
+        id: "absence-ready",
+        obligations: ["literal-source-absent:NeverDefined"],
+        workspace: WORKSPACE,
+      },
+    };
+    const body = { v: 1, kind: "read.task_pack", evidence: [], decision: absenceDecision };
+    expect(actFloorHolds(body, "read.task_pack")).toBe(true);
+    expect(actFloorHolds({
+      ...body,
+      decision: {
+        ...absenceDecision,
+        certificate: {
+          ...absenceDecision.certificate,
+          workspace: { ...WORKSPACE, inventory_complete: false },
+        },
+      },
+    }, "read.task_pack")).toBe(false);
+    expect(actFloorHolds({
+      ...body,
+      decision: {
+        ...absenceDecision,
+        certificate: {
+          ...absenceDecision.certificate,
+          obligations: ["literal-source-absent:NeverDefined", "surface-content"],
+        },
+      },
+    }, "read.task_pack")).toBe(true);
+    expect(actFloorHolds({
+      ...body,
+      decision: {
+        ...absenceDecision,
+        certificate: { ...absenceDecision.certificate, obligations: ["literal-source-absent:"] },
+      },
+    }, "read.task_pack")).toBe(false);
+  });
+
   it("FLOOR-EDIT as amended by [R5-23]: frontier non-empty OR a create target — and NEITHER is still a breach", () => {
     const withDecision = (extra: Body): Body => ({
       v: 1, kind: "read.task_pack", evidence: [],
@@ -285,7 +325,10 @@ describe("§2.1.1 DEGRADE — demoteToDiscover", () => {
 
 describe("the ladder demotes rather than shipping a shorn act (P13)", () => {
   it("an act.answer whose bodies are all shed ships as `discover` with a non-empty executable next", () => {
-    const { body } = emit(answerPack(), 900);
+    const { body, bytes } = emit(answerPack(), 900);
+    // RV-6 wire gate: canonicalized demotion calls remain valid and compact
+    // enough to preserve the established 900B shedding success point.
+    expect(bytes).toBeLessThanOrEqual(900);
     const decision = body["decision"] as Body;
     expect(decision["kind"]).toBe("discover");
     expect(decision).not.toHaveProperty("certificate");
@@ -294,7 +337,10 @@ describe("the ladder demotes rather than shipping a shorn act (P13)", () => {
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls as Array<{ tool: string; arguments: Record<string, unknown> }>) {
       expect(call.tool).toBe("read_file");
-      expect(typeof call.arguments["handle"] === "string" || typeof call.arguments["qref"] === "string").toBe(true);
+      const targets = call.arguments["targets"];
+      const target = Array.isArray(targets) ? targets[0] as Body | undefined : undefined;
+      expect(typeof target?.["handle"] === "string" || typeof call.arguments["qref"] === "string").toBe(true);
+      expect(call.arguments["mode"]).toBeUndefined();
     }
     // The floor holds on what actually shipped — vacuously, because the kind no
     // longer claims anything a floor governs. That IS the property.
@@ -351,6 +397,50 @@ describe("the ladder demotes rather than shipping a shorn act (P13)", () => {
 // ---------------------------------------------------------------------------
 // 4. Ruling 6 at the projector — create promotion and branch-3 re-siting
 // ---------------------------------------------------------------------------
+
+describe("literal-source absence promotion", () => {
+  it("projects and emits final wire act.answer with empty evidence only for the proved exhaustive absence certificate", () => {
+    const contract = {
+      version: 1,
+      state: "ready",
+      readiness: "answer-ready",
+      discovery_complete: true,
+      next_action: "answer",
+      max_additional_discovery_calls: 0,
+      reason: "literal source inventory is complete and the term is absent",
+      workspace_state: WORKSPACE,
+      readiness_certificate: {
+        id: "ready-literal-absence",
+        obligations: [{ id: "surface-content" }, { id: "literal-source-absent:NeverDefined" }],
+      },
+      typestate: {
+        phase: "prepared",
+        certificate_id: "ready-literal-absence",
+        allowed_actions: ["answer"],
+        challenge_required_for: [],
+      },
+    } as unknown as TaskExecutionContract;
+    const decision = projectTaskDecision({
+      result: {},
+      contract,
+      canonicalKind: "act-answer",
+      evidence: [],
+    });
+    expect(decision?.kind).toBe("act.answer");
+    const payload = {
+      v: 1,
+      kind: "read.task_pack",
+      task: { id: "task-absence", coverage: "complete" },
+      profile: "answer",
+      evidence: [],
+      decision,
+    };
+    const shipped = emit(payload, 2048).body;
+    expect((shipped["decision"] as Body)["kind"]).toBe("act.answer");
+    expect(shipped["evidence"]).toEqual([]);
+    expect(actFloorHolds(shipped, "read.task_pack")).toBe(true);
+  });
+});
 
 describe("[R5-23] create_target rides `decision.act.edit`", () => {
   const certifiedEditContract = (): TaskExecutionContract => ({

@@ -412,10 +412,21 @@ function shedEvidenceEntry(payload: ShedPayload): ShedOutcome | undefined {
  * emitted as a recovery, and the step declines instead.
  */
 export function sliceCall(handle: string, ranges: readonly string[]): ToolCall | undefined {
-  return emittableToolCall({
+  const call = emittableToolCall({
     tool: "read_file",
-    arguments: { mode: "slice", handle, ranges: [...ranges] },
+    arguments: ranges.length === 1
+      ? { mode: "slice", handle, range: ranges[0] }
+      : { mode: "slice", handle, ranges: [...ranges] },
   });
+  if (call === undefined) return undefined;
+  // `content:"auto"` is the canonicalizer's helpful default for addressed
+  // reads, but it is redundant here: this continuation has no full/outline
+  // request and the server's omitted content default is already auto. Keep
+  // the executable advertised shape while reclaiming the bytes needed for a
+  // demoted task-pack to remain inside the tight wire budget.
+  const argumentsRecord = { ...call.arguments } as Record<string, unknown>;
+  delete argumentsRecord["content"];
+  return { ...call, arguments: argumentsRecord } as ToolCall;
 }
 
 export const READ_TASK_PACK_SHEDDER: Shedder = {

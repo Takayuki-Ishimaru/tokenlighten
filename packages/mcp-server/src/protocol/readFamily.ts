@@ -42,7 +42,9 @@
 // the deviation set is one grep rather than a reading exercise.
 // ---------------------------------------------------------------------------
 
-import type { Evidence, Kind, Limit, OmittedClass, Receipt, ToolCall } from "@tokenlighten/types";
+import type {
+  Evidence, Kind, Limit, OmittedClass, Receipt, TaskVerifyObligation, ToolCall,
+} from "@tokenlighten/types";
 
 import { emittableToolCall, parseProseToolCall } from "./refusal.js";
 // PI-03 attestation tier (default OFF). `clientAcknowledgedPrior` is false for
@@ -50,6 +52,23 @@ import { emittableToolCall, parseProseToolCall } from "./refusal.js";
 // path — which is exactly the property that keeps this projector's bytes
 // unchanged without the flag.
 import { clientAcknowledgedPrior } from "../state/contextAttestation.js";
+// W-LEDGER (DESIGN-v0.15-sf-turn-economy.md §2). `TL_RECEIPT_COVERAGE` is
+// default OFF, so `projectCoveredBy` below returns `undefined` for every call
+// on the default path and this projector's bytes are unchanged without the
+// flag — the same dead-code-by-default property `clientAcknowledgedPrior` has.
+// W-VERIFY-CLOSURE (DESIGN-v0.15-sf-verification-first.md §4). `TL_SF_VERIFY_FIRST`
+// is default OFF, so `verifyClosureGate` returns `undefined` on its FIRST LINE for
+// every call on the default path — the same dead-code-by-default property, and the
+// structural reason flag-off is byte-identical rather than merely tested to be.
+import { receiptCoverageEnabled, sfVerifyFirstEnabled } from "../util/flags.js";
+import { recordedVerifyObligations } from "../state/session.js";
+import type { CoveredSpan } from "./coverageReceipt.js";
+// FX-OH F2: the demote pass's own withholding marks — the ONLY driver of
+// `nextTargetsWithheldFrontierRow`, and empty with `TL_SF_DEMOTE` off.
+import {
+  semanticFrontierEvidenceWitnessId,
+  semanticFrontierWithholdingMarks,
+} from "./semanticFrontierTraceContext.js";
 
 type Body = Record<string, unknown>;
 
@@ -277,11 +296,99 @@ function limitFrom(body: Body, withheld: boolean): Limit | undefined {
   if (!withheld) return undefined;
   const omitted = omittedClasses(body);
   const next = deriveNext(body);
-  if (next === undefined) {
+  // FX-OH F2: a `next` that merely pulls a withheld SUPPORTING/caller-named row
+  // is not a continuation this response may prescribe — see
+  // `nextTargetsWithheldFrontierRow`. The limit degrades to the no-`next` arm,
+  // which for a cap-fired body is exactly `{cause:"capped", omitted:[...]}`.
+  if (next === undefined || nextTargetsWithheldFrontierRow(body, next)) {
     const cause = capFired(body) ? "capped" : "source";
     return omitted.length > 0 ? { cause, omitted } : { cause };
   }
   return omitted.length > 0 ? { cause: "wire", omitted, next } : { cause: "wire", next };
+}
+
+// ---------------------------------------------------------------------------
+// FX-OH F2 (2026-09-04) — A WITHHELD SUPPORTING ROW IS NOT THE RESPONSE'S
+// `limit.next`.
+//
+// THE DEFECT, MEASURED. On the sealed SF05 replay `TL_SF_STRUCTURAL_CONCERNS`
+// added a caller-named row for a 50 KB document and `TL_SF_DEMOTE` then made
+// it the pack's arbitrated `next` — so `limit` became
+// `{cause:"wire", omitted:["evidence"], next:{…}}`: an EXECUTABLE invitation
+// (+341 B) to spend a turn fetching a body the response had deliberately not
+// sent. With `TL_SF_DEMOTE` alone off, the identical pack shipped the honest
+// `{cause:"capped", omitted:["evidence"]}` — 41 B, no pull — and the wire's own
+// continuations then terminated in 2 hops instead of 4.
+//
+// THE RULE. `limit.next` is read by the shipped guide as "run this verbatim".
+// A row this response WITHHELD (W-DEMOTE's supporting tier, or the caller-named
+// join's bounded row) is by definition not the frontier: it already carries its
+// own `handle` + `remaining`, so a caller that decides it wants those bytes can
+// zoom them itself. Promoting one to the response level turns an addressable
+// option into an instruction.
+//
+// SCOPE, AND WHY THE DEFAULT WIRE CANNOT MOVE. The predicate is driven ENTIRELY
+// by `semanticFrontierWithholdingMarks()`, which `decisionWire.ts`'s demote pass
+// publishes only while `TL_SF_DEMOTE` is active. With the flag off both mark
+// sets are empty and this function returns `false` on its first line — so a
+// flag-off response is byte-identical by construction, not by review.
+// ---------------------------------------------------------------------------
+
+/** Every `path`/`handle` a continuation call addresses, in one pass. */
+function toolCallAddresses(next: ToolCall): { paths: Set<string>; handles: Set<string> } {
+  const paths = new Set<string>();
+  const handles = new Set<string>();
+  const args = next.arguments;
+  if (!isRecord(args)) return { paths, handles };
+  const addPath = (value: unknown): void => { const v = str(value); if (v !== undefined) paths.add(v); };
+  const addHandle = (value: unknown): void => { const v = str(value); if (v !== undefined) handles.add(v); };
+  addPath(args["path"]);
+  addHandle(args["handle"]);
+  for (const entry of Array.isArray(args["targets"]) ? args["targets"] : []) {
+    if (!isRecord(entry)) continue;
+    addPath(entry["path"]);
+    addHandle(entry["handle"]);
+  }
+  for (const entry of Array.isArray(args["paths"]) ? args["paths"] : []) {
+    if (isRecord(entry)) addPath(entry["path"]);
+    else addPath(entry);
+  }
+  for (const entry of Array.isArray(args["handles"]) ? args["handles"] : []) {
+    if (isRecord(entry)) addHandle(entry["handle"]);
+    else addHandle(entry);
+  }
+  return { paths, handles };
+}
+
+/**
+ * True iff `next` addresses an evidence row THIS response withheld a body from
+ * (W-DEMOTE, or the caller-named frontier join) that still carries its own
+ * `remaining` — i.e. a row the caller can already zoom on its own handle.
+ *
+ * Inert with `TL_SF_DEMOTE` off: the mark sets are then empty.
+ */
+function nextTargetsWithheldFrontierRow(body: Body, next: ToolCall): boolean {
+  const marks = semanticFrontierWithholdingMarks();
+  if (marks.demoted.size === 0 && marks.named.size === 0) return false;
+  const evidence = body["evidence"];
+  if (!Array.isArray(evidence)) return false;
+  const { paths, handles } = toolCallAddresses(next);
+  if (paths.size === 0 && handles.size === 0) return false;
+  for (const row of evidence) {
+    if (!isRecord(row)) continue;
+    const handle = str(row["handle"]);
+    const path = str(row["path"]);
+    const addressed = (handle !== undefined && handles.has(handle))
+      || (path !== undefined && paths.has(path));
+    if (!addressed) continue;
+    // A row with nothing outstanding is not a withheld row, whatever the mark
+    // says: the caller holds it, so a `next` at it would be a no-progress call
+    // the `deriveNext` contract already forbids for other reasons.
+    if (stringArray(row["remaining"]).length === 0) continue;
+    const id = semanticFrontierEvidenceWitnessId(row as Record<string, unknown>);
+    if (id !== undefined && (marks.demoted.has(id) || marks.named.has(id))) return true;
+  }
+  return false;
 }
 
 /**
@@ -446,6 +553,14 @@ const EPOCH_RESET_PATH_CAP = 8;
 export interface ReadProjectionContext {
   /** The workspace root this call resolved against. */
   readonly workspace?: string;
+  /**
+   * VF-5/VF-7: the workspace root, published ONLY for the verify-first
+   * closure gate (`verifyClosureGate`'s kit-less session-obligation
+   * fallback). Deliberately separate from `workspace` above -- see
+   * `ProtocolCallContext.verifyClosureWorkspace`'s own doc comment
+   * (protocol/envelope.ts) for why reusing `workspace` here is unsafe.
+   */
+  readonly verifyClosureWorkspace?: string;
   /** This call's INBOUND arguments, as received. */
   readonly args?: Readonly<Record<string, unknown>>;
 }
@@ -488,6 +603,45 @@ function receiptHasContinuation(receipt: Receipt): boolean {
 }
 
 /**
+ * W-LEDGER: project the emitter's `covered_by` — "which earlier calls put
+ * which lines of this window on the wire" — onto a `code-unchanged` receipt.
+ *
+ * `code-unchanged`'s residency claim is `handle` + `sha`, which is a claim
+ * about ONE serving call. `covered_by` is the PLURAL of the existing scalar
+ * `served_by`, and it exists because the ledger this receipt can now be
+ * decided from (`state/session.ts`'s `servedRangeLedger`, per PATH and
+ * cumulative) may name several earlier calls for one window — a whole-file
+ * request answered by three prior slices has no single `served_by` to name.
+ *
+ * THIS FUNCTION IS A GATE, NOT A BUILDER. It never derives coverage; it only
+ * forwards what `protocol/coverageReceipt.ts` already decided from the ledger,
+ * and it drops anything it cannot recognise. Three refusals, in order:
+ *
+ *   - flag off  => `undefined`, before the body is even inspected. This is the
+ *     second of the two independent gates the module header describes; the
+ *     first is in `coverageReceiptFor` itself.
+ *   - not an array of records with a `range` string => that entry is dropped.
+ *     A `covered_by` entry with no addressing claims residency it cannot
+ *     address, which is exactly what A.4 forbids.
+ *   - nothing survived => `undefined`, never `[]` (E-1, A.8.1: an empty array
+ *     is never emitted in place of absence).
+ */
+function projectCoveredBy(body: Body): CoveredSpan[] | undefined {
+  if (!receiptCoverageEnabled()) return undefined;
+  const declared = body["covered_by"];
+  if (!Array.isArray(declared)) return undefined;
+  const spans: CoveredSpan[] = [];
+  for (const entry of declared) {
+    if (!isRecord(entry)) continue;
+    const range = str(entry["range"]);
+    if (range === undefined) continue;
+    const servedBy = str(entry["served_by"]);
+    spans.push({ range, ...(servedBy !== undefined ? { served_by: servedBy } : {}) });
+  }
+  return spans.length > 0 ? spans : undefined;
+}
+
+/**
  * §2.3 / A.4: a receipt is a response that carries a `Receipt`.
  *
  * The emitters mint `receipt: "<form>"` at their own exit (that is what makes
@@ -503,7 +657,7 @@ function receiptHasContinuation(receipt: Receipt): boolean {
  * [R5-10] (2026-08-14): every WITHHOLDING form additionally carries the
  * continuation it was emitted with — see `receiptContinuation` below.
  */
-export function receiptOf(body: Body): Receipt | undefined {
+export function receiptOf(body: Body, workspaceRoot?: string): Receipt | undefined {
   const tag = str(body["receipt"]);
   if (tag === undefined) return undefined;
 
@@ -589,13 +743,24 @@ export function receiptOf(body: Body): Receipt | undefined {
       // something the client just asserted it holds. `handle` + `sha` (the
       // residency claim itself) and `next` are never dropped.
       const servedBy = clientAcknowledgedPrior(handle) ? undefined : str(body["served_by"]);
-      return {
+      // W-LEDGER: the plural of `served_by`, forwarded only under
+      // `TL_RECEIPT_COVERAGE`. An attestation that already names this handle
+      // makes the whole provenance tier restatement, so it is dropped with
+      // `served_by` for the same reason.
+      const coveredBy = clientAcknowledgedPrior(handle) ? undefined : projectCoveredBy(body);
+      // F10 (2026-09-02 review fix): `covered_by` is now declared on the
+      // `code-unchanged` member of `Receipt` (types/src/mcp/receipts.ts), so
+      // this is a properly typed construction of that member — no `unknown`
+      // detour needed to reach the union.
+      const codeUnchanged: Extract<Receipt, { receipt: "code-unchanged" }> = {
         receipt: "code-unchanged",
         handle,
         sha,
         ...(servedBy !== undefined ? { served_by: servedBy } : {}),
+        ...(coveredBy !== undefined ? { covered_by: coveredBy } : {}),
         ...(next !== undefined ? { next } : {}),
       };
+      return codeUnchanged;
     }
 
     case "decision-unchanged":
@@ -636,6 +801,15 @@ export function receiptOf(body: Body): Receipt | undefined {
     }
 
     case "kit-unchanged": {
+      // FX-N0 (2026-09-03): the `Receipt` union still declares this arm
+      // (`packages/types/src/mcp/receipts.ts`), but no in-tree producer ever
+      // sets `body["receipt"] = "kit-unchanged"` in a live request/response
+      // (grep-verified over `src/`) — this projector arm is reached today
+      // only by tests that construct the tag directly (e.g.
+      // `servedReceiptElisionHonesty.spec.ts`) to pin the wire's declared
+      // receipt-form vocabulary. Kept, not deleted, so that vocabulary stays
+      // provable; see `protocol/budget/requiredSets.ts`'s `kit-unchanged`
+      // row for the fuller citation.
       const kitRef = str(body["kit_ref"]);
       if (kitRef === undefined) return undefined;
       return { receipt: "kit-unchanged", kit_ref: kitRef, ...(next !== undefined ? { next } : {}) };
@@ -645,6 +819,16 @@ export function receiptOf(body: Body): Receipt | undefined {
       const done = body["done"];
       const total = body["total"];
       if (typeof done !== "number" || typeof total !== "number") return undefined;
+      // W-VERIFY-CLOSURE (§3.4). THE COMPLETION CLAIM IS WITHHELD while any
+      // verify obligation is `unproven`/`served-untested`. Declining the tag is
+      // the documented behaviour of this function ("a tag whose A.4 required
+      // set is not satisfied yields no `Receipt`, and the response then keeps
+      // its content-bearing member"), and it is what makes `envelope.ts`'s
+      // `isReceiptBody` fall through to `mode === "closure"` — the response
+      // ships as the open `read.closure` it actually is, carrying `remaining`
+      // and `gaps`. Default OFF: `verifyWithholdsCompletion` is `false` for
+      // every call without the flag, so this line adds no bytes and no branch.
+      if (verifyWithholdsCompletion(body, workspaceRoot)) return undefined;
       return { receipt: "closure-complete", done, total };
     }
 
@@ -1215,7 +1399,14 @@ function artifactContent(body: Body): Body | undefined {
 
   if ((form === "csv" || form === "tsv") && Array.isArray(body["rows"])) {
     const content: Body = { form: "csv" };
-    keep(content, body, ["range", "columns", "rows", "total_rows", "total_columns", "dialect", "note"]);
+    // round-18A finding 1 / ruling (v): `file_range` (the PHYSICAL file line
+    // span `csvTable` computed, distinct from `range`'s logical row numbers)
+    // must survive this projection — it is what `protocol/envelope.ts`'s
+    // `servedWindowsOf` csv clause corroborates against; dropping it here
+    // would make `bookCsvArtifactServe`'s staged booking permanently inert
+    // again (retracted at settlement for want of corroboration), the exact
+    // "SAFE but inert" state round-17 finding 3 was in before FX-P1.
+    keep(content, body, ["range", "file_range", "columns", "rows", "total_rows", "total_columns", "dialect", "note"]);
     return content;
   }
 
@@ -1237,7 +1428,7 @@ function artifactContent(body: Body): Body | undefined {
   }
   if (Array.isArray(body["rows"])) {
     const content: Body = { form: "csv" };
-    keep(content, body, ["range", "columns", "rows", "total_rows", "total_columns", "dialect", "note"]);
+    keep(content, body, ["range", "file_range", "columns", "rows", "total_rows", "total_columns", "dialect", "note"]);
     return content;
   }
   return undefined;
@@ -1269,6 +1460,425 @@ function projectArtifact(body: Body): Body {
 }
 
 // ---------------------------------------------------------------------------
+// W-VERIFY-CLOSURE — the verify-first closure gate
+// NORMATIVE SOURCE: DESIGN-v0.15-sf-verification-first.md §3.2-§3.4 and §4
+// (wire table rows 3-4); DESIGN-v0.15-semantic-frontier-plan.md §4.3.1
+// (new fields optional + flag-gated + byte-identical when off).
+//
+// THE ONE THING THIS GATE DOES. TL CANNOT RUN TESTS. §3.4 is explicit that
+// `act.answer`/`act.edit` therefore keep firing — refusing an edit because a
+// test has not been run would be both over-reaching and dishonest. What
+// changes is the CLAIM OF COMPLETION: while any verify obligation is
+// `unproven` or `served-untested`, this closure does not say `done`, and it
+// does not become the `closure-complete` receipt. It lists what is owed
+// (`remaining`) and what is unproven (`gaps`) instead.
+//
+// WHY IT LIVES IN `receiptOf` AND `projectClosure`, AND NOWHERE ELSE.
+// `envelope.ts`'s `isReceiptBody` IS `receiptOf(body) !== undefined`, and its
+// own contract already says so: "a tag whose A.4 required set is not satisfied
+// yields no `Receipt`, and the response then keeps its content-bearing member
+// rather than shipping a residency claim it cannot address". A withheld
+// `closure-complete` is exactly that case — the completion claim is not
+// satisfied — so declining the tag here makes `kindOf` fall through to
+// `mode === "closure"` and the response ships as the open `read.closure` it
+// actually is. No emitter changes, no new kind, no new receipt form, and the
+// execution typestate (`state/session.ts`) is not consulted or touched: this
+// gate reads ONE response body and returns a verdict.
+//
+// EVIDENCE SOURCES, IN PRIORITY ORDER (§3.1 "reuse existing producers"):
+//   1. `verify_obligations` carried on the body (W-VERIFY-GEN's
+//      `change_contract.verify_obligations`, wherever the emitter parks it).
+//      CONSUMED AS A FIELD — this gate never re-derives what that producer
+//      decided, and never inspects how it decided it.
+//   2. Otherwise, DERIVED from the verification kit this closure already
+//      carries (`verification.surfaces[].references`/`code`/`body`,
+//      `compile_facts[].path`) plus `summary.files`. That kit IS the
+//      "verification-manifest" source §3.1 names; nothing new is discovered.
+// Absence of both leaves the response untouched: absence is "not computed",
+// never "verified" (`TaskVerifyObligation`'s own doc comment).
+// ---------------------------------------------------------------------------
+
+// Round-11 (2026-09-03) ratified correction — THE CENTRAL DEFECT FIX: a
+// referencing test being SERVED is not the same claim as TL having OBSERVED
+// it run. Counting `"served"` as done was the exact bug ("verification
+// counted as done when it was merely READ"). §3.4 (amended) now names THREE
+// states a closure may not call done — `"served"` and `"served-untested"`
+// are both unsatisfied; only `"observed"` (a real TL-observed
+// execution/verification fact — a before/after compile-facts comparison, or
+// a verification receipt TL itself produced) counts toward `done`. Since
+// neither `served` nor `served-untested` ever counts, ageing one into the
+// other cannot flip completion either way (VF-3's monotonicity requirement
+// falls out of this for free).
+const VERIFY_UNSATISFIED: ReadonlySet<string> = new Set(["unproven", "served-untested", "served"]);
+const VERIFY_KINDS: ReadonlySet<string> = new Set([
+  "referencing-test", "compile-facts", "workspace-command", "diff-review",
+]);
+const VERIFY_SATISFIED_BY: ReadonlySet<string> = new Set([
+  "served", "served-untested", "observed", "unproven",
+]);
+const VERIFY_SOURCES: ReadonlySet<string> = new Set([
+  "verification-manifest", "change-contract", "workspace-declared",
+]);
+
+/** Bounded like every other list on this member; `remaining` is not a report. */
+const VERIFY_MAX_OBLIGATIONS = 12;
+const VERIFY_MAX_LISTED = 8;
+const VERIFY_GAP_MAX_CHARS = 200;
+/** `open` is a rollup, not a transcript: server.ts caps its own at 8. */
+const VERIFY_OPEN_CAP = 16;
+
+type VerifyObligation = TaskVerifyObligation;
+
+interface VerifyGate {
+  /** Every obligation this closure knows about, after the §3.3 ageing pass. */
+  readonly obligations: readonly VerifyObligation[];
+  /** The subset that blocks completion (`unproven` / `served-untested`). */
+  readonly unsatisfied: readonly VerifyObligation[];
+  /** One line per unsatisfied entry, built from `kind`/`targets` (§3.4). */
+  readonly gaps: readonly string[];
+  /**
+   * `observed` ONLY — what may legitimately count toward `done` (§3.2bis
+   * correction 1). `served`, `served-untested` and `unproven` are all in
+   * `VERIFY_UNSATISFIED` above and every one of them WITHHOLDS completion:
+   * having put bytes on the wire is not having observed them execute.
+   */
+  readonly satisfiedCount: number;
+}
+
+function normalizeRel(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+/**
+ * VF-10 (round-11, 2026-09-03): a `verifyObligationKey` used to dedupe
+ * carried/derived obligations by (kind, sorted targets) so the same claim
+ * riding two sources is never double-counted toward `total`.
+ */
+function verifyObligationKey(entry: VerifyObligation): string {
+  return `${entry.kind}:${entry.targets.map(normalizeRel).slice().sort().join("|")}`;
+}
+
+function dedupeVerifyObligations(list: readonly VerifyObligation[]): VerifyObligation[] {
+  const seen = new Set<string>();
+  const out: VerifyObligation[] = [];
+  for (const entry of list) {
+    const key = verifyObligationKey(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  return out;
+}
+
+/** A carried obligation, validated field by field. An invalid entry is DROPPED,
+ *  never coerced: a malformed claim must not become a completion verdict. */
+function carriedObligation(value: unknown): VerifyObligation | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = str(value["id"]);
+  const kind = str(value["kind"]);
+  const satisfiedBy = str(value["satisfied_by"]);
+  const source = str(value["source"]);
+  if (id === undefined || kind === undefined || satisfiedBy === undefined || source === undefined) {
+    return undefined;
+  }
+  if (!VERIFY_KINDS.has(kind) || !VERIFY_SATISFIED_BY.has(satisfiedBy) || !VERIFY_SOURCES.has(source)) {
+    return undefined;
+  }
+  const targets = stringArray(value["targets"]).map(normalizeRel);
+  const evidence = Array.isArray(value["evidence"])
+    ? value["evidence"].filter(isRecord).map((entry) => ({
+      ...(str(entry["handle"]) !== undefined ? { handle: str(entry["handle"]) as string } : {}),
+      ...(str(entry["path"]) !== undefined ? { path: normalizeRel(str(entry["path"]) as string) } : {}),
+      ...(str(entry["note"]) !== undefined ? { note: str(entry["note"]) as string } : {}),
+    }))
+    : undefined;
+  return {
+    id,
+    kind: kind as VerifyObligation["kind"],
+    targets,
+    satisfied_by: satisfiedBy as VerifyObligation["satisfied_by"],
+    ...(evidence !== undefined && evidence.length > 0 ? { evidence } : {}),
+    source: source as VerifyObligation["source"],
+  };
+}
+
+/** Source 1: whatever the change contract carried onto this response. */
+function carriedVerifyObligations(body: Body): VerifyObligation[] | undefined {
+  const holders: unknown[] = [
+    body["verify_obligations"],
+    isRecord(body["change_contract"]) ? body["change_contract"]["verify_obligations"] : undefined,
+    isRecord(body["verification"]) ? body["verification"]["verify_obligations"] : undefined,
+  ];
+  for (const holder of holders) {
+    if (!Array.isArray(holder)) continue;
+    const parsed = holder
+      .map(carriedObligation)
+      .filter((entry): entry is VerifyObligation => entry !== undefined);
+    // VF-6: dedupe by (kind, targets) BEFORE the cap is applied, so the cap
+    // truncates real distinct obligations rather than exact duplicates.
+    if (parsed.length > 0) return dedupeVerifyObligations(parsed);
+  }
+  return undefined;
+}
+
+/**
+ * §3.3, THE TRANSITION THAT MAKES `served` HONEST. `served` means "TL sent the
+ * evidence bytes ON THIS CALL". An obligation that arrives already marked
+ * `served` was served EARLIER, and a closure being built now is precisely the
+ * moment at which no intervening observation has been recorded — so it ages to
+ * `served-untested`. Bytes that ride THIS response (a kit surface with `code`)
+ * are freshly served and do not age.
+ *
+ * SERVING IS NOT RUNNING: nothing in this pass can promote an obligation to
+ * `observed`. Only a TL-OBSERVABLE FACT does that (§3.2), and re-reading a test
+ * file is not one — a later `read_file` that serves the same test leaves a
+ * `served-untested` obligation exactly where it was.
+ */
+function ageServed(obligation: VerifyObligation, freshlyServed: boolean): VerifyObligation {
+  if (obligation.satisfied_by !== "served" || freshlyServed) return obligation;
+  return { ...obligation, satisfied_by: "served-untested" };
+}
+
+/**
+ * Source 2: the verification kit this closure already carries.
+ *
+ * `VerificationSurface.references` is "edited rel paths this file references",
+ * so the kit itself says which edited file each referencing test covers. An
+ * edited file no test surface references has NO referencing-test evidence at
+ * all, which §3.1(4) files as `unproven` — carried as a `diff-review`
+ * obligation, the evidence class whose proof (a `search_files action=diff` or a
+ * re-edit) TL CAN observe.
+ */
+/**
+ * VF-6: reports how many candidate obligations the `MAX_VERIFY_OBLIGATIONS`
+ * cap dropped, so the caller can disclose that count instead of silently
+ * truncating (see `verifyClosureGate`).
+ */
+interface DerivedVerifyObligations {
+  readonly obligations: VerifyObligation[];
+  readonly droppedByCap: number;
+}
+
+function derivedVerifyObligations(body: Body): DerivedVerifyObligations {
+  const kit = isRecord(body["verification"]) ? body["verification"] : undefined;
+  if (kit === undefined) return { obligations: [], droppedByCap: 0 };
+  const surfaces = Array.isArray(kit["surfaces"]) ? kit["surfaces"].filter(isRecord) : [];
+  const compileFacts = Array.isArray(kit["compile_facts"]) ? kit["compile_facts"].filter(isRecord) : [];
+  const summary = isRecord(body["summary"]) ? body["summary"] : undefined;
+
+  const edited: string[] = [];
+  const push = (value: string): void => {
+    const rel = normalizeRel(value);
+    if (rel !== "" && !edited.includes(rel)) edited.push(rel);
+  };
+  for (const path of stringArray(summary?.["files"])) push(path);
+  for (const fact of compileFacts) {
+    const path = str(fact["path"]);
+    if (path !== undefined) push(path);
+  }
+  for (const surface of surfaces) {
+    for (const ref of stringArray(surface["references"])) push(ref);
+  }
+  if (edited.length === 0) return { obligations: [], droppedByCap: 0 };
+
+  const tests = surfaces.filter((surface) => str(surface["role"]) === "test");
+  const boundedEdited = edited.slice(0, VERIFY_MAX_OBLIGATIONS);
+  const obligations: VerifyObligation[] = [];
+  for (const path of boundedEdited) {
+    // VF-10 (round-11): EXACT normalized-path match only. `references`
+    // already names the surfaces verificationPack.ts decided are related, at
+    // generation time (itself using basename/stem matching, per design
+    // §3.1) — re-deriving a SECOND, independent basename match here at the
+    // closure gate can only ever WIDEN that decision unsafely (matching an
+    // unrelated file that happens to share a basename in another directory),
+    // never narrow it. This fallback path only re-reads what the kit said.
+    const cover = tests.find((surface) =>
+      stringArray(surface["references"]).some((ref) => normalizeRel(ref) === path));
+    if (cover === undefined) {
+      // §3.1(4): no TL-observable verification evidence exists for this file.
+      // `unproven` carries NO `evidence[]` — there is nothing to cite.
+      obligations.push({
+        id: `verify:diff-review:${path}`,
+        kind: "diff-review",
+        targets: [path],
+        satisfied_by: "unproven",
+        source: "change-contract",
+      });
+      continue;
+    }
+    const testPath = normalizeRel(str(cover["path"]) ?? "");
+    const handle = str(cover["handle"]);
+    const fresh = typeof cover["code"] === "string";
+    // `body:"omitted"` = never served (2026-07-31 forensics) => no evidence at
+    // all. `body:"served-earlier"` = the bytes rode an EARLIER response, which
+    // is `served` about to age. `code` present = served on THIS response.
+    const servedAtAll = fresh || str(cover["body"]) === "served-earlier";
+    const raw: VerifyObligation = servedAtAll
+      ? {
+        id: `verify:referencing-test:${path}`,
+        kind: "referencing-test",
+        targets: [path, testPath].filter((entry) => entry !== ""),
+        satisfied_by: "served",
+        evidence: [{
+          ...(handle !== undefined ? { handle } : {}),
+          ...(testPath !== "" ? { path: testPath } : {}),
+          note: fresh ? "test body served on this response" : "test body served on an earlier response",
+        }],
+        source: "verification-manifest",
+      }
+      : {
+        id: `verify:referencing-test:${path}`,
+        kind: "referencing-test",
+        targets: [path, testPath].filter((entry) => entry !== ""),
+        satisfied_by: "unproven",
+        source: "verification-manifest",
+      };
+    obligations.push(ageServed(raw, fresh));
+  }
+  return {
+    obligations: dedupeVerifyObligations(obligations),
+    droppedByCap: Math.max(0, edited.length - boundedEdited.length),
+  };
+}
+
+/** §3.4: `kind` + `targets` + what would prove it. Never a synthesized
+ *  expectation, never an instruction TL cannot observe the outcome of. */
+function verifyGapLine(obligation: VerifyObligation): string {
+  const targets = obligation.targets.join(", ");
+  const cited = (obligation.evidence ?? [])
+    .map((entry) => entry.path ?? entry.handle)
+    .filter((entry): entry is string => entry !== undefined);
+  let proof: string;
+  if (obligation.satisfied_by === "served-untested") {
+    const where = cited.length > 0 ? cited.join(", ") : "the referencing test";
+    proof = `${where} was served but no run was observed — TL cannot execute it; run it in your shell`;
+  } else if (obligation.kind === "referencing-test") {
+    proof = "no referencing-test body has been served — read the test, or add one, then run it";
+  } else if (obligation.kind === "diff-review") {
+    proof = "no referencing test covers this edit — prove it with a diff review (search_files action=diff) or add a test";
+  } else if (obligation.kind === "compile-facts") {
+    proof = "compile facts were not compared across the edit — re-request them, then rebuild";
+  } else {
+    proof = "no workspace-declared verification command was proven — name one, then run it";
+  }
+  const line = `${obligation.kind} ${targets}: ${proof}`;
+  return line.length > VERIFY_GAP_MAX_CHARS ? `${line.slice(0, VERIFY_GAP_MAX_CHARS - 1)}…` : line;
+}
+
+/**
+ * The gate's verdict for ONE closure body, or `undefined` for "changes
+ * nothing".
+ *
+ * `undefined` on: the flag off (BYTE-IDENTICAL, structurally — nothing below
+ * this line runs), a body that is not a closure, no obligations computable,
+ * and — the case that matters — every obligation `served`/`observed`. Total
+ * and side-effect-free by construction: it reads one body and allocates.
+ */
+function verifyClosureGate(body: Body, workspaceRoot?: string): VerifyGate | undefined {
+  if (!sfVerifyFirstEnabled()) return undefined;
+  try {
+    if (str(body["mode"]) !== "closure") return undefined;
+    const carried = carriedVerifyObligations(body);
+    let obligationsFull: VerifyObligation[];
+    let droppedByCap: number;
+    if (carried !== undefined) {
+      // A carried obligation was decided on an EARLIER call by construction, so
+      // its `served` ages here (§3.3). This gate consumes the field; it never
+      // reaches into how W-VERIFY-GEN produced it.
+      obligationsFull = carried.map((entry) => ageServed(entry, false));
+      droppedByCap = 0;
+    } else {
+      const derived = derivedVerifyObligations(body);
+      if (derived.obligations.length === 0 && workspaceRoot !== undefined) {
+        // VF-5: THIS response carries no `verification` kit at all (a
+        // kit-less closure — e.g. a bare `task.pull:"closure"` call after an
+        // edit, with no fresh surfaces to derive obligations from). Fall back
+        // to the task epoch's recorded `change_contract.verify_obligations`
+        // (state/session.ts's `recordExecutionContract`/`recordedVerifyObligations`)
+        // rather than treating an unproven task as if it had nothing left to
+        // verify. Parsed through the SAME `carriedObligation` shape-check a
+        // wire-carried array gets, and aged exactly like one: these were
+        // recorded on an earlier call, never served fresh on this one.
+        const recorded = recordedVerifyObligations(workspaceRoot);
+        const fromSession = recorded === undefined
+          ? undefined
+          : dedupeVerifyObligations(
+            recorded.map(carriedObligation).filter((entry): entry is VerifyObligation => entry !== undefined),
+          );
+        if (fromSession !== undefined && fromSession.length > 0) {
+          obligationsFull = fromSession.map((entry) => ageServed(entry, false));
+          droppedByCap = 0;
+        } else {
+          obligationsFull = derived.obligations;
+          droppedByCap = derived.droppedByCap;
+        }
+      } else {
+        obligationsFull = derived.obligations;
+        droppedByCap = derived.droppedByCap;
+      }
+    }
+    const obligations = obligationsFull.slice(0, VERIFY_MAX_OBLIGATIONS);
+    droppedByCap += Math.max(0, obligationsFull.length - obligations.length);
+    if (obligations.length === 0) return undefined;
+    const unsatisfied = obligations.filter((entry) => VERIFY_UNSATISFIED.has(entry.satisfied_by));
+    if (unsatisfied.length === 0) return undefined;
+    // VF-6: the per-response `gaps` list is capped at VERIFY_MAX_LISTED; when
+    // either that cap or the per-task VERIFY_MAX_OBLIGATIONS cap actually
+    // dropped something, disclose the count rather than truncating silently.
+    const listed = unsatisfied.slice(0, VERIFY_MAX_LISTED);
+    const droppedFromList = Math.max(0, unsatisfied.length - listed.length);
+    const gaps = listed.map(verifyGapLine);
+    if (droppedFromList > 0) {
+      gaps.push(`+${droppedFromList} more unsatisfied verify obligation(s) not shown (per-response cap)`);
+    }
+    if (droppedByCap > 0) {
+      gaps.push(`+${droppedByCap} verify obligation(s) omitted by the per-task cap (MAX_VERIFY_OBLIGATIONS=${VERIFY_MAX_OBLIGATIONS})`);
+    }
+    return {
+      obligations,
+      unsatisfied,
+      gaps,
+      satisfiedCount: obligations.length - unsatisfied.length,
+    };
+  } catch {
+    // A gate that throws must not turn a closure into a failure: the pre-gate
+    // behaviour (say `done` if the emitter said `done`) is the honest fallback
+    // for a gate that could not run, and it is what the flag-off path does.
+    return undefined;
+  }
+}
+
+/**
+ * True iff this body's `closure-complete` claim is withheld (§3.4).
+ *
+ * Read by `receiptOf`, which `envelope.ts`'s `isReceiptBody` delegates to — so
+ * declining the tag here is what re-classifies the response as the open
+ * `read.closure` it is. It changes NO typestate: the execution fence records
+ * its own phase from the contract, never from a receipt tag.
+ */
+/**
+ * VF-7 hand-off accessor: pure predicate over a would-be closure body — the
+ * SAME gate `projectClosure`/`receiptOf`'s `closure-complete` arm already
+ * consult. Exported so `server.ts` (FX-C) can guard `markClosureSatisfied`
+ * with it.
+ *
+ * B5 (2026-09-03): the ordering gap this comment used to describe — the
+ * `mode==="closure"` branch computing `closureIsComplete` from
+ * `computeClosureStateSafe` alone and calling `markClosureSatisfied` BEFORE
+ * this module's verify-first gate ever ran — is CLOSED. FX-G-A's
+ * `emitClosure` (server.ts, the one closure it wraps around every
+ * `mode==="closure"` return) builds the actual response body first, computes
+ * `closureVerified = closureIsComplete && !verifyWithholdsCompletion(body,
+ * workspace)` against THIS function, and calls `markClosureSatisfied` only
+ * when `closureVerified` is true — otherwise it calls `clearClosureSatisfied`.
+ * The session decision and the wire decision are the same computation now;
+ * nothing further is owed here.
+ */
+export function verifyWithholdsCompletion(body: Body, workspaceRoot?: string): boolean {
+  return verifyClosureGate(body, workspaceRoot) !== undefined;
+}
+
+// ---------------------------------------------------------------------------
 // A.5.7 `read.closure`
 // ---------------------------------------------------------------------------
 
@@ -1284,15 +1894,56 @@ function projectArtifact(body: Body): Body {
  */
 const KEPT_ON_CLOSURE = ["verification"] as const;
 
-function projectClosure(body: Body): Body {
-  const projected: Body = {
-    open: stringArray(body["open"]),
-    done: typeof body["done"] === "number" ? body["done"] : 0,
-    total: typeof body["total"] === "number" ? body["total"] : 0,
-  };
-  // A.8.2: `applicability` iff no checks are registered.
-  keep(projected, body, ["applicability", "note", "summary"]);
+const VERIFY_WITHHELD_NOTE =
+  "closure NOT complete — verification obligations remain unproven; see `remaining`/`gaps`. "
+  + "TL cannot run tests: serving a test is not running it, so only your own run closes these.";
+
+function projectClosure(body: Body, workspaceRoot?: string): Body {
+  const open = stringArray(body["open"]);
+  const done = typeof body["done"] === "number" ? body["done"] : 0;
+  const total = typeof body["total"] === "number" ? body["total"] : 0;
+  // W-VERIFY-CLOSURE (§3.4). `undefined` on the default path — see
+  // `verifyClosureGate` — so everything below collapses to the pre-gate shape.
+  const gate = verifyClosureGate(body, workspaceRoot);
+  const projected: Body = gate === undefined
+    ? { open, done, total }
+    : {
+      // A.5.7's completeness rule IS `open.length === 0`, so withholding the
+      // claim means naming the open obligations, not deleting a flag. The ids
+      // are the field's own semantics ("obligation ids still open").
+      open: [...open, ...gate.unsatisfied.map((entry) => entry.id)].slice(0, VERIFY_OPEN_CAP),
+      // HONEST ARITHMETIC: every verify obligation counts in `total`, and only
+      // `served`/`observed` ones count in `done`. A withheld `closure-complete`
+      // arrives here with done === total; it leaves with done < total.
+      done: done + gate.satisfiedCount,
+      total: total + gate.obligations.length,
+    };
+  // A.8.2: `applicability` iff no checks are registered. A gate verdict IS a
+  // registered check, so the two can never ride together.
+  keep(projected, body, gate === undefined ? ["applicability", "note", "summary"] : ["summary"]);
   keep(projected, body, KEPT_ON_CLOSURE);
+  if (gate !== undefined) {
+    // The withheld branch's own prose replaces the emitter's — a body that
+    // reached here as `closure-complete` carries CLOSURE_SATISFIED_NOTE
+    // ("closure complete — verify with tests/git diff"), which is the exact
+    // claim this gate is refusing to make.
+    projected["note"] = VERIFY_WITHHELD_NOTE;
+    projected["remaining"] = gate.unsatisfied.slice(0, VERIFY_MAX_LISTED);
+    projected["gaps"] = [...gate.gaps];
+    // VF-8/VF-9: `summary.checks_open`/`checks_closed` must agree with the
+    // `open`/`done`/`total` this SAME withhold just computed — a caller that
+    // reads only `summary` must never see a closed task while `open`/`gaps`
+    // say otherwise. Only the two gate-driven fields are touched; every
+    // other summary field (edits, files, ...) is the emitter's, untouched.
+    const summary = projected["summary"];
+    if (isRecord(summary)) {
+      projected["summary"] = {
+        ...summary,
+        checks_closed: projected["done"],
+        checks_open: (projected["open"] as string[]).length,
+      };
+    }
+  }
   return projected;
 }
 
@@ -1439,6 +2090,13 @@ function projectTaskPack(body: Body): Body {
   projected["evidence"] = Array.isArray(body["evidence"]) ? body["evidence"] : [];
   keep(projected, body, ["decision"]);
 
+  // A partially covered pack must retain its unresolved-obligation disclosure.
+  // In particular, an exhausted no-grounded-call-remains decision has no
+  // `gaps` member, so dropping `missing` would turn a real terminal gap into
+  // a silent dead end on the wire.
+  const task = isRecord(body["task"]) ? body["task"] : undefined;
+  if (task?.["coverage"] === "partial") keep(projected, body, ["missing"]);
+
   const plan: Body = {};
   keep(plan, body, PLAN_MEMBERS);
   if (Object.keys(plan).length > 0) projected["plan"] = plan;
@@ -1475,12 +2133,13 @@ export function projectReadBody(kind: Kind, body: Body, context?: ReadProjection
     case "read.map":       return projectMap(body);
     case "read.batch":     return projectBatch(body);
     case "read.artifact":  return projectArtifact(body);
-    case "read.closure":   return projectClosure(body);
+    case "read.closure":   return projectClosure(body, context?.verifyClosureWorkspace);
     case "read.receipt": {
-      const receipt = receiptOf(body);
-      // `context` reaches here only to mint the [R5-10] epoch-reset floor —
-      // the receipt projector's one piece of call context, used nowhere else
-      // in this module.
+      // VF-5/VF-7: `verifyClosureWorkspace` lets a kit-less closure-complete
+      // receipt fall back to the task epoch's recorded verify obligations
+      // (see `verifyClosureGate`) -- separate from `context.workspace`,
+      // which mints the [R5-10] floor below.
+      const receipt = receiptOf(body, context?.verifyClosureWorkspace);
       return receipt === undefined ? body : projectReceipt(body, receipt, context);
     }
     default: return body;

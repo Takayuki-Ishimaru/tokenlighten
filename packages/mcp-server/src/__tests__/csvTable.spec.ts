@@ -269,3 +269,62 @@ describe("csvTable — parse-time safety quota wiring (finding 1)", () => {
     expect(t.warnings.some((w) => /larger than this server safely parses/.test(w))).toBe(false);
   });
 });
+
+describe("csvTable — fileLineRange (round-18A finding 1, ruling (v))", () => {
+  it("ordinary RFC4180 case: fileLineRange equals the logical range (no blanks, no quoted newlines)", () => {
+    const text = "id,name\n1,a\n2,b\n3,c\n";
+    const t = ok(csvTable(bytes(text)));
+    expect(t.range).toBe("2-4");
+    expect(t.fileLineRange).toBe("2-4");
+  });
+
+  it("a quoted multi-line field pushes fileLineRange PAST the logical range", () => {
+    // file line 1=header, 2-6=one quoted multi-line record (logical row 2),
+    // 7=logical row 3, 8=row 4, 9=row 5.
+    const lines = ["id,text", '1,"A2', "A3", "A4", "A5", 'A6"'];
+    for (let i = 2; i <= 10; i++) lines.push(`${i},plain${i}`);
+    const text = `${lines.join("\n")}\n`;
+
+    const wholeRecord = ok(csvTable(bytes(text), { range: "2-2" }));
+    expect(wholeRecord.range).toBe("2-2");
+    expect(wholeRecord.fileLineRange, "the quoted record spans file lines 2-6").toBe("2-6");
+
+    const after = ok(csvTable(bytes(text), { range: "3-5" }));
+    expect(after.range).toBe("3-5");
+    expect(after.rows).toEqual([["2", "plain2"], ["3", "plain3"], ["4", "plain4"]]);
+    expect(after.fileLineRange, "logical rows 3-5 are FILE lines 7-9, not 3-5").toBe("7-9");
+  });
+
+  it("blank separator lines push fileLineRange past the logical range once a blank has been skipped", () => {
+    const lines = ["id,name"];
+    let id = 1;
+    for (let g = 0; g < 3; g++) {
+      for (let k = 0; k < 5; k++) { lines.push(`${id},name${id}`); id++; }
+      lines.push("");
+    }
+    const text = `${lines.join("\n")}\n`;
+    // Logical rows 7-8 (first two of group 2, ids 6-7) are FILE lines 8-9
+    // (one blank line — file line 7 — was skipped ahead of them).
+    const t = ok(csvTable(bytes(text), { range: "7-8" }));
+    expect(t.range).toBe("7-8");
+    expect(t.rows).toEqual([["6", "name6"], ["7", "name7"]]);
+    expect(t.fileLineRange).toBe("8-9");
+  });
+
+  it("fail-closed: no fileLineRange when nothing shipped (columns-only maxRows:0 fallback)", () => {
+    const t = ok(csvTable(bytes("id,name\n1,a\n2,b\n"), { maxRows: 0 }));
+    expect(t.rows.length).toBe(0);
+    expect(t.fileLineRange).toBeUndefined();
+  });
+
+  it("fail-closed: an old-Mac lone-CR record separator (not a physical line break under this codebase's \\r?\\n convention) disables fileLineRange entirely", () => {
+    // Lone CR (no LF) between records — parseCsv treats it as a record
+    // terminator, but util/countLines.ts's own convention (split(/\r?\n/))
+    // does NOT treat a lone CR as a line break, so row->physical-line mapping
+    // is not well-defined for this file.
+    const text = "id,name\r1,a\r2,b\r";
+    const t = ok(csvTable(bytes(text)));
+    expect(t.rows.length).toBeGreaterThan(0);
+    expect(t.fileLineRange, "row->line mapping cannot be trusted for lone-CR dialects").toBeUndefined();
+  });
+});

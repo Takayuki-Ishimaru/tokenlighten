@@ -454,31 +454,40 @@ describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi
 });
 
 // =============================================================================
-// GROUP 3 (FIXED): target="all" is consulted in exactly ONE dispatch branch
-// (handleId && handleRange && target==="all"). A plain path+search+replace
-// call with target="all" but no range handle silently drops target, and —
-// when search legitimately matches more than once, the exact case target=all
-// exists for — the resulting "ambiguous" error tells the caller to "add more
-// context to make it unique", directly contradicting a stated "replace all"
-// intent. Confirmed live. A hint naming the real mechanism is now appended;
-// the original error/candidates are left intact, and the harmless
-// exactly-one-match case (still ok:true) is deliberately left unchanged.
+// GROUP 3 (M1): path+search target="all" reaches the same replace-all
+// primitive as the established range-handle route. Small edits apply directly;
+// a near-whole-file fan-out requires the existing expected-hash acknowledgement.
 // =============================================================================
-describe("argMatrix — edit_file — FIXED: target=\"all\" without a range handle", () => {
-  it("target='all', no handle, search matches multiple times: still refuses (unchanged), but now hints at the real fix instead of only contradicting advice", async () => {
+describe("argMatrix — edit_file — M1: target=\"all\" without a range handle", () => {
+  it("path+search target='all' replaces every match and reports the actual count", async () => {
     const { ws, srv } = await newServer("target-all-ambiguous");
     writeFile(ws, "dup.ts", "const val = 1;\nconst val2 = 1;\nconst val3 = 1;\n");
 
     const res = await srv.call("edit_file", { path: "dup.ts", search: "= 1", replace: "= 99", target: "all" });
-    expect(res["kind"]).toBe("refusal");
-    expect(res["code"]).toBe("ambiguous");
-    // Original message is preserved (still names the match count) —
-    expect(String(res["detail"])).toContain("locations");
-    // — AND the new hint corrects the misleading part, pointing at mode=slice.
-    expect(String(res["hint"])).toContain("mode=slice");
-    expect(String(res["hint"])).toContain("target=");
+    expect(res["kind"], JSON.stringify(res)).toBe("edit.applied");
+    expect(res["replacements"]).toBe(3);
+    expect(readFile(ws, "dup.ts")).toBe("const val = 99;\nconst val2 = 99;\nconst val3 = 99;\n");
+  }, 30000);
 
-    expect(readFile(ws, "dup.ts")).toBe("const val = 1;\nconst val2 = 1;\nconst val3 = 1;\n");
+  it("requires expected-hash acknowledgement before a path replace-all touches nearly every line", async () => {
+    const { ws, srv } = await newServer("target-all-blast-radius");
+    const before = Array.from({ length: 300 }, (_, i) => `const value${i} = \"old\";`).join("\n") + "\n";
+    writeFile(ws, "broad.ts", before);
+
+    const refused = await srv.call("edit_file", { path: "broad.ts", search: "old", replace: "new", target: "all" });
+    expect(refused["kind"], JSON.stringify(refused)).toBe("refusal");
+    expect(refused["code"]).toBe("blast-radius-precondition-required");
+    expect(refused["replaced_percent"]).toBe(100);
+    expect(typeof refused["current_sha"]).toBe("string");
+    expect(readFile(ws, "broad.ts")).toBe(before);
+
+    const applied = await srv.call("edit_file", {
+      path: "broad.ts", search: "old", replace: "new", target: "all",
+      precondition: "expected-hash", expectedSha: shaOfText(before),
+    });
+    expect(applied["kind"], JSON.stringify(applied)).toBe("edit.applied");
+    expect(applied["replacements"]).toBe(300);
+    expect(readFile(ws, "broad.ts")).not.toContain("old");
   }, 30000);
 
   it("sanity (no regression): target='all', no handle, search matches EXACTLY once still succeeds (target=all is moot, not harmful, here)", async () => {
@@ -505,6 +514,7 @@ describe("argMatrix — edit_file — FIXED: target=\"all\" without a range hand
     const slice = await srv.call("read_file", { mode: "slice", path: "items.ts", range: "2-5" });
     const res = await srv.call("edit_file", { handle: slice["handle"], target: "all", search: "old-", replace: "new-" });
     expect(res["kind"]).not.toBe("refusal");
+    expect(res["replacements"]).toBe(2);
     const updated = readFile(ws, "items.ts");
     expect(updated).toContain("new-a");
     expect(updated).toContain("new-b");
@@ -1089,12 +1099,17 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     // funnel and is canonicalized once, rather than prose folding into detail.
     expect(res["next"], JSON.stringify(res)).toEqual({
       tool: "read_file",
-      arguments: { qref: "q-0123456789abcdef", targets: [{ path: "src/order.ts" }], content: "auto" },
+      arguments: {
+        cwd: ws,
+        qref: "q-0123456789abcdef",
+        targets: [{ path: "src/order.ts" }],
+        content: "auto",
+      },
     });
   }, 30000);
 
-  it("(b) query+qref, no paths: keeps the original drop-qref-restate-query hint unchanged", async () => {
-    const { srv } = await newServer("read-task-pack-query-qref-no-paths");
+  it("(b) query+qref, no paths: echoes the caller's OWN query as a real re-pack instead of a placeholder", async () => {
+    const { ws, srv } = await newServer("read-task-pack-query-qref-no-paths");
 
     const res = await srv.call("read_file", {
       mode: "task_pack",
@@ -1103,10 +1118,17 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     });
     expect(res["kind"]).toBe("refusal");
     expect(String(res["detail"])).toContain("query and qref are mutually exclusive for task_pack");
-    // R-5 (v0.13-3 F-2): the generic placeholder is deliberately still not
-    // executable (placeholder guard remains fail-closed); unlike the prior
-    // legacy prose it is not emitted as a misleading wire continuation.
-    expect(res["next"], JSON.stringify(res)).toBeUndefined();
+    // G2 (2026-09-04): was `expect(res["next"]).toBeUndefined()` (R-5/v0.13-3
+    // F-2: the generic "<restate the request verbatim>" placeholder, which
+    // the placeholder guard silently strips to nothing on the wire). This
+    // call's OWN `query` is right here in the request, so `taskPackRecoveryFor`
+    // (server.ts) echoes it back verbatim as a real, executable re-pack —
+    // never a fabricated value, since the caller supplied this exact text.
+    expect(res["retry"], JSON.stringify(res)).toBe("new-task");
+    expect(res["next"], JSON.stringify(res)).toEqual({
+      tool: "read_file",
+      arguments: { cwd: ws, query: "Explain something.", task: { epoch: "new" } },
+    });
   }, 30000);
 
   it("(c) qref+paths, no query: stays closed under the prepared certificate", async () => {
@@ -1308,23 +1330,23 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
     // The fix: both continuation fields survive the projection.
     expect(Array.isArray(entry["remaining_ranges"])).toBe(true);
     expect((entry["remaining_ranges"] as string[])[0]).toMatch(/^\d+-\d+$/);
-    expect(typeof entry["next"]).toBe("string");
+    expect(typeof entry["next"]).toBe("object");
     // Executable, not prose. The handle it names is the RESUME handle the
     // truncation minted, not necessarily the one this call passed in — the
     // 2026-08-01 truncated-mint consistency rule narrows a truncated serve's
     // recorded range/sha to the bytes actually served, so the continuation
     // rides a handle whose range/sha agree with each other.
     const remaining = (entry["remaining_ranges"] as string[])[0]!;
-    const parsed = /^read_file mode=slice handle=(h\S+) range=(\S+)$/.exec(String(entry["next"]));
-    expect(parsed, `next must be an executable slice call, got: ${String(entry["next"])}`).not.toBeNull();
-    expect(parsed![2]).toBe(remaining);
+    const next = entry["next"] as { tool: string; arguments: Record<string, unknown> };
+    expect(next.tool).toBe("read_file");
+    expect(next.arguments["content"]).toBe("auto");
+    const nextTarget = (next.arguments["targets"] as Array<Record<string, unknown>>)[0]!;
+    expect(nextTarget["range"]).toBe(remaining);
+    expect(nextTarget["handle"]).toMatch(/^h/);
+    expect(next.arguments["cwd"]).toBe(ws);
 
-    // Running it VERBATIM actually advances — the whole point of the promise.
-    const resumed = await srv.call("read_file", {
-      mode: "slice",
-      handle: parsed![1]!,
-      range: parsed![2]!,
-    });
+    // Running the whole structured continuation VERBATIM actually advances.
+    const resumed = await srv.call(next.tool, next.arguments);
     expect(resumed["kind"]).toBe("read.text");
     // §3.3: served bytes ride `evidence[].body`, not a top-level `content`.
     const resumedBody = (resumed["evidence"] as Array<Record<string, unknown>>)

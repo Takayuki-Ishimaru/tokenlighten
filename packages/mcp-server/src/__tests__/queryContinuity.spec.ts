@@ -62,7 +62,6 @@ import {
   resetPriorPackStoreForTest,
 } from "../features/task-pack/priorPackStore.js";
 import { recordServedSurfaces, resetPackServeLogForTest } from "../util/packServeLog.js";
-import { nextStringToCall } from "../util/continuation.js";
 import {
   rememberTaskQuery,
   resolveTaskQueryRef,
@@ -161,8 +160,8 @@ describe("D1 — a `next` hint carries the whole task query", () => {
   });
 
   it("normalizes only what the one-line `query=\"...\"` encoding cannot carry", () => {
-    // Newlines would break the single-line `next`; `"` would break the
-    // encoding, which `nextStringToCall` does not unescape.
+    // Preserve the historical normalization contract even though executable
+    // continuations now travel as ToolCall objects rather than one-line prose.
     const messy = 'fix  the\n"checksumContract"\tvalidator\r\nand its tests ';
     expect(continuationQuery(messy)).toBe("fix the checksumContract validator and its tests");
   });
@@ -178,8 +177,9 @@ describe("D1 — a `next` hint carries the whole task query", () => {
     // The exact shape of the defect: a `query="..."` / `query=<...>` template
     // interpolating a slice of the task query.
     expect(source).not.toMatch(/query=[^\n]*\$\{query\.slice\(/u);
-    // And the replacement is actually in use at every one of the five sites.
-    expect(source.match(/\$\{continuationQuery\(query\)\}/gu)?.length ?? 0).toBe(5);
+    // Every query-carrying ToolCall producer uses the lossless normalizer,
+    // including the v0.14 rootSuggestion re-scope continuation.
+    expect(source.match(/query:\s*continuationQuery\(query\)/gu)?.length ?? 0).toBe(5);
   });
 
   it("a missing-roles pack emits an EXECUTABLE hint that replays the whole query", async () => {
@@ -190,9 +190,8 @@ describe("D1 — a `next` hint carries the whole task query", () => {
     );
     expect(result.coverage_reason).toBe("missing-roles");
     expect(result.next).toBeDefined();
-    const parsed = nextStringToCall(result.next!);
-    expect(parsed, `unparseable next: ${result.next}`).toBeDefined();
-    const replayed = (parsed!.arguments as { query?: string }).query;
+    expect(result.next!.tool).toBe("read_file");
+    const replayed = (result.next!.arguments as { query?: string }).query;
     expect(replayed).toBe(continuationQuery(ROLE_GAP_QUERY));
     // The intent-bearing tail is the whole point: a 60/80-char slice lost it.
     expect(replayed!.length).toBeGreaterThan(80);
@@ -403,22 +402,21 @@ describe("D2b — taskEpoch:\"new\" clears the prior-pack obligation store", () 
     open: true,
   } as const;
 
-  let savedV1: string | undefined;
-  let savedV2: string | undefined;
+  let savedPacker: string | undefined;
 
   beforeEach(() => {
     // The V11-03 seam that both READS the store and writes F-B3's
-    // `unserved-obligation:` disclosure is flag-gated; without it the store is
-    // never consulted and this test would pass vacuously.
-    savedV1 = process.env["TL_COVERAGE_PACKER"];
-    savedV2 = process.env["TL_COVERAGE_PACKER_V2"];
-    process.env["TL_COVERAGE_PACKER"] = "1";
-    process.env["TL_COVERAGE_PACKER_V2"] = "1";
+    // `unserved-obligation:` disclosure is flag-gated (coveragePackerV2Enabled,
+    // true only at TL_COVERAGE_PACKER=v2 — CONSOLIDATED, v0.14 flag
+    // inventory, 2026-08-31: the former paired TL_COVERAGE_PACKER_V2 env var
+    // is now this var's "v2" value); without it the store is never consulted
+    // and this test would pass vacuously.
+    savedPacker = process.env["TL_COVERAGE_PACKER"];
+    process.env["TL_COVERAGE_PACKER"] = "v2";
   });
 
   afterEach(() => {
-    if (savedV1 === undefined) delete process.env["TL_COVERAGE_PACKER"]; else process.env["TL_COVERAGE_PACKER"] = savedV1;
-    if (savedV2 === undefined) delete process.env["TL_COVERAGE_PACKER_V2"]; else process.env["TL_COVERAGE_PACKER_V2"] = savedV2;
+    if (savedPacker === undefined) delete process.env["TL_COVERAGE_PACKER"]; else process.env["TL_COVERAGE_PACKER"] = savedPacker;
   });
 
   it("WITHOUT the epoch clear, a stale obligation still reaches the next pack (control)", async () => {

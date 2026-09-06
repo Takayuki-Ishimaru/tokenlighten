@@ -1,5 +1,6 @@
 import type { ImpactSurface } from "./locate-impact.js";
 import type { AwaitInputCode } from "./decision.js";
+import type { ToolCall } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // DESIGN-v0.9 §5 (WS2) ContinuationPlan — contract mirror.
@@ -10,8 +11,9 @@ import type { AwaitInputCode } from "./decision.js";
 // ReadCodeTaskPackOutput mirror below carries pack_unchanged/checks_open;
 // `closure` ships as a bare string[]). A model-agnostic structured plan for the
 // residual reads a response leaves, in a server-verified order any client can
-// execute. The legacy `next` string is derived from `stages[0].calls[0]`
-// (§5.3), so a client that reads only `next` gets the first step.
+// execute. `ReadCodeTaskPackOutput.next` is the canonical executable ToolCall
+// derived from `stages[0].calls[0]` (§5.3), so a client can run the first step
+// without parsing prose.
 // ---------------------------------------------------------------------------
 export interface ContinuationCall {
   /** One of the 3 advertised tools. */
@@ -170,6 +172,50 @@ export interface TaskChangeContract {
   missing: string[];
   /** Bounded residual TL calls required before the contract is edit-ready. */
   max_additional_tl_calls: number;
+  /**
+   * DESIGN-v0.15 §3.1/§4 (Workstream 6, "Semantic Frontier: Verification-
+   * First"): additive verify-concern layer over `obligations[]`. Never
+   * changes `obligations[]`/`stages[][]`/`action` edit-eligibility semantics
+   * — this is a separate, evidence-only claim about what TL itself observed
+   * being served/executed for an obligation, not a gate on `act.edit`.
+   *
+   * OPTIONAL, flag-gated by `TL_SF_VERIFY_FIRST` (default OFF; registry:
+   * packages/mcp-server/src/util/flags.ts). Absence means "not computed for
+   * this pack" — never infer "nothing to verify" or "already verified" from
+   * absence; only a populated array is evidence either way.
+   */
+  verify_obligations?: readonly TaskVerifyObligation[];
+}
+
+/**
+ * DESIGN-v0.15 §3.1: one bounded, TL-observable verification-evidence claim
+ * for a `TaskChangeObligation`. Sourced by reusing existing verification
+ * producers (`VerificationKit.surfaces`/`compile_facts`,
+ * `ToolchainInfo`/`HarnessInfo`) — no new discovery logic added here.
+ *
+ * OPTIONAL, flag-gated by `TL_SF_VERIFY_FIRST` (default OFF; registry:
+ * packages/mcp-server/src/util/flags.ts). Absence of the whole array on
+ * `TaskChangeContract.verify_obligations` means "not computed" — never infer
+ * verification status from absence.
+ */
+export interface TaskVerifyObligation {
+  id: string;
+  /** What TL-observable evidence class this claim rests on. */
+  kind: "referencing-test" | "compile-facts" | "workspace-command" | "diff-review";
+  /** Repo-relative paths or handles this obligation concerns. */
+  targets: string[];
+  /**
+   * "served": TL sent the evidence bytes this call. "served-untested": the
+   * evidence was served but no subsequent TL-observed call (re-edit,
+   * compile-fact refresh) shows it was acted on. "observed": TL's own serve
+   * record is the evidence (e.g. a compile-fact comparison), not a body send.
+   * "unproven": no TL-observable evidence exists for this obligation.
+   */
+  satisfied_by: "served" | "served-untested" | "observed" | "unproven";
+  /** Present only when `satisfied_by` names TL-observed evidence. */
+  evidence?: Array<{ handle?: string; path?: string; note?: string }>;
+  /** Which existing verification producer this claim was derived from. */
+  source: "verification-manifest" | "change-contract" | "workspace-declared";
 }
 
 export type TaskWiringEvidence =
@@ -179,10 +225,36 @@ export type TaskWiringEvidence =
   | "project-family"
   | "closure-check"
   | "callable-insertion-site"
+  /**
+   * D3' (2026-09-05): the insertion site stands because it is the callable
+   * inside the module family the QUERY named, not because a call edge to the
+   * producer already exists there. Rides ONLY when it is the deciding reason
+   * — a destination that already calls the producer keeps the plain
+   * `"callable-insertion-site"` proof and this tag stays off the wire. It is a
+   * disclosure, not a weaker claim: a "wire A into B" task asks for a call
+   * that by construction does NOT exist yet, so demanding a pre-existing
+   * `direct_calls` edge as insertion proof can only ever report the work
+   * itself as missing evidence.
+   */
+  | "domain-insertion-site"
   | "receiver-construction-site";
 
-/** Bounded repository evidence used to justify a role without naming conventions. */
-export type TaskEvidenceRelationKind = "defines" | "references" | "imports" | "direct_calls";
+/**
+ * Bounded repository evidence used to justify a role without naming
+ * conventions.
+ *
+ * `"referenced_by"` added (FX-W1, round 21B finding 1, HIGH, 2026-09-04,
+ * ruling (z), additive): a SCIP occurrence's role (Definition/Import/
+ * ReadAccess/WriteAccess/…) proves the identifier appears at that exact
+ * file+line, never that the site CALLS the anchor — `"direct_calls"` stays
+ * reserved for a genuine call-edge source (none exists today; see
+ * `graph/index.ts`'s `GraphIndex.hasCallEdges` doc). A non-definition,
+ * non-import reference occurrence is reported as `"referenced_by"` instead —
+ * honest evidence of a mention, at a lower confidence than a proven call,
+ * and never counted as satisfying a relation concern on its own (see
+ * `sfSatisfaction.ts`'s `relationPacketSatisfies`).
+ */
+export type TaskEvidenceRelationKind = "defines" | "references" | "imports" | "direct_calls" | "referenced_by";
 export type TaskEvidenceRole =
   | "producer"
   | "consumer"
@@ -210,11 +282,41 @@ export interface TaskEvidenceRelation {
   confidence: number;
 }
 
+/**
+ * Relation classes a `TaskEvidenceGraph` producer could not compute at all
+ * for any node in it (e.g. `"callees"` when the compiling adapter has no
+ * real call-edge source) — never "computed, found none". Extend it the same
+ * commit a further class gains a real "no source" producer.
+ *
+ * `"callers"` added FX-R2 (additive, 2026-09-03): the symmetric case —
+ * a producer with no real call-edge source at all (no `GraphIndex` on disk)
+ * cannot compute callers either, and must disclose that the same way.
+ */
+export type TaskEvidenceUnavailableKind = "callees" | "callers";
+
 /** Small, deterministic relation graph over the served wiring frontier. */
 export interface TaskEvidenceGraph {
   version: 1;
   nodes: TaskEvidenceNode[];
   relations: TaskEvidenceRelation[];
+  /**
+   * Relation classes no contributing producer could compute at all (FX-G-B,
+   * additive, 2026-09-03; extended to `"callers"` by FX-R2) — e.g.
+   * `["callees"]` or `["callees","callers"]`. Absent (never `[]`) when
+   * every class every contributor emits was at least attempted. A reader
+   * MUST NOT read a missing relation kind for some node as "none exist"
+   * without checking this array first.
+   */
+  unavailable?: TaskEvidenceUnavailableKind[];
+  /**
+   * `true` when a contributing relation packet could not fit its byte
+   * budget even after shedding everything shedable (FX-R2, additive,
+   * 2026-09-03) — this graph may look identical to "resolved nothing", but
+   * actually means "too large to serve as a packet, re-ask narrower" rather
+   * than "nothing found". Absent (never `false`) when no contributor was
+   * over budget.
+   */
+  over_budget?: true;
 }
 
 /** A source or destination proven by a reusable handle. */
@@ -596,7 +698,7 @@ export interface ReadCodeTaskPackOutput {
   coverage_reason?: "single-site" | "candidate-list" | "missing-roles" | "concerns-uncovered" | "diff-truncated";
   surfaces: ReadCodeTaskPackSurface[];
   missing: string[];
-  next?: string;
+  next?: ToolCall;
   /** DESIGN-v0.9 §8 multi_concern coverage. */
   concerns?: ConcernCoverage[];
   /** Genuine lexical ties that require a caller choice rather than more search. */

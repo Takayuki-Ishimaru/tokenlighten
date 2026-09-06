@@ -16,9 +16,17 @@
  */
 
 import { createHash } from "crypto";
-import type { TaskExecutionContract } from "@tokenlighten/types";
-import { postReadyTrimEnabled, postReadyTrimThreshold } from "../util/flags.js";
-import { laneScopedKey, rootOfLaneScopedKey } from "../util/laneKey.js";
+import type { TaskExecutionContract, TaskVerifyObligation } from "@tokenlighten/types";
+import { currentSessionLane, laneScopedKey, rootOfLaneScopedKey } from "../util/laneKey.js";
+import { batchEditFrontierEnabled, receiptCoverageEnabled } from "../util/flags.js";
+import { persistQueryRef, rehydrateQueryRef, clearPersistedQueryRef } from "./stateHandles.js";
+// M1 (2026-09-05 R28 remediation): the ONE production reset for
+// packServeLog.ts's served-surface ledger (see `clearServedSurfaces`'s own
+// doc comment for why an explicit `task.epoch:"new"` must retire it here, not
+// only via `recordServedSurfaces`'s query-token-overlap heuristic). A leaf
+// module (imports `util/laneKey.js` only), so this is a one-directional edge
+// — no cycle.
+import { clearServedSurfaces } from "../util/packServeLog.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -69,6 +77,65 @@ export interface ServedRangeLedgerState {
    * WHICH already-shipped projection runs.
    */
   deltaFromSha?: string;
+  /**
+   * FX-V1 (round-20A finding 1, ruling (x), 2026-09-04): file-line spans this
+   * session's OWN serves elided — a `doc elided L<a>-<b>` marker
+   * (`util/formatCompress.ts`'s `elideDocComments`) the caller genuinely
+   * received on the wire, naming the exact lines it stands for — never bytes
+   * TL never touched at all.
+   *
+   * UNMERGED, exactly like `spans` — `_stageElisionGap` (called from
+   * `recordServedRange`) pushes an entry the SAME way `recordServedRange`
+   * pushes to `spans`: immediately and optimistically, before the funnel
+   * knows whether the finalized wire will corroborate it. `id` lets
+   * `_settleSessionServeBookings` RETRACT one exact entry if the response was
+   * shed before reaching the wire (a governor/cap/response-size cut it after
+   * this call staged it) — the same optimistic-write/corroboration-gated-
+   * retraction shape `spans` already uses, so a direct in-process caller of
+   * `recordServedRange` that never runs a funnel (the unit specs) sees its
+   * elided claim exactly as durably as its shipped one.
+   *
+   * READ ONLY BY `_foreignHandleRangeCovered`. `servedRangeReceipt` (every
+   * `prior`/`code_unchanged`/`served_by` claim) is DELIBERATELY elision-blind
+   * — a receipt about an elided line must always re-serve, since the caller
+   * never actually received those bytes; only WRITE-AUTHORITY coverage (the
+   * caller holds the lines' exact positions and TL, not the caller, chose to
+   * compress them) may count an elided span as held. Capped the same way
+   * `spans` is; fail-safe direction is under-claiming (see
+   * `SERVED_RANGE_LEDGER_ELISION_CAP`).
+   *
+   * FX-W3 (ruling (aa), 2026-09-04) TIGHTENS WHERE THE `id` ABOVE COMES FROM
+   * WITHOUT CHANGING THIS FIELD'S SHAPE OR THIS FUNCTION'S ALGORITHM.
+   * `_stageElisionGap` still detects a candidate purely by ARITHMETIC — the
+   * gap between two `recordServedRange` calls sharing one (call, range) key —
+   * never by inspecting served TEXT for marker-shaped lines. What changed is
+   * upstream, at the RECORD-TIME call sites in `server.ts`: they used to split
+   * their own window into per-span `recordServedRange` calls by re-parsing
+   * their OWN rendered output for marker-shaped lines
+   * (`servedSpansOfDisplayedText`), which cannot distinguish a genuine
+   * `elideDocComments` collapse from a caller's own file content that merely
+   * LOOKS like one — round-21A finding 1's forged `/* doc elided L5-250 *\/`
+   * literal. They now split using `elideDocCommentsWithWindows`'s own
+   * `elided` return value — the exact windows the compressor itself removed,
+   * a fact of the renderer — via pure arithmetic (`spansExcludingWindows`),
+   * so a candidate `_stageElisionGap` ever sees can only ever correspond to a
+   * REAL collapse. The retraction half (`_settleSessionServeBookings`,
+   * below) and the CONFIRMATION half (`servedWindowsOf`,
+   * `protocol/envelope.ts`) are equally load-bearing: `envelope.ts` no longer
+   * extends a corroboration window past what the wire's own declared `range`
+   * says by re-parsing the wire body either, so even a genuinely-forged
+   * candidate that slipped through would be retracted here for want of a
+   * window that reaches it, whenever the response was shed at all.
+   */
+  elided: ElidedRangeEntry[];
+  /**
+   * FX-V1: ephemeral (call, range)-scoped cursor `_stageElisionGap` uses to
+   * detect a gap between consecutive shipped spans of the SAME (call,
+   * window) group — see its doc comment. Internal record-time bookkeeping
+   * only: never read outside `recordServedRange`/`_stageElisionGap`, not part
+   * of the ledger's receipt surface, and never serialized to the wire.
+   */
+  _elisionCursor?: { call: number; range: string; next: number };
 }
 
 /** One contiguous run of file lines one call actually served, plus its provenance. */
@@ -84,6 +151,19 @@ export interface ServedRangeSpan {
    * same window are ordinary (a re-affirmation of an already-held range books
    * one), and retracting the wrong one would delete a genuine serve.
    */
+  id: number;
+}
+
+/**
+ * FX-V1 (round-20A finding 1, ruling (x), 2026-09-04): one file-line span this
+ * session's own serve elided (see `ServedRangeLedgerState.elided`). `id`
+ * mirrors `ServedRangeSpan.id` — session-unique, so `_settleSessionServeBookings`
+ * can retract exactly this entry rather than any other elided span of the
+ * same window.
+ */
+export interface ElidedRangeEntry {
+  start: number;
+  end: number;
   id: number;
 }
 
@@ -319,6 +399,23 @@ export interface ExecutionFenceState {
    * executionRefusal.
    */
   actionTargetPairs: HandlePathPair[];
+  /**
+   * FX-L (2026-09-03, ruling (r)): the certificate addresses this pack CITED
+   * and this session never sent bytes for — `action_frontier` ∪
+   * `evidence_handles` MINUS the shipped projection above. Absent when the
+   * certificate and the shipped set agree, which is every non-capped pack.
+   *
+   * NOT a permission field: nothing admits an edit because of it. It exists so
+   * the refusal these addresses now produce carries the recovery ruling (r)
+   * requires — "the fence STAYS and refuses, and the refusal must carry a
+   * recoverable `next` … so it is not refuse-only". `executionRefusal` turns it
+   * into a `read_file` re-read of exactly the refused address, which restores
+   * residency (`recordServedRange` / the booking pass) and admits the same
+   * edit on the next call. That loop IS the T13 anti-desertion property.
+   */
+  withheldTargets?: HandlePathPair[];
+  /** Exact ready change-contract targets batched atomically; never inferred from the broader actionTargetPairs frontier. */
+  batchEditTargets: HandlePathPair[];
   challengeCount: number;
   reclassification?: ExecutionReclassification;
   /**
@@ -374,8 +471,6 @@ export interface ExecutionFenceState {
    * introduced the very symbol that was missing.
    */
   zeroByteSignatures: Set<string>;
-  /** W5: post-ready read/search calls seen before the first successful edit. */
-  postReadyDiscoveryCalls: number;
   /**
    * Discovery this pack's OWN response advertised as still available, and the
    * one budget that governs it.
@@ -430,13 +525,57 @@ export interface ServedFindLedgerState {
 const SERVED_FIND_LEDGER_CAP = 32;
 
 /**
+ * TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, W-T-D wave): one
+ * recorded `search_files` response, keyed by its canonical fingerprint (see
+ * `protocol/searchFamily.ts`'s `searchDedupFingerprint`) in
+ * `WorkspaceSession.searchDedupLedger`.
+ *
+ * This ledger does NOT cache or replay old bytes — the server always
+ * recomputes the search fresh, and (with no write in between) a fresh search
+ * over the same fingerprint is provably the same result. What this ledger
+ * remembers is only enough PROVENANCE to let a repeat's response cite the
+ * call that first proved it: `servedBy` is a human-readable label
+ * (`search find (call #N)`), never a body snapshot.
+ */
+export interface SearchDedupLedgerEntry {
+  /** The wire `kind` the first serving response carried (`search.matches`, etc). */
+  readonly kind: string;
+  /** The resolved `search_files` action (`find`, `symbols`, `references`, `tree`). */
+  readonly action: string;
+  /** F3-style audit label for the first serving call, e.g. `search find (call #2)`. */
+  readonly servedBy: string;
+  /** The result's own count field at record time (`total_files`/`total`/etc). */
+  readonly files: number;
+  /**
+   * `WorkspaceSession.writeEventSerial` at record time. A lookup whose
+   * CURRENT session counter has moved on is stale — some edit landed since —
+   * and must be treated as a miss, never as a hit with borrowed provenance.
+   */
+  readonly writeEventSerial: number;
+  /**
+   * F3 (2026-09-02 review fix): sha256 (`protocol/searchFamily.ts`'s
+   * `searchDedupDigest`) of the FULL fresh body this entry was recorded
+   * from. `writeEventSerial` alone only proves "no write went through THIS
+   * server's own edit path since" — it says nothing about an external
+   * (non-TL) edit to the same files. A repeat's freshly recomputed digest is
+   * compared against this value BEFORE a `receipt` is ever attached; any
+   * mismatch means the content actually changed (by any means), so the
+   * fresh body is served with no receipt and this entry is replaced.
+   */
+  readonly digest: string;
+}
+
+/** Bounded LRU: `searchDedupLookup`/`recordSearchDedupEntry` evict the oldest entry past this. */
+const SEARCH_DEDUP_LEDGER_CAP = 64;
+
+/**
  * L1 (2026-08-07): how a create-shaped call named the workspace it writes into.
  * Supplied by the DISPATCHER, which is the only layer that sees the raw call
  * shape and the handle table; the guard never infers it. Absent means the
  * dispatcher could not establish a workspace for this create, which is the
  * same predicate W1's `cwd-required-for-create` refusal keys on.
  */
-export type CreateWorkspacePin = "explicit-cwd" | "handle-capability";
+export type CreateWorkspacePin = "explicit-cwd" | "handle-capability" | "single-root-default";
 
 /** Provenance for a create admitted by its own pin rather than by the frontier. */
 export interface ExecutionCreateAuthorization {
@@ -553,8 +692,72 @@ export interface WorkspaceSession {
    * Empty between calls. A direct in-process caller of `recordServedRange`
    * (the unit specs) never runs a funnel, so its spans simply stay booked —
    * provisional means "retractable", not "inert".
+   *
+   * FX-N (ruling (s), 2026-09-03): this list is now also the STAGING SET for
+   * the admissible-union / byte-residency writes `recordServedRange` used to
+   * perform inline. No second structure was added, deliberately: the two facts
+   * ("these lines were booked" and "this path was booked") come from the same
+   * statement and must be settled by the same corroboration, so deriving the
+   * second from the first makes them unable to disagree. `settleServedRanges`
+   * promotes a path iff at least one of its spans survived corroboration.
    */
   pendingServeSpans: Array<{ path: string; id: number; start: number; end: number }>;
+
+  /**
+   * FX-V1 (round-20A finding 1, ruling (x), 2026-09-04): elision-gap entries
+   * `_stageElisionGap` (called from `recordServedRange`) already wrote
+   * OPTIMISTICALLY into their ledger entry's `ServedRangeLedgerState.elided`
+   * for the CURRENT response, awaiting the SAME funnel corroboration
+   * `pendingServeSpans` awaits — mirroring exactly how a span is written to
+   * `state.spans` immediately and only RETRACTED later if unconfirmed. An
+   * entry here is retracted from `elided` by `_settleSessionServeBookings`
+   * unless the finalized wire's corroboration FULLY contains it; anything the
+   * response shed before the wire loses its claim. Empty between calls.
+   */
+  pendingElidedSpans: Array<{ path: string; id: number; start: number; end: number }>;
+
+  /**
+   * FX-W3 (ruling (aa), 2026-09-04, round-21A finding 1): per-path TRUE
+   * FILE-LINE end this response's own `recordServedRange` calls declared they
+   * were serving, for the CURRENT response — the largest `provenance.range`
+   * end seen so far for that path (`_parseHandleLineRange`, the same parse
+   * `_stageElisionGap` already runs). RENDERER ACCOUNTING, written
+   * automatically by `recordServedRange` for EVERY caller (`server.ts`,
+   * `tools/readCodeSmallFile.ts`, `features/task-pack/readCodeTaskPack.ts`,
+   * `features/search/find/servedFindEscalation.ts`, `protocol/coverageReceipt.ts`)
+   * without any of them needing to know this map exists — never derived from
+   * wire text.
+   *
+   * WHY IT EXISTS. A `mode=full`/`small_file` serve's WIRE `range` is
+   * synthesized from DISPLAY line count (`readFamily.ts`), which under-reaches
+   * the file whenever a real elision collapsed a comment block — the `seh6`
+   * fixture's `range:"1-20"` for a 40-line file whose real spans reach line
+   * 40. Round-17/FX-N's fix was to WIDEN the wire's OWN declared window by
+   * re-parsing the served BODY for marker-shaped lines; round-21A broke that
+   * (a caller's own file content that merely LOOKS like a TL elision marker
+   * is indistinguishable from a genuine one to that parse, and combined with
+   * an ordinary `budget.bytes` shed it inflated corroboration past what the
+   * wire actually carried). This map lets `_settleSessionServeBookings` widen
+   * a window `protocol/envelope.ts`'s `servedWindowsOf` ALREADY attributed to
+   * a path — never manufacture one from nothing — using a fact recorded
+   * in-process, at STAGING time, before any wire-level shed could touch it,
+   * and ONLY when `emit.ts` has independently confirmed no shedding occurred
+   * on this response at all (see `_settleSessionServeBookings`'s `wasShed`
+   * parameter). A shed response never widens through this map either: the
+   * declared window then narrows exactly as ruling (aa) requires.
+   *
+   * RESIDUE SAFETY. Like `pendingServeSpans`/`pendingElidedSpans`, an entry
+   * left behind by a call that threw before reaching the funnel survives
+   * here until the NEXT response of this session settles — but
+   * `_settleSessionServeBookings` only ever widens a window this response's
+   * OWN corroboration (`ServeCorroboration.windows`) already produced for
+   * that exact path, so a stale entry for a path this response's wire never
+   * mentions at all can never manufacture write authority the way an
+   * unconditional per-path lookup would (round-17 finding 2's exact class of
+   * hazard, avoided the same way that fix avoided it: never promote/widen
+   * what THIS response did not itself corroborate). Empty between calls.
+   */
+  pendingRenderedExtent: Map<string, number>;
 
   /** Monotonic id source for `ServedRangeSpan.id` ([R5-10]). */
   serveSpanSerial: number;
@@ -596,6 +799,55 @@ export interface WorkspaceSession {
 
   /** Proof-carrying ready phase for the active task epoch. */
   executionFence: ExecutionFenceState | undefined;
+
+  /**
+   * DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2) — layer 2 OBSERVED evidence
+   * for `sfIntent.ts`'s `resolveIntent`: has an `edit_file` call already
+   * passed `guardExecutionEdit` (i.e. `decision.allowed` — see
+   * `guardExecutionEdit`'s exported wrapper) during the CURRENT task epoch?
+   * Same lifetime as the task-state ledger: lane/workspace-scoped (this is a
+   * per-lane `WorkspaceSession`), cleared by `task.epoch:"new"` in both
+   * `guardExecutionDiscovery` and `guardExecutionEditCore`, exactly like
+   * `servedFindLedger`/`searchDedupLedger` above. Never cleared by anything
+   * else — an edit that lands stays observed for the rest of this task, per
+   * §4.2's "以後の pack は書き込み可能 frontier を出す".
+   *
+   * L1 (2026-09-05 R28 remediation): an edit_file call that ITSELF carries
+   * `task.epoch:"new"` is NOT excluded from setting this. `guardExecutionEdit`
+   * used to gate on `resetForNewTask !== true`, on the (false, for edit_file)
+   * assumption that a reset-tagged decision meant "nothing observed yet" —
+   * true for the discovery guard's `taskEpoch:"new"` exit, which returns
+   * before any bytes are served, but `guardExecutionEditCore`'s own
+   * `taskEpoch:"new"` branch does not short-circuit the edit: it resets the
+   * epoch's ledgers and falls through to `{allowed:true,
+   * resetForNewTask:true}`, and server.ts's dispatcher then actually applies
+   * the edit in the SAME call. The old gate left a genuinely landed edit
+   * unrecorded whenever it opened its own epoch. The corrected rule is simply
+   * `decision.allowed` — a REFUSED edit (`allowed:false`) still never sets
+   * this, reset-tagged or not.
+   */
+  intentEditObserved: boolean;
+
+  /**
+   * VF-5 hand-off: the active task epoch's `TaskChangeContract.verify_obligations`,
+   * as last reported by `recordExecutionContract`. Read-only outside this
+   * file via `recordedVerifyObligations()` — a kit-less `read.closure` call
+   * (no `verification` surface on THIS response) has nothing else to derive
+   * obligations from, so `protocol/readFamily.ts`'s `verifyClosureGate` falls
+   * back to this instead of treating the closure as clean.
+   *
+   * LIFETIME (FX-G-A, round-12 finding 1): EXACTLY the task epoch — the same
+   * lifetime as `executionFence`. Every site that writes
+   * `session.executionFence = undefined` also calls
+   * `_clearRecordedVerifyObligations`, INCLUDING the two genuine epoch
+   * boundaries (`guardExecutionDiscovery`'s and `guardExecutionEdit`'s
+   * `taskEpoch:"new"` branches), which used to clear the fence and the
+   * admissible union but leave this field standing. A survivor withheld the
+   * NEXT task's `read.closure`, naming a file that task never touched.
+   * Writes are REPLACE, never merge: see `recordExecutionContract`'s
+   * `verifyObligations` parameter for the empty-array-clears rule.
+   */
+  recordedVerifyObligations: readonly TaskVerifyObligation[] | undefined;
 
   /** One-shot advisory for prepared handles invalidated by a later pack. */
   pendingPreparedHandleAdvisory: string | undefined;
@@ -680,6 +932,71 @@ export interface WorkspaceSession {
   admissibleEditTargetPairs: HandlePathPair[];
 
   /**
+   * FX-L (2026-09-03, ruling (r)) — PER-ADDRESS BYTE RESIDENCY, the only
+   * authority for "does the caller actually hold this file's bytes".
+   *
+   * A certificate's `action_frontier`/`evidence_handles` name what the pack
+   * CITED, which is not the same question: FX-K proved a `budget.bytes` pack
+   * can emit a surface row, strip its body, name it in the certificate, and
+   * have `recordExecutionContract` lift it into the admissible union — an
+   * `edit.applied` against bytes the session never sent.
+   *
+   * `"shipped"` is written by the two SERVE-TIME producers and by them only:
+   * `recordServedEditAdmissibility` (the single post-trim booking pass's
+   * `shippedSurfaces(returned)` projection, plus `recordCreatedEditAdmissibility`
+   * for a file this server itself wrote) and `settleServedRanges` (the
+   * served-range ledger's funnel-exit settlement — FX-N moved this write out of
+   * `recordServedRange`, which fires mid-assembly, before the response kind is
+   * known; see ruling (s)). `"withheld"` is written by
+   * `recordWithheldEditAddresses` from the same booking pass, for exactly the
+   * surfaces the FINAL pack emitted WITHOUT a body (Phase-E stripped,
+   * Phase-F spliced, SF-seam withheld).
+   *
+   * MONOTONE TOWARD SHIPPED. `"shipped"` is never downgraded: a later pack that
+   * re-emits an already-served path bodyless (a restatement, a demoted echo)
+   * does not withdraw bytes the caller demonstrably holds — that direction is
+   * the T09/T10 "the gate refuses a handle this server itself served"
+   * regression class. Insertion order is preserved on upgrade, so the FIFO cap
+   * evicts by first-seen exactly like the admissible union.
+   *
+   * ABSENT ≠ WITHHELD. An address neither producer has ever seen (a synthetic
+   * certificate, a handle minted by a read family that does not route through
+   * the booking pass) is `undefined` and stays admissible — the filter refuses
+   * only on POSITIVE evidence of withholding, never on missing evidence.
+   * Cleared with the admissible union at a genuine epoch boundary.
+   */
+  editHandleResidency: Map<string, "shipped" | "withheld">;
+  /** Path-keyed counterpart of `editHandleResidency`; same writers and rules. */
+  editPathResidency: Map<string, "shipped" | "withheld">;
+
+  /**
+   * FX-P1 ruling (v) (2026-09-03, round-18A finding 2): `_clearAdmissibleEditUnion`
+   * wipes `editHandleResidency`/`editPathResidency` wholesale at every genuine
+   * epoch boundary — but the handle table is NOT epoch-scoped, so a handle
+   * minted (and marked `withheld`) in the epoch that is about to retire is
+   * still redeemable after the wipe, and a plain post-reset lookup then reads
+   * `undefined` ("unknown", positive-evidence-only admits). That is a second,
+   * standing laundering channel beyond the ordering bug the same finding
+   * fixes in `guardExecutionEdit` — ANY later epoch reset (not only one
+   * declared on the very edit call that names the address) opens it.
+   *
+   * These two sets are the retired complement: every key `_clearAdmissibleEditUnion`
+   * is about to drop from the live "withheld" maps is folded in HERE first, and
+   * survives the reset. `_editAddressResidency` consults them only as a
+   * fallback, AFTER the live maps report nothing for the address (so a fresh
+   * "shipped" mark in the new epoch — an honest re-read — always wins; see
+   * that function). Only `"withheld"` ever needs to survive: a `"shipped"`
+   * mark is never authority-in-a-different-epoch on its own, and letting it
+   * survive would create exactly the "epoch switch grants authority" hole
+   * ruling (v) closes for the opposite (withheld) direction. FIFO-capped like
+   * `editHandleResidency` (same `EDIT_RESIDENCY_CAP`), so a long session
+   * cannot grow this without bound.
+   */
+  retiredWithheldEditHandles: Set<string>;
+  /** Path-keyed counterpart of `retiredWithheldEditHandles`; same rule. */
+  retiredWithheldEditPaths: Set<string>;
+
+  /**
    * R2 (2026-07-25 refusal-forensics): the last few execution-edit refusal
    * signatures (editCallSignature), most-recent last, bounded to
    * EDIT_REFUSAL_SIGNATURE_HISTORY entries. A refused edit whose signature is
@@ -701,6 +1018,19 @@ export interface WorkspaceSession {
 
   /** Workspace-relative paths successfully written by edit_code this session. */
   editedPaths: Set<string>;
+
+  /**
+   * TL_SEARCH_DEDUP (W-T-D): monotonic count of successful writes this
+   * session — incremented once per `recordEditedPath` call, regardless of
+   * whether the written path was already in `editedPaths` (a second write to
+   * the SAME path still invalidates a search-dedup entry recorded in
+   * between). This is the generic "a write happened" signal the search-dedup
+   * ledger stales itself against; nothing else reads it, so it carries no
+   * other freshness meaning by design — nothing before this wave needed a
+   * write COUNT (as opposed to a write SET or a boolean brake), so none
+   * existed to reuse.
+   */
+  writeEventSerial: number;
 
   /**
    * Successful single-edit edit_file completions this session (search/replace,
@@ -736,6 +1066,21 @@ export interface WorkspaceSession {
    * does not reliably stop the wasteful pattern.
    */
   findHintFired: boolean;
+
+  /**
+   * W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF): consecutive
+   * single-target read-family calls (read_file with exactly one
+   * target/handle, or search_files action=find with exactly one query) this
+   * task epoch has issued with no intervening multi-target read-family call.
+   * Unlike singleFindCompletions/findHintFired above (a per-session one-shot
+   * latch), this streak is scoped to (workspace, lane, task epoch): reset to
+   * 0 by any multi-target read-family call AND by `taskEpoch:"new"` — see
+   * recordReadFamilySingleTargetCall and guardExecutionDiscovery's epoch-reset
+   * block. Read by server.ts at the read_file/search_files dispatch sites
+   * only; getSession(workspaceRoot) is already lane-scoped (laneScopedKey),
+   * so no separate per-lane map is needed here.
+   */
+  serialSingleTargetReads: number;
 
   /**
    * Guard 2 (2026-07-12b decoy-fix forensics): rolling set of concern-anchor
@@ -788,6 +1133,38 @@ export interface WorkspaceSession {
    * pressure earned by a different scope.
    */
   servedFindLedger?: ServedFindLedgerState;
+
+  /**
+   * TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, default OFF): the
+   * per-task record of already-served `search_files` fingerprints — see
+   * `SearchDedupLedgerEntry`'s doc comment for what it holds and why.
+   *
+   * TASK-scoped like `servedFindLedger`: cleared wholesale on `taskEpoch:
+   * "new"` (see `guardExecutionDiscovery`/`guardExecutionEdit`), because "this
+   * exact search already ran" is a claim about the CURRENT task, not the
+   * session. Individual entries also self-invalidate on any intervening write
+   * via `writeEventSerial`, so a write mid-task does not require a second
+   * clear call to take effect.
+   *
+   * Iteration order is LRU-recency order (`searchDedupLookup`/
+   * `recordSearchDedupEntry` re-insert on touch), capped at
+   * SEARCH_DEDUP_LEDGER_CAP entries.
+   */
+  searchDedupLedger: Map<string, SearchDedupLedgerEntry>;
+
+  /**
+   * F9 (2026-09-02 review fix): the search-dedup ledger's OWN serve-call
+   * ordinal, used ONLY to label a first-time entry's `servedBy` provenance
+   * string (`search find (call #N)`). Deliberately SEPARATE from
+   * `serveCallSerial` above: that counter numbers every read_file serving
+   * call server.ts labels a `served_by`/`code_unchanged` receipt against, so
+   * a search_files call drawing from it would silently renumber every READ
+   * receipt issued afterward whenever TL_SEARCH_DEDUP happens to be on — an
+   * observable wire-shape difference from merely enabling a (B) flag, which
+   * the flag's own byte-identity contract forbids. See
+   * `beginSearchDedupServeCall` below.
+   */
+  searchDedupCallSerial: number;
 
   /**
    * Feature 1: true once the one-shot unread-sibling concern note has run
@@ -1363,6 +1740,8 @@ function _emptySession(): WorkspaceSession {
     servedRangeLedger: new Map(),
     artifactServedRangeLedger: new Map(),
     pendingServeSpans: [],
+    pendingElidedSpans: [],
+    pendingRenderedExtent: new Map(),
     serveSpanSerial: 0,
     serveCallSerial: 0,
     allowFullExpansionsTotal: 0,
@@ -1370,19 +1749,29 @@ function _emptySession(): WorkspaceSession {
     candidatePackFullReads: 0,
     packChecks: undefined,
     executionFence: undefined,
+    intentEditObserved: false,
+    recordedVerifyObligations: undefined,
     pendingPreparedHandleAdvisory: undefined,
     lastExecutionCertificateId: undefined,
     revokedCertificateIds: new Set(),
     admissibleEditHandles: [],
     admissibleEditPaths: [],
     admissibleEditTargetPairs: [],
+    editHandleResidency: new Map(),
+    editPathResidency: new Map(),
+    retiredWithheldEditHandles: new Set(),
+    retiredWithheldEditPaths: new Set(),
     recentEditRefusalSignatures: [],
     refusedEditShapes: [],
     editedPaths: new Set(),
+    writeEventSerial: 0,
+    searchDedupLedger: new Map(),
+    searchDedupCallSerial: 0,
     singleEditCompletions: 0,
     usedEditsBatch: false,
     singleFindCompletions: 0,
     findHintFired: false,
+    serialSingleTargetReads: 0,
     concernTokens: [],
     concernNotedPaths: new Set(),
     readPaths: new Set(),
@@ -1427,23 +1816,56 @@ export function taskQueryRef(workspaceRoot: string, query: string): string {
     .slice(0, 16)}`;
 }
 
-/** Records the newest task query and invalidates the previous qref for this workspace. */
+/**
+ * Records the newest task query and invalidates the previous qref for this
+ * workspace.
+ *
+ * G2 (2026-09-04): also mirrored onto the durable per-(workspace, lane) slot
+ * (`state/stateHandles.ts`'s `persistQueryRef`) so a `qref` minted here still
+ * resolves after a server restart or a fresh reconnect — see that module's
+ * doc comment for why a single persisted slot, not a table, is the right
+ * shape. The in-process field stays authoritative and is written first; the
+ * durable mirror is best-effort and never changes what this call returns.
+ */
 export function rememberTaskQuery(workspaceRoot: string, query: string): string {
   const normalized = query.trim();
   const ref = taskQueryRef(workspaceRoot, normalized);
   getSession(workspaceRoot).activeTaskQuery = { ref, query: normalized };
+  persistQueryRef(workspaceRoot, ref, normalized);
   return ref;
 }
 
-/** Resolves only the current workspace-bound qref; old and cross-workspace refs fail closed. */
+/**
+ * Resolves only the current workspace-bound qref; old and cross-workspace
+ * refs fail closed.
+ *
+ * G2: an in-process MISS (a restarted server, or the first call of a fresh
+ * reconnect) consults the durable slot before failing closed, exactly as
+ * `util/handles.ts`'s content-handle `get` consults its own persisted
+ * backing. A hit is promoted into this session so every later call in this
+ * process takes the fast, in-memory path; a ref that does not match the
+ * slot's current contents (superseded, or cleared by `taskEpoch:"new"`) is
+ * still a miss, on disk exactly as it already was in memory.
+ */
 export function resolveTaskQueryRef(workspaceRoot: string, ref: string): string | undefined {
   const active = getSession(workspaceRoot).activeTaskQuery;
-  return active?.ref === ref ? active.query : undefined;
+  if (active !== undefined) return active.ref === ref ? active.query : undefined;
+  const rehydrated = rehydrateQueryRef(workspaceRoot, ref);
+  if (rehydrated === undefined) return undefined;
+  getSession(workspaceRoot).activeTaskQuery = { ref, query: rehydrated };
+  return rehydrated;
 }
 
-/** Explicit epoch boundary for task query inheritance. */
+/**
+ * Explicit epoch boundary for task query inheritance.
+ *
+ * G2: clears the durable slot too — an epoch boundary must sever a `qref`'s
+ * validity on disk exactly as it does in memory, or a stale ref could outlive
+ * an explicit `taskEpoch:"new"` purely by surviving a restart in between.
+ */
 export function clearTaskQueryRef(workspaceRoot: string): void {
   getSession(workspaceRoot).activeTaskQuery = undefined;
+  clearPersistedQueryRef(workspaceRoot);
 }
 
 // R1/R2 (2026-07-25 refusal-forensics) caps. A typestate refusal now carries
@@ -1453,6 +1875,12 @@ export function clearTaskQueryRef(workspaceRoot: string): void {
 // signatures.
 const FRONTIER_HANDLE_CAP = 32;
 const FRONTIER_PATH_CAP = 16;
+/**
+ * FX-L: how many cited-but-unshipped addresses a fence remembers for its
+ * recovery `next`. Small on purpose — the `next` it feeds is a re-read call,
+ * and a re-read of 8 files is already the largest recovery worth prescribing.
+ */
+const WITHHELD_TARGET_CAP = 8;
 const NEXT_CALL_EDIT_CAP = 8;
 const EDIT_REFUSAL_SIGNATURE_HISTORY = 8;
 /** W6: bounded per-task refusal-shape history. */
@@ -2070,11 +2498,180 @@ function executionRefusal(
     prescriptionCandidateHandles.length > 0 ? prescriptionCandidateHandles : frontierHandles;
   const prescriptionPaths =
     prescriptionCandidatePaths.length > 0 ? prescriptionCandidatePaths : frontierPaths;
+  // ---------------------------------------------------------------------
+  // FX-L (2026-09-03, ruling (r)) — THE CAPPED-CERTIFICATE RECOVERY.
+  //
+  // A fence whose certificate cited addresses this session never sent bytes
+  // for now REFUSES them (recordExecutionContract's shipped projection). Ruling
+  // (r) requires that refusal to be recoverable, "the same executable shape the
+  // read family uses for `cause:"capped"`": re-read exactly the unshipped
+  // addresses, keep the workspace and the task binding, and the very next
+  // `edit_file` is admitted — because a served range marks the path shipped
+  // (`recordServedRange`) and the booking pass books it into the union.
+  //
+  // SCOPED TO THE ADDRESSES THIS REFUSAL IS ABOUT. It fires when the refused
+  // target IS one of the withheld ones (the honest diagnosis: "you were told
+  // about this file and never given it"), or when the fence has nothing else
+  // to prescribe at all (an entirely-withheld certificate, which would
+  // otherwise be the refuse-only fence the 2026-07-25 T13 note warns about).
+  // A never-packed control file matches neither, so its refusal keeps today's
+  // shape byte for byte.
+  const fenceWithheldTargets = isEditContext ? fence.withheldTargets ?? [] : [];
+  const requestedEditArgs = opts?.editArgs ?? {};
+  const requestedHandlesForRecovery = requestedEditHandles(requestedEditArgs);
+  const requestedPathsForRecovery = new Set([
+    ...requestedEditPaths(requestedEditArgs),
+    ...requestedHandlesForRecovery
+      .map((handle) => opts?.resolveHandlePath?.(handle))
+      .filter((candidate): candidate is string => typeof candidate === "string" && candidate !== ""),
+  ]);
+  // FX-N (round-16 finding 3, 2026-09-03) — MATCH ON THE RESOLVED PATH.
+  //
+  // `recordExecutionContract` builds each withheld pair's path from the
+  // certificate's own evidence pairing (`evidenceByHandle`), which is EMPTY for
+  // a frontier handle minted outside the obligation evidence set — those pairs
+  // carry `path:""`. Matching on `pair.path` alone therefore missed the very
+  // address being refused whenever the certificate had no pairing for it, and
+  // the recovery fell through to `nothingElseToPrescribe`'s whole-complement
+  // branch, whose FIRST entry is an unrelated file. Measured (`r16_b`, flags
+  // off): `edit_file {path:"src/pricing_0.ts"}` refused with
+  // `next = read_file targets:[{path:"src/anchor.ts"}]`; running it verbatim
+  // served anchor.ts, the same edit refused AGAIN, and only that second
+  // refusal named pricing_0.ts — one wasted round trip per address, and a
+  // first `next` that is not the executable recovery for the refusal it rides
+  // on. §12 row FX-L states the contract as "未出荷 address のみ拒否し `next`
+  // はその未出荷 address だけを名指す (per-address)".
+  //
+  // The dispatcher's handle table is the second resolver the recovery already
+  // uses when it BUILDS the `next` (see `recoveryTargets` below); consulting it
+  // for the MATCH as well is what makes the two halves agree about which
+  // address this refusal is about.
+  const resolvedWithheldPath = (pair: HandlePathPair): string =>
+    pair.path !== "" ? pair.path : opts?.resolveHandlePath?.(pair.handle) ?? "";
+  const refusedWithheld = fenceWithheldTargets.filter((pair) =>
+    (pair.handle !== "" && requestedHandlesForRecovery.includes(pair.handle))
+    || (resolvedWithheldPath(pair) !== ""
+      && requestedPathsForRecovery.has(resolvedWithheldPath(pair))));
+  const nothingElseToPrescribe = prescriptionCandidateHandles.length === 0
+    && prescriptionCandidatePaths.length === 0
+    && frontierHandles.length === 0
+    && frontierPaths.length === 0;
+  // FX-N (round-16 finding 3) — THE FALLBACK NAMES THE REFUSED ADDRESS.
+  //
+  // `nothingElseToPrescribe` is the entirely-withheld certificate: the fence
+  // has no frontier left to prescribe, and FX-L keeps it alive precisely so it
+  // can refuse with a recovery instead of being cleared. What it prescribed was
+  // the certificate's WHOLE withheld complement, whose first entry has no
+  // relation to the edit being refused — measured in `r16_b`: an
+  // `edit_file {path:"src/pricing_0.ts"}` answered
+  // `next = read_file targets:[{path:"src/anchor.ts"}]`, and only the SECOND
+  // refusal, after that unrelated read, named pricing_0.ts. The loop terminated
+  // but cost an extra round trip per address, and the first `next` was not the
+  // executable recovery for the refusal it rode on.
+  //
+  // The refused address IS the honest recovery here, by the same rule FX-L
+  // states for the withheld case: a `read_file … content:"full"` of it puts
+  // bytes on the wire and books them, and the very next edit is admitted (this
+  // is the A1 serve-time admissibility rule, not a new affordance —
+  // `r16_b`'s own second step is the measurement). The certificate's withheld
+  // complement stays as the fallback for every other shape. Nothing changes for
+  // a fence that still HAS a frontier: the refused address never reaches this
+  // branch there, so the never-packed control keeps today's frontier
+  // prescription byte for byte.
+  //
+  // GATED ON POSITIVE `withheld` EVIDENCE, AND ON AN EDIT-TERMINAL FENCE.
+  // Only an address THIS SESSION emitted and withheld the bytes for is
+  // recovered this way — the same per-address residency FX-L writes, read from
+  // the session rather than from the one certificate that happens to be live
+  // (in `r16_b` the refused address was withheld by an EARLIER capped pack in
+  // the same epoch, which is why the live certificate's own complement did not
+  // contain it). Three shapes are deliberately left exactly as they were:
+  //   - a never-packed control under an entirely-withheld certificate has no
+  //     residency at all, so it keeps prescribing the certificate's withheld
+  //     complement (`sfCertificateWriteAuthority.spec.ts`'s discriminating
+  //     control);
+  //   - an ANSWER-ready certificate's ungrounded edit keeps its
+  //     `taskEpoch:"new"` re-scope remedy — reading the file does not, and must
+  //     not, unlock an answer fence (`executionTypestate.spec.ts` A2, replay
+  //     corpus `afr2`);
+  //   - a refusal that names no address, or an address with no `withheld`
+  //     record, falls through to the complement.
+  const refusedUnshippedPairs: HandlePathPair[] = fence.terminalAction === "edit"
+    ? [
+        ...requestedHandlesForRecovery.map((handle) => ({
+          handle,
+          path: opts?.resolveHandlePath?.(handle) ?? "",
+        })),
+        ...requestedEditPaths(requestedEditArgs).map((path) => ({ handle: "", path })),
+      ].filter((pair) =>
+        (pair.handle !== "" && _editAddressResidency(session, pair.handle, "") === "withheld")
+        || (pair.path !== "" && _editAddressResidency(session, "", pair.path) === "withheld"))
+    : [];
+  const withheldRecoveryTargets = refusedWithheld.length > 0
+    ? refusedWithheld
+    : nothingElseToPrescribe
+      ? (refusedUnshippedPairs.length > 0 ? refusedUnshippedPairs : fenceWithheldTargets)
+      : [];
+  // The task binding rides when this session still has one: `qref` re-binds the
+  // re-read to the same task epoch, so the recovery is a zoom on the certified
+  // task rather than an abandonment of it (a `taskEpoch:"new"` recovery would
+  // discard the very certificate the caller is trying to execute).
+  // NO `qref`, DELIBERATELY, AND THIS WAS MEASURED. Ruling (r) asks for the
+  // task binding to ride; on this fixture it makes the recovery unexecutable.
+  // `read_file {qref, targets:[…]}` is a task-pack RE-ASK, and the pack dedup
+  // answers it `pack-unchanged` with a `prior` restatement for the very surface
+  // the capped pack shipped no body for — the recovery would route straight
+  // back through the mechanism that withheld the bytes, and hand the caller a
+  // second false "you already hold these". The plain targeted read below is the
+  // "read/search of UNSERVED scope is still served" affordance, it is scoped to
+  // the same epoch by the fence that emitted it, and it is the only shape
+  // observed to actually put the bytes on the wire AND book them.
+  //
+  // (The false `prior` on that re-ask is a separate, pre-existing defect in the
+  // receipt path, reported by FX-L rather than fixed here: the booking pass
+  // books no span for a bodyless surface, but the receipt still cites it.)
+  // A withheld ADDRESS is prescribed by PATH wherever one is known — the
+  // certificate's own {handle,path} pairing first, the dispatcher's handle
+  // table second. Measured: `targets:[{handle}]` under a live qref answers
+  // `decision-unchanged` (a receipt, not bytes), and a handle-addressed re-read
+  // re-mints a handle rather than proving the file resident.
+  const recoveryTargets = withheldRecoveryTargets
+    .slice(0, NEXT_CALL_EDIT_CAP)
+    .map((pair) => (pair.path !== "" ? pair.path : opts?.resolveHandlePath?.(pair.handle) ?? ""))
+    .filter((candidate) => candidate !== "")
+    .filter((candidate, index, all) => all.indexOf(candidate) === index);
+  // `content:"full"` is load-bearing, not decoration. The recovery only closes
+  // the loop if the re-read BOOKS what it serves: `content:"full"` routes
+  // through `recordServedRange`, which is the served-range ledger ruling (r)
+  // names as the proof of residency — the default `auto` selection returns the
+  // same bytes on this fixture and books nothing, so a caller executing it
+  // verbatim would be refused a second time. A file too large for one full read
+  // answers with the read family's own capped contract (skeleton +
+  // `remaining_ranges` + an executable `next`), which is the documented way on
+  // from there.
+  const withheldNextCall = recoveryTargets.length > 0
+    ? {
+        tool: "read_file",
+        arguments: {
+          targets: recoveryTargets.map((candidate) => ({ path: candidate })),
+          content: "full",
+          ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
+        },
+      }
+    : undefined;
+  // ---------------------------------------------------------------------
   // F-R8: a known-but-out-of-epoch batch takes priority over both the brake
   // rescope and the generic frontier/challenge prescription — neither of
   // those names the caller's actual targets, and this one is a real,
   // placeholder-free `read_file` call that re-covers exactly them.
-  const nextCall = knownOutsideRepack !== undefined
+  //
+  // FX-L outranks even that: `knownOutsideRepack` prescribes
+  // `taskEpoch:"new"`, which THROWS AWAY the live certificate. When the reason
+  // the target is inadmissible is "this response withheld its bytes", the
+  // proportionate recovery is to send them.
+  const nextCall = withheldNextCall !== undefined
+    ? withheldNextCall
+    : knownOutsideRepack !== undefined
     ? {
         tool: "read_file",
         arguments: {
@@ -2249,6 +2846,18 @@ function executionRefusal(
             also_admissible: alsoAdmissible,
           }
         : { handles: frontierHandles, paths: frontierPaths },
+      // FX-L (ruling (r)): the refusal SAYS why the certificate's own address is
+      // inadmissible, in the read family's own vocabulary — the bytes were
+      // capped out of the response that named it. Advisory: `code` still says
+      // `execution-typestate` and `next` carries the whole recovery, so a
+      // caller that ignores this field loses nothing.
+      //
+      // ONLY when THIS target is the withheld one. An unrelated target refused
+      // under an entirely-withheld fence still gets the recovery `next` (that
+      // fence has nothing else to offer anyone, and a fence that can only
+      // refuse is the 2026-07-25 T13 failure), but saying `cause:"capped"`
+      // about a file the pack never named would be a false diagnosis.
+      ...(withheldNextCall !== undefined && refusedWithheld.length > 0 ? { cause: "capped" } : {}),
       next_call: nextCall,
       // Rides the REFUSAL, never the arguments: edit_file's unknown-argument
       // layer fails closed, so a marker inside `arguments` would make the
@@ -2401,6 +3010,12 @@ function compactEditRefusal(
     certificate_id: full["certificate_id"],
     ...(delta ? { remaining: delta } : { unchanged: "unchanged since previous refusal" }),
     ...(full["challenge"] ? { challenge: full["challenge"] } : {}),
+    // FX-L: `cause` rides the compact receipt for the same reason `challenge`
+    // does — it is the DIAGNOSIS, and this shape is what a caller sees on every
+    // retry after the first. A compact receipt that keeps the recovery call but
+    // drops the one word saying the bytes were capped is the escape-erasing
+    // compaction C3 removed, in miniature. ~20 B.
+    ...(full["cause"] !== undefined ? { cause: full["cause"] } : {}),
     ...(compactCall ? { next_call: compactCall } : {}),
   };
 }
@@ -2577,8 +3192,264 @@ function _clearAdmissibleEditUnion(session: WorkspaceSession): void {
   session.admissibleEditHandles = [];
   session.admissibleEditPaths = [];
   session.admissibleEditTargetPairs = [];
+  // FX-L: residency is epoch-scoped for the same reason the union is — the
+  // handles are stale and the next task's certificate must be judged against
+  // what THAT task served. Cleared here and nowhere else, so the two can never
+  // disagree about which epoch they describe.
+  //
+  // FX-P1 ruling (v): before wiping, fold every WITHHELD key into the retired
+  // sets (see their doc comment) — a `taskEpoch:"new"` boundary must not be a
+  // way to forget that this session already emitted an address bodyless. The
+  // live maps' own SHIPPED keys are dropped outright: a stale "shipped" mark
+  // has no protective value to preserve across an epoch it does not describe.
+  for (const [key, state] of session.editHandleResidency) {
+    if (state === "withheld") _foldIntoRetiredWithheld(session.retiredWithheldEditHandles, key);
+  }
+  for (const [key, state] of session.editPathResidency) {
+    if (state === "withheld") _foldIntoRetiredWithheld(session.retiredWithheldEditPaths, key);
+  }
+  session.editHandleResidency.clear();
+  session.editPathResidency.clear();
   session.recentEditRefusalSignatures = [];
   session.refusedEditShapes = [];
+}
+
+/**
+ * FIFO-capped insert into a retired-withheld set (`EDIT_RESIDENCY_CAP` —
+ * declared just below, referenced only at call time so the forward reference
+ * is safe). Insertion order is a `Set`'s iteration order, so the oldest
+ * entry is whichever was added first.
+ */
+function _foldIntoRetiredWithheld(set: Set<string>, key: string): void {
+  if (key === "" || set.has(key)) return;
+  set.add(key);
+  while (set.size > EDIT_RESIDENCY_CAP) {
+    const oldest = set.values().next().value as string | undefined;
+    if (oldest === undefined) break;
+    set.delete(oldest);
+  }
+}
+
+/**
+ * FX-L: per-address residency bound. Sized above ADMISSIBLE_EDIT_UNION_CAP
+ * because a capped pack emits MORE addresses than it books (that is the whole
+ * defect), and a "withheld" entry evicted early silently re-opens the blind
+ * edit it exists to refuse.
+ */
+const EDIT_RESIDENCY_CAP = 512;
+
+/**
+ * The ONE writer for `editHandleResidency`/`editPathResidency`. `"shipped"`
+ * always wins (see the field doc: monotone toward shipped), an entry keeps its
+ * first-seen position on upgrade, and the oldest entry is FIFO-evicted past
+ * the cap — identical discipline to `_appendAdmissible`.
+ */
+function _markEditResidency(
+  map: Map<string, "shipped" | "withheld">,
+  keys: readonly string[],
+  state: "shipped" | "withheld",
+): void {
+  for (const key of keys) {
+    if (key === "") continue;
+    const current = map.get(key);
+    if (current === state) continue;
+    if (current === "shipped") continue;
+    map.set(key, state);
+    while (map.size > EDIT_RESIDENCY_CAP) {
+      const oldest = map.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+  }
+}
+
+/**
+ * FX-L (ruling (r)): "this response EMITTED these addresses and sent no bytes
+ * for them". Called by the single post-trim booking pass
+ * (`bookShippedPackServeState`) with exactly the final pack's bodyless
+ * surfaces, AFTER `recordServedEditAdmissibility` has marked the shipped ones,
+ * so a path with one shipped and one bodyless row stays `"shipped"`.
+ *
+ * This is the ONLY thing that distinguishes "this session never served
+ * anything" (a synthetic or first-call certificate — residency `undefined`,
+ * today's behavior preserved) from "this response emitted addresses and
+ * withheld their bytes" (a cap-overflowing pack — residency `"withheld"`, the
+ * certificate lift refuses). `recordExecutionContract` is the only reader.
+ */
+export function recordWithheldEditAddresses(
+  workspaceRoot: string,
+  entries: { handles?: readonly string[]; paths?: readonly string[] },
+): void {
+  const handles = entries.handles ?? [];
+  const paths = entries.paths ?? [];
+  if (handles.length === 0 && paths.length === 0) return;
+  const session = getSession(workspaceRoot);
+  _markEditResidency(session.editHandleResidency, handles, "withheld");
+  _markEditResidency(session.editPathResidency, paths, "withheld");
+}
+
+/**
+ * FX-P1 (INV-I-1, DESIGN-v0.15 ruling (r)/(v), 2026-09-03) — THE ONE
+ * EDIT-ADMISSIBILITY PREDICATE.
+ *
+ * Ruling (r): write authority comes from SHIPPED BYTES (a body this session
+ * sent, a `code_unchanged` restatement, a served range, a file this server
+ * created) and from nothing else. Three consumers ask that question and, before
+ * this function, two of them spelled the answer out inline while a third never
+ * asked at all:
+ *
+ *   1. `recordExecutionContract`'s certificate lift (`addressShipped`) — FX-L;
+ *   2. `executionRefusal`'s capped-recovery match (`refusedUnshippedPairs`) —
+ *      FX-N;
+ *   3. `guardExecutionEdit` itself — WHICH DID NOT ASK, and that is INV-I-1.
+ *
+ * INV-I-1, THE MEASURED DEFECT (live, all SF flags off, `scratchpad/fxp1/i1.mjs`):
+ *
+ *   read_file { query:<generic pricing change>, task:{profile:"generic",epoch:"new"},
+ *               budget:{ bytes: 6144 } }
+ *     -> read.task_pack, decision.kind = "discover", ONE evidence row
+ *        (`src/pricing_5.ts`) whose body the byte cap stripped: `hasBody:false`.
+ *        The booking pass marks it `withheld` exactly as FX-L designed.
+ *   edit_file { edits:[{ handle:<that row's handle>, content:"…" }] }
+ *     -> edit.applied.   The 575-byte real file is replaced by a 37-byte guess.
+ *
+ * Reproduced identically for `handle`+`search`, `path`+`search`, and
+ * `handle`+`range`+`content`; only `path`+`content` refused, and only because
+ * `write-intent-ambiguous` catches that ONE shape for unrelated reasons. So the
+ * gap was never about a form — it was about the gate.
+ *
+ * ROOT CAUSE, one line: `guardExecutionEdit`'s
+ * `if (fence === undefined || fence.phase === "revoked" || fence.phase === "done")
+ * return { allowed: true }`. The FENCE was the only thing that ever consulted
+ * residency, via the certificate lift, and a pack whose `decision.kind` is
+ * `discover` emits NO `execution_contract`, so `recordExecutionContract` never
+ * runs and no fence is installed. FX-K/FX-L/FX-N did not catch it because every
+ * one of their cases arms a certificate first — `sfCertificateWriteAuthority`'s
+ * production case even spends a second call specifically to install the fence.
+ * A capped DISCOVERY pack mints handles and installs nothing.
+ *
+ * WHY THIS FUNCTION AND NOT A FOURTH INLINE COPY. The three consumers must agree
+ * about the SAME address, or the gate refuses what the recovery cannot restore
+ * (and vice versa — round-16 finding 3 was exactly that disagreement, in the
+ * path-resolution half). One function, three callers, one answer.
+ *
+ * POSITIVE EVIDENCE ONLY, UNCHANGED. `"unknown"` — an address neither serve-time
+ * producer ever saw — stays admissible. Requiring proof of shipping would refuse
+ * every edit in a session that never read anything, which is both a legitimate
+ * call shape and the T09/T10 "the gate refuses a handle this server itself
+ * served" regression class. Only an address this session EMITTED and withheld
+ * the bytes for is refused.
+ */
+export type EditAddressResidency = "shipped" | "withheld" | "unknown";
+
+function _editAddressResidency(
+  session: WorkspaceSession,
+  handle: string,
+  filePath: string,
+): EditAddressResidency {
+  // THE FILE IS THE UNIT OF BYTE RESIDENCY (FX-L): a known path outranks the
+  // handle id, because the same file is routinely re-emitted under a fresh
+  // handle and the pack withholds (or sends) the FILE, not one address for it.
+  if (session.editHandleResidency.get(handle) === "shipped") return "shipped";
+  const byPath = filePath === "" ? undefined : session.editPathResidency.get(filePath);
+  if (byPath === "shipped") return "shipped";
+  if (byPath === "withheld") return "withheld";
+  if (session.editHandleResidency.get(handle) === "withheld") return "withheld";
+  // FX-P1 ruling (v): the live maps say nothing about this address in the
+  // CURRENT epoch — fall back to what a now-retired epoch recorded before its
+  // `taskEpoch:"new"` wipe. A fresh "shipped" mark always wins (both checks
+  // above already returned before reaching here), so this can only ever
+  // EXTEND a refusal that positive evidence already earned, never create one
+  // out of "unknown". See the fields' own doc comment for why only the
+  // withheld direction is carried forward.
+  if (handle !== "" && session.retiredWithheldEditHandles.has(handle)) return "withheld";
+  if (filePath !== "" && session.retiredWithheldEditPaths.has(filePath)) return "withheld";
+  return "unknown";
+}
+
+/**
+ * IL-W5 (DESIGN-v0.15-sf-intent-layers.md §11.2(1)) — read-only, HANDLE-ONLY
+ * accessor for the `write-intent-ambiguous` auto-resolve. Deliberately NOT a
+ * `path` lookup, and NOT `_editAddressResidency` (which falls back to the
+ * PATH-keyed `editPathResidency` map): that map is `"shipped"` the instant
+ * ANY byte of the path reached this lane — `_promoteStagedServeBookings`
+ * (the general per-response funnel exit) promotes a path the moment ONE of
+ * its served spans corroborates, by design (FX-N: "a partially-carried span
+ * still counts... they are per-FILE, not per-line"), and
+ * `recordServedEditAdmissibility` (the task_pack booking pass) does the same
+ * for a single served slice row. Measured regression
+ * (`fxq2RangeGranularForeignHandle.spec.ts`, "control: the SAME lane's
+ * honest whole-file path+content replace still refuses"): a lane that read
+ * only lines 1-10 of a large file already has `editPathResidency==="shipped"`
+ * for that path, which would wrongly auto-resolve a bare `{path, content}`
+ * whole-file replace as if the whole file were held.
+ *
+ * The caller (server.ts) proves FULL-body residency instead by canonicalizing
+ * the exact whole-file `{kind:"file", path, workspaceRoot, sha:<current sha>}`
+ * handle (via `handleTable.upsert`, which resolves to the SAME id a prior
+ * `create:true` or `content:"full"` serve already minted, and mints nothing
+ * new when it did not) and asking THIS function whether exactly THAT handle
+ * — never the path — is `"shipped"`. A `create:true` mint's handle is marked
+ * shipped by `recordCreatedEditAdmissibility`; a task_pack whole-file serve's
+ * handle is marked shipped by `recordServedEditAdmissibility`. A plain direct
+ * `content:"full"` read (outside task_pack) does not mint through either of
+ * those, so the caller ALSO checks `servedRangeCoverage(...).complete` (the
+ * range ledger `bookFullFileExpansionServe` populates for exactly that case)
+ * — this accessor only ever answers the handle half of that OR.
+ */
+export function isHandleShippedInThisLane(workspaceRoot: string, handle: string): boolean {
+  if (handle === "") return false;
+  return getSession(workspaceRoot).editHandleResidency.get(handle) === "shipped";
+}
+
+/**
+ * Every address THIS edit call asks to write whose bytes this session emitted
+ * and withheld. Reads BOTH request vocabularies — `requestedEditHandles` and
+ * `requestedEditPaths` — so `handle`+`content`, `handle`+`search`,
+ * `path`+`search`, a `range` form and an `edits[]` batch all reach the same
+ * answer; the write FORM is not part of the question.
+ */
+function _withheldEditAddresses(
+  session: WorkspaceSession,
+  args: Record<string, unknown>,
+  resolveHandlePath?: (handle: string) => string | undefined,
+): HandlePathPair[] {
+  const pairs: HandlePathPair[] = [
+    ...requestedEditHandles(args).map((handle) => ({
+      handle,
+      path: resolveHandlePath?.(handle) ?? "",
+    })),
+    ...requestedEditPaths(args).map((path) => ({ handle: "", path })),
+  ];
+  return pairs
+    .filter((pair) => _editAddressResidency(session, pair.handle, pair.path) === "withheld")
+    .filter((pair, index, all) =>
+      all.findIndex((other) => other.handle === pair.handle && other.path === pair.path) === index);
+}
+
+/**
+ * Defensive per-session element bound for `recordedVerifyObligations`. The
+ * PRODUCER (`features/task-pack/sfVerifyObligations.ts`) already caps a
+ * contract at 8, and the CONSUMER (`protocol/readFamily.ts`'s
+ * `VERIFY_MAX_OBLIGATIONS`) caps the gate at 12 and DISCLOSES what it dropped;
+ * this bound sits above both so it never silences that disclosure in any shape
+ * production can reach — it exists only so a hostile/oversized contract cannot
+ * park an unbounded array on the session.
+ */
+const RECORDED_VERIFY_OBLIGATIONS_MAX = 32;
+
+/**
+ * FX-G-A (round-12 finding 1): the single greppable writer for "this task
+ * epoch's recorded verify obligations are gone". Called by EVERY site that
+ * writes `session.executionFence = undefined` — the three inside
+ * `recordExecutionContract` and, the ones that were missing, the two
+ * `taskEpoch:"new"` epoch boundaries in `guardExecutionDiscovery` /
+ * `guardExecutionEdit`. Keeping one function (rather than five inline
+ * assignments) is what makes the fence/obligation co-lifetime invariant
+ * checkable by grep, which is how this defect got past review the first time.
+ */
+function _clearRecordedVerifyObligations(session: WorkspaceSession): void {
+  session.recordedVerifyObligations = undefined;
 }
 
 /**
@@ -2598,6 +3469,13 @@ export function recordServedEditAdmissibility(
   if (entries.paths !== undefined && entries.paths.length > 0) {
     _appendAdmissible(session.admissibleEditPaths, entries.paths);
   }
+  // FX-L: this function's contract is already "callers pass only what actually
+  // carried bytes", so it is the exact, and only, place the SHIPPED half of
+  // per-address residency is established. It runs BEFORE
+  // `recordWithheldEditAddresses` in the booking pass, which is what makes a
+  // path with one body-bearing and one bodyless row resolve to "shipped".
+  _markEditResidency(session.editHandleResidency, entries.handles ?? [], "shipped");
+  _markEditResidency(session.editPathResidency, entries.paths ?? [], "shipped");
   // Ticket 1 (2026-08-07): pair handles with paths ONLY when this call's own
   // arrays arrived at matching length — this call site's real caller
   // (readCodeTaskPack.ts finalizePackServeState) maps both from the SAME
@@ -2678,6 +3556,28 @@ export function recordExecutionContract(
    * layer that sees the FINAL normalized route next to the FINAL surfaces.
    */
   sanctionedZoom?: { handles: readonly string[]; budget: number },
+  batchEditTargets: readonly HandlePathPair[] = [],
+  /**
+   * VF-5 hand-off: this call's `TaskChangeContract.verify_obligations`, when
+   * the caller (server.ts) has one to report. Recorded verbatim, alongside
+   * every "ready" contract this function sees (even a compact pack_unchanged
+   * one) so a LATER, kit-less `read.closure` call in the SAME task epoch can
+   * still recover it via `recordedVerifyObligations()`.
+   *
+   * SET SEMANTICS (FX-G-A, round-12 finding 1) — REPLACE, never merge:
+   *   - `undefined`  = this caller has no `verify_obligations` FIELD to report
+   *     at all (the flag is off, or the contract carried none): the recorded
+   *     value is left untouched.
+   *   - `[]`         = this contract reported the field and it is EMPTY, i.e.
+   *     "this task has no verify obligations": the recorded value is CLEARED.
+   *     It used to be ignored, so one task's obligations outlived every
+   *     later contract in the session that honestly reported none.
+   *   - non-empty    = REPLACES whatever was recorded. Never unioned with an
+   *     earlier contract's list: obligations are per-contract, and merging
+   *     two contracts' lists would withhold a closure for a file the live
+   *     contract does not name.
+   */
+  verifyObligations?: readonly TaskVerifyObligation[],
 ): "installed" | "cleared" | "revoked" {
   const session = getSession(workspaceRoot);
   const certificate = contract?.readiness_certificate;
@@ -2691,7 +3591,13 @@ export function recordExecutionContract(
   if (contract?.state !== "ready") {
     rememberInvalidatedPreparedHandles();
     session.executionFence = undefined;
+    _clearRecordedVerifyObligations(session);
     return "cleared";
+  }
+  if (verifyObligations !== undefined) {
+    session.recordedVerifyObligations = verifyObligations.length > 0
+      ? verifyObligations.slice(0, RECORDED_VERIFY_OBLIGATIONS_MAX)
+      : undefined;
   }
   const certificateId = certificate?.id ?? contract.typestate.certificate_id;
   // A challenged proof must not be re-armed by a compact pack_unchanged
@@ -2706,6 +3612,7 @@ export function recordExecutionContract(
   if (certificate === undefined) {
     if (certificateId && session.executionFence?.certificateId === certificateId) return "installed";
     session.executionFence = undefined;
+    _clearRecordedVerifyObligations(session);
     return "cleared";
   }
   // `evidence` is OPTIONAL since 2026-08-14: a computed proof carries it, a
@@ -2739,6 +3646,70 @@ export function recordExecutionContract(
     ...[...actionHandles].map((handle) => ({ handle, path: evidenceByHandle.get(handle) ?? "" })),
     ...explicitActionPaths.map((path) => ({ handle: "", path })),
   ];
+  // ---------------------------------------------------------------------
+  // FX-L (2026-09-03, ruling (r)) — THE CERTIFICATE IS NOT WRITE AUTHORITY.
+  //
+  // `action_frontier` / `evidence_handles` name what this pack CITED. Write
+  // authority comes only from SHIPPED BYTES: an address per-address residency
+  // proves the caller holds (a body this session sent, a `code_unchanged`
+  // restatement, a served range, or a file this server itself created).
+  // Everything below — the fence, the answer-sub-read lift, and the epoch
+  // admissible union — is built from the SHIPPED projection of the raw
+  // certificate read above.
+  //
+  // Measured defect (round-15 `r15_k`, all SF flags off): a `budget.bytes`
+  // pack ships five bodyless rows, `priorEpochActionFrontier` carries one of
+  // their handles into the next certificate's `action_frontier`, and this
+  // function lifted it into `admissibleEditHandles` — so `edit_file
+  // {handle:…}` landed `edit.applied` against a file the session sent no bytes
+  // for, while the PATH form of the same edit refused. FX-K closed the union
+  // half in the booking pass and recorded this half as carried-forward.
+  //
+  // WHY POSITIVE EVIDENCE ONLY. `addressShipped` refuses on `"withheld"` and
+  // on nothing else: an address neither serve-time producer has ever seen is
+  // `undefined` and stays admissible. Requiring positive proof of shipping
+  // instead would refuse every certificate a read family outside the task-pack
+  // booking pass minted — the T09/T10 "the gate refuses a handle this server
+  // itself served" regression class, which is the one direction this file may
+  // never move in.
+  //
+  // THE FILE IS THE UNIT OF BYTE RESIDENCY, so a known path outranks the handle
+  // id: the same file is routinely re-emitted under a fresh handle, and the
+  // pack withholds (or sends) the FILE, not one address for it. A handle whose
+  // path is already proven resident is therefore admissible even though its own
+  // row carried no body — withdrawing it would be the T09/T10 direction. Only
+  // when no path is known (a certificate with no evidence pairing — exactly the
+  // round-15 shape) does the handle's own residency decide.
+  // FX-P1: ONE predicate (`_editAddressResidency`), three consumers. This call
+  // is byte-for-byte the answer FX-L's inline copy gave — "withheld" refuses,
+  // "shipped" and "unknown" admit — now shared with the edit gate and the
+  // capped-recovery match so the three can never disagree about an address.
+  const addressShipped = (handle: string, filePath: string): boolean =>
+    _editAddressResidency(session, handle, filePath) !== "withheld";
+  const pathOf = (handle: string): string => evidenceByHandle.get(handle) ?? "";
+  const pairShipped = (pair: HandlePathPair): boolean => addressShipped(pair.handle, pair.path);
+  const shippedActionHandles = new Set(
+    [...actionHandles].filter((handle) => addressShipped(handle, pathOf(handle))),
+  );
+  const shippedExplicitActionPaths = explicitActionPaths.filter((entry) => addressShipped("", entry));
+  const shippedEvidence = evidence.filter((item) => addressShipped(item.handle, item.path));
+  const shippedEvidenceHandleSet = new Set(
+    [...evidenceHandleSet].filter((handle) => addressShipped(handle, pathOf(handle))),
+  );
+  const shippedActionTargetPairs = actionTargetPairs.filter(pairShipped);
+  // The complement, kept on the fence so the refusal it now produces is
+  // RECOVERABLE rather than refuse-only (ruling (r)): these are exactly the
+  // addresses this certificate promised and this session never sent, and a
+  // `read_file` of them restores their authority in one call.
+  const rawEvidenceOnlyPairs: HandlePathPair[] = [...evidenceHandleSet]
+    .filter((handle) => !actionHandles.has(handle))
+    .map((handle) => ({ handle, path: pathOf(handle) }));
+  const withheldTargets: HandlePathPair[] = [...actionTargetPairs, ...rawEvidenceOnlyPairs]
+    .filter((pair) => !pairShipped(pair))
+    .filter((pair, index, all) =>
+      all.findIndex((other) => other.handle === pair.handle && other.path === pair.path) === index)
+    .slice(0, WITHHELD_TARGET_CAP);
+  // ---------------------------------------------------------------------
   const terminalAction: "answer" | "edit" = contract.next_action === "answer" ? "answer" : "edit";
   // A3 (2026-08-01 signal5-2 T10): an explicit answer-profile SUB-READ inside a
   // live change epoch must not downgrade the edit-authorizing fence — the
@@ -2753,10 +3724,14 @@ export function recordExecutionContract(
     && liveFence.terminalAction === "edit"
     && (liveFence.phase === "prepared" || liveFence.phase === "acting" || liveFence.phase === "verifying")
   ) {
-    _appendAdmissible(session.admissibleEditHandles, [...evidenceHandleSet]);
-    _appendAdmissible(session.admissibleEditPaths, evidence.map((item) => item.path));
+    // FX-L: the answer certificate's evidence feeds the union exactly as
+    // before — but only the SHIPPED half of it. An answer sub-read that cited
+    // a bodyless row must not hand the live edit fence authority the pack
+    // itself never sent bytes for.
+    _appendAdmissible(session.admissibleEditHandles, [...shippedEvidenceHandleSet]);
+    _appendAdmissible(session.admissibleEditPaths, shippedEvidence.map((item) => item.path));
     _appendAdmissiblePairs(session.admissibleEditTargetPairs,
-      evidence.map((item) => ({ handle: item.handle, path: item.path })));
+      shippedEvidence.map((item) => ({ handle: item.handle, path: item.path })));
     return "installed";
   }
   // 2026-07-25 T13 forensics: an edit-terminal certificate with NO frontier
@@ -2764,6 +3739,18 @@ export function recordExecutionContract(
   // refuse — every edit is "outside certificate frontier" by construction and
   // the refusal's own frontier payload is empty. A refuse-only fence is
   // strictly worse than no fence: leave edits ungated instead.
+  //
+  // FX-L (ruling (r)) — READ ON THE RAW CERTIFICATE, DELIBERATELY. The hatch
+  // answers "was there anything to fence at all", which is a question about
+  // the CERTIFICATE, not about residency. Re-pointing it at the shipped
+  // projection is exactly the attempt FX-K measured and reverted: a
+  // cap-overflowing pack's certificate filters to empty, the hatch fires, the
+  // fence is CLEARED, and four refusals (including a never-packed control)
+  // become four `edit.applied` — the narrowing opens edits in precisely the
+  // case it was written to close. So: no certificate content ⇒ no fence (this
+  // branch, byte-identical to before); a certificate whose addresses were all
+  // withheld ⇒ the fence STAYS and refuses, with a recoverable `next`
+  // (`withheldTargets`, consumed by executionRefusal).
   if (
     terminalAction === "edit"
     && actionHandles.size === 0
@@ -2773,6 +3760,7 @@ export function recordExecutionContract(
     && session.admissibleEditPaths.length === 0
   ) {
     session.executionFence = undefined;
+    _clearRecordedVerifyObligations(session);
     return "cleared";
   }
   // Defect G: the zoom sanction is a property of the RESPONSE that installed
@@ -2799,18 +3787,27 @@ export function recordExecutionContract(
     epochTokens: tokenizeForEpoch(query),
     terminalAction,
     obligationIds: certificate.obligations.map((obligation) => obligation.id),
-    evidenceHandles: [...new Set(certificate.evidence_handles)],
-    evidencePaths: [...new Set(evidence.map((item) => item.path))],
-    actionFrontier: [...actionHandles],
+    // FX-L: every membership predicate the edit gate reads off this fence is
+    // the SHIPPED projection of the certificate. The raw certificate survives
+    // only in `obligationIds` (challenge authorship, which grants no writes)
+    // and in `withheldTargets` (the recovery `next`).
+    evidenceHandles: [...shippedEvidenceHandleSet],
+    evidencePaths: [...new Set(shippedEvidence.map((item) => item.path))],
+    actionFrontier: [...shippedActionHandles],
     actionPaths: [...new Set([
-      ...explicitActionPaths,
-      ...evidence.filter((item) => actionHandles.has(item.handle)).map((item) => item.path),
+      ...shippedExplicitActionPaths,
+      ...shippedEvidence.filter((item) => shippedActionHandles.has(item.handle)).map((item) => item.path),
     ])],
-    actionTargetPairs,
+    actionTargetPairs: shippedActionTargetPairs,
+    ...(withheldTargets.length > 0 ? { withheldTargets } : {}),
+    // FX-L: a batch obligation is a REQUIREMENT to write a target. Requiring
+    // one the fence will then refuse as unshipped is a deadlock, so the same
+    // shipped predicate narrows it. Pure narrowing of a demand — it can never
+    // widen authority, and it is a no-op whenever nothing was withheld.
+    batchEditTargets: batchEditTargets.filter(pairShipped).filter((pair) => pair.handle !== "" || pair.path !== "").filter((pair, index, all) => all.findIndex((candidate) => candidate.handle === pair.handle && candidate.path === pair.path) === index).slice(0, 12).map((pair) => ({ ...pair })),
     challengeCount: 0,
     discoverySignatures: new Map(),
     zeroByteSignatures: new Set(),
-    postReadyDiscoveryCalls: 0,
     // ONE accounting home for every sanctioned post-prepared discovery call,
     // so an advertised zoom is never a new uncounted class next to the exact
     // signature follow-up.
@@ -2834,10 +3831,12 @@ export function recordExecutionContract(
   // handle. actionHandles is the wave-4 shape-classified set, so an h-shaped
   // frontier entry outside the evidence set is still admitted as a handle (and
   // is never mixed into the path list).
-  _appendAdmissible(session.admissibleEditHandles, [...actionHandles, ...evidenceHandleSet]);
+  // FX-L (ruling (r)): the lift is the SHIPPED intersection, never the raw
+  // certificate. This is the line the round-15 repro rode into the union.
+  _appendAdmissible(session.admissibleEditHandles, [...shippedActionHandles, ...shippedEvidenceHandleSet]);
   _appendAdmissible(session.admissibleEditPaths, [
-    ...explicitActionPaths,
-    ...evidence.map((item) => item.path),
+    ...shippedExplicitActionPaths,
+    ...shippedEvidence.map((item) => item.path),
   ]);
   // Ticket 1 (2026-08-07): the paired counterpart of the two accumulations
   // above. actionTargetPairs already covers action_frontier's own handles/
@@ -2845,10 +3844,10 @@ export function recordExecutionContract(
   // evidence, not itself a write target, e.g. evidenceHandleSet \ actionHandles)
   // still belong in the admissible union, paired via the same evidenceByHandle
   // lookup so no guessed correspondence enters the union either.
-  const evidenceOnlyPairs: HandlePathPair[] = [...evidenceHandleSet]
-    .filter((handle) => !actionHandles.has(handle))
-    .map((handle) => ({ handle, path: evidenceByHandle.get(handle) ?? "" }));
-  _appendAdmissiblePairs(session.admissibleEditTargetPairs, [...actionTargetPairs, ...evidenceOnlyPairs]);
+  const evidenceOnlyPairs: HandlePathPair[] = [...shippedEvidenceHandleSet]
+    .filter((handle) => !shippedActionHandles.has(handle))
+    .map((handle) => ({ handle, path: pathOf(handle) }));
+  _appendAdmissiblePairs(session.admissibleEditTargetPairs, [...shippedActionTargetPairs, ...evidenceOnlyPairs]);
   return "installed";
 }
 
@@ -3392,13 +4391,53 @@ function heldSelfMaterialReceipt(
     }
   }
   if (windows.length === 0) return undefined;
+  const cappedWindows = windows.slice(0, SELF_MATERIAL_RECEIPT_WINDOW_CAP);
+  // FX-S #3 (2026-09-03), corrected 2026-09-05 (candidate 2 forensics). This
+  // comment used to claim TL_RECEIPT_COVERAGE's `covered_by` "could never
+  // surface" through THIS receipt — `heldSelfMaterialReceipt` is the
+  // execution fence's OWN "you already hold these exact bytes" brake
+  // (guardExecutionDiscovery), which intercepts a repeat read/zoom BEFORE any
+  // mode dispatch (and therefore before `coverageReceiptFor`'s OTHER call
+  // sites ever run) whenever a prepared certificate is active. THAT PART IS
+  // STILL TRUE. What was wrong is the "could never surface" conclusion: it
+  // was drawn from sfV2CombinedPin.spec.ts's own TL_RECEIPT_COVERAGE scenario
+  // (its `fullA`/`fullB` calls), which does NOT actually exercise this brake
+  // at all — `fullA`/`fullB` read `src/plain.ts`, a path that is never part
+  // of the open certificate's own evidence/edit material
+  // (`brakeTargetPath`'s admissibleEditPaths/editedPaths/fence.evidencePaths
+  // union), so those calls fall through to the ORDINARY, fence-independent
+  // `coverageReceiptFor` path instead (`coverageReceiptWiring.spec.ts`'s own
+  // subject) — a DIFFERENT emit site that was already wired correctly. A
+  // repeat read of material the certificate's OWN frontier actually names
+  // (e.g. re-reading one of an edit-ready pack's explicit `targets` while
+  // that pack's certificate is still open) DOES reach this function, and
+  // live-verified (receiptCoverageFenceRepeat.spec.ts, the case this
+  // forensics correction produced): `cappedWindows` below already carries
+  // EXACTLY the CoveredSpan shape (`{range, served_by?}`) for every line this
+  // claim corroborates, `protocol/envelope.ts`'s `priorOnlyTextReceipt`
+  // recognizes `windowFor`'s per-window `code_unchanged:true` marker and
+  // reconstructs the `receipt:"code-unchanged"` tag + `handle` this legacy
+  // (`path`, no `receipt` tag) body shape lacks — forwarding `covered_by`
+  // unmodified through its `{...body, ...}` spread — and `readFamily.ts`'s
+  // `receiptOf`/`projectCoveredBy` then project it onto the wire exactly like
+  // any other `code-unchanged` receipt. No code path drops it. Both
+  // `priorOnlyTextReceipt` and `projectCoveredBy` gate on the SAME
+  // `receiptCoverageEnabled()` flag this function reads below, so the
+  // default-off wire stays untouched, byte-for-byte.
+  const coveredBy = receiptCoverageEnabled()
+    ? cappedWindows.map((window) => {
+        const w = window as { range: string; served_by?: string };
+        return { range: w.range, ...(w.served_by !== undefined ? { served_by: w.served_by } : {}) };
+      })
+    : undefined;
   return {
     ok: true,
     reason: "already-served",
     code_unchanged: true,
     path: selfMaterial,
     sha: state.fileSha.slice(0, 12),
-    windows: windows.slice(0, SELF_MATERIAL_RECEIPT_WINDOW_CAP),
+    windows: cappedWindows,
+    ...(coveredBy !== undefined && coveredBy.length > 0 ? { covered_by: coveredBy } : {}),
     phase: fence.phase,
     certificate_id: fence.certificateId,
     detail: "these lines are already in your context, unchanged since this session served them — act on them, or ask for a window you do not hold",
@@ -3558,11 +4597,37 @@ export function guardExecutionDiscovery(
     // survives the epoch, but a new declared task must not inherit its
     // predecessor's occurrence count or terminal escalation.
     session.servedFindLedger = undefined;
+    // TL_SEARCH_DEDUP (W-T-D): same reasoning — "this exact search already
+    // ran this task" is a claim about the task that just ended.
+    session.searchDedupLedger.clear();
     // Whether a NEW task re-attaches a verification kit is task-shaped, so
     // this one resets. Which BYTES are already on the wire is NOT: see
     // `verificationSurfacesServed`'s doc comment for why that ledger is
     // session-scoped and deliberately survives the epoch boundary.
     session.verificationManifestPathsServed.clear();
+    // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): "an edit already landed
+    // THIS task" is exactly as task-shaped as the ledgers above — a NEW
+    // declared task has observed no edit of its own yet, even when reached
+    // via a discovery call rather than an edit_file call.
+    session.intentEditObserved = false;
+    // M1 (2026-09-05 R28 remediation): `referencesObserved` (sfIntent.ts,
+    // backed by packServeLog.ts's `executedLocates` ledger) is exactly as
+    // task-shaped as `intentEditObserved` just above — "a `references` call
+    // already ran THIS task" is a claim about the task that just ended, same
+    // as every other ledger in this block. `recordServedSurfaces`'s own
+    // query-token-overlap heuristic reset is a best-effort SIBLING path (a
+    // re-pack whose query happens to share no token with the retiring one),
+    // not a substitute for this one: a declared `task.profile:"answer"` task
+    // never calls `recordServedSurfaces` at all (candidate-list packs skip
+    // it), so without this explicit clear the ledger survived indefinitely
+    // across an EXPLICIT `task.epoch:"new"` — the exact leak this fixes.
+    clearServedSurfaces(workspaceRoot);
+    // W-BATCH-HINT candidate 3: the serial-single-target-call streak is
+    // exactly as task-shaped as the ledgers above — a NEW declared task has
+    // issued no read-family calls of its own yet, so a streak from the task
+    // that just ended must not carry forward and inflate the new task's own
+    // count.
+    session.serialSingleTargetReads = 0;
   }
   const fence = session.executionFence;
   if (args["taskEpoch"] === "new") {
@@ -3574,6 +4639,12 @@ export function guardExecutionDiscovery(
     }
     session.executionFence = undefined;
     _clearAdmissibleEditUnion(session);
+    // FX-G-A (round-12 finding 1): the fence's OWN lifetime governs the VF-5
+    // obligation hand-off. Without this, a dead task's
+    // `change_contract.verify_obligations` outlived its epoch and
+    // `verifyClosureGate`'s kit-less fallback withheld the NEXT task's
+    // `read.closure`, naming a file that task never touched.
+    _clearRecordedVerifyObligations(session);
     session.refusedEditShapes = [];
     return { allowed: true, resetForNewTask: true };
   }
@@ -3594,11 +4665,15 @@ export function guardExecutionDiscovery(
   // explicit taskEpoch:"new" (handled before the fence lookup).  A capability
   // gap must therefore remain a discovery contract and never reach this fence.
   if (fence.phase === "prepared") {
+    const batchFenceActive = batchEditFrontierEnabled()
+      && fence.terminalAction === "edit"
+      && (fence.batchEditTargets.length > 1 || fence.actionTargetPairs.length > 1);
     // W5b: a prepared edit certificate trims the first broad full read.
     // A concrete decision-changing challenge above revokes the fence and is
     // the explicit escape hatch; force_serve remains unconditional recovery.
     if (
-      fence.terminalAction === "edit"
+      !batchFenceActive
+      && fence.terminalAction === "edit"
       && tool === "read_file"
       && args["mode"] === "full"
       && args["force_serve"] !== true
@@ -3606,27 +4681,6 @@ export function guardExecutionDiscovery(
       return { allowed: true, postReadyTrim: true };
     }
 
-    // W5: after a ready edit decision, trim only the pre-edit discovery tail.
-    // A newly requested target has not been served, so it MUST reach the
-    // ordinary dispatcher: a prepared receipt would falsely claim unchanged
-    // content. For full reads the dispatcher converts this marker into its
-    // existing skeleton downgrade, including truthful coverage and a zoom;
-    // search/slice/symbol calls serve their ordinary real payload. force_serve
-    // remains an unconditional compaction recovery.
-    // task_pack is NOT trimmed discovery: a repeat must keep reaching the
-    // pack_unchanged receipt below, and a FRESH pack must keep taking the
-    // prepared-discovery receipt at the bottom of this phase — short-circuiting
-    // it to `allowed` would let a re-pack mint a new certificate mid-trim.
-    if (
-      postReadyTrimEnabled()
-      && args["force_serve"] !== true
-      && !(tool === "read_file" && args["mode"] === "task_pack")
-    ) {
-      fence.postReadyDiscoveryCalls += 1;
-      if (fence.postReadyDiscoveryCalls >= postReadyTrimThreshold()) {
-        return { allowed: true, postReadyTrim: true };
-      }
-    }
     // A verified cache hit is an idempotent receipt, not discovery: let it
     // reach task_pack's existing pack_unchanged encoder. The dispatcher
     // proves the hit up front, so a stale or changed pack cannot use this
@@ -3656,6 +4710,16 @@ export function guardExecutionDiscovery(
     // shape specifically, never as an actual limiter (required semantics #1).
     if (consumeSanctionedZoom(fence, tool, args)) {
       return { allowed: true };
+    }
+    // A ready multi-target pack already has its complete edit frontier. Only
+    // advertised zooms above and explicit recovery may serve before it lands.
+    if (batchFenceActive) {
+      if (args["force_serve"] === true) return { allowed: true };
+      if (tool === "read_file") {
+        const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
+        if (receipt !== undefined) return { allowed: false, servedReceipt: receipt };
+      }
+      return { allowed: false, servedReceipt: preparedDiscoveryReceipt(session, fence, workspaceRoot, seen > 0, tool, args) };
     }
     // F-V12-1 (2026-08-27, D1-b): `search_files` bypasses the read-side
     // residency receipt below UNCONDITIONALLY, ahead of it rather than after.
@@ -3795,12 +4859,205 @@ function requestedEditPaths(args: Record<string, unknown>): string[] {
   return [...new Set(paths)];
 }
 
-/** Edit boundary guard: an edit-ready certificate may mutate only its frontier. */
-export function guardExecutionEdit(
+/**
+ * FX-P1: the refusal for an edit that no CERTIFICATE fences but the ONE
+ * admissibility predicate rejects — a withheld address (INV-I-1) or a
+ * cross-lane handle (INV-I-2).
+ *
+ * It is deliberately NOT `refuseExecutionEdit`: that builder needs a live
+ * fence for `phase`/`certificate_id`/`frontier`, and inventing one here would
+ * report a certificate the caller never received. So this is the minimum
+ * honest refusal, in the SAME vocabulary the fenced capped refusal uses:
+ * `execution-typestate` (the code), an advisory `cause` (only where the
+ * diagnosis is true — `"capped"` is a claim about the byte budget, never
+ * attached to a lane refusal), and the executable per-address recovery
+ * `next_call` — `read_file … content:"full"`, which is the one `targets`
+ * shape that routes through `recordServedRange` and therefore actually books
+ * what it serves, so the very next edit is admitted.
+ *
+ * `retry` is left to `retryOf` and lands on `"call"`, the same transition the
+ * fenced capped refusal reports (measured, `scratchpad/fxp1/fxl_shape.mjs`):
+ * no `terminal`, no `discovery_closed`, no `required_action` — because there
+ * is no fence to unlock or rescope, only bytes to fetch.
+ *
+ * FX-V1 (round-20A finding 1, ruling (x), 2026-09-04): `content:"full"` was
+ * already the right shape here and stays UNCHANGED — round-20A's finding was
+ * never that this `next` names the wrong call, only that
+ * `_foreignHandleRangeCovered`'s whole-file predicate could not be satisfied
+ * by running it, for any file containing a 2+-line doc comment (its lines
+ * never rode a prior wire, so no ordinary `content:"full"` re-read — this
+ * one included — could ever book them). Now that the predicate accepts
+ * `state.spans ∪ state.elided` (see `_foreignHandleRangeCovered`), the SAME
+ * `content:"full"` this `next` has always issued genuinely closes that gap:
+ * it re-stages the whole file under the redeeming lane, `_stageElisionGap`
+ * detects the identical elision gap again, and the retried edit's whole-file
+ * check now finds `spans ∪ elided` covering `1..totalLines`. The FX-Q1 loop
+ * property — "running the recovery verbatim admits the same edit" — holds
+ * for the first time for a commented file, with no change to this function.
+ */
+function _refuseUngatedEdit(
+  session: WorkspaceSession,
+  workspaceRoot: string,
+  args: Record<string, unknown>,
+  spec: { cause?: string; detail: string; recoveryPaths: readonly string[]; lane?: string },
+): ExecutionGuardDecision {
+  const targets = [...new Set(spec.recoveryPaths)].slice(0, NEXT_CALL_EDIT_CAP);
+  // W6 parity: a verbatim retry of this exact shape repeats the correction
+  // rather than the whole payload, using the same ring the fenced refusals use.
+  const repeated = noteRefusedEditShape(session, args, spec.detail);
+  const detail = repeated === undefined
+    ? spec.detail
+    : `${spec.detail} This edit_file shape was already refused in this task (attempt ${repeated.count}); retrying it unchanged cannot change the result. First correction: ${repeated.firstDetail}`;
+  return {
+    allowed: false,
+    refusal: {
+      ok: false,
+      reason: "execution-typestate",
+      retry_same_call: false,
+      detail,
+      ...(spec.cause !== undefined ? { cause: spec.cause } : {}),
+      ...(targets.length > 0
+        ? {
+            next_call: {
+              tool: "read_file",
+              arguments: {
+                targets: targets.map((candidate) => ({ path: candidate })),
+                content: "full",
+                // round-18A finding 6: the recovery must stage its serve under
+                // the SAME lane that was refused, or "run it verbatim" mints a
+                // lane-less (or wrong-lane) handle that cannot ground the
+                // caller's own retry. Omitted for a lane-less caller so a
+                // single-agent session's `next_call` stays byte-identical.
+                ...(spec.lane !== undefined && spec.lane !== "" ? { lane: spec.lane } : {}),
+                ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
+              },
+            },
+          }
+        : {}),
+    },
+  };
+}
+
+/**
+ * FX-Q2 (ruling (w), round-19A, 2026-09-03): parse a `HandleEntry.range`
+ * string (`"start-end"`, both inclusive, 1-based) into numeric bounds.
+ * Malformed input (should never occur from the handle table, but this is a
+ * fail-closed boundary) yields `undefined`, which the caller treats exactly
+ * like a whole-file handle — the STRICTER of the two readings, never the more
+ * permissive one.
+ */
+function _parseHandleLineRange(range: string): { start: number; end: number } | undefined {
+  const parts = range.split("-");
+  if (parts.length !== 2) return undefined;
+  const start = Number.parseInt(parts[0]!, 10);
+  const end = Number.parseInt(parts[1]!, 10);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < start) return undefined;
+  return { start, end };
+}
+
+/**
+ * FX-Q2 (ruling (w), round-19A, 2026-09-03): does the REDEEMING lane's own
+ * SETTLED served-range ledger for `path` already cover `requestedRange` in
+ * full? `requestedRange === undefined` means the foreign handle names the
+ * WHOLE FILE, which is answered against the ledger's OWN recorded
+ * `totalLines` — this module is I/O-free (see the file header) and never
+ * re-reads the file to find out how long it "really" is now; the ledger's
+ * own bookkeeping is exactly what a genuine `content:"full"` serve (or a
+ * `code_unchanged` restatement of one) would have populated.
+ *
+ * Reuses `servedRangeReceipt` — the ledger's own canonical "is this window
+ * already held" query, same subsumption logic the same-lane receipt path
+ * uses — against the ledger's OWN `fileSha`, not an externally supplied one:
+ * this predicate only asks "does THIS lane's own ledger already prove it
+ * received these exact bytes", which is a question the ledger can answer
+ * about itself without any outside disk read.
+ *
+ * FX-V1 (round-20A finding 1, ruling (x), 2026-09-04) — SHIPPED ∪ ELIDED,
+ * BUT ONLY HERE. `servedRangeReceipt` alone is elision-blind by design: every
+ * ordinary text serve (`content:"full"` included, and the plain DEFAULT read
+ * mode) collapses a 2+-line doc-comment/docstring block to a single
+ * `doc elided L<a>-<b>` marker (`util/formatCompress.ts`'s `elideDocComments`)
+ * whose source lines never ride the wire, so `recordServedRange` never books
+ * them and a whole-file `servedRangeReceipt` subsumption over
+ * `1..totalLines` was PERMANENTLY unreachable for any such file — the
+ * redeeming lane's own recovery `next` (`_refuseUngatedEdit`, below), run
+ * verbatim and repeatedly, could never satisfy the predicate it was offered
+ * as the remedy for (round-20A's live minimal repro: a 2-line JSDoc comment).
+ *
+ * The ruling: a window TL ITSELF chose to elide from a serve — disclosed
+ * in-band by the marker naming its own exact line span — counts as coverage
+ * for THIS write-authority predicate, because the caller holds the marker's
+ * printed positions and TL, not the caller, chose the compression. It does
+ * NOT count for `servedRangeReceipt`/`prior`/`code_unchanged`/`served_by` —
+ * those stay exactly as elision-blind as before, since a receipt claims the
+ * caller already RECEIVED the bytes, which an elided span's caller did not.
+ * So this function tries the ordinary receipt first (unchanged, and the
+ * common case is decided there without ever touching `elided`), and only on
+ * a receipt miss falls back to a SEPARATE union-and-subsume check over
+ * `state.spans ∪ state.elided` — never routed through `servedRangeReceipt`
+ * itself, which must stay elision-blind for every other caller.
+ * `state.elided` is populated only by `_stageElisionGap` /
+ * `_settleSessionServeBookings`, confirmed under the same finalized-wire
+ * corroboration `spans` are, so a response a governor/cap shed before the
+ * wire leaves no elision claim behind either.
+ */
+function _foreignHandleRangeCovered(
+  session: WorkspaceSession,
+  workspaceRoot: string,
+  path: string,
+  requestedRange: { start: number; end: number } | undefined,
+): boolean {
+  const state = session.servedRangeLedger.get(path);
+  if (state === undefined) return false;
+  const { start, end } = requestedRange ?? { start: 1, end: state.totalLines };
+  if (servedRangeReceipt(workspaceRoot, path, state.fileSha, start, end, state.totalLines) !== undefined) {
+    return true;
+  }
+  if (state.elided.length === 0) return false;
+  const s = Math.max(1, Math.min(state.totalLines, start));
+  const e = Math.max(s, Math.min(state.totalLines, end));
+  const shippedOrElided = mergeServedRanges([
+    ...state.spans.map((span) => [span.start, span.end] as [number, number]),
+    ...state.elided.map((entry) => [entry.start, entry.end] as [number, number]),
+  ]);
+  return shippedOrElided.some(([rangeStart, rangeEnd]) => rangeStart <= s && rangeEnd >= e);
+}
+
+/**
+ * Edit boundary guard: an edit-ready certificate may mutate only its
+ * frontier. Renamed from `guardExecutionEdit` (IL-W2, DESIGN-v0.15
+ * §4.2) — the exported name now belongs to the thin wrapper just below
+ * this function, which layers the §4.2 observed-edit record on top
+ * without touching anything in here. Every internal booking this function
+ * already performs (fence/certificate transitions, admissible-union
+ * writes, refusal construction) is unchanged and in the same order.
+ */
+function guardExecutionEditCore(
   workspaceRoot: string,
   args: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
-  opts?: { createWorkspacePin?: CreateWorkspacePin },
+  opts?: {
+    createWorkspacePin?: CreateWorkspacePin;
+    /**
+     * FX-P1 (INV-I-2): the lane a handle was minted in, from the dispatcher's
+     * handle table. `undefined` for an unknown handle, a handle from another
+     * workspace, or a lane-less mint — all three are "no positive evidence
+     * about provenance" and admit.
+     */
+    resolveHandleLane?: (handle: string) => string | undefined;
+    /**
+     * FX-Q2 (ruling (w), round-19A, 2026-09-03): the handle's own stored
+     * `"start-end"` line range (`HandleEntry.range`), from the SAME
+     * dispatcher handle table `resolveHandleLane` reads. `undefined` means
+     * either an unknown handle (never reaches this — `resolveHandleLane`
+     * already refused it a positive lane) or, for a handle this call already
+     * knows is foreign, a WHOLE-FILE handle (the table simply has no `range`
+     * on that entry). Only consulted once a handle is already known to be
+     * foreign, so the "unknown handle" and "whole-file handle" cases can
+     * never be confused with each other here.
+     */
+    resolveHandleRange?: (handle: string) => string | undefined;
+  },
 ): ExecutionGuardDecision {
   const session = getSession(workspaceRoot);
   // taskEpoch:"new" opens a genuinely new task even when no fence is
@@ -3811,11 +5068,117 @@ export function guardExecutionEdit(
     session.candidatePackFullReads = 0;
     session.revokedCertificateIds.clear();
     session.servedFindLedger = undefined;
+    // TL_SEARCH_DEDUP (W-T-D): same epoch reset as the discovery guard.
+    session.searchDedupLedger.clear();
     // L2 (2026-08-07): same epoch reset as the discovery guard — see there.
     session.verificationManifestPathsServed.clear();
+    // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): same epoch reset as the
+    // discovery guard's identical clear above — see there.
+    session.intentEditObserved = false;
+    // M1 (2026-09-05 R28 remediation): same epoch reset as the discovery
+    // guard's identical clear above — see there. An `edit_file` call carrying
+    // its OWN `task.epoch:"new"` is exactly as much "a new task" as a
+    // discovery call carrying one; the served-surface ledger must not survive
+    // it either.
+    clearServedSurfaces(workspaceRoot);
   }
   const fence = session.executionFence;
   const createRequested = isCreateEditRequest(args);
+
+  // -----------------------------------------------------------------------
+  // FX-P1 (INV-I-2, 2026-09-03) — A HANDLE IS WRITE AUTHORITY ONLY IN THE LANE
+  // THAT EARNED IT.
+  //
+  // MEASURED (`scratchpad/fxp1/i2.mjs`, and INV-I's own `p10_lane_isolation`):
+  // lane A reads `src/shared.ts` in full and receives handle h; lane B, which
+  // issued ZERO reads in this workspace, sends
+  // `edit_file {lane:"agent-B", edits:[{handle:h, content:"…HIJACKED…"}]}`
+  // and the file is overwritten. Every OTHER piece of session state is
+  // lane-partitioned (`sessionKeyFor` = `laneScopedKey`), so lane B's fence,
+  // its admissible union and its byte residency all correctly said "you have
+  // never been served this file" — and none of them was consulted, because
+  // handle possession alone reached the write.
+  //
+  // THE RULING (INV-I-2's open design question, decided here). Lanes ARE an
+  // isolation boundary for WRITES: AGENTS.md's concurrency contract, F-V13-3's
+  // certificate cross-talk fix and FX-M1's `operation_id`/kit-cache lane folds
+  // all treat `lane` that way, and a bearer-token reading makes the write half
+  // of that contract vacuous. READS are deliberately left alone — a read is
+  // not write authority, it serves bytes rather than consuming them, and it
+  // stages what it serves under the READING lane's own session
+  // (`recordServedRange` -> `getSession(workspaceRoot)` -> `laneScopedKey`),
+  // so a cross-lane zoom grounds the reader and nobody else. That asymmetry is
+  // the whole point: lane B may LOOK at lane A's handle and, by looking, earn
+  // its own authority over those bytes.
+  //
+  // NO FALSE POSITIVES BY CONSTRUCTION: `canonicalKey` now forks handle dedup
+  // identity by lane, so a lane's own honest read always hands it a handle
+  // stamped with its own lane. `undefined` (a lane-less mint, or an entry
+  // rehydrated from a pre-FX-P1 store) is unknown provenance and admits —
+  // positive evidence only, the same rule residency follows.
+  const redeemingLane = currentSessionLane();
+  const foreignLaneHandles = createRequested
+    ? []
+    : requestedEditHandles(args).filter((handle) => {
+        const mintedIn = opts?.resolveHandleLane?.(handle);
+        if (typeof mintedIn !== "string" || mintedIn === "" || mintedIn === redeemingLane) return false;
+        // ruling (w) (round-19A, 2026-09-03) — REVOKES the FX-Q1 exception
+        // below (round-18A finding 6 / ruling (r)-(u-2)), which asked only
+        // "does the redeeming lane hold ANY earned authority over this FILE"
+        // (`_editAddressResidency(...) === "shipped"`, a FILE-granular
+        // question). MEASURED (`scratchpad/r19a/a1_range_foreign.mts`,
+        // `a3_range_foreign_searchreplace.mts`, both env arms): lane A reads
+        // ONLY lines 500-510 of a 700-line file and gets a range-scoped
+        // handle; lane B, having read only lines 1-10 of the SAME file (so it
+        // already holds file-granular "shipped" residency), redeems lane A's
+        // handle and blind-overwrites lines 500-510 — bytes lane B never
+        // received — for both `{handle,content}` and `{handle,search,
+        // replace}`. The SAME lane B's honest equivalent, a bare
+        // `path`+`content` whole-file replace declaring its actual intent,
+        // correctly refuses `write-intent-ambiguous`
+        // (`a2_path_whole_file_control.mts`) — so the foreign-range-handle
+        // route was a strictly more dangerous, less-declared write primitive
+        // than anything the file-granular check was designed to permit.
+        //
+        // THE RULING: a handle NAMES an address, not merely a file, and a
+        // handle minted with a `range` names exactly that address — the
+        // redeeming lane's own authority must cover the SAME address, not
+        // just some other part of the same file. The redeeming lane's OWN
+        // session (`session` here IS that lane's — `getSession` is
+        // lane-scoped) may already hold that authority via its own honest
+        // reads, staged under its own lane in `servedRangeLedger` — the same
+        // per-address ledger FX-L/FX-N already treat as the sole proof of
+        // "bytes this lane received". A foreign handle is redundant with (and
+        // therefore admissible against) bytes this lane already holds only
+        // when that ledger's SETTLED spans fully cover the handle's own line
+        // range; a whole-file handle (no `range` on its table entry) needs
+        // whole-file coverage — a genuine `content:"full"` serve, or a
+        // `code_unchanged` restatement of one, both leave nothing unserved.
+        // File-granular admission (the old exception) is now refused.
+        //
+        // THE LOOP PROPERTY IS UNCHANGED: `_refuseUngatedEdit`'s recovery
+        // `next` below always reads the WHOLE file (`content:"full"`) under
+        // the redeeming lane, which trivially satisfies ANY range this same
+        // predicate asks about on the verbatim retry — so FX-Q1's "running
+        // the recovery verbatim admits the same edit" property still holds
+        // for this narrower predicate.
+        const path = resolveHandlePath?.(handle) ?? "";
+        if (path === "") return true;
+        const range = opts?.resolveHandleRange?.(handle);
+        const requestedRange = typeof range === "string" ? _parseHandleLineRange(range) : undefined;
+        return !_foreignHandleRangeCovered(session, workspaceRoot, path, requestedRange);
+      });
+  if (foreignLaneHandles.length > 0) {
+    return _refuseUngatedEdit(session, workspaceRoot, args, {
+      detail: `edit handle(s) ${foreignLaneHandles.join(",")} were minted in another agent lane; a handle is write authority only in the lane that was served its bytes`
+        + (redeemingLane === "" ? " (this call declared no lane)" : ` (this call's lane=${redeemingLane})`),
+      recoveryPaths: foreignLaneHandles
+        .map((handle) => resolveHandlePath?.(handle) ?? "")
+        .filter((candidate) => candidate !== ""),
+      lane: redeemingLane,
+    });
+  }
+
 
   // D5/W4: challenge/taskEpoch:new are decision-reset inputs, not create
   // authority. An edit_file create cannot combine either with the mutation to
@@ -3854,6 +5217,55 @@ export function guardExecutionEdit(
   }
 
   if (args["taskEpoch"] === "new") {
+    // -------------------------------------------------------------------
+    // FX-P1 ruling (v) (round-18A finding 2, 2026-09-03) — THE PREDICATE
+    // RUNS BEFORE THE RESET, NOT AFTER IT, AND NEVER RUNS UNRESET.
+    //
+    // MEASURED (`scratchpad/r18/d3_gate.mts`, live, every SF flag off): a
+    // capped DISCOVERY pack mints a handle for a row it shipped no body for
+    // (residency "withheld"); `edit_file {task:{epoch:"new"}, edits:[{handle,
+    // content}]}` used to hit the OLD version of this branch, which returned
+    // `{allowed:true}` immediately — several statements before the
+    // `_withheldEditAddresses` predicate below ever ran. `taskEpoch:"new"`
+    // (the legacy spelling) reproduced identically. The result was the exact
+    // INV-I-1 blind whole-file overwrite, laundered through one extra
+    // advertised key.
+    //
+    // THE FIX: ask the SAME predicate the unfenced exit below asks — of the
+    // RETIRING epoch's residency, i.e. BEFORE `_clearAdmissibleEditUnion`
+    // wipes `editHandleResidency`/`editPathResidency` — and refuse on a
+    // withheld address exactly as that exit does. Ruling (v) is explicit:
+    // "epoch リセットは書き込み権限を生まない"; a caller cannot use
+    // `task.epoch:"new"` to disclaim knowledge that ITS OWN prior call in
+    // this same session was told these bytes were withheld. NO EPOCH RESET
+    // HAPPENS ON REFUSAL — fence, admissible union, residency and verify
+    // obligations are left exactly as they were, so the caller's next honest
+    // step (read the address, or resubmit without `task.epoch:"new"` once it
+    // has) lands on ground this task already has.
+    //
+    // A handle minted in the epoch that is now retiring and redeemed AFTER a
+    // *different* call already performed the reset goes through the same
+    // predicate too, via `session.retiredWithheldEditHandles`/
+    // `retiredWithheldEditPaths` (`_clearAdmissibleEditUnion`'s doc comment):
+    // the handle table itself is not epoch-scoped, so without that carry-over
+    // the wipe below would erase the only record that the address was ever
+    // withheld, and a LATER plain edit (no `task.epoch:"new"` of its own)
+    // could then redeem it as "unknown" (positive-evidence-only admits).
+    const withheld = createRequested ? [] : _withheldEditAddresses(session, args, resolveHandlePath);
+    if (withheld.length > 0) {
+      const recoveryPaths = withheld
+        .map((pair) => (pair.path !== "" ? pair.path : resolveHandlePath?.(pair.handle) ?? ""))
+        .filter((candidate) => candidate !== "");
+      return _refuseUngatedEdit(session, workspaceRoot, args, {
+        cause: "capped",
+        detail: "this session emitted "
+          + withheld.map((pair) => pair.path || pair.handle).join(",")
+          + " and withheld its bytes; `task.epoch:\"new\"` does not create write authority over bytes this "
+          + "session never actually served — the epoch was NOT reset",
+        recoveryPaths,
+        lane: redeemingLane,
+      });
+    }
     // Mirror of the discovery guard's branch above: an epoch reset through
     // edit_file discards an unexecuted prepared frontier just the same, so it
     // owes the same one-shot advisory (w12 merge-review symmetry fix).
@@ -3865,9 +5277,62 @@ export function guardExecutionEdit(
     }
     session.executionFence = undefined;
     _clearAdmissibleEditUnion(session);
+    // FX-G-A: same co-lifetime as the discovery guard's branch above — an
+    // epoch reset declared through `edit_file` retires the dead task's VF-5
+    // verify obligations too.
+    _clearRecordedVerifyObligations(session);
     return { allowed: true, resetForNewTask: true };
   }
-  if (fence === undefined || fence.phase === "revoked" || fence.phase === "done") return { allowed: true };
+  // -----------------------------------------------------------------------
+  // FX-P1 (INV-I-1, ruling (r)) — THE ADMISSIBILITY PREDICATE RUNS FOR EVERY
+  // EDIT, NOT ONLY THE ONES A CERTIFICATE HAPPENS TO FENCE.
+  //
+  // The early return immediately below is what INV-I-1 rides: a capped
+  // DISCOVERY pack mints a handle for a row it shipped no body for, installs
+  // no `execution_contract` (so `recordExecutionContract` never runs), and the
+  // gate then admits every write form against bytes the caller never received.
+  // `_withheldEditAddresses` is the same predicate the certificate lift and the
+  // capped recovery already use, asked here of the REQUEST rather than of a
+  // certificate — so it covers `handle`+`content`, `handle`+`search`,
+  // `path`+`search`, the ranged forms and an `edits[]` batch identically.
+  //
+  // SCOPED TO THE UNFENCED EXITS ON PURPOSE. When a live fence exists, a
+  // withheld address is already refused by the frontier check below (FX-L's
+  // shipped projection removed it from the frontier) and that refusal carries
+  // the `cause`/`next` shape `sfCertificateWriteAuthority` pins — including
+  // the deliberate ABSENCE of `cause:"capped"` for a DEMOTED row, whose bytes
+  // were withheld for a different reason. Short-circuiting it here would
+  // rewrite refusals that are already correct.
+  //
+  // Creates are excluded: a create target is a file that does not exist yet, so
+  // it has no withheld bytes to hold back, and the create branches below own
+  // that decision (`create-target-exists` refuses an existing file anyway).
+  if (fence === undefined || fence.phase === "revoked" || fence.phase === "done") {
+    const withheld = createRequested ? [] : _withheldEditAddresses(session, args, resolveHandlePath);
+    if (withheld.length > 0) {
+      const recoveryPaths = withheld
+        .map((pair) => (pair.path !== "" ? pair.path : resolveHandlePath?.(pair.handle) ?? ""))
+        .filter((candidate) => candidate !== "");
+      // `cause:"capped"` reads the residency map, which records THAT bytes were
+      // withheld, not WHY — a demoted surface marks the same map. Under a live
+      // fence FX-L can tell the two apart (only a capped certificate address
+      // reaches `fence.withheldTargets`, which is why the DEMOTE arm keeps a
+      // `cause`-free refusal) and this exit cannot. It is advisory either way:
+      // `code` is `execution-typestate` and `next` carries the whole recovery,
+      // which is identical for both reasons — read the address and the write is
+      // admitted. The detail therefore states the FACT (emitted, not sent)
+      // without asserting a mechanism.
+      return _refuseUngatedEdit(session, workspaceRoot, args, {
+        cause: "capped",
+        detail: "this session emitted "
+          + withheld.map((pair) => pair.path || pair.handle).join(",")
+          + " and withheld its bytes; write authority comes only from bytes this session actually served",
+        recoveryPaths,
+        lane: redeemingLane,
+      });
+    }
+    return { allowed: true };
+  }
   const challenged = applyChallenge(session, fence, args, workspaceRoot);
   if (challenged !== undefined) return challenged;
   // R2: one signature per edit call — a verbatim retry of ANY refusal below
@@ -3922,6 +5387,15 @@ export function guardExecutionEdit(
         .filter((p): p is string => typeof p === "string" && p !== ""),
     ])].slice(0, 8);
     return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, "answer-ready certificate does not authorize edits; if the task genuinely requires edits, re-scope with taskEpoch:\"new\"", remedyRepackPaths, args, resolveHandlePath);
+  }
+  if (batchEditFrontierEnabled() && fence.phase === "prepared" && fence.batchEditTargets.length > 1 && !createRequested) {
+    const requestedHandleSet = new Set(handles);
+    const requestedPathSet = new Set([...paths, ...handles.map((handle) => resolveHandlePath?.(handle)).filter((candidate): candidate is string => typeof candidate === "string" && candidate !== "")]);
+    const missingBatchTargets = fence.batchEditTargets.filter((target) => !requestedHandleSet.has(target.handle) && (target.path === "" || !requestedPathSet.has(target.path)));
+    if (missingBatchTargets.length > 0) {
+      const missing = missingBatchTargets.map((target) => target.path || target.handle).join(",");
+      return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, `prepared multi-target edit must batch every ready edit obligation in one edits[] call; missing=${missing}`, undefined, args, resolveHandlePath);
+    }
   }
   if (createRequested) {
     // Frontier-union fix: a create target admissible in ANY earlier same-epoch
@@ -4032,6 +5506,59 @@ export function guardExecutionEdit(
   return { allowed: true };
 }
 
+/** The `opts` shape `guardExecutionEditCore` takes, reused by its wrapper below. */
+type GuardExecutionEditOpts = Parameters<typeof guardExecutionEditCore>[3];
+
+/**
+ * DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): records layer 2's
+ * OBSERVED evidence for `sfIntent.ts`'s `resolveIntent` — has an edit_file
+ * call already passed this guard, genuinely, during the current task epoch?
+ *
+ * L1 (2026-09-05 R28 remediation): `resetForNewTask` no longer excludes this
+ * record. Unlike the DISCOVERY guard (`guardExecutionDiscovery`), whose
+ * `taskEpoch:"new"` branch returns immediately — no read/search bytes are
+ * served by that same call, so `resetForNewTask:true` there genuinely means
+ * "nothing was observed yet" — `guardExecutionEditCore`'s `taskEpoch:"new"`
+ * branch does NOT short-circuit the edit: it resets the epoch's ledgers
+ * in-place and, absent a withheld-address refusal, falls through to
+ * `{allowed:true, resetForNewTask:true}` while server.ts's dispatcher
+ * CONTINUES on to actually apply the requested edit in this SAME call (the
+ * only gate is `if (!executionGuard.allowed) return …`). An edit_file call
+ * that opens its own new epoch and lands is therefore exactly as much "an
+ * edit_file call passed this guard, genuinely, during the current task
+ * epoch" as an ordinary one — the epoch it belongs to is simply the one it
+ * just opened. The old `resetForNewTask !== true` guard treated "opened a new
+ * epoch" as synonymous with "did not edit", which is true for discovery and
+ * false for edit_file; excluding it here left a landed edit unrecorded, so
+ * `referencesObserved`/`editObserved`-gated logic downstream saw a task that
+ * had (from ITS OWN edit_file call) already written a file but had
+ * apparently never edited anything. A REFUSED edit — `decision.allowed ===
+ * false`, whether or not it also carried `task.epoch:"new"` — still never
+ * sets this: `decision.allowed` alone is the exact predicate the
+ * NON-reset path always used, extended honestly to the reset path.
+ *
+ * Deliberately NOT a new post-core seam: no staging, no deferred/wire-time
+ * settlement (unlike `settleServedRanges`'s FX-N ruling (s) pattern), no
+ * separate module reading the finished decision later. This wrapper reads
+ * the SAME `ExecutionGuardDecision` its caller reads, synchronously, right
+ * here, and every fence/certificate booking `guardExecutionEditCore` performs
+ * stays exactly as it was — this function changes nothing about WHEN or IN
+ * WHAT ORDER those bookings happen, only records one extra fact once the
+ * core guard has already finished deciding.
+ */
+export function guardExecutionEdit(
+  workspaceRoot: string,
+  args: Record<string, unknown>,
+  resolveHandlePath?: (handle: string) => string | undefined,
+  opts?: GuardExecutionEditOpts,
+): ExecutionGuardDecision {
+  const decision = guardExecutionEditCore(workspaceRoot, args, resolveHandlePath, opts);
+  if (decision.allowed) {
+    getSession(workspaceRoot).intentEditObserved = true;
+  }
+  return decision;
+}
+
 /**
  * Successful certified edit advances PREPARED -> VERIFYING, and (C5) discharges
  * the fence's outstanding demand by the PATHS the edit actually wrote.
@@ -4089,6 +5616,20 @@ export function recordExecutionEditResult(
 
 export function getExecutionFence(workspaceRoot: string): ExecutionFenceState | undefined {
   return getSession(workspaceRoot).executionFence;
+}
+
+/**
+ * VF-5 hand-off: the active task epoch's recorded `TaskChangeContract.verify_obligations`,
+ * as last reported to `recordExecutionContract`. `undefined` when no ready
+ * contract in the CURRENT epoch reported any — which now covers three cases
+ * that all mean the same thing to the gate: none was ever recorded, a later
+ * contract reported an empty list (replace semantics), or the epoch turned
+ * over (`taskEpoch:"new"`). Never an empty array: the recorder normalizes
+ * `[]` to `undefined`. Read by `protocol/readFamily.ts`'s `verifyClosureGate`
+ * as its kit-less fallback source (VF-5).
+ */
+export function recordedVerifyObligations(workspaceRoot: string): readonly TaskVerifyObligation[] | undefined {
+  return getSession(workspaceRoot).recordedVerifyObligations;
 }
 
 /** Consume the one-shot advisory generated when a prepared frontier is superseded. */
@@ -4329,6 +5870,54 @@ export function recordSingleFindCompletion(workspaceRoot: string): boolean {
 }
 
 /**
+ * W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF; DESIGN-v0.15-sf-
+ * turn-economy.md §3). Threshold at which a run of consecutive single-target
+ * read-family calls (read_file with one target/handle, or search_files
+ * action=find with one query — see server.ts's classification at its two
+ * `guardExecutionDiscovery` call sites) starts advertising the fold-into-one-
+ * call hint. UNLIKE FIND_HINT_THRESHOLD/BATCH_HINT_THRESHOLD (one-shot: the
+ * hint fires once and never again), this hint is meant to keep firing on
+ * every response for the rest of an unbroken streak — see
+ * recordReadFamilySingleTargetCall's return-value doc below — because the
+ * turn waste it names (32 consecutive single-target calls in the r4
+ * forensics this candidate answers) does not stop being waste after the
+ * first nudge.
+ */
+export const SERIAL_SINGLE_TARGET_HINT_THRESHOLD = 3;
+
+/**
+ * Records one read-family call's target-count shape against this
+ * (workspace, lane, task-epoch) streak — `getSession` is already lane-scoped
+ * (laneScopedKey) and `guardExecutionDiscovery`'s epoch-reset block zeroes
+ * `serialSingleTargetReads` on `taskEpoch:"new"`, so this function itself
+ * only has to handle the streak's own increment/reset rule: `isSingleTarget`
+ * true advances the streak by one; false (a multi-target read_file or
+ * search_files-find call) resets it to zero — the "a multi-target call
+ * resets the counter" rule this candidate specifies. Call this UNCONDITIONALLY
+ * for every read_file/search_files-find call that reaches dispatch (never for
+ * edit_file, which does not participate at all — neither advancing nor
+ * resetting the streak), regardless of whether the response that follows
+ * turns out to be a receipt or a refusal: the streak counts CALL SHAPES, and
+ * whether to actually attach the hint to THIS response is a separate,
+ * narrower decision the caller makes from the boolean this returns (never
+ * fires on edit_file/refusal/receipt kinds — see envelope.ts's
+ * `applySerialSingleTargetHint`).
+ *
+ * Returns true from the call that brings the streak to
+ * SERIAL_SINGLE_TARGET_HINT_THRESHOLD onward, until the next reset — NOT
+ * one-shot, unlike recordSingleFindCompletion above.
+ */
+export function recordReadFamilySingleTargetCall(workspaceRoot: string, isSingleTarget: boolean): boolean {
+  const s = getSession(workspaceRoot);
+  if (!isSingleTarget) {
+    s.serialSingleTargetReads = 0;
+    return false;
+  }
+  s.serialSingleTargetReads += 1;
+  return s.serialSingleTargetReads >= SERIAL_SINGLE_TARGET_HINT_THRESHOLD;
+}
+
+/**
  * Records a read of (path, range) and returns the updated repeat count.
  * The first read returns 1; each subsequent call for the same pair increments.
  */
@@ -4404,6 +5993,14 @@ const SERVED_RANGE_LEDGER_CLUSTER_CAP = 64;
  * claiming, never coverage it invents.
  */
 const SERVED_RANGE_LEDGER_SPAN_CAP = 256;
+/**
+ * FX-V1 (round-20A finding 1, 2026-09-04): bound on `ServedRangeLedgerState.elided`.
+ * Same drop-the-oldest idiom and the same fail-safe direction as the caps
+ * above — an evicted elided span costs one redundant `content:"full"` (or
+ * `comments:"keep"`) re-serve before a foreign handle admits, never a claim
+ * the ledger cannot back.
+ */
+const SERVED_RANGE_LEDGER_ELISION_CAP = 64;
 
 function mergeServedRanges(ranges: Array<[number, number]>): Array<[number, number]> {
   const sorted = ranges
@@ -4557,6 +6154,112 @@ export function servedRangeReceipt(
  * over-recording hands out a `code_unchanged` receipt for bytes nobody ever
  * received.
  */
+/**
+ * FX-N (ruling (s), 2026-09-03): the lane-scoped SESSION KEYS holding staged
+ * serve bookings the funnel has not settled yet.
+ *
+ * WHY A REGISTRY AND NOT JUST THE CALL'S OWN ROOT. `emit.ts` knows the root
+ * dispatch RESOLVED (`ProtocolCallContext.readServeWorkspace`, taken at
+ * dispatch entry), but a read whose target is addressed by handle may ADOPT
+ * the handle's own mint root part-way through (`server.ts`'s `let workspace`
+ * — "the handle IS the workspace pin") and book into THAT session instead.
+ * Settling only the entry-time root would leave those spans provisional
+ * forever and, worse, would never promote their union/residency — the T09/T10
+ * "the gate refuses a handle this server itself served" direction. The
+ * registry names exactly the sessions this call actually booked into.
+ *
+ * KEYS, NOT ROOTS, so the settlement is lane-isolated by construction: an
+ * entry is consumed only by a call running in the same lane it was staged in
+ * (`sessionKeyFor` re-derives the same composite key iff the lane matches).
+ * A key left behind by a THROWN call is therefore not lost to another lane;
+ * it is settled by the next response of its own lane, whose corroboration
+ * cannot promote a path it did not itself ship.
+ */
+const _pendingServeSessionKeys = new Set<string>();
+
+/**
+ * FX-V1 (round-20A finding 1, ruling (x), 2026-09-04): stage a CANDIDATE
+ * elided-line gap for this `recordServedRange` call, keyed to the caller's
+ * own (provenance `call`, provenance `range`) pair.
+ *
+ * WHY THIS DETECTS ELISION AND NOTHING ELSE. Every serve site that can elide
+ * doc comments narrows the window it books through
+ * `servedSpansOfDisplayedText` (`util/formatCompress.ts`) BEFORE calling
+ * `recordServedRange` — one call per surviving (non-elided) span, in
+ * increasing line order, all sharing one `beginServeCall` ordinal and one
+ * `provenance.range` string naming the FULL window that walk covered (see
+ * every booking site: `bookFullFileExpansionServe`, `buildFullServePayload`'s
+ * governed-head branch, `readCodeSmallFile.ts`'s small_file serve,
+ * `appendFresh`'s ledger-difference fresh windows, `readCodeTaskPack.ts`).
+ * Nothing else drops file lines from that walk, so a gap between the
+ * window's own start (or the previous shipped span already recorded for the
+ * SAME (call, range) pair) and THIS span's start is exactly the lines a
+ * `doc elided L<a>-<b>` marker stood in for.
+ *
+ * KEYED ON (call, range), NOT call ALONE. A single response can book several
+ * DIFFERENT windows under one shared `beginServeCall` ordinal — e.g.
+ * `buildLedgerDifferenceFullPayload`'s `appendFresh`, called once per FRESH
+ * sub-range with one `serveCall` shared across the whole difference payload.
+ * The "prior" span between two such fresh windows names bytes an EARLIER call
+ * genuinely served (not re-shipped now, but never elided either); mistaking
+ * that gap for an elision candidate would be exactly the over-claim ruling
+ * (x) forbids. A new (call, range) pair always resets the cursor to that
+ * window's own start, so a prior-coverage gap between two fresh windows is
+ * never attributed to this window's cursor.
+ *
+ * WRITTEN OPTIMISTICALLY, RETRACTED ON NON-CONFIRMATION. Exactly like
+ * `recordServedRange` itself pushes its own span into `state.spans`
+ * immediately (before the funnel knows whether the wire will corroborate
+ * it), this writes the gap directly into `state.elided` right away, and ALSO
+ * stages it in `session.pendingElidedSpans` so `_settleSessionServeBookings`
+ * can RETRACT that exact entry once the finalized wire's corroboration is
+ * known — a candidate whose response was shed by a governor/cap/response-size
+ * AFTER this call must not survive as a standing elision claim. A direct
+ * in-process caller of `recordServedRange` that never runs a funnel (the unit
+ * specs) therefore sees the elided claim immediately, exactly as durably as
+ * the shipped span it sits beside.
+ *
+ * No-op when `provenance` is absent or its `range` does not parse as a
+ * `"start-end"` pair (the same shape `_parseHandleLineRange` already parses
+ * for handle ranges — reused here rather than duplicated) — there is then no
+ * window to detect a gap against, and recording nothing is always the safe
+ * direction (ruling (x): elided-window coverage is an ADDITIVE write-
+ * authority relaxation, never a receipt claim).
+ */
+function _stageElisionGap(
+  session: WorkspaceSession,
+  state: ServedRangeLedgerState,
+  filePath: string,
+  provenance: ServedRangeProvenance | undefined,
+  start: number,
+  end: number,
+): void {
+  if (provenance === undefined) return;
+  const parsedWindow = _parseHandleLineRange(provenance.range);
+  if (parsedWindow === undefined) return;
+  const track = state._elisionCursor;
+  const cursor = track !== undefined && track.call === provenance.call && track.range === provenance.range
+    ? track.next
+    : parsedWindow.start;
+  if (start > cursor) {
+    const gapStart = Math.max(1, Math.min(state.totalLines, cursor));
+    const gapEnd = Math.max(gapStart, Math.min(state.totalLines, start - 1));
+    // Written OPTIMISTICALLY, exactly like `state.spans.push` a few lines up
+    // in `recordServedRange` — a direct in-process caller that never runs a
+    // funnel (the unit specs) sees this claim immediately and durably, just
+    // like the shipped span it sits beside. `_settleSessionServeBookings`
+    // RETRACTS this exact `id` later if the finalized wire never actually
+    // corroborates it.
+    const id = (session.serveSpanSerial += 1);
+    state.elided.push({ start: gapStart, end: gapEnd, id });
+    if (state.elided.length > SERVED_RANGE_LEDGER_ELISION_CAP) {
+      state.elided = state.elided.slice(-SERVED_RANGE_LEDGER_ELISION_CAP);
+    }
+    session.pendingElidedSpans.push({ path: filePath, id, start: gapStart, end: gapEnd });
+  }
+  state._elisionCursor = { call: provenance.call, range: provenance.range, next: Math.max(cursor, end + 1) };
+}
+
 export function recordServedRange(
   workspaceRoot: string,
   filePath: string,
@@ -4569,16 +6272,32 @@ export function recordServedRange(
   const session = getSession(workspaceRoot);
   const start = Math.max(1, Math.min(totalLines, startLine));
   const end = Math.max(start, Math.min(totalLines, endLine));
-  // A1 (2026-08-01 signal5-2): raw content served for a path grounds a later
-  // edit of that path. Feed the epoch-scoped admissible union at SERVE time —
-  // ready-certificate install alone left slice/full-read content and
-  // partial/discovery-pack surfaces permanently outside the edit frontier, so
-  // the gate refused handles this server itself had served (T09 enums.ts,
-  // T05c rep1 cross-subsystem batch).
-  _appendAdmissible(session.admissibleEditPaths, [filePath]);
+  // FX-N (ruling (s), 2026-09-03) — THE UNION/RESIDENCY WRITES MOVED OUT OF
+  // THIS FUNCTION, to `settleServedRanges` at the funnel exit.
+  //
+  // A1 (2026-08-01 signal5-2) established that raw content served for a path
+  // grounds a later edit of that path, and FX-L (ruling (r)) added that the
+  // served-range ledger IS the "body shipped" proof. Both remain true. What
+  // was wrong is WHEN they were asserted: these two statements used to run
+  // HERE, while the body was still being assembled — before the budget/cap
+  // shed, before the response kind was known, and outside [R5-10]'s
+  // corroboration entirely. Round-16 measured the cost end to end: a
+  // `read_file … budget:{bytes:300}` that shed to `refusal/cap-exceeded`
+  // (ZERO file bytes on the wire) still enrolled the path in the admissible
+  // union and marked it `"shipped"`, so the next `edit_file` landed on a file
+  // no byte of which had ever been sent (`r16_e`), and an FX-L `withheld`
+  // address was laundered to `shipped` by the same byte-free call (`r16_q`).
+  //
+  // The booking is now STAGED on `pendingServeSpans` alongside the ledger span
+  // it comes from, and promoted by `settleServedRanges` only for a path whose
+  // spans the FINAL serialized payload actually corroborated. Nothing else
+  // about the enrolment changed: same union, same monotone residency, same
+  // "a served range grounds the edit" rule — asserted one funnel exit later,
+  // from the bytes that left rather than the bytes that were intended.
+  _pendingServeSessionKeys.add(sessionKeyFor(workspaceRoot));
   let state = session.servedRangeLedger.get(filePath);
   if (state === undefined || state.fileSha !== fileSha) {
-    state = { fileSha, ranges: [], spans: [], requests: [], totalLines };
+    state = { fileSha, ranges: [], spans: [], requests: [], totalLines, elided: [] };
     session.servedRangeLedger.delete(filePath);
     session.servedRangeLedger.set(filePath, state);
   }
@@ -4611,6 +6330,22 @@ export function recordServedRange(
     id: spanId,
   });
   session.pendingServeSpans.push({ path: filePath, id: spanId, start, end });
+  // FX-V1 (round-20A finding 1, ruling (x), 2026-09-04): stage this call's own
+  // elision-gap candidate, if any — see `_stageElisionGap`'s doc comment.
+  _stageElisionGap(session, state, filePath, provenance, start, end);
+  // FX-W3 (ruling (aa), 2026-09-04): stage this call's own TRUE recorded
+  // extent for `filePath` — see `WorkspaceSession.pendingRenderedExtent`'s
+  // doc comment. `provenance.range` is the caller's OWN declared window (file
+  // coordinates, e.g. `1-40` for a whole-file serve, `50-200` for a slice),
+  // never the wire's synthesized display range, so a narrow slice's own
+  // extent never widens past its own request.
+  if (provenance !== undefined) {
+    const declaredWindow = _parseHandleLineRange(provenance.range);
+    if (declaredWindow !== undefined) {
+      const priorExtent = session.pendingRenderedExtent.get(filePath);
+      session.pendingRenderedExtent.set(filePath, Math.max(priorExtent ?? 0, declaredWindow.end));
+    }
+  }
   materializeServedRanges(state);
   while (session.servedRangeLedger.size > SERVED_RANGE_LEDGER_PATH_CAP) {
     const oldest = session.servedRangeLedger.keys().next().value as string | undefined;
@@ -4666,58 +6401,246 @@ function _servePathsMatch(left: string, right: string): boolean {
  * measurement point sits, which is not a coincidence: "what did this response
  * actually carry" is one question and deserves one answer.
  *
- * DELIBERATELY NOT RETRACTED: the `admissibleEditPaths` enrolment
- * `recordServedRange` performs (A1, 2026-08-01). [R5-10] governs what may
- * ground a RECEIPT — a claim about bytes. Edit admissibility is grounded in
- * the caller having addressed the path under a live certificate, which a
- * body-less response does not undo; retracting it would re-open the gate that
- * refused handles this server had itself served.
+ * SETTLED HERE TOO, SINCE FX-N (ruling (s), 2026-09-03): the admissible-union
+ * enrolment (A1, 2026-08-01) and the per-address `"shipped"` residency (FX-L)
+ * that `recordServedRange` used to write inline. The older note here read
+ * "DELIBERATELY NOT RETRACTED … edit admissibility is grounded in the caller
+ * having addressed the path under a live certificate, which a body-less
+ * response does not undo". Ruling (s) supersedes that reading: write authority
+ * comes from SHIPPED BYTES, and a response that shipped none of a path's bytes
+ * grounds nothing about that path.
+ *
+ * PROMOTION, NOT RETRACTION, is what actually happens — the distinction
+ * matters and is what keeps this out of the T09/T10 direction. The writes were
+ * never performed at booking time, so this function does not remove anything a
+ * previous call established: it promotes exactly the paths THIS response
+ * corroborated, and silently drops the staging for the rest. An earlier call
+ * that genuinely served a path keeps its union entry and its `"shipped"`
+ * residency; a later byte-free refusal neither adds nor withdraws one
+ * (ruling (s): "a refusal books nothing and retracts nothing it did not
+ * ship").
  */
+/**
+ * R11 A-5 (independent review, 2026-09-03): the contiguous sub-ranges of
+ * `span` that lie within the union of `windows` — `[]` when there is no
+ * overlap at all, `[span]` unchanged when `windows` fully cover it, and one
+ * or more NARROWER pieces otherwise (a gap between two windows inside the
+ * span splits it). Pure and side-effect free so `settleServedRanges` can
+ * decide, per span, whether to leave it untouched, retract it outright, or
+ * replace it with only what was demonstrably delivered.
+ */
+function _coveredPiecesOfSpan(
+  span: { start: number; end: number },
+  windows: ReadonlyArray<{ start: number; end: number }>,
+): Array<{ start: number; end: number }> {
+  const overlaps = windows
+    .map((w) => ({ start: Math.max(span.start, w.start), end: Math.min(span.end, w.end) }))
+    .filter((r) => r.start <= r.end)
+    .sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const r of overlaps) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && r.start <= last.end + 1) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      merged.push({ start: r.start, end: r.end });
+    }
+  }
+  return merged;
+}
+
 export function settleServedRanges(
   workspaceRoot: string,
-  corroboration: {
-    /**
-     * True when the response carries served bytes this function cannot
-     * attribute to a path (a body-bearing entry with no `path` addressing).
-     * FAIL-OPEN: every pending span is kept. The ruling is about responses
-     * that carried NO bytes for a range, not about the projector's addressing
-     * completeness, and a false retraction would re-serve bytes the caller
-     * already holds — a cost regression dressed as honesty.
-     */
-    unattributed: boolean;
-    /** Body-bearing line windows the serialized payload declared. */
-    windows: ReadonlyArray<{ path: string; start: number; end: number }>;
-  },
+  corroboration: ServeCorroboration,
+  wasShed?: boolean,
 ): void {
-  const session = getSession(workspaceRoot);
-  const pending = session.pendingServeSpans;
-  if (pending.length === 0) return;
-  session.pendingServeSpans = [];
-  if (corroboration.unattributed) return;
+  _pendingServeSessionKeys.delete(sessionKeyFor(workspaceRoot));
+  _settleSessionServeBookings(getSession(workspaceRoot), corroboration, wasShed);
+}
 
+/**
+ * FX-N (ruling (s)): the ONE settlement `protocol/emit.ts` calls, for EVERY
+ * response of every kind, once, after the projector has finalized the wire.
+ *
+ * `primaryRoot` is the root this call's dispatch resolved against
+ * (`context.workspace` for an edit, `context.readServeWorkspace` for a
+ * read/search); it is settled even when it staged nothing, so an edit keeps
+ * its historical `settleServedRanges(context.workspace, …)` behaviour exactly.
+ * Every OTHER session key this call booked into — see
+ * `_pendingServeSessionKeys` — is settled in the same pass, so there is one
+ * booking write per call and no path is ever settled twice.
+ */
+export function settleServedCallBookings(
+  corroboration: ServeCorroboration,
+  primaryRoot?: string,
+  wasShed?: boolean,
+): void {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  if (primaryRoot !== undefined && primaryRoot !== "") {
+    const key = sessionKeyFor(primaryRoot);
+    seen.add(key);
+    keys.push(key);
+  }
+  for (const key of [..._pendingServeSessionKeys]) {
+    // Lane isolation: a key staged in another lane re-derives to a different
+    // composite key here, so it is left for that lane's own funnel exit.
+    if (key !== sessionKeyFor(rootOfSessionKey(key))) continue;
+    _pendingServeSessionKeys.delete(key);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  for (const key of keys) {
+    _pendingServeSessionKeys.delete(key);
+    const session = _sessions.get(key);
+    if (session === undefined) continue;
+    _settleSessionServeBookings(session, corroboration, wasShed);
+  }
+}
+
+/** The corroboration `protocol/envelope.ts`'s `servedWindowsOf` produces. */
+export interface ServeCorroboration {
+  /**
+   * True when the response carries served bytes this function cannot
+   * attribute to a path (a body-bearing entry with no `path` addressing).
+   *
+   * FAIL-CLOSED ON AUTHORITY since FX-O1 (ruling (t), 2026-09-03): the
+   * response has not proved that any particular file's bytes reached the
+   * caller, so it promotes NO path — no admissible-union entry, no `"shipped"`
+   * residency. The span half still settles against whatever windows the payload
+   * DID attribute, so nothing demonstrably delivered is thrown away and
+   * everything uncorroborated is discarded, exactly as on any other response.
+   * The old fail-open arm did the opposite in both halves: it kept every span
+   * AND promoted every pending path, which made FX-N's own safety argument — "a key left
+   * behind by a THROWN call is settled by the next response of its own lane,
+   * whose corroboration cannot promote a path it did not itself ship" — false
+   * for exactly the responses that took it: a staged residue for a file no
+   * byte of which was ever sent became `"shipped"` on the next unattributed
+   * response and unlocked `edit_file` (round-17 finding 2).
+   *
+   * The cost the old comment feared (re-serving bytes the caller holds) is
+   * paid by nothing in production: the two shapes that reached this arm —
+   * `mode=symbol`'s assembled scope view and `mode=auto`'s small-content serve
+   * — now publish `ProtocolCallContext.serveAttributionPath` at their staging
+   * sites, so `protocol/envelope.ts` attributes their bodies and this flag is
+   * unreachable for a shipped body. A future shape that IS unattributable is
+   * refused write authority rather than granted it on a guess.
+   */
+  unattributed: boolean;
+  /** Body-bearing line windows the serialized payload declared. */
+  windows: ReadonlyArray<{ path: string; start: number; end: number }>;
+}
+
+function _settleSessionServeBookings(
+  session: WorkspaceSession,
+  corroboration: ServeCorroboration,
+  // FX-W3 (ruling (aa), 2026-09-04): true iff `emit.ts`'s ladder performed
+  // ANY wire-level shedding on this response. Defaults to the CONSERVATIVE
+  // (narrow-only) direction so every pre-existing direct caller of
+  // `settleServedRanges`/`settleServedCallBookings` (the unit specs that hand-
+  // build a `ServeCorroboration` and know nothing of this parameter) keeps its
+  // exact prior behavior. See `pendingRenderedExtent`'s doc comment for why
+  // this is the ONLY signal allowed to widen a window past what the wire
+  // declared, and only ever a window this response's OWN corroboration
+  // already produced for that path.
+  wasShed: boolean = true,
+): void {
+  const pending = session.pendingServeSpans;
+  // FX-V1: a pending elided candidate can only ever be staged ALONGSIDE a
+  // pending span from the SAME `recordServedRange` call (see
+  // `_stageElisionGap`), so `pending.length === 0` implies no elided
+  // candidate is pending either — but the OR guard costs nothing and keeps
+  // this function correct even if that invariant ever loosens.
+  if (pending.length === 0 && session.pendingElidedSpans.length === 0) return;
+  session.pendingServeSpans = [];
+  // FX-O1 (ruling (t), 2026-09-03) — FAIL CLOSED ON AUTHORITY. An
+  // unattributable response cannot prove that any particular file's bytes
+  // reached the caller, so it promotes NOTHING: no admissible-union entry, no
+  // `"shipped"` residency. The span half still settles against whatever windows
+  // the payload DID attribute, so a span this response demonstrably carried
+  // keeps its receipt and the residue — anything the payload does not
+  // corroborate, including a staging left behind by a call that threw before
+  // the funnel — is discarded exactly as it is on any other response.
+  //
+  // The old arm did the opposite in both halves: it kept every span AND
+  // promoted every pending path, which made FX-N's safety note ("a key left
+  // behind by a THROWN call … is settled by the next response of its own lane,
+  // whose corroboration cannot promote a path it did not itself ship") false
+  // for the responses that took it. See `ServeCorroboration.unattributed`.
+  //
+  // FX-W3 (ruling (aa)): a window `servedWindowsOf` ALREADY attributed to a
+  // path is widened to this response's own recorded TRUE extent for that
+  // SAME path (`pendingRenderedExtent`), but ONLY when nothing was shed. This
+  // NEVER manufactures a window for a path the wire's own walk did not
+  // attribute at all (the `windows.map` below only ever touches an EXISTING
+  // entry), so a stale `pendingRenderedExtent` entry left by an unrelated
+  // thrown call can widen nothing this response's own corroboration does not
+  // already mention — the same residue-safety `unattributed` already
+  // provides for `windows` itself.
+  const renderedExtent = session.pendingRenderedExtent;
+  session.pendingRenderedExtent = new Map();
+  const windows = wasShed || renderedExtent.size === 0
+    ? corroboration.windows
+    : corroboration.windows.map((window) => {
+        const extentEnd = renderedExtent.get(window.path);
+        return extentEnd !== undefined && extentEnd > window.end
+          ? { ...window, end: extentEnd }
+          : window;
+      });
+
+  // FX-N: paths at least one of whose spans the FINAL payload corroborated.
+  // A partially-carried span still counts — the caller demonstrably holds
+  // bytes of that file, which is the whole question the union/residency pair
+  // answers (they are per-FILE, not per-line; the per-line claim is the
+  // ledger's own, settled span by span below).
+  const shippedPaths = new Set<string>();
   const retractedByPath = new Map<string, Set<number>>();
+  const narrowedByPath = new Map<string, Array<{ start: number; end: number; by: string }>>();
   for (const span of pending) {
-    // INTERSECTION, not containment. The emitters already narrowed each span
-    // to the marker-free text they put on the wire
-    // (`servedSpansOfDisplayedText`), so line-exact re-checking here would
-    // double-count the elision and retract genuine serves. The funnel's
-    // question is the coarse one the ruling asks: did bytes for this file
-    // reach the consumer on this response at all, anywhere in this window?
-    const carried = corroboration.windows.some((window) =>
-      _servePathsMatch(window.path, span.path)
-      && window.start <= span.end && window.end >= span.start);
-    if (carried) continue;
+    // CONTAINMENT, not intersection (R11 A-5, independent review 2026-09-03).
+    // The emitters already narrow each span to the marker-free text they put
+    // on the wire (`servedSpansOfDisplayedText`), so in the ordinary
+    // (elision-only) case the corroborated window equals the booked span
+    // exactly and nothing below changes anything — this stays a no-op for
+    // that case, which is what the old any-overlap rule was actually trying
+    // to protect. But a LATER stage (a governor, a per-task cap, the response
+    // cap) can shed bytes AFTER the span was booked, independent of that
+    // narrowing: then the corroborated window is a strict SUBSET of the
+    // booked span, and the old rule kept the span WHOLE on any overlap at
+    // all — a span booked 1-40 whose serve was shed to 1-20 stayed booked as
+    // 1-40, so a later request for 21-40 answered from a ledger claiming
+    // bytes that were never delivered. Book only what the windows actually
+    // cover instead: fully carried spans are untouched; a partially-carried
+    // span is retracted and replaced by narrower spans naming only the
+    // delivered sub-range(s); a span with no overlap at all is retracted
+    // outright, exactly as before.
+    const matchingWindows = windows.filter((window) =>
+      _servePathsMatch(window.path, span.path));
+    const covered = _coveredPiecesOfSpan(span, matchingWindows);
+    if (covered.length > 0) shippedPaths.add(span.path);
+    if (covered.length === 1 && covered[0]!.start === span.start && covered[0]!.end === span.end) {
+      continue; // fully carried — unchanged, byte-identical to the old rule's outcome here.
+    }
     let ids = retractedByPath.get(span.path);
     if (ids === undefined) { ids = new Set(); retractedByPath.set(span.path, ids); }
     ids.add(span.id);
+    if (covered.length > 0) {
+      const originalBy = session.servedRangeLedger.get(span.path)?.spans
+        .find((s) => s.id === span.id)?.by ?? `read ${span.start}-${span.end}`;
+      let pieces = narrowedByPath.get(span.path);
+      if (pieces === undefined) { pieces = []; narrowedByPath.set(span.path, pieces); }
+      for (const piece of covered) pieces.push({ start: piece.start, end: piece.end, by: originalBy });
+    }
   }
 
   for (const [path, ids] of retractedByPath) {
     const state = session.servedRangeLedger.get(path);
     if (state === undefined) continue;
     const kept = state.spans.filter((span) => !ids.has(span.id));
-    if (kept.length === state.spans.length) continue;
-    if (kept.length === 0) {
+    const narrowed = narrowedByPath.get(path) ?? [];
+    if (kept.length === state.spans.length && narrowed.length === 0) continue;
+    if (kept.length === 0 && narrowed.length === 0) {
       // Nothing this session ever put on the wire for this path survives, so
       // the entry itself is the claim to delete — an emptied state would pin
       // `fileSha` and make a later serve of a CHANGED file look like a
@@ -4726,8 +6649,88 @@ export function settleServedRanges(
       continue;
     }
     state.spans = kept;
+    for (const piece of narrowed) {
+      state.spans.push({
+        start: piece.start,
+        end: piece.end,
+        by: piece.by,
+        id: (session.serveSpanSerial += 1),
+      });
+    }
     materializeServedRanges(state);
   }
+
+  // FX-V1 (round-20A finding 1, ruling (x), 2026-09-04): RETRACT this
+  // response's staged elision-gap candidates that the finalized wire does not
+  // corroborate, under the SAME `windows` the spans above were just judged
+  // against. `_stageElisionGap` already wrote each candidate directly into
+  // its `ServedRangeLedgerState.elided` (optimistic, exactly like
+  // `state.spans.push` above) — this is the retraction half, not the write.
+  //
+  // FULL containment only — never narrowed like a shipped span. A shipped
+  // span narrows sensibly (a partially-delivered span still names bytes the
+  // caller genuinely holds for the delivered sub-range), but a PARTIALLY
+  // confirmed elision gap is not a coherent claim: either the response's
+  // finalized wire demonstrably reaches all the way across the gap (proving
+  // the marker that stands for it really rode the wire), or it does not and
+  // the candidate must be retracted outright. `corroboration.unattributed`
+  // fails this closed exactly like the shipped-span half above — an
+  // unattributable response proves no particular file's bytes reached the
+  // caller, so every pending elision claim is retracted.
+  const pendingElided = session.pendingElidedSpans;
+  if (pendingElided.length > 0) {
+    session.pendingElidedSpans = [];
+    const retractedElidedByPath = new Map<string, Set<number>>();
+    for (const candidate of pendingElided) {
+      let confirmed = false;
+      if (!corroboration.unattributed) {
+        const matchingWindows = windows.filter((window) =>
+          _servePathsMatch(window.path, candidate.path));
+        const covered = _coveredPiecesOfSpan(candidate, matchingWindows);
+        confirmed = covered.length === 1
+          && covered[0]!.start === candidate.start
+          && covered[0]!.end === candidate.end;
+      }
+      if (confirmed) continue;
+      let ids = retractedElidedByPath.get(candidate.path);
+      if (ids === undefined) { ids = new Set(); retractedElidedByPath.set(candidate.path, ids); }
+      ids.add(candidate.id);
+    }
+    for (const [path, ids] of retractedElidedByPath) {
+      const state = session.servedRangeLedger.get(path);
+      // A path deleted above (nothing this session ever shipped for it
+      // survived settlement) has no entry left to retract from anyway.
+      if (state === undefined) continue;
+      state.elided = state.elided.filter((entry) => !ids.has(entry.id));
+    }
+  }
+
+  // FX-O1: an unattributable response promotes nothing — see the note at the
+  // head of this function. The ledger half above has already settled.
+  _promoteStagedServeBookings(session, corroboration.unattributed ? new Set<string>() : shippedPaths);
+}
+
+/**
+ * FX-N (ruling (s)): the promotion half of the settlement — the ONLY place a
+ * raw read's admissible-union enrolment and `"shipped"` byte residency are
+ * written, and it runs from the finalized wire.
+ *
+ * The two writes are exactly the pair `recordServedRange` used to perform
+ * inline (A1's `_appendAdmissible` and FX-L's `_markEditResidency`), with
+ * identical semantics: de-duplicated, FIFO-capped, monotone toward `shipped`.
+ * `_markEditResidency` will not overwrite an existing `"shipped"`, and a path
+ * marked `"withheld"` earlier in THIS call by the pack booking pass
+ * (`recordWithheldEditAddresses`) is only reachable here if the same call also
+ * put a body for that path on the wire — in which case `"shipped"` is the
+ * honest answer and the pack pass already wrote it. A byte-free response
+ * reaches this function with an EMPTY set, which is what closes round-16
+ * finding 1c: the `withheld → shipped` laundering path no longer exists.
+ */
+function _promoteStagedServeBookings(session: WorkspaceSession, paths: ReadonlySet<string>): void {
+  if (paths.size === 0) return;
+  const list = [...paths];
+  _appendAdmissible(session.admissibleEditPaths, list);
+  _markEditResidency(session.editPathResidency, list, "shipped");
 }
 
 // ---------------------------------------------------------------------------
@@ -4844,16 +6847,19 @@ export function transformServedRangesAcrossServerEdit(
   // A PRE-EDIT BOOKING CANNOT BE ADJUDICATED BY A POST-EDIT RESPONSE.
   //
   // `settleServedRanges` is contracted to run once per response against that
-  // response's own windows, but `emitFinalizedPayload` only invokes it when
-  // `context.workspace` is set — which today is the EDIT path (`finishEdit`'s
-  // `noteWorkspaceRoot`). A read's provisional spans therefore stay pending and
-  // are settled against the NEXT EDIT's payload, and an `edit.applied` declares
-  // no addressed body window at all (`applied[].head` is a string ARRAY, so
-  // `servedWindowsOf` books nothing). The result is that the read's span — for
-  // bytes that response demonstrably carried — is retracted by an unrelated
-  // later response, which silently deleted the head of every carried ledger
-  // here (reproduced 2026-08-27; reported as an independent defect, since with
-  // the sha reset it is otherwise invisible).
+  // response's own windows. FX-N (ruling (s), 2026-09-03) made that true: the
+  // funnel now settles for the read family as well, keyed on
+  // `ProtocolCallContext.readServeWorkspace`. Until then the guard was
+  // `context.workspace`, written only by the EDIT path (`finishEdit`'s
+  // `noteWorkspaceRoot`), so a read's provisional spans stayed pending and were
+  // settled against the NEXT EDIT's payload — and an `edit.applied` declares no
+  // addressed body window at all (`applied[].head` is a string ARRAY, so
+  // `servedWindowsOf` books nothing), which silently deleted the head of every
+  // carried ledger here (reproduced 2026-08-27; reported then as an independent
+  // defect, since with the sha reset it is otherwise invisible). That
+  // cross-response leak is closed; what remains, and is what this block is
+  // about, is a span still pending from a call that THREW before reaching the
+  // funnel.
   //
   // Retracting THIS path's pending spans is not something this function can
   // decide honestly, and neither is confirming them; what it can say is that
@@ -4917,6 +6923,20 @@ export function transformServedRangesAcrossServerEdit(
   state.totalLines = afterTotalLines;
   state.deltaFromSha = beforeSha;
   state.spans = kept;
+  // FX-V1 (round-20A finding 1, 2026-09-04): discard rather than re-project.
+  // `elided` spans are only ever trusted for the WRITE-AUTHORITY coverage
+  // predicate (`_foreignHandleRangeCovered`), never a receipt, but an
+  // unshifted elided span surviving a line-count-changing edit could still
+  // land on the WRONG post-edit lines and over-claim coverage there — a
+  // hazard `spans` avoids by being explicitly re-projected through the same
+  // hunk above. Re-projecting `elided` too would need the identical
+  // transform-and-clamp machinery for a claim that only ever saves one
+  // re-serve; discarding it is the fail-safe direction this whole ledger
+  // already follows (under-claiming costs a redundant serve, never a false
+  // admission), and it naturally re-populates on the next elided serve of the
+  // post-edit content.
+  state.elided = [];
+  state._elisionCursor = undefined;
   materializeServedRanges(state);
   const heldLines = state.ranges.reduce((sum, [start, end]) => sum + (end - start + 1), 0);
   return { kept: state.spans.length, dropped, shifted, heldLines };
@@ -4932,6 +6952,34 @@ export function transformServedRangesAcrossServerEdit(
  */
 export function hasServedRangeLedgerEntry(workspaceRoot: string, relPath: string): boolean {
   return getSession(workspaceRoot).servedRangeLedger.has(relPath);
+}
+
+/**
+ * W-BATCH-HINT (TL_BATCH_HINTS, DESIGN-v0.15-sf-turn-economy.md §3): how many
+ * distinct served-range CLUSTERS (`ServedRangeLedgerState.ranges`, already
+ * merged by `materializeServedRanges`) this session holds for `relPath` right
+ * now — independent of whether any of them covers a particular new request.
+ * Pure read accessor over the same ledger DC3 designates as the single
+ * authority for byte-residency claims: never mutates, never invents a
+ * cluster the ledger does not already report. Used only to detect "this is
+ * the 2nd distinct slice/symbol read of this path this session" (exactly one
+ * cluster existed before the call that is about to add a 2nd) without a
+ * second, competing counter.
+ */
+export function servedClusterCount(workspaceRoot: string, relPath: string): number {
+  return getSession(workspaceRoot).servedRangeLedger.get(relPath)?.ranges.length ?? 0;
+}
+
+/**
+ * W-BATCH-HINT sibling of `servedClusterCount`: the held clusters themselves,
+ * spelled in the wire's `"<start>-<end>"` dialect, oldest-serve-first. Used
+ * only to NAME already-held spans in `READ_BATCH_HINT_TEXT` — never to decide
+ * whether to serve fewer bytes (that stays `coverageReceiptFor`'s job, gated
+ * separately by `TL_RECEIPT_COVERAGE`).
+ */
+export function servedClusterRanges(workspaceRoot: string, relPath: string): string[] {
+  const state = getSession(workspaceRoot).servedRangeLedger.get(relPath);
+  return state === undefined ? [] : state.ranges.map(([start, end]) => `${start}-${end}`);
 }
 
 /**
@@ -5150,6 +7198,11 @@ export function recordEditedPath(workspaceRoot: string, path: string): void {
   // this session just changed. Same freshness rule the discovery brake's
   // signature map obeys (see ExecutionFenceState.discoverySignatures).
   session.servedFindLedger = undefined;
+  // TL_SEARCH_DEDUP (W-T-D): same freshness rule again, for the search-dedup
+  // ledger — "this exact search already ran with no write since" can no
+  // longer be asserted. Bumping the counter (rather than clearing the map
+  // outright) lets each entry self-invalidate lazily at lookup time.
+  session.writeEventSerial += 1;
 }
 
 /**
@@ -5243,6 +7296,16 @@ export function recordReadPath(workspaceRoot: string, path: string): void {
 /** Returns the workspace-relative paths read this session (Feature 1). */
 export function getReadPaths(workspaceRoot: string): string[] {
   return [...getSession(workspaceRoot).readPaths];
+}
+
+/**
+ * DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): the layer-2 OBSERVED
+ * evidence a task_pack build threads into `sfIntent.ts`'s `resolveIntent` as
+ * `IntentEvidence.editObserved` — see `WorkspaceSession.intentEditObserved`'s
+ * doc comment for the exact set/clear rules. Read-only outside this file.
+ */
+export function getIntentEditObserved(workspaceRoot: string): boolean {
+  return getSession(workspaceRoot).intentEditObserved;
 }
 
 // ---------------------------------------------------------------------------
@@ -5375,6 +7438,109 @@ export function getServedFindLedgerForTest(
     signatures: [...ledger.signatures],
     fingerprints: [...ledger.fingerprints],
   };
+}
+
+// ---------------------------------------------------------------------------
+// TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, W-T-D wave, default
+// OFF) — the search-dedup ledger. Consulted/written only by
+// `protocol/searchFamily.ts`'s `applySearchDedup`, itself only reachable when
+// `util/flags.ts`'s `searchDedupEnabled()` is true, so with the flag off
+// neither function below is ever called and the ledger stays permanently
+// empty — the flag-off byte-identity guarantee holds by construction, not by
+// a check inside these functions.
+// ---------------------------------------------------------------------------
+
+/** Re-insert `key` at the MRU (last) position, evicting the LRU entry past the cap. */
+function touchSearchDedupLedger(
+  ledger: Map<string, SearchDedupLedgerEntry>,
+  key: string,
+  entry: SearchDedupLedgerEntry,
+): void {
+  ledger.delete(key);
+  ledger.set(key, entry);
+  while (ledger.size > SEARCH_DEDUP_LEDGER_CAP) {
+    const oldest = ledger.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    ledger.delete(oldest);
+  }
+}
+
+/**
+ * Look up a fingerprint recorded earlier THIS task. Returns `undefined` on a
+ * genuine miss (never recorded) OR on a STALE hit (some write landed after
+ * the entry was recorded) — the two are indistinguishable to the caller on
+ * purpose: both mean "do not dedup, this call must stand on its own". A stale
+ * entry found here is evicted immediately rather than left to expire, so a
+ * later distinct write does not resurrect it by coincidence of counter math.
+ *
+ * A fresh hit is touched (moved to MRU) before being returned, so a
+ * repeatedly-asked query survives LRU pressure from other distinct queries
+ * the same task also ran.
+ */
+export function searchDedupLookup(
+  workspaceRoot: string,
+  fingerprint: string,
+): SearchDedupLedgerEntry | undefined {
+  const session = getSession(workspaceRoot);
+  const entry = session.searchDedupLedger.get(fingerprint);
+  if (entry === undefined) return undefined;
+  if (entry.writeEventSerial !== session.writeEventSerial) {
+    session.searchDedupLedger.delete(fingerprint);
+    return undefined;
+  }
+  touchSearchDedupLedger(session.searchDedupLedger, fingerprint, entry);
+  return entry;
+}
+
+/**
+ * Record the FIRST serving of a fingerprint this task, stamped with the
+ * session's CURRENT write-event counter — a later `searchDedupLookup` treats
+ * any entry whose stamp has fallen behind as stale (see its own doc comment).
+ */
+export function recordSearchDedupEntry(
+  workspaceRoot: string,
+  fingerprint: string,
+  entry: { kind: string; action: string; servedBy: string; files: number; digest: string },
+): void {
+  const session = getSession(workspaceRoot);
+  touchSearchDedupLedger(session.searchDedupLedger, fingerprint, {
+    ...entry,
+    writeEventSerial: session.writeEventSerial,
+  });
+}
+
+/**
+ * F9 (2026-09-02 review fix): the search-dedup ledger's OWN serve-call
+ * ordinal — see `WorkspaceSession.searchDedupCallSerial`'s doc comment for
+ * why this is a dedicated counter rather than a reuse of `beginServeCall`'s
+ * shared `serveCallSerial`.
+ */
+export function beginSearchDedupServeCall(workspaceRoot: string): number {
+  const s = getSession(workspaceRoot);
+  s.searchDedupCallSerial += 1;
+  return s.searchDedupCallSerial;
+}
+
+/** Test hook: the live search-dedup ledger, as plain data (MRU last). */
+export function getSearchDedupLedgerForTest(
+  workspaceRoot: string,
+): ReadonlyArray<readonly [string, SearchDedupLedgerEntry]> {
+  return [...getSession(workspaceRoot).searchDedupLedger.entries()];
+}
+
+/** Test hook: the session's current write-event counter. */
+export function getWriteEventSerialForTest(workspaceRoot: string): number {
+  return getSession(workspaceRoot).writeEventSerial;
+}
+
+/**
+ * Test hook (F9): the session's SHARED serve-call serial (`beginServeCall`'s
+ * counter) — used to prove that search-dedup activity (`beginSearchDedupServeCall`)
+ * never advances it, so enabling TL_SEARCH_DEDUP cannot shift a subsequent
+ * read's `served_by` numbering.
+ */
+export function getServeCallSerialForTest(workspaceRoot: string): number {
+  return getSession(workspaceRoot).serveCallSerial;
 }
 
 /**
@@ -5717,6 +7883,9 @@ export function resetWorkspace(workspaceRoot: string): void {
 /** Clears all session state. Test hook. */
 export function resetAll(): void {
   _sessions.clear();
+  // FX-N: the staging registry names session KEYS, so a leftover entry would
+  // point at a session that no longer exists. Cleared with them.
+  _pendingServeSessionKeys.clear();
 }
 
 /** Returns a plain-object snapshot suitable for trace output. */
@@ -5741,6 +7910,7 @@ export function snapshotForTrace(workspaceRoot: string): Record<string, unknown>
     usedEditsBatch: s.usedEditsBatch,
     singleFindCompletions: s.singleFindCompletions,
     findHintFired: s.findHintFired,
+    serialSingleTargetReads: s.serialSingleTargetReads,
     closureOpenStreak: s.closureOpenStreak,
     closureEscalationFired: s.closureEscalationFired,
     admissibleEditHandlesCount: s.admissibleEditHandles.length,

@@ -91,8 +91,16 @@ import { acquireWriterLock } from "./writerLock.js";
  * purpose discriminator separates "why the handle was minted" from "what it
  * addresses", and persisting a content handle must never make it redeemable as
  * a task handle.
+ *
+ * `qref` (G2, 2026-09-04) is the SAME pattern applied to the task-pack query
+ * ledger (`state/session.ts`'s `activeTaskQuery`, persisted via
+ * `state/stateHandles.ts`'s `persistQueryRef`/`rehydrateQueryRef`): a plain,
+ * unsigned store record keyed by a per-(workspace, lane) slot, never a
+ * `handleCodec.ts` MAC-authenticated token. It is not a wire purpose either —
+ * a `qref` string is never accepted where a `task`/`context`/`continuation`
+ * token is required, and the reverse.
  */
-export type StoredPurpose = "task" | "context" | "continuation" | "content";
+export type StoredPurpose = "task" | "context" | "continuation" | "content" | "qref";
 
 export interface StoredRecord {
   key: string;
@@ -632,7 +640,10 @@ function asRecord(value: unknown): StoredRecord | undefined {
   const v = value as Record<string, unknown>;
   if (typeof v["key"] !== "string" || v["key"] === "") return undefined;
   const purpose = v["purpose"];
-  if (purpose !== "task" && purpose !== "context" && purpose !== "continuation" && purpose !== "content") {
+  if (
+    purpose !== "task" && purpose !== "context" && purpose !== "continuation"
+    && purpose !== "content" && purpose !== "qref"
+  ) {
     return undefined;
   }
   if (typeof v["version"] !== "number" || !Number.isFinite(v["version"])) return undefined;

@@ -14,7 +14,7 @@
 // the header of `read-result.ts` for their statement.
 // ---------------------------------------------------------------------------
 
-import type { ProtocolVersion, Limit } from "./protocol.js";
+import type { ProtocolVersion, Limit, ToolCall } from "./protocol.js";
 import type { LocateOutput } from "./locate-impact.js";
 import type { ArchiveFormat } from "./archive.js";
 
@@ -66,8 +66,8 @@ export type SearchMatchesResult = {
 export type SearchMatches =
   /** today's action=find — `FindResponse`
    *  (features/search/find/findText.ts:636-746), plus the fields stamped
-   *  downstream by `servedFindEscalation.ts` and `searchHopClosure.ts`, which
-   *  are NOT on the declared interface. */
+   *  downstream by `servedFindEscalation.ts`, which are NOT on the declared
+   *  interface. */
   | {
       form: "find";
       query: string;
@@ -99,10 +99,6 @@ export type SearchMatches =
       member_sweep?: MemberSweepAttachment;
       /** As `member_sweep`. */
       related_lookups?: RelatedLookups;
-      /** As `member_sweep`. */
-      hop1?: Hop1Context[];
-      /** As `member_sweep`. */
-      hop1_omitted?: number;
       /** Emitted iff some matched lines lie outside what was served this
        *  session (servedFindEscalation.ts:287). */
       partially_served?: true;
@@ -211,10 +207,6 @@ export type SearchReferencesResult = {
   member_sweep?: MemberSweepAttachment;
   /** Emitted only alongside `member_sweep` (findReferences.ts:570). */
   hint?: string;
-  /** Emitted iff the hop-1 closure pass produced content. */
-  hop1?: Hop1Context[];
-  /** As `hop1`. */
-  hop1_omitted?: number;
 
   /**
    * DISCLOSED DEVIATION, C2-4 (Revision-5 row). A.5.9 lists `cursor_note` among
@@ -392,17 +384,7 @@ export type MemberSweepAttachment = {
   /** Up to 12 member names, public/exported-looking members first. */
   members: string[];
   /** Ready-to-run BATCHED find call for the first <=5 members. */
-  next: string;
-};
-
-/** util/searchHopClosure.ts:11-18. */
-export type Hop1Context = {
-  path: string;
-  line: number;
-  range: string;
-  relation: "definition" | "reference" | "match";
-  handle: string;
-  code: string;
+  next: ToolCall;
 };
 
 /** tools/searchSymbols.ts:55. */

@@ -40,10 +40,10 @@
  * an honest, non-fabricated finding distinct from "tuning found nothing".
  *
 
- * Weights are ONLY consulted when both TL_RRF_FUSION and TL_RRF_PROFILES are
- * on (see util/flags.ts's rrfFusionEnabled/rrfProfilesEnabled). With either
- * off, index.ts never reaches this module and fusion runs with every list at
- * implicit weight 1 — byte-identical to pre-V11-02 output.
+ * Weights are ONLY consulted at TL_RRF_FUSION=profiles (see util/flags.ts's
+ * rrfFusionMode/rrfProfilesEnabled). At plain "on" or "off", index.ts never
+ * reaches this module and fusion runs with every list at implicit weight 1 —
+ * byte-identical to pre-V11-02 output.
  */
 
 export type TaskProfileId =

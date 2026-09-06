@@ -1,7 +1,11 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import { getTlVersion } from "./cli.js";
-import { loadUsageSummary } from "./commands.js";
+import {
+  formatUsageMeasurementStatus,
+  formatUsageMeasurementTier,
+  loadUsageSummary,
+} from "./commands.js";
 import {
   getConfiguredLanguage,
   getDisplayLanguage,
@@ -286,6 +290,7 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
     let billingReductionDetail = "";
     let usageProgressLine = "";
     let measuredFallbackLine = "";
+    let measurementTierLine = "";
     let usageReasonLine = "";
     if (active) {
       try {
@@ -303,6 +308,13 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
         measuredFallbackLine = getDisplayLanguage() === "ja"
           ? `実測呼び出し: ${summary.measuredBaselineCalls}、応答バイト対ベースライン比: ${measuredRatio === null ? "利用不可" : `${(measuredRatio * 100).toFixed(1)}%`}`
           : `Measured calls: ${summary.measuredBaselineCalls}; response bytes vs baseline: ${measuredRatio === null ? "unavailable" : `${(measuredRatio * 100).toFixed(1)}%`}`;
+        if (summary.measurementDisplay) {
+          const language = getDisplayLanguage();
+          const net = summary.measurementDisplay.session.net;
+          measurementTierLine = language === "ja"
+            ? `TL応答合計: 約${summary.estimatedResponseTokens.toLocaleString("ja-JP")}トークン（${summary.method ?? "file-bytes"}）、観測usage: ${formatUsageMeasurementStatus(summary.measurementDisplay.wire, "ja")}、MCP応答オーバーヘッド: ${formatUsageMeasurementTier(summary.measurementDisplay.mcpResponse, "ja")}、回避コンテキスト: ${formatUsageMeasurementTier(summary.measurementDisplay.contextAvoided, "ja")}、セッション回避ターン: ${formatUsageMeasurementTier(summary.measurementDisplay.session, "ja")}、純減: ${net ? formatUsageMeasurementTier(net, "ja") : "利用不可"}`
+            : `TL response total: ~${summary.estimatedResponseTokens.toLocaleString("en-US")} tokens (${summary.method ?? "file-bytes"}); observed usage: ${formatUsageMeasurementStatus(summary.measurementDisplay.wire, "en")}; MCP response overhead: ${formatUsageMeasurementTier(summary.measurementDisplay.mcpResponse, "en")}; context avoided: ${formatUsageMeasurementTier(summary.measurementDisplay.contextAvoided, "en")}; session avoided-turn: ${formatUsageMeasurementTier(summary.measurementDisplay.session, "en")}; net: ${net ? formatUsageMeasurementTier(net, "en") : "unavailable"}`;
+        }
         const warnings = summary.sessionEstimate?.warnings ?? [];
         usageReasonLine = warnings.includes("recorder-off")
           ? (getDisplayLanguage() === "ja" ? "レコーダーが無効です。" : "Recorder is off.")
@@ -604,6 +616,7 @@ body.vscode-high-contrast .mark,body.vscode-high-contrast-light .mark{border:1px
     <div class="metric ${statusClass}"><span class="muted">${copy.tlStatus}</span><strong class="metric-value">${escapeHtml(statusText)}</strong><span class="muted">${escapeHtml(statusDetail)}</span></div>
     ${usageProgressLine ? `<div class="metric"><span class="muted">${escapeHtml(usageProgressLine)}</span></div>` : ""}
     ${measuredFallbackLine ? `<div class="metric"><span class="muted">${escapeHtml(measuredFallbackLine)}</span></div>` : ""}
+    ${measurementTierLine ? `<div class="metric"><span class="muted">${escapeHtml(measurementTierLine)}</span></div>` : ""}
     ${usageReasonLine ? `<div class="metric"><span class="muted">${escapeHtml(usageReasonLine)}</span></div>` : ""}
   </div>
 

@@ -42,9 +42,13 @@
     "next": {
       "tool": "search_files",
       "arguments": {
+        "cwd": "$WS",
         "action": "tree",
         "scope": {
           "path": "fw/src/estimator"
+        },
+        "task": {
+          "handle": "$TH"
         }
       }
     },
