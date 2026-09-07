@@ -678,6 +678,30 @@ export interface WorkspaceSession {
   artifactServedRangeLedger: Map<string, ArtifactServedRangeState>;
 
   /**
+   * DESIGN-v0.15 §6.2 (R4): the parent-full-request exception's index.
+   *
+   * `state/readRequestStore.ts`'s `markReadRequestOpenness` populates this
+   * with a request's `state/stateStore.ts` key, per target path, whenever
+   * that request's own settle leaves it INCOMPLETE (D non-empty) — and drops
+   * it again once a later settle empties D. `openParentReadRequest` reads it
+   * to answer "is there an OPEN full/range/batch read request still owed
+   * lines of this path, in THIS (workspace, lane)?" for a later, ORDINARY
+   * (non-cursor) read of the same path — the case a plain re-read of one
+   * page's exact range, or one symbol inside it, must still carry the
+   * parent's `next` while the parent itself has remaining lines (design
+   * §6.2's second paragraph: "今回のページだけが既読だった場合は親のDを更新
+   * し、残件がある限り次ページを運ぶ").
+   *
+   * Keyed by STORE KEY, never by value — the lookup always re-loads and
+   * re-settles the live record against the CURRENT ledger, so a pointer left
+   * behind by an expired/completed/foreign-bound request is simply pruned
+   * when next encountered rather than trusted. An INDEPENDENT read (no open
+   * parent request exists for its path) finds nothing here and answers with
+   * a plain, next-less receipt — R4's headline fix.
+   */
+  openReadRequests: Map<string, Set<string>>;
+
+  /**
    * [R5-10] (2026-08-14) — spans booked by the CURRENT response, awaiting the
    * funnel's corroboration that the wire actually carried them.
    *
@@ -1739,6 +1763,7 @@ function _emptySession(): WorkspaceSession {
     repeatedReadsPerPathRange: new Map(),
     servedRangeLedger: new Map(),
     artifactServedRangeLedger: new Map(),
+    openReadRequests: new Map(),
     pendingServeSpans: [],
     pendingElidedSpans: [],
     pendingRenderedExtent: new Map(),
@@ -1882,6 +1907,16 @@ const FRONTIER_PATH_CAP = 16;
  */
 const WITHHELD_TARGET_CAP = 8;
 const NEXT_CALL_EDIT_CAP = 8;
+// v0.14.1 defect 3 fix (2026-09-07): the F-R8 known-outside-repack recovery
+// (executionRefusal's `knownOutsideRepack` branch) re-reads paths this
+// session already knows about -- small files, cheap to batch in full, unlike
+// the edit-template caps above. Reusing NEXT_CALL_EDIT_CAP silently dropped
+// every path past the 8th with no `remaining`/`limit` signal, so a caller
+// running that `next` verbatim and then retrying the same edit was refused
+// again for the omitted paths. Raised well above the common case; a batch
+// that still exceeds it gets an explicit `remaining` list instead of silent
+// loss (see the `remaining` construction in executionRefusal).
+const KNOWN_OUTSIDE_REPACK_PATH_CAP = 64;
 const EDIT_REFUSAL_SIGNATURE_HISTORY = 8;
 /** W6: bounded per-task refusal-shape history. */
 const EDIT_REFUSAL_SHAPE_LEDGER_CAP = 32;
@@ -2259,7 +2294,17 @@ function classifyEditRefusal(
       unlock: unlockPayload(fence),
     };
   }
-  if (isCreateEditRequest(args) && detail === CREATE_OUTSIDE_FRONTIER_DETAIL) {
+  // v0.14.1 defect 1 fix (2026-09-07): `detail === CREATE_OUTSIDE_FRONTIER_DETAIL`
+  // alone is unambiguous -- session.ts sends that exact sentinel `detail` from
+  // exactly two create-admission-failure call sites (the answer-fence branch
+  // and guardExecutionEditCore's create branch), both already create-triggered
+  // by construction. Dropping the redundant `isCreateEditRequest(args)` guard
+  // is what lets a per-item edits[] create (which `isCreateEditRequest`
+  // deliberately does not recognise -- see its own doc comment) reach this
+  // SAME terminal classification instead of falling through to the generic
+  // frontier/challenge prescription, which would point the caller at an
+  // unrelated already-in-frontier file.
+  if (detail === CREATE_OUTSIDE_FRONTIER_DETAIL) {
     const target = requestedEditPaths(args)[0] ?? "this create target";
     // D2 fix (2026-08-06, P5-F3): a brand-new create target can never be
     // grounded by `challenge` -- challenge only contests evidence THIS
@@ -2677,7 +2722,7 @@ function executionRefusal(
         arguments: {
           mode: "task_pack",
           taskEpoch: "new",
-          paths: [...knownOutsideRepack.paths].slice(0, NEXT_CALL_EDIT_CAP),
+          paths: [...knownOutsideRepack.paths].slice(0, KNOWN_OUTSIDE_REPACK_PATH_CAP),
           ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
         },
       }
@@ -2761,14 +2806,36 @@ function executionRefusal(
           // replaced. Other terminal edit refusals (the demand-ledger
           // case) retain the historical edit_file unlock template.
           next_call: terminality.reason === "create-target-not-servable"
+            // v0.14.1 defect 1 fix (2026-09-07): this next_call is a
+            // next_call_is_template:true payload (set unconditionally a few
+            // lines below), and its query carries a placeholder -- protocol/
+            // refusal.ts's emittableToolCall deliberately does not
+            // canonicalize any template so the caller's placeholder survives
+            // verbatim, which means the legacy mode/taskEpoch/taskProfile/
+            // paths spelling used to reach the wire unchanged. The canonical
+            // fix would route this through protocol/envelope.ts's
+            // canonicalToolCall ("the ONE place every emitted next/next_call
+            // is built through"), but envelope.ts imports protocol/emit.ts
+            // and protocol/readFamily.ts, both of which import THIS module --
+            // state/session.ts -> protocol/envelope.ts -> protocol/emit.ts ->
+            // state/session.ts is a real cycle (confirmed live: it threw
+            // "Cannot access 'EDIT_SEARCH_PLACEHOLDER' before initialization"
+            // in protocol/refusal.ts, which imports both this module and
+            // envelope.ts, the moment session.ts's own top-level evaluation
+            // reached an envelope.js import ahead of that const). So the
+            // canonical shape is hand-built here instead: `task.epoch`/
+            // `task.profile` replace `taskEpoch`/`taskProfile`, `targets`
+            // (path-only entries) replaces `paths`, and `mode` is dropped --
+            // byte-identical to what canonicalToolCall("read_file", {mode:
+            // "task_pack", ...}) produces for this exact shape (no `content`
+            // key: canonicalReadArguments only defaults one for mode !==
+            // "task_pack"/"closure").
             ? {
                 tool: "read_file",
                 arguments: {
-                  mode: "task_pack",
-                  taskEpoch: "new",
-                  taskProfile: "generic",
+                  task: { epoch: "new", profile: "generic" },
                   query: `<one sentence change request that explicitly says to create ${requestedEditPaths(opts.editArgs ?? {})[0] ?? "the target file"}>`,
-                  paths: requestedEditPaths(opts.editArgs ?? {}).slice(0, 8),
+                  targets: requestedEditPaths(opts.editArgs ?? {}).slice(0, 8).map((path) => ({ path })),
                   ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
                 },
               }
@@ -2859,6 +2926,15 @@ function executionRefusal(
       // about a file the pack never named would be a false diagnosis.
       ...(withheldNextCall !== undefined && refusedWithheld.length > 0 ? { cause: "capped" } : {}),
       next_call: nextCall,
+      // v0.14.1 defect 3 fix (2026-09-07): `knownOutsideRepack.paths` can
+      // exceed KNOWN_OUTSIDE_REPACK_PATH_CAP for a genuinely large batch; the
+      // `next_call` above silently drops the tail, so name what it dropped
+      // instead of losing it -- a caller that re-issues `next_call` verbatim
+      // and then retries the SAME edit_file call is refused again for exactly
+      // the omitted paths otherwise.
+      ...(knownOutsideRepack !== undefined && knownOutsideRepack.paths.length > KNOWN_OUTSIDE_REPACK_PATH_CAP
+        ? { remaining: knownOutsideRepack.paths.slice(KNOWN_OUTSIDE_REPACK_PATH_CAP) }
+        : {}),
       // Rides the REFUSAL, never the arguments: edit_file's unknown-argument
       // layer fails closed, so a marker inside `arguments` would make the
       // prescription unexecutable all over again.
@@ -4829,6 +4905,14 @@ export function noteDiscoveryServedNoBytes(
   }
 }
 
+/**
+ * True iff the LEGACY top-level create/allow_create flag is set -- the whole
+ * call is a create. A canonical edits[] item's OWN `create:true` is a
+ * DIFFERENT, per-item concern (see `requestedItemCreatePaths` and
+ * guardExecutionEditCore's create branch); this function deliberately does
+ * not look inside `edits[]`, so every OTHER branch gated on it keeps reading
+ * "is the WHOLE call a create", unchanged.
+ */
 function isCreateEditRequest(args: Record<string, unknown>): boolean {
   return args["create"] === true || args["allow_create"] === true;
 }
@@ -4852,6 +4936,30 @@ function requestedEditPaths(args: Record<string, unknown>): string[] {
   if (Array.isArray(args["edits"])) {
     for (const edit of args["edits"]) {
       if (edit && typeof edit === "object" && typeof (edit as Record<string, unknown>)["path"] === "string") {
+        paths.push((edit as Record<string, unknown>)["path"] as string);
+      }
+    }
+  }
+  return [...new Set(paths)];
+}
+
+/**
+ * v0.14.1 defect 1 fix (2026-09-07): the per-item create paths in a canonical
+ * `edits[]` batch -- every item whose OWN `create === true`, independent of
+ * the legacy top-level `create`/`allow_create` flag (`isCreateEditRequest`),
+ * which keeps meaning "the whole call is a create" unchanged. Never includes
+ * the legacy top-level `path` -- that path's create-ness is decided by
+ * `isCreateEditRequest`, not by this function.
+ */
+function requestedItemCreatePaths(args: Record<string, unknown>): string[] {
+  const paths: string[] = [];
+  if (Array.isArray(args["edits"])) {
+    for (const edit of args["edits"]) {
+      if (
+        edit && typeof edit === "object"
+        && (edit as Record<string, unknown>)["create"] === true
+        && typeof (edit as Record<string, unknown>)["path"] === "string"
+      ) {
         paths.push((edit as Record<string, unknown>)["path"] as string);
       }
     }
@@ -5388,7 +5496,32 @@ function guardExecutionEditCore(
     ])].slice(0, 8);
     return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, "answer-ready certificate does not authorize edits; if the task genuinely requires edits, re-scope with taskEpoch:\"new\"", remedyRepackPaths, args, resolveHandlePath);
   }
-  if (batchEditFrontierEnabled() && fence.phase === "prepared" && fence.batchEditTargets.length > 1 && !createRequested) {
+  // v0.14.1 defect 1 fix (2026-09-07): a canonical edits[] batch may mark
+  // individual items create:true -- each such item is a create request for
+  // ITS OWN path, independent of whichever other items ride in the same
+  // batch (mixed batches included). `createRequested` (the legacy top-level
+  // create/allow_create flag) keeps meaning "the whole call is a create",
+  // unchanged -- every OTHER branch above that gates on it (foreign-lane
+  // handles, the answer-fence branch, the taskEpoch:"new"/unfenced
+  // withheld-bytes checks) is deliberately left reading that same narrow
+  // boolean: widening it there would silently exempt a mixed batch's
+  // NON-create items from those checks too (FX-P1's lane isolation above in
+  // particular must not weaken). Per-item detection is therefore local to
+  // this branch and the frontier check immediately below it.
+  const itemCreatePaths = createRequested ? [] : requestedItemCreatePaths(args);
+  const createPaths = createRequested ? paths : itemCreatePaths;
+  const nonCreateHandles = createRequested ? [] : handles;
+  const nonCreatePaths = createRequested
+    ? []
+    : paths.filter((candidate) => !itemCreatePaths.includes(candidate));
+  const anyCreateRequested = createRequested || itemCreatePaths.length > 0;
+  if (
+    batchEditFrontierEnabled() && fence.phase === "prepared" && fence.batchEditTargets.length > 1
+    // A wholly-create call has no prepared batch to complete against
+    // (unchanged pure-create behaviour, below); a mixed batch must still
+    // batch every ready obligation among its non-create items.
+    && (nonCreateHandles.length > 0 || nonCreatePaths.length > 0)
+  ) {
     const requestedHandleSet = new Set(handles);
     const requestedPathSet = new Set([...paths, ...handles.map((handle) => resolveHandlePath?.(handle)).filter((candidate): candidate is string => typeof candidate === "string" && candidate !== "")]);
     const missingBatchTargets = fence.batchEditTargets.filter((target) => !requestedHandleSet.has(target.handle) && (target.path === "" || !requestedPathSet.has(target.path)));
@@ -5397,13 +5530,13 @@ function guardExecutionEditCore(
       return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, `prepared multi-target edit must batch every ready edit obligation in one edits[] call; missing=${missing}`, undefined, args, resolveHandlePath);
     }
   }
-  if (createRequested) {
+  let createAuthorization: ExecutionCreateAuthorization | undefined;
+  if (anyCreateRequested) {
     // Frontier-union fix: a create target admissible in ANY earlier same-epoch
     // certificate (the union) stays admissible, not just the latest frontier.
-    if (paths.length > 0 && paths.every((candidate) =>
-      fence.actionPaths.includes(candidate) || session.admissibleEditPaths.includes(candidate))) {
-      return { allowed: true };
-    }
+    const packNamedCreate = createPaths.length > 0 && createPaths.every((candidate) =>
+      fence.actionPaths.includes(candidate) || session.admissibleEditPaths.includes(candidate));
+    if (!packNamedCreate) {
     // L1 (2026-08-07 T05c/T10 forensics): this fence ALREADY authorizes
     // writes, and the only transition the refusal below can advertise --
     // `read_file mode=task_pack taskEpoch:"new"` -- grants the create no
@@ -5426,13 +5559,18 @@ function guardExecutionEditCore(
     // Deliberately NOT extended to `fence.terminalAction === "answer"`, which
     // is handled far above and keeps refusing: a pin says where a create goes,
     // never whether an answer certificate may write at all (D5/W4).
-    if (opts?.createWorkspacePin !== undefined && paths.length > 0) {
-      return {
-        allowed: true,
-        createAuthorization: { pin: opts.createWorkspacePin, paths: [...paths] },
-      };
+      if (opts?.createWorkspacePin === undefined || createPaths.length === 0) {
+        return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, CREATE_OUTSIDE_FRONTIER_DETAIL, undefined, args, resolveHandlePath);
+      }
+      createAuthorization = { pin: opts.createWorkspacePin, paths: [...createPaths] };
     }
-    return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, CREATE_OUTSIDE_FRONTIER_DETAIL, undefined, args, resolveHandlePath);
+    if (nonCreateHandles.length === 0 && nonCreatePaths.length === 0) {
+      return createAuthorization !== undefined ? { allowed: true, createAuthorization } : { allowed: true };
+    }
+    // Mixed batch: the create side is admitted (pack-named or pinned, above)
+    // -- fall through to the SAME ordinary frontier-membership check every
+    // other edit goes through, now scoped to the non-create remainder, before
+    // admitting the whole batch.
   }
   // Frontier-union fix (2026-07-24 T10): admit a target in the LATEST frontier
   // (unchanged fast path) OR in the epoch-scoped admissible union (a handle/path
@@ -5452,13 +5590,15 @@ function guardExecutionEditCore(
       || fence.evidencePaths.includes(relPath)
     );
   };
-  const outsideHandles = handles.filter((handle) =>
+  const checkHandles = anyCreateRequested ? nonCreateHandles : handles;
+  const checkPaths = anyCreateRequested ? nonCreatePaths : paths;
+  const outsideHandles = checkHandles.filter((handle) =>
     !fence.actionFrontier.includes(handle)
     && !session.admissibleEditHandles.includes(handle)
     && !handlePathAdmissible(handle));
-  const outsidePaths = paths.filter((candidate) =>
+  const outsidePaths = checkPaths.filter((candidate) =>
     !fence.actionPaths.includes(candidate) && !session.admissibleEditPaths.includes(candidate));
-  if (handles.length === 0 && paths.length === 0) {
+  if (!anyCreateRequested && handles.length === 0 && paths.length === 0) {
     return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, "edit has no certificate-backed handle or path", undefined, args, resolveHandlePath);
   }
   if (outsideHandles.length > 0 || outsidePaths.length > 0) {
@@ -5503,7 +5643,7 @@ function guardExecutionEditCore(
       knownOutsideRepack,
     );
   }
-  return { allowed: true };
+  return createAuthorization !== undefined ? { allowed: true, createAuthorization } : { allowed: true };
 }
 
 /** The `opts` shape `guardExecutionEditCore` takes, reused by its wrapper below. */

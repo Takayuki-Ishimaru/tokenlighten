@@ -275,6 +275,8 @@ export interface SearchReplaceResult {
    * miss.
    */
   hint?: string;
+  /** Count of occurrences replaced (applyReplaceAll's target:"all" contract only). */
+  replaced?: number;
 }
 
 /**
@@ -398,4 +400,49 @@ export function applySingleEdit(
   }
 
   return { ok: true, text: result };
+}
+
+/**
+ * Replace EVERY exact occurrence of `search` in `text` — the whole-text
+ * sibling of `applySingleEdit` for an explicit `target:"all"` request
+ * (v0.14.1 defect 2 fix, DESIGN-v0.14-plan §8, 2026-09-07). Shares `applySingleEdit`'s LF+NFC
+ * matching normalization and original-line-ending restoration, but
+ * deliberately does NOT share its literal-backslash-escape recovery or
+ * indentation-equivalence fuzzy-match fallback: `target:"all"` is an
+ * unambiguous instruction ("every exact occurrence"), so a search string
+ * that only matches via one of those recovery layers gets a plain
+ * not-found here rather than a silent reinterpretation of what the caller
+ * asked to replace everywhere. split/join makes one pass over the
+ * ORIGINAL text, so a `replace` that itself contains `search` can never
+ * trigger a re-scan loop.
+ */
+export function applyReplaceAll(
+  text: string,
+  search: string,
+  replace: string
+): SearchReplaceResult {
+  if (search === "") {
+    return {
+      ok: false,
+      code: "empty-search",
+      error: "search string is empty — for new file creation use create:true with an empty search",
+    };
+  }
+
+  const originalLineEnd = detectLineEnding(text);
+  const normalizedText = toLfNfc(text);
+  const normalizedSearch = toLfNfc(search);
+  const normalizedReplace = toLfNfc(replace);
+
+  const count = countOccurrences(normalizedText, normalizedSearch);
+  if (count === 0) {
+    return { ok: false, code: "not-found", error: `search string not found in file` };
+  }
+
+  let allResult = normalizedText.split(normalizedSearch).join(normalizedReplace);
+  if (originalLineEnd !== "\n") {
+    allResult = allResult.replace(/\n/g, originalLineEnd);
+  }
+
+  return { ok: true, text: allResult, replaced: count };
 }

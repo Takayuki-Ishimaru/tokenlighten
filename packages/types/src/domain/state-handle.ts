@@ -54,7 +54,25 @@ import type { EvidenceId } from "./evidence.js";
  * threads itself; `context_handle` represents body RETENTION and is not
  * model-controlled strong evidence on its own — see `ClientContextAttestation`.
  */
-export type StateHandlePurpose = "task" | "context" | "continuation";
+export type StateHandlePurpose =
+  | "task"
+  | "context"
+  | "continuation"
+  /**
+   * DESIGN-v0.15 §5.1/§5.2 (R2): ONE `read_file` fetch request's remainder.
+   *
+   * A FOURTH purpose rather than a reuse of `continuation`: §5.2 is explicit
+   * that the new cursor must not borrow the existing reference-continuation
+   * token ("既存reference cursorを要求結合なしで流用しない"), because that one
+   * is self-contained page POSITION with no binding to an original request,
+   * while this one addresses a stored Q/D record bound to a workspace, a lane,
+   * a task handle and a source revision. Keeping them apart is what makes an
+   * old `tlh_cont_v1_` token fail as an authenticated wrong-purpose handle
+   * instead of being reinterpreted as a new payload (§9's rollback rule).
+   */
+  | "read-request"
+  /** The same, for `search_files` match paging (R3, Wave 2). */
+  | "search-request";
 
 /**
  * `StateHandlePurpose`'s closed member list, backing `isStateHandlePurpose`,
@@ -65,6 +83,8 @@ export const STATE_HANDLE_PURPOSES = [
   "task",
   "context",
   "continuation",
+  "read-request",
+  "search-request",
 ] as const satisfies readonly StateHandlePurpose[];
 
 /** Runtime guard for `StateHandlePurpose`. */
@@ -194,6 +214,8 @@ export const HANDLE_WIRE_PREFIXES = {
   task: "tlh_task_v1_",
   context: "tlh_ctx_v1_",
   continuation: "tlh_cont_v1_",
+  "read-request": "tlh_rreq_v1_",
+  "search-request": "tlh_sreq_v1_",
 } as const satisfies Record<StateHandlePurpose, string>;
 
 /**

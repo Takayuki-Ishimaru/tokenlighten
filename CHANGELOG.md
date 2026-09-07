@@ -2,6 +2,35 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.14.1
+
+- Task completion now waits until the returned content covers every point in
+  the request.
+- Reads that exceed their response budget continue through a `cursor` until
+  every requested line has been delivered.
+- Bounded searches continue as searches instead of expanding into whole-file
+  reads.
+- `content:"full"` no longer forces content already in context to be re-sent;
+  use `task.force_serve:true` to request a resend. The existing
+  `budget.allowFull:true` behavior is unchanged.
+- Edits that quote unique source text keep discovery local to that text.
+- `target:"all"` now replaces every match of a path-based edit and reports the
+  count; new files can be created in the same batch as other edits.
+- Added the `code` tool surface for code-only workspaces
+  (`--tool-surface code`, `TOKENLIGHTEN_TOOL_SURFACE`, or the VS Code setting
+  `tokenlighten.toolSurface`).
+- Updated the managed agent instructions, including the edit rules.
+
+### Migration
+
+Custom clients that used `content:"full"` to force a resend should send
+`task.force_serve:true`. Continuations may carry an opaque `cursor`; execute
+the returned `next` as given. Legacy v0.12/v0.13 request fields remain refused
+by default; `TL_LEGACY_INPUT=accept` is still the temporary migration bridge.
+No dependency changes are declared in this release.
+
+See the [v0.14.1 release notes](release-docs/github-release-v0.14.1.md).
+
 ## 0.14.0
 
 - Improved continuation and recovery calls when response budgets or search

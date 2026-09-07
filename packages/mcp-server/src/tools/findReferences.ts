@@ -103,7 +103,7 @@ import * as fs from "fs";
 import { looksLikeStateHandle } from "../state/handleCodec.js";
 import { mintContinuationHandle, resolveContinuationHandle } from "../state/stateHandles.js";
 import type { LangKey, WalkOmissions } from "./walkRepo.js";
-import { walkCodeFiles, createWalkOmissions, TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "./walkRepo.js";
+import { walkCodeFiles, createWalkOmissions, anyWalkOmission, TEXT_SCAN_MAX_FILE_SIZE_BYTES } from "./walkRepo.js";
 import { escapeRegExp, trimMatchText, buildOmittedExtra, createScanCoverage, findScopeBoundaryRefusal } from "../features/search/find/findText.js";
 import { decodeTextBuffer } from "../util/textDecode.js";
 import { collectLexicalSegments, segmentKindAt } from "./lexicalRanges.js";
@@ -117,6 +117,26 @@ import {
 // protocol wire-budget frame for this exact (kind,form), not a private
 // literal — see MAX_RESPONSE_BYTES's own doc comment below.
 import { budgetFor } from "../protocol/budget/wireBudget.js";
+// DESIGN-v0.15 §6.1 (R3 extension, validation appendix §1 "検索cursor"
+// bullet): a NEWLY EMITTED references continuation cursor is now a
+// `tlh_sreq_v1_` search-request-store record (same store/handle family
+// `find`'s R3 cursor uses, `action:"references"`), bound to this request's
+// symbol/scope/lane/task and the resume file's source revision. `purpose`
+// is read off the wire prefix ONLY to ROUTE (never to authorize — see
+// `parseHandlePurposeFromPrefix`'s own doc comment); a `tlh_cont_v1_` or
+// unsigned legacy token still resolves exactly as before via
+// `decodeReferencesCursor`, untouched below.
+import { parseHandlePurposeFromPrefix } from "@tokenlighten/types";
+import {
+  SEARCH_CURSOR_TOKEN_BYTES_ESTIMATE,
+  mintSearchCursor,
+  openReferencesCursorRequest,
+  persistReferencesCursorRequest,
+  resolveReferencesCursor,
+  walkScopeFingerprint,
+} from "../state/searchRequestStore.js";
+import { readFileSafe } from "../util/safePath.js";
+import { shaOfText } from "../util/handles.js";
 
 const MAX_REFERENCES = 200;
 /** Safety valve: never tree-sitter-parse more than this many candidate files for one member_sweep lookup. */
@@ -203,6 +223,17 @@ export interface FindReferencesInput {
    * protocol wire-budget frame (`MAX_RESPONSE_BYTES`); never widens past it.
    * See `effectiveResponseCap`. */
   maxBytes?: number;
+  /**
+   * DESIGN-v0.15 §6.1 (R3 extension): the caller's lane/task binding, so a
+   * NEWLY MINTED `tlh_sreq_v1_` continuation cursor (and the resolution of
+   * one presented back in `cursor`) can be scoped to them exactly like
+   * `find`'s own search-request cursor is. Absent on a direct unit-test call
+   * (no session), which mints/resolves against an unbound (`""`/`undefined`)
+   * lane and task — internally consistent, since the SAME absence is used on
+   * both the minting and the resolving side.
+   */
+  lane?: string;
+  taskHandle?: string;
 }
 
 export interface Reference {
@@ -577,9 +608,8 @@ const CURSOR_INVALID_NOTE =
  */
 function continuationNextCall(
   symbol: string,
-  pos: ReferencesCursorPos,
+  cursorToken: string,
   input: FindReferencesInput,
-  workspaceRoot?: string,
 ): { tool: "search_files"; arguments: Record<string, unknown> } {
   return {
     tool: "search_files",
@@ -606,9 +636,79 @@ function continuationNextCall(
       ...(input.maxBytes !== undefined
         ? { maxBytes: effectiveResponseCap(input.maxBytes) }
         : {}),
-      cursor: encodeReferencesCursor(pos, workspaceRoot),
+      // DESIGN-v0.15 §6.1 (R3 extension): a v0.15 `tlh_sreq_v1_` cursor is
+      // bound to the lane/task THIS call carried (see
+      // `mintReferencesCursorToken`) — AGENTS.md's "run every `next` verbatim"
+      // contract means the follower resubmits exactly these arguments, so the
+      // binding must ride along here or a lane-scoped continuation would spend
+      // its first resume refusing itself `cursor-invalid` (other-lane). Absent
+      // whenever the caller never declared one (every pre-v0.15 direct-call
+      // site, `input.lane`/`.taskHandle` undefined), so this is a strict
+      // no-op for the legacy shape's existing pinned tests.
+      ...(input.lane !== undefined && input.lane !== "" ? { lane: input.lane } : {}),
+      ...(input.taskHandle !== undefined ? { task: { handle: input.taskHandle } } : {}),
+      cursor: cursorToken,
     },
   };
+}
+
+/**
+ * DESIGN-v0.15 §6.1 (R3 extension): mint the cursor a `next_call` actually
+ * carries. Tries the NEW store-backed `tlh_sreq_v1_` form first — reusing the
+ * search-request store's own mint/resolve/CAS code paths (`openReferences
+ * CursorRequest`/`persistReferencesCursorRequest`/`mintSearchCursor`) — and
+ * falls back to the legacy signed/unsigned position token when the store is
+ * unavailable, mirroring `encodeReferencesCursor`'s own "never lose the
+ * chain over unavailable key material" rule one layer up. `scopeInfo` is
+ * free: the caller already computed it during its OWN walk.
+ *
+ * ALWAYS OPENS A FRESH RECORD, even when the incoming cursor already
+ * resolved one (`findReferences`'s `resolvedCursor` is otherwise unused
+ * here on purpose). An EARLIER wave of this fix updated the resolved
+ * record's `resume_position` IN PLACE instead — which broke "resend the
+ * same cursor returns the same logical page" (§5.2/§3.3's progress
+ * invariant): the record a token's `payloadRef` addresses is looked up by
+ * that ref alone, not by the exact CAS version the token was minted at (find
+ * avoids this by fixing PAGES under `cursor_state_version`; references, with
+ * no page list, keeps this invariant instead by never mutating an
+ * already-issued record — the "wasted" earlier record simply expires on the
+ * shared TTL, exactly like an abandoned find page would).
+ */
+function mintReferencesCursorToken(
+  symbol: string,
+  pos: ReferencesCursorPos,
+  sha: string,
+  input: FindReferencesInput,
+  workspace: string,
+  scopeInfo: { scopeFingerprint: string; walkComplete: boolean; totalMatches: number; totalFiles: number },
+): string {
+  const lane = input.lane !== undefined && input.lane !== "" ? input.lane : undefined;
+  const taskHandle = input.taskHandle;
+  const resumePosition = { path: pos.p, line: pos.l, sha };
+
+  const staged = openReferencesCursorRequest({
+    workspaceRoot: workspace,
+    ...(lane !== undefined ? { lane } : {}),
+    ...(taskHandle !== undefined ? { taskHandle } : {}),
+    originalInput: {
+      symbol,
+      ...(input.path !== undefined ? { path: input.path } : {}),
+      ...(input.lang !== undefined ? { lang: input.lang } : {}),
+    },
+    echo: {
+      ...(lane !== undefined ? { lane } : {}),
+      ...(taskHandle !== undefined ? { taskHandle } : {}),
+    },
+    scopeFingerprint: scopeInfo.scopeFingerprint,
+    walkComplete: scopeInfo.walkComplete,
+    totalMatches: scopeInfo.totalMatches,
+    totalFiles: scopeInfo.totalFiles,
+    resumePosition,
+  });
+
+  const persisted = persistReferencesCursorRequest(staged);
+  const token = persisted !== undefined ? mintSearchCursor(persisted) : undefined;
+  return token ?? encodeReferencesCursor(pos, workspace);
 }
 
 /**
@@ -664,6 +764,136 @@ function withAbsence(
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 §6.1 (R3 extension) — resolving an INCOMING references cursor.
+// ---------------------------------------------------------------------------
+
+/** references' own `searchCursorInputMismatch`: a references record's `original_input` is `{symbol,path?,lang?}`, not find's `{queries,scope}`. */
+function referencesCursorInputMismatch(
+  originalInput: Record<string, unknown>,
+  candidate: { symbol: string; path?: string; lang?: string },
+): string | undefined {
+  const origSymbol = typeof originalInput["symbol"] === "string" ? originalInput["symbol"] : undefined;
+  if (origSymbol !== candidate.symbol) return "symbol";
+  const origPath = typeof originalInput["path"] === "string" ? originalInput["path"] : undefined;
+  if (origPath !== candidate.path) return "path";
+  const origLang = typeof originalInput["lang"] === "string" ? originalInput["lang"] : undefined;
+  if (origLang !== candidate.lang) return "lang";
+  return undefined;
+}
+
+interface ResolvedReferencesCursor {
+  /** The resume position to window `all` against, or `undefined` to serve from the start. */
+  pos: ReferencesCursorPos | undefined;
+  /** Legacy-form disclosure only (`cursor_note`) — never set alongside `refusal`. */
+  cursorInvalidNote: boolean;
+  /** A hard refusal (`{ok:false,reason,...}`) to return immediately, before the walk. */
+  refusal?: Record<string, unknown>;
+}
+
+/**
+ * Resolve `input.cursor`, called BEFORE the walk. A token whose wire prefix
+ * does not read as `search-request` (no cursor, a legacy `tlh_cont_v1_`
+ * signed token, the pre-PI-09 unsigned form, or garbage) takes the EXACT
+ * pre-v0.15 path — `decodeReferencesCursor`, untouched, soft-ignoring an
+ * undecodable value via `cursor_note` rather than refusing. A `search-request`
+ * token gets the NEW binding/action/staleness validation and, on success, an
+ * `all.filter` position exactly like the legacy form's.
+ *
+ * `parseHandlePurposeFromPrefix` is diagnostic-only (see its own doc
+ * comment) — the routing choice below decides ONLY which decoder gets first
+ * look; `resolveReferencesCursor`'s MAC validation is what actually
+ * authorizes a `search-request` token, so a forged prefix on an otherwise
+ * garbage string still ends up refused, never silently trusted.
+ */
+async function resolveReferencesCursorInput(
+  cursorToken: string,
+  workspace: string,
+  symbol: string,
+  input: FindReferencesInput,
+): Promise<ResolvedReferencesCursor> {
+  if (parseHandlePurposeFromPrefix(cursorToken) !== "search-request") {
+    const pos = decodeReferencesCursor(cursorToken, workspace);
+    return { pos, cursorInvalidNote: pos === undefined };
+  }
+
+  const lane = input.lane !== undefined && input.lane !== "" ? input.lane : undefined;
+  const binding = {
+    ...(lane !== undefined ? { lane } : {}),
+    ...(input.taskHandle !== undefined ? { taskHandle: input.taskHandle } : {}),
+  };
+
+  const resolved = resolveReferencesCursor(cursorToken, workspace, binding);
+  if (!resolved.ok) {
+    // Mirrors `server.ts`'s `serveSearchCursorPage` (R3 find) convention: a
+    // binding/purpose/action failure is `cursor-invalid` with NO `next` —
+    // only a proven stale revision below earns a restart call.
+    return {
+      pos: undefined,
+      cursorInvalidNote: false,
+      refusal: {
+        ok: false,
+        reason: "cursor-invalid",
+        field: "cursor",
+        detail: `${resolved.reason}; restart the original request`,
+        retry: "call",
+      },
+    };
+  }
+
+  const mismatch = referencesCursorInputMismatch(resolved.state.original_input, {
+    symbol,
+    path: input.path,
+    lang: input.lang,
+  });
+  if (mismatch !== undefined) {
+    return {
+      pos: undefined,
+      cursorInvalidNote: false,
+      refusal: {
+        ok: false,
+        reason: "invalid-input",
+        field: mismatch,
+        detail: `search cursor continuation cannot change '${mismatch}'; re-issue the original request to change it`,
+        retry: "call",
+      },
+    };
+  }
+
+  // SOURCE REVISION FIRST (§5.2's rule, shared with the read/find cursors):
+  // the ONE file this stateless chain's resume point depends on must still
+  // hash the same as when this record was written.
+  const resumePosition = resolved.state.resume_position!;
+  const currentText = await readFileSafe(resumePosition.path, workspace);
+  if (currentText === null || shaOfText(currentText) !== resumePosition.sha) {
+    return {
+      pos: undefined,
+      cursorInvalidNote: false,
+      refusal: {
+        ok: false,
+        reason: "cursor-stale",
+        field: "cursor",
+        detail: `the source revision of ${resumePosition.path} moved under this cursor; restart the original request`,
+        retry: "call",
+        next: {
+          tool: "search_files",
+          arguments: {
+            action: "references",
+            query: symbol,
+            ...(input.path ? { path: input.path } : {}),
+            ...(input.lang ? { lang: input.lang } : {}),
+          },
+        },
+      },
+    };
+  }
+
+  return {
+    pos: { p: resumePosition.path, l: resumePosition.line },
+    cursorInvalidNote: false,
+  };
+}
+
 export async function findReferences(input: FindReferencesInput, workspace: string): Promise<FindReferencesResult> {
   // FX-G13 G1: the ceiling THIS call measures against — the default frame,
   // narrowed only by an explicit caller `budget.bytes` (never widened).
@@ -700,6 +930,22 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
       return { symbol, references: [], files: [], truncated: false, total: 0, ...notFound } as unknown as FindReferencesResult;
     }
   }
+
+  // DESIGN-v0.15 §6.1 (R3 extension): resolve an incoming cursor BEFORE the
+  // walk, same placement as the scope-boundary refusal above — a binding or
+  // staleness refusal must never pay for a full-repo walk it will not use.
+  const cursorToken = typeof input.cursor === "string" && input.cursor.length > 0 ? input.cursor : undefined;
+  const resolvedCursor: ResolvedReferencesCursor = cursorToken !== undefined
+    ? await resolveReferencesCursorInput(cursorToken, workspace, symbol, input)
+    : { pos: undefined, cursorInvalidNote: false };
+  if (resolvedCursor.refusal !== undefined) {
+    return {
+      symbol, references: [], files: [], truncated: false, total: 0,
+      ...resolvedCursor.refusal,
+    } as unknown as FindReferencesResult;
+  }
+  const cursorPos = resolvedCursor.pos;
+  const cursorInvalid = resolvedCursor.cursorInvalidNote;
 
   const needle = new RegExp(`\\b${escapeRegExp(symbol)}\\b`, "g");
 
@@ -738,6 +984,11 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // as findText.ts's own ScanCoverage.undecodable. `.scanned`/`.unscanned`
   // stay empty and unused here.
   const scanCoverage = createScanCoverage();
+  // DESIGN-v0.15 §6.1 (R3 extension): the source revision of every scanned
+  // file, captured at this SAME read so minting a v0.15 continuation cursor
+  // for the resume file needs no second read pass (mirrors
+  // `state/searchRequestStore.ts`'s `scanFullSearchSnapshot` `shaCache`).
+  const fileShas = new Map<string, string>();
 
   for (const f of files) {
     let raw: string;
@@ -759,6 +1010,7 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
       continue;
     }
     scannedFiles++;
+    fileShas.set(f.relPath, shaOfText(raw));
     const lines = raw.split(/\r?\n/);
     const lexicalSegments = await collectLexicalSegments(raw, f.language);
     let fileHasNonCommentMatch = false;
@@ -805,13 +1057,13 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   all.sort((a, b) => comparePaths(a.path, b.path) || a.line - b.line);
 
   // L4: the continuation cursor — LINE-granular. Everything at or before the
-  // decoded (path,line) was served by an earlier page of this chain; this
-  // page starts strictly after it. An undecodable token is IGNORED and
-  // disclosed (cursor_note): serving from the start re-serves at worst,
-  // while a guessed window would silently lose matches.
-  const cursorToken = typeof input.cursor === "string" && input.cursor.length > 0 ? input.cursor : undefined;
-  const cursorPos = cursorToken !== undefined ? decodeReferencesCursor(cursorToken, workspace) : undefined;
-  const cursorInvalid = cursorToken !== undefined && cursorPos === undefined;
+  // resolved (path,line) was served by an earlier page of this chain; this
+  // page starts strictly after it. `cursorPos`/`cursorInvalid` were already
+  // resolved BEFORE the walk above (`resolveReferencesCursorInput`) — an
+  // undecodable LEGACY token is IGNORED and disclosed (cursor_note): serving
+  // from the start re-serves at worst, while a guessed window would silently
+  // lose matches. A v0.15 store-backed token's binding/staleness failure
+  // already returned a hard refusal above and never reaches this line.
   const windowed = cursorPos === undefined
     ? all
     : all.filter((r) => refAfterPos(r, cursorPos));
@@ -936,16 +1188,22 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
     references_omitted: MAX_REFERENCES,
   };
   const widestPath = fileGroups.map((g) => g.path).reduce((a, b) => (b.length > a.length ? b : a), "");
+  // PI-09 / DESIGN-v0.15 §6.1 (R3 extension): the probe must reserve for the
+  // LARGER of the two forms a real emission can mint — the legacy signed
+  // token (grows with path length; `widestPath` + max line keeps it an upper
+  // bound on the real token's authenticated tail) or the new store-backed
+  // `tlh_sreq_v1_` form (a FIXED size regardless of path length, since the
+  // position lives server-side — see `SEARCH_CURSOR_TOKEN_BYTES_ESTIMATE`'s
+  // own doc comment). Measuring the smaller of the two would under-reserve
+  // and blow the fit whenever the actually-minted form is the larger one.
+  const cursorProbeToken = "x".repeat(Math.max(
+    encodeReferencesCursor({ p: widestPath, l: 2147483647 }, workspace).length,
+    SEARCH_CURSOR_TOKEN_BYTES_ESTIMATE,
+  ));
   const continuationProbe: Record<string, unknown> = {
     ...reasonProbe,
     files_omitted: new Set(windowed.map((r) => r.path)).size,
-    // PI-09: the probe must be signed too. It exists to RESERVE bytes for the
-    // continuation the real emission will carry, and a signed token is ~3x the
-    // unsigned one — measuring the cheap form and emitting the expensive one
-    // would under-reserve and blow the fit. Widest path + max line keeps it an
-    // upper bound on the real token's authenticated tail, which is exactly the
-    // property this probe already relied on.
-    next_call: continuationNextCall(symbol, { p: widestPath, l: 2147483647 }, input, workspace),
+    next_call: continuationNextCall(symbol, cursorProbeToken, input),
   };
   // L4: matched lines of the LAST limit-sliced group lying beyond the slice —
   // stamped on that group (as more_lines) BEFORE the fit so every trial
@@ -994,6 +1252,32 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   const references = peekOf(emittedRefs);
   const referencesOmitted = emittedRefs.length - references.length;
 
+  // DESIGN-v0.15 §6.1 (R3 extension): mint the REAL cursor only now that
+  // `lastPos` is final — reusing the search-request store's mint/resolve/CAS
+  // code paths, either fresh or by updating THIS call's own resolved v0.15
+  // record, with a fallback to the legacy position token whenever the store
+  // (or this file's own resume sha) is unavailable. Never computed when
+  // there is nothing left to serve.
+  let nextCallCursorToken: string | undefined;
+  if (unservedAfter > 0 && lastPos !== undefined) {
+    const resumeSha = fileShas.get(lastPos.p);
+    nextCallCursorToken = resumeSha === undefined
+      ? encodeReferencesCursor(lastPos, workspace)
+      : mintReferencesCursorToken(
+          symbol,
+          lastPos,
+          resumeSha,
+          input,
+          workspace,
+          {
+            scopeFingerprint: walkScopeFingerprint(files.map((f) => f.relPath), walkOmissions),
+            walkComplete: !anyWalkOmission(walkOmissions),
+            totalMatches: all.length,
+            totalFiles: new Set(all.map((r) => r.path)).size,
+          },
+        );
+  }
+
   return {
     symbol,
     references,
@@ -1004,8 +1288,8 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
     total: all.length,
     ...(cursorInvalid ? { cursor_note: CURSOR_INVALID_NOTE } : {}),
     ...(omittedPaths.size > 0 ? { files_omitted: omittedPaths.size } : {}),
-    ...(unservedAfter > 0 && lastPos !== undefined
-      ? { next_call: continuationNextCall(symbol, lastPos, input, workspace) }
+    ...(nextCallCursorToken !== undefined
+      ? { next_call: continuationNextCall(symbol, nextCallCursorToken, input) }
       : {}),
     ...extra,
   };

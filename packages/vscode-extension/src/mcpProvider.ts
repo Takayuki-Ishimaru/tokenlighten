@@ -85,7 +85,16 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => changed.fire()),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("tokenlighten.enabled")) changed.fire();
+      // DESIGN-v0.15 §8.2 (R7 Part B): the tool surface is fixed per
+      // connection (server.ts's ACTIVE_TOOL_SURFACE, resolved once at
+      // process start) — a setting change needs a NEW server process, which
+      // only happens if this fires a definitions-changed event so VS Code
+      // re-registers (and the `version` string below actually changed, or
+      // this fire is a no-op).
+      if (
+        event.affectsConfiguration("tokenlighten.enabled")
+        || event.affectsConfiguration("tokenlighten.toolSurface")
+      ) changed.fire();
     }),
   );
   const registerProvider = vscode.lm?.registerMcpServerDefinitionProvider;
@@ -108,11 +117,24 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
           return [];
         }
         observeActivation("active");
+        // DESIGN-v0.15 §8.2 (R7 Part B): resource-scoped so a multi-root
+        // workspace can carry a per-folder value, matching guideProfile's
+        // own scope. Read fresh on every provideMcpServerDefinitions() call
+        // (VS Code re-invokes this on definitions-changed, which the
+        // configuration-change listener above fires for this exact key) —
+        // never cached across calls, so a setting change is reflected on
+        // the very next reconnect.
+        const toolSurface = vscode.workspace
+          .getConfiguration("tokenlighten", root.uri)
+          .get<string>("toolSurface", "full");
         const launch = getMcpLaunchConfig([
           "mcp",
           "start",
           "--stdio",
           ...(settings.writeEnabled ? ["--allow-write"] : []),
+          // Omitted (not merely "full") for the common case — matches every
+          // other optional flag here (--allow-write above).
+          ...(toolSurface === "code" ? ["--tool-surface", "code"] : []),
         ]);
         const definition = new vscode.McpStdioServerDefinition(
           "TokenLighten",
@@ -133,8 +155,15 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
           // schemaStamp.ts) keeps today's per-release change signal while
           // ALSO changing whenever the advertised tool schema content
           // itself changes, independent of whether that release happened to
-          // bump the extension version.
-          `${packageVersion}+${TOKENLIGHTEN_SCHEMA_STAMP}`,
+          // bump the extension version. DESIGN-v0.15 §8.2 (R7 Part B): the
+          // literal `toolSurface` setting value is ALSO folded in — the
+          // baked-in TOKENLIGHTEN_SCHEMA_STAMP is computed once at this
+          // extension's BUILD time under the full surface, so it alone
+          // would not change when a user only toggles this per-workspace
+          // setting; appending the setting's own value guarantees the
+          // `version` string changes on every surface toggle too, the exact
+          // property this cache-invalidation contract requires.
+          `${packageVersion}+${TOKENLIGHTEN_SCHEMA_STAMP}+${toolSurface}`,
         );
         definition.cwd = root.uri;
         return [definition];

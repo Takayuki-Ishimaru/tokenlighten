@@ -85,6 +85,9 @@ export type {
 export {
   MCP_LANGS,
   MCP_LANG_EXTS,
+  // DESIGN-v0.15 §8.2 (R7 Part B): the code/full tool surface.
+  TOOL_SURFACE_VALUES,
+  isToolSurface,
 } from "./mcp.js";
 
 // ---------------------------------------------------------------------------
@@ -212,6 +215,18 @@ export type {
   MockHeaderEntry,
   HarnessInfo,
   ToolchainInfo,
+  // DESIGN-v0.15 §5/§6.1 — fetch-request continuation state (R2 read, R3 search)
+  LineWindow,
+  ContentRepresentation,
+  ReadRequestTargetState,
+  ReadRequestPage,
+  ReadRequestState,
+  SearchMatchRecord,
+  SearchRequestPage,
+  SearchRequestState,
+  FetchRequestState,
+  // DESIGN-v0.15 §8.2 (R7 Part B) — the startup-selected code/full tool surface.
+  ToolSurface,
 } from "./mcp.js";
 
 export type {

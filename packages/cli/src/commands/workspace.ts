@@ -17,7 +17,11 @@ import type {
   TokenLightenWorkspaceListResult,
   TokenLightenWorkspaceSetupResult,
   TokenLightenWorkspaceSummary,
+  ToolSurface,
 } from "@tokenlighten/types";
+// DESIGN-v0.15 §8.2 (R7 Part B): value imports (not type-only) for the CLI's
+// own --tool-surface validation.
+import { TOOL_SURFACE_VALUES, isToolSurface } from "@tokenlighten/types";
 import {
   getNestedKey,
   readConfig,
@@ -37,7 +41,7 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--tool-surface code|full] [--rules-only] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
@@ -123,13 +127,18 @@ function objectMember(
  * rerunning `tl workspace setup` later picks up a real value once the
  * resolvable mcp-server can report one.
  */
-export function currentMcpSchemaStamp(): string | undefined {
+export function currentMcpSchemaStamp(toolSurface?: ToolSurface): string | undefined {
   try {
     const bin = resolveMcpBin();
     if (!existsSync(bin)) return undefined;
+    // DESIGN-v0.15 §8.2 (R7 Part B): the stamped surface must match the one
+    // `serverConfig` embeds in the generated `args` below — otherwise
+    // TOKENLIGHTEN_SCHEMA_STAMP silently describes the WRONG surface,
+    // defeating the anti-wedge-cache mechanism specifically for a
+    // `--tool-surface code` workspace (the report's own "concrete gap").
     const result = crossSpawn.sync(
       process.execPath,
-      [bin, "--print-schema-stamp"],
+      [bin, "--print-schema-stamp", ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : [])],
       { shell: false, encoding: "utf8", timeout: 30_000 },
     );
     if (result.error || result.status !== 0) return undefined;
@@ -145,6 +154,7 @@ function serverConfig(
   client: "vscode" | "claude-code",
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
+  toolSurface: ToolSurface | undefined,
 ): Record<string, unknown> {
   return {
     command: launcher.command,
@@ -156,6 +166,10 @@ function serverConfig(
       "--allow-write",
       "--workspace",
       root,
+      // DESIGN-v0.15 §8.2 (R7 Part B): omitted (not merely "full") when the
+      // caller did not opt in — the DEFAULT generated config must stay
+      // byte-for-byte identical to before this flag existed.
+      ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : []),
     ],
     env: {
       ...launcher.env,
@@ -170,11 +184,12 @@ function configureVsCode(
   root: string,
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
+  toolSurface: ToolSurface | undefined,
 ): string {
   const target = join(root, ".vscode", "mcp.json");
   const document = readJsonObject(target);
   const servers = objectMember(document, "servers");
-  servers["tokenlighten"] = serverConfig(root, "vscode", launcher, schemaStamp);
+  servers["tokenlighten"] = serverConfig(root, "vscode", launcher, schemaStamp, toolSurface);
   writeJsonAtomic(root, target, document);
   return target;
 }
@@ -183,13 +198,14 @@ function configureClaude(
   root: string,
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
+  toolSurface: ToolSurface | undefined,
 ): string {
   const target = join(root, ".mcp.json");
   const document = readJsonObject(target);
   const servers = objectMember(document, "mcpServers");
   servers["tokenlighten"] = {
     type: "stdio",
-    ...serverConfig(root, "claude-code", launcher, schemaStamp),
+    ...serverConfig(root, "claude-code", launcher, schemaStamp, toolSurface),
   };
   writeJsonAtomic(root, target, document);
   return target;
@@ -199,6 +215,7 @@ function configureCodex(
   root: string,
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
+  toolSurface: ToolSurface | undefined,
 ): string {
   const target = join(root, ".codex", "config.toml");
   assertInsideRoot(root, target);
@@ -215,6 +232,7 @@ function configureCodex(
       "--allow-write",
       "--workspace",
       root,
+      ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : []),
     ],
     env: {
       ...launcher.env,
@@ -241,6 +259,13 @@ export async function setupWorkspace(options: {
    * means the real best-effort resolve-and-spawn implementation.
    */
   schemaStamp?: () => string | undefined;
+  /**
+   * DESIGN-v0.15 §8.2 (R7 Part B): the tool surface generated client configs
+   * should launch the server with. Omitted (the default) generates the
+   * EXACT prior `args` array — no `--tool-surface` flag at all — so an
+   * existing workspace's regenerated config is byte-for-byte unchanged.
+   */
+  toolSurface?: ToolSurface;
 }): Promise<TokenLightenWorkspaceSetupResult> {
   const requestedRoot = resolve(options.root);
   if (!existsSync(requestedRoot) || !lstatSync(requestedRoot).isDirectory()) {
@@ -272,17 +297,17 @@ export async function setupWorkspace(options: {
   // written — a rules-only setup (or an empty client list) never calls
   // configureVsCode/configureCodex/configureClaude, so skip the spawn.
   const schemaStamp = clients.length > 0
-    ? (options.schemaStamp ?? currentMcpSchemaStamp)()
+    ? (options.schemaStamp !== undefined ? options.schemaStamp() : currentMcpSchemaStamp(options.toolSurface))
     : undefined;
   for (const client of clients) {
     if (client === "vscode") {
-      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp));
+      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface));
     }
     if (client === "codex") {
-      configFilesWritten.push(configureCodex(root, launcher, schemaStamp));
+      configFilesWritten.push(configureCodex(root, launcher, schemaStamp, options.toolSurface));
     }
     if (client === "claude-code") {
-      configFilesWritten.push(configureClaude(root, launcher, schemaStamp));
+      configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface));
     }
   }
   return {
@@ -728,6 +753,14 @@ export async function runWorkspace(
     process.exitCode = 1;
     return;
   }
+  const rawToolSurface = valueAfter(rest, "--tool-surface");
+  const toolSurface: ToolSurface | undefined =
+    rawToolSurface !== undefined && isToolSurface(rawToolSurface) ? rawToolSurface : undefined;
+  if (rawToolSurface !== undefined && toolSurface === undefined) {
+    process.stderr.write(`tl workspace: unrecognized --tool-surface value '${rawToolSurface}' (expected ${TOOL_SURFACE_VALUES.join(" | ")})\n`);
+    process.exitCode = 1;
+    return;
+  }
   const launcher = options.launcher
     ?? resolveStableLauncher({ allowBareFallback: true });
   const serverBuild = rulesOnly
@@ -739,6 +772,7 @@ export async function runWorkspace(
     launcher,
     rulesOnly,
     ...(guideProfile !== undefined ? { guideProfile } : {}),
+    ...(toolSurface !== undefined ? { toolSurface } : {}),
   });
   const registryTarget = options.registryPath ?? configFilePath();
   let registryWarning: WorkspaceSetupJsonWarning | undefined;

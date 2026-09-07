@@ -256,6 +256,20 @@ export type WorkspaceMarker = {
  * the producer type cannot express a value the wire cannot carry.
  *
  * Checklist rows: A.9.2 rows 15 + 24 — both CLOSED.
+ *
+ * SIX SINCE DESIGN-v0.15 R1 (2026-09-07). `request-item-absent` is additive,
+ * not a re-narrowing of the five above: an explicit request item (design §4.2,
+ * §4.1) that this pack's obligation graph closed by VERIFIED ABSENCE — a
+ * scoped, exclusion-aware negative ("no workspace occurrence of X"), never an
+ * explanation of a nonexistent implementation's behavior — used to prove that
+ * obligation with no wire trace at all (`readCodeTaskPack.ts`'s
+ * `proveUnbindableRequestItem` set only an internal `reason` string). The live
+ * emitter is the SAME `buildCapabilityGaps`; see its own `request_item_absences`
+ * handling. D-4 still holds (`decision.ts`): this code, like the other five,
+ * rides `decision.discover.gaps` only — a pack whose LAST open point closes by
+ * absence and reaches `act.answer`/`act.edit` has no `gaps` slot to carry it on
+ * (the underlying obligation's `reason` still states it), because extending
+ * that structural rule itself is a protocol-level change this addition does not make.
  */
 export type CapabilityGap = {
   code:
@@ -263,10 +277,12 @@ export type CapabilityGap = {
     | "ambiguous-target"
     | "invalid-request"
     | "unsupported-operation"
-    | "workspace-changed";
+    | "workspace-changed"
+    | "request-item-absent";
   /**
    * Handles/paths/identifiers the gap is about. Emitted iff the server can name
    * them; absence means the gap is not localisable, NOT that it is unimportant.
+   * For `request-item-absent`: `[<request item id>, <the absent search term>]`.
    */
   refs?: string[];
 };
@@ -575,7 +591,17 @@ export type HandleCode =
   | "handle-required-lockdown"                // server.ts (grep "handle-required-lockdown")
   | "directory-handle-unknown"                // server.ts (grep "directory-handle-unknown")
   | "directory-handle-workspace-mismatch"     // server.ts (grep "directory-handle-workspace-mismatch")
-  | "directory-handle-wrong-kind";            // server.ts (grep "directory-handle-wrong-kind")
+  | "directory-handle-wrong-kind"             // server.ts (grep "directory-handle-wrong-kind")
+  /**
+   * A continuation cursor whose PAGE could not be fixed because another
+   * writer holds the record (DESIGN-v0.15 §5.2's page fixing is a CAS, and a
+   * conflict this server could neither reuse nor rebase within its bounded
+   * retry is "nothing was attempted", not "the cursor is unusable"). Unlike
+   * `cursor-invalid`, recovery is to RE-SEND THE SAME CURSOR: the page is
+   * either already fixed by the other writer or still unfixed, and either way
+   * the next attempt sees a settled record. `retry:"call"`.
+   */
+  | "state-conflict";                         // server.ts (grep "state-conflict")
 
 /** Execution typestate and the prepared fence (§2.6 progressivity). */
 export type TypestateCode =
@@ -660,6 +686,22 @@ export type ReadLimitCode =
    * to HANDLE addressing, while no handle is involved here.
    */
   | "is-a-directory"                  // server.ts (grep "is-a-directory")
+  /**
+   * DESIGN-v0.15 §5.2 (R2): the source revision moved under a live read
+   * cursor. Distinct from `served-content-stale` (a WRITE precondition about
+   * bytes the caller holds) — this one is about a FETCH REQUEST whose pages
+   * may no longer be mixed: "source revisionが一致しない場合は新旧本文を混ぜず
+   * refusalと原要求を再開する正準nextを返す". Carries that restart `next`.
+   */
+  | "cursor-stale"                    // server.ts (grep "cursor-stale")
+  /**
+   * DESIGN-v0.15 §5.2 (R2): an unknown, tampered, expired, wrong-purpose,
+   * other-workspace, other-lane or other-task cursor ("未知/改竄/別purpose/別
+   * workspace/lane/taskのcursorを受理しない"). The server holds no state for
+   * it, so it carries NO `next` — the recovery is to restart the original
+   * request, which only the caller can restate.
+   */
+  | "cursor-invalid"                  // server.ts (grep "cursor-invalid")
   | "markdown-section-read-failed"    // server.ts (grep "markdown-section-read-failed")
   | "markdown-section-ambiguous"      // server.ts (grep "markdown-section-ambiguous")
   | "markdown-section-not-found";     // server.ts (grep "markdown-section-not-found")

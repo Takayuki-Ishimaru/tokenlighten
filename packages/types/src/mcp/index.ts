@@ -28,6 +28,12 @@ export type * from "./read-result.js";
 export type * from "./search-result.js";
 export type * from "./edit-result.js";
 export type * from "./request-shape.js";
+// DESIGN-v0.15 R2/R3: the fetch-request continuation state model (server-side;
+// the only wire surface it grows is the opaque `read_file.cursor` argument).
+export type * from "./continuation.js";
+// DESIGN-v0.15 §8.2 (R7 Part B): the startup-selected code/full tool surface.
+export type { ToolSurface } from "./tool-surface.js";
+export { TOOL_SURFACE_VALUES, isToolSurface } from "./tool-surface.js";
 
 // pre-v1, still live
 export type * from "./locate-impact.js";

@@ -25,7 +25,7 @@ import { searchSymbols } from "./tools/searchSymbols.js";
 import { getCurrentDiff } from "./tools/getCurrentDiff.js";
 import { createFile } from "./tools/createFile.js";
 import { readAndEdit } from "./tools/readAndEdit.js";
-import { findText, buildFindResponse, buildFindResponseForQueries } from "./features/search/find/findText.js";
+import { findText, buildFindResponse, buildFindResponseForQueries, MAX_LINES_PER_FILE, type FindFileGroup } from "./features/search/find/findText.js";
 import { applyServedFindProtocol, type ServedFindOutcome } from "./features/search/find/servedFindEscalation.js";
 import { maybeAttachMemberSweepToFindResponse } from "./features/search/find/memberSweep.js";
 import { maybeAttachRelatedLookups } from "./features/search/find/relatedLookups.js";
@@ -120,7 +120,7 @@ import {
   verifyContextAttestation,
   type VerifiedContextAttestation,
 } from "./state/contextAttestation.js";
-import { CONTEXT_STATE_META_KEY } from "@tokenlighten/types";
+import { CONTEXT_STATE_META_KEY, parseHandlePurposeFromPrefix } from "@tokenlighten/types";
 import { resolveMap, resolveDigest, resolveSlice, resolveSliceRanges, extractSymbolsFromFile, READ_SYMBOL_CAP_BYTES, resolveCallerByteCeiling } from "./tools/readCodeModes.js";
 import { resolveClientProfile, resolveDefaultResponseByteCeiling } from "./protocol/codec/clientProfile.js";
 // office/csv.ts is pure and dependency-free (unlike office/xlsx.ts, which is
@@ -150,6 +150,45 @@ import { buildVerificationManifest, verificationBodyIdentity, verificationDepend
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
 import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNext, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordServedBytes } from "./util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "./util/laneKey.js";
+// DESIGN-v0.15 §5 (R2): the read-request continuation store. Q/D live here, not
+// in a handle payload and not in a second store (§10 item 3).
+import {
+  PAGE_ENVELOPE_RESERVE_BYTES,
+  appendReadRequestTarget,
+  choosePage,
+  fixPage,
+  mintReadCursor,
+  openParentReadRequest,
+  openReadRequest,
+  parseWindows,
+  resolveReadCursor,
+  stagedFromResolution,
+  windowStrings,
+  wireWindowsCostBytes,
+} from "./state/readRequestStore.js";
+// DESIGN-v0.15 §6.2 (R4): the SAME cursor-call builder the ladder/settle tail
+// uses (protocol/emit.ts), reused so a receipt's `next` for an open parent
+// request is byte-identical to that request's ordinary page `next`.
+import { cursorCall as readRequestCursorCall } from "./protocol/readRequestContinuation.js";
+// DESIGN-v0.15 §6.1 (R3): the search-request continuation store — a SEPARATE
+// block from R2's read-request import immediately above (never interleaved
+// with it; this wave's file-ownership rule). Q is the immutable ordered
+// match snapshot, not a handle payload and not a second store (§10 item 3,
+// shared with R2). Aliased where a name collides with R2's own read-side
+// import of the same generic name.
+import {
+  chooseSearchPage,
+  openSearchRequest,
+  renderPageFiles,
+  resolveSearchCursor,
+  scanFullSearchSnapshot,
+  searchCursorInputMismatch,
+  searchPageEnvelopeReserve,
+  stagedFromResolution as stagedSearchRequestFromResolution,
+  withMoreLines,
+  type SearchScanQuery,
+} from "./state/searchRequestStore.js";
+import { fixSearchPage } from "./protocol/searchRequestContinuation.js";
 import { stableStringify } from "./util/schemaStamp.js";
 import { attachSupply } from "./util/attachSupply.js";
 import { mustFetchReadBudget } from "./util/mustFetch.js";
@@ -182,7 +221,7 @@ import {
   withinRefusalBudget,
   type SchemaNode,
 } from "./validation/requestShape.js";
-import { MCP_LANGS, type McpLang, type RefusalCode, type TaskDecision, type TaskExecutionContract, type TaskProfileRequest, type TaskRef, type TaskVerifyObligation, type ToolCall } from "@tokenlighten/types";
+import { MCP_LANGS, TOOL_SURFACE_VALUES, isToolSurface, type LineWindow, type McpLang, type RefusalCode, type TaskDecision, type TaskExecutionContract, type TaskProfileRequest, type TaskRef, type TaskVerifyObligation, type ToolCall, type ToolSurface } from "@tokenlighten/types";
 import {
   createUsageRecorder,
   estimateTokensFromBytes,
@@ -225,6 +264,7 @@ import {
   noteWorkspaceRoot,
   protocolCallContext,
   runWithProtocolCall,
+  setEnvelopeToolSurface,
 } from "./protocol/envelope.js";
 import { setEmittedToolCallValidator } from "./protocol/refusal.js";
 import { verifyWithholdsCompletion } from "./protocol/readFamily.js";
@@ -251,7 +291,11 @@ import {
   sanctionFromEvidence,
   taskDecisionWireViolations,
 } from "./protocol/decisionWire.js";
-import { assertStartupBudgetsAreSane } from "./protocol/budget/wireBudget.js";
+// `estimateBytesFromTokens`: the ONE token->byte ratio this server budgets
+// with (`protocol/emit.ts` folds a declared `maxTokens` in through it), reused
+// by the read-cursor resume so an inherited `budget.tokens` sizes a page the
+// same way an inherited `budget.bytes` does — DESIGN-v0.15 §5.2.
+import { assertStartupBudgetsAreSane, estimateBytesFromTokens } from "./protocol/budget/wireBudget.js";
 // v0.10 alpha.1 dual-era transport (DESIGN-v0.10-expansion-plan-v1.3.md §4.5).
 // The transport modules import back from this file (advertisedTools, callTool,
 // handleRequest, ...); the cycle is safe because every one of those bindings is
@@ -445,6 +489,50 @@ const DOC_DISABLED = /^(0|false|no|off)$/i.test(process.env["TOKENLIGHTEN_DOCUME
 
 /** --allow-write flag: write tools are registered and callable only when true. */
 export const ALLOW_WRITE = argv.includes("--allow-write");
+
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 §8.2 (R7 Part B): the startup-selected advertised tool
+// surface. See `ToolSurface`'s doc comment (@tokenlighten/types) for what
+// each value advertises. Resolved ONCE, here, at module evaluation — same
+// life of this process; a caller cannot change it mid-connection because
+// nothing downstream re-reads argv/env after this line runs. An unrecognized
+// value fails the process closed with a clear message instead of silently
+// coercing to a default: this is launcher configuration, not request input,
+// so there is no caller to send a recoverable refusal to.
+// ---------------------------------------------------------------------------
+function parseToolSurfaceArg(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--tool-surface") return args[i + 1];
+  }
+  return undefined;
+}
+
+function resolveToolSurface(): ToolSurface {
+  const raw = parseToolSurfaceArg(argv) ?? process.env["TOKENLIGHTEN_TOOL_SURFACE"];
+  if (raw === undefined || raw === "") return "full";
+  if (isToolSurface(raw)) return raw;
+  process.stderr.write(
+    `[tl-mcp] fatal: unrecognized --tool-surface/TOKENLIGHTEN_TOOL_SURFACE value ${JSON.stringify(raw)} (expected ${TOOL_SURFACE_VALUES.join(" | ")})\n`,
+  );
+  return process.exit(1);
+}
+
+/**
+ * The resolved, immutable tool surface for this process. `full` (default)
+ * advertises every capability this server has ever advertised; `code`
+ * removes Office/archive-member/credential-ref inputs from the advertised
+ * schema, the inbound validator, and every internal extension-based
+ * auto-detection path that would otherwise reach the same capability
+ * without an advertised field (see `officeOrArchiveSurfaceRefusal` below).
+ */
+export const ACTIVE_TOOL_SURFACE: ToolSurface = resolveToolSurface();
+// DESIGN-v0.15 §8.2 (R7 Part B residual close-out): push the resolved value
+// into `protocol/envelope.ts`'s own copy at this SAME module-load moment —
+// that module is a DEPENDENCY of this one (it exports `canonicalToolCall`,
+// imported above), so it cannot import `ACTIVE_TOOL_SURFACE` back without a
+// cycle. A setter call, not a second resolution, so the two can never
+// disagree. See `canonicalToolCall`'s own surface-aware minting there.
+setEnvelopeToolSurface(ACTIVE_TOOL_SURFACE);
 
 /**
  * Per-process session ID: embedded in shadow-git checkpoint commit messages.
@@ -943,7 +1031,7 @@ const closed = (properties: Record<string, unknown>) => ({
 const CANONICAL_ARCHIVE = closed({
   path: { type: "string", description: "Archive path (.zip)." },
   member: { type: "string", description: "Member path in the archive." },
-  prefix: { type: "string", description: "Only members under this prefix." },
+  prefix: { type: "string", description: "Members under this prefix." },
 });
 const CANONICAL_TASK = {
   ...closed({
@@ -978,8 +1066,8 @@ const CANONICAL_SCOPE = {
     surfaceRoles: { type: "array", items: { type: "string" }, description: "Surface roles for closure." },
     includeScores: { type: "boolean", description: "Match-confidence scores." },
     symbol: { type: "string", description: "Symbol to address/search." },
-    archive: { ...CANONICAL_ARCHIVE, description: "Archive: path/member/prefix." },
-    kind: { enum: ["text", "symbol"], description: "text or a resolved symbol." },
+    archive: { ...CANONICAL_ARCHIVE, description: "path/member/prefix." },
+    kind: { enum: ["text", "symbol"], description: "text or resolved symbol." },
   }),
 };
 // W3-4(b): search_files delivers only the byte/token/item dimensions — it has
@@ -1021,7 +1109,7 @@ const CANONICAL_TARGET = {
     purpose: { type: "string", description: "Why this target is needed." },
     profile: { type: "string", description: "Skeleton rendering profile." },
     lang: { type: "string", description: "Language hint." },
-    archive: { ...CANONICAL_ARCHIVE, description: "Archive: path/member/prefix." },
+    archive: { ...CANONICAL_ARCHIVE, description: "path/member/prefix." },
   }),
   oneOf: [{ required: ["path"] }, { required: ["handle"] }],
 };
@@ -1056,7 +1144,7 @@ export const ARTIFACT_SELECT_KEYS: readonly string[] =
 const CANONICAL_EDIT_ITEM = {
   ...closed({
     path: { type: "string", description: "File path to edit." },
-    from: { type: "string", description: "Source path/handle for create-by-copy." },
+    from: { type: "string", description: "Path/handle for create-by-copy." },
     handle: { type: "string", description: "Handle; resolves path/symbol/range." },
     range: { type: "string", description: "1-based N-M range." },
     search: { type: "string", description: "Text to find (with replace)." },
@@ -1129,6 +1217,126 @@ const CANONICAL_EDIT_ITEM = {
   ],
 };
 
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 §8.2 (R7 Part B): the full-only classification — the SINGLE
+// list naming which advertised/dispatch inputs are Office/archive-member/
+// credential-only, kept next to `ALL_TOOLS` so it is visibly the one
+// classification source (never a second hand-written schema per tool). Two
+// per-tool tables are derived from it, not two independent classifications:
+// `FULL_ONLY_PROPERTY_PATHS` names dotted paths into the ADVERTISED nested
+// schema tree (e.g. "select.properties.sheet" deletes read_file's advertised
+// `select.sheet`); `FULL_ONLY_LEGACY_KEYS` names the SAME capabilities' flat
+// top-level spellings in `LEGACY_DISPATCH_PROPERTIES` (the post-normalization
+// dispatch view a v0.13.x legacy caller's field lands on, e.g. bare `sheet`
+// or `archive`). `ARTIFACT_SELECT_KEYS` (defined above) is reused verbatim
+// for read_file.select's contribution — never re-listed by hand.
+// ---------------------------------------------------------------------------
+const FULL_ONLY_PROPERTY_PATHS: Record<string, readonly string[]> = {
+  read_file: [
+    "targets.items.properties.archive",
+    "targets.items.properties.credentialRef",
+    ...ARTIFACT_SELECT_KEYS.map((key) => `select.properties.${key}`),
+    "budget.properties.rows",
+    "budget.properties.cells",
+    "scope.properties.archive",
+    "scope.properties.credentialRef",
+  ],
+  edit_file: ["artifact", "credentials"],
+  search_files: ["scope.properties.archive", "scope.properties.credentialRef"],
+};
+
+// FX-M8-style note: LEGACY_DISPATCH_PROPERTIES's flat keys are validated
+// AFTER `normalizeCanonicalRequest` has already run, so this list must catch
+// a legacy caller's OWN raw spelling of each full-only capability — not only
+// the canonical field name — or `TL_LEGACY_INPUT=accept` would reopen
+// exactly the Office/archive backdoor the surface exists to close (the
+// report's own "concrete gap", not a hypothetical).
+const FULL_ONLY_LEGACY_KEYS: Record<string, readonly string[]> = {
+  read_file: ["archive", "credentialRef", "sheet", "rows", "columns", "slides", "pages", "as", "kind", "maxRows", "maxCells"],
+  edit_file: ["artifact", "credentialRef", "outputCredentialRef"],
+  search_files: ["archive", "credentialRef"],
+};
+
+/**
+ * Deletes each of `dottedPaths` from a CLONE of `properties` and returns the
+ * clone; `properties` itself is never mutated (every consumer below shares
+ * the same ALL_TOOLS-derived objects across requests/processes). A dotted
+ * path walks `properties`/`items` exactly the way the advertised JSON Schema
+ * nests them — the final segment is the key actually deleted. A path whose
+ * parent does not exist (e.g. a legacy-only path fed the advertised tree, or
+ * vice versa) is a silent no-op: callers pass the matching table for the
+ * tree they hold, so this only guards against the two tables drifting.
+ */
+function withoutSchemaPaths(
+  properties: Record<string, SchemaNode>,
+  dottedPaths: readonly string[],
+): Record<string, SchemaNode> {
+  const clone = structuredClone(properties) as Record<string, unknown>;
+  for (const dotted of dottedPaths) {
+    const segments = dotted.split(".");
+    const last = segments.pop()!;
+    let node: Record<string, unknown> | undefined = clone;
+    for (const segment of segments) {
+      if (node === undefined) break;
+      node = node[segment] as Record<string, unknown> | undefined;
+    }
+    if (node !== undefined) delete node[last];
+  }
+  return clone as Record<string, SchemaNode>;
+}
+
+/**
+ * DESIGN-v0.15 §8.2 (R7 Part B): the ONE pure function every surface-aware
+ * consumer shares — `advertisedTools()` (the wire schema), the properties
+ * views `advertisedPropertiesFor`/`dispatchPropertiesFor` hand to the
+ * validator (via a minimal `{name, inputSchema:{properties}}` wrapper), and
+ * `LEGACY_DISPATCH_PROPERTIES`'s own per-surface view (through
+ * `dispatchPropertiesFor` again, with `FULL_ONLY_LEGACY_KEYS`). `full`
+ * returns `definition` completely unchanged — no clone, no allocation —
+ * so every existing full-surface caller keeps its exact prior identity and
+ * behavior. `code` deletes every path in `pathsToRemove` from a clone of
+ * `inputSchema.properties`, and — only when the definition still carries an
+ * `anyOf` (edit_file) and its `artifact` branch's requirement no longer
+ * exists on the filtered properties — collapses the two-branch
+ * `anyOf:[{required:["edits"]},{required:["artifact"]}]` down to plain
+ * `required:["edits"]`, since `artifact` no longer exists to require.
+ */
+function filterToolDefinitionForSurface<
+  T extends { name: string; inputSchema: { properties: Record<string, SchemaNode>; anyOf?: unknown[]; required?: string[] } },
+>(definition: T, surface: ToolSurface, pathsToRemove: readonly string[]): T {
+  if (surface === "full") return definition;
+  definition.inputSchema.properties = withoutSchemaPaths(definition.inputSchema.properties, pathsToRemove);
+  if (
+    definition.name === "edit_file"
+    && definition.inputSchema.anyOf !== undefined
+    && definition.inputSchema.properties["artifact"] === undefined
+  ) {
+    delete definition.inputSchema.anyOf;
+    definition.inputSchema.required = ["edits"];
+  }
+  return definition;
+}
+
+/**
+ * DESIGN-v0.15 §8.2 (R7 Part B): true once dispatch is about to enter an
+ * Office- or archive-specific code path — reached either through an
+ * advertised full-only field (already refused earlier, at validation, by
+ * `filterToolDefinitionForSurface`'s effect on `dispatchPropertiesFor`) or
+ * through extension-based auto-detection (`isOffice`, `isSupportedArchivePath`
+ * below), which carries no advertised field for the schema-level gate to
+ * catch, and through a legacy `mode` value a v0.13.x caller can still send
+ * directly (`mode` itself stays a generic, non-Office-specific legacy key —
+ * see `FULL_ONLY_LEGACY_KEYS`'s doc comment). Every such branch must check
+ * this immediately before running, so a `--tool-surface code` connection can
+ * never reach Office/archive behavior — including a suggested `next`/
+ * `next_call` naming an unadvertised field — regardless of how the request
+ * arrived (canonical or legacy).
+ */
+function officeOrArchiveSurfaceRefusal(): { error: string; code: RefusalCode } | undefined {
+  if (ACTIVE_TOOL_SURFACE !== "code") return undefined;
+  return { error: "Office documents and archive access require --tool-surface full.", code: "not-a-document" };
+}
+
 // D-2 advertised-only input surface. Legacy spellings are normalized at the
 // dispatch boundary for the v0.13.x compatibility window.
 export const ALL_TOOLS: ToolEntry[] = [
@@ -1153,12 +1361,24 @@ export const ALL_TOOLS: ToolEntry[] = [
           lane: { type: "string", description: "Concurrency isolation key." },
           cwd: { type: "string", description: "Worktree root for this call." },
           scope: { ...CANONICAL_SCOPE, description: "Read scope fields." },
+          // DESIGN-v0.15 §5.2 (R2): the ONE additive wire field of this wave.
+          // An opaque, purpose-bound token that resumes the ORIGINAL fetch
+          // request — the caller never composes it, and a cursor call carries
+          // nothing else except `cwd`/`lane`/`task.handle` echoes and the two
+          // sanctioned overrides (`budget`, `task.force_serve`).
+          cursor: { type: "string", description: "Resumes a read from prior limit.next; send alone + cwd/lane/task/budget." },
         }),
         oneOf: [
           { required: ["query"], not: { required: ["targets"] } },
           { required: ["targets"], not: { required: ["query"] } },
           { required: ["query", "targets"] },
           { required: ["task"], not: { anyOf: [{ required: ["query"] }, { required: ["targets"] }] } },
+          // R2: the cursor-only continuation shape. No `not` clause is needed
+          // and none is paid for: `oneOf` requires EXACTLY ONE branch to match,
+          // so `{cursor, query}` or `{cursor, targets}` matches two branches and
+          // is rejected by composition. `cursorCoInputRefusal` (dispatch) then
+          // names the offending field, which a schema rejection cannot do.
+          { required: ["cursor"] },
           // W3-4(a) (wave-2 handoff): a BARE `qref` (no query/targets/task) is
           // the sanctioned replay shape AGENTS.md documents verbatim ("Re-pack
           // with the returned `qref`, no `query`"), and the legacy dispatch
@@ -1413,7 +1633,7 @@ const LEGACY_PATHS_SCHEMA_INTERNAL: SchemaNode = {
 const LEGACY_DISPATCH_PROPERTIES: Record<string, Record<string, SchemaNode>> = {
   read_file: {
     ...legacyProperties([
-    "path", "credentialRef", "mode", "symbol", "handle", "handles", "query", "qref",
+    "path", "credentialRef", "mode", "symbol", "handle", "handles", "query", "qref", "cursor",
     "taskProfile", "lang", "maxTokens", "allowFull", "content", "comments", "includeClosure", "surfaceRoles",
     "sheet", "range", "ranges", "sections", "slides", "pages", "maxBytes", "limit", "profile", "kind", "as",
     "columns", "rows", "maxRows", "maxCells", "taskEpoch", "task_handle", "lane",
@@ -1448,11 +1668,34 @@ const LEGACY_DISPATCH_PROPERTIES: Record<string, Record<string, SchemaNode>> = {
 function advertisedPropertiesFor(tool: string): Record<string, SchemaNode> {
   const definition = ALL_TOOLS.find((entry) => entry.name === tool)!.definition;
   const inputSchema = definition["inputSchema"] as { properties: Record<string, SchemaNode> };
-  return inputSchema.properties;
+  if (ACTIVE_TOOL_SURFACE === "full") return inputSchema.properties;
+  // DESIGN-v0.15 §8.2 (R7 Part B): the SAME filter `advertisedTools()` applies
+  // to the wire schema, applied here to the closed-schema validator's own
+  // property tree — a code-mode caller sending e.g. `select:{sheet:...}` is
+  // refused `unknown-arguments` the same way any other unadvertised key is,
+  // never a second, hand-written gate.
+  return filterToolDefinitionForSurface(
+    { name: tool, inputSchema: { properties: structuredClone(inputSchema.properties) } },
+    ACTIVE_TOOL_SURFACE,
+    FULL_ONLY_PROPERTY_PATHS[tool] ?? [],
+  ).inputSchema.properties;
 }
 
 function dispatchPropertiesFor(tool: string): Record<string, SchemaNode> {
-  return LEGACY_DISPATCH_PROPERTIES[tool] ?? advertisedPropertiesFor(tool);
+  const legacy = LEGACY_DISPATCH_PROPERTIES[tool];
+  if (legacy === undefined) return advertisedPropertiesFor(tool);
+  if (ACTIVE_TOOL_SURFACE === "full") return legacy;
+  // DESIGN-v0.15 §8.2 (R7 Part B) — the report's "concrete gap": left
+  // unfiltered, a code-mode server run with `TL_LEGACY_INPUT=accept` would
+  // silently reopen the exact Office/archive backdoor the surface exists to
+  // close, since a legacy caller's field name never touches the advertised
+  // (already-filtered) property tree above. `FULL_ONLY_LEGACY_KEYS` names
+  // the same capabilities' flat legacy spellings.
+  return filterToolDefinitionForSurface(
+    { name: tool, inputSchema: { properties: structuredClone(legacy) } },
+    ACTIVE_TOOL_SURFACE,
+    FULL_ONLY_LEGACY_KEYS[tool] ?? [],
+  ).inputSchema.properties;
 }
 
 /** Test-only readback of the post-normalizer validation surface. */
@@ -2014,7 +2257,21 @@ export function advertisedTools() {
   // sharing so each caller gets an independent tree.
   // D11: no `deprecated` filter — ALL_TOOLS holds only advertised tools now,
   // so advertised == accepted by construction rather than by agreement.
-  return ALL_TOOLS.filter((t) => t.enabled).map((t) => structuredClone(t.definition));
+  // DESIGN-v0.15 §8.2 (R7 Part B): `full` (the default) returns the exact
+  // prior byte-for-byte definitions — `filterToolDefinitionForSurface` is a
+  // no-op passthrough for that surface, so this line's behavior for existing
+  // users is unchanged.
+  return ALL_TOOLS.filter((t) => t.enabled).map((t) => {
+    const cloned = structuredClone(t.definition) as {
+      name: string;
+      inputSchema: { properties: Record<string, SchemaNode>; anyOf?: unknown[]; required?: string[] };
+    };
+    return filterToolDefinitionForSurface(
+      cloned,
+      ACTIVE_TOOL_SURFACE,
+      FULL_ONLY_PROPERTY_PATHS[t.name] ?? [],
+    ) as unknown as Record<string, unknown>;
+  });
 }
 
 function extractRangeText(content: string, range: string): string | null {
@@ -3052,7 +3309,8 @@ function bookCsvArtifactServe(
  * row→physical-line mapping (`table.fileLineRange === undefined` —
  * round-18A finding 1 / ruling (v): fail-closed, never fall back to `range`'s
  * logical numbers), or when the caller asked for a forced serve
- * (`content:"full"` / `allowFull` / `force_serve`), which is the documented
+ * (`allowFull` / `force_serve` — DESIGN-v0.15 §6.3 (R6): canonical
+ * `content:"full"` alone no longer forces one), which is the documented
  * recovery for a compacted context and must never be answered with a receipt.
  */
 function csvArtifactServeReceipt(
@@ -4544,9 +4802,18 @@ export function serveGovernedFullHead(
  * compacted away no longer HAS the bytes the ledger says it was served, so the
  * force-serve path must be first-class and self-documenting — never something
  * the caller has to already know.
+ *
+ * DESIGN-v0.15 §6.3 (R6) migration note: this used to name `content:"full"`
+ * as a forcing input too, because `forceContentServe` (below) treated that
+ * bare canonical field as a resend request. It no longer does — canonical
+ * `content:"full"` is now purely a REPRESENTATION selector, judged in the
+ * same served-range ledger as any other window, and only `task.force_serve:
+ * true` (or the legacy `allowFull`/`mode:"full"` dialect kept for
+ * `TL_LEGACY_INPUT=accept`'s compat window, see `forceContentServe`'s own
+ * doc comment) guarantees a resend. The note is updated to match.
  */
 export const SERVED_CONTENT_RECEIPT_NOTE =
-  'served earlier this session and unchanged; pass content:"full" (or allowFull:true) to force the bytes';
+  'served earlier this session and unchanged; pass task.force_serve:true (or allowFull:true) to force the bytes';
 
 /**
  * Compact receipt for a read whose payload the SAME session already served for
@@ -4561,6 +4828,15 @@ export const SERVED_CONTENT_RECEIPT_NOTE =
  * convention mode=closure uses for "what this session already did"). Without
  * it the response would be a bare pointer, which is exactly the zero-content
  * shape the turn-economy work exists to eliminate.
+ *
+ * DESIGN-v0.15 §6.2 (R4): `summary.unserved` (when present) is purely
+ * INFORMATIONAL — the rest of the FILE this session has not yet read. It is
+ * never, by itself, a reason to attach a `next`: a receipt for a request
+ * whose OWN window is fully satisfied ends that request (§3.3's "既読通知の
+ * 終端"). The ONLY thing that may put a `next` on this receipt is
+ * `parentContinuation` — an OPEN full/range/batch read request for this same
+ * path that still owes lines (the caller's `openParentReceiptContinuation`
+ * decides that from the read-request store, never from `ledger.unserved`).
  */
 function servedContentReceipt(args: {
   mode: string;
@@ -4581,8 +4857,15 @@ function servedContentReceipt(args: {
    *  trace repeated_range for every mode that funnels through it. Optional
    *  and additive — omitted callers simply do not emit the event. */
   workspace?: string;
+  /**
+   * DESIGN-v0.15 §6.2 (R4): the open PARENT request's own continuation, when
+   * this window is a page of one (`openParentReceiptContinuation`). Absent
+   * for an independent request — the ordinary case — which then carries no
+   * `next` at all.
+   */
+  parentContinuation?: ToolCall;
 }): Record<string, unknown> {
-  const { mode, path: filePath, handle, sha, range, symbol, ledger, extra } = args;
+  const { mode, path: filePath, handle, sha, range, symbol, ledger, extra, parentContinuation } = args;
   // F3: a receipt that cannot be checked is indistinguishable from a false
   // one — name the call that put these bytes on the wire (~30 B).
   const servedBy = args.servedBy ?? ledger.served_by;
@@ -4619,16 +4902,13 @@ function servedContentReceipt(args: {
       complete: ledger.complete,
     },
     note: SERVED_CONTENT_RECEIPT_NOTE,
-    // A partial ledger receipt must point straight at the exact windows it did
-    // not establish. This is a fresh slice, not a task re-pack or a replay of
-    // the already-served range above.
-    // FX-1 (v0.13 wave-3 review fix): canonical `targets=[...]` prose, not the
-    // legacy `mode=slice handle=… ranges=…` dialect — `canonicalizeEmittedToolCalls`
-    // (protocol/envelope.ts) only rewrites OBJECT-shaped embedded tool calls, so a
-    // raw STRING `next` here was a blind spot that reached the wire unconverted.
-    ...(ledger.unserved.length > 0
-      ? { next: canonicalToolCall("read_file", { targets: [{ handle, ranges: ledger.unserved }], content: "auto" }) }
-      : {}),
+    // DESIGN-v0.15 §6.2 (R4): a `next` here means "the PARENT request this
+    // page belongs to still owes lines", never "the file has more unread
+    // lines" — `ledger.unserved` (the whole-file complement) no longer drives
+    // this field; only an OPEN parent request does (R4 fix — pre-fix this
+    // unconditionally named `ledger.unserved`, attaching an unrequested `next`
+    // for the rest of the file to an otherwise fully-satisfied receipt).
+    ...(parentContinuation !== undefined ? { next: parentContinuation } : {}),
     ...(extra ?? {}),
   };
 }
@@ -5171,6 +5451,12 @@ function buildFullServePayload(args: {
   extra?: Record<string, unknown>;
 }): Record<string, unknown> {
   const { workspace, filePath, content, handleId, sha, keepComments, allowFull, extra } = args;
+  // DESIGN-v0.15 §5.1 (R2): a `content:"full"` request's Q is the WHOLE FILE,
+  // in file coordinates, and it stays the request's scope even when the wire
+  // budget later cuts the body down to a handful of lines. Staged here — the
+  // one place that knows the file, its revision and its real line count —
+  // rather than at the dispatcher, which knows none of the three.
+  stageFullReadRequest(workspace, filePath, content, sha, keepComments);
   const language = languageForPath(filePath);
   // 2026-07-16a bench forensics: fall back to raw content + a note instead of
   // serving an elided-empty doc-only file — see elideDocCommentsForDisplay.
@@ -5192,6 +5478,21 @@ function buildFullServePayload(args: {
       fullFileExpansion: true as const,
       language: filePath.split(".").pop() ?? "unknown",
       ...(whole.note ? { note: whole.note } : {}),
+      // DESIGN-v0.15 §5.1 (R2): a GENUINELY EMPTY (0-byte) file. `content` is
+      // already `""` (below), and `readFamily.ts`'s `str()` collapses an
+      // empty string to absent everywhere on the wire (the shared rule that
+      // keeps "" out of `path`/`range` as a false address) — which otherwise
+      // makes `textEvidence`/`batchEntry` see NEITHER a body NOR a derivable
+      // range and drop this window entirely, projecting `evidence: []` (a
+      // `read.text`/`read.batch` item with nothing to address, violating its
+      // own required set). `total_lines: 0` is the producer's OWN verified
+      // fact — this branch only reaches it after actually reading and eliding
+      // the file — so the projector can tell "empty file, correctly served"
+      // from "no content available" without guessing from an absent key.
+      // Additive only for this one case: every non-empty `content:"full"`
+      // serve is unaffected, so the byte-identical-at-default-budgets
+      // invariant holds for every OTHER file.
+      ...(content === "" ? { total_lines: 0 } : {}),
       ...(extra ?? {}),
     };
   }
@@ -5536,6 +5837,12 @@ async function resolveFullReadForPath(
   const isOffice = ext === "docx" || ext === "xlsx" || ext === "pptx" || ext === "pdf";
 
   if (isOffice) {
+    // DESIGN-v0.15 §8.2 (R7 Part B): extension-based auto-detection reaches
+    // Office handling with NO advertised full-only field in the request (a
+    // plain `path:"foo.xlsx"` read) — the schema/validator filter above
+    // cannot catch this, so gate it here, at the point of entry.
+    const surfaceRefusal = officeOrArchiveSurfaceRefusal();
+    if (surfaceRefusal !== undefined) return { ok: false, error: surfaceRefusal.error, code: surfaceRefusal.code };
     if (DOC_DISABLED) return { ok: false, error: "Document extraction is disabled.", code: "not-a-document" };
 
     // mode=full on office files: redirect unless allowFull is explicitly true.
@@ -7538,6 +7845,517 @@ function annotateServedFindHits(
   );
 }
 
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 §6.1 (R3) — the search-request cursor.
+//
+// A SEPARATE, clearly-delimited section: not R2's read-request helpers
+// (`stageReadRequestForServe` etc., defined near `normalizeCanonicalRequest`)
+// and not the mode=pack/readCodePack region elsewhere in this dispatcher —
+// this wave's file-ownership rule. Two entry points, both used only from the
+// `search_files` `action:"find"` arm below:
+//
+//   `stageSearchRequestForFind` — called once an ORDINARY (non-cursor) find
+//   response comes back `truncated:true`. Computes the full, uncapped match
+//   snapshot and REBUILDS this call's own `files[]`/`total_files`/
+//   `total_matches` from the snapshot's stable order — never the ordinary
+//   footholds-first rendering `buildFindResponse`/`buildFindResponseForQueries`
+//   produced, because that rendering can deliver a SCATTERED (non-prefix)
+//   subset of the snapshot and `SearchRequestState.delivered` is a plain
+//   prefix counter (see `state/searchRequestStore.ts`'s header for why).
+//
+//   `serveSearchCursorPage` — called instead of the ordinary producers when a
+//   `find` call carries `cursor`. Resolves+validates the token, re-verifies
+//   every referenced file's source revision and the walk's own candidate-file
+//   identity (`cursor-stale` on any drift, never a silent restart), and pages
+//   directly from the snapshot — never re-entering `buildFindResponse`/
+//   `buildFindResponseForQueries` and never escalating to `read_file`.
+// ---------------------------------------------------------------------------
+
+/** Same one-line heuristic `findText.ts`'s (module-private) `isSingleToken` uses — kept local rather than exported across modules for one boolean. */
+function isSingleSearchToken(query: string): boolean {
+  return query.trim().split(/\s+/).filter(Boolean).length <= 1;
+}
+
+/** Per-query case-insensitivity resolution — MUST match `buildFindResponseForQueries`'s own default exactly, so a staged snapshot's matches agree with what the ordinary pipeline would have found. */
+function searchScanQueriesFor(queries: readonly string[], regex: boolean): SearchScanQuery[] {
+  return queries.map((text) => ({ text, regex, caseInsensitive: !regex && isSingleSearchToken(text) }));
+}
+
+/** The canonical `original_input` a staged search request restarts from and validates a resume's own `queries`/`scope` against. */
+function canonicalSearchOriginalInput(input: {
+  queries: readonly string[];
+  path?: string;
+  lang?: string;
+  regex: boolean;
+}): Record<string, unknown> {
+  const original: Record<string, unknown> = { queries: [...input.queries] };
+  const scope: Record<string, unknown> = {};
+  if (input.path !== undefined) scope["path"] = input.path;
+  if (input.lang !== undefined) scope["lang"] = input.lang;
+  if (input.regex) scope["regex"] = true;
+  if (Object.keys(scope).length > 0) original["scope"] = scope;
+  return original;
+}
+
+/**
+ * Matches `protocol/budget/wireBudget.ts`'s calibrated `search.matches`
+ * ceiling (arch-map §5) — used only as the byte target for CHOOSING page
+ * content; the generic wire ladder still governs what actually ships (see
+ * `searchRequestStore.ts`'s reserve doc comment for why an imprecise choice
+ * here is never a correctness risk).
+ */
+const DEFAULT_SEARCH_FIND_PAGE_BUDGET_BYTES = 131072;
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function findStr(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+function findNum(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * True iff every entry of the producer's own `inventory` already appears in
+ * `files[]` — an ordinary `findScopedNext` re-scope to the next UNSERVED
+ * inventory file has nothing new to move to. Mirrors
+ * `protocol/searchFamily.ts`'s (former) `findNext` inventory loop. An
+ * unserved per-directory rollup entry (`dir`, no `path`) also counts as
+ * "something left to visit", matching that loop.
+ */
+function findInventoryExhausted(body: Record<string, unknown>): boolean {
+  const files = (Array.isArray(body["files"]) ? body["files"] : []).filter(isRecordLike);
+  const served = new Set(files.map((f) => findStr(f["path"])).filter((p): p is string => p !== undefined));
+  const inventory = Array.isArray(body["inventory"]) ? body["inventory"] : [];
+  for (const raw of inventory) {
+    if (!isRecordLike(raw)) continue;
+    const path = findStr(raw["path"]);
+    if (path !== undefined) {
+      if (!served.has(path)) return false;
+      continue;
+    }
+    if (findStr(raw["dir"]) !== undefined) return false;
+  }
+  return true;
+}
+
+/**
+ * True iff some ALREADY-SERVED file's preview is capped by the HARD,
+ * budget-independent `MAX_LINES_PER_FILE` ceiling (`findText.ts`'s
+ * `capFileGroup`, applied "before any response-wide byte fitting") rather
+ * than merely by this response's own byte budget.
+ *
+ * THIS is the precise distinguishing signal between the two shapes
+ * `truncated:true` + `inventory` exhausted can describe:
+ *
+ *  - "fic" (many small files sharing one budget): every file's OWN true
+ *    count is well under `MAX_LINES_PER_FILE`, so a file left short here got
+ *    that way from `fitFilesToCap`'s byte-budget widen pass running out of
+ *    room — `findScopedNext` re-scoping to JUST that file genuinely helps
+ *    (it stops sharing the budget with 39 siblings and can show the rest).
+ *    None of its files ever reach this predicate.
+ *  - LITERAL_31/SINGLE_31 (few files, each individually huge): a file whose
+ *    OWN true count exceeds `MAX_LINES_PER_FILE` shows EXACTLY
+ *    `MAX_LINES_PER_FILE` lines NO MATTER HOW IT IS SCOPED — a fresh
+ *    single-file `findScopedNext` re-run reproduces the identical truncated
+ *    preview. That is the exact precondition the old `read_file` escalation
+ *    fired on, and it is knowable on the VERY FIRST response — unlike a
+ *    "did this call already narrow to exactly this file" check, which would
+ *    only fire a hop late and, by then, have lost the ORIGINAL multi-file
+ *    scope to the intermediate re-scope's own narrower `path`.
+ */
+function findHasHardCappedFile(files: readonly Record<string, unknown>[]): boolean {
+  return files.some((f) => {
+    const lines = Array.isArray(f["lines"]) ? f["lines"] : undefined;
+    const moreLines = findNum(f["more_lines"]) ?? 0;
+    return lines !== undefined && lines.length >= MAX_LINES_PER_FILE && moreLines > 0;
+  });
+}
+
+/** Mirrors `protocol/searchFamily.ts`'s (former) `findNext` escalation precondition exactly — see `findHasHardCappedFile`'s doc comment for why this is knowable on the first response. */
+function findWouldHaveEscalated(body: Record<string, unknown>): boolean {
+  if (!findInventoryExhausted(body)) return false;
+  const files = (Array.isArray(body["files"]) ? body["files"] : []).filter(isRecordLike);
+  return findHasHardCappedFile(files);
+}
+
+/**
+ * DESIGN-v0.15 §5.3 / finding 9: what `stageSearchRequestForFind` returns.
+ *
+ * `"body"` is the ordinary case — either the untouched producer body (nothing
+ * needed staging) or the freshly-paginated snapshot page. `"refusal"` is the
+ * budget-floor case `chooseSearchPage`'s own `budget-below-minimum` names:
+ * mirrors the read cursor's `budget-below-minimum` refusal exactly (design
+ * §5.3: "必要下限を示す既存refusal/retry契約で回復する") instead of falling back
+ * to the producer's own oversized body, which the generic wire ladder could
+ * then only answer with a `cap-exceeded` dead end (finding 9's repro).
+ */
+type StageSearchRequestForFindResult =
+  | { kind: "body"; body: Record<string, unknown> }
+  | { kind: "refusal"; refusal: Record<string, unknown> };
+
+/**
+ * Stage a search request for an ALREADY-BUILT `find` body that came back
+ * `truncated:true`, and rebuild that body's own `files[]`/`total_files`/
+ * `total_matches`/`omitted` from the freshly-scanned, stably-ordered
+ * snapshot.
+ *
+ * TWO INDEPENDENT TRIGGERS, EITHER ONE ENOUGH (finding 9):
+ *
+ *  1. `findWouldHaveEscalated` — the ORIGINAL, narrower "inventory exhausted
+ *     AND some served file sits at the hard per-file cap" shape. UNCHANGED
+ *     from before finding 9: a `truncated:true` many-small-files response
+ *     that does NOT hit this shape (no file near `MAX_LINES_PER_FILE`) is
+ *     genuinely well served by the producer's own `findScopedNext`
+ *     continuation already — re-scoping to the next unserved file actually
+ *     helps there, and staging it instead would change a DEFAULT-budget wire
+ *     shape that was never broken (measured: `searchFamily.spec.ts`'s
+ *     "clause 1" 90-file fixture and `findBatchingHint.spec.ts`'s trimmed-cap
+ *     fixture both rely on exactly this continuation at the DEFAULT budget).
+ *  2. `wouldOverflowDeclaredBudget` — NEW. `buildFindResponseForQueries` has
+ *     no per-call byte-budget awareness of its own: a 12-file/3-match-each
+ *     result (none of them near the hard per-file cap) renders EVERY match
+ *     unconditionally and reports `truncated:false`, even when the caller
+ *     declared a `budget.bytes` far too small to hold it (finding 9's own
+ *     reproduction: 36 matches lost to a bare `cap-exceeded`, `truncated`
+ *     never `true` at all, `findScopedNext`'s own continuation never in the
+ *     running because the PRODUCER never even signaled truncation). Checked
+ *     here — BEFORE the generic wire ladder ever runs, which can only shed
+ *     peripheral fields, never whole match groups, and so can never turn an
+ *     over-budget find into a paginated one — via a cheap, conservative
+ *     predictor: does the UNSTAGED body's own measured size already exceed
+ *     what the caller declared? A default (undeclared) budget makes this
+ *     `false` by construction, so it is a strict no-op at default budgets.
+ *
+ * Returns `body` UNCHANGED when NEITHER trigger fires, or when the fresh scan
+ * found nothing to page (should not happen when a trigger fired, but
+ * defensive), or when the first page could not be chosen for a reason OTHER
+ * than the budget floor (`chooseSearchPage`'s `"complete"` — D emptied
+ * between the producer's own pass and this one). A budget too small to hold
+ * even one match group plus its envelope is the ONE case that instead
+ * returns a `"refusal"` — see `StageSearchRequestForFindResult`'s own doc.
+ */
+function stageSearchRequestForFind(input: {
+  workspace: string;
+  queries: readonly string[];
+  regex: boolean;
+  path?: string;
+  lang?: string;
+  args: Record<string, unknown>;
+  body: Record<string, unknown>;
+}): StageSearchRequestForFindResult {
+  const declaredMaxBytesForGate = typeof input.args["maxBytes"] === "number" && input.args["maxBytes"] > 0
+    ? input.args["maxBytes"] as number
+    : undefined;
+  const wouldOverflowDeclaredBudget = declaredMaxBytesForGate !== undefined
+    && Buffer.byteLength(JSON.stringify(input.body), "utf8") > declaredMaxBytesForGate;
+  const escalationShape = input.body["truncated"] === true && findWouldHaveEscalated(input.body);
+  if (!escalationShape && !wouldOverflowDeclaredBudget) return { kind: "body", body: input.body };
+  const scan = scanFullSearchSnapshot({
+    workspace: input.workspace,
+    queries: searchScanQueriesFor(input.queries, input.regex),
+    ...(input.path !== undefined ? { path: input.path } : {}),
+    ...(input.lang !== undefined ? { lang: parseMcpLang(input.lang) } : {}),
+  });
+  if (scan.records.length === 0) return { kind: "body", body: input.body };
+
+  const lane = currentSessionLane();
+  const taskHandle = typeof input.args["task_handle"] === "string" ? input.args["task_handle"] : undefined;
+  const cwd = typeof input.args["cwd"] === "string" ? input.args["cwd"] : undefined;
+  const declaredMaxBytes = typeof input.args["maxBytes"] === "number" ? (input.args["maxBytes"] as number) : undefined;
+  const declaredMaxTokens = typeof input.args["maxTokens"] === "number" ? (input.args["maxTokens"] as number) : undefined;
+  const budgetBytes = declaredMaxBytes !== undefined && declaredMaxBytes > 0
+    ? declaredMaxBytes
+    : DEFAULT_SEARCH_FIND_PAGE_BUDGET_BYTES;
+  const itemsBudget = typeof input.args["limit"] === "number" && (input.args["limit"] as number) > 0
+    ? Math.floor(input.args["limit"] as number)
+    : undefined;
+  const originalBudget = {
+    ...(declaredMaxBytes !== undefined ? { bytes: declaredMaxBytes } : {}),
+    ...(itemsBudget !== undefined ? { items: itemsBudget } : {}),
+    ...(declaredMaxTokens !== undefined ? { tokens: declaredMaxTokens } : {}),
+  };
+
+  const staged = openSearchRequest({
+    workspaceRoot: input.workspace,
+    ...(lane !== "" ? { lane } : {}),
+    ...(taskHandle !== undefined ? { taskHandle } : {}),
+    originalInput: canonicalSearchOriginalInput(input),
+    ...(Object.keys(originalBudget).length > 0 ? { budget: originalBudget } : {}),
+    echo: {
+      ...(cwd !== undefined ? { cwd } : {}),
+      ...(lane !== "" ? { lane } : {}),
+      ...(taskHandle !== undefined ? { taskHandle } : {}),
+    },
+    scan,
+  });
+
+  const reserve = searchPageEnvelopeReserve({
+    queries: input.queries,
+    path: input.path,
+    lang: input.lang,
+    cwd,
+    lane: lane !== "" ? lane : undefined,
+    budgetBytes: declaredMaxBytes,
+  });
+  const choice = chooseSearchPage(staged.state, scan.readLine, budgetBytes, reserve, itemsBudget);
+  if (!choice.ok) {
+    // finding 9: name the floor instead of falling back to the producer's
+    // own (oversized, for this budget) body — mirrors the read cursor's
+    // identical `budget-below-minimum` refusal (server.ts's cursor-resume
+    // dispatch, above) so both halves of the same design rule read alike.
+    if (choice.reason === "budget-below-minimum") {
+      return {
+        kind: "refusal",
+        refusal: {
+          ok: false,
+          code: "budget-below-minimum",
+          field: "budget",
+          error: `budget ${budgetBytes} B cannot hold one whole match group plus its envelope`,
+          detail: "raise budget.bytes to at least required_min_bytes and re-issue this find",
+          required_min_bytes: choice.requiredMinBytes,
+          retry: "call",
+        },
+      };
+    }
+    return { kind: "body", body: input.body };
+  }
+
+  const context = protocolCallContext();
+  if (context !== undefined) context.searchRequest = staged;
+
+  const truncated = choice.page.end < staged.state.matches.length || staged.state.snapshot_capped;
+  const files = withMoreLines(staged.state, choice.page.files, choice.page.end);
+  const newBody: Record<string, unknown> = {
+    query: typeof input.body["query"] === "string" ? input.body["query"] : input.queries.join(" OR "),
+    literal: input.body["literal"] === true,
+    files,
+    total_files: staged.state.total_files ?? 0,
+    total_matches: staged.state.total_matches ?? 0,
+    truncated,
+  };
+  if (Array.isArray(input.body["matched_terms"])) newBody["matched_terms"] = input.body["matched_terms"];
+  if (Array.isArray(input.body["term_results"])) newBody["term_results"] = input.body["term_results"];
+  if (scan.omitted !== undefined) newBody["omitted"] = scan.omitted;
+  return { kind: "body", body: newBody };
+}
+
+/**
+ * Serve a `find` call that presented `cursor` — resolve, validate, re-verify
+ * freshness, and page directly from the staged snapshot. Never re-enters the
+ * ordinary `buildFindResponse`/`buildFindResponseForQueries` producer and
+ * never builds a `read_file` call.
+ */
+async function serveSearchCursorPage(
+  token: string,
+  args: Record<string, unknown>,
+  workspace: string,
+): Promise<ReturnType<typeof toolOk>> {
+  const cursorLane = currentSessionLane();
+  const cursorTaskHandle = typeof args["task_handle"] === "string" ? args["task_handle"] : undefined;
+  const cursorCwd = typeof args["cwd"] === "string" ? args["cwd"] : undefined;
+
+  const resolvedCursor = resolveSearchCursor(token, workspace, {
+    ...(cursorLane !== "" ? { lane: cursorLane } : {}),
+    ...(cursorTaskHandle !== undefined ? { taskHandle: cursorTaskHandle } : {}),
+  });
+  if (!resolvedCursor.ok) {
+    return toolStructuredError({
+      ok: false,
+      code: "cursor-invalid",
+      field: "cursor",
+      error: "this search cursor is not usable here",
+      detail: `${resolvedCursor.reason}; restart the original request`,
+      retry: "call",
+    });
+  }
+  // DESIGN-v0.15 §6.1 (R3 extension): a `tlh_sreq_v1_` record opened by
+  // `search_files action=references` (this wave's own addition — see
+  // `state/searchRequestStore.ts`'s `openReferencesCursorRequest`) resolves
+  // fine as a search-request HANDLE but is not a valid `find` cursor: its
+  // `original_input` has no `queries`, so falling through to the mismatch
+  // check below would misreport this as `code:"invalid-input", field:
+  // "queries"` instead of the correct wrong-purpose refusal. `undefined`
+  // reads as `"find"` (every record written before this field existed).
+  if (resolvedCursor.state.action !== undefined && resolvedCursor.state.action !== "find") {
+    return toolStructuredError({
+      ok: false,
+      code: "cursor-invalid",
+      field: "cursor",
+      error: "this search cursor is not usable here",
+      detail: "wrong-action; restart the original request",
+      retry: "call",
+    });
+  }
+
+  const candidateQueries = Array.isArray(args["queries"])
+    ? (args["queries"] as unknown[]).filter((v): v is string => typeof v === "string" && v !== "")
+    : typeof args["query"] === "string" && args["query"] !== ""
+      ? [args["query"] as string]
+      : [];
+  const candidatePath = typeof args["path"] === "string" ? args["path"] : undefined;
+  const candidateLang = typeof args["lang"] === "string" ? args["lang"] : undefined;
+  const candidateRegex = args["regex"] === true;
+
+  const mismatch = searchCursorInputMismatch(resolvedCursor.state.original_input, {
+    queries: candidateQueries,
+    path: candidatePath,
+    lang: candidateLang,
+    regex: candidateRegex,
+  });
+  if (mismatch !== undefined) {
+    return toolStructuredError({
+      ok: false,
+      code: "invalid-input",
+      field: mismatch,
+      error: `search cursor continuation cannot change '${mismatch}'`,
+      detail: "cursor continuation accepts only budget overrides; re-issue the original request to change queries/scope",
+      retry: "call",
+    });
+  }
+
+  const cursorEcho = {
+    ...(cursorCwd !== undefined ? { cwd: cursorCwd } : {}),
+    ...(cursorLane !== "" ? { lane: cursorLane } : {}),
+    ...(cursorTaskHandle !== undefined ? { taskHandle: cursorTaskHandle } : {}),
+  };
+  const staged = stagedSearchRequestFromResolution(workspace, resolvedCursor, cursorEcho);
+
+  const restartNext = (): unknown => canonicalToolCall("search_files", {
+    action: "find",
+    ...staged.state.original_input,
+    ...(cursorCwd !== undefined ? { cwd: cursorCwd } : {}),
+    ...(cursorLane !== "" ? { lane: cursorLane } : {}),
+    ...(cursorTaskHandle !== undefined ? { task: { handle: cursorTaskHandle } } : {}),
+  });
+
+  // SOURCE REVISION FIRST, before any page decision (§5.2's rule, shared with
+  // the read cursor): every distinct path this snapshot references must
+  // still hash the same as when the match was found.
+  const distinctPaths = [...new Set(staged.state.matches.map((m) => m.path))];
+  const lineCache = new Map<string, string[]>();
+  for (const relPath of distinctPaths) {
+    const text = await readFileSafe(relPath, workspace);
+    const expected = staged.state.matches.find((m) => m.path === relPath)?.sha;
+    if (text === null || (expected !== undefined && shaOfText(text) !== expected)) {
+      return toolStructuredError({
+        ok: false,
+        code: "cursor-stale",
+        field: "cursor",
+        error: `the source revision of ${relPath} moved under this cursor`,
+        detail: "pages of one search request are never mixed across revisions; restart the original request",
+        retry: "call",
+        next: restartNext(),
+      });
+    }
+    lineCache.set(relPath, text.replace(/\r\n/gu, "\n").split("\n"));
+  }
+
+  // WALK IDENTITY: files added/removed under scope, or an ignore-rule change,
+  // both move the candidate-file fingerprint even when every ALREADY-FOUND
+  // file's own content is untouched.
+  const walkCheck = scanFullSearchSnapshot({
+    workspace,
+    queries: searchScanQueriesFor(candidateQueries, candidateRegex),
+    ...(candidatePath !== undefined ? { path: candidatePath } : {}),
+    ...(candidateLang !== undefined ? { lang: parseMcpLang(candidateLang) } : {}),
+  });
+  if (walkCheck.scopeFingerprint !== staged.state.scope_fingerprint) {
+    return toolStructuredError({
+      ok: false,
+      code: "cursor-stale",
+      field: "cursor",
+      error: "the set of files under this search's scope changed",
+      detail: "pages of one search request are never mixed across a changed walk; restart the original request",
+      retry: "call",
+      next: restartNext(),
+    });
+  }
+
+  const lineTextOf = (p: string, l: number): string | undefined => lineCache.get(p)?.[l - 1];
+  const declaredMaxBytes = typeof args["maxBytes"] === "number" ? (args["maxBytes"] as number) : undefined;
+  const budgetBytes = declaredMaxBytes !== undefined && declaredMaxBytes > 0
+    ? declaredMaxBytes
+    : staged.state.budget?.bytes ?? DEFAULT_SEARCH_FIND_PAGE_BUDGET_BYTES;
+  const itemsBudget = typeof args["limit"] === "number" && (args["limit"] as number) > 0
+    ? Math.floor(args["limit"] as number)
+    : undefined;
+  const reserve = searchPageEnvelopeReserve({
+    queries: candidateQueries,
+    path: candidatePath,
+    lang: candidateLang,
+    cwd: cursorCwd,
+    lane: cursorLane !== "" ? cursorLane : undefined,
+    budgetBytes: declaredMaxBytes,
+  });
+
+  let files: FindFileGroup[];
+  const existingPage = staged.state.pages.find((p) => p.cursor_state_version === resolvedCursor.cursorVersion);
+  if (existingPage !== undefined) {
+    staged.page = existingPage;
+    files = withMoreLines(staged.state, renderPageFiles(staged.state, existingPage, lineTextOf), existingPage.end);
+  } else {
+    const choice = chooseSearchPage(staged.state, lineTextOf, budgetBytes, reserve, itemsBudget);
+    if (!choice.ok) {
+      if (choice.reason === "budget-below-minimum") {
+        return toolStructuredError({
+          ok: false,
+          code: "budget-below-minimum",
+          field: "budget",
+          error: `budget ${budgetBytes} B cannot hold one whole line of this page plus its envelope`,
+          detail: "raise budget.bytes to at least required_min_bytes and re-send the same cursor",
+          required_min_bytes: choice.requiredMinBytes,
+          retry: "call",
+        });
+      }
+      // "complete": a resend after this request already fully delivered.
+      // Honest empty, non-truncated page — nothing is owed, nothing invented.
+      files = [];
+    } else {
+      const fixed = fixSearchPage(staged, resolvedCursor.cursorVersion, { start: choice.page.start, end: choice.page.end });
+      if (!fixed.ok && fixed.reason === "state-conflict") {
+        // §5.2's page fixing is a CAS (shared with the read side). A conflict
+        // this server could neither adopt nor prove within its bounded retry
+        // fails closed rather than serving a slice whose fixation is unknown
+        // — re-sending the SAME cursor then simply finds the winner's page.
+        return toolStructuredError({
+          ok: false,
+          code: "state-conflict",
+          field: "cursor",
+          error: "this search cursor's page could not be fixed under CAS",
+          detail: `another call is advancing the request this cursor addresses (cursor state version ${resolvedCursor.cursorVersion}); re-send the same cursor`,
+          retry: "call",
+        });
+      }
+      // A page ANOTHER writer fixed first is served as it stands (§5.2 never
+      // narrows or widens a fixed page), rendered from the record rather than
+      // from this call's own — now superseded — choice.
+      const settledPage = staged.page;
+      files = settledPage !== undefined && fixed.ok && fixed.reused
+        ? withMoreLines(staged.state, renderPageFiles(staged.state, settledPage, lineTextOf), settledPage.end)
+        : withMoreLines(staged.state, choice.page.files, choice.page.end);
+    }
+  }
+
+  const endIndex = staged.page?.end ?? staged.state.delivered;
+  const truncated = endIndex < staged.state.matches.length || staged.state.snapshot_capped;
+  const context = protocolCallContext();
+  if (context !== undefined) context.searchRequest = staged;
+
+  const body: Record<string, unknown> = {
+    query: candidateQueries.join(" OR "),
+    literal: !candidateRegex,
+    files,
+    total_files: staged.state.total_files ?? 0,
+    total_matches: staged.state.total_matches ?? 0,
+    truncated,
+  };
+  return toolOk(body);
+}
+
 /**
  * WS-P3 (DESIGN-v0.9 §6, "zero-content turns") checkless-`mode=closure`
  * content: a compact session-activity summary substituted for the old bare
@@ -8370,25 +9188,17 @@ const HANDLE_OVERRIDES_INPUT = Symbol("tokenlighten.read-file-handle-overrides")
 // actual caller's `unknown-arguments` refusal) never advertises `handle`.
 const LEGACY_PATHS_INTERNAL_HANDLE_INPUT = Symbol("tokenlighten.read-file-legacy-paths-internal-handle");
 
-// round-18A finding 3 (DESIGN-v0.15 ruling (u-1), 2026-09-03): same
-// module-private Symbol pattern as HANDLE_OVERRIDES_INPUT above. A canonical
-// `content:"full"` selects the legacy `mode="full"` dialect a few statements
-// below and is then DELETED from `args` (`delete args["content"]`, this
-// function's own tail) so it never leaks into the legacy dispatcher's
-// mode-based served-ledger accounting — but `forceContentServe`
-// (`args["content"] === "full" || args["allowFull"] === true ||
-// args["force_serve"] === true`, deep inside dispatchTool's read_file case)
-// reads `args["content"]` AFTER that delete on every canonical call, so it
-// is always `undefined` there and the branch is unreachable — only the
-// legacy dialect (`TL_LEGACY_INPUT=accept`) could ever satisfy it. Ruling
-// (u-1) and this server's own comments (`bookCsvArtifactServe`,
-// `csvArtifactServeReceipt`) promise `content:"full"` always returns bytes,
-// same as `force_serve`/`allowFull` — measured broken live
-// (`scratchpad/r18/m_force.mts`: a `content:"full"` repeat of an
-// already-served range still answers `read.receipt`, no bytes). This Symbol
-// carries the ORIGINAL canonical `content:"full"` fact across the delete, so
-// `forceContentServe` can see it under any dialect.
-const CANONICAL_CONTENT_FULL_INPUT = Symbol("tokenlighten.read-file-canonical-content-full");
+// DESIGN-v0.15 §6.3 (R6, 2026-09-07): round-18A finding 3 / ruling (u-1) is
+// SUPERSEDED. That ruling treated "a canonical `content:"full"` repeat still
+// answers `read.receipt` instead of bytes" as a bug and added a Symbol-keyed
+// marker (`CANONICAL_CONTENT_FULL_INPUT`, formerly declared here) carrying
+// the ORIGINAL canonical `content:"full"` fact across `normalizeCanonicalRequest`'s
+// `delete args["content"]` so `forceContentServe` could see it under any
+// dialect and force a resend. R6 makes that dedup the INTENDED behavior — see
+// `forceContentServe`'s own doc comment (deep inside dispatchTool's read_file
+// case) for the current contract — so the marker is removed rather than kept
+// unused: `content:"full"` no longer needs to survive the delete for
+// `forceContentServe`'s sake, and nothing else ever read it.
 
 // I-5 fix (v0.13.1 forensics, DESIGN-v0.13-plan.md §6 2026-08-30 entry;
 // bench/workflows/experiments/2026-08-30-v0131-forensics/{REPORT.md,terra/
@@ -8510,6 +9320,241 @@ const CANONICAL_ARRAY_FIELDS: readonly string[] = ["targets", "queries", "edits"
  * REAL, LIVE advertised schema (`advertisedPropertiesFor`), never a
  * hand-maintained mirror of it.
  */
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 §5 (R2) — the read-request cursor
+// ---------------------------------------------------------------------------
+
+/**
+ * The caller's own CANONICAL arguments, stashed before the legacy projection.
+ *
+ * `ProtocolCallContext.args` carries the POST-normalization dialect
+ * (`maxBytes`, `paths`, `mode`, …), which is exactly what a restart `next` may
+ * not contain under `TL_LEGACY_INPUT=refuse`. This marker is set in `callTool`,
+ * one statement before `normalizeCanonicalRequest` runs, so the request record
+ * can restate the ORIGINAL request in the one dialect the server is allowed to
+ * prescribe. Symbol-keyed and therefore invisible to `Object.keys` — the
+ * unknown-argument fence never sees it — but ENUMERABLE, so it survives the
+ * `{...input}` spreads between here and `dispatchTool` (same contract as
+ * `HANDLE_OVERRIDES_INPUT`).
+ */
+const CANONICAL_ORIGINAL_INPUT = Symbol("tokenlighten.read-file-canonical-original-input");
+
+/** The advertised `read_file` inputs a restart `next` may carry. */
+const CANONICAL_READ_INPUT_KEYS: readonly string[] =
+  ["query", "qref", "targets", "content", "select", "budget", "task", "scope"];
+
+/**
+ * A cursor call carries ONLY the cursor plus call scoping and the two
+ * sanctioned overrides.
+ *
+ * §5.2: "継続時に許す上書きは広告されたbudget調整とforce_serve等の再送指定に
+ * 限り、targets/query/contentの無言変更は拒否する" — the silent change is the
+ * thing being refused, so the refusal NAMES the field rather than letting the
+ * `oneOf` composition reject the call with no field to fix.
+ */
+function cursorCoInputRefusal(
+  canonical: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (canonical !== "read_file") return undefined;
+  if (typeof input["cursor"] !== "string" || input["cursor"] === "") return undefined;
+  const refuse = (field: string): Record<string, unknown> => ({
+    ok: false,
+    code: "invalid-input",
+    field,
+    error: `read_file cursor continuation cannot carry '${field}'`,
+    detail: "cursor continuation accepts only budget/task.force_serve overrides",
+    retry: "call",
+  });
+  for (const key of ["targets", "query", "qref", "content", "select", "scope"]) {
+    if (input[key] !== undefined) return refuse(key);
+  }
+  const task = input["task"];
+  if (task !== null && typeof task === "object" && !Array.isArray(task)) {
+    for (const key of ["epoch", "pull"]) {
+      if ((task as Record<string, unknown>)[key] !== undefined) return refuse(`task.${key}`);
+    }
+  }
+  return undefined;
+}
+
+/** Canonical-only projection of the caller's own input, minus call scoping. */
+function canonicalOriginalReadInput(raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of CANONICAL_READ_INPUT_KEYS) {
+    if (key === "budget") continue;
+    if (raw[key] !== undefined) out[key] = raw[key];
+  }
+  return out;
+}
+
+/**
+ * Stage the read request THIS call is serving, so `emit.ts`'s tail can settle
+ * D and mint the continuation cursor.
+ *
+ * Called from the SERVE sites, which are the only places that know the file's
+ * sha, its real line count and the window the caller actually asked for. A
+ * no-op when there is no protocol call context (direct unit-test use) or when
+ * the request is unaddressable. When a request is ALREADY staged — a RESUMED
+ * cursor call staged its own on the way in, or an EARLIER target in the SAME
+ * multi-target `paths[]`/`targets[]` batch already opened one — this appends
+ * the new target to it (`appendReadRequestTarget`, idempotent per path)
+ * instead of no-op'ing, so a multi-target request's Q spans every target the
+ * batch loop visits, not just the first (DESIGN-v0.15 §5.1).
+ */
+/**
+ * `stageReadRequestForServe` for a whole-file (`content:"full"`) serve.
+ *
+ * A thin wrapper so `buildFullServePayload` — which has no `args` of its own —
+ * stays a payload builder. Reads the inbound arguments off the per-call
+ * protocol context, which is the same source every family projector uses to
+ * synthesise a continuation from what the caller actually asked for.
+ */
+function stageFullReadRequest(
+  workspace: string,
+  filePath: string,
+  content: string,
+  fileSha: string,
+  keepComments: boolean,
+): void {
+  const context = protocolCallContext();
+  if (context === undefined || context.args === undefined) return;
+  const totalLines = countLines(content);
+  if (totalLines <= 0) return;
+  stageReadRequestForServe({
+    workspace,
+    relPath: filePath,
+    fileSha,
+    totalLines,
+    requested: [{ start: 1, end: totalLines }],
+    content: "full",
+    keepComments,
+    args: context.args as Record<string, unknown>,
+  });
+}
+
+function stageReadRequestForServe(input: {
+  workspace: string;
+  relPath: string;
+  fileSha: string;
+  totalLines: number;
+  requested: LineWindow[];
+  content: "full" | "auto" | "outline";
+  keepComments: boolean;
+  args: Record<string, unknown>;
+}): void {
+  if (input.totalLines <= 0 || input.requested.length === 0) return;
+  const context = protocolCallContext();
+  if (context === undefined) return;
+  if (context.readRequest !== undefined) {
+    // DESIGN-v0.15 §5.1: a multi-target `content:"full"` call's Q must span
+    // EVERY target, not just the first one this call's producer loop reached.
+    // `server.ts`'s `mode=full` `paths[]` batch calls this once per path in
+    // request order; the first call opens the request (below) and every
+    // later call for a NEW path in the SAME dispatch appends to it instead of
+    // silently staying single-target (a no-op here would repeat the
+    // "abandons every target after the first" defect this append closes).
+    appendReadRequestTarget(context.readRequest, {
+      path: input.relPath,
+      sha: input.fileSha,
+      totalLines: input.totalLines,
+      representation: { content: input.content, comments: input.keepComments ? "keep" : "elide" },
+      requested: input.requested,
+    });
+    return;
+  }
+  const raw = (input.args as Record<PropertyKey, unknown>)[CANONICAL_ORIGINAL_INPUT];
+  const canonical = raw !== null && typeof raw === "object" && !Array.isArray(raw)
+    ? { ...(raw as Record<string, unknown>) }
+    : {};
+  // A LEGACY-dialect caller (only reachable with `TL_LEGACY_INPUT=accept`)
+  // leaves nothing canonical to restate, so the restart `next` is synthesized
+  // from what this serve knows. Either way `original_input` is canonical: the
+  // server never prescribes a call its own default dispatch would refuse.
+  if (canonical["targets"] === undefined && canonical["query"] === undefined && canonical["qref"] === undefined) {
+    canonical["targets"] = [{ path: input.relPath }];
+    canonical["content"] = input.content;
+  }
+  const budgetBytes = typeof input.args["maxBytes"] === "number" ? input.args["maxBytes"] : undefined;
+  const budgetTokens = typeof input.args["maxTokens"] === "number" ? input.args["maxTokens"] : undefined;
+  const lane = currentSessionLane();
+  const taskHandle = typeof input.args["task_handle"] === "string" ? input.args["task_handle"] : undefined;
+  const cwd = typeof input.args["cwd"] === "string" ? input.args["cwd"] : undefined;
+  const staged = openReadRequest({
+    workspaceRoot: input.workspace,
+    ...(lane !== "" ? { lane } : {}),
+    ...(taskHandle !== undefined ? { taskHandle } : {}),
+    originalInput: canonical,
+    ...(budgetBytes !== undefined || budgetTokens !== undefined
+      ? {
+          budget: {
+            ...(budgetBytes !== undefined ? { bytes: budgetBytes } : {}),
+            ...(budgetTokens !== undefined ? { tokens: budgetTokens } : {}),
+          },
+        }
+      : {}),
+    forceServeOrigin: input.args["force_serve"] === true,
+    echo: {
+      ...(cwd !== undefined ? { cwd } : {}),
+      ...(lane !== "" ? { lane } : {}),
+      ...(taskHandle !== undefined ? { taskHandle } : {}),
+    },
+    targets: [{
+      path: input.relPath,
+      sha: input.fileSha,
+      totalLines: input.totalLines,
+      representation: { content: input.content, comments: input.keepComments ? "keep" : "elide" },
+      requested: input.requested,
+    }],
+  });
+  if (staged !== undefined) context.readRequest = staged;
+}
+
+/**
+ * DESIGN-v0.15 §6.2 (R4) — the parent-full-request exception, for every
+ * `servedContentReceipt` call site.
+ *
+ * A `code-unchanged` receipt normally ends the request it answers with no
+ * `next` at all (§3.3's "既読通知の終端": the caller's OWN window is
+ * satisfied, and "the rest of the FILE is unread" is `summary.unserved`'s
+ * business, never a reason for a `next`). The one exception is a page — by
+ * cursor, or by an ordinary explicit range/symbol read that happens to land
+ * on it — of a still-open full/range/batch read request for the SAME path:
+ * that request's own continuation duty survives this call, so the receipt
+ * must still carry it forward while D ≠ ∅.
+ *
+ * `relPath`/`fileSha` name what THIS call just confirmed held; `servedWindows`
+ * is the EXACT window(s) (1-based, file line coordinates) this call confirmed
+ * for that path — finding 8: without it, `openParentReadRequest` had nothing
+ * to test the confirmed window against, so ANY read of the same (path, sha)
+ * attached the parent's cursor, including one that never asked about the
+ * parent's own pages (e.g. an unrelated symbol elsewhere in the file). `args`
+ * is the inbound request this call arrived with, the same source
+ * `stageReadRequestForServe` reads lane/task/cwd binding from. Returns
+ * `undefined` when no open parent claims this exact window — the ordinary,
+ * independent-read case — never a fabricated continuation.
+ */
+function openParentReceiptContinuation(
+  workspace: string,
+  relPath: string,
+  fileSha: string,
+  args: Record<string, unknown>,
+  servedWindows: readonly LineWindow[],
+): ToolCall | undefined {
+  const lane = currentSessionLane();
+  const taskHandle = typeof args["task_handle"] === "string" ? args["task_handle"] : undefined;
+  const cwd = typeof args["cwd"] === "string" ? args["cwd"] : undefined;
+  const binding = { ...(lane !== "" ? { lane } : {}), ...(taskHandle !== undefined ? { taskHandle } : {}) };
+  const staged = openParentReadRequest(workspace, relPath, fileSha, binding, {
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(lane !== "" ? { lane } : {}),
+    ...(taskHandle !== undefined ? { taskHandle } : {}),
+  }, servedWindows);
+  if (staged === undefined) return undefined;
+  const cursor = mintReadCursor(staged);
+  return cursor === undefined ? undefined : readRequestCursorCall(staged, cursor);
+}
+
 export function normalizeCanonicalRequest(canonical: string, input: Record<string, unknown>): Record<string, unknown> {
   // FX-2: rescue JSON-stringified canonical fields BEFORE `hasCanonicalShape`
   // (below) or anything else inspects them — `hasCanonicalShape` itself is
@@ -8695,14 +9740,10 @@ export function normalizeCanonicalRequest(canonical: string, input: Record<strin
     // scope is the single home for closure selection on every tool.
     if (scopeValue?.["includeClosure"] !== undefined) args["includeClosure"] = scopeValue["includeClosure"];
     if (scopeValue?.["surfaceRoles"] !== undefined) args["surfaceRoles"] = scopeValue["surfaceRoles"];
-    // round-18A finding 3: stash the ORIGINAL canonical content:"full" fact
-    // under a Symbol key (unforgeable from the wire, survives the `{...args}`
-    // spreads between here and dispatchTool — see CANONICAL_CONTENT_FULL_INPUT's
-    // doc comment) BEFORE the delete below erases it, so `forceContentServe`
-    // can still see it deep inside dispatchTool's read_file case.
-    if (args["content"] === "full") {
-      Object.defineProperty(args, CANONICAL_CONTENT_FULL_INPUT, { value: true, enumerable: true, configurable: true });
-    }
+    // DESIGN-v0.15 §6.3 (R6): round-18A finding 3's Symbol-keyed carry-across-
+    // the-delete marker is removed — `forceContentServe` (dispatchTool's
+    // read_file case) no longer needs to know the ORIGINAL canonical
+    // `content:"full"` fact, because that fact no longer forces anything.
     // `content` selects the legacy mode above; do not leak it into the
     // legacy dispatcher, whose served-ledger accounting is mode-based.
     delete args["content"];
@@ -9031,35 +10072,305 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       if (!commentsMode.ok) return toolError("comments must be elide or keep", { code: "invalid-input" });
       const keepComments = commentsMode.keep;
 
-      // W1 served-content receipts: an EXPLICIT request for bytes always wins
-      // over "you already have this". A caller that lost its context to
-      // compaction genuinely does not hold what the session ledger says it was
-      // served, so `content:"full"` / `allowFull:true` force a normal body
-      // serve on every receipt-eligible read path (the receipt's own `note`
-      // states this — see SERVED_CONTENT_RECEIPT_NOTE).
+      // DESIGN-v0.15 §6.3 (R6) MIGRATION NOTE.
       //
-      // PI-09 close-out: `force_serve:true` is the EXPLICIT spelling of that
-      // same request. `content:"full"`/`allowFull:true` mean "serve the whole
-      // file" and force a serve only as a side effect; `force_serve` says the
-      // thing itself, at any mode and any range, and is the recovery a
-      // context-compacted caller can execute without also changing WHAT it
-      // asked for. Folded into the one existing lever so every receipt-
-      // eligible read path honours it by construction rather than by a list.
+      // BEFORE this fix, canonical `content:"full"` was folded into this same
+      // boolean (via the `CANONICAL_CONTENT_FULL_INPUT` marker
+      // `normalizeCanonicalRequest` stamped before deleting `args["content"]`,
+      // so the fact survived down to here), so simply asking for the FULL
+      // representation of a file ALSO forced a resend past every ledger/
+      // receipt/delta shortcut on the read path — a caller could not say "I
+      // want the whole file" without also saying "and re-send it even if I
+      // already hold it", and a byte-identical repeated `content:"full"` read
+      // could never dedup into a receipt (R6's headline defect).
       //
-      // round-18A finding 3 (ruling (u-1)): `args["content"] === "full"` is
-      // dead on the canonical dialect — normalizeCanonicalRequest deletes
-      // `args["content"]` (to keep it out of the legacy dispatcher's
-      // mode-based served-ledger accounting) several statements before this
-      // runs, so only the legacy dialect could ever reach it directly. The
-      // Symbol-keyed marker set right before that delete
-      // (CANONICAL_CONTENT_FULL_INPUT — unforgeable from the wire, same
-      // pattern as HANDLE_OVERRIDES_INPUT) restores the fact for the
-      // canonical path so `content:"full"` forces a real serve there too,
-      // exactly as `allowFull`/`force_serve` already do.
-      const forceContentServe = args["content"] === "full"
-        || (args as Record<PropertyKey, unknown>)[CANONICAL_CONTENT_FULL_INPUT] === true
-        || args["allowFull"] === true
+      // AFTER this fix, `content:"full"`/`content:"auto"`/`content:"outline"`
+      // are purely a REPRESENTATION selector, judged in the SAME served-range
+      // ledger as any other window by current sha + needed range +
+      // representation: fully already-read -> receipt (§6.2's `next` rule
+      // still applies to it, unchanged by this variable); partially read ->
+      // only the unread windows (the existing, previously-unreachable-for-
+      // canonical-full `buildLedgerDifferenceFullPayload`/`fullCoverage`
+      // branches below); changed sha -> current content. Only two things may
+      // still force a resend regardless of what the ledger holds:
+      //
+      //   - `task.force_serve:true` (`force_serve` here) — the ONE resend
+      //     guarantee DESIGN-v0.15 §3.3/§6.3 name ("force_serveは有効な再読
+      //     要求でdedupを必ず迂回する"), for full/range/symbol/cursor reads
+      //     alike.
+      //   - `allowFull:true` — kept as a second forcing input, UNCONDITIONALLY
+      //     (not only under `TL_LEGACY_INPUT=accept`): `allowFull`'s own
+      //     advertised purpose is raising the full-read BYTE CAP
+      //     (`READ_FULL_CAP_BYTES_ALLOW_FULL`), and a caller asking for a
+      //     higher ceiling is asking for the ACTUAL bytes back, never a
+      //     receipt a normal cap would already have permitted — so treating
+      //     it as a resend request too costs nothing and matches
+      //     `servedReceipts.spec.ts`'s pinned `allowFull:true forces a normal
+      //     serve past an otherwise-qualifying receipt` cases (which reach
+      //     this via the LEGACY `mode`/`path` dialect under
+      //     `TL_LEGACY_INPUT=accept`, but the input itself — `budget.
+      //     allowFull` — is canonical and not gated by that flag). The legacy
+      //     `mode:"full"` dialect keeps ITS existing meaning too, but only
+      //     because `mode:"full"` alone was never a forcing input on its
+      //     own — it always needed `allowFull`/`force_serve` alongside it,
+      //     which this boolean still honors unconditionally.
+      //
+      // `SERVED_CONTENT_RECEIPT_NOTE` (server.ts, above) is updated to match:
+      // it no longer tells a caller that `content:"full"` forces the bytes.
+      const forceContentServe = args["allowFull"] === true
         || args["force_serve"] === true;
+
+      // -----------------------------------------------------------------------
+      // DESIGN-v0.15 §5.2 (R2): CURSOR CONTINUATION.
+      //
+      // A cursor call is not a new read — it is the NEXT PAGE of a read the
+      // caller already made. Resolved here, before mode resolution, and then
+      // REWRITTEN into the ordinary single-file window serve below, so the
+      // page travels the same code as any other slice: same served-range
+      // ledger, same receipts, same elision accounting. The only thing the
+      // cursor adds is memory of the ORIGINAL request, which `emit.ts`'s tail
+      // turns back into the one canonical `limit.next`.
+      // -----------------------------------------------------------------------
+      const rawCursor = args["cursor"];
+      if (typeof rawCursor === "string" && rawCursor !== "") {
+        delete args["cursor"];
+        const cursorLane = currentSessionLane();
+        const cursorTaskHandle = typeof args["task_handle"] === "string" ? args["task_handle"] : undefined;
+        const cursorCwd = typeof args["cwd"] === "string" ? args["cwd"] : undefined;
+        const resolvedCursor = resolveReadCursor(rawCursor, workspace, {
+          ...(cursorLane !== "" ? { lane: cursorLane } : {}),
+          ...(cursorTaskHandle !== undefined ? { taskHandle: cursorTaskHandle } : {}),
+        });
+        if (!resolvedCursor.ok) {
+          // NO `next`. The server holds no state for this token, so it cannot
+          // name the request to restart — only the caller can restate it
+          // (§5.2: "期限切れ・状態喪失なら明示的に再開始を要求する").
+          return toolStructuredError({
+            ok: false,
+            code: "cursor-invalid",
+            field: "cursor",
+            error: "this read cursor is not usable here",
+            detail: `${resolvedCursor.reason}; restart the original request`,
+            retry: "call",
+          });
+        }
+        const cursorEcho = {
+          ...(cursorCwd !== undefined ? { cwd: cursorCwd } : {}),
+          ...(cursorLane !== "" ? { lane: cursorLane } : {}),
+          ...(cursorTaskHandle !== undefined ? { taskHandle: cursorTaskHandle } : {}),
+        };
+        const staged = stagedFromResolution(workspace, resolvedCursor, cursorEcho);
+
+        // SOURCE REVISION FIRST, BEFORE ANY PAGE DECISION. §5.2: "source
+        // revisionが一致しない場合は新旧本文を混ぜずrefusalと原要求を再開する
+        // 正準nextを返す" — the restart `next` is the request's own canonical
+        // original input, never a narrowed slice of it.
+        const cursorContents = new Map<string, string>();
+        for (const target of staged.state.targets) {
+          const text = await readFileSafe(target.path, workspace);
+          if (text === null || shaOfText(text) !== target.sha) {
+            return toolStructuredError({
+              ok: false,
+              code: "cursor-stale",
+              field: "cursor",
+              error: `the source revision of ${target.path} moved under this cursor`,
+              detail: "pages of one request are never mixed across revisions; restart the request",
+              retry: "call",
+              next: canonicalToolCall("read_file", {
+                ...staged.state.original_input,
+                ...(cursorCwd !== undefined ? { cwd: cursorCwd } : {}),
+                ...(cursorLane !== "" ? { lane: cursorLane } : {}),
+                ...(cursorTaskHandle !== undefined ? { task: { handle: cursorTaskHandle } } : {}),
+              }),
+            });
+          }
+          cursorContents.set(target.path, text);
+        }
+
+        // -------------------------------------------------------------------
+        // DESIGN-v0.15 §5.2: "原要求のbudgetは状態で継承する".
+        //
+        // A minted cursor call carries NO `budget` — a follower runs `next`
+        // verbatim, which is exactly what AGENTS.md tells it to do. The
+        // inherited budget used to reach `choosePage` ONLY, so the page was
+        // SIZED for 1024 B while `emit.ts` measured the finalized response
+        // against `context.args.maxBytes`/`maxTokens` — absent on a
+        // cursor-only call — and therefore against the much larger calibrated
+        // ceiling. The same data at an inherited 1024 B shipped at ~1193 B.
+        //
+        // Restored onto THIS CALL'S ARGS, in the same `maxBytes`/`maxTokens`
+        // slots `mapCanonicalBudget` fills for a declared `budget`, and before
+        // any dispatch reaches the producer — so every consumer of the
+        // declared budget (the producer's own ceiling, the wire ladder, the
+        // post-rewrite safety net) sees the one number the caller actually
+        // asked for. An EXPLICIT `budget` on the continuation call overrides
+        // it (§5.2's sanctioned override) and BECOMES the request's inherited
+        // budget for every later page.
+        // -------------------------------------------------------------------
+        const declaredCursorBytes = typeof args["maxBytes"] === "number" && args["maxBytes"] > 0
+          ? Math.floor(args["maxBytes"])
+          : undefined;
+        const declaredCursorTokens = typeof args["maxTokens"] === "number" && args["maxTokens"] > 0
+          ? Math.floor(args["maxTokens"])
+          : undefined;
+        if (declaredCursorBytes !== undefined || declaredCursorTokens !== undefined) {
+          staged.state = {
+            ...staged.state,
+            budget: {
+              ...(declaredCursorBytes !== undefined ? { bytes: declaredCursorBytes } : {}),
+              ...(declaredCursorTokens !== undefined ? { tokens: declaredCursorTokens } : {}),
+            },
+          };
+        } else {
+          const inherited = staged.state.budget;
+          if (inherited?.bytes !== undefined) args["maxBytes"] = inherited.bytes;
+          if (inherited?.tokens !== undefined) args["maxTokens"] = inherited.tokens;
+        }
+        // The page-sizing budget is the TIGHTER of the two, converted through
+        // the same ratio `emit.ts` uses, so `choosePage` and the wire ladder
+        // are bounded by one number rather than two.
+        const effectiveCursorBytes = staged.state.budget?.bytes;
+        const effectiveCursorTokenBytes = estimateBytesFromTokens(staged.state.budget?.tokens);
+        const cursorBudget = effectiveCursorBytes !== undefined && effectiveCursorTokenBytes !== undefined
+          ? Math.min(effectiveCursorBytes, effectiveCursorTokenBytes)
+          : effectiveCursorBytes
+            ?? effectiveCursorTokenBytes
+            ?? defaultResponseByteCeiling
+            ?? FULL_SERVE_CHUNK_BYTES;
+        const linesOf = (path: string): string[] | undefined => {
+          const text = cursorContents.get(path);
+          return text === undefined ? undefined : text.replace(/\r\n/gu, "\n").split("\n");
+        };
+
+        // §5.2 forbids narrowing an ALREADY-FIXED page, so a budget that
+        // cannot hold one is answered with the floor, never a shrunken page.
+        // Applies to every page THIS CALL did not itself choose — a plain
+        // resend, and (defect 4) a page a concurrent writer fixed first and
+        // this call therefore REUSED.
+        const fixedPageFloorRefusal = (
+          page: { windows: Array<{ path: string; window: { start: number; end: number } }> },
+        ): ReturnType<typeof toolStructuredError> | undefined => {
+          const pagePathFixed = page.windows[0]?.path;
+          const linesFixed = pagePathFixed === undefined ? undefined : linesOf(pagePathFixed);
+          if (pagePathFixed === undefined || linesFixed === undefined) return undefined;
+          // MEASURED THE WAY THE WIRE MEASURES IT (`wireLineCostBytes`), the
+          // same estimator `choosePage` fixed the page with — otherwise the
+          // floor this names and the boundary that was chosen disagree on
+          // every line carrying a quote or a backslash.
+          const required = wireWindowsCostBytes(
+            linesFixed,
+            page.windows.filter((entry) => entry.path === pagePathFixed).map((entry) => entry.window),
+          )
+            + PAGE_ENVELOPE_RESERVE_BYTES
+            + Buffer.byteLength(pagePathFixed, "utf8")
+            + (cursorCwd === undefined ? 0 : Buffer.byteLength(cursorCwd, "utf8"));
+          if (cursorBudget >= required) return undefined;
+          return toolStructuredError({
+            ok: false,
+            code: "budget-below-minimum",
+            field: "budget",
+            error: `budget ${cursorBudget} B cannot hold this already-fixed page`,
+            detail: "a fixed page is never narrowed; raise budget.bytes to required_min_bytes",
+            required_min_bytes: required,
+            retry: "call",
+          });
+        };
+
+        // THE PAGE, FIXED ONCE. A resend whose cursor already named a page gets
+        // that page back verbatim, whatever budget it declares.
+        let cursorPage = staged.state.pages.find(
+          (page) => page.cursor_state_version === resolvedCursor.cursorVersion,
+        );
+        if (cursorPage === undefined) {
+          const choice = choosePage(staged.state, linesOf, cursorBudget, cursorCwd);
+          if (!choice.ok && choice.reason === "budget-below-minimum") {
+            return toolStructuredError({
+              ok: false,
+              code: "budget-below-minimum",
+              field: "budget",
+              error: `budget ${cursorBudget} B cannot hold one whole line of this page plus its envelope`,
+              detail: "raise budget.bytes to at least required_min_bytes and re-send the same cursor",
+              required_min_bytes: choice.requiredMinBytes,
+              retry: "call",
+            });
+          }
+          if (choice.ok) {
+            const fixed = fixPage(staged, resolvedCursor.cursorVersion, choice);
+            if (!fixed.ok && fixed.reason === "state-conflict") {
+              // DESIGN-v0.15 §5.2's page fixing is a CAS, and this server
+              // could neither prove the boundary nor adopt a proven one
+              // within its bounded retry. Serving a page whose fixation is
+              // unknown is exactly the lost update that let two concurrent
+              // calls on one cursor return two different windows, so this
+              // fails closed instead. RE-SENDING THE SAME CURSOR recovers:
+              // the winning writer's page is then simply found and reused.
+              return toolStructuredError({
+                ok: false,
+                code: "state-conflict",
+                field: "cursor",
+                error: "this read cursor's page could not be fixed under CAS",
+                detail: `another call is advancing the request this cursor addresses (cursor state version ${resolvedCursor.cursorVersion}); re-send the same cursor`,
+                retry: "call",
+              });
+            }
+            if (fixed.ok) {
+              cursorPage = fixed.page;
+              // A REUSED page was chosen by somebody else's budget.
+              if (fixed.reused) {
+                const refusal = fixedPageFloorRefusal(fixed.page);
+                if (refusal !== undefined) return refusal;
+              }
+            }
+          } else {
+            // D became empty between pages (another read in this lane covered
+            // it). Re-address the LAST page so the ordinary serve path answers
+            // with its own honest `read.receipt`; the emit tail then drops the
+            // continuation because nothing is owed (§3.3, §6.2).
+            cursorPage = staged.state.pages[staged.state.pages.length - 1];
+          }
+        } else {
+          const refusal = fixedPageFloorRefusal(cursorPage);
+          if (refusal !== undefined) return refusal;
+        }
+        if (cursorPage === undefined) {
+          return toolStructuredError({
+            ok: false,
+            code: "cursor-invalid",
+            field: "cursor",
+            error: "this read cursor names no servable page",
+            detail: "unknown; restart the original request",
+            retry: "call",
+          });
+        }
+
+        // REWRITE INTO THE ORDINARY WINDOW SERVE. One path per page (see
+        // `readRequestStore.ts`'s "ONE PAGE, ONE PATH" note).
+        const pagePath = cursorPage.windows[0]!.path;
+        const pageWindows = cursorPage.windows
+          .filter((entry) => entry.path === pagePath)
+          .map((entry) => entry.window);
+        delete args["handle"];
+        delete args["handles"];
+        delete args["symbol"];
+        args["path"] = pagePath;
+        if (pageWindows.length === 1) {
+          args["range"] = `${pageWindows[0]!.start}-${pageWindows[0]!.end}`;
+          delete args["ranges"];
+        } else {
+          args["ranges"] = windowStrings(pageWindows);
+          delete args["range"];
+        }
+        args["mode"] = "slice";
+        mode = "slice";
+        // finding 12: record THIS call's own fixed page so the emit tail's
+        // settle can clip its `S` contribution to what the finalized wire
+        // body actually ships, instead of trusting `cursorPage.windows`
+        // wholesale — see `readRequestStore.ts`'s `settledTargets` doc
+        // comment ("CURRENT PAGE" branch).
+        staged.page = cursorPage;
+        const cursorContext = protocolCallContext();
+        if (cursorContext !== undefined) cursorContext.readRequest = staged;
+      }
 
       // -----------------------------------------------------------------------
       // Handle resolution: when args.handle is provided, resolve it to
@@ -9916,6 +11227,14 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           )
         );
       if (archiveTaskRequested && taskArchivePath) {
+        // DESIGN-v0.15 §8.2 (R7 Part B): a single-path task_pack query over a
+        // zip auto-detects an archive task pack purely from the extension —
+        // no advertised full-only field is present for the schema gate to
+        // catch. Gate the auto-detected capability itself.
+        const archiveTaskSurfaceRefusal = officeOrArchiveSurfaceRefusal();
+        if (archiveTaskSurfaceRefusal !== undefined) {
+          return toolStructuredError({ ok: false, code: archiveTaskSurfaceRefusal.code, error: archiveTaskSurfaceRefusal.error });
+        }
         const archiveBytes = await readBytesSafe(taskArchivePath, workspace);
         if (archiveBytes === null) {
           return toolStructuredError({
@@ -9959,6 +11278,18 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
 
       const outerArchivePath =
         archiveSelector?.member ? undefined : archiveSelector?.path ?? resolvedPath;
+      // DESIGN-v0.15 §8.2 (R7 Part B): a bare `mode=auto` read of a `.zip`
+      // path auto-detects archive-manifest handling purely from the
+      // extension — gate the capability once, ahead of both branches below
+      // (the manifest success path and the "archive-read-only-container"
+      // refusal further down, whose own `next` would otherwise suggest
+      // `mode:"archive"`, a shape this surface can never accept).
+      const outerArchiveSurfaceRefusal = outerArchivePath && isSupportedArchivePath(outerArchivePath)
+        ? officeOrArchiveSurfaceRefusal()
+        : undefined;
+      if (outerArchiveSurfaceRefusal !== undefined) {
+        return toolStructuredError({ ok: false, code: outerArchiveSurfaceRefusal.code, error: outerArchiveSurfaceRefusal.error });
+      }
       if (
         outerArchivePath &&
         isSupportedArchivePath(outerArchivePath) &&
@@ -10636,6 +11967,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             : heldLabels.length <= 2
               ? heldLabels.join(" + ")
               : `${heldLabels[0]!} +${heldLabels.length - 1} more`;
+          const sectionsParentContinuation = openParentReceiptContinuation(
+            workspace, resolvedPath, rawFileSha, args,
+            parseWindows(rawSections.map((section) => section.range)),
+          );
           if (sectionQueries.length === 1 && items.length === 1) {
             return toolOk(attachSupply(servedContentReceipt({
               mode: "markdown-section",
@@ -10647,6 +11982,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(sectionServedBy !== undefined ? { servedBy: sectionServedBy } : {}),
               extra: { section: items[0]!["section"], served_range_ledger: sectionLedger },
               workspace,
+              ...(sectionsParentContinuation !== undefined ? { parentContinuation: sectionsParentContinuation } : {}),
             }), workspace));
           }
           const fileHandle = handleTable.upsert({
@@ -10665,6 +12001,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             ...(sectionServedBy !== undefined ? { servedBy: sectionServedBy } : {}),
             extra: { sections: items.map((item) => item["section"]), served_range_ledger: sectionLedger },
             workspace,
+            ...(sectionsParentContinuation !== undefined ? { parentContinuation: sectionsParentContinuation } : {}),
           }), workspace));
         }
 
@@ -10952,6 +12289,33 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const content = await readFileSafe(slicePath, workspace);
         if (content === null) return toolError(`File not found or outside workspace: ${slicePath}`, { code: "not-found" });
 
+        // DESIGN-v0.15 §5.1 (R2): an explicit window request has a Q too — the
+        // windows the caller named — and §5.1 requires "複数targets、離れた
+        // ranges、空ファイル、最終改行、CRLF、日本語・長い行でも同じ定義を使う".
+        // A no-op on a cursor call (that one staged its own request on the way
+        // in) and on a request that is fully delivered (nothing is persisted).
+        {
+          const requestedWindows = hasRangesBatch
+            ? parseWindows(rangesArg)
+            : resolvedRange !== undefined ? parseWindows([resolvedRange]) : [];
+          if (requestedWindows.length > 0) {
+            const sliceTotalLines = countLines(content);
+            stageReadRequestForServe({
+              workspace,
+              relPath: slicePath,
+              fileSha: shaOfText(content),
+              totalLines: sliceTotalLines,
+              requested: requestedWindows.map((window) => ({
+                start: Math.min(window.start, Math.max(1, sliceTotalLines)),
+                end: Math.min(window.end, Math.max(1, sliceTotalLines)),
+              })),
+              content: "auto",
+              keepComments,
+              args,
+            });
+          }
+        }
+
         // W-BATCH-HINT (a): snapshot how many served-range CLUSTERS this
         // session already holds for slicePath BEFORE any of this call's own
         // recordServedRange calls (deep in the branches below, part of the
@@ -11182,6 +12546,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               : heldLabels.length <= 2
                 ? heldLabels.join(" + ")
                 : `${heldLabels[0]!} +${heldLabels.length - 1} more`;
+            const batchParentContinuation = openParentReceiptContinuation(
+              workspace, slicePath, rawFileSha, args,
+              parseWindows(batchData.segments.map((segment) => segment.range)),
+            );
             return toolOk(attachSupply(servedContentReceipt({
               mode: "slice",
               handle: batchData.handle,
@@ -11192,6 +12560,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(batchServedBy !== undefined ? { servedBy: batchServedBy } : {}),
               extra: { served_range_ledger: batchLedger },
               workspace,
+              ...(batchParentContinuation !== undefined ? { parentContinuation: batchParentContinuation } : {}),
             }), workspace));
           }
 
@@ -11646,6 +13015,21 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             const coveredBy = sliceCoverageVerdict !== undefined
               ? coveredByField(sliceCoverageVerdict)
               : undefined;
+            // NOTE: the lookup key is `rawFileSha` (this branch's own
+            // ledger-facing whole-file sha, the SAME value `rangeLedger`/
+            // `rangeServedBy` above were computed against — see this
+            // function's `const rawFileSha = shaOfText(content)`), NOT
+            // `sliceData.sha`: `resolveSlice`'s own `.sha` can diverge from
+            // the file's CURRENT content hash (observed live while
+            // implementing R4 — a plain path+range re-read of a page the
+            // parent's cursor had already served came back with a DIFFERENT
+            // `sliceData.sha` than `shaOfText(content)`/`rawFileSha` for the
+            // identical, unchanged file), which would make an open-parent
+            // lookup keyed on it spuriously miss every time.
+            const sliceParentContinuation = openParentReceiptContinuation(
+              workspace, slicePath, rawFileSha, args,
+              parseWindows(sliceData.range.split(",")),
+            );
             return toolOk(attachSupply(servedContentReceipt({
               mode: "slice",
               handle: sliceData.handle,
@@ -11654,6 +13038,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               sha: shortSha(sliceData.sha),
               ledger: rangeLedger,
               ...(rangeServedBy !== undefined ? { servedBy: rangeServedBy } : {}),
+              ...(sliceParentContinuation !== undefined ? { parentContinuation: sliceParentContinuation } : {}),
               extra: {
                 served_range_ledger: rangeLedger,
                 ...(coveredBy !== undefined ? { covered_by: coveredBy } : {}),
@@ -11913,6 +13298,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // mode=artifact — structured office document reads (v0.7).
       // -----------------------------------------------------------------------
       if (mode === "artifact") {
+        // DESIGN-v0.15 §8.2 (R7 Part B): `mode` stays a generic legacy key (see
+        // FULL_ONLY_LEGACY_KEYS's doc comment) — a legacy caller can send
+        // `mode:"artifact"` directly, bypassing the `select`-based schema
+        // gate a canonical caller would hit. Gate the value here too.
+        const artifactSurfaceRefusal = officeOrArchiveSurfaceRefusal();
+        if (artifactSurfaceRefusal !== undefined) return toolError(artifactSurfaceRefusal.error, { code: artifactSurfaceRefusal.code });
         const artifactPath = resolvedPath ?? "";
         if (!artifactPath) return toolError("path is required for mode=artifact", { code: "invalid-input" });
         const ext = (artifactPath.toLowerCase().match(/\.([^.\\/]+)$/)?.[1]) ?? "";
@@ -12354,7 +13745,6 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           defaultResponseByteCeiling,
         );
         let fullBatchBytesSoFar = 0;
-        let fullBatchCapHit = false;
         for (const requestedEntry of requestedEntries) {
           const p = requestedEntry.path;
           if (!p) {
@@ -12363,12 +13753,45 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               : { path: p, reason: "path is required" });
             continue;
           }
-          if (fullBatchCapHit) {
-            omitted.push({ path: p, reason: "aggregate response byte cap reached" });
-            continue;
-          }
+          // DESIGN-v0.15 §5.1/§5.3 (R2): EVERY requested path is resolved —
+          // never skipped unread once an earlier oversized item trips the
+          // ceiling. `resolveFullReadForPath` is what stages this path's
+          // whole-file window into the batch's Q (via `buildFullServePayload`
+          // -> `stageFullReadRequest` -> `appendReadRequestTarget`), so
+          // skipping the call the way the old sticky "cap already hit, skip
+          // every path after" gate did silently dropped every later target
+          // from Q too — the exact defect `r2-batch-coverage` pins (a 3-target
+          // batch whose 2nd/3rd targets, both tiny, never entered Q at all
+          // because the 1st target alone already exceeded the budget).
           const fr = await resolveFullReadForPath(workspace, p, allowFullRequested, keepComments, officeOpts);
           if (fr.ok) {
+            const itemBytes = fullBatchCeiling !== undefined
+              ? Buffer.byteLength(JSON.stringify(fr.data), "utf8")
+              : 0;
+            // ADMISSION, PER ITEM — not a sticky "everything after the first
+            // overflow is omitted" flag. A small target (this batch's crlf.ts/
+            // empty.ts) still ships on THIS response even when an earlier,
+            // larger one (statusBar.ts) already used or alone exceeds the
+            // ceiling; the larger one is deferred to its own page(s) via the
+            // Q this call just staged for it, never silently lost.
+            //   "cap-exceeded"  — this ONE item's own wire cost already
+            //     exceeds the WHOLE declared ceiling; no admission order
+            //     could have shipped it on this response.
+            //   "aggregate response byte cap reached" — it would have fit a
+            //     fresh ceiling, just not what THIS response has left.
+            // Mirrors `readCodePack.ts`'s established two-tier vocabulary for
+            // the same distinction.
+            const exceedsFresh = fullBatchCeiling !== undefined && itemBytes > fullBatchCeiling;
+            const exceedsRemaining = !exceedsFresh
+              && fullBatchCeiling !== undefined
+              && fullBatchBytesSoFar + itemBytes > fullBatchCeiling;
+            if (exceedsFresh || exceedsRemaining) {
+              omitted.push({
+                path: p,
+                reason: exceedsFresh ? "cap-exceeded" : "aggregate response byte cap reached",
+              });
+              continue;
+            }
             // Each item carries the same fields a single-path mode=full
             // response would (content + fullFileExpansion:true on success, or
             // a downgraded skeleton/artifact-redirect shape carrying its own
@@ -12388,10 +13811,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               const bookable = await readFileSafe(p, workspace);
               if (bookable !== null) bookFullFileExpansionServe(workspace, p, bookable, keepComments);
             }
-            if (fullBatchCeiling !== undefined) {
-              fullBatchBytesSoFar += Buffer.byteLength(JSON.stringify(fr.data), "utf8");
-              if (fullBatchBytesSoFar > fullBatchCeiling) fullBatchCapHit = true;
-            }
+            if (fullBatchCeiling !== undefined) fullBatchBytesSoFar += itemBytes;
           } else {
             // A per-path hard failure (not found, escapes workspace, doc
             // extraction disabled) folds into omitted instead of aborting the
@@ -12442,6 +13862,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // mode=artifact is handled above. mode=full redirects unless allowFull:true.
       // mode=auto/skeleton/symbol return roster (xlsx) or extractOfficeText (docx/pptx).
       if (isOffice) {
+        // DESIGN-v0.15 §8.2 (R7 Part B): see resolveFullReadForPath's twin gate
+        // above — this is the single-target inline dispatch's own
+        // extension-based auto-detection entry point.
+        const officeSurfaceRefusal = officeOrArchiveSurfaceRefusal();
+        if (officeSurfaceRefusal !== undefined) return toolError(officeSurfaceRefusal.error, { code: officeSurfaceRefusal.code });
         if (DOC_DISABLED) return toolError("Document extraction is disabled.", { code: "not-a-document" });
 
         // mode=full on office files: routes through resolveFullReadForPath
@@ -12626,7 +14051,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             totalLines: countLines(decodeCsvBytes(csvBytes)),
             // FX-P1 (ruling (u)): the same forced-serve escape the other two
             // csv routes honour — a compacted caller's `force_serve`/
-            // `content:"full"` must get bytes, never a receipt.
+            // `allowFull` must get bytes, never a receipt (DESIGN-v0.15 §6.3
+            // (R6): `content:"full"` alone no longer does).
             forceServe: forceContentServe,
           });
           if (csvOut !== undefined) {
@@ -12732,7 +14158,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // W1 served-content receipt: this session already served every file
         // line this symbol spans, at this exact sha. Re-assembling the same
         // window buys the caller nothing it does not already hold — answer with
-        // the compact receipt (content:"full"/allowFull:true force the bytes).
+        // the compact receipt (allowFull:true/force_serve:true force the
+        // bytes; DESIGN-v0.15 §6.3 (R6) — content:"full" alone no longer does).
         if (!forceContentServe) {
           const symFileSha = shaOfText(content);
           const symTotalLines = countLines(content);
@@ -12755,6 +14182,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               sha: shaOfText(result.data.code),
             });
             recordReadPath(workspace, filePath);
+            const symParentContinuation = openParentReceiptContinuation(
+              workspace, filePath, symFileSha, args,
+              [{ start: result.data.range.start, end: result.data.range.end }],
+            );
             return toolOk(attachSupply(servedContentReceipt({
               mode: "symbol",
               path: filePath,
@@ -12764,6 +14195,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               symbol: symbolArg,
               ledger: symLedger,
               workspace,
+              ...(symParentContinuation !== undefined ? { parentContinuation: symParentContinuation } : {}),
             }), workspace));
           }
         }
@@ -13008,7 +14440,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // this exact sha (via an earlier full serve, or via slices that
         // cumulatively covered the file), so the caller holds these bytes
         // already. Answer with the compact receipt instead of re-charging for
-        // an identical body. content:"full"/allowFull:true force the bytes.
+        // an identical body. Only `force_serve`/`allowFull` force real bytes
+        // past it (DESIGN-v0.15 §6.3, R6) — canonical `content:"full"` alone
+        // no longer does.
         //
         // Deliberately does NOT fire when wasFullyServed already knows about a
         // tracked full expansion of this exact sha, nor when the full governor
@@ -13020,6 +14454,20 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // cases). This standalone check exists only for what that mechanism
         // cannot see: full coverage assembled from cumulative SLICE/SYMBOL
         // serves that never went through a tracked mode=full expansion.
+        //
+        // DESIGN-v0.15 §6.3 (R6) EXCEPTION: a TINY file (`TINY_BYTES`/
+        // `TINY_LINES`) is EXEMPT from the governor's per-path/per-task full
+        // caps by design (DESIGN-v0.8 §C4's own tiny-governor carve-out;
+        // `WorkspaceSession.tinyFullExpansionsTotal`'s doc comment), so a
+        // REPEAT `content:"full"` of a tiny file never reaches
+        // `buildFullDowngradePayload`'s own wasFullyServed receipt at all —
+        // `decideFullRead` keeps answering "allow" and `resolveFullReadForPath`
+        // keeps re-serving fresh bytes, forever. That is exactly the R6 defect
+        // (a byte-identical repeated full read never dedups) for the one file
+        // size class the governor deliberately does not gate, so a tiny file
+        // is never treated as "already handled by that other pipeline" here.
+        const fullBytesForDedupCheck = Buffer.byteLength(content, "utf8");
+        const fullIsTinyForDedup = fullBytesForDedupCheck <= TINY_BYTES && countLines(content) <= TINY_LINES;
         const fullSha = shaOfText(content);
         // B2 / V12-02: this partial-coverage difference branch is UNFLAGGED —
         // it already serves prior+residual for coverage assembled from earlier
@@ -13038,7 +14486,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             });
         if (
           !forceContentServe
-          && !wasFullyServed(workspace, filePath, fullSha)
+          && (!wasFullyServed(workspace, filePath, fullSha) || fullIsTinyForDedup)
         ) {
           const fullTotalLines = countLines(content);
           const fullCoverage = servedRangeCoverage(workspace, filePath, fullSha, fullTotalLines);
@@ -13074,7 +14522,26 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             return toolOk(attachSupply(partial.data as Record<string, unknown>, workspace));
           }
 
-          const fullLedger = servedRangeReceipt(workspace, filePath, fullSha, 1, fullTotalLines, fullTotalLines);
+          // FX-OH F3 (2026-09-04) / DESIGN-v0.15 §6.3: the SAME "already
+          // fully served -> receipt" gate `buildFullDowngradePayload` above
+          // guards with `!keepComments` (its own F3 block comment) — this
+          // STANDALONE dedup check (cumulative slice/symbol coverage, or the
+          // tiny-file governor exemption) was missing that guard. A prior
+          // `content:"full"` repeat can make `fullCoverage.complete` true by
+          // shipping a comment block'S REAL bytes (elideDocCommentsForDisplay's
+          // doc-only fallback fires when an internal gap-fill window happens
+          // to be 100% comment), which is a genuine wire delivery and so
+          // correctly booked into `spans` — but that booking carries no
+          // record of WHICH representation shipped, so it must never be read
+          // as proof that a LATER `comments:"keep"` request's projection was
+          // already delivered. `comments:"keep"` therefore never takes this
+          // fast path: it always falls through to a real
+          // resolveFullReadForPath/buildFullServePayload serve below, which
+          // renders `content` verbatim (no elision) and re-books the whole
+          // file's real spans via `bookFullFileExpansionServe`.
+          const fullLedger = keepComments
+            ? undefined
+            : servedRangeReceipt(workspace, filePath, fullSha, 1, fullTotalLines, fullTotalLines);
           if (fullLedger !== undefined) {
             const fullHandle = handleTable.upsert({
               kind: "file",
@@ -13531,12 +14998,28 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // Computed from exactly the two facts W1's cwd-required-for-create
       // refusal above keys on, so the pin exists precisely when that refusal
       // does not fire: an explicit cwd, or a handle capability the call
-      // already carries. Undefined for every other shape (including a
-      // `create:true` riding an edits[] batch, and an artifact/intent/rename
-      // dispatch) — those keep the historical frontier verdict. Consumed ONLY by
-      // guardExecutionEdit's create branch; the containment checks that
-      // actually bound the write live in createFile.ts and are untouched.
-      const createWorkspacePin = createDispatchRequested
+      // already carries. Undefined for every other shape (an
+      // artifact/intent/rename dispatch, or a batch/single create with
+      // neither an explicit cwd nor a capability handle) — those keep the
+      // historical frontier verdict. Consumed ONLY by guardExecutionEdit's
+      // create branch; the containment checks that actually bound the write
+      // live in createFile.ts and are untouched.
+      //
+      // v0.14.1 defect 1 fix (2026-09-07): a canonical edits[] batch may mark
+      // individual items create:true (mixed batches included) --
+      // `createDispatchRequested` deliberately excludes
+      // `Array.isArray(args["edits"])` (it also drives
+      // singleRootDefaultCreate/batchCreateUsesServerDefault and the
+      // cwd-required-for-create refusal above, none of which this fix
+      // touches), so it never saw those. Detected independently and
+      // consulted ONLY here, so a per-item create gets the SAME two pin
+      // sources -- explicit cwd, or a handle capability -- as the legacy
+      // single-target shape; singleRootDefaultCreate stays scoped to that
+      // legacy shape, unchanged.
+      const batchCreateItemRequested = Array.isArray(args["edits"])
+        && args["edits"].some((edit) =>
+          edit !== null && typeof edit === "object" && (edit as Record<string, unknown>)["create"] === true);
+      const createWorkspacePin = (createDispatchRequested || batchCreateItemRequested)
         ? (cwdExplicit
             ? "explicit-cwd" as const
             : createCapabilityHandleIds.length > 0
@@ -13748,6 +15231,18 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       const isBinaryDocumentPath = /\.(docx|xlsx|pptx|pdf)$/.test(lowerFilePath);
       const isWritableZipRequest = artifactKind === "zip" && lowerFilePath.endsWith(".zip");
 
+      // DESIGN-v0.15 §8.2 (R7 Part B): both branches below already refuse a
+      // zip/Office edit target under code surface as a side effect (`artifact`
+      // is unreachable, so `isWritableZipRequest`/`artifactRequested` are
+      // always false there) — but their messages point at `artifact={...}`,
+      // an input this surface never advertises. Give the surface-specific
+      // reason first so the refusal is honest about why.
+      if ((splitArchiveVirtualPath(filePath) || isSupportedArchivePath(filePath) || isBinaryDocumentPath)) {
+        const editArchiveSurfaceRefusal = officeOrArchiveSurfaceRefusal();
+        if (editArchiveSurfaceRefusal !== undefined) {
+          return toolStructuredError({ ok: false, code: editArchiveSurfaceRefusal.code, path: filePath, error: editArchiveSurfaceRefusal.error });
+        }
+      }
       if (splitArchiveVirtualPath(filePath) || (isSupportedArchivePath(filePath) && !isWritableZipRequest)) {
         return toolStructuredError({
           ok: false,
@@ -13773,6 +15268,13 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const editHandle = typeof edit["handle"] === "string" ? handleTable.get(edit["handle"]) : undefined;
           const editPath = String(editHandle?.path ?? edit["path"] ?? "");
           if (splitArchiveVirtualPath(editPath) || isSupportedArchivePath(editPath)) {
+            // DESIGN-v0.15 §8.2 (R7 Part B): per-item variant of the file-level
+            // gate above — a batch `edits[]` entry can target a different
+            // path than `filePath`.
+            const perEditArchiveSurfaceRefusal = officeOrArchiveSurfaceRefusal();
+            if (perEditArchiveSurfaceRefusal !== undefined) {
+              return toolStructuredError({ ok: false, code: perEditArchiveSurfaceRefusal.code, path: editPath, error: perEditArchiveSurfaceRefusal.error });
+            }
             return toolStructuredError({
               ok: false,
               reason: "archive-member-read-only",
@@ -14687,6 +16189,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           anchorSha?: string;
           anchorShaRange?: string;
           create?: boolean;
+          // v0.14.1 defect 2 fix (2026-09-07): explicit "replace every exact occurrence" —
+          // forwarded only from a path-based item or a handle item with no
+          // range; a range-bearing item already replaces every match within
+          // its range unconditionally and does not consult this field.
+          target?: "all";
           // R29-FIX (2026-09-05, D2): see the blastAcknowledged comment at its
           // single-item-batch computation site below.
           blastAcknowledged?: boolean;
@@ -14821,6 +16328,23 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               precondition: "unique-match",
               failed_item: { index },
               detail: "unique-match requires a non-empty search on the affected edits[] item",
+            });
+          }
+          // v0.14.1 defect 2 fix (2026-09-07): target:"all" (replace EVERY occurrence) and
+          // precondition:"unique-match" (require EXACTLY one occurrence) are
+          // a direct contradiction. Refuse before ANY item in the batch is
+          // touched (Phase 1 validation, all-or-nothing), naming the exact
+          // item and field so the caller can drop one of the two and retry
+          // in one call — same field-qualified, retry:"call" convention the
+          // write-intent-ambiguous refusal below uses.
+          if (entry["target"] === "all" && uniqueMatchBatch) {
+            return toolStructuredError({
+              ok: false,
+              code: "invalid-input",
+              error: `edits[${index}] carries both target:"all" (replace every occurrence) and precondition:"unique-match" (require exactly one) — these are contradictory; drop one and retry`,
+              field: `edits[${index}].precondition`,
+              retry: "call",
+              failed_item: { index },
             });
           }
           const entryHandleId = typeof entry["handle"] === "string" ? entry["handle"] : undefined;
@@ -15009,6 +16533,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 search: String(entry["search"] ?? ""),
                 replace: String(entry["replace"] ?? ""),
                 ...(uniqueMatchBatch ? { uniqueMatch: true } : {}),
+                ...(entry["target"] === "all" ? { target: "all" as const } : {}),
               });
             }
             continue;
@@ -15101,6 +16626,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             search: String(entry["search"] ?? ""),
             replace: String(entry["replace"] ?? ""),
             ...(uniqueMatchBatch ? { uniqueMatch: true } : {}),
+            ...(entry["target"] === "all" ? { target: "all" as const } : {}),
           });
         }
 
@@ -15909,26 +17435,17 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         workspace, ALLOW_WRITE,
       );
 
-      // AUDIT (argument-combination matrix, 2026-07-12): `target` is read in
-      // exactly ONE place in this dispatch — the handleId+handleRange+
-      // target==="all" branch far above, which calls replaceAllInRange.
-      // Anywhere else (this plain path+search fallback included), `target`
-      // is silently unconsumed. That is usually harmless (target="all" with
-      // a search that happens to match exactly once behaves identically to
-      // ordinary single-match edit_file — confirmed live, still ok:true, no
-      // regression here), but when the search legitimately matches more than
-      // once — precisely the case target=all exists for — applySingleEdit's
-      // "ambiguous" refusal reads "add more surrounding context to make it
-      // unique", which directly CONTRADICTS what the caller asked for
-      // (replace every match, not narrow to one). Empirically confirmed
-      // live. Rather than block this call shape outright (that would also
-      // reject the harmless exactly-one-match case), append the real fix as
-      // a `hint` so the response, taken as a whole, is no longer misleading
-      // — the original error/candidates are left completely intact.
-      if (args["target"] === "all" && !(handleId && handleRange) && (result as { code?: string }).code === "ambiguous") {
-        (result as Record<string, unknown>)["hint"] =
-          'target="all" only replaces every occurrence when scoped to a range handle: read_file mode=slice to mint one, then edit_file handle=<id> target=all search=... replace=...; without a handle, edit_file still requires search to match exactly once';
-      }
+      // v0.14.1 defect 2 fix (2026-09-07): the 2026-07-12 audit hint that used
+      // to live here (worded in the legacy `read_file mode=slice` spelling)
+      // is now dead AND wrong: the top-level `args["target"] === "all"`
+      // branches above already intercept every reachable `target:"all"` +
+      // string `search` combination on this dispatch path before execution
+      // gets here, and the edits[] batch
+      // sibling (tools/applyEditsMulti.ts's applyEditStep) now honors
+      // target:"all" directly for a path-based or range-less-handle item —
+      // so "only replaces every occurrence when scoped to a range handle"
+      // is no longer true even in the hypothetical case this line fired.
+      // Removed rather than rewritten: nothing reaches it to rewrite for.
 
       // If auto-mint succeeded and the edit succeeded, record as handle-backed and
       // include the handle id in the response.
@@ -16107,6 +17624,14 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         ?? (explicitSearchPath && isSupportedArchivePath(explicitSearchPath) ? explicitSearchPath : undefined);
       const archivePrefix = archiveSelector?.prefix ?? archiveSelector?.member ?? virtualSearch?.member;
       if (archiveSearchPath && (action === "find" || action === "tree")) {
+        // DESIGN-v0.15 §8.2 (R7 Part B): searching/listing inside a zip archive
+        // is archive capability — gate it here, since `archiveSearchPath` can
+        // be derived purely from a plain `.zip` path extension with no
+        // advertised full-only field present.
+        const archiveSearchSurfaceRefusal = officeOrArchiveSurfaceRefusal();
+        if (archiveSearchSurfaceRefusal !== undefined) {
+          return toolStructuredError({ ok: false, code: archiveSearchSurfaceRefusal.code, error: archiveSearchSurfaceRefusal.error });
+        }
         const archiveBytes = await readBytesSafe(archiveSearchPath, workspace);
         if (archiveBytes === null) {
           return toolStructuredError({
@@ -16155,6 +17680,15 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       }
 
       if (action === "find") {
+        // DESIGN-v0.15 §6.1 (R3): a `find` cursor is served ENTIRELY from the
+        // staged search-request snapshot — it never re-enters the ordinary
+        // producers below and never builds a `read_file` escalation. Checked
+        // before the query/queries validation below, exactly as read_file's
+        // cursor is checked before its own targets/content validation.
+        const rawSearchCursor = args["cursor"];
+        if (typeof rawSearchCursor === "string" && rawSearchCursor !== "") {
+          return await serveSearchCursorPage(rawSearchCursor, args, workspace);
+        }
         const rawQueries = args["queries"];
         const hasQueries = rawQueries !== undefined;
         const queryStr = args["query"] !== undefined && args["query"] !== null ? String(args["query"]) : "";
@@ -16281,7 +17815,23 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               if (served.length > 0) recordServedConcernEvidence(workspace, served, batchScope);
             }
           }
-          return toolOk(outcome.body);
+          // DESIGN-v0.15 §6.1 (R3): a truncated queries[] find is staged and
+          // its own files[]/total_files/total_matches rebuilt from the full
+          // snapshot's stable order — see `stageSearchRequestForFind`'s doc
+          // comment. Runs AFTER the concern/proof recording above, which must
+          // see the ORIGINAL (unstaged) body's own term_results/absence.
+          const stagedQueriesFind = stageSearchRequestForFind({
+            workspace,
+            queries,
+            regex: args["regex"] === true,
+            ...(args["path"] !== undefined ? { path: String(args["path"]) } : {}),
+            ...(lang !== undefined ? { lang } : {}),
+            args,
+            body: outcome.body as Record<string, unknown>,
+          });
+          return stagedQueriesFind.kind === "refusal"
+            ? toolStructuredError(stagedQueriesFind.refusal)
+            : toolOk(stagedQueriesFind.body);
         }
 
         // Feature 2 (2026-07-12b2): single-query find — filter through the
@@ -16378,9 +17928,61 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // (readCodeTaskPack.ts) consults it to SUPPRESS, never advance, a
         // repeat of this exact (action,query).
         recordExecutedSearch(workspace, "find", queryStr, []);
-        return toolOk(outcome.body);
+        // DESIGN-v0.15 §6.1 (R3): see the queries[] branch above for the full
+        // doc comment — a truncated single-query find is staged and rebuilt
+        // from the full snapshot's stable order the same way.
+        const stagedSingleFind = stageSearchRequestForFind({
+          workspace,
+          queries: [queryStr],
+          regex: args["regex"] === true,
+          ...(args["path"] !== undefined ? { path: String(args["path"]) } : {}),
+          ...(lang !== undefined ? { lang } : {}),
+          args,
+          body: outcome.body as Record<string, unknown>,
+        });
+        return stagedSingleFind.kind === "refusal"
+          ? toolStructuredError(stagedSingleFind.refusal)
+          : toolOk(stagedSingleFind.body);
       }
       if (action === "references") {
+        // DESIGN-v0.15 §6.1 (R3): the existing position cursor
+        // (`tools/findReferences.ts`'s `encodeReferencesCursor`/
+        // `decodeReferencesCursor`, purpose `continuation`) keeps working
+        // UNCHANGED for backward compatibility, including the frozen
+        // replay-corpus case — that decoder's own undecodable-token path
+        // (silently serve from the start, disclosed via `cursor_note`) is
+        // untouched. But a token that DOES decode as a KNOWN, DIFFERENT
+        // purpose OTHER than this wave's own `tlh_sreq_v1_` search-request
+        // cursor (in particular `tlh_rreq_v1_`/`tlh_task_v1_`) is a caller
+        // error, not an ordinary "start over" — refusing it explicitly is
+        // what keeps a foreign cursor from ever being silently reinterpreted
+        // as a fresh, unscoped references walk.
+        //
+        // DESIGN-v0.15 §6.1 (R3 extension, this wave): `tlh_sreq_v1_` is now
+        // ALSO let through — `findReferences.ts` itself owns the deep
+        // resolution (binding, `action:"references"`, source-revision
+        // staleness) for that purpose, exactly like `serveSearchCursorPage`
+        // does for `find`'s own search-request cursor. A `tlh_sreq_v1_`
+        // token that turns out to be a `find`-opened record (wrong action)
+        // is refused `cursor-invalid` by that deep resolution, not here.
+        const referencesCursorToken = typeof args["cursor"] === "string" ? args["cursor"] : undefined;
+        const referencesCursorForeignPurpose = referencesCursorToken !== undefined
+          ? parseHandlePurposeFromPrefix(referencesCursorToken)
+          : undefined;
+        if (
+          referencesCursorForeignPurpose !== undefined
+          && referencesCursorForeignPurpose !== "continuation"
+          && referencesCursorForeignPurpose !== "search-request"
+        ) {
+          return toolStructuredError({
+            ok: false,
+            code: "cursor-invalid",
+            field: "cursor",
+            error: "this search cursor is not usable here",
+            detail: `wrong-purpose (${referencesCursorForeignPurpose}); restart the original request`,
+            retry: "call",
+          });
+        }
         const symbol = String(args["symbol"] ?? args["query"] ?? "");
         // FX-G13 G1: the caller's own page-width ceiling — canonical
         // `budget.bytes`/`budget.tokens` both map here (mapCanonicalBudget ->
@@ -16398,6 +18000,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           typeof args["maxTokens"] === "number" ? args["maxTokens"] : undefined,
           undefined,
         );
+        // DESIGN-v0.15 §6.1 (R3 extension): the lane/task binding a NEWLY
+        // MINTED `tlh_sreq_v1_` continuation cursor is scoped to, and that an
+        // incoming one is checked against — same source as `find`'s own
+        // `serveSearchCursorPage` (`currentSessionLane()`/`args["task_handle"]`).
+        const referencesLane = currentSessionLane();
+        const referencesTaskHandle = typeof args["task_handle"] === "string" ? args["task_handle"] : undefined;
         const response = await findReferences(
           {
             symbol,
@@ -16416,6 +18024,8 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             // on paths with spaces — both review findings.
             ...(typeof args["cursor"] === "string" && args["cursor"] ? { cursor: args["cursor"] } : {}),
             ...(referencesMaxBytes !== undefined ? { maxBytes: referencesMaxBytes } : {}),
+            ...(referencesLane !== "" ? { lane: referencesLane } : {}),
+            ...(referencesTaskHandle !== undefined ? { taskHandle: referencesTaskHandle } : {}),
           },
           workspace,
         );
@@ -16627,6 +18237,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // S1/C3: no doc path should end in a hard error — extract directly
         // (same primitive read_code's mode=full/extract_office_text alias
         // use: readBytesSafe + extractOfficeText) instead of refusing.
+        // DESIGN-v0.15 §8.2 (R7 Part B): gate this legacy alias too.
+        const actionOfficeSurfaceRefusal = officeOrArchiveSurfaceRefusal();
+        if (actionOfficeSurfaceRefusal !== undefined) return toolError(actionOfficeSurfaceRefusal.error, { code: actionOfficeSurfaceRefusal.code });
         if (DOC_DISABLED) return toolError("Document extraction is disabled.", { code: "not-a-document" });
         const officePath = String(args["path"] ?? "");
         if (!officePath) return toolError("path is required", { code: "invalid-input" });
@@ -17425,7 +19038,27 @@ export async function callTool(
   if (refusal !== undefined) {
     return runWithProtocolCall({ tool: name, kind: "refusal" }, () => finalizeProtocolResponse(name, refusal));
   }
+  // DESIGN-v0.15 §5.2 (R2): a cursor continuation may not silently change WHAT
+  // was asked for. Checked here, on the caller's OWN canonical arguments, one
+  // statement before the legacy projection erases the distinction between
+  // `content:"full"` and `mode=full`.
+  const cursorRefusal = cursorCoInputRefusal(name, args);
+  if (cursorRefusal !== undefined) {
+    return runWithProtocolCall(
+      { tool: name, kind: "refusal" },
+      () => finalizeProtocolResponse(name, toolStructuredError(cursorRefusal)),
+    );
+  }
   const legacyArgs = normalizeCanonicalRequest(name, args);
+  // The canonical original, for the restart `next` a `cursor-stale` refusal and
+  // a stored request record owe (see `CANONICAL_ORIGINAL_INPUT`).
+  if (name === "read_file") {
+    Object.defineProperty(legacyArgs, CANONICAL_ORIGINAL_INPUT, {
+      value: canonicalOriginalReadInput(args),
+      enumerable: true,
+      configurable: true,
+    });
+  }
   return runWithTraceCall(() => callToolTraced(name, legacyArgs, requestMeta));
 }
 

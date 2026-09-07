@@ -316,6 +316,7 @@ const REFUSAL_CODES: ReadonlySet<string> = new Set<RefusalCode>([
   "handle-unknown", "handle-workspace-missing", "handle-workspace-mismatch",
   "handle-required", "handle-required-lockdown", "directory-handle-unknown",
   "directory-handle-workspace-mismatch", "directory-handle-wrong-kind",
+  "state-conflict",
   // TypestateCode
   "execution-typestate", "prepared-discovery-closed", "discovery-loop-brake",
   "prescribed-step-executed-target-still-inadmissible", "create-target-not-servable",
@@ -333,6 +334,7 @@ const REFUSAL_CODES: ReadonlySet<string> = new Set<RefusalCode>([
   "intent-requires-handle",
   // ReadLimitCode
   "symbol-cap-reached", "cap-exceeded", "budget-below-minimum", "legacy-input",
+  "cursor-stale", "cursor-invalid",
   "per-task-cap-reached", "per-path-cap-reached",
   "candidate-pack-full-repeat", "tiny-task-cap-reached", "allowfull-task-cap-reached",
   "artifact-full-downgraded", "not-tiny", "broad-overview-query",

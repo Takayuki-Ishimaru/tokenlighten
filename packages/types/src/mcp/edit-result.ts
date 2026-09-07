@@ -129,6 +129,15 @@ export type AppliedEntry = {
   /** `"+N/-M"` (`EditFileResult.delta`). */
   delta?: string;
   /**
+   * v0.14.1 defect 2 fix (2026-09-07): count of occurrences replaced by an explicit
+   * `target:"all"` edits[] item (`EditFileResult.replaced`,
+   * tools/applyEditsMulti.ts) — lets the caller verify a replace-all
+   * without a read-back. Absent unless the edit actually used
+   * `target:"all"`, never emitted as `0` (zero matches refuses `not-found`
+   * before any write, so a landed edit's count is always >= 1).
+   */
+  replaced?: number;
+  /**
    * INV-I-5 / FX-P2 (2026-09-03, additive/optional — same convention as
    * `EditApplied.replayed`): `true` iff this edit was addressed by a
    * `handle` that turned out to be stale/unknown, and `allowPathFallback:

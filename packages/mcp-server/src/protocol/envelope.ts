@@ -35,7 +35,20 @@
 // ---------------------------------------------------------------------------
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Evidence, Kind, ToolCall, ToolName } from "@tokenlighten/types";
+import { posix as posixPath } from "node:path";
+import type { Evidence, Kind, ToolCall, ToolName, ToolSurface } from "@tokenlighten/types";
+// DESIGN-v0.15 §8.2 (R7 Part B, this wave's own R7 residual close-out — see
+// DESIGN-v0.15-exploration-continuation-wave0-ledger.md §7.2's wiring-table row
+// 5): `canonicalToolCall` is the ONE place every emitted `next`/`next_call`
+// (success or refusal, `emittableToolCall`-routed or not) funnels through —
+// see this file's own `canonicalizeEmittedToolCalls` and `refusal.ts`'s
+// `emittableToolCall`, both of which call it directly. Making IT surface-aware
+// is therefore sufficient to keep a `code`-surface connection's minted
+// continuations inside its own advertised capability, with no second filter
+// site to keep in sync. `isSupportedArchivePath` is a leaf format utility
+// (no dependency on this module or on `server.ts`), so importing it here adds
+// no cycle — `server.ts` is what imports FROM `envelope.ts`, never the reverse.
+import { isSupportedArchivePath } from "../tools/archive.js";
 
 import {
   buildRefusal,
@@ -1098,17 +1111,187 @@ export function canonicalizeEmittedToolCalls(value: Record<string, unknown>): Re
     ) {
       // Route object-shaped continuations through the public constructor too:
       // otherwise the final recursive pass would normalize syntax but miss
-      // cwd/task attribution for direct mint sites.
-      copied["arguments"] = canonicalToolCall(tool, argumentsValue as Record<string, unknown>)["arguments"];
+      // cwd/task attribution for direct mint sites. DESIGN-v0.15 §8.2 (R7 Part
+      // B): under a `code` surface this constructor can also SWAP `tool`
+      // itself (a full-only read replaced by a `search_files` directory
+      // listing — see `fullOnlyPathRecovery`), so `tool` is re-stamped from
+      // the SAME call, never just `arguments` alone — leaving the old `tool`
+      // paired with the new shape would emit an inconsistent, unexecutable
+      // continuation.
+      const canonical = canonicalToolCall(tool, argumentsValue as Record<string, unknown>);
+      copied["tool"] = canonical.tool;
+      copied["arguments"] = canonical.arguments;
     }
     return copied;
   };
   return visit(value) as Record<string, unknown>;
 }
 
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 §8.2 (R7 Part B) — surface-aware minting.
+//
+// `server.ts` resolves `ACTIVE_TOOL_SURFACE` exactly once, at module load
+// (CLI `--tool-surface` / env `TOKENLIGHTEN_TOOL_SURFACE`), and this module is
+// one of ITS dependencies (`server.ts` imports `canonicalToolCall` from here),
+// so this file cannot import that resolution back without a cycle. Instead
+// `server.ts` pushes the resolved value here, at that SAME module-load
+// moment, via `setEnvelopeToolSurface` — a plain setter, not a second
+// resolution, so the two can never disagree. Defaults to "full" (server.ts's
+// own default) so a caller of `canonicalToolCall` before that push runs
+// (there is none in practice: this module has no side effects of its own at
+// import time) keeps the historical, unfiltered behavior.
+// ---------------------------------------------------------------------------
+let envelopeToolSurface: ToolSurface = "full";
+
+/** Called once by `server.ts`, at the same moment it resolves `ACTIVE_TOOL_SURFACE`. */
+export function setEnvelopeToolSurface(surface: ToolSurface): void {
+  envelopeToolSurface = surface;
+}
+
+/**
+ * `select`'s artifact-addressing keys — the DATA-argument-shaped mirror of
+ * `server.ts`'s own exported `ARTIFACT_SELECT_KEYS` (`kind`/`format`/`sheet`/
+ * `rows`/`columns`/`slides`/`pages`). Duplicated by VALUE, not imported: this
+ * module is a dependency of `server.ts`, so importing the other way would
+ * cycle. Keep the two lists in sync by hand — `toolSurfaceReachability.spec.ts`
+ * is the corpus-replay check that would catch a drift.
+ */
+const FULL_ONLY_SELECT_ARGUMENT_KEYS = ["kind", "format", "sheet", "rows", "columns", "slides", "pages"] as const;
+
+/** Office document extensions `server.ts`'s own inline `isOffice` checks name — the binary-artifact half of "full-only path" (the other half is `isSupportedArchivePath`). */
+const FULL_ONLY_DOCUMENT_EXT_RE = /\.(?:docx|xlsx|pptx|pdf)$/i;
+
+/**
+ * True when READING THIS PATH would land in Office/archive handling by
+ * FILE EXTENSION ALONE, regardless of whether the call ALSO carried an
+ * advertised full-only field — the auto-detection gates `server.ts`'s own
+ * `officeOrArchiveSurfaceRefusal` protects (wave-0 ledger §7.2: 9 such
+ * gates). Stripping `archive`/`select` from a target whose PATH is itself
+ * `data.zip`/`report.pdf` does not make reading it meaningful on a `code`
+ * surface — the dispatcher would refuse it again the moment it ran.
+ */
+function isFullOnlyPath(path: string): boolean {
+  return isSupportedArchivePath(path) || FULL_ONLY_DOCUMENT_EXT_RE.test(path);
+}
+
+interface SurfacedCall {
+  tool: string;
+  arguments: Record<string, unknown>;
+}
+
+/** Directory-listing recovery for a path this surface can never read — no query to guess, so `tree` (which needs none) is the one recovery that is always constructible. */
+function fullOnlyPathRecovery(removedPath: string): SurfacedCall {
+  return { tool: "search_files", arguments: { action: "tree", scope: { path: posixPath.dirname(removedPath) } } };
+}
+
+/** Strip `edit_file`'s two full-only top-level blocks. Structural only: an artifact-only edit with nothing left is a pre-existing narrower gap (edit_file next-calls do not mint bare artifact edits today) left to the schema's own `unknown-arguments`/`edits`-required refusal rather than a fabricated recovery. */
+function withoutFullOnlyEditFileArguments(tool: string, args: Record<string, unknown>): SurfacedCall {
+  if (args["artifact"] === undefined && args["credentials"] === undefined) return { tool, arguments: args };
+  const next = { ...args };
+  delete next["artifact"];
+  delete next["credentials"];
+  return { tool, arguments: next };
+}
+
+/** Strip `search_files.scope.archive`/`.credentialRef`; if the survives-stripping `scope.path` is itself full-only-shaped, the call would still dead-end on this surface — recover with a directory listing instead. */
+function withoutFullOnlySearchFilesArguments(tool: string, args: Record<string, unknown>): SurfacedCall {
+  const scope = recordOf(args["scope"]);
+  if (scope === undefined) return { tool, arguments: args };
+  if (scope["archive"] === undefined && scope["credentialRef"] === undefined) {
+    const path = typeof scope["path"] === "string" ? scope["path"] : undefined;
+    return path !== undefined && isFullOnlyPath(path) ? fullOnlyPathRecovery(path) : { tool, arguments: args };
+  }
+  const restScope = { ...scope };
+  delete restScope["archive"];
+  delete restScope["credentialRef"];
+  const path = typeof restScope["path"] === "string" ? restScope["path"] : undefined;
+  if (path !== undefined && isFullOnlyPath(path)) return fullOnlyPathRecovery(path);
+  return { tool, arguments: { ...args, scope: restScope } };
+}
+
+/**
+ * Strip `read_file`'s full-only surface: each target's `archive`/
+ * `credentialRef`, `select`'s artifact-addressing keys, `budget.rows`/
+ * `.cells`, and `scope.archive`/`.credentialRef`. A target whose PATH is
+ * itself full-only-shaped is DROPPED ENTIRELY (field-stripping alone cannot
+ * make `data.zip` a plain-text file); if every target is dropped this way,
+ * the whole call is replaced by a directory listing of the first removed
+ * path's parent — never a `read_file targets:[{archive:…}]` a `code` surface
+ * cannot execute.
+ */
+function withoutFullOnlyReadFileArguments(tool: string, args: Record<string, unknown>): SurfacedCall {
+  const out: Record<string, unknown> = { ...args };
+
+  const targets = Array.isArray(out["targets"]) ? out["targets"] : undefined;
+  const removedPaths: string[] = [];
+  if (targets !== undefined) {
+    const kept: unknown[] = [];
+    for (const raw of targets) {
+      const target = recordOf(raw);
+      if (target === undefined) { kept.push(raw); continue; }
+      const path = typeof target["path"] === "string" ? target["path"] : undefined;
+      if (path !== undefined && isFullOnlyPath(path)) {
+        removedPaths.push(path);
+        continue;
+      }
+      if (target["archive"] !== undefined || target["credentialRef"] !== undefined) {
+        const restTarget = { ...target };
+        delete restTarget["archive"];
+        delete restTarget["credentialRef"];
+        kept.push(restTarget);
+        continue;
+      }
+      kept.push(target);
+    }
+    if (kept.length === 0 && removedPaths.length > 0) return fullOnlyPathRecovery(removedPaths[0]!);
+    out["targets"] = kept;
+  }
+
+  const scope = recordOf(out["scope"]);
+  if (scope !== undefined && (scope["archive"] !== undefined || scope["credentialRef"] !== undefined)) {
+    const restScope = { ...scope };
+    delete restScope["archive"];
+    delete restScope["credentialRef"];
+    if (Object.keys(restScope).length > 0) out["scope"] = restScope; else delete out["scope"];
+  }
+
+  const select = recordOf(out["select"]);
+  if (select !== undefined && FULL_ONLY_SELECT_ARGUMENT_KEYS.some((k) => select[k] !== undefined)) {
+    const restSelect = { ...select };
+    for (const k of FULL_ONLY_SELECT_ARGUMENT_KEYS) delete restSelect[k];
+    if (Object.keys(restSelect).length > 0) out["select"] = restSelect; else delete out["select"];
+  }
+
+  const budget = recordOf(out["budget"]);
+  if (budget !== undefined && (budget["rows"] !== undefined || budget["cells"] !== undefined)) {
+    const restBudget = { ...budget };
+    delete restBudget["rows"];
+    delete restBudget["cells"];
+    if (Object.keys(restBudget).length > 0) out["budget"] = restBudget; else delete out["budget"];
+  }
+
+  return { tool, arguments: out };
+}
+
+/**
+ * The ONE surface gate every minted continuation passes through (see the
+ * module-doc block above `envelopeToolSurface`). `full` is a strict no-op —
+ * returns `{tool, arguments}` UNCHANGED, not merely equivalent, so every
+ * existing full-surface caller keeps its exact prior identity.
+ */
+function applyToolSurface(tool: string, args: Record<string, unknown>): SurfacedCall {
+  if (envelopeToolSurface === "full") return { tool, arguments: args };
+  if (tool === "edit_file") return withoutFullOnlyEditFileArguments(tool, args);
+  if (tool === "search_files") return withoutFullOnlySearchFilesArguments(tool, args);
+  if (tool === "read_file") return withoutFullOnlyReadFileArguments(tool, args);
+  return { tool, arguments: args };
+}
+
 /** Construct an executable wire continuation through the one canonicalizer. */
 export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_files", args: Record<string, unknown>): ToolCall {
-  return { tool, arguments: attributedContinuationArguments(canonicalToolArguments(tool, args)) } as ToolCall;
+  const attributed = attributedContinuationArguments(canonicalToolArguments(tool, args));
+  const surfaced = applyToolSurface(tool, attributed);
+  return { tool: surfaced.tool, arguments: surfaced.arguments } as ToolCall;
 }
 
 /**
@@ -1209,6 +1392,12 @@ function canonicalBudget(args: Record<string, unknown>): Record<string, unknown>
 
 function canonicalReadArguments(args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  // DESIGN-v0.15 §5.2 (R2): `read_file.cursor` is carried verbatim, exactly as
+  // `canonicalSearchArguments` below already carries the search cursor. An
+  // opaque token has no legacy spelling to project from and nothing to derive:
+  // dropping it here (the pre-R2 behaviour) silently turned the one canonical
+  // continuation into a `{cwd}`-only call the dispatcher then refused.
+  if (args["cursor"] !== undefined) out["cursor"] = args["cursor"];
   if (args["query"] !== undefined) out["query"] = args["query"];
   if (args["qref"] !== undefined) out["qref"] = args["qref"];
   const targets = canonicalReadTargets(args);

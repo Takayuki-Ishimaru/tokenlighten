@@ -36,7 +36,7 @@ import { callWorkspace, handleTable, shaOfBytes, shaOfText } from "../../util/ha
 import { classifySurface, surfaceInventory, deriveTokenVariants } from "../../util/impact.js";
 import { readFileSafe, safeResolve, isWithin, resolveReal, statReadTargetSync } from "../../util/safePath.js";
 import { decodeTextBuffer } from "../../util/textDecode.js";
-import { languageForPath } from "../../util/languages.js";
+import { languageForPath, languageForPathWithContent } from "../../util/languages.js";
 import { elideDocComments } from "../../util/formatCompress.js";
 import { isEnumLikeQuery, stripPathSpans, tokenizeQuery } from "../../util/queryShape.js";
 import { maskCommentsAndStrings } from "./sfCodeMask.js";
@@ -49,6 +49,7 @@ import {
   escapeRegExp,
   scanLiteral,
   type FindTextUniverse,
+  type ScanContentCache,
 } from "../search/find/findText.js";
 import { extractSymbolsFromFile, extractSymbolsFromLines, resolveCallerByteCeiling, DEFAULT_RESPONSE_BYTE_FLOOR } from "../../tools/readCodeModes.js";
 import { queryRequestsTestEvidence, selectQueryEvidence } from "../../tools/queryEvidence.js";
@@ -95,7 +96,15 @@ import {
   type ContinuationPlan,
 } from "../../util/continuation.js";
 import { collectSymbols, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
-import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, recordWithheldEditAddresses, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, servedClusterRanges, getIntentEditObserved, type PackCheckRecord } from "../../state/session.js";
+import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, recordWithheldEditAddresses, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, servedClusterRanges, getIntentEditObserved, getSession, type PackCheckRecord } from "../../state/session.js";
+import {
+  extractRequestItems,
+  createRequestItemIndexView,
+  salientWords,
+  sharesSignificantSubstring,
+  looksLikeFileTerm,
+  type RequestItem,
+} from "./requestItems.js";
 import {
   recordServedSurfaces,
   queryServedSurfaces,
@@ -1798,7 +1807,21 @@ export async function buildTaskPack(
     args.maxTokens,
     args.clientDefaultByteCeilingHint,
   );
-  return packByteCeilingStorage.run(byteCeiling, async () => {
+  // DESIGN-v0.15 R1 P1 fix (2026-09-07): the tree-sitter declaration-range
+  // pre-pass (prepareRequestItemPrewalk, near cachedRequestItemPass below)
+  // is async and must finish before buildTaskPackCore's synchronous
+  // buildTaskExecutionContract/proveRequestItem chain reads it back out via
+  // requestItemPrewalkStorage.getStore() — ALS, not a bare local, for the
+  // exact same reason packByteCeilingStorage just above is one (must not
+  // leak across two interleaved buildTaskPack calls). The wrapped body below
+  // is intentionally left at its pre-existing indentation to keep this a
+  // minimal, reviewable diff.
+  const requestItemPrewalk = await prepareRequestItemPrewalk(
+    workspace,
+    args.query ?? args.symbol ?? args.path ?? "",
+  );
+  return requestItemPrewalkStorage.run(requestItemPrewalk, () =>
+    packByteCeilingStorage.run(byteCeiling, async () => {
     try {
       await prefetchArtifactSurfaceSections(args, workspace);
     } catch {
@@ -1848,7 +1871,7 @@ export async function buildTaskPack(
     } finally {
       artifactSectionPrefetch.delete(workspace);
     }
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -3545,7 +3568,7 @@ async function buildTaskPackCore(
   ) {
     const shortCircuitSeed = singleSiteShortCircuitSeed(query, workspace);
     if (shortCircuitSeed !== undefined) {
-      return buildSeededTaskPack({ ...args, paths: [shortCircuitSeed] }, query, workspace);
+      return buildSeededTaskPack({ ...args, paths: [shortCircuitSeed], autoDiscoveredLocation: true }, query, workspace);
     }
   }
 
@@ -3747,7 +3770,7 @@ async function buildTaskPackCore(
       : undefined;
     if (inferredScope !== undefined) {
       const retried = await buildSeededTaskPack(
-        { ...args, paths: [{ path: inferredScope }] },
+        { ...args, paths: [{ path: inferredScope }], autoDiscoveredLocation: true },
         query,
         workspace,
       );
@@ -3793,7 +3816,7 @@ async function buildTaskPackCore(
         if (abs !== undefined && fs.existsSync(abs)) weakPaths.push(cand.path);
       }
       if (weakPaths.length > 0) {
-        return buildSeededTaskPack({ ...args, paths: weakPaths.map((p) => ({ path: p })) }, query, workspace);
+        return buildSeededTaskPack({ ...args, paths: weakPaths.map((p) => ({ path: p })), autoDiscoveredLocation: true }, query, workspace);
       }
     }
 
@@ -3804,7 +3827,7 @@ async function buildTaskPackCore(
     const genericFallback = discoverGenericTaskPackFallback(args, locatingQuery, workspace);
     if (genericFallback.paths.length > 0) {
       return buildSeededTaskPack(
-        { ...args, paths: genericFallback.paths.map((p) => ({ path: p })) },
+        { ...args, paths: genericFallback.paths.map((p) => ({ path: p })), autoDiscoveredLocation: true },
         query,
         workspace,
       );
@@ -5162,17 +5185,66 @@ interface LiteralFrontierTerm {
 
 /**
  * Directed routing is an ordering hint, never a general-language edit parser.
- * A quoted sentence or a conceptual phrase must fall back to the ordinary
- * locator rather than becoming an edit-ready source/destination relation.
+ * An UNQUOTED atom must still look identifier/path-shaped to become an
+ * edit-ready source/destination term -- bare prose ("the timeout", "status")
+ * falls back to the ordinary locator. An EXPLICITLY QUOTED atom (the
+ * caller's own `` `…` ``/`"…"`/`'…'`/`「…」`/`『…』` delimiters) is different
+ * evidence: the delimiters are the caller's own unambiguous boundary, so its
+ * interior -- Unicode text, internal whitespace, punctuation, case -- is
+ * kept exactly as written (design v0.15 §7: never normalize a quoted
+ * source's Unicode/whitespace/punctuation away). Only a genuinely empty
+ * interior, or one spanning a hard line break (almost certainly two
+ * sentences the outer grammar accidentally bridged), is rejected.
  */
-function literalFrontierAtom(value: string): string | undefined {
-  const trimmed = value.trim().replace(/^[`"'「『]+|[`"'」』]+$/gu, "");
+function literalFrontierAtom(value: string, quoted: boolean): string | undefined {
+  if (quoted) {
+    // English captures carry their own delimiters (the outer `atom`
+    // alternation wraps the WHOLE quoted span, backticks/quotes included);
+    // JA bracket captures are already delimiter-free (their regex capture
+    // group excludes 「」/『』) -- stripping is a safe no-op for those.
+    const interior = value.replace(/^[`"'「『]|[`"'」』]$/gu, "");
+    if (interior.length === 0 || /[\r\n]/u.test(interior)) return undefined;
+    // A quoted capture is ambiguous between a genuine literal -- a short UI
+    // label ("Reload window", "Reload (window)", "日本語 ラベル"), an
+    // identifier, or arbitrary caller-supplied text/code the atom regex's
+    // OWN backtick/quote alternative already bounded tightly enough to
+    // trust as a unit -- and a conceptual PROSE sentence describing one
+    // ("the old status label"), which must still fall back to the ordinary
+    // locator ("意味が曖昧なら推測編集しない", design v0.15 §7). A pure run
+    // of lowercase ASCII letters/apostrophes/spaces -- no uppercase (Title
+    // Case), digit, non-ASCII text (JA/etc.), or punctuation -- is exactly
+    // that prose shape, whether it is one word or several (a long, purely
+    // alphabetic-lowercase blob is just as ambiguous a "sentence" as a short
+    // one); anything carrying even one such signal is trusted verbatim.
+    if (/^[a-z\s']+$/u.test(interior)) return undefined;
+    return interior;
+  }
+  const trimmed = value.trim();
   if (trimmed.length < 2 || /\s/u.test(trimmed)) return undefined;
   if (!/^[A-Za-z0-9_./:-]+$/u.test(trimmed)) return undefined;
   // Bare prose words ("status", "green", "default") are concepts, not
   // literal code evidence. Require an identifier/path signal even when the
   // relation grammar itself is otherwise unambiguous.
   return /[A-Z0-9_./:-]/u.test(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * True when a captured English `atom` alternative used an explicit quote
+ * delimiter. The English regex's capture group spans the WHOLE alternative
+ * (delimiters included when present), unlike the JA bracket groups whose own
+ * regex already strips 「」/『』 before the value reaches here -- so JA
+ * quoted-ness is instead known directly from which capture group matched
+ * (see call sites below), never sniffed from content.
+ */
+function isDelimitedAtomCapture(value: string): boolean {
+  const t = value.trim();
+  return t.length >= 2 && (
+    (t.startsWith("`") && t.endsWith("`"))
+    || (t.startsWith("\"") && t.endsWith("\""))
+    || (t.startsWith("'") && t.endsWith("'"))
+    || (t.startsWith("「") && t.endsWith("」"))
+    || (t.startsWith("『") && t.endsWith("』"))
+  );
 }
 
 interface LiteralSourceWitness {
@@ -5202,11 +5274,10 @@ function literalFirstMultipleRelations(query: string): boolean {
 /** Extract a directed change relation without applying identifier-shape filters. */
 function literalFirstRelation(query: string, symbol?: string): LiteralFrontierTerm[] | undefined {
   const terms: LiteralFrontierTerm[] = [];
-  const add = (value: string, role: LiteralFrontierRole, source: string): void => {
-    if (literalFrontierAtom(value) === undefined) return;
-    const trimmed = value.trim().replace(/^[`"'「『]+|[`"'」』]+$/gu, "");
-    if (trimmed === "" || terms.some((term) => term.value === trimmed && term.role === role)) return;
-    terms.push({ value: trimmed, role, roleSource: source });
+  const add = (value: string, role: LiteralFrontierRole, source: string, quoted: boolean): void => {
+    const atomValue = literalFrontierAtom(value, quoted);
+    if (atomValue === undefined || terms.some((term) => term.value === atomValue && term.role === role)) return;
+    terms.push({ value: atomValue, role, roleSource: source });
   };
   const atom = "(?:`[^`]+`|[\"'][^\"']+[\"']|「[^」]+」|『[^』]+』|[A-Za-z0-9_./-]+)";
   const english = new RegExp(`\\b(?:replace|rename|change)\\s+(${atom})\\s+(?:with|to|into)\\s+(${atom})`, "iu").exec(query);
@@ -5218,27 +5289,27 @@ function literalFirstRelation(query: string, symbol?: string): LiteralFrontierTe
   // ordinary multi-concern/propagation flow keeps every clause visible.
   if (literalFirstMultipleRelations(query)) return undefined;
   if (english) {
-    add(english[1]!, "subject", `english-directed:${english.index ?? 0}`);
-    add(english[2]!, "destination", `english-directed:${english.index ?? 0}`);
+    add(english[1]!, "subject", `english-directed:${english.index ?? 0}`, isDelimitedAtomCapture(english[1]!));
+    add(english[2]!, "destination", `english-directed:${english.index ?? 0}`, isDelimitedAtomCapture(english[2]!));
   } else if (japanese) {
-    add(japanese[1] ?? japanese[2] ?? japanese[3] ?? "", "subject", `japanese-directed:${japanese.index ?? 0}`);
-    add(japanese[4] ?? japanese[5] ?? japanese[6] ?? "", "destination", `japanese-directed:${japanese.index ?? 0}`);
+    add(japanese[1] ?? japanese[2] ?? japanese[3] ?? "", "subject", `japanese-directed:${japanese.index ?? 0}`, japanese[1] !== undefined || japanese[2] !== undefined);
+    add(japanese[4] ?? japanese[5] ?? japanese[6] ?? "", "destination", `japanese-directed:${japanese.index ?? 0}`, japanese[4] !== undefined || japanese[5] !== undefined);
   } else if (englishInsertRemove) {
-    add(englishInsertRemove[2]!, "subject", `english-insert-remove:${englishInsertRemove.index ?? 0}`);
-    add(englishInsertRemove[1]!, "destination", `english-insert-remove:${englishInsertRemove.index ?? 0}`);
+    add(englishInsertRemove[2]!, "subject", `english-insert-remove:${englishInsertRemove.index ?? 0}`, isDelimitedAtomCapture(englishInsertRemove[2]!));
+    add(englishInsertRemove[1]!, "destination", `english-insert-remove:${englishInsertRemove.index ?? 0}`, isDelimitedAtomCapture(englishInsertRemove[1]!));
   } else if (japaneseInsertRemove) {
-    add(japaneseInsertRemove[1] ?? japaneseInsertRemove[2] ?? japaneseInsertRemove[3] ?? "", "subject", `japanese-insert-remove:${japaneseInsertRemove.index ?? 0}`);
-    add(japaneseInsertRemove[4] ?? japaneseInsertRemove[5] ?? japaneseInsertRemove[6] ?? "", "destination", `japanese-insert-remove:${japaneseInsertRemove.index ?? 0}`);
+    add(japaneseInsertRemove[1] ?? japaneseInsertRemove[2] ?? japaneseInsertRemove[3] ?? "", "subject", `japanese-insert-remove:${japaneseInsertRemove.index ?? 0}`, japaneseInsertRemove[1] !== undefined || japaneseInsertRemove[2] !== undefined);
+    add(japaneseInsertRemove[4] ?? japaneseInsertRemove[5] ?? japaneseInsertRemove[6] ?? "", "destination", `japanese-insert-remove:${japaneseInsertRemove.index ?? 0}`, japaneseInsertRemove[4] !== undefined || japaneseInsertRemove[5] !== undefined);
   } else {
     return undefined;
   }
-  if (symbol) add(symbol, "subject", "args.symbol");
+  if (symbol) add(symbol, "subject", "args.symbol", false);
   // Compound segments are measured for collision/absence evidence only; the
   // whole dotted/slashed form above remains the sole propagation seed.
   for (const term of [...terms]) {
     if (term.role === "measurement-only") continue;
     for (const part of term.value.split(/[./]/u)) {
-      if (part.length >= 2 && part !== term.value) add(part, "measurement-only", `segment-of:${term.roleSource}`);
+      if (part.length >= 2 && part !== term.value) add(part, "measurement-only", `segment-of:${term.roleSource}`, false);
     }
   }
   return terms;
@@ -5258,6 +5329,13 @@ function literalFirstDestinationNorms(query: string): ReadonlySet<string> {
   );
 }
 
+/** A single exact match of the literal SOURCE, at (path, line, column) granularity. */
+interface LiteralSourceOccurrence {
+  path: string;
+  line: number;
+  column: number;
+}
+
 interface LiteralFirstMeasurement {
   /** `partial` is deliberately non-terminal: it cannot prove source absence. */
   kind: "present" | "absent" | "partial";
@@ -5270,7 +5348,18 @@ interface LiteralFirstMeasurement {
   sourceImplementationPaths: number;
   sourceRootCount: number;
   scannedPaths: number;
+  /** DISTINCT FILE count -- kept for the existing rarity-limit/root checks below, which are genuinely about file/root spread, not per-file occurrence count. */
   sourcePaths: number;
+  /**
+   * Design v0.15 §7: the TRUE occurrence count -- "一致ファイルが1件でも、
+   * 同じファイルに2出現あれば一意ではない". Always >= `sourcePaths` (one
+   * file contributing >= 1 occurrence each); never conflate the two:
+   * `sourcePaths===1 && sourceOccurrenceCount===1` is the only shape that
+   * may be treated as a genuinely unique replacement source.
+   */
+  sourceOccurrenceCount: number;
+  /** Every occurrence backing `sourceOccurrenceCount`, for local-window construction. */
+  sourceOccurrences: readonly LiteralSourceOccurrence[];
   destinationOccurrences: number;
   universePaths: number;
   universeFingerprint: string;
@@ -5296,6 +5385,38 @@ function literalUniverseFingerprint(universe: FindTextUniverse): string {
   }));
 }
 
+/**
+ * Every exact, case-sensitive occurrence of `source` inside one already-
+ * confirmed candidate file (a fresh, bounded re-read -- `scanLiteral`'s own
+ * per-line regex has no `g` flag, so it cannot see a second occurrence on
+ * the same line; this is the precise recount design v0.15 §7 requires).
+ * `fallbackLine` is the witness `scanLiteral` already proved for this path,
+ * used only if the reread itself fails (I/O race, since-deleted file) or
+ * somehow finds nothing -- never UNDER-count below what was already proved.
+ */
+function countSourceOccurrencesInFile(
+  workspace: string,
+  relPath: string,
+  source: string,
+  fallbackLine: number,
+): LiteralSourceOccurrence[] {
+  const content = source.length === 0 ? undefined : readCached(workspace, relPath);
+  if (content === undefined) return [{ path: relPath, line: fallbackLine, column: 1 }];
+  const out: LiteralSourceOccurrence[] = [];
+  const lines = content.split(/\r\n|\r|\n/u);
+  for (let i = 0; i < lines.length; i++) {
+    const lineText = lines[i]!;
+    let from = 0;
+    for (;;) {
+      const at = lineText.indexOf(source, from);
+      if (at < 0) break;
+      out.push({ path: relPath, line: i + 1, column: at + 1 });
+      from = at + source.length;
+    }
+  }
+  return out.length > 0 ? out : [{ path: relPath, line: fallbackLine, column: 1 }];
+}
+
 function literalFirstMeasurement(
   args: TaskPackArgs,
   query: string,
@@ -5319,8 +5440,13 @@ function literalFirstMeasurement(
   let destinationOccurrences = 0;
   for (const term of terms) {
     const paths = new Set<string>();
+    // Design v0.15 §7: the replacement source is a fixed string, matched
+    // CASE-SENSITIVELY -- "retry_limit" must never be credited as a witness
+    // for a query naming "RETRY_LIMIT" (or vice versa). Same for the
+    // destination: it exists to detect a collision with the exact source
+    // identity, not a same-spelling-different-case neighbor.
     for (const match of scanLiteral(term.value, workspace, {
-      caseInsensitive: true,
+      caseInsensitive: false,
       files: universe.files,
       contentCache,
       coverage,
@@ -5351,6 +5477,16 @@ function literalFirstMeasurement(
     && coverage.undecodable.size === 0
     && universe.omissions.unreadable_dirs === 0
     && universe.omissions.oversize === 0;
+  // Design v0.15 §7: a genuine per-occurrence recount over just the
+  // already-confirmed candidate files (never a second incomplete walk --
+  // the file SET still comes entirely from the shared `universe` above).
+  // `sourceWitnesses` deliberately keeps its existing first-per-path shape
+  // (other consumers below key surfaces/candidates by distinct path); this
+  // is an additional, independent view for exactly the "is this file's ONE
+  // match its ONLY match" question.
+  const sourceOccurrences = [...sourceWitnesses.values()]
+    .flatMap((witness) => countSourceOccurrencesInFile(workspace, witness.path, source.value, witness.line))
+    .sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line || a.column - b.column);
   return {
     kind: directSourceOccurrences === 0
       ? universeComplete ? "absent" : "partial"
@@ -5363,6 +5499,8 @@ function literalFirstMeasurement(
     sourceRootCount: sourceRoots.size,
     scannedPaths: coverage.scanned.size,
     sourcePaths: directSourceOccurrences,
+    sourceOccurrenceCount: sourceOccurrences.length,
+    sourceOccurrences,
     destinationOccurrences,
     universePaths: universe.files.length,
     universeFingerprint: literalUniverseFingerprint(universe),
@@ -5895,6 +6033,18 @@ async function buildPropagationTaskPack(
   query: string,
   workspace: string,
 ): Promise<TaskPackResult | undefined> {
+  // Captured BEFORE `propagationSeedResolution` runs (and before the
+  // `{...args, paths}` reassignment below): a directed relation can reach
+  // this function even when the caller ALREADY supplied an explicit
+  // `path`/`paths` (the gate above has no pathless guard, unlike the other
+  // seeding branches) -- e.g. F-V13-8's `paths:["src/statusBar.ts"]` plus a
+  // "replace `X` with `Y`" query. Literal-first here may still RE-DERIVE its
+  // own `paths` (a rename can span files the caller never named), but a
+  // caller who already gave an explicit location keeps the existing (body-
+  // withheld) fast-path behavior for it regardless -- only a truly pathless
+  // caller is discovering this location for the first time.
+  const hadExplicitLocation = (Array.isArray(args.paths) && args.paths.length > 0)
+    || (typeof args.path === "string" && args.path.length > 0);
   const resolution = await propagationSeedResolution(args, query, workspace);
   if (resolution.literal?.kind === "absent") {
     const result: TaskPackResult = {
@@ -5954,7 +6104,7 @@ async function buildPropagationTaskPack(
     traceLiteralFirstRouteDecision(resolution.literal, paths, "abstained", workspace);
     return undefined;
   }
-  const result = await buildSeededTaskPack({ ...args, paths }, query, workspace);
+  const result = await buildSeededTaskPack({ ...args, paths, autoDiscoveredLocation: !hadExplicitLocation }, query, workspace);
   // buildSeededTaskPack captures the internal seeded request. Replace that
   // cache key with the caller's original pathless request so an exact retry
   // still receives the compact pack-unchanged response.
@@ -9412,6 +9562,7 @@ async function buildPartialPack(
         path: matched.path,
         ...(exactSymbol ? { symbol: matched.symbol } : {}),
       }],
+      autoDiscoveredLocation: true,
     }, query, workspace);
     // buildSeededTaskPack captures the internal identity-seeded request.
     // Replace that cache key with the caller's original ambiguous/pathless
@@ -20747,6 +20898,1258 @@ function groundedAnalysisEvidence(
   }).slice(0, 6);
 }
 
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 R1 (2026-09-07): request-item obligations
+// (features/task-pack/requestItems.ts's extraction; wave1-contract.md §3).
+//
+// Deliberately parallel to the enumerated-item/F-V13-6 mechanism above rather
+// than merged into it: F-V13-6 proves a single-facet-per-segment substring
+// hit, which is exactly the "同名identifierでは呼出関係を証明しない" shape
+// design §4.1 forbids for a `decision`/`relation` point (a decoy sharing an
+// identifier, or two definitions served side by side, must not close a
+// point). Kept as an ADDITIVE obligation source so an existing single-target
+// query — `extractRequestItems` returns 0-1 items for those by construction
+// — never engages this path and stays byte-identical (contract §3.4).
+// ---------------------------------------------------------------------------
+
+const REQUEST_ITEM_OBLIGATION_PREFIX = "request-item:";
+/** Bound on one batched discover call for still-uncovered request items. */
+const MAX_REQUEST_ITEM_BATCH = 8;
+/** Bound on distinct candidate files a topic item's literal find may return before it is too ambiguous to batch. */
+const MAX_REQUEST_ITEM_TOPIC_CANDIDATES = 8;
+
+interface RequestItemProof {
+  proved: boolean;
+  evidence: TaskReadinessEvidence[];
+  reason: string;
+  /** Real, existing workspace paths still worth fetching when NOT proved. Empty when nothing more can be fetched for this point (never re-requested). */
+  candidatePaths: string[];
+  /**
+   * DESIGN-v0.15 R1 (2026-09-07): set ONLY by `proveUnbindableRequestItem`'s
+   * verified-absence arm (`matchedPaths.size === 0`) — the exact salient-word
+   * phrase the workspace-wide literal scan found zero occurrences of. Absent
+   * on every other proof path (served-surface match, candidate coverage,
+   * "no salient wording"), including the OTHER `proved:true` arms above,
+   * which close by positive evidence, not absence.
+   */
+  absentTerm?: string;
+  /**
+   * DESIGN-v0.15 R1 false-completion fix (2026-09-07, P1): set when a
+   * candidate PATH is served but the proof-critical line range (a decision
+   * identifier's own declaration/implementation body; see
+   * `declarationRangeInFile`) is not yet covered by the union of served
+   * windows for that path (see `servedLineSpansOf`/`lineSpansCover`) — a
+   * range:"1-20" prefix read of a file whose real decision logic sits past
+   * line 20 must never be credited as "this file is served" (design §4.2:
+   * "単なる...path単位の既読...を禁止する"). The proof-critical range is the
+   * identifier's AST-resolved declaration span, or — when the AST cannot
+   * bound it at all (P1 ruling, 2026-09-07) — the WHOLE file at the current
+   * revision; either way the follow-up fetches exactly the UNSERVED lines,
+   * never a whole-file re-read of bytes this task already holds — see
+   * `buildRequestItemReadiness`'s own use of this field. An
+   * explicit `range` (never `symbol:`) — verified empirically that a
+   * `{path,symbol}` target for a path this task already touched resolves
+   * back to the EXISTING served range rather than the symbol's own bounds
+   * (a pre-existing wire-layer limitation outside this fix's ownership),
+   * while an explicit overlapping/wider `range` for the same path reliably
+   * serves fresh bytes for the new span.
+   */
+  rangeCandidates?: Array<{ path: string; range: string }>;
+}
+
+function evidenceSurfacesForPath(priorEvidence: readonly TaskPackSurface[], relPath: string): TaskPackSurface[] {
+  return priorEvidence.filter((surface) => surface.path === relPath && hasServedCode(surface));
+}
+
+function servedPathSet(priorEvidence: readonly TaskPackSurface[]): Set<string> {
+  return new Set(priorEvidence.filter(hasServedCode).map((surface) => surface.path));
+}
+
+/** Workspace files whose basename resolves a bare filename term (never fabricated — only real `universe` entries). */
+function fileTermCandidatePaths(workspace: string, universe: FindTextUniverse, term: string): string[] {
+  if (!term.includes("/") && !term.includes("\\")) {
+    const direct = path.join(workspace, term);
+    try {
+      if (fs.statSync(direct).isFile()) return [term];
+    } catch { /* fall through to a universe scan */ }
+  }
+  const lowerTerm = term.toLowerCase();
+  return universe.files
+    .filter((f) => f.relPath.toLowerCase() === lowerTerm || path.basename(f.relPath).toLowerCase() === lowerTerm)
+    .map((f) => f.relPath);
+}
+
+/** Root-level manifest files actually present, for a `definition` item naming no explicit file term. */
+function manifestCandidatePaths(workspace: string): string[] {
+  const out: string[] = [];
+  for (const name of LITERAL_SURFACE_DUTY_MANIFEST_BASENAMES) {
+    try {
+      if (fs.statSync(path.join(workspace, name)).isFile()) out.push(name);
+    } catch { /* not present */ }
+  }
+  return out;
+}
+
+/** Files where `identifier` is DECLARED (function/class/const/...), falling back to every literal occurrence if no declaration-shaped line exists. */
+/** A line declaring `identifier` (function/class/const/...) — shared by declarationCandidatePaths' candidate scan and declarationRangeInFile's brace/indent fallback anchor below. */
+function declarationLineRegex(identifier: string): RegExp {
+  return new RegExp(
+    `\\b(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?(?:function|class|interface|type|enum|const|let|var|struct|fn|func|def)\\s+${escapeRegExp(identifier)}\\b`,
+  );
+}
+
+function declarationCandidatePaths(
+  workspace: string,
+  universe: FindTextUniverse,
+  identifier: string,
+  contentCache?: ScanContentCache,
+): string[] {
+  const matches = scanLiteral(identifier, workspace, { files: universe.files, ...(contentCache ? { contentCache } : {}) });
+  const declRe = declarationLineRegex(identifier);
+  const declPaths = new Set<string>();
+  const anyPaths = new Set<string>();
+  for (const match of matches) {
+    anyPaths.add(match.path);
+    if (match.text !== undefined && declRe.test(match.text)) declPaths.add(match.path);
+  }
+  return declPaths.size > 0 ? [...declPaths].sort() : [...anyPaths].sort();
+}
+
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 R1 false-completion fix (2026-09-07, P1): line-range coverage.
+//
+// `proveRequestItem`'s decision arm used to credit a candidate definition
+// site as soon as ANY content was served for its PATH (`servedPathSet` /
+// `served.has(p)`) — a range:"1-20" prefix read of a ~35-line function whose
+// real decision logic sits in its last lines was enough. Design §4.2:
+// satisfaction requires the window backing the point (here, the
+// identifier's OWN declaration/implementation body) to actually be on the
+// wire — never a path-level "already read" flag. These helpers compute the
+// union of a path's genuinely served line spans (see epochServedEvidence's
+// own comma-joined multi-range `TaskPackSurface.range` for cross-pack
+// carried-forward evidence, and content_completeness:"partial"'s
+// remaining_ranges for a same-pack body-stripped/centered-trimmed surface —
+// both are respected here, mirroring isWholeAuthoritySurface's own
+// partial-awareness) and check it against the identifier's resolved
+// declaration range.
+// ---------------------------------------------------------------------------
+
+interface LineSpan { start: number; end: number; }
+
+/** Parse ONE OR MORE comma-joined "N-M" spans. `epochServedEvidence` joins a path's several same-epoch ledger ranges into one comma-separated `range` string; every other surface producer emits exactly one "N-M" segment, which this also accepts (a single-piece split). Malformed pieces are skipped, never thrown. */
+function parseSurfaceSpans(range: string | undefined): LineSpan[] {
+  if (range === undefined) return [];
+  const out: LineSpan[] = [];
+  for (const piece of range.split(",")) {
+    const parsed = parseSurfaceSpan(piece);
+    if (parsed !== undefined) out.push(parsed);
+  }
+  return out;
+}
+
+/** Merge overlapping/adjacent spans into a sorted, non-overlapping list. */
+function mergeLineSpans(spans: readonly LineSpan[]): LineSpan[] {
+  const sorted = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: LineSpan[] = [];
+  for (const span of sorted) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && span.start <= last.end + 1) {
+      if (span.end > last.end) last.end = span.end;
+    } else {
+      merged.push({ start: span.start, end: span.end });
+    }
+  }
+  return merged;
+}
+
+/** Subtract `holes` from `span`, returning the remaining covered sub-spans (0, 1, or 2+ pieces). */
+function subtractLineSpans(span: LineSpan, holes: readonly LineSpan[]): LineSpan[] {
+  let pieces: LineSpan[] = [span];
+  for (const hole of holes) {
+    const next: LineSpan[] = [];
+    for (const piece of pieces) {
+      if (hole.end < piece.start || hole.start > piece.end) { next.push(piece); continue; }
+      if (hole.start > piece.start) next.push({ start: piece.start, end: Math.min(hole.start - 1, piece.end) });
+      if (hole.end < piece.end) next.push({ start: Math.max(hole.end + 1, piece.start), end: piece.end });
+    }
+    pieces = next;
+  }
+  return pieces.filter((p) => p.start <= p.end);
+}
+
+/**
+ * Every line span actually served across `surfaces` (already filtered to one
+ * path by the caller, e.g. via `evidenceSurfacesForPath`) — DESIGN-v0.15
+ * §4.2's "現在のsource revisionに対応した窓". A `content_completeness:
+ * "partial"` surface contributes its `range` MINUS `remaining_ranges` —
+ * mirrors `isWholeAuthoritySurface`'s own partial-awareness — never the full
+ * nominal range a body-stripped/centered-trimmed surface merely claims. A
+ * surface with an unparseable/absent `range` contributes nothing (the safe
+ * direction: never credited as covering anything).
+ */
+function servedLineSpansOf(surfaces: readonly TaskPackSurface[]): LineSpan[] {
+  const out: LineSpan[] = [];
+  for (const surface of surfaces) {
+    const spans = parseSurfaceSpans(surface.range);
+    if (spans.length === 0) continue;
+    if (surface.content_completeness === "partial") {
+      const holes = (surface.remaining_ranges ?? []).flatMap((r) => parseSurfaceSpans(r));
+      for (const span of spans) out.push(...subtractLineSpans(span, holes));
+    } else {
+      out.push(...spans);
+    }
+  }
+  return mergeLineSpans(out);
+}
+
+/** True when `target` has no line left uncovered by `spans` (already merged, non-overlapping). */
+function lineSpansCover(spans: readonly LineSpan[], target: LineSpan): boolean {
+  return spans.some((span) => span.start <= target.start && span.end >= target.end);
+}
+
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 R1 false-completion fix continued (2026-09-07, P1 review
+// finding): the ORIGINAL `braceOrIndentBalancedDeclarationExtent` counted
+// every literal `{`/`}` CHARACTER with no lexical context at all — a `}`
+// inside a string literal (reported repro: `const closing = String("}");`
+// as a decision function's own FIRST statement) was miscounted as the
+// function's closing brace, truncating the computed range to just that one
+// statement. A served `range:"1-20"` prefix then trivially "covered" the
+// (wrongly short) computed range and the pack reached `act.answer` without
+// ever serving the real decision at the function's tail — see
+// explorationContinuationFixtures.ts's "decision-at-function-tail-brace-in-
+// string" fixture and requestItemCompletion.spec.ts's matching regression.
+//
+// `lexicalDeclarationExtent` — the brace/indent lexer those repros kept
+// defeating — is DELETED (2026-09-07 P1 ruling; see its tombstone comment
+// below `regexLiteralCloseIndex`). `isRegexLiteralStartAt`/
+// `regexLiteralCloseIndex` survive only as the RELATION arm's lexical
+// helpers (`isInsideRegexLiteralAt`), where a wrong answer cannot bound a
+// declaration or close a point on its own. `isEscapedAt` (below, shared
+// with `isInsideQuotesAt`) is reused rather than re-implemented.
+// ---------------------------------------------------------------------------
+
+/**
+ * True when a `/` at `line[index]` most likely opens a REGEX LITERAL rather
+ * than a division operator: the character preceding it (skipping
+ * whitespace) is an operator, `(`, `,`, `=`, `:`, `;`, an opening bracket, or
+ * the line ends in a keyword a regex may legally follow (`return`,
+ * `typeof`, `case`, ...). A `/` after an identifier, digit, `)`, or `]` is
+ * division, never a regex start. Deliberately conservative: a missed regex
+ * just leaves its `/.../ ` characters lexed as ordinary code, which can only
+ * WIDEN a computed extent — never narrow one below the true declaration, so
+ * getting this heuristic wrong is safe in the direction that matters here.
+ * Shared with `isCallOrImportOccurrence` below (design §4.1's relation proof)
+ * so a regex-literal mention of a producer identifier is never mistaken for
+ * a call/import occurrence either.
+ */
+/**
+ * Keywords after which a `/` can only start a regex literal (no operand can
+ * precede the `/`). Checked as a WHOLE preceding token — the P1 follow-up
+ * (2026-09-07) was exactly `return /}/.test(...)`: the old code inspected only
+ * the character before the `/`, saw `return`'s trailing `n` (an identifier
+ * character), classified the `/` as division, and then counted the `}` inside
+ * the regex as the function's closing brace.
+ */
+const REGEX_PRECEDING_KEYWORDS: ReadonlySet<string> = new Set([
+  "return", "typeof", "case", "instanceof", "in", "of", "yield", "throw", "new",
+  "delete", "void", "else", "do", "await",
+]);
+
+/**
+ * Keywords whose parenthesised CONDITION a `/` may directly follow as a
+ * regex literal: `if (x) /re/.test(x)` is a regex, while `foo(x) / 2` is
+ * division. P1 follow-up (2026-09-07), reported form 1: the old code
+ * classified EVERY `)` as "a value just ended, so `/` is division" and then
+ * counted the `}` inside `/}/ ` as a closing brace.
+ */
+const REGEX_PRECEDING_CONDITION_KEYWORDS: ReadonlySet<string> = new Set(["if", "while", "for", "with"]);
+
+/**
+ * Index of the last character of the token preceding `index` on `line`,
+ * skipping whitespace AND whole `/* ... *\/` block comments — P1 follow-up
+ * (2026-09-07), reported form 2: `return /* probe *\/ /}/.test(x)` hid the
+ * `return` keyword from a scan that only skipped whitespace. Returns -1 when
+ * nothing but whitespace/comments precedes `index`. A `// ...` line comment
+ * needs no handling here: everything after it IS comment, so no code
+ * position can follow one on the same line.
+ */
+function previousTokenEndIndex(line: string, index: number): number {
+  let i = index - 1;
+  for (;;) {
+    while (i >= 0 && /\s/.test(line[i]!)) i--;
+    if (i >= 1 && line[i] === "/" && line[i - 1] === "*") {
+      const open = line.lastIndexOf("/*", i - 2);
+      if (open < 0) return -1;
+      i = open - 1;
+      continue;
+    }
+    return i;
+  }
+}
+
+/**
+ * True when the `)` at `closeIndex` closes an `if`/`while`/`for`/`with`
+ * CONDITION — matched back to its own `(` by paren depth, then the token
+ * before that `(` must be one of those keywords as a whole word. Naive about
+ * parens inside string/regex literals on the same line (same documented
+ * "conservative heuristic" scope as `isInsideQuotesAt` above): a wrong
+ * answer here can only mis-lex a `/` on one line, never widen or narrow a
+ * PROOF — declaration ranges come from the AST alone (see
+ * `declarationRangeInFile` below).
+ */
+function closesControlFlowCondition(line: string, closeIndex: number): boolean {
+  let depth = 0;
+  let i = closeIndex;
+  for (; i >= 0; i--) {
+    const ch = line[i]!;
+    if (ch === ")") depth++;
+    else if (ch === "(") {
+      depth--;
+      if (depth === 0) break;
+    }
+  }
+  if (i < 0 || depth !== 0) return false;
+  const before = previousTokenEndIndex(line, i);
+  if (before < 0) return false;
+  const word = /([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(line.slice(0, before + 1));
+  if (word === null) return false;
+  const wordStart = before + 1 - word[1]!.length;
+  if (wordStart > 0 && /[A-Za-z0-9_$.]/.test(line[wordStart - 1]!)) return false;
+  return REGEX_PRECEDING_CONDITION_KEYWORDS.has(word[1]!);
+}
+
+export function isRegexLiteralStartAt(line: string, index: number): boolean {
+  const i = previousTokenEndIndex(line, index);
+  if (i < 0) return true;
+  const prevChar = line[i]!;
+  if (/[A-Za-z0-9_$]/.test(prevChar)) {
+    // An identifier-shaped token ends right before the `/`. A value
+    // (identifier, number, `obj.prop`) makes it division; one of the
+    // keywords above makes it a regex. The keyword must be a whole word
+    // (not `x.return`, not `myreturn`).
+    const word = /([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(line.slice(0, i + 1));
+    if (word === null) return false;
+    const wordStart = i + 1 - word[1]!.length;
+    if (wordStart > 0 && /[A-Za-z0-9_$.]/.test(line[wordStart - 1]!)) return false;
+    return REGEX_PRECEDING_KEYWORDS.has(word[1]!);
+  }
+  if (prevChar === ")") return closesControlFlowCondition(line, i);
+  if (prevChar === "]") return false;
+  if ("(,=:;!&|?+-*%^~{[".includes(prevChar)) return true;
+  return false;
+}
+
+/**
+ * Index of the unescaped closing `/` of a regex literal opening at
+ * `line[start]` (character-class contents `[...]` are skipped whole, since a
+ * literal `/` inside a class does not close the regex). Returns
+ * `line.length` when unterminated on this line (defensive only — real code
+ * always closes a regex literal on the line it opens).
+ */
+function regexLiteralCloseIndex(line: string, start: number): number {
+  let i = start + 1;
+  let inClass = false;
+  while (i < line.length) {
+    const ch = line[i]!;
+    if (ch === "\\") { i += 2; continue; }
+    if (ch === "[") { inClass = true; i++; continue; }
+    if (ch === "]") { inClass = false; i++; continue; }
+    if (ch === "/" && !inClass) return i;
+    i++;
+  }
+  return line.length;
+}
+
+/**
+ * DESIGN-v0.15 R1 P1 ruling (2026-09-07): `lexicalDeclarationExtent` — a
+ * hand-written brace/indent lexer that used to run as the always-computed
+ * FALLBACK declaration-range source here, merged "wider wins" with the AST —
+ * IS DELETED. Three separate reports produced the same class of defect
+ * against it (a `}` inside a string; `return /}/`; then `if (x) /}/` and a
+ * block comment between `return` and the regex), each one truncating a
+ * ~35-line function to a couple of lines, which a short prefix read then
+ * trivially "covered" — a false completion. Patching the lexer's Nth trap
+ * only postpones the (N+1)th: design §4.1/§4.2 require that an unobtainable
+ * relation is never filled in by guesswork and that anything the analysis
+ * cannot establish is reported as UNCONFIRMED. So the lexer is gone from the
+ * proof path entirely and `declarationRangeInFile` below answers with the
+ * AST or with "unresolved" — never with an estimate.
+ *
+ * `isRegexLiteralStartAt`/`regexLiteralCloseIndex` above survive because
+ * `isInsideRegexLiteralAt` (the relation arm's call/import scanner) still
+ * uses them; they bound no declaration and prove nothing on their own.
+ */
+
+/**
+ * What the AST — and ONLY the AST — can say about `identifier`'s own
+ * declaration/implementation body in `relPath`'s CURRENT content.
+ * DESIGN-v0.15 R1 P1 ruling (2026-09-07).
+ *
+ * - `{source:"ast", span}`: tree-sitter genuinely resolved `identifier` in
+ *   THIS file during the async pre-pass (`resolveDecisionAstRanges` below —
+ *   `collectSymbols`, a real parse), clamped to the file's own logical line
+ *   count. `proveRequestItem` requires the served windows to cover `span`.
+ * - `{source:"unresolved"}`: no grammar for this file's language, the parse
+ *   found no such declaration, the candidate fell outside the pre-pass'
+ *   bound, no prewalk context is active at all (a caller that bypasses
+ *   `buildTaskPack`'s ALS wrapper, as several readiness specs do with
+ *   synthetic results), or the file cannot be read. The declaration range is
+ *   then UNCONFIRMED — never estimated. `proveRequestItem` proves such a
+ *   candidate only from WHOLE-FILE coverage, which bounds any declaration
+ *   range without trusting a heuristic.
+ *
+ * There is deliberately no third, "best effort" answer: the deleted
+ * `lexicalDeclarationExtent` (see its tombstone comment above) was exactly
+ * that, and it produced three separate false completions.
+ */
+type DeclarationResolution =
+  | { source: "ast"; span: LineSpan }
+  | { source: "unresolved" };
+
+function declarationRangeInFile(workspace: string, relPath: string, identifier: string): DeclarationResolution {
+  const fromAst = requestItemPrewalkStorage.getStore()?.astDeclarationRanges.get(relPath)?.get(identifier);
+  if (fromAst === undefined) return { source: "unresolved" };
+  const totalLines = currentFileLineCount(workspace, relPath);
+  if (totalLines === undefined) return { source: "unresolved" };
+  const start = Math.max(1, Math.min(fromAst.start, totalLines));
+  const end = Math.max(start, Math.min(totalLines, fromAst.end));
+  return { source: "ast", span: { start, end } };
+}
+
+/**
+ * `relPath`'s current logical line count — `util/countLines.ts` semantics,
+ * the SAME count every range-serving read path mints its own `range` strings
+ * against (a trailing newline is not a phantom extra line), so a whole-file
+ * requirement of `1-<count>` is exactly satisfiable by a whole-file serve.
+ * `undefined` when the file cannot be read or decoded.
+ */
+function currentFileLineCount(workspace: string, relPath: string): number | undefined {
+  const content = readCached(workspace, relPath);
+  if (content === undefined) return undefined;
+  return Math.max(1, countLines(content));
+}
+
+/** Candidate consumer files for a relation's `to` — prefer index-derived aliases (already real paths), else a file-shaped `to` term. */
+function relationConsumerCandidatePaths(
+  workspace: string,
+  universe: FindTextUniverse,
+  item: RequestItem,
+  toTerms: readonly string[],
+): string[] {
+  const aliasPaths = item.aliases.filter((alias) => alias.includes("/") || looksLikeFileTerm(alias));
+  if (aliasPaths.length > 0) return [...new Set(aliasPaths)];
+  const out = new Set<string>();
+  for (const term of toTerms) {
+    if (looksLikeFileTerm(term)) {
+      for (const p of fileTermCandidatePaths(workspace, universe, term)) out.add(p);
+    }
+  }
+  return [...out];
+}
+
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 R1 finding-2 fix (2026-09-07): structural (never bare-
+// substring) proof for relation/definition request items.
+//
+// A `relation` item used to be "proved" by ANY textual mention of the
+// producer term anywhere in the consumer's served body — a comment, a TODO,
+// a string literal — because `text.includes(term)` is a raw substring test
+// over the whole window, and `sharesSignificantSubstring`'s containment
+// short-circuit ignored its own `min` floor (fixed separately, in
+// requestItems.ts). Design §4.1 forbids exactly this ("コメント中の言及
+// だけでは呼出関係を証明しない"). The whole request-item proof pipeline is
+// synchronous (`buildTaskExecutionContract`, several call sites up, has 8
+// internal call sites and ~17 external ones this wave must not touch), so
+// this is a regex/line-based scan rather than `tools/lexicalRanges.ts`'s
+// tree-sitter-backed `collectLexicalSegments`/`segmentKindAt` (both async,
+// which would force this whole call chain async) — cheap and conservative in
+// the direction that matters: a comment or string-literal position is
+// rejected even when it looks call-shaped (a "// TODO: call foo() later"
+// comment must never count), and only a "(" call or an import/require
+// specifier counts as a use — never a bare identifier mention.
+// ---------------------------------------------------------------------------
+
+const HASH_COMMENT_LANGUAGES = new Set(["python", "ruby", "shell", "yaml", "toml"]);
+
+function isEscapedAt(line: string, index: number): boolean {
+  let backslashes = 0;
+  for (let i = index - 1; i >= 0 && line[i] === "\\"; i--) backslashes++;
+  return backslashes % 2 === 1;
+}
+
+function lineCommentMarkerIndex(line: string, language: string | undefined): number {
+  const marker = language !== undefined && HASH_COMMENT_LANGUAGES.has(language) ? "#" : "//";
+  for (let i = 0; i <= line.length - marker.length; i++) {
+    if (line.startsWith(marker, i) && !isEscapedAt(line, i)) return i;
+  }
+  return -1;
+}
+
+/** True when `index` sits inside a single/double/backtick-quoted run of `line` (naive, unnested, per-line — good enough to keep a plain call/import scan off a string literal's contents). */
+function isInsideQuotesAt(line: string, index: number): boolean {
+  let quote: string | undefined;
+  for (let i = 0; i < index; i++) {
+    const ch = line[i]!;
+    if (quote === undefined) {
+      if ((ch === "\"" || ch === "'" || ch === "`") && !isEscapedAt(line, i)) quote = ch;
+    } else if (ch === quote && !isEscapedAt(line, i)) {
+      quote = undefined;
+    }
+  }
+  return quote !== undefined;
+}
+
+function isIdentifierChar(c: string): boolean {
+  return /[A-Za-z0-9_$]/.test(c);
+}
+
+/**
+ * True when `term` occurs in `text` at a non-comment, non-string, call- or
+ * import-shaped position: `term(` (a call) or a line that is import/require
+ * -shaped and mentions `term` as a specifier. Never a bare mention.
+ */
+/**
+ * True when `index` sits inside a `/regex/` literal on `line` — DESIGN-v0.15
+ * R1 P1 fix (2026-09-07): the SOLE remaining consumer of
+ * `isRegexLiteralStartAt`/`regexLiteralCloseIndex` above, now that the
+ * declaration-extent lexer they were shared with is deleted. A miss here
+ * can only mis-read one line of a call/import scan; it bounds no
+ * declaration and proves no point by itself. Skips quoted spans first so a `/` inside a
+ * string is never misread as a regex delimiter — naive/unnested, matching
+ * `isInsideQuotesAt`'s own documented "good enough" scope just above.
+ */
+function isInsideRegexLiteralAt(line: string, index: number): boolean {
+  let i = 0;
+  while (i < index) {
+    const ch = line[i]!;
+    if (ch === "\"" || ch === "'" || ch === "`") {
+      const quote = ch;
+      i++;
+      while (i < line.length && line[i] !== quote) {
+        if (line[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "/" && isRegexLiteralStartAt(line, i)) {
+      const close = regexLiteralCloseIndex(line, i);
+      if (index > i && index < close) return true;
+      i = close + 1;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
+function isCallOrImportOccurrence(text: string, term: string, language: string | undefined): boolean {
+  if (term.length === 0) return false;
+  const lines = text.split(/\r\n|\r|\n/);
+  let inBlockComment = false;
+  for (const rawLine of lines) {
+    let line = rawLine;
+    if (inBlockComment) {
+      const closeAt = line.indexOf("*/");
+      if (closeAt < 0) continue;
+      line = line.slice(closeAt + 2);
+      inBlockComment = false;
+    }
+    const commentAt = lineCommentMarkerIndex(line, language);
+    const codePart = commentAt >= 0 ? line.slice(0, commentAt) : line;
+    let searchFrom = 0;
+    for (;;) {
+      const at = codePart.indexOf(term, searchFrom);
+      if (at < 0) break;
+      searchFrom = at + term.length;
+      const before = at > 0 ? codePart[at - 1]! : "";
+      const after = codePart[at + term.length] ?? "";
+      if (isIdentifierChar(before) || isIdentifierChar(after)) continue;
+      if (isInsideQuotesAt(codePart, at)) continue;
+      if (isInsideRegexLiteralAt(codePart, at)) continue;
+      const trailing = codePart.slice(at + term.length);
+      const isCall = /^\s*\(/.test(trailing);
+      const isImportShaped = /^\s*import\b/.test(rawLine.trimStart())
+        || /\brequire\s*\(\s*["'][^"']*["']\s*\)/.test(rawLine)
+        || /^\s*from\s+\S+\s+import\b/.test(rawLine)
+        || /\bfrom\s+["'][^"']+["']\s*;?\s*$/.test(rawLine);
+      if (isCall || isImportShaped) return true;
+    }
+    const openAt = rawLine.indexOf("/*");
+    if (openAt >= 0 && rawLine.indexOf("*/", openAt + 2) < 0) inBlockComment = true;
+  }
+  return false;
+}
+
+const JSON_KEY_TOKEN_RE = /"([A-Za-z0-9_.$-]{2,})"\s*:/gu;
+function jsonKeyTokens(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(JSON_KEY_TOKEN_RE)) out.add(m[1]!);
+  return [...out];
+}
+
+const DECLARED_IDENTIFIER_TOKEN_RE =
+  /\b(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|enum|const|let|var|struct|fn|func|def)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gu;
+function declaredIdentifierTokens(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(DECLARED_IDENTIFIER_TOKEN_RE)) out.add(m[1]!);
+  return [...out];
+}
+
+/**
+ * A definition candidate is proved only by a genuine KEY/IDENTIFIER TOKEN
+ * relating to the request — a JSON object key for a manifest-shaped file, a
+ * declared identifier name for code — never a raw substring hunt over the
+ * whole served body (a description sentence sharing a long character run
+ * with an unrelated identifier is not a definition).
+ */
+function definitionKeyTokensOf(path: string, text: string): string[] {
+  return /\.jsonc?$/iu.test(path) ? jsonKeyTokens(text) : declaredIdentifierTokens(text);
+}
+
+/**
+ * Proof for an unbindable item (a `topic` point, or any other kind whose own
+ * structural resolution found no candidate at all): design §4.2's absence
+ * path. Reuses the shared walk (`enumerateFindTextUniverse`/`scanLiteral`)
+ * for exactly ONE literal find over the point's salient words — never a
+ * fabricated frontier, and a zero-candidate result is treated as verified
+ * absence (limited closure) rather than an unresolvable block.
+ */
+function proveUnbindableRequestItem(
+  item: RequestItem,
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+  universe: FindTextUniverse,
+  contentCache?: ScanContentCache,
+): RequestItemProof {
+  const words = salientWords(item.text);
+  if (words.length === 0) {
+    return { proved: true, evidence: [], reason: "residual point has no salient searchable wording", candidatePaths: [] };
+  }
+  const alreadyServed = priorEvidence.filter(
+    (surface) => hasServedCode(surface) && words.some((word) => servedSurfaceText(surface).toLowerCase().includes(word.toLowerCase())),
+  );
+  if (alreadyServed.length > 0) {
+    return { proved: true, evidence: alreadyServed.map(readinessEvidence), reason: "a served surface already contains this point's salient wording", candidatePaths: [] };
+  }
+  const matchedPaths = new Set<string>();
+  for (const word of words.slice(0, 4)) {
+    for (const match of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
+      matchedPaths.add(match.path);
+    }
+  }
+  if (matchedPaths.size === 0) {
+    return {
+      proved: true,
+      evidence: [],
+      reason: `verified absent: no workspace occurrence of ${words.join("/")}`,
+      candidatePaths: [],
+      absentTerm: words.join("/"),
+    };
+  }
+  if (matchedPaths.size > MAX_REQUEST_ITEM_TOPIC_CANDIDATES) {
+    // Too ambiguous to batch; leave uncovered with no candidate — the
+    // decision falls back to await-input once nothing else can progress,
+    // rather than a fabricated/oversized frontier.
+    return { proved: false, evidence: [], reason: `${matchedPaths.size} candidate files for ${words.join("/")} exceed the batch bound`, candidatePaths: [] };
+  }
+  const served = servedPathSet(priorEvidence);
+  const missing = [...matchedPaths].filter((p) => !served.has(p));
+  if (missing.length === 0) {
+    const evidence = [...matchedPaths].flatMap((p) => evidenceSurfacesForPath(priorEvidence, p)).map(readinessEvidence);
+    return { proved: true, evidence, reason: "every literal-find candidate for this point is served", candidatePaths: [] };
+  }
+  return { proved: false, evidence: [], reason: `literal-find candidate(s) not yet served for ${words.join("/")}`, candidatePaths: missing };
+}
+
+function proveRequestItem(
+  item: RequestItem,
+  allItems: readonly RequestItem[],
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+  universe: FindTextUniverse,
+  contentCache?: ScanContentCache,
+  /**
+   * OWNERSHIP RULE (2026-09-07, R1 x F-V13-6/F-V14 reconciliation).
+   *
+   * Lowercased facets the query's OWN enumerated-item obligation
+   * (`enumeratedQueryItemsForEpoch`, minted independently in
+   * `buildReadinessObligations`) already tracks for this same query. When
+   * an item's salient wording overlaps one of them, this item is the SAME
+   * plain-prose checklist point the enumerated-item mechanism already
+   * mints its own `enumerated-item:<hash>:<facet>` obligation for — most
+   * visibly the checklist's own LEADING item, which a stray keyword
+   * collision can misclassify as a structured `definition`/`decision`
+   * point with no real term (observed: "explain what the settings panel
+   * does with clipboard, autosave, telemetry and shortcuts" — "settings"
+   * inside "settings panel" trips `DEFINITION_KEYWORDS_RE` even though the
+   * segment names no actual config key, so it fell to
+   * `manifestCandidatePaths`' "any manifest in the repo" fallback and
+   * manufactured a `read_file package.json` obligation the request never
+   * asked about — package.json was never going to answer "does it handle
+   * clipboard"). Two independent obligations about the identical fact must
+   * not disagree (the same principle `buildRequestItemReadiness`'s own
+   * "reconciled from request-item" comment below already applies to a
+   * `decision`/`identifier:` pair), and mining a second, differently-proved
+   * obligation over a fact `enumeratedQueryItemsForEpoch` already covers is
+   * double-counting, not extra rigor — precisely what that mechanism's own
+   * "ANYTHING THE EXISTING ROUTES ALREADY OWN IS DROPPED" rule already does
+   * in the other direction (an identifier/behavior-body-shaped item is
+   * dropped from ITS candidate set). Deferring is safe because both
+   * mechanisms converge on the SAME conservative "served body mentions it /
+   * verifiably absent" standard for anything this unstructured — R1 is not
+   * skipping a check, it is not re-running one the wire already reports
+   * under `enumerated-item:*`, which keeps its own `search_files` bounded
+   * follow-up as the pack's ONE next call instead of racing R1's batched
+   * `read_file` for an unrelated fallback target. A well-grounded item
+   * (real file/identifier/relation candidates) is unaffected in every other
+   * query — `ownedFacets` is empty whenever `enumeratedQueryItemsForEpoch`
+   * found nothing (the overwhelming majority of requests), so this check is
+   * inert there.
+   */
+  ownedFacets: ReadonlySet<string> = new Set(),
+): RequestItemProof {
+  if (ownedFacets.size > 0 && salientWords(item.text).some((word) => ownedFacets.has(word.toLowerCase()))) {
+    return {
+      proved: true,
+      evidence: [],
+      reason: "this point's salient wording is already tracked by the query's own enumerated-item obligation (F-V13-6/F-V14); not duplicated as a separate request-item obligation",
+      candidatePaths: [],
+    };
+  }
+  const served = servedPathSet(priorEvidence);
+
+  if (item.kind === "decision" && item.terms.length > 0) {
+    const identifier = item.terms[0]!;
+    const candidates = declarationCandidatePaths(workspace, universe, identifier, contentCache);
+    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, universe, contentCache);
+    const missing = candidates.filter((p) => !served.has(p));
+    if (missing.length > 0) {
+      return { proved: false, evidence: [], reason: `decision identifier ${identifier} has ${missing.length} unserved candidate definition site(s)`, candidatePaths: missing };
+    }
+    // DESIGN-v0.15 §4.2 false-completion fix (2026-09-07, P1) + the P1
+    // RULING that replaced its lexical half: a served PATH is not proof by
+    // itself — the window backing this point must actually be on the wire
+    // (never a partial-prefix read, e.g. `range:"1-20"` of a 35-line
+    // function whose real decision sits in its last lines). What "the
+    // window" IS depends on what the AST could establish, and NOTHING else
+    // is allowed to answer that question (see `declarationRangeInFile`):
+    //
+    // - `ast`: the identifier's own resolved declaration span must be fully
+    //   covered by the union of served windows for that path.
+    // - `unresolved`: the declaration range is UNCONFIRMED (no grammar, no
+    //   parse, past the pre-pass bound, ...). The candidate is proved only
+    //   when the served windows cover the WHOLE current file, which bounds
+    //   ANY declaration range in it without trusting a heuristic. This is
+    //   the third reported P1's own shape: nine same-named candidates, the
+    //   ninth a `.gradle` file outside tree-sitter's analysis, whose range
+    //   a hand-written lexer got wrong by 32 lines.
+    //
+    // Either way the follow-up asks for exactly the UNSERVED lines
+    // (`rangeCandidates`), never a whole-file re-read and never
+    // `{path,symbol}` — symbol resolution on a non-AST file falls back to
+    // the same class of heuristics this ruling removed from the proof path,
+    // and for an already-bounded candidate a symbol-addressed target for a
+    // path this task already touched was verified empirically to resolve
+    // back to the EXISTING served range instead of the symbol's own bounds.
+    const uncovered: string[] = [];
+    const unresolvedUncovered: string[] = [];
+    const unreadable: string[] = [];
+    const rangeCandidates: Array<{ path: string; range: string }> = [];
+    const evidence: TaskReadinessEvidence[] = [];
+    for (const candidate of candidates) {
+      const surfacesForCandidate = evidenceSurfacesForPath(priorEvidence, candidate);
+      const servedSpans = servedLineSpansOf(surfacesForCandidate);
+      const resolution = declarationRangeInFile(workspace, candidate, identifier);
+      let required: LineSpan;
+      if (resolution.source === "ast") {
+        required = resolution.span;
+      } else {
+        const totalLines = currentFileLineCount(workspace, candidate);
+        if (totalLines === undefined) {
+          // Unreadable/undecodable: nothing to bound and nothing to slice —
+          // fail closed and ask for the path itself rather than invent a
+          // range for a file this process cannot read.
+          uncovered.push(candidate);
+          unreadable.push(candidate);
+          continue;
+        }
+        required = { start: 1, end: totalLines };
+      }
+      if (lineSpansCover(servedSpans, required)) {
+        evidence.push(...surfacesForCandidate.map(readinessEvidence));
+        continue;
+      }
+      uncovered.push(candidate);
+      if (resolution.source === "unresolved") unresolvedUncovered.push(candidate);
+      const missingPieces = subtractLineSpans(required, servedSpans);
+      const hull = missingPieces.length > 0
+        ? { start: missingPieces[0]!.start, end: missingPieces[missingPieces.length - 1]!.end }
+        : required;
+      rangeCandidates.push({ path: candidate, range: `${hull.start}-${hull.end}` });
+    }
+    if (uncovered.length > 0) {
+      const baseReason = `decision identifier ${identifier} is served at the path level but its declaration body is not fully covered by a served window in ${uncovered.join(", ")}`;
+      return {
+        proved: false,
+        evidence: [],
+        // Design §4.2 ("対象外・解析未対応・意味の曖昧さは未確認として明示
+        // する"): an AST-unresolved candidate says so, in the obligation's
+        // own reason, instead of quietly demanding a range some heuristic
+        // made up.
+        reason: unresolvedUncovered.length > 0
+          ? `${baseReason}; ${unresolvedUncovered.join(", ")} is outside AST analysis, so its declaration range is UNCONFIRMED and only whole-file coverage at the current revision can prove it`
+          : baseReason,
+        candidatePaths: unreadable,
+        rangeCandidates,
+      };
+    }
+    return { proved: true, evidence, reason: `decision identifier ${identifier} is served from every candidate definition site`, candidatePaths: [] };
+  }
+
+  if (item.kind === "definition") {
+    const fileTerm = item.terms.find(looksLikeFileTerm);
+    const candidates = fileTerm !== undefined
+      ? fileTermCandidatePaths(workspace, universe, fileTerm)
+      : manifestCandidatePaths(workspace);
+    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, universe, contentCache);
+    const missing = candidates.filter((p) => !served.has(p));
+    if (missing.length > 0) {
+      return { proved: false, evidence: [], reason: `definition candidate(s) not yet served: ${missing.join(", ")}`, candidatePaths: missing };
+    }
+    // Every candidate is served — design §4.2: a served file is not proof by
+    // itself. Finding 2 fix: require a genuine KEY/IDENTIFIER TOKEN (a JSON
+    // object key, a declared identifier) relating to a term/alias named
+    // anywhere in this same request — never a raw substring hunt over the
+    // whole body (that credited an unrelated description sentence).
+    const relatedTerms = [...new Set(allItems.flatMap((other) => [...other.terms, ...other.aliases]))];
+    const servedBodies = candidates.flatMap((p) => evidenceSurfacesForPath(priorEvidence, p));
+    const matched = servedBodies.some((surface) => {
+      const keyTokens = definitionKeyTokensOf(surface.path, servedSurfaceText(surface));
+      return keyTokens.some((key) => relatedTerms.some((term) => sharesSignificantSubstring(term, key, 8)));
+    });
+    if (matched) {
+      return { proved: true, evidence: servedBodies.map(readinessEvidence), reason: "a served definition candidate contains a key/identifier related to the request", candidatePaths: [] };
+    }
+    // Mirror of the relation arm's finding-3 closure (2026-09-07), narrowed to
+    // a definition item that NAMES a concrete key (a dotted key, quoted string
+    // or identifier — never just a file such as package.json): every candidate
+    // is served in FULL and none declares that key, so the scope-bound verified
+    // absence ("<key> is not defined in the served manifests/files") closes the
+    // point with a `request-item-absent` disclosure naming the key (design §3.3
+    // progress invariant, §4.2 限定結論). A file-only or term-less definition
+    // item keeps the `proved:false` path below on purpose: the absent KEY is
+    // then named by the epoch contract / identifier obligations derived from
+    // the served bodies, which the negative language-setting cases rely on.
+    // Partial/truncated serves never qualify: an unseen remainder could hold it.
+    const namedKey = item.terms.find((term) => !looksLikeFileTerm(term));
+    if (namedKey !== undefined && servedBodies.length > 0 && servedBodies.every((surface) => isWholeAuthoritySurface(surface, workspace))) {
+      return {
+        proved: true,
+        evidence: servedBodies.map(readinessEvidence),
+        reason: `every definition candidate is served in full and none declares ${namedKey}`,
+        candidatePaths: [],
+        absentTerm: namedKey,
+      };
+    }
+    return { proved: false, evidence: servedBodies.map(readinessEvidence), reason: "every definition candidate is served but none contains a related key/identifier", candidatePaths: [] };
+  }
+
+  if (item.kind === "relation" && item.relation !== undefined && item.relation.to.length > 0) {
+    const relation = item.relation;
+    const candidates = relationConsumerCandidatePaths(workspace, universe, item, relation.to);
+    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, universe, contentCache);
+    const missing = candidates.filter((p) => !served.has(p));
+    if (missing.length > 0) {
+      return { proved: false, evidence: [], reason: `relation consumer candidate(s) not yet served: ${missing.join(", ")}`, candidatePaths: missing };
+    }
+    const servedBodies = candidates.flatMap((p) => evidenceSurfacesForPath(priorEvidence, p));
+    const fromTerms = relation.from.length > 0 ? relation.from : item.terms;
+    // Finding 2 fix: a producer term is evidence of the relation only at a
+    // non-comment, non-string, call/import-shaped position — never a bare
+    // mention (a comment, a TODO, a string, two definitions served side by
+    // side).
+    const matched = servedBodies.some((surface) => {
+      const text = servedSurfaceText(surface);
+      const language = languageForPath(surface.path);
+      return fromTerms.some((term) => isCallOrImportOccurrence(text, term, language));
+    });
+    if (matched) {
+      return { proved: true, evidence: servedBodies.map(readinessEvidence), reason: "a served consumer window contains the producer term at a call/import site", candidatePaths: [] };
+    }
+    // Finding 3 fix (2026-09-07): every consumer candidate is served AND
+    // fully served (whole-file authority, not a partial/truncated slice) —
+    // there is nothing further to fetch for THIS relation. Design §4.2 does
+    // allow a scope-bound verified absence ("定義がない"等の限定結論) — here
+    // the limited conclusion is narrowly "this consumer's fully-read body
+    // does not call/import the producer", never a claim about the producer's
+    // existence or behavior elsewhere. Closing this way is what lets the
+    // pack make honest progress instead of leaving an uncovered point with
+    // no further candidate (design §3.3's progress invariant) — the
+    // alternative is a dead end: no candidate left to fetch, so no
+    // request_item_gap gets minted, and the pack falls through to whatever
+    // OTHER obligation the generic dispatch finds next.
+    if (servedBodies.length > 0 && servedBodies.every((surface) => isWholeAuthoritySurface(surface, workspace))) {
+      return {
+        proved: true,
+        evidence: servedBodies.map(readinessEvidence),
+        reason: "every relation consumer candidate is served in full and none calls/imports the producer term",
+        candidatePaths: [],
+        absentTerm: fromTerms[0] ?? item.text,
+      };
+    }
+    return { proved: false, evidence: servedBodies.map(readinessEvidence), reason: "every relation consumer candidate is served but none contains the producer term", candidatePaths: [] };
+  }
+
+  return proveUnbindableRequestItem(item, priorEvidence, workspace, universe, contentCache);
+}
+
+interface RequestItemReadiness {
+  obligations: TaskReadinessObligation[];
+  gap?: { next_call: ToolCall; ids: string[] };
+  /** DESIGN-v0.15 R1: request items PROVED by verified absence (see `RequestItemProof.absentTerm`). Always present (possibly empty), mirroring `obligations`. */
+  absences: Array<{ id: string; term: string }>;
+}
+
+/**
+ * Mints one required `concern` obligation per explicit request item (design
+ * §4.1/§4.2) and, when any is uncovered, ONE batched discover call for every
+ * independently-fetchable missing candidate (contract §3.4). Never gated on
+ * any Semantic Frontier flag (design §4.1: this is the default path).
+ */
+/**
+ * Finding 5 fix (2026-09-07): `enumerateFindTextUniverse` + a shared
+ * `ScanContentCache` for every `scanLiteral` call this mechanism issues,
+ * memoized per `TaskPackResult` OBJECT IDENTITY — the same "dedupe on
+ * result identity" idiom `proofCompletionCountedResults` (just above
+ * `buildTaskExecutionContract`) already uses for the SAME reason: that
+ * builder runs several times per pack build (P2(b))'s doc comment), and
+ * every prior run re-walked the whole workspace even though the file list
+ * cannot have changed between re-evaluations of the SAME pack. A WeakMap
+ * means this never persists across pack builds and never leaks: a fresh
+ * `result` object gets a fresh entry, and a stale one is GC-eligible the
+ * moment nothing else references it.
+ */
+// ---------------------------------------------------------------------------
+// DESIGN-v0.15 R1 P1 fix continued (2026-09-07): async AST
+// declaration-range pre-pass — the proof path's ONLY declaration-range
+// source since the P1 ruling deleted the lexical fallback.
+//
+// `proveRequestItem`/`buildRequestItemReadiness` (and everything between
+// them and `buildTaskExecutionContract`) are synchronous by design (see this
+// module's own "R1 finding-2 fix" doc comment far above, near
+// `HASH_COMMENT_LANGUAGES`: the whole request-item proof pipeline is
+// synchronous, several call sites deep, and that wave must not touch it).
+// `collectSymbols` (symbols/collectSymbols.ts) — the tree-sitter walk
+// itself, deliberately NOT `getSymbolWithContext`, whose regex fallback the
+// P1 ruling forbids as a proof source — is async, so it cannot be called
+// from inside that chain directly.
+// Instead it runs ONCE, early, in `buildTaskPack`'s own async body
+// (mirroring `packByteCeilingStorage`'s own doc comment far above: an
+// `AsyncLocalStorage`, never a bare module `let` that would leak across two
+// interleaved `buildTaskPack` calls for different workspaces on the same
+// event loop), and the synchronous chain reads the result back out through
+// `getStore()` (see `declarationRangeInFile` above).
+//
+// Reuses the SAME `enumerateFindTextUniverse` walk `cachedRequestItemPass`
+// would otherwise perform on its own (see its modified body just below) so a
+// composite pack still walks the workspace exactly once for the whole
+// build — finding 5's own perf contract (requestItemCompletion.spec.ts's
+// "enumerateFindTextUniverse walk count" describe block) — instead of once
+// here PLUS once there.
+// ---------------------------------------------------------------------------
+
+/** Bound on candidate declaration files resolved via tree-sitter per `decision` item — mirrors `declarationCandidatePaths`' own unbounded return with a pass-wide cap so a pathological identifier with many same-named candidates cannot inflate one `buildTaskPack` call's async pre-pass. */
+const MAX_DECISION_TREE_SITTER_CANDIDATES = 8;
+
+interface RequestItemPrewalk {
+  universe: FindTextUniverse;
+  contentCache: ScanContentCache;
+  /** `relPath -> identifier -> AST-resolved declaration range`, consulted by `declarationRangeInFile` above. An ABSENT entry is the honest "the AST could not bound this" answer, never an invitation to estimate. Never mutated after `prepareRequestItemPrewalk` returns. */
+  astDeclarationRanges: ReadonlyMap<string, ReadonlyMap<string, LineSpan>>;
+}
+
+/** `undefined` outside a `buildTaskPack` call, or when the pre-pass determined nothing needed resolving (a single-item query, or a composite query with no `decision` item) — `declarationRangeInFile` treats a missing store, a missing file entry and a missing identifier entry identically: `{source:"unresolved"}`, i.e. only whole-file coverage can prove that candidate. See the module doc comment just above for the full ALS rationale. */
+const requestItemPrewalkStorage = new AsyncLocalStorage<RequestItemPrewalk | undefined>();
+
+/**
+ * Resolves the AST-backed declaration range for every `decision` request
+ * item's candidate declaration files found in `query`, bounded per item by
+ * `MAX_DECISION_TREE_SITTER_CANDIDATES`.
+ *
+ * `collectSymbols` (symbols/collectSymbols.ts) is the AST itself — the same
+ * tree-sitter walk `getSymbolWithContext`'s own `findSymbolWithTreeSitter`
+ * performs, and the reason this no longer goes through
+ * `getSymbolWithContext`: that tool answers `ok:true` from a REGEX fallback
+ * when the grammar misses, and a regex-derived range is exactly the class of
+ * evidence the P1 ruling (2026-09-07) forbids as a proof source. A language
+ * with no collector, a grammar that fails to load, or a parse that finds no
+ * such declaration all leave this map WITHOUT an entry, which
+ * `declarationRangeInFile` reports as `{source:"unresolved"}` — honestly
+ * unconfirmed, never estimated. A throw is likewise skipped: an AST defect
+ * must never fail the whole pack, it just makes that candidate unconfirmed.
+ */
+async function resolveDecisionAstRanges(
+  workspace: string,
+  query: string,
+  universe: FindTextUniverse,
+  contentCache: ScanContentCache,
+): Promise<Map<string, Map<string, LineSpan>>> {
+  const out = new Map<string, Map<string, LineSpan>>();
+  const index = createRequestItemIndexView({ relPaths: universe.files.map((f) => f.relPath) });
+  const items = extractRequestItems(query, index);
+  for (const item of items) {
+    if (item.kind !== "decision" || item.terms.length === 0) continue;
+    const identifier = item.terms[0]!;
+    const candidates = declarationCandidatePaths(workspace, universe, identifier, contentCache)
+      .slice(0, MAX_DECISION_TREE_SITTER_CANDIDATES);
+    for (const candidate of candidates) {
+      const content = readCached(workspace, candidate);
+      if (content === undefined) continue;
+      const lang = languageForPathWithContent(candidate, content);
+      if (lang === undefined) continue;
+      let symbols: Awaited<ReturnType<typeof collectSymbols>>;
+      try {
+        symbols = await collectSymbols(content, lang, {});
+      } catch {
+        continue;
+      }
+      const match = symbols.find((symbol) => symbol.name === identifier);
+      if (match === undefined) continue;
+      let byIdentifier = out.get(candidate);
+      if (byIdentifier === undefined) { byIdentifier = new Map(); out.set(candidate, byIdentifier); }
+      byIdentifier.set(identifier, { start: match.startLine, end: match.endLine });
+    }
+  }
+  return out;
+}
+
+/**
+ * Async pre-pass entry point — called once near the top of `buildTaskPack`,
+ * before `packByteCeilingStorage.run`/`buildTaskPackCore` (see the module
+ * doc comment above `MAX_DECISION_TREE_SITTER_CANDIDATES`). Mirrors
+ * `buildRequestItemReadiness`'s own cheap, index-free pre-gate
+ * (`extractRequestItems(query).length < 2`) so the overwhelming majority of
+ * single-target queries pay for neither a universe walk nor any AST parse
+ * here.
+ */
+async function prepareRequestItemPrewalk(workspace: string, query: string): Promise<RequestItemPrewalk | undefined> {
+  if (extractRequestItems(query).length < 2) return undefined;
+  let universe: FindTextUniverse;
+  try {
+    universe = enumerateFindTextUniverse(workspace);
+  } catch {
+    return undefined;
+  }
+  const contentCache = createScanContentCache();
+  const astDeclarationRanges = await resolveDecisionAstRanges(workspace, query, universe, contentCache);
+  return { universe, contentCache, astDeclarationRanges };
+}
+
+interface RequestItemPassCache {
+  universe: FindTextUniverse;
+  contentCache: ScanContentCache;
+}
+const requestItemPassCache = new WeakMap<TaskPackResult, RequestItemPassCache>();
+
+function cachedRequestItemPass(workspace: string, result: TaskPackResult): RequestItemPassCache | undefined {
+  const cached = requestItemPassCache.get(result);
+  if (cached !== undefined) return cached;
+  // Reuse the async pre-pass's own walk (if one ran for this buildTaskPack
+  // call) instead of walking again — see the module doc comment above
+  // `MAX_DECISION_TREE_SITTER_CANDIDATES` for why this must stay exactly one
+  // walk per composite pack build.
+  const prewalk = requestItemPrewalkStorage.getStore();
+  if (prewalk !== undefined) {
+    const fromPrewalk: RequestItemPassCache = { universe: prewalk.universe, contentCache: prewalk.contentCache };
+    requestItemPassCache.set(result, fromPrewalk);
+    return fromPrewalk;
+  }
+  let universe: FindTextUniverse;
+  try {
+    universe = enumerateFindTextUniverse(workspace);
+  } catch {
+    return undefined;
+  }
+  const built: RequestItemPassCache = { universe, contentCache: createScanContentCache() };
+  requestItemPassCache.set(result, built);
+  return built;
+}
+
+function buildRequestItemReadiness(
+  workspace: string | undefined,
+  query: string,
+  profile: TaskProfile,
+  result: TaskPackResult,
+  /**
+   * Finding 3 fix (2026-09-07): the SAME obligations `buildReadinessObligations`
+   * already minted for this pack (identifiers, behavior-body, ...), read-only
+   * — see the "shadowed identifier" reaffirm below.
+   */
+  otherObligations: readonly TaskReadinessObligation[] = [],
+): RequestItemReadiness {
+  const none: RequestItemReadiness = { obligations: [], absences: [] };
+  if (workspace === undefined) return none;
+  // Scoped to the two profiles the R1 corpus exercises (omitted defaults to
+  // "generic"); specialized profiles keep their own existing obligation
+  // vocabulary untouched.
+  if (profile !== "answer" && profile !== "generic") return none;
+  // A resolved create_target (new-file intent) is its own self-complete
+  // frontier — buildReadinessObligations's own provedCreate short-circuit
+  // above already returns a single proved "surface-content" obligation for
+  // it (the file does not exist yet, so there is no additional evidence for
+  // request items to demand). Extracting request items from a create query
+  // and requiring EXISTING candidate files for them would wrongly demote an
+  // otherwise-ready create route back to discovery.
+  if (result.create_target !== undefined) return none;
+  // Same reasoning for a directed literal-source-absence pack (a different,
+  // already-terminal proof shape buildReadinessObligations short-circuits
+  // on before ever reaching request items).
+  if (result.literal_source_absence !== undefined) return none;
+
+  // Finding 5 fix: a cheap, INDEX-FREE pre-gate ahead of the workspace walk.
+  // `extractRequestItems`'s item COUNT never depends on the index (an
+  // `RequestItemIndexView` only ever widens `.aliases` on an item that is
+  // pushed regardless — see requestItems.ts's own `aliasesFor`/`pushXxx`
+  // helpers: every `items.push(...)` call site runs unconditionally, and
+  // `index` only feeds the `aliases:` field of the object already being
+  // constructed), so this exactly predicts the post-walk gate below and lets
+  // every single-target query (the overwhelming majority) skip
+  // `enumerateFindTextUniverse` entirely.
+  if (extractRequestItems(query).length < 2) return none;
+
+  const pass = cachedRequestItemPass(workspace, result);
+  if (pass === undefined) return none;
+  const { universe, contentCache } = pass;
+  const index = createRequestItemIndexView({ relPaths: universe.files.map((f) => f.relPath) });
+  const items = extractRequestItems(query, index);
+  // Contract §3.4: a single-item query already proved by `surface-content`
+  // must stay byte-identical — only a genuinely composite request (2+
+  // explicit points) engages this mechanism at all.
+  if (items.length < 2) return none;
+  // A structured signal (a named setting/config DEFINITION, a named
+  // identifier's DECISION, or a producer->consumer RELATION) is required
+  // before this mechanism engages at all — every item being an unstructured
+  // `topic` means the split (often just a semicolon/"and" inside one prose
+  // sentence, e.g. "Trace how X builds Y; identify the implementation path")
+  // is far more likely to be ordinary multi-clause prose than a genuine
+  // multi-point request in design §4.1's sense. Observed regression:
+  // replayCorpus.spec.ts's "observed directory task_pack" and "d12a" cases
+  // split on a bare semicolon/and into two topic-only fragments and blocked
+  // an otherwise-ready certificate.
+  if (!items.some((item) => item.kind !== "topic")) return none;
+
+  const epochTokens = tokenizeForEpoch(query);
+  const priorEvidence = epochServedEvidence(workspace, result, epochTokens);
+
+  // OWNERSHIP RULE: the query's own enumerated-item facets (F-V13-6/F-V14),
+  // computed the identical way `buildReadinessObligations` mints them —
+  // `proveRequestItem`'s own doc comment on its `ownedFacets` parameter has
+  // the full rationale for why a request item overlapping one of these must
+  // defer rather than mint a second, competing obligation over the same
+  // plain-prose checklist point.
+  const ownedFacets = new Set(enumeratedQueryItemsForEpoch(query, workspace).map((facetItem) => facetItem.facet));
+
+  const obligations: TaskReadinessObligation[] = [];
+  const missingTargets = new Set<string>();
+  // DESIGN-v0.15 R1 false-completion fix (2026-09-07, P1): a path already
+  // (partially) served but not YET covering its proof-critical declaration
+  // range — see `RequestItemProof.rangeCandidates`'s own doc comment.
+  // Collected separately from `missingTargets` (which requests a whole
+  // UNSERVED path) so the batched follow-up fetches exactly this narrower
+  // declaration RANGE, never re-reading a file this task already has bytes
+  // for as an undifferentiated whole.
+  const missingRangeTargets: Array<{ path: string; range: string }> = [];
+  const gapIds: string[] = [];
+  // DESIGN-v0.15 R1 (2026-09-07): request items PROVED by verified absence
+  // (`RequestItemProof.absentTerm`) — see `RequestItemReadiness.absences`'s
+  // own doc comment for where this feeds the wire.
+  const absences: Array<{ id: string; term: string }> = [];
+
+  for (const item of items) {
+    const proof = proveRequestItem(item, items, priorEvidence, workspace, universe, contentCache, ownedFacets);
+    obligations.push({
+      id: `${REQUEST_ITEM_OBLIGATION_PREFIX}${item.id}`,
+      kind: "concern",
+      status: proof.proved ? "proved" : "uncovered",
+      required: true,
+      evidence: proof.evidence,
+      reason: proof.reason,
+      origin: "query",
+    });
+    if (!proof.proved) {
+      gapIds.push(item.id);
+      for (const p of proof.candidatePaths) missingTargets.add(p);
+      for (const rt of proof.rangeCandidates ?? []) missingRangeTargets.push(rt);
+    } else if (proof.absentTerm !== undefined) {
+      absences.push({ id: item.id, term: proof.absentTerm });
+    }
+    // Finding 3 fix (2026-09-07, residual dead end): a PROVED `decision`
+    // item here and an UNRELATED, older `identifier:<X>` obligation
+    // (`buildReadinessObligations`'s `explicitCodeIdentifiers` loop) can
+    // disagree about the IDENTICAL identifier. That older obligation checks
+    // ONLY this turn's own freshly-served surfaces (no epoch carry-forward —
+    // `epochServedEvidence`/`priorEvidence` above is this mechanism's OWN,
+    // newer fix for exactly that staleness), so it can go stale precisely
+    // when this item just proved the same identifier from carried-forward
+    // evidence. Left alone, once every request item closes this same turn
+    // (nothing left for `missingTargets`/`gapIds` to carry), the generic
+    // dispatch (`nextCallForUnresolved`) picks the STALE obligation's own
+    // `search_files action:"symbols"` next — a call with no continuation of
+    // its own, i.e. the exact dead end this finding closes (reproduced:
+    // `consumer-does-not-reference`, EN_QUERY: `request-item:ri-1` proves
+    // `getDisplayLanguage` from language.ts served two turns earlier, while
+    // `identifier:getDisplayLanguage` — same token — sees only this turn's
+    // statusBar.ts/updateChecker.ts and reports uncovered). A `next_call`
+    // that RE-FETCHES language.ts is not a fix: the wire layer's own
+    // already-consumed filter (correctly) drops a call targeting bytes this
+    // task already has, which is exactly what silently discarded that
+    // approach here. Reconciling the STALE obligation in place — never
+    // touching `buildReadinessObligations`'s own code, only the one entry
+    // this item ALREADY independently proved — is the narrow, safe fix: two
+    // obligations about the identical fact must not disagree.
+    if (proof.proved && item.kind === "decision" && item.terms.length > 0) {
+      const identifier = item.terms[0]!;
+      const stale = otherObligations.find(
+        (obligation) => obligation.status !== "proved" && obligation.id === `identifier:${identifier}`,
+      );
+      if (stale !== undefined) {
+        stale.status = "proved";
+        stale.evidence = proof.evidence;
+        stale.reason = `reconciled from request-item:${item.id}, which independently proved identifier ${identifier} from carried-forward evidence`;
+      }
+    }
+  }
+
+  if (missingTargets.size === 0 && missingRangeTargets.length === 0) {
+    return { obligations, absences };
+  }
+  // A path riding missingRangeTargets already has a scoped entry in this
+  // same batch — never ALSO add its plain-path form (that would be exactly
+  // the whole-file re-read this fix exists to avoid).
+  const rangeTargetPaths = new Set(missingRangeTargets.map((t) => t.path));
+  const pathTargets = [...missingTargets]
+    .filter((p) => !rangeTargetPaths.has(p))
+    .map((p) => ({ path: p }));
+  const rangeTargets = missingRangeTargets.map((t) => ({ path: t.path, range: t.range }));
+  return {
+    obligations,
+    absences,
+    gap: {
+      next_call: {
+        tool: "read_file",
+        arguments: {
+          query,
+          targets: [...pathTargets, ...rangeTargets].slice(0, MAX_REQUEST_ITEM_BATCH),
+          content: "auto",
+        },
+      },
+      ids: gapIds,
+    },
+  };
+}
+
 function buildReadinessObligations(
   result: TaskPackResult,
   profile: TaskProfile,
@@ -21740,6 +23143,25 @@ function buildCapabilityGaps(
       ...(nextCall ? { next_call: nextCall } : {}),
     });
   }
+  // DESIGN-v0.15 R1 (2026-09-07): an explicit request item this pack closed
+  // by VERIFIED ABSENCE (design §4.2) — see `TaskPackResult.
+  // request_item_absences`'s own doc comment. ADDITIVE and never gates
+  // `decision.kind` by itself: appended after the blocking arms above (so a
+  // genuine blocking gap keeps priority under the `.slice(0,3)` cap below),
+  // and this gap's own `recoverable:false` never installs a `next_call` — a
+  // verified absence has nothing further to fetch. The wire projection
+  // (`decisionWire.ts`'s `projectGaps`) only ever runs from a `discover`
+  // decision (D-4), so this rides the wire exactly when some OTHER open
+  // point keeps the pack from closing `act.answer`/`act.edit` outright —
+  // never by itself changing which decision this pack reaches.
+  for (const absence of result.request_item_absences ?? []) {
+    gaps.push({
+      kind: "request-item-absent",
+      recoverable: false,
+      reason: `verified absent: no workspace occurrence of ${absence.term}`,
+      obligation_ids: [absence.id, absence.term],
+    });
+  }
   return gaps.length > 0 ? gaps.slice(0, 3) : undefined;
 }
 
@@ -22018,6 +23440,14 @@ function nextCallForUnresolved(
 ): ContinuationCall | undefined {
   const unresolved = obligations.find((obligation) => obligation.status === "uncovered");
   if (!unresolved) return undefined;
+  // DESIGN-v0.15 R1: ahead of every other branch, same reasoning as the
+  // enumerated-item case just below — `buildRequestItemReadiness` already
+  // computed the single BATCHED call covering every still-uncovered request
+  // item (contract §3.4), so the generic "first uncovered obligation"
+  // single-token fallbacks below must not re-derive a narrower one.
+  if (unresolved.id.startsWith(REQUEST_ITEM_OBLIGATION_PREFIX)) {
+    return result.request_item_gap?.next_call;
+  }
   // Ahead of the generic branches below: an enumerated item names its own
   // search term, so the shared "first uncovered obligation" fallbacks would
   // otherwise emit a symbols/references sweep over an unrelated token.
@@ -22317,6 +23747,22 @@ export function buildTaskExecutionContract(
   // never a wire effect. See enumeratedObligationSummaryCountedResults' doc
   // comment.
   const obligations = buildReadinessObligations(result, profile, query, openUniverseDischarged, workspace);
+  // DESIGN-v0.15 R1: request-item obligations join the SAME array the
+  // certificate gate below reads, so an uncovered explicit point demotes
+  // `discovery_complete` exactly like any other open obligation — no second,
+  // independent correctness ledger (design §4.1). Must run before
+  // `projectCompletion` so its verdict already reflects them.
+  const requestItemReadiness = buildRequestItemReadiness(workspace, query, profile, result, obligations);
+  obligations.push(...requestItemReadiness.obligations);
+  if (requestItemReadiness.gap !== undefined) {
+    result.request_item_gap = requestItemReadiness.gap;
+  }
+  // DESIGN-v0.15 R1: see `TaskPackResult.request_item_absences`'s own doc
+  // comment for the wire path this feeds (`buildCapabilityGaps`, gated to a
+  // `discover` decision by D-4).
+  if (requestItemReadiness.absences.length > 0) {
+    result.request_item_absences = requestItemReadiness.absences;
+  }
   const completion = projectCompletion(result, obligations);
   result.coverage = completion.coverage;
   const blockingObligations = completion.blocking;
@@ -24681,12 +26127,32 @@ function computePackFingerprint(args: TaskPackArgs, workspace: string): string {
   return shaOfText(material);
 }
 
-/** iter-3 F2: the normalized, sorted set of paths a request explicitly SEEDED (paths[] + path). */
+/**
+ * iter-3 F2: the normalized, sorted set of paths a request explicitly SEEDED
+ * (paths[] + path).
+ *
+ * DESIGN-v0.15 R1 false-completion fix (2026-09-07, P1): each `paths[]` entry
+ * now carries its `range`/`symbol` alongside the path (mirroring
+ * `computePackFingerprint`'s own `paths` material exactly) — PATH ALONE used
+ * to be the whole key, so a follow-up asking for a WIDER/DIFFERENT range of a
+ * path this task already seeded (e.g. `range:"7-41"` after an earlier
+ * `range:"1-20"` of the SAME file, same query) fingerprinted identically to
+ * the earlier, narrower request. `tryServeSemanticDuplicatePack`'s "SAME
+ * requested path set" gate then matched the stale EARLIER record and replayed
+ * its compact `pack-unchanged` receipt instead of building the fresh pack the
+ * wider range asked for — silently discarding the caller's own explicit
+ * widening and masking exactly the range-coverage fix this mechanism exists
+ * to make effective (an uncovered decision/relation/definition item's own
+ * follow-up `range` request must actually reach a fresh build). The singular
+ * legacy `args.path` stays a bare path add: it carries no `range` of its own,
+ * and its `symbol` is already covered separately by `computeExtraArgsKey`.
+ */
 function requestedPathSet(args: TaskPackArgs): string[] {
   const out = new Set<string>();
   for (const entry of args.paths ?? []) {
-    const p = normalizePathEntry(entry).path;
-    if (p.length > 0) out.add(p);
+    const normalized = normalizePathEntry(entry);
+    if (normalized.path.length === 0) continue;
+    out.add([normalized.path, normalized.range ?? "", normalized.symbol ?? ""].join("\u0000"));
   }
   if (typeof args.path === "string" && args.path.length > 0) out.add(args.path);
   return [...out].sort();
@@ -26550,18 +28016,38 @@ function epochServedEvidence(
 ): TaskPackSurface[] {
   return [
     ...codeTaskPackSurfaces(result.surfaces),
-    ...epochServedSurfaceEntries(workspace, epochTokens, result).map((entry) => ({
-      role: entry.role,
-      handle: entry.handle ?? "",
-      path: entry.path,
-      range: "",
-      // The serve log deliberately stores identities rather than response
-      // bodies.  Re-read the still-local source only for this server-side
-      // proof check, so a same-epoch challenge can prove an earlier concern
-      // from evidence it genuinely served instead of reopening it merely
-      // because the current pack selected a different frontier.
-      code: readCached(workspace, entry.path),
-    })),
+    ...epochServedSurfaceEntries(workspace, epochTokens, result).flatMap((entry) => {
+      // DESIGN-v0.15 R1 / validation appendix §1 row 2 fix (2026-09-07): the
+      // serve log only proves a path was served at SOME earlier revision —
+      // it carries no range/sha. Reconstructing "evidence" by re-reading the
+      // whole CURRENT file (the prior behaviour here) let a same-epoch
+      // challenge certify a concern from bytes that may have diverged from
+      // what this caller actually received (a file edited between two packs
+      // of the epoch, by the user, a native tool, or this task's own
+      // `edit_file`). The session's OWN served-range ledger
+      // (`state/session.ts`) is the one structure that records BOTH a sha
+      // and the exact merged line spans served under it — use ONLY that,
+      // sliced, and only when its `fileSha` still matches the file on disk
+      // right now. A stale sha, or no ledger entry at all (served only
+      // through some other path this ledger never saw), yields NO evidence
+      // for this path rather than a whole-file guess.
+      const ledger = getSession(workspace).servedRangeLedger.get(entry.path);
+      if (ledger === undefined || ledger.ranges.length === 0) return [];
+      const current = readCached(workspace, entry.path);
+      if (current === undefined) return [];
+      if (shaOfText(current) !== ledger.fileSha) return [];
+      const code = ledger.ranges
+        .map(([start, end]) => sliceLinesToText(current, start, end))
+        .join("\n");
+      if (code.length === 0) return [];
+      return [{
+        role: entry.role,
+        handle: entry.handle ?? "",
+        path: entry.path,
+        range: ledger.ranges.map(([start, end]) => `${start}-${end}`).join(","),
+        code,
+      }];
+    }),
   ];
 }
 
@@ -29478,6 +30964,16 @@ function attachSingleSiteUniqueMatchFastPath(
   query: string,
   profile: TaskProfile,
   cache?: FileReadCache,
+  /**
+   * True when the CALLER named this exact file (`paths`/`targets`) rather
+   * than the server locating it. Only then does the normal evidence surface
+   * "already carry" the body in the sense the clearing comment below
+   * assumes -- see that comment for why the two cases must diverge (design
+   * v0.15 §7 / R5: a literal-first DISCOVERED source has never appeared on
+   * any wire yet, so its local window must ship even when a fast_path also
+   * proves the edit).
+   */
+  hasCallerSuppliedLocation = false,
 ): void {
   delete result.fast_path;
   if (profile !== "generic" || result.route?.action !== "edit_from_handles") return;
@@ -29539,9 +31035,16 @@ function attachSingleSiteUniqueMatchFastPath(
       : {}),
     task: { id: taskId },
   };
-  // The fast path is a proof-carrying edit recipe; re-send no source body or
-  // likely_edits that the normal evidence surface already carried.
-  surface.code = undefined;
+  // The fast path is a proof-carrying edit recipe; re-send no likely_edits
+  // that the normal evidence surface already carried. The source BODY only
+  // joins that "already carried" set when the caller supplied this exact
+  // location themselves (`paths`/`targets`) -- design v0.15 §7's literal-
+  // first discovery flow has the opposite shape: nothing pointed at this
+  // file before the server's own search found it, so this response is the
+  // first and only chance to show the local window the search/replace pair
+  // is proven against. Clearing it there would certify `act.edit` over text
+  // nobody -- caller or server -- ever actually saw on the wire.
+  if (hasCallerSuppliedLocation) surface.code = undefined;
   surface.facts = undefined;
   surface.likely_edits = undefined;
   surface.done_check = undefined;
@@ -30751,7 +32254,18 @@ function dedupeTrimAndPersist(
     literalSourceUniverse,
     packLane,
   );
-  attachSingleSiteUniqueMatchFastPath(trimmed, workspace, effectiveQuery, profile, opts?.cache);
+  // A1: `paths`/`targets` naming this file is the caller's own explicit
+  // location. A recursive internal seed (literal-first discovery, the
+  // identity-match/short-circuit/directory-retry/generic-text-lane
+  // fallbacks) ALSO leaves `args.paths` non-empty by the time it reaches
+  // this tail, so `autoDiscoveredLocation` -- stamped by every such site,
+  // never present on a wire call's own args -- is required to tell the two
+  // apart. See attachSingleSiteUniqueMatchFastPath's own doc comment on its
+  // last parameter for why the two must diverge.
+  const hasCallerSuppliedLocation = Array.isArray(opts?.args?.paths)
+    && opts.args.paths.length > 0
+    && opts.args.autoDiscoveredLocation !== true;
+  attachSingleSiteUniqueMatchFastPath(trimmed, workspace, effectiveQuery, profile, opts?.cache, hasCallerSuppliedLocation);
   persistPackFingerprints(workspace, trimmed);
   // Session-state registration is skipped too for an answer pack — a later
   // `read_file mode=closure` call must have nothing open to report for a

@@ -370,6 +370,10 @@ function classifyStateHandlePurpose(purpose: StateHandlePurpose): string {
       return "acknowledged receipt set / client context generation";
     case "continuation":
       return "immutable response snapshot or reconstruction condition";
+    case "read-request":
+      return "one read_file fetch request's original scope and remainder";
+    case "search-request":
+      return "one search_files fetch request's match snapshot and remainder";
     default: {
       const exhaustive: never = purpose;
       throw new Error(`classifyStateHandlePurpose(): unhandled StateHandlePurpose ${String(exhaustive)}`);

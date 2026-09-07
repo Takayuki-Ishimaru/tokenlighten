@@ -33,7 +33,11 @@ function localized(en: string, ja: string): string {
   return getDisplayLanguage() === "ja" ? ja : en;
 }
 
-export function workspaceSetupArgs(root: string, profile: GuideProfile = "full"): string[] {
+export function workspaceSetupArgs(
+  root: string,
+  profile: GuideProfile = "full",
+  toolSurface?: "full" | "code",
+): string[] {
   return [
     "workspace",
     "setup",
@@ -43,6 +47,11 @@ export function workspaceSetupArgs(root: string, profile: GuideProfile = "full")
     "vscode,codex,claude-code",
     "--guide-profile",
     profile,
+    // DESIGN-v0.15 §8.2 (R7 Part B): omitted (not merely "full") when the
+    // caller did not pass one — matches every other optional-flag call site
+    // this wave touches, and keeps this function's default invocation
+    // (and its existing exact-array test) byte-for-byte unchanged.
+    ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : []),
     "--json",
   ];
 }
@@ -226,13 +235,22 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   );
   if (choice !== confirm) return;
   bar.setStale();
-  const configuredProfile = vscode.workspace
-    .getConfiguration("tokenlighten", vscode.Uri.file(root))
-    .get<string>("guideProfile", "full");
+  const workspaceConfig = vscode.workspace.getConfiguration("tokenlighten", vscode.Uri.file(root));
+  const configuredProfile = workspaceConfig.get<string>("guideProfile", "full");
   const profile: GuideProfile = configuredProfile === "medium" || configuredProfile === "compact"
     ? configuredProfile
     : "full";
-  const result = await spawnTl(workspaceSetupArgs(root, profile), { cwd: root });
+  // DESIGN-v0.15 §8.2 (R7 Part B): keeps the generated .vscode/mcp.json /
+  // .mcp.json / .codex/config.toml in sync with the SAME setting
+  // mcpProvider.ts's direct-registration path reads — a Codex/Claude Code
+  // user (no VS Code direct-registration API) only ever sees the surface
+  // this generated file config selects.
+  const configuredToolSurface = workspaceConfig.get<string>("toolSurface", "full");
+  const toolSurface: "full" | "code" = configuredToolSurface === "code" ? "code" : "full";
+  const result = await spawnTl(
+    workspaceSetupArgs(root, profile, toolSurface === "code" ? "code" : undefined),
+    { cwd: root },
+  );
   if (result.code !== 0) {
     const detail = firstLine(result.stderr || result.stdout);
     bar.setError(detail);

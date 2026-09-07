@@ -293,6 +293,115 @@ export function resolveContinuationHandle<T = unknown>(
 }
 
 // ---------------------------------------------------------------------------
+// Fetch-request handles (DESIGN-v0.15 R2 read cursor / R3 search cursor)
+// ---------------------------------------------------------------------------
+
+/**
+ * A FOURTH namespace on the same store, and the reason it is not the third.
+ *
+ * `continuation` is SELF-CONTAINED: the page position rides the token's own
+ * `aad` and nothing is stored. A fetch request cannot work that way — §5.1
+ * requires it to carry the ORIGINAL request Q, the recomputed remainder D, the
+ * fixed page list, the source revision of every target and the canonical
+ * original input to restart from, which is far past `MAX_AAD_BYTES` and must
+ * survive a restart and be CAS-updated. So the token here is an ADDRESS
+ * (`payloadRef` -> a store record) exactly like a `task` handle, and the `aad`
+ * carries only a short binding digest that the MAC then authenticates.
+ *
+ * `stateVersion` IS THE PAGE SELECTOR. The token carries no page number; the
+ * record's `pages[].cursor_state_version` is matched against the decoded
+ * `stateVersion` instead, which makes "the same cursor names the same logical
+ * page" a lookup and makes a page-N cursor structurally unable to advance to
+ * page N+1 (§5.2: "再送された同じcursorは同じ論理ページを参照し、その再送で別の
+ * ページへ進めない").
+ */
+export type FetchRequestPurpose = "read-request" | "search-request";
+
+/** A page cursor is short-lived by nature; an hour covers any real paging run. */
+export const FETCH_REQUEST_HANDLE_TTL_MS = 60 * 60 * 1000;
+
+export type FetchRequestResolution =
+  | { ok: true; record: StoredRecord; stateVersion: number; payloadRef: string }
+  | { ok: false; outcome: HandleFailure; detail?: string };
+
+/** Nine raw bytes of a sha256, the store-key form `handleCodec` requires. */
+export function fetchRequestPayloadRef(seed: string): Buffer {
+  return Buffer.from(shaOfText(`fetch-request:${seed}`).slice("sha256:".length), "hex").subarray(0, 9);
+}
+
+/**
+ * Mint a cursor addressing an ALREADY-PERSISTED fetch-request record.
+ *
+ * The caller persists first and passes the record's CAS `version` as
+ * `stateVersion`, so the token and the record it names can never disagree
+ * about which generation of the request this cursor belongs to.
+ */
+export function mintFetchRequestHandle(input: {
+  workspaceRoot: string;
+  purpose: FetchRequestPurpose;
+  payloadRef: Buffer;
+  stateVersion: number;
+  bindingDigest: string;
+}): string | undefined {
+  const store = stateStoreFor(input.workspaceRoot);
+  if (store === undefined || !store.available) return undefined;
+  const aad = Buffer.from(input.bindingDigest, "utf8");
+  if (aad.length > MAX_AAD_BYTES) return undefined;
+  try {
+    return mintHandle({
+      purpose: input.purpose,
+      workspaceRoot: input.workspaceRoot,
+      storeEpoch: store.epoch,
+      stateVersion: input.stateVersion,
+      ttlMs: FETCH_REQUEST_HANDLE_TTL_MS,
+      issuer: ISSUER,
+      payloadRef: input.payloadRef,
+      aad,
+    }).token;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Validate a caller-supplied cursor and return the record it addresses.
+ *
+ * Same outcome ladder as `resolveTaskHandle`, for the same reason: the refusal
+ * layer names one recovery per cause, and `stale` (the store generation moved)
+ * must stay distinguishable from `unknown` (the record itself expired).
+ */
+export function resolveFetchRequestHandle(
+  token: string,
+  workspaceRoot: string,
+  purpose: FetchRequestPurpose,
+): FetchRequestResolution {
+  const validation = validateHandleToken({ token, expectedPurpose: purpose, workspaceRoot });
+  if (!validation.ok) {
+    return { ok: false, outcome: validation.outcome, ...(validation.detail !== undefined ? { detail: validation.detail } : {}) };
+  }
+  const store = stateStoreFor(workspaceRoot);
+  if (store === undefined || !store.available) {
+    return { ok: false, outcome: "store-unavailable", detail: "no durable state store for this workspace" };
+  }
+  if (validation.decoded.stateStoreEpoch !== store.epoch) {
+    return { ok: false, outcome: "stale", detail: "cursor belongs to a previous state-store generation" };
+  }
+  const record = store.get(validation.decoded.payloadRef);
+  if (record === undefined) {
+    return { ok: false, outcome: "unknown", detail: "state store no longer holds this request" };
+  }
+  if (record.purpose !== purpose) {
+    return { ok: false, outcome: "wrong-purpose", detail: "stored record is not a fetch request of this family" };
+  }
+  return {
+    ok: true,
+    record,
+    stateVersion: validation.decoded.stateVersion,
+    payloadRef: validation.decoded.payloadRef,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Content-handle persistence (restart recovery for `h…` handles)
 // ---------------------------------------------------------------------------
 

@@ -36,13 +36,20 @@ import {
   stopMcp,
 } from "../process.js";
 import { wantsHelp } from "../util/helpFlag.js";
+import { TOOL_SURFACE_VALUES, isToolSurface, type ToolSurface } from "@tokenlighten/types";
 
 const MCP_USAGE = `\
 Usage: tl mcp <start|stop|status>
 
   start [--stdio] [--allow-write] [--workspace DIR]
-        [--allowed-parent DIR]... [--no-prereq-check]
+        [--allowed-parent DIR]... [--tool-surface code|full] [--no-prereq-check]
                     Start the MCP server (used by generated client configs).
+                    --tool-surface (default: full) selects the advertised
+                    tool schema: "code" advertises code/text/config
+                    read/edit/search only (a smaller schema, no Office/
+                    archive/credential inputs); "full" keeps every existing
+                    capability. Fixed for the life of the server process —
+                    changing it requires restarting with the new flag.
   stop              Stop a running background MCP server.
   status            Report whether a background MCP server is running.
 `;
@@ -101,6 +108,7 @@ interface McpStartOpts {
   workspace?: string;
   allowedParents: string[];
   noPrereqCheck: boolean;
+  toolSurface?: ToolSurface;
 }
 
 function parseStartOpts(args: string[]): McpStartOpts {
@@ -109,6 +117,7 @@ function parseStartOpts(args: string[]): McpStartOpts {
   let workspace: string | undefined;
   const allowedParents: string[] = [];
   let noPrereqCheck = false;
+  let toolSurface: ToolSurface | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -122,9 +131,21 @@ function parseStartOpts(args: string[]): McpStartOpts {
       allowedParents.push(args[++i]!);
     } else if (a === "--no-prereq-check") {
       noPrereqCheck = true;
+    } else if (a === "--tool-surface" && args[i + 1] !== undefined) {
+      const raw = args[++i]!;
+      // DESIGN-v0.15 §8.2 (R7 Part B): fail closed here too, matching the
+      // server's own posture — do not spawn a process that will just exit
+      // 1 on an unrecognized value when the CLI can name the problem first.
+      if (!isToolSurface(raw)) {
+        process.stderr.write(
+          `tl mcp: unrecognized --tool-surface value ${JSON.stringify(raw)} (expected ${TOOL_SURFACE_VALUES.join(" | ")})\n`,
+        );
+        process.exit(1);
+      }
+      toolSurface = raw;
     }
   }
-  return { allowWrite, stdio, workspace, allowedParents, noPrereqCheck };
+  return { allowWrite, stdio, workspace, allowedParents, noPrereqCheck, toolSurface };
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +190,7 @@ async function runMcpStart(args: string[]): Promise<void> {
   if (opts.allowWrite) argv.push("--allow-write");
   if (opts.workspace) argv.push("--workspace", opts.workspace);
   for (const parent of opts.allowedParents) argv.push("--allowed-parent", parent);
+  if (opts.toolSurface !== undefined) argv.push("--tool-surface", opts.toolSurface);
 
   const instanceId = randomBytes(16).toString("hex");
   const child = spawn(process.execPath, argv, {

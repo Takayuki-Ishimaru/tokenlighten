@@ -145,22 +145,58 @@ function truncateLargestBody(payload: ShedPayload): ShedOutcome | undefined {
 
   const [start] = bounds;
   const keptRange = `${start}-${start + keep - 1}`;
-  const cutRange = `${start + keep}-${start + lines.length - 1}`;
-  const continuation = emittableToolCall({
-    tool: "read_file",
-    arguments: { mode: "slice", handle, range: cutRange },
-  });
-  if (continuation === undefined) return undefined;
+  const cutStart = start + keep;
 
   const remaining = Array.isArray(entry["remaining"])
     ? (entry["remaining"] as unknown[]).filter((value): value is string => typeof value === "string")
     : [];
 
+  // ------------------------------------------------------------------------
+  // R2 (DESIGN-v0.15 §5.1, "113行の例で … Dは30〜113行である").
+  //
+  // THE CONTINUATION DESCRIBES EVERYTHING NOT KEPT, RELATIVE TO THE ENTRY'S
+  // ORIGINAL EXTENT — not just the window THIS pass cut.
+  //
+  // `ladder.ts` re-invokes this rung while the response is still over budget,
+  // and its "LAST LIMIT-BEARING RUNG WINS" rule ships only the most recent
+  // pass's continuation. So for a 113-line file cut to fit a 1024 B caller
+  // budget (pass 1 keeps 1-57 / cuts 58-113, pass 2 keeps 1-29 / cuts 30-57,
+  // pass 3 keeps 1-15 / cuts 16-29) the wire used to carry `range:"16-29"`
+  // alone. A follower doing exactly what AGENTS.md tells it to do — "every
+  // `next` is executable: run it verbatim" — fetched 16-29 and then STOPPED,
+  // because a fresh slice request for 16-29 has no memory of the 113-line
+  // scope. Lines 30-113 were lost silently. That is R2's literal root cause.
+  //
+  // The union of the accumulated `remaining` and this pass's cut is contiguous
+  // above `cutStart` by construction (each pass halves the SURVIVOR, so every
+  // earlier cut starts above this one's end), so the honest continuation is
+  // ONE window `cutStart .. max(end of everything already cut, this cut's
+  // end)`, and `remaining` collapses to that same single window instead of
+  // reporting the shed HISTORY.
+  //
+  // `emit.ts`'s tail replaces this `next` with the parent request's cursor
+  // whenever one is staged; this rung stays correct on its own for the paths
+  // that stage none.
+  // ------------------------------------------------------------------------
+  let unkeptEnd = start + lines.length - 1;
+  for (const span of remaining) {
+    const parsed = parseRange(span);
+    if (parsed !== undefined && parsed[1] > unkeptEnd) unkeptEnd = parsed[1];
+  }
+  const unkeptRange = `${cutStart}-${unkeptEnd}`;
+  const continuation = emittableToolCall({
+    tool: "read_file",
+    arguments: { mode: "slice", handle, range: unkeptRange },
+  });
+  if (continuation === undefined) return undefined;
+
   const nextEntry: Record<string, unknown> = {
     ...entry,
     range: keptRange,
     body: lines.slice(0, keep).join("\n"),
-    remaining: remaining.includes(cutRange) ? remaining : [...remaining, cutRange],
+    remaining: remaining.length === 1 && remaining[0] === unkeptRange
+      ? remaining
+      : [unkeptRange],
   };
   const nextEvidence = [...evidence];
   nextEvidence[index] = nextEntry;

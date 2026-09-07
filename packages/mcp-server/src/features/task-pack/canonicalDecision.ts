@@ -1055,6 +1055,28 @@ function hasUnservedEpochContract(result: TaskPackResult): boolean {
 }
 
 /**
+ * DESIGN-v0.15 R1 (2026-09-07) / wave1-contract.md §3.4 — "the act→discover
+ * demotion arbitration" seat this module owns for request items.
+ *
+ * `readCodeTaskPack.ts`'s `buildRequestItemReadiness` already folds each
+ * explicit request item into the SAME obligation array `projectCompletion`
+ * reads, so an uncovered point already keeps `discovery_complete` false —
+ * `hasCertificateForTerminal` below never fires an `act.*` over it. This zoom
+ * supplies the other half: a concrete, batched `next` for what is still
+ * missing, computed with real workspace/candidate-path knowledge this
+ * (fs-free) module does not have. Reads a plain, internal, non-wire field —
+ * never a string marker parsed out of `missing[]` — because the batched call
+ * already carries a `targets[]` array a regex could not safely round-trip.
+ */
+function unservedRequestItemZoom(result: TaskPackResult): ContinuationCall | undefined {
+  return (result as TaskPackResult & { request_item_gap?: { next_call?: ContinuationCall } }).request_item_gap?.next_call;
+}
+
+function hasUnservedRequestItems(result: TaskPackResult): boolean {
+  return unservedRequestItemZoom(result) !== undefined;
+}
+
+/**
  * A ready answer may name extra code affordances, but only an explicit
  * answer-route Markdown remainder is mandatory answer evidence. Keep this
  * narrower than servedDocumentZoom(): generic partial-code affordances remain
@@ -1235,6 +1257,24 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
       kind: "discover",
       next_call: epochContractZoom,
       reason: "an earlier pack in this task established a requirement no served evidence covers; close it against the task's own query before certifying this narrowed pack",
+    };
+  }
+
+  // DESIGN-v0.15 R1 (wave1-contract.md §3.4): before the certificate → act
+  // step, an explicit request item this pack's own query named — but served
+  // plus prior-epoch evidence does not yet prove — always wins over an
+  // otherwise-ready certificate. `discovery_complete` already reflects this
+  // (buildRequestItemReadiness's obligations joined the same array
+  // `projectCompletion` used), so `hasCertificateForTerminal` below would
+  // already refuse; this supplies the concrete batched `next` instead of
+  // falling through to the generic bundle/await-input fallback at the
+  // bottom of this chain.
+  const requestItemZoom = canonicalNextAllowed ? unservedRequestItemZoom(result) : undefined;
+  if (requestItemZoom !== undefined) {
+    return {
+      kind: "discover",
+      next_call: requestItemZoom,
+      reason: "one or more explicit points of this request have no served evidence yet",
     };
   }
 
@@ -1597,6 +1637,19 @@ function repairCompleteCoverageWithGaps(
   ) {
     result.coverage = "partial";
   }
+  // DESIGN-v0.15 R1: same coverage-honesty repair for an uncovered request
+  // item. `buildRequestItemReadiness` already demotes `coverage` via the
+  // normal obligation path in the common case (its obligations join the same
+  // array `projectCompletion` reads before this pack's own coverage is set);
+  // this only guards a rebuilt/repaired envelope that reaches this exit with
+  // a stale "complete" alongside the still-pending gap.
+  if (
+    result.coverage === "complete"
+    && decision.kind === "discover"
+    && hasUnservedRequestItems(result)
+  ) {
+    result.coverage = "partial";
+  }
 }
 
 /** Apply the canonical decision at the shared task-pack exit. */
@@ -1846,6 +1899,16 @@ export function canonicalTaskDecisionInvariantViolations(result: TaskPackResult)
     && hasUnservedEpochContract(result)
   ) {
     violations.push("certificate-forbids-unserved-epoch-contract");
+  }
+  // DESIGN-v0.15 R1: a certificate must not stand while an explicit request
+  // item this same pack extracted is still uncovered — the mirror of the
+  // epoch-contract oracle entry above, for the per-pack (not cross-pack)
+  // gap `buildRequestItemReadiness` records.
+  if (
+    hasCertificateBinding(contract)
+    && hasUnservedRequestItems(result)
+  ) {
+    violations.push("certificate-forbids-unserved-request-item");
   }
   return violations;
 }

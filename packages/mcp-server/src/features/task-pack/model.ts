@@ -324,6 +324,40 @@ export interface TaskPackResult {
   profile_binding?: TaskProfileBinding;
   /** Stable stop/continue signal consumed by agents and bench telemetry. */
   execution_contract?: TaskExecutionContract;
+  /**
+   * DESIGN-v0.15 R1 (2026-09-07): an explicit request item (see
+   * `requestItems.ts`) that served+prior evidence does not yet prove, paired
+   * with the single batched call that would fetch every still-missing,
+   * independently-fetchable item at once. INTERNAL ONLY — never a wire field
+   * by itself; `canonicalDecision.ts`'s `unservedRequestItemZoom` is the sole
+   * reader, and turns it into `decision.next` before the certificate/act
+   * gate so an uncovered point never falls through to `act.answer`/
+   * `act.edit`. Absent once every extracted item is proved or unbindable
+   * with no viable candidate left to fetch.
+   */
+  request_item_gap?: {
+    next_call: ToolCall;
+    /** Request-item ids (see `RequestItem.id`) this call is meant to cover. */
+    ids: string[];
+  };
+  /**
+   * DESIGN-v0.15 R1 (2026-09-07): explicit request items (see
+   * `requestItems.ts`) this pack's obligation graph closed by VERIFIED
+   * ABSENCE rather than positive evidence (design §4.2: "検証済みabsenceは
+   * 限定結論の証拠" — a limited conclusion, never proof of a nonexistent
+   * implementation's behavior; `readCodeTaskPack.ts`'s
+   * `proveUnbindableRequestItem`, the `matchedPaths.size === 0` arm). INTERNAL
+   * ONLY, same convention as `request_item_gap` above — `buildCapabilityGaps`
+   * is the sole reader, and turns each entry into a wire
+   * `gaps:[{code:"request-item-absent", refs:[id, term]}]` entry. That wire
+   * entry only survives when this pack's OWN decision is already `discover`
+   * for some other reason (D-4, `packages/types/src/mcp/decision.ts`: gaps
+   * live on `decision.gaps` and nowhere else) — an otherwise-ready
+   * `act.answer`/`act.edit` pack has no wire slot for it, though the
+   * underlying obligation's own `reason` string still states it. Absent when
+   * no extracted item was closed this way.
+   */
+  request_item_absences?: Array<{ id: string; term: string }>;
   /** Sparse receipt for safe read/search operations completed before returning. */
   internalized?: Array<{
     op: "find" | "read";
@@ -545,6 +579,25 @@ export interface TaskPackArgs {
    * field — most unit tests — keeps its exact prior behavior.
    */
   writeAllowed?: boolean;
+  /**
+   * R5 (DESIGN-v0.15-exploration-continuation-reliability.md §7): true only
+   * on an INTERNAL recursive `buildSeededTaskPack({...args, paths:[...]})`
+   * call whose `paths`/`path`/`symbol` the server itself derived from a
+   * pathless query (the literal-first single-source search, the ordinary
+   * locator's exact-identity fallback, a directory-scope retry, or the
+   * generic-text lane) -- never set on the top-level args a wire call
+   * produces. `attachSingleSiteUniqueMatchFastPath` reads it to decide
+   * whether a served surface's local-window body has ever reached the
+   * caller before: a caller-supplied `paths`/`targets` means the normal
+   * evidence surface already told them what is there, so the fast_path
+   * recipe alone is new information and the body may be withheld: but a
+   * server-DISCOVERED location has never appeared on any wire, so clearing
+   * its body would certify `act.edit` over text nobody ever actually saw.
+   * Defaults to false/absent, the existing (body-withheld) behavior, so a
+   * seeding site this wave did not touch keeps its prior byte shape exactly.
+   * Server-derived; internal only, never serialized or fingerprinted.
+   */
+  autoDiscoveredLocation?: boolean;
   /**
    * Canonical, server-resolved task identity for result-consumption state.
    *

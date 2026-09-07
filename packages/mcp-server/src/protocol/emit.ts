@@ -73,6 +73,16 @@ import {
 } from "./envelope.js";
 import { buildRefusal } from "./refusal.js";
 import { settleServedCallBookings } from "../state/session.js";
+import {
+  applyReadRequestContinuation,
+  demoteActAfterShed,
+  shrinkLargestEvidenceByOneLine,
+} from "./readRequestContinuation.js";
+import {
+  applySearchRequestContinuation,
+  rewindSearchRequestDelivered,
+  shrinkLastSearchMatchGroup,
+} from "./searchRequestContinuation.js";
 import { recordServedBytes } from "../util/packServeLog.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
 import { applyResponseCodec } from "./codec/pipeline.js";
@@ -114,6 +124,20 @@ import { trace, isTraceEnabled } from "../util/trace.js";
  * payload at this layer would be a byte change against the §6.1(b) pins even
  * when it changes no information.
  */
+/**
+ * Bytes reserved for the R2 read-request cursor a staged read's tail installs.
+ *
+ * MEASURED, not guessed: the cursor call is
+ * `{"tool":"read_file","arguments":{"cwd":<path>,"cursor":<200 chars>}}` and it
+ * REPLACES a `{"targets":[{"handle":"h…","range":"a-b"}],"content":"auto"}`
+ * next of about 70 B, so the swap costs ~200-240 B net (the `remaining` array
+ * collapsing from one entry per shed pass to a single window gives some back).
+ * 256 covers it with headroom, and headroom is the right side to err on: an
+ * under-reserve ships an over-budget response, an over-reserve ships one line
+ * fewer.
+ */
+export const READ_CURSOR_NEXT_RESERVE_BYTES = 256;
+
 export function emitFinalizedPayload(
   payload: ShedPayload,
   kind: Kind,
@@ -201,10 +225,44 @@ export function emitFinalizedPayload(
   const initialBudget = opts?.budgetOverrideBytes !== undefined
     ? limit
     : calibratedLimit;
+  // DESIGN-v0.15 §5 (R2): ROOM FOR THE CONTINUATION THE TAIL WILL INSTALL.
+  //
+  // When this call carries a read request, the tail below replaces whatever
+  // `next` the producer or the ladder built with the request's own cursor call
+  // — `{cursor:<~200 chars>, cwd}` — which is ~240 B wider than the
+  // `{targets:[{handle,range}],content:"auto"}` it displaces. The ladder
+  // measures the response BEFORE that swap, so without this reserve a response
+  // shed to exactly `limit` ships at `limit + 240` (measured: a `maxBytes:1000`
+  // full read landed at 1067 B, `fullModeBudget.spec.ts`).
+  //
+  // RESERVING IS THE ONLY HONEST ORDER. The alternative — re-running the ladder
+  // after the rewrite — would shed bodies the served-range ledger has already
+  // settled against, so the response would claim delivery of bytes it then cut.
+  // Reserving first keeps one settle, one measurement and one truth.
+  //
+  // Never below the kind's own protocol floor, and zero when no request is
+  // staged — which is every call that is not a line-addressed read, so the
+  // §0.3 byte invariant is untouched on them by construction. On the staged
+  // ones nothing sheds at the calibrated budgets either (every row is >= 4x the
+  // largest cap that can feed it), so the reserve only ever bites where a
+  // caller's own budget is already binding.
+  const continuationReserve = context.readRequest === undefined ? 0 : READ_CURSOR_NEXT_RESERVE_BYTES;
+  // NEVER ABOVE THE BUDGET IT IS RESERVING FROM. An earlier version clamped up
+  // to `floorBytes(kind, form)` — "the pinned minimum any legitimate response of
+  // this shape has ever measured" — which for `read.text` is well above 1 KiB,
+  // so a `maxBytes:1000` call ended up handing the ladder a LARGER budget than
+  // the caller declared and shedding less than before (measured: 1482 B against
+  // a 1000 B cap, `fullModeBudget.spec.ts`). The floor is the ladder's own
+  // business; asking it for less than the floor just means it does what it can
+  // and the tail below fails closed, which is exactly the pre-existing
+  // behaviour for a budget nothing can satisfy.
+  const withReserve = (budget: number): number => continuationReserve === 0
+    ? budget
+    : Math.max(1, budget - continuationReserve);
   let ladder = runLadder({
     payload,
     kind,
-    budget: initialBudget,
+    budget: withReserve(initialBudget),
     context: ladderContext,
     validate: (candidate) => validateShedCandidate(candidate, kind),
     canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
@@ -217,7 +275,7 @@ export function emitFinalizedPayload(
     const reentered = runLadder({
       payload: ladder.payload,
       kind,
-      budget: limit,
+      budget: withReserve(limit),
       context: ladderContext,
       validate: (candidate) => validateShedCandidate(candidate, kind),
       canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
@@ -234,7 +292,7 @@ export function emitFinalizedPayload(
   // fourth. Unreachable at the calibrated table; reachable through
   // `budgetOverrideBytes`, which is how the sweep exercises it.
   if (used > limit) {
-    const converted = failClosed(kind, context, limit, used, ladder.continuation);
+    const converted = failClosed(kind, context, limit, used, ladder.continuation ?? existingNextOf(payload));
     if (converted !== undefined) {
       current = converted;
       onWire = "refusal";
@@ -306,6 +364,29 @@ export function emitFinalizedPayload(
   // now (`state/session.ts`), which is only honest because the attribution
   // makes `unattributed` unreachable for a shipped body. An empty string means
   // the call staged for two different paths: ambiguous, so no attribution.
+  // DESIGN-v0.15 §3.2, LAST SENTENCE — "最終段で証拠が減ったならact.*を降格し、
+  // 未配信範囲を回復するnextを残す". §2.1.1's act floor (inside the ladder)
+  // already catches the case where a cut makes the evidence set STRUCTURALLY
+  // insufficient for the act. This catches the weaker one the design also
+  // names: the evidence merely DECREASED. A certificate is a claim about bytes
+  // that shipped, and a body the ladder truncated did not ship whole.
+  //
+  // GATED ON `ladder.records.length > 0`, so at the calibrated budgets — where
+  // nothing sheds — this is a no-op returning the payload BY IDENTITY, and the
+  // §6.1(b) pins keep their bytes.
+  const demoted = demoteActAfterShed({
+    before: payload,
+    after: current,
+    onWire,
+    shed: ladder.records.length > 0,
+    canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
+  });
+  if (demoted !== current) {
+    current = demoted;
+    text = JSON.stringify(current);
+    used = measureResponseBytes(text);
+  }
+
   const settlementRoot = context.workspace !== undefined && context.workspace !== ""
     ? context.workspace
     : context.readServeWorkspace;
@@ -334,6 +415,120 @@ export function emitFinalizedPayload(
     settlementRoot !== undefined && settlementRoot !== "" ? settlementRoot : undefined,
     wasShed,
   );
+
+  // DESIGN-v0.15 §5 (R2), THE REQUEST HALF — immediately after the ledger half,
+  // and for the same reason: D = Q - (C ∪ S) is only computable once the ledger
+  // reflects exactly what THIS response carries. `applyReadRequestContinuation`
+  // recomputes D, persists it, and collapses every `next` position onto the ONE
+  // cursor call that continues the ORIGINAL request (§5.3). With no staged
+  // request — every call that is not a line-addressed read — it returns the
+  // payload by identity and nothing is re-serialized.
+  const continued = applyReadRequestContinuation(current, context.readRequest, {
+    budgetDeclared: declaredMaxBytes !== undefined,
+    shed: ladder.records.length > 0,
+  });
+  if (continued !== current) {
+    current = continued;
+    text = JSON.stringify(current);
+    used = measureResponseBytes(text);
+  }
+
+  // ---------------------------------------------------------------------
+  // DESIGN-v0.15 §6.1 (R3), THE SEARCH REQUEST HALF — a SEPARATE, ADDITIVE
+  // block after the read-request block above (never inside it): a staged
+  // `search_files find` request's `delivered` prefix is settled from this
+  // SAME finalized payload, for the same reason R2's settle runs here rather
+  // than at dispatch time — the ladder has already run, so this reflects
+  // exactly what THIS response carries. `applySearchRequestContinuation`
+  // returns the payload by identity for every call that did not stage a
+  // search request (every non-`find` search response, and every `find`
+  // whose result already fit in one response).
+  // finding 11: snapshotted BEFORE the settle below can advance it, so a
+  // post-rewrite shrink retry (further down) can correctly rewind this
+  // request's monotonic `delivered` prefix if it needs to drop a group this
+  // settle is about to count as shipped — see `rewindSearchRequestDelivered`.
+  const searchDeliveredBeforeSettle = context.searchRequest?.state.delivered;
+  const searchContinued = applySearchRequestContinuation(current, context.searchRequest);
+  if (searchContinued !== current) {
+    current = searchContinued;
+    text = JSON.stringify(current);
+    used = measureResponseBytes(text);
+  }
+  // ---------------------------------------------------------------------
+
+  // finding 11: POST-REWRITE BUDGET SAFETY. `used` was just recomputed twice
+  // above, but never re-compared to `limit` — budget safety rested entirely
+  // on `READ_CURSOR_NEXT_RESERVE_BYTES`/`PAGE_ENVELOPE_RESERVE_BYTES`/
+  // `searchPageEnvelopeReserve` being adequate reserves, which they are
+  // MEASURED (not merely guessed) to be at every calibrated budget — the
+  // design's own 1024 B/113-line case peaks at 948 B across every page — so
+  // this is unreachable today. It is the honest fallback the moment one of
+  // them under-estimates: ONE whole-line shrink of the page the rewrite just
+  // installed, re-run through the SAME continuation function so D/`next`
+  // reflect exactly what survives (never a stale, wider continuation for a
+  // narrower body), and — only if that single shrink still is not enough —
+  // fail closed naming the floor, exactly like the read cursor's and (finding
+  // 9's) search staging's own `budget-below-minimum` refusal. Never ships the
+  // truth silently over budget.
+  //
+  // NEVER when `current` is ALREADY a refusal. `applyReadRequestContinuation`
+  // deliberately still installs its cursor on one (a `budget-below-minimum`
+  // refusal's own `limit.next` is how a caller retries the SAME request at a
+  // raised budget) — genuinely reachable today, unlike the read/search
+  // request's OWN reserve. Re-deciding a settled refusal here — e.g. a
+  // `cap-exceeded` the LADDER's own fail-closed tail already produced,
+  // widened by that cursor install past a razor-thin declared budget — would
+  // overwrite one honest, already-terminal refusal with a different one for
+  // no reason; `current["kind"]` is the ground truth for this, not `onWire`
+  // (a ladder-internal fail-closed rung can produce a refusal-shaped payload
+  // without `onWire` itself ever being reassigned).
+  if (
+    (context.readRequest !== undefined || context.searchRequest !== undefined)
+    && used > limit
+    && current["kind"] !== "refusal"
+  ) {
+    const shrunk = context.readRequest !== undefined
+      ? shrinkLargestEvidenceByOneLine(current)
+      : shrinkLastSearchMatchGroup(current);
+    if (shrunk !== undefined) {
+      let reRewritten: ShedPayload;
+      if (context.readRequest !== undefined) {
+        reRewritten = applyReadRequestContinuation(shrunk, context.readRequest, {
+          budgetDeclared: declaredMaxBytes !== undefined,
+          shed: true,
+        });
+      } else {
+        if (context.searchRequest !== undefined && searchDeliveredBeforeSettle !== undefined) {
+          rewindSearchRequestDelivered(context.searchRequest, searchDeliveredBeforeSettle);
+        }
+        reRewritten = applySearchRequestContinuation(shrunk, context.searchRequest);
+      }
+      const reText = JSON.stringify(reRewritten);
+      const reUsed = measureResponseBytes(reText);
+      if (reUsed <= limit) {
+        current = reRewritten;
+        text = reText;
+        used = reUsed;
+      }
+    }
+    if (used > limit) {
+      const forTool = advertisedTool(context.tool);
+      if (forTool !== undefined) {
+        current = canonicalizeEmittedToolCalls({
+          ...buildRefusal(forTool, {
+            code: "budget-below-minimum",
+            field: "budget",
+            detail: "raise budget.bytes to at least required_min_bytes and re-issue the same call",
+            required_min_bytes: used,
+            retry: "call",
+          }),
+        }) as ShedPayload;
+        onWire = "refusal";
+        text = JSON.stringify(current);
+        used = measureResponseBytes(text);
+      }
+    }
+  }
 
   const shed = ladder.records;
   // V10-11: choose the wire REPRESENTATION of the payload already finalized
@@ -432,6 +627,50 @@ function discardStagedServeBookings(context: ProtocolCallContext): void {
  * which is precisely what [R5-9] spent an adjudication removing elsewhere. The
  * cross-tool placement is recorded as an S3 note rather than fixed by a mint.
  */
+/**
+ * The recovery `next` a payload ALREADY carried before shedding ran, if any.
+ *
+ * DESIGN-v0.15 §5.3/§3.3 (R2): `failClosed`'s only source of a recovery
+ * `next` used to be `ladder.continuation` — a shedder RUNG's own computed
+ * continuation. A rung that shrinks a payload WITHOUT recomputing one (the
+ * `read.map` skeleton shedder trims `outline.signatures` but builds no
+ * continuation of its own) left the eventual refusal with NO `next` at all,
+ * discarding a perfectly good, already-executable recovery the PRODUCER had
+ * already named on the unshed body. Measured: a per-task-governed `read.map`
+ * skeleton downgrade ("per-task whole-file budget spent on other files; zoom
+ * this handle by range") too big for a small declared budget refused
+ * `cap-exceeded` with no `next` at all — a dead end for a call whose only
+ * fault was arriving after this task's OTHER full reads, not anything about
+ * the file itself.
+ *
+ * Checked in the same fixed priority the design's own canonical-next
+ * selection uses (`limit.next`, then top-level `next`, then `decision.next`),
+ * so this recovers the producer's existing continuation without teaching
+ * every shedder rung to duplicate it.
+ */
+function existingNextOf(payload: ShedPayload): ToolCall | undefined {
+  const asCall = (value: unknown): ToolCall | undefined => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const tool = record["tool"];
+    const args = record["arguments"];
+    return typeof tool === "string" && args !== null && typeof args === "object" && !Array.isArray(args)
+      ? ({ tool, arguments: args } as ToolCall)
+      : undefined;
+  };
+  const limit = payload["limit"];
+  const limitNext = limit !== null && typeof limit === "object" && !Array.isArray(limit)
+    ? asCall((limit as Record<string, unknown>)["next"])
+    : undefined;
+  if (limitNext !== undefined) return limitNext;
+  const topNext = asCall(payload["next"]);
+  if (topNext !== undefined) return topNext;
+  const decision = payload["decision"];
+  return decision !== null && typeof decision === "object" && !Array.isArray(decision)
+    ? asCall((decision as Record<string, unknown>)["next"])
+    : undefined;
+}
+
 function failClosed(
   kind: Kind,
   context: ProtocolCallContext,

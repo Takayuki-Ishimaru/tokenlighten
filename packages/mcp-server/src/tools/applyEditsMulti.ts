@@ -34,6 +34,7 @@ import { validateCreateTarget, publishNewFile } from "./createFileCore.js";
 import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/textDecode.js";
 import {
+  applyReplaceAll,
   applySingleEdit,
   findUniqueIndentationEquivalent,
   hasLiteralBackslashEscape,
@@ -247,6 +248,14 @@ export interface EditEntry {
    * check.
    */
   create?: boolean;
+  // v0.14.1 defect 2 fix (2026-09-07): explicit "replace every exact occurrence" — forwarded
+  // only from a path-based item or a handle item with no range
+  // (applyEditStep's whole-file branch below). A range-bearing item already
+  // replaces every match within its range unconditionally (see the
+  // "Range-scoped replace-all" branch of applyEditStep) and does not
+  // consult this field — see that branch's own doc comment for why that is
+  // unchanged behavior, not a gap this field needs to close.
+  target?: "all";
   // R29-FIX (2026-09-05, D2): set by server.ts's edits[] mapping loop ONLY for
   // a single-item batch whose per-item precondition:"expected-hash" already
   // passed enforcePreconditions there -- the same acknowledgment contract the
@@ -282,6 +291,14 @@ export interface EditFileResult {
   /** Create entry's whole-file line count — see `lines`'s doc comment. */
   total_lines?: number;
   delta: string;
+  /**
+   * v0.14.1 defect 2 fix (2026-09-07): count of occurrences replaced by an explicit
+   * target:"all" edit — carried next to `delta` so the caller can verify a
+   * replace-all without a read-back. Absent unless the edit actually used
+   * target:"all"; never `0` (zero matches refuses not-found before any
+   * write reaches here).
+   */
+  replaced?: number;
   /**
    * DESIGN-v0.8 B3.1: a per-file handle (kind:"file", POST-edit sha) minted
    * after this file was successfully written, so a follow-up edit in the
@@ -567,6 +584,8 @@ export async function applyEditsMulti(
     isCreate?: boolean;
     /** F-V13-2: whole-file line count, create entries only — see EditFileResult.lines. */
     totalLines?: number;
+    /** v0.14.1 defect 2 fix (2026-09-07): summed replace-all count across this path's merged edit chain. */
+    replaced?: number;
   }
   const prepared: PreparedEdit[] = [];
   /** Rels where at least one edit needed literal-backslash-escape recovery. */
@@ -579,7 +598,7 @@ export async function applyEditsMulti(
    * disk read for the first edit, or the previous edit's output for a
    * subsequent one in the same group). */
   type StepResult =
-    | { ok: true; newText: string; lines: string; added: number; removed: number; normalizedEscapes?: true; normalizedWhitespace?: true }
+    | { ok: true; newText: string; lines: string; added: number; removed: number; normalizedEscapes?: true; normalizedWhitespace?: true; replaced?: number }
     | ({ ok: false; error: string; code: string; hint?: string; reason?: string; file_line_count?: number } & NearestMatchInfo);
 
   function applyEditStep(currentText: string, edit: EditEntry): StepResult {
@@ -865,6 +884,45 @@ export async function applyEditsMulti(
       };
     }
 
+    // v0.14.1 defect 2 fix (2026-09-07): target:"all" on a path-based item, or a handle item
+    // with no range, replaces EVERY exact occurrence — the batch-edits[]
+    // sibling of the top-level (non-batch) args["target"]==="all" dispatch
+    // in server.ts, which already calls write/rangeEdit.ts's
+    // replaceAllInRange for the identical shape reached through a single
+    // (non-array) edit_file call. applyReplaceAll (write/textEdit.ts) is
+    // this whole-file layer's own exact-match-only implementation — see
+    // its doc comment for why it does NOT share applySingleEdit's escape/
+    // indentation recovery fallbacks. server.ts's edits[] mapping loop
+    // already refuses target:"all" combined with precondition:"unique-match"
+    // before any item reaches here, so edit.uniqueMatch is never true
+    // alongside edit.target==="all" — no such conflict needs handling below.
+    // lines/added/removed mirror the whole-file {content} branch above
+    // (whole-file span, not a per-match hunk): `replaced` is the field a
+    // caller should trust for "how much changed".
+    if (edit.target === "all") {
+      const allResult = applyReplaceAll(currentText, edit.search, edit.replace);
+      if (!allResult.ok) {
+        return {
+          ok: false,
+          error: allResult.error ?? "edit validation failed",
+          code: allResult.code ?? "edit-error",
+          ...(allResult.code === "not-found"
+            ? nearestMatchForensics(currentText, edit.search, 1)
+            : {}),
+        };
+      }
+      const removedTotal = countLogicalLinesEntry(currentText);
+      const addedTotal = countLogicalLinesEntry(allResult.text!);
+      return {
+        ok: true,
+        newText: allResult.text!,
+        lines: formatLines(1, Math.max(1, addedTotal)),
+        added: addedTotal,
+        removed: removedTotal,
+        replaced: allResult.replaced,
+      };
+    }
+
     const editResult = applySingleEdit(currentText, edit.search, edit.replace);
     if (!editResult.ok) {
       return {
@@ -1095,6 +1153,7 @@ export async function applyEditsMulti(
     let lastLines = "";
     let totalAdded = 0;
     let totalRemoved = 0;
+    let totalReplaced = 0;
     let pathNormalizedEscapes = false;
     let pathNormalizedWhitespace = false;
     for (const cluster of executionClusters) {
@@ -1132,6 +1191,7 @@ export async function applyEditsMulti(
         lastLines = step.lines;
         totalAdded += step.added;
         totalRemoved += step.removed;
+        if (step.replaced !== undefined) totalReplaced += step.replaced;
         if (rangeOnlyGroup) clusterLineDelta += step.added - step.removed;
         if (step.normalizedEscapes) pathNormalizedEscapes = true;
         if (step.normalizedWhitespace) pathNormalizedWhitespace = true;
@@ -1154,6 +1214,7 @@ export async function applyEditsMulti(
       // identical to the pre-merge per-edit lines/delta.
       lines: lastLines,
       delta: formatDelta(totalAdded, totalRemoved),
+      ...(totalReplaced > 0 ? { replaced: totalReplaced } : {}),
     });
   }
 
@@ -1334,6 +1395,7 @@ export async function applyEditsMulti(
         // server.ts's attachAppliedReadback and protocol/editFamily.ts.
         ...(item.isCreate ? { total_lines: item.totalLines ?? 0 } : { lines: item.lines }),
         delta: item.delta,
+        ...(item.replaced !== undefined ? { replaced: item.replaced } : {}),
         handle: hEntry.id,
       };
     });
@@ -1345,6 +1407,7 @@ export async function applyEditsMulti(
         path: item.rel,
         ...(item.isCreate ? { total_lines: item.totalLines ?? 0 } : { lines: item.lines }),
         delta: item.delta,
+        ...(item.replaced !== undefined ? { replaced: item.replaced } : {}),
         handle: "",
       }));
   }

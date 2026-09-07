@@ -99,8 +99,24 @@ import { acquireWriterLock } from "./writerLock.js";
  * `handleCodec.ts` MAC-authenticated token. It is not a wire purpose either —
  * a `qref` string is never accepted where a `task`/`context`/`continuation`
  * token is required, and the reverse.
+ *
+ * `read-request` / `search-request` (DESIGN-v0.15 R2/R3) are the DURABLE half
+ * of a fetch-request cursor: unlike `continuation`, whose page position rides
+ * the token's own `aad`, a fetch request carries an original scope (Q), a
+ * remainder (D) and a fixed page list that must survive a restart and must be
+ * CAS-updated (§5.2: "未確定ページの境界は … 既存stateのCASで一度だけ確定する",
+ * "再起動では既存永続状態から復元し"). They ARE wire purposes — the token that
+ * addresses them is MAC-authenticated with its own prefix — which is why they
+ * are listed beside the three original ones rather than beside `content`.
  */
-export type StoredPurpose = "task" | "context" | "continuation" | "content" | "qref";
+export type StoredPurpose =
+  | "task"
+  | "context"
+  | "continuation"
+  | "content"
+  | "qref"
+  | "read-request"
+  | "search-request";
 
 export interface StoredRecord {
   key: string;
@@ -635,23 +651,55 @@ export class WorkspaceStateStore {
   }
 }
 
+/**
+ * Every `StoredPurpose`, as a runtime set. See `asRecord`'s mirror-duty note.
+ *
+ * finding 13: a plain `readonly StoredPurpose[]` annotation only rejects an
+ * EXTRA value in this list (a typo, or a value that is not — or is no longer
+ * — a `StoredPurpose`); it does nothing to catch a MISSING one, so the mirror
+ * duty the old comment claimed was enforced in one direction only. Routing
+ * the literal through `satisfies Record<StoredPurpose, true>` closes the
+ * other direction too: `tsc` rejects this object literal if it is missing a
+ * key OR carries one `StoredPurpose` does not have, in EITHER direction, the
+ * moment `StoredPurpose` gains or loses a member — exactly the mirror duty
+ * `asRecord`'s own comment (below) describes.
+ */
+const STORED_PURPOSES_BY_KEY = {
+  task: true,
+  context: true,
+  continuation: true,
+  content: true,
+  qref: true,
+  "read-request": true,
+  "search-request": true,
+} satisfies Record<StoredPurpose, true>;
+const STORED_PURPOSES: readonly StoredPurpose[] = Object.keys(STORED_PURPOSES_BY_KEY) as StoredPurpose[];
+const STORED_PURPOSE_SET: ReadonlySet<string> = new Set<string>(STORED_PURPOSES);
+
 function asRecord(value: unknown): StoredRecord | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
   if (typeof v["key"] !== "string" || v["key"] === "") return undefined;
   const purpose = v["purpose"];
-  if (
-    purpose !== "task" && purpose !== "context" && purpose !== "continuation"
-    && purpose !== "content" && purpose !== "qref"
-  ) {
-    return undefined;
-  }
+  // MIRROR DUTY, ENFORCED BY `tsc` IN BOTH DIRECTIONS. This used to be a
+  // hand-written chain of `!==` comparisons, and a purpose added to
+  // `StoredPurpose` but not to the chain was silently DROPPED on every
+  // journal replay — the record survived the process that wrote it and
+  // vanished the moment `_withWriterLock` resynced, so its CAS version fell
+  // back to 0 and every update looked like a fresh insert.
+  // `STORED_PURPOSES_BY_KEY`'s `satisfies Record<StoredPurpose, true>` fails
+  // to compile if a `StoredPurpose` member is MISSING from it (finding 13 —
+  // a bare `readonly StoredPurpose[]` annotation alone only catches an EXTRA
+  // value, not a missing one) or if it carries a key `StoredPurpose` does
+  // not; `SET.has` below is the runtime check this compile-time guarantee
+  // makes safe to rely on.
+  if (typeof purpose !== "string" || !STORED_PURPOSE_SET.has(purpose)) return undefined;
   if (typeof v["version"] !== "number" || !Number.isFinite(v["version"])) return undefined;
   if (typeof v["updatedAtMs"] !== "number" || typeof v["expiresAtMs"] !== "number") return undefined;
   if (typeof v["data"] !== "object" || v["data"] === null) return undefined;
   return {
     key: v["key"],
-    purpose,
+    purpose: purpose as StoredPurpose,
     version: v["version"],
     updatedAtMs: v["updatedAtMs"],
     expiresAtMs: v["expiresAtMs"],

@@ -312,22 +312,38 @@ function findNext(body: Body, args: Body): ToolCall | undefined {
   }
 
   // Inventory can be exhaustive while every matched file is represented by only
-  // its first eight snippets. Narrow to one such file; once already narrowed,
-  // leave the search family and read that file so the continuation progresses.
+  // its first eight snippets. Narrow to one such file so the continuation can
+  // progress within the SAME search family.
   const partialScope = scope === undefined
     ? files.find((file) => (num(file["more_lines"]) ?? 0) > 0)
     : undefined;
   if (partialScope !== undefined) scope = str(partialScope["path"]);
   if (scope === undefined) return undefined;
 
+  // DESIGN-v0.15 §6.1 (R3): this branch used to fall through, once ALREADY
+  // narrowed to exactly this one file (`args["path"] === scope`, i.e. this is
+  // not the first pass — a prior call already scoped `find` to this file and
+  // it is STILL truncated), into a `read_file mode:"full"` escalation —
+  // "検索の続きが全文へ膨張" (the search's continuation expanding into a full
+  // read), the exact defect the design names by name. That escalation is
+  // DELETED, not merely narrowed: re-scoping `find` to one file whose own
+  // per-file preview is STILL truncated cannot make progress either
+  // (`MAX_LINES_PER_FILE`/byte caps apply regardless of scope — a second scoped
+  // find shows the SAME first lines again), so what is actually needed is a
+  // MATCH-RECORD cursor that can page PAST those caps, never a whole-file read.
+  // That cursor is `state/searchRequestStore.ts` /
+  // `protocol/searchRequestContinuation.ts`'s job: `server.ts`'s find dispatch
+  // stages a full, uncapped snapshot whenever a response comes back
+  // `truncated:true`, and the emit tail (`applySearchRequestContinuation`)
+  // installs the authoritative `search_files find {cursor}` continuation —
+  // OVERRIDING whatever this function returns for that call. Declining here
+  // (no re-scoped re-search that would just reproduce the same truncated
+  // preview, no escalation out of the search family) is therefore always
+  // safe: either a search request is staged and this return value is
+  // replaced, or none was and the honest answer is "no nameable next" —
+  // `foldLimit`'s own clause 4 degrades that to `capped`, never a wrong next.
   if (partialScope !== undefined && str(args["path"]) === scope) {
-    const readCall: Body = { mode: "full", path: scope };
-    for (const key of [
-      "cwd", "lane", "taskProfile", "taskEpoch", "credentialRef", "maxBytes", "maxTokens",
-    ] as const) {
-      if (args[key] !== undefined) readCall[key] = args[key];
-    }
-    return emittableToolCall({ tool: "read_file", arguments: readCall });
+    return undefined;
   }
 
   return findScopedNext(scope, body, args);

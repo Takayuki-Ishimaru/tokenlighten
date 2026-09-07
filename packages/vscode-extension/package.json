@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -115,6 +115,20 @@
           "default": "full",
           "scope": "resource",
           "description": "Guide profile injected during workspace setup."
+        },
+        "tokenlighten.toolSurface": {
+          "type": "string",
+          "enum": [
+            "full",
+            "code"
+          ],
+          "enumDescriptions": [
+            "Every capability, including Office/archive/encrypted-artifact inputs.",
+            "Code/plain-text/config read, edit, and search only — a smaller tool schema."
+          ],
+          "default": "full",
+          "scope": "resource",
+          "description": "Advertised MCP tool surface. Changing this requires reconnecting (a new schema stamp is generated)."
         }
       }
     }

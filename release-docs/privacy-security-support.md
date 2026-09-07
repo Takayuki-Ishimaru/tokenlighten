@@ -22,7 +22,7 @@ The VS Code extension and CLI can produce local usage and cost-savings estimates
 
 ## Dependency updates
 
-v0.14.0 includes dependency updates that address security issues. Use the latest released version. Source users can run `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation. Advisory information can change after release.
+v0.14.0 included dependency updates that address security issues, and v0.14.1 declares no dependency changes. Use the latest released version. Source users can run `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation. Advisory information can change after release.
 
 ## Support and service level
 

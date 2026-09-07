@@ -186,24 +186,11 @@
       "in_comment": [
         false
       ]
-    },
-    {
-      "path": "src/d19/f.ts",
-      "lines": [
-        1
-      ],
-      "in_comment": [
-        false
-      ]
     }
   ],
   "total": 40,
   "limit": {
     "cause": "wire",
-    "omitted": [
-      "metadata",
-      "results"
-    ],
     "next": {
       "tool": "search_files",
       "arguments": {
@@ -217,6 +204,10 @@
         ],
         "cursor": "$TH"
       }
-    }
+    },
+    "omitted": [
+      "results",
+      "metadata"
+    ]
   }
 }

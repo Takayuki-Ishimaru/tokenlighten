@@ -407,6 +407,12 @@ function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
     if (lines !== undefined && lines !== range) entry.lines = lines;
     const delta = str(row["delta"]);
     if (delta !== undefined) entry.delta = delta;
+    // v0.14.1 defect 2 fix (2026-09-07): edits[] target:"all" replace-all count, carried next
+    // to delta — see EditFileResult.replaced (tools/applyEditsMulti.ts) and
+    // AppliedEntry.replaced (types/mcp/edit-result.ts). Additive-only:
+    // absent unless the row actually performed a replace-all.
+    const replaced = row["replaced"];
+    if (typeof replaced === "number") entry.replaced = replaced;
     // INV-I-5 (FX-P2): additive-only — absent unless the row actually set it.
     if (row["path_fallback"] === true) entry.path_fallback = true;
     entries.push(entry);

@@ -488,6 +488,17 @@ export interface TaskReadinessObligation {
    * binding carries identity, not prose.
    */
   reason?: string;
+  /**
+   * DESIGN-v0.15 R1 (2026-09-07): where this obligation came from. `"query"`
+   * — minted directly from an explicit point the caller's request named
+   * (`features/task-pack/requestItems.ts`'s `extractRequestItems`).
+   * `"evidence-expansion"` / `"prescribed-next"` mirror the epoch-scoped
+   * `Obligation.origin` union already used by `state/obligationLedger.ts`, so
+   * a per-pack obligation and its cross-epoch counterpart share one
+   * vocabulary instead of inventing a second. Optional: every obligation
+   * kind that predates R1 omits it.
+   */
+  origin?: "query" | "evidence-expansion" | "prescribed-next";
 }
 
 /** Bounded negative checks run before a task_pack may claim ready. */
@@ -575,10 +586,13 @@ export interface TaskDecisionEvidenceModel {
  * Machine-readable reason the MCP cannot yet close the requested action.
  *
  * OB-GAP (A.9.2 rows 15 + 24, discharged in P2 / C2-7b): `kind` was SEVEN
- * values and is now FIVE. `permission-required` and `external-execution-required`
+ * values and is now FIVE (now SIX — DESIGN-v0.15 R1, 2026-09-07, adds
+ * `request-item-absent`; see `CapabilityGap["code"]`'s own doc comment for
+ * why it is additive, not a re-narrowing). `permission-required` and
+ * `external-execution-required`
  * are DELETED — the §3.4 E2 pass found zero emitters and zero readers for both,
  * and neither is a `RefusalCode` either, so nothing in this server constructs
- * the concept. The remaining five are exactly `CapabilityGap["code"]`
+ * the concept. The remaining values are exactly `CapabilityGap["code"]`
  * (`mcp/protocol.ts`), so this producer type can no longer express a gap the v1
  * wire has to drop.
  */
@@ -588,7 +602,8 @@ export interface TaskCapabilityGap {
     | "ambiguous-target"
     | "invalid-request"
     | "unsupported-operation"
-    | "workspace-changed";
+    | "workspace-changed"
+    | "request-item-absent";
   recoverable: boolean;
   reason: string;
   obligation_ids?: string[];

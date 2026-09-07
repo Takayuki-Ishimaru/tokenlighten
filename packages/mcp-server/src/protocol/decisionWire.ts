@@ -618,8 +618,10 @@ function projectCreateTarget(result: Record<string, unknown>): CreateTarget | un
 /**
  * `TaskCapabilityGap.kind` -> `CapabilityGap.code`, A.9.2 rows 15 + 24.
  *
- * OB-GAP IS DISCHARGED (C2-7b): both types are now the SAME five values, so
- * this set is a total map, not a narrowing. `invalid-request` and
+ * OB-GAP IS DISCHARGED (C2-7b): both types are now the SAME six values (five,
+ * plus DESIGN-v0.15 R1's additive `request-item-absent` — see
+ * `CapabilityGap["code"]`'s own doc comment), so this set is a total map, not
+ * a narrowing. `invalid-request` and
  * `unsupported-operation` were MINTED into the v1 union — their emitters in
  * `buildCapabilityGaps` (`features/task-pack/readCodeTaskPack.ts`) are live, so
  * dropping them silently would have been information loss, and coercing them
@@ -635,6 +637,10 @@ function projectCreateTarget(result: Record<string, unknown>): CreateTarget | un
 const GAP_CODES: ReadonlySet<string> = new Set<CapabilityGap["code"]>([
   "missing-evidence", "ambiguous-target", "invalid-request",
   "unsupported-operation", "workspace-changed",
+  // DESIGN-v0.15 R1 (2026-09-07): an explicit request item this pack closed
+  // by verified absence — `features/task-pack/readCodeTaskPack.ts`'s
+  // `buildCapabilityGaps`, fed by `TaskPackResult.request_item_absences`.
+  "request-item-absent",
 ]);
 
 /**

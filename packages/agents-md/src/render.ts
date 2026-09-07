@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { StubTargetId } from "@tokenlighten/types";
+import type { StubTargetId, ToolSurface } from "@tokenlighten/types";
 import { SENTINEL_START, SENTINEL_END, sha256hex } from "./sentinel.js";
 import { INSTRUCTIONS_VERSION } from "./version.js";
 
@@ -67,6 +67,42 @@ function renderTemplate(template: string, version: string): string {
 
   // Second pass: inject real sha
   return withVersion.replace("0".repeat(64), sha);
+}
+
+// DESIGN-v0.15 §8.2 (R7 Part B): guide/tool-surface pairing. The "full"
+// guide tier is the ONLY tier that mentions archive/credential capabilities
+// in prose (compact/medium templates never do — nothing to strip there,
+// this is a harmless no-op on them). `AGENTS.md.tmpl`/`.jp.tmpl` wrap that
+// prose in these markers, each on its own line.
+const FULL_ONLY_START = "<!-- tl-full-only:start -->";
+const FULL_ONLY_END = "<!-- tl-full-only:end -->";
+// Inline variant: wraps a full-only PHRASE inside an otherwise code-legal
+// sentence (no surrounding newline to consume/preserve, unlike the
+// line-oriented block markers above).
+const FULL_ONLY_INLINE_START = "<!--tl-full-only-inline-->";
+const FULL_ONLY_INLINE_END = "<!--/tl-full-only-inline-->";
+
+/**
+ * `full` (default) strips ONLY the marker text, keeping every wrapped word —
+ * the rendered output is therefore byte-identical to a template that never
+ * had these markers, which is why the root AGENTS.md generated block (always
+ * rendered at "full") does not change. `code` strips the markers AND
+ * whatever they wrap (a whole line/block for the line-oriented pair, an
+ * inline phrase for the other), so a `--tool-surface code` workspace's
+ * generated guide never mentions a capability its advertised schema does
+ * not have.
+ */
+function applyToolSurface(template: string, toolSurface: ToolSurface): string {
+  if (toolSurface === "code") {
+    return template
+      .replace(new RegExp(`${FULL_ONLY_START}\\n[\\s\\S]*?${FULL_ONLY_END}\\n?`, "g"), "")
+      .replace(new RegExp(`${FULL_ONLY_INLINE_START}[\\s\\S]*?${FULL_ONLY_INLINE_END}`, "g"), "");
+  }
+  return template
+    .replace(new RegExp(`${FULL_ONLY_START}\\n`, "g"), "")
+    .replace(new RegExp(`${FULL_ONLY_END}\\n`, "g"), "")
+    .replace(new RegExp(FULL_ONLY_INLINE_START, "g"), "")
+    .replace(new RegExp(FULL_ONLY_INLINE_END, "g"), "");
 }
 
 /**
@@ -145,11 +181,12 @@ function loadTemplateForProfile(
   target: StubTargetId | undefined,
   locale: Locale,
   profile: GuideProfile,
+  toolSurface: ToolSurface,
 ): string {
-  if (target === "claude") return CLAUDE_IMPORT_TEMPLATE;
-  if (profile === "medium") return loadMediumTemplate(locale);
-  if (profile === "compact") return loadCompactTemplate(locale);
-  return loadTemplateForTarget(target, locale);
+  if (target === "claude") return applyToolSurface(CLAUDE_IMPORT_TEMPLATE, toolSurface);
+  if (profile === "medium") return applyToolSurface(loadMediumTemplate(locale), toolSurface);
+  if (profile === "compact") return applyToolSurface(loadCompactTemplate(locale), toolSurface);
+  return applyToolSurface(loadTemplateForTarget(target, locale), toolSurface);
 }
 
 export function renderBlock(
@@ -157,8 +194,13 @@ export function renderBlock(
   locale: Locale = "en",
   version: string = INSTRUCTIONS_VERSION,
   profile: GuideProfile = "full",
+  // DESIGN-v0.15 §8.2 (R7 Part B): trailing/optional so every existing
+  // positional call site (profile-only callers included) is unaffected —
+  // "full" reproduces exactly today's output (applyToolSurface's "full"
+  // branch only removes the (new, otherwise-invisible) marker lines).
+  toolSurface: ToolSurface = "full",
 ): string {
-  const template = loadTemplateForProfile(target, locale, profile);
+  const template = loadTemplateForProfile(target, locale, profile, toolSurface);
   const rendered = renderTemplate(template, version);
   return renderTargetPreamble(target) + rendered;
 }
@@ -170,8 +212,9 @@ export function renderCanonicalBlock(
   locale: Locale = "en",
   version: string = INSTRUCTIONS_VERSION,
   profile: GuideProfile = "full",
+  toolSurface: ToolSurface = "full",
 ): string {
-  return renderBlock(undefined, locale, version, profile);
+  return renderBlock(undefined, locale, version, profile, toolSurface);
 }
 
 /**
@@ -183,8 +226,9 @@ export function blockSha256(
   version: string = INSTRUCTIONS_VERSION,
   target?: StubTargetId,
   profile: GuideProfile = "full",
+  toolSurface: ToolSurface = "full",
 ): string {
-  const template = loadTemplateForProfile(target, locale, profile);
+  const template = loadTemplateForProfile(target, locale, profile, toolSurface);
   const withVersion = template
     .replace(/{{VERSION}}/g, version)
     .replace(/{{SHA256}}/g, "0".repeat(64));

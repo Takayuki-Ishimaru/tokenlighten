@@ -410,6 +410,40 @@
  * `ImpactCandidate` shape via its `required` flag (required tier -> pack-
  * eligible, likely tier -> inventory-only, informational tier -> traced but
  * NEVER wired).
+ *
+ * ---------------------------------------------------------------------------
+ * DESIGN-v0.15 exploration-continuation-reliability addendum (2026-09-07)
+ * ---------------------------------------------------------------------------
+ *
+ * Two more D10-classified env reads, both added by this wave and NOT part of
+ * the SEMANTIC_FRONTIER_V2_FLAG_REGISTRY ten (neither gates a v0.15 SF
+ * treatment arm):
+ *
+ *   TOKENLIGHTEN_TOOL_SURFACE (server.ts's `resolveToolSurface`, §8.2/R7 Part
+ *   B) -- startup-only launcher configuration, resolved ONCE at module
+ *   evaluation (same timing/pattern as ALLOW_WRITE) and never re-read for the
+ *   life of the process; the public launcher option is the CLI
+ *   `--tool-surface` flag, this is its env spelling. Unrecognized values fail
+ *   the process closed rather than silently defaulting. It DOES change the
+ *   ADVERTISED SURFACE -- a `code`-surface connection sees fewer
+ *   schema/dispatch properties (Office/archive/credential inputs withdrawn) --
+ *   but that is an explicit, out-of-band operator opt-in at process start,
+ *   never a per-request branch a caller's own tool arguments can steer, and
+ *   the frozen v1 wire vocabulary/kinds are identical on both surfaces. Not
+ *   (B): it adds no unfrozen protocol capability behind a default-OFF
+ *   experiment flag: `full` (the default, unset) is exactly today's
+ *   surface, and `code` is a reviewed, shipped, narrower surface, not an
+ *   experiment. Classified (C)-adjacent: operational/launcher configuration.
+ *
+ *   TOKENLIGHTEN_TEST_MAX_SEARCH_SNAPSHOT_RECORDS
+ *   (state/searchRequestStore.ts's `MAX_SEARCH_SNAPSHOT_RECORDS`, §6.1/R3) --
+ *   test-only override (a positive integer) of the R3 search-continuation
+ *   snapshot's default 4096-record cap, letting a test reach the
+ *   `snapshot_capped`/`snapshot_next_path` recovery path without constructing
+ *   thousands of matches. Ignored (falls back to 4096) when unset,
+ *   non-numeric, or non-positive; production never sets it. Class (C):
+ *   test-harness/diagnostic, never a response-shape branch at the production
+ *   default.
  */
 import { appendFileSync, statSync } from "node:fs";
 

@@ -599,6 +599,21 @@ function receiptHasContinuation(receipt: Receipt): boolean {
   // either, since `context.args` is scoped to THIS call, not to the task the
   // certificate holds.
   if (receipt.receipt === "decision-unchanged") return true;
+  // DESIGN-v0.15 §6.2 (R4): a satisfied `code-unchanged` receipt is complete
+  // WITHOUT a `next`. Its residency claim (`handle` + `sha`, required by
+  // `receiptOf` above — never absent) IS the caller's complete picture of
+  // what it holds and at what revision, exactly as `served_by`/`covered_by`
+  // restate WHO served it when the producer supplied them; "the rest of the
+  // FILE is still unread" is a fact `summary.unserved` may carry, never a
+  // duty of THIS request (§3.3's "既読通知の終端": a satisfied read-request
+  // ends with no unrequested `next`). A page of a still-OPEN parent request
+  // is not this case at all — `server.ts`'s `openParentReceiptContinuation`
+  // attaches that parent's own cursor as a real `next` BEFORE this function
+  // ever runs, so `receipt.next !== undefined` above already exempts it.
+  // Before this, an absent `next` here minted the [R5-10] `epochResetCall`
+  // floor for even a fully independent, satisfied receipt — the exact
+  // unrequested continuation R4 exists to remove.
+  if (receipt.receipt === "code-unchanged") return true;
   return false;
 }
 
@@ -1092,6 +1107,22 @@ function textEvidence(body: Body): Evidence[] {
         range,
         ...(content !== undefined ? { body: content } : {}),
       });
+    } else if (body["total_lines"] === 0 && body["content"] === "") {
+      // DESIGN-v0.15 §5.1 (R2): A GENUINELY EMPTY FILE. `servedBody` (via
+      // `str()`) collapses an explicit `content: ""` to `undefined` — the
+      // same absent-vs-empty rule that keeps `""` out of `path`/`range` as a
+      // false address — which is exactly right there, but here it also erases
+      // the ONLY signal this window ever shipped: with `content` undefined
+      // there is no body AND no derivable range, so the branch above pushes
+      // nothing and a `content:"full"` read of a 0-byte file projected
+      // `evidence: []`, failing A.5.2's required set (>=1 `FreshEvidence`).
+      // `total_lines: 0` is the producer's OWN verified fact
+      // (`buildFullServePayload` sets it only after actually reading and
+      // eliding the file down to nothing), so this is honest by construction,
+      // not a guess from an absent key. The file has no real line to name, so
+      // the range is a bare `0-0` sentinel — never a valid 1-based line and
+      // never confusable with one.
+      push({ handle, ...pathOf(), range: "0-0", body: "" });
     }
   }
 
@@ -1325,6 +1356,22 @@ function batchEntry(raw: Body): Body | undefined {
   if (path !== undefined) {
     const entry: Body = { form: "file", path, truncated: raw["truncated"] === true };
     keep(entry, raw, ["handle", "content", "sha", "fullFileExpansion"]);
+    // DESIGN-v0.15 §5.1 (R2): a GENUINELY EMPTY (0-byte) batch item. `keep()`
+    // is E-1's shared "absent iff empty" rule and drops `content: ""` like
+    // every other empty string, which for every OTHER item is correct (an
+    // empty string is never a real address or a real body fragment) but here
+    // it is the item's ENTIRE truthful content — dropping it left a batch
+    // entry with `path`+`truncated` and nothing a caller could tell apart
+    // from "no content was ever attempted". `total_lines: 0` is the
+    // producer's OWN verified fact (`buildFullServePayload` sets it only
+    // after actually reading and eliding the file down to nothing), so
+    // restoring both here states what shipped rather than guessing from an
+    // absent key. Every non-empty item is unaffected (`entry["content"]` is
+    // already set by `keep()` above, so this never overwrites it).
+    if (entry["content"] === undefined && raw["content"] === "" && raw["total_lines"] === 0) {
+      entry["content"] = "";
+      entry["total_lines"] = 0;
+    }
     return entry;
   }
 
