@@ -25,13 +25,11 @@
         {
           "kind": "inspect-slice",
           "handle": "$H1",
-          "target": "read_file mode=slice handle=$H1",
           "confidence": 0.5
         },
         {
           "kind": "handle-scoped-edit",
           "handle": "$H1",
-          "target": "edit_file handle=$H1 allowPathFallback=false",
           "confidence": 0.4
         }
       ]

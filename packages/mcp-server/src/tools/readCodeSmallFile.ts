@@ -480,7 +480,7 @@ export async function buildSmallFile(
   // `exempt` argument) so their one-call-complete packs never erode the budget
   // an agent's own later tiny reads draw down.
   // D10 (2026-08-14): unconditional — `TL_FULL_GOVERNOR` is deleted.
-  recordFullExpansion(workspace, resolvedPath, sha);
+  recordFullExpansion(workspace, resolvedPath, sha, options.keepComments === true);
   recordTinyFullExpansion(workspace, options.governorExempt);
 
   // DESIGN-v0.8 §C4 item 3: elideDocComments applied to the served content

@@ -6,6 +6,7 @@
  */
 import type {
   CreateTarget,
+  LikelyEditHint,
   McpLang,
   TaskChangeContract,
   TaskExecutionContract,
@@ -55,7 +56,7 @@ export interface TaskPackSurface {
    * surfaces omit it (fully derivable boilerplate; the agent already has the
    * primary surface's likely_edits shape to follow).
    */
-  likely_edits?: Array<{ kind: string; handle?: string; target?: string; confidence?: number }>;
+  likely_edits?: LikelyEditHint[];
   /**
    * DESIGN-v0.8 §C1 item 3: `needs_exact_code`/`slice_wider` were dropped —
    * both are fully implied (code presence; the always-present `handle`,
@@ -346,18 +347,30 @@ export interface TaskPackResult {
    * ABSENCE rather than positive evidence (design §4.2: "検証済みabsenceは
    * 限定結論の証拠" — a limited conclusion, never proof of a nonexistent
    * implementation's behavior; `readCodeTaskPack.ts`'s
-   * `proveUnbindableRequestItem`, the `matchedPaths.size === 0` arm). INTERNAL
-   * ONLY, same convention as `request_item_gap` above — `buildCapabilityGaps`
-   * is the sole reader, and turns each entry into a wire
-   * `gaps:[{code:"request-item-absent", refs:[id, term]}]` entry. That wire
-   * entry only survives when this pack's OWN decision is already `discover`
-   * for some other reason (D-4, `packages/types/src/mcp/decision.ts`: gaps
-   * live on `decision.gaps` and nowhere else) — an otherwise-ready
-   * `act.answer`/`act.edit` pack has no wire slot for it, though the
-   * underlying obligation's own `reason` string still states it. Absent when
-   * no extracted item was closed this way.
+   * `proveUnbindableRequestItem`, the `matchedPaths.size === 0` arm, and the
+   * definition/relation arms' own scope-bound closures). INTERNAL ONLY, same
+   * convention as `request_item_gap` above — this array has exactly two
+   * readers: `buildCapabilityGaps` (`readCodeTaskPack.ts`), which turns each
+   * entry into a `decision.gaps` `{code:"request-item-absent", refs:[id,
+   * term]}` entry that only survives when this pack's OWN decision is
+   * already `discover` for some other reason (D-4: gaps live on
+   * `decision.gaps` and nowhere else); and `decisionWire.ts`'s
+   * `projectCertificate`, which additionally synthesizes an
+   * `explicit-gap:request-item-absent:<term>` STRING onto
+   * `decision.certificate.gaps` — the one channel reachable even from a
+   * certified `act.answer`/`act.edit` (2026-09-08, P1-2 residual). Absent
+   * when no extracted item was closed this way.
+   *
+   * Review finding 2(b) fix (2026-09-08): `scope_complete` is `true` only
+   * when the scan that certified this absence excluded NOTHING from its own
+   * scope (see `RequestItemProof.absentScopeComplete`'s own doc comment for
+   * the two ways an entry can earn `true`). Both wire readers above must
+   * gate their "scope complete"/"N paths excluded" wording on this field —
+   * never assume completeness, and never drop `omitted_count` when it is
+   * `false` (finding 2's own false-positive was exactly this claim made
+   * unconditionally).
    */
-  request_item_absences?: Array<{ id: string; term: string }>;
+  request_item_absences?: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }>;
   /** Sparse receipt for safe read/search operations completed before returning. */
   internalized?: Array<{
     op: "find" | "read";

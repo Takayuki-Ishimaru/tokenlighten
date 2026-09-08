@@ -21,7 +21,7 @@
  */
 
 import { basename } from "node:path";
-import { extractCjkTokens } from "./cjkSpans.js";
+import { HAN_RUN_RE, HIRAGANA_RUN_RE, KATAKANA_RUN_RE } from "./cjkSpans.js";
 
 /**
  * Generic query-shape classification shared by editIntentForRole,
@@ -94,6 +94,119 @@ function scoreTokenDistinctiveness(token: string): number {
   return score;
 }
 
+// ---------------------------------------------------------------------------
+// extractCjkQueryTokens — CJK token extraction for FREE-TEXT QUERIES only
+// (field-report fix, 2026-09-08). Deliberately NOT cjkSpans.ts's shared
+// extractCjkTokens: that helper also feeds retrieval/tokenize.ts's BM25F
+// CONTENT indexing (doc/body/signature/markdown/config fields — see
+// units.ts), where a whole-hiragana-run token and its bigrams are harmless
+// (BM25's own IDF already suppresses a term common across most documents —
+// see cjkSpans.ts's own module comment) and changing that shared behavior
+// is out of scope here. A free-text QUERY has different requirements: a
+// tokenizeQuery caller can turn its output directly into a `search_files
+// find` `queries` item (see readCodeTaskPack.ts's generic no-named-subject
+// discovery fallback), where a single bad token — a hiragana fragment made
+// of verb inflection and particles, with no dictionary meaning of its own —
+// can never match anything and wastes the whole call. Confirmed defect:
+// "エラーが起きたときのリトライ処理を説明してください" used to mint the
+// token "きたときの" (a Hiragana run straddling the tail of 起きた, the
+// standalone とき, and の) via extractCjkTokens's whole-run-token pass.
+//
+// Rules (deliberately simpler than extractCjkTokens's runs/bigrams/
+// unigrams — no partial-match fallback is attempted here at all):
+//   - A Hiragana run is NEVER emitted as a token, whole or partial. Kana
+//     runs in ordinary prose are overwhelmingly particle strings and verb/
+//     adjective inflection (の が を に へ と で は も か から まで より
+//     など して する した ください, …) with no standalone lexical meaning
+//     — unlike cjkSpans.ts's shared helper, there is no bigram/stopword-
+//     substring compromise here; a query-token pipeline can simply drop
+//     the whole script rather than gamble on a fixed stopword list.
+//   - A Han (kanji) run is emitted whole when it is 2+ characters. A
+//     single kanji character is emitted only when a Katakana run
+//     immediately follows it — standing alone next to unrelated prose it
+//     otherwise carries too little signal of its own to search on.
+//   - A Katakana run — already inclusive of the long-vowel mark ー, see
+//     cjkSpans.ts's KATAKANA_RUN_RE — is emitted whole when it is 2+
+//     characters.
+//   - A Han or Katakana run immediately followed (no gap) by a Hiragana
+//     run that STARTS WITH して/する/した/ください is dropped entirely,
+//     stem included — these are the top three conjugations of する ("to
+//     do") plus the polite imperative auxiliary, which together build the
+//     extremely common 漢語+する / カタカナ+する compound verb (説明する
+//     "explain", 確認する "confirm", 修正する "fix", スタートする
+//     "start", …) or a bare imperative (確認ください). A query phrased as
+//     an instruction sentence ("…を[X]してください" = "please [X] …")
+//     almost always ends this way, and [X] names one of a small,
+//     low-signal set of generic instruction verbs that never usefully
+//     narrows a code search — unlike the noun phrase earlier in the same
+//     sentence (リトライ処理, 有効期限判定, …), which this rule leaves
+//     untouched. This check runs BEFORE the length rules above, so it can
+//     drop a run the length rule alone would have kept.
+//   - A dot-qualified Latin identifier ("Cache.get", "foo.bar.baz") is
+//     emitted whole, ADDITIONALLY to (never instead of) whatever the
+//     caller's own ASCII word pass already produced for it ("Cache" and
+//     "get" separately) — that pass's own word regex never crosses a `.`,
+//     so a dotted/qualified name it can never see would otherwise vanish
+//     from a CJK-mixed query even though it is usually the query's single
+//     most distinctive token.
+//
+// Order is first-appearance in `query` (Latin dotted identifiers last);
+// tokens are deduped by exact string equality. Bypasses the caller's own
+// minLen/stopWords entirely, same as extractCjkTokens did — an ASCII
+// minLen of 3+ has no CJK analog, and a caller's ASCII-only stopWords set
+// can never match a CJK token or a dotted Latin identifier anyway.
+// ---------------------------------------------------------------------------
+
+/** Hiragana continuations recognized as verb/imperative inflection — see extractCjkQueryTokens's own comment above for why these five specifically. */
+const CJK_VERB_INFLECTION_PREFIXES = ["して", "する", "した", "ください"];
+
+/** A dot-qualified Latin identifier ("Cache.get", "foo.bar.baz") — at least one `.`-joined continuation; a bare word is already covered by each caller's own ASCII word pass. */
+const DOTTED_LATIN_IDENTIFIER_RE = /[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+/g;
+
+function extractCjkQueryTokens(query: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  function add(tok: string): void {
+    if (seen.has(tok)) return;
+    seen.add(tok);
+    out.push(tok);
+  }
+
+  const runRe = new RegExp(`(${HAN_RUN_RE.source})|(${HIRAGANA_RUN_RE.source})|(${KATAKANA_RUN_RE.source})`, "g");
+  const runs: Array<{ text: string; index: number; kind: "han" | "hiragana" | "katakana" }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = runRe.exec(query)) !== null) {
+    const kind = m[1] !== undefined ? "han" : m[2] !== undefined ? "hiragana" : "katakana";
+    runs.push({ text: m[0], index: m.index, kind });
+  }
+
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i]!;
+    if (run.kind === "hiragana") continue;
+
+    const next = runs[i + 1];
+    const adjacent = !!next && next.index === run.index + run.text.length;
+    const followedByVerbHiragana =
+      adjacent && next!.kind === "hiragana" && CJK_VERB_INFLECTION_PREFIXES.some((p) => next!.text.startsWith(p));
+    if (followedByVerbHiragana) continue;
+
+    if (run.kind === "han") {
+      if (run.text.length >= 2) {
+        add(run.text);
+      } else if (adjacent && next!.kind === "katakana") {
+        add(run.text);
+      }
+    } else if (run.text.length >= 2) {
+      add(run.text);
+    }
+  }
+
+  const dotted = query.match(DOTTED_LATIN_IDENTIFIER_RE) ?? [];
+  for (const d of dotted) add(d);
+
+  return out;
+}
+
 function tokenizeIdentifierMode(query: string, minLen: number, stopWords: ReadonlySet<string>): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -121,15 +234,16 @@ function tokenizeIdentifierMode(query: string, minLen: number, stopWords: Readon
     if (/[_-]/.test(w)) for (const p of w.split(/[_-]+/)) add(p);
   }
 
-  // CJK (field-report fix, 2026-08-27): the ASCII word/quoted-phrase passes
-  // above never match a Han/Hiragana/Katakana character, so a Japanese-heavy
-  // query used to contribute NOTHING here. extractCjkTokens's own runs/
-  // bigrams/unigrams bypass this mode's minLen — an ASCII minLen of 3+ has
-  // no CJK analog (a single kanji, or a 2-char kana bigram, is already a
-  // meaningful unit; see util/cjkSpans.ts) — but still flow through `add`'s
-  // existing dedup and this caller's OWN (ASCII-only) stopWords set, which
-  // can never match a CJK token anyway.
-  for (const t of extractCjkTokens(query)) add(t, { bypassMinLen: true });
+  // CJK (field-report fix, 2026-08-27; refined 2026-09-08): the ASCII word/
+  // quoted-phrase passes above never match a Han/Hiragana/Katakana
+  // character, so a Japanese-heavy query used to contribute NOTHING here.
+  // extractCjkQueryTokens's own tokens bypass this mode's minLen — an ASCII
+  // minLen of 3+ has no CJK analog (a single kanji, or a 2-char kana run, is
+  // already a meaningful unit; see extractCjkQueryTokens's own comment
+  // above) — but still flow through `add`'s existing dedup and this
+  // caller's OWN (ASCII-only) stopWords set, which can never match a CJK
+  // token anyway.
+  for (const t of extractCjkQueryTokens(query)) add(t, { bypassMinLen: true });
 
   // Distinctive-first: longer, non-generic, identifier-shaped tokens sort first.
   out.sort((a, b) => scoreTokenDistinctiveness(b) - scoreTokenDistinctiveness(a));
@@ -139,12 +253,13 @@ function tokenizeIdentifierMode(query: string, minLen: number, stopWords: Readon
 function tokenizeSimpleMode(query: string, minLen: number, stopWords: ReadonlySet<string>): string[] {
   const raw = query.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 0);
   const asciiTokens = raw.filter((t) => t.length >= minLen && !stopWords.has(t));
-  // CJK (field-report fix, 2026-08-27): `.split(/[^a-z0-9]+/)` treats every
-  // Han/Hiragana/Katakana character as a separator, discarding it — the same
-  // defect as tokenizeIdentifierMode above. CJK tokens bypass this mode's
-  // minLen/stopWords for the same reason (extractCjkTokens already applies
-  // its own JA-specific stopword filtering internally).
-  const cjkTokens = extractCjkTokens(query);
+  // CJK (field-report fix, 2026-08-27; refined 2026-09-08): `.split(/[^a-z0-9]+/)`
+  // treats every Han/Hiragana/Katakana character as a separator, discarding
+  // it — the same defect as tokenizeIdentifierMode above. CJK tokens bypass
+  // this mode's minLen/stopWords for the same reason (extractCjkQueryTokens
+  // already applies its own JA-specific filtering internally — see its own
+  // comment above).
+  const cjkTokens = extractCjkQueryTokens(query);
   return [...new Set([...asciiTokens, ...cjkTokens])];
 }
 

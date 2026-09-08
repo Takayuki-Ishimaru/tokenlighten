@@ -63,16 +63,16 @@ describe("createSessionLedgerReader — delegation is exact, nothing manufacture
 
   it("wasFullyServed: false until a tracked full expansion is recorded at this sha", () => {
     expect(reader.wasFullyServed(FILE, SHA_A)).toBe(false);
-    recordFullExpansion(WS, FILE, SHA_A);
-    recordFullServeCompleteness(WS, FILE, SHA_A, true);
+    recordFullExpansion(WS, FILE, SHA_A, false);
+    recordFullServeCompleteness(WS, FILE, SHA_A, true, false);
     expect(reader.wasFullyServed(FILE, SHA_A)).toBe(true);
     // A different sha is a different (path,sha) identity — never conflated.
     expect(reader.wasFullyServed(FILE, SHA_B)).toBe(false);
   });
 
   it("wasFullyServed: a CHUNKED full serve (complete:false) is never claimed as full", () => {
-    recordFullExpansion(WS, FILE, SHA_A);
-    recordFullServeCompleteness(WS, FILE, SHA_A, false);
+    recordFullExpansion(WS, FILE, SHA_A, false);
+    recordFullServeCompleteness(WS, FILE, SHA_A, false, false);
     expect(reader.wasFullyServed(FILE, SHA_A)).toBe(false);
   });
 
@@ -106,8 +106,8 @@ describe("createSessionLedgerReader — delegation is exact, nothing manufacture
     // server-applied edit whose delta-transform did not run/does not apply).
     // The pre-edit sha's residency must not answer for the post-edit bytes.
     expect(reader.servedRangeCoverage(FILE, SHA_B, TOTAL)).toBeUndefined();
-    recordFullExpansion(WS, FILE, SHA_A);
-    recordFullServeCompleteness(WS, FILE, SHA_A, true);
+    recordFullExpansion(WS, FILE, SHA_A, false);
+    recordFullServeCompleteness(WS, FILE, SHA_A, true, false);
     expect(reader.wasFullyServed(FILE, SHA_A)).toBe(true);
     expect(reader.wasFullyServed(FILE, SHA_B)).toBe(false);
   });

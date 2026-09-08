@@ -209,6 +209,67 @@ export function enumerateFindTextUniverse(
   };
 }
 
+/**
+ * Widens a base `enumerateFindTextUniverse` result with the SAME
+ * generic-text fallback tier `buildFindResponse`'s own `genericFallbackResponse`
+ * runs when its literal scan misses (S1/C2) — one extra `walkCodeFiles` pass
+ * with `includeGenericText:true`, kept to files `walkCodeFiles` tags
+ * `kind:"generic-text"` (i.e. not already covered by the base extension set,
+ * so the union below can never double-count a path).
+ *
+ * DESIGN-v0.15 review finding 2(b) (2026-09-08): an absence proof built ONLY
+ * over `enumerateFindTextUniverse`'s own narrow extension set can disagree
+ * with `search_files find` for the identical term/workspace — the reviewer's
+ * counter-example is `Redis` inside `src/notes.adoc` (an unrecognized
+ * extension `find` still discovers via this exact fallback, but the base
+ * universe silently drops with no omission counted at all, since a file
+ * `walkCodeFiles` never even offers for consideration cannot be tallied as
+ * excluded). Any caller that treats a zero-hit scan as verified absence
+ * (readCodeTaskPack.ts's request-item proof machinery) must widen through
+ * this same tier first, or its "absent" can be contradicted by `find` in the
+ * same workspace. A no-op when generic-text discovery is administratively
+ * off (`TL_GENERIC_TEXT_DISCOVERY=0`) — `find` would not consult it either.
+ *
+ * Only `oversize`/`non_text`/`secrets` are folded from the generic pass into
+ * the returned `omissions` — mirrors `genericFallbackResponse`'s own merge
+ * exactly: `ignored`/`gitignored`/`tokenlighten_ignored`/`symlinks`/
+ * `unreadable_dirs`/`outside_workspace`/`source_only_excluded` would double
+ * count the SAME directories the base walk already tallied once.
+ */
+export function widenFindUniverseForAbsence(workspace: string, base: FindTextUniverse): FindTextUniverse {
+  if (!genericTextDiscoveryEnabled()) return base;
+  const genericOmissions = createWalkOmissions();
+  const genericFiles = walkCodeFiles(workspace, {
+    extraExts: FIND_ACTION_EXTRA_EXTS,
+    extraBasenames: FIND_ACTION_EXTRA_BASENAMES,
+    includeGenericText: true,
+    respectGitignore: true,
+    omissions: genericOmissions,
+    sizeCapBytes: TEXT_SCAN_MAX_FILE_SIZE_BYTES,
+  }).filter((file) => file.kind === "generic-text");
+  const byPath = new Map<string, FoundFile>();
+  for (const file of base.files) byPath.set(file.relPath, file);
+  for (const file of genericFiles) if (!byPath.has(file.relPath)) byPath.set(file.relPath, file);
+  const omissions: WalkOmissions = {
+    ...base.omissions,
+    oversize: base.omissions.oversize + genericOmissions.oversize,
+    non_text: base.omissions.non_text + genericOmissions.non_text,
+    secrets: base.omissions.secrets + genericOmissions.secrets,
+  };
+  return {
+    files: [...byPath.values()].sort((left, right) => left.relPath.localeCompare(right.relPath)),
+    omissions,
+    scopes: base.scopes,
+  };
+}
+
+/** Sum of every `WalkOmissions` counter — the raw "N paths excluded" figure `anyWalkOmission` only reports as a boolean. Exported so a caller (readCodeTaskPack.ts's request-item absence wording) can phrase the count without re-deriving the field list. */
+export function totalOmittedPaths(omissions: WalkOmissions): number {
+  return omissions.ignored + omissions.gitignored + omissions.tokenlighten_ignored + omissions.oversize
+    + omissions.symlinks + omissions.non_text + omissions.secrets + omissions.unreadable_dirs
+    + omissions.outside_workspace + omissions.source_only_excluded;
+}
+
 // ---------------------------------------------------------------------------
 // Constants — exported so budget tests (P3.3) can import them.
 // ---------------------------------------------------------------------------

@@ -172,6 +172,72 @@ export function salientWords(text: string): string[] {
   return out;
 }
 
+/**
+ * True when `word` is entirely CJK (Han/Hiragana/Katakana) characters — the
+ * SAME character range as `salientWords`' own second extraction branch
+ * (`[぀-ヿ一-鿿]{2,}`). `salientWords` itself does not tag which of its two
+ * branches produced a given output entry, so a caller that needs to tell
+ * them apart (verified-absence tiering, readCodeTaskPack.ts's
+ * `distinctiveSalientAbsence`: EN salient words and CJK runs are handled by
+ * different tiers) tests membership here instead. A single-purpose
+ * classification test, not a re-derivation of the extraction itself — if
+ * `salientWords`' own range ever changes, update this one too.
+ */
+export function isCjkRun(word: string): boolean {
+  return /^[぀-ヿ一-鿿]{2,}$/u.test(word);
+}
+
+// ---------------------------------------------------------------------------
+// Tier B generic-Japanese vocabulary (DESIGN-v0.15 R1 §4.2 generalization,
+// 2026-09-08) — words so common/structural in Japanese technical prose that
+// their absence, by itself, would never tell a reader something
+// distinguishing about a workspace (the same test STOPWORDS/
+// GENERIC_SOFTWARE_ABSENCE_WORDS — readCodeTaskPack.ts's Tier C list — apply
+// to English: "would an absence of this word ever tell the reader something
+// about the workspace?"). Kept short and hand-reviewed, one line each, same
+// spirit as STOPWORDS above; unrelated to GLOSSARY_SEEDS above (that list
+// bridges a JA word to workspace-index lookup SEEDS for alias resolution —
+// this one excludes a JA word from verified-ABSENCE disclosure candidacy;
+// a word can legitimately sit on both, doing two unrelated jobs).
+// ---------------------------------------------------------------------------
+const GENERIC_JA_ABSENCE_WORDS = new Set([
+  "実装", // "implementation" — how code is organized, not a subject of its own
+  "説明", // "explanation" — a request verb/genre word ("please explain"), not a subject
+  "処理", // "processing"/"handling" — generic verb-noun for "does something"
+  "機能", // "feature"/"function" — generic capability noun
+  "対応", // "handling"/"support" — generic verb-noun
+  "追加", // "addition" — generic change-kind word
+  "修正", // "fix" — generic change-kind word
+  "変更", // "change" — generic change-kind word
+  "確認", // "confirmation"/"check" — generic verb-noun
+  "方法", // "method"/"way" — generic manner noun
+  "場合", // "case"/"situation" — generic conditional noun
+  "方式", // "method"/"scheme" — generic manner noun
+  "仕様", // "specification" — generic document-kind noun
+  "概要", // "overview" — generic document-kind noun
+  "全体", // "whole"/"overall" — generic scope noun
+  "関連", // "related"/"relevant" — generic relevance noun
+  "参照", // "reference" — generic pointer noun
+  "定義", // "definition" — generic document-kind noun
+  "部分", // "part"/"portion" — generic scope noun
+  "設定", // "setting"/"configuration" — generic config noun
+  "内容", // "content"/"substance" — generic content noun
+  "一覧", // "list" — generic document-kind noun
+  "理由", // "reason" — generic justification noun
+  "影響", // "impact"/"effect" — generic consequence noun
+  "現在", // "current"/"present" — generic temporal noun
+  "テスト", // "test" (katakana loanword) — generic artifact-kind noun
+  "ファイル", // "file" (katakana loanword) — generic artifact-kind noun
+  "コード", // "code" (katakana loanword) — generic artifact-kind noun
+  "システム", // "system" (katakana loanword) — generic scope noun
+  "データ", // "data" (katakana loanword) — generic content noun
+]);
+
+/** True when `word` (a `salientWords`/`isCjkRun` CJK candidate) is on the short generic-Japanese absence-disclosure exclusion list above. */
+export function isGenericJapaneseAbsenceTerm(word: string): boolean {
+  return GENERIC_JA_ABSENCE_WORDS.has(word);
+}
+
 // ---------------------------------------------------------------------------
 // Term extraction
 // ---------------------------------------------------------------------------
@@ -304,7 +370,14 @@ function splitNounList(text: string): string[] {
 // ---------------------------------------------------------------------------
 
 function splitLeadAndBody(query: string): { lead: string; body: string } {
-  const m = /^(.*?[?？。!！])\s*([\s\S]*)$/u.exec(query.trim());
+  // Only ?/？/!/！ end a "lead" clause, exactly like the ASCII-only path:
+  // a plain 。/． (JA/fullwidth periods) is EXCLUDED for the same reason ASCII
+  // "." always was (too often just a statement terminator, not a question/
+  // exclamation boundary; JA prose ends ordinary sentences in 。, so treating
+  // it as a lead-ender discarded a whole substantive leading sentence as
+  // "context" for any multi-sentence JA request -- see requestItemCompletion
+  // "JA lead swallows first sentence" case).
+  const m = /^(.*?[?？!！])\s*([\s\S]*)$/u.exec(query.trim());
   if (m && m[2] !== undefined && m[2].trim().length > 0) {
     return { lead: m[1]!, body: m[2]! };
   }
@@ -340,7 +413,21 @@ function splitEnumerated(text: string): string[] {
     // question into spurious extra points (observed regression against
     // replayCorpus.spec.ts's DriveMounter case).
     .replace(/,\s+(?:and|or)\s+/giu, ", ")
-    .replace(/および|また|そして/gu, "、")
+    // JA conjunctions that already delimit `splitNounList`'s relation-actor
+    // lists (design consistency, not a new heuristic). Adversarial review 2
+    // finding 2 (2026-09-08): bare "と" was tried here and REVERTED — unlike
+    // the multi-character alternatives, a single "と" is not a reliable
+    // conjunction boundary. It is also the final syllable of extremely common
+    // grammatical forms (こと/とき/として/ところ/もと/あと) and the quotative
+    // particle (…と等しい/…とする/…と言う), all indistinguishable from the
+    // list-conjunction "と" by any neighbour-character heuristic tried; the
+    // false-positive splits fabricated request items out of ordinary prose
+    // and truncated the surviving ones (e.g. "…確認することを説明してください"
+    // losing "とを説明してください" entirely once "こと" was cut). A genuine
+    // "X と Y" enumeration (e.g. "キャッシュとログの読み込みを説明して") now
+    // stays fused into one item instead of splitting into two — a smaller,
+    // acceptable cost next to fabricating nonsense items/search queries.
+    .replace(/および|及び|並びに|また|そして/gu, "、")
     .replace(/(?:^|\n)[ \t]*(?:[-*•]|\(?\d{1,2}[.)]|[①-⑳])[ \t]+/gu, "\n");
   return normalized
     .split(/[,;、，\n]+/u)

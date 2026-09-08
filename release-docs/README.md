@@ -1,6 +1,6 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.14.1.
+This directory contains the public documentation for TokenLighten v0.14.2.
 
 ## Start here
 
@@ -11,7 +11,9 @@ This directory contains the public documentation for TokenLighten v0.14.1.
 - [Language support](language-support.md) — languages, formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
-- [GitHub Release v0.14.1](github-release-v0.14.1.md) — evidence-gated
+- [GitHub Release v0.14.2](github-release-v0.14.2.md) — task continuation,
+  clearer input requests, Japanese request handling, and compact code guides.
+- [Historical GitHub Release v0.14.1](github-release-v0.14.1.md) — evidence-gated
   completion, cursor continuation, receipts, and the `code` tool surface.
 - [Historical GitHub Release v0.14.0](github-release-v0.14.0.md) — canonical
   continuations, recovery, compatibility, and known limitations.
@@ -27,7 +29,7 @@ This directory contains the public documentation for TokenLighten v0.14.1.
 
 ## Release scope
 
-The v0.14.1 public release includes the CLI, MCP server, selected developer
+The v0.14.2 public release includes the CLI, MCP server, selected developer
 source/tests, and VS Code extension. The desktop application is not included.
 
 TokenLighten is source-available, not OSI-approved open source. See

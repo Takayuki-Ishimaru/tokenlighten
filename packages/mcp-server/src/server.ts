@@ -145,10 +145,10 @@ import { deriveIrTaskRef, recordReasoningIrV2ClosureFromEdit, recordReasoningIrV
 import { deriveCanonicalTaskDecision, discoveryBundleNext, enforceCanonicalTaskDecisionAtExit } from "./features/task-pack/canonicalDecision.js";
 import type { TaskPackResult } from "./features/task-pack/model.js";
 import { projectLeanExecutionContract } from "./util/leanExecutionContract.js";
-import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, type ServedRangeLedgerReceipt } from "./state/session.js";
+import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, resolveTaskQueryRefBinding, resolveTaskQueryRefHandle, attachTaskQueryRefBinding, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, type ServedRangeLedgerReceipt } from "./state/session.js";
 import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, type BodyMarker } from "./util/verificationPack.js";
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
-import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNext, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordServedBytes } from "./util/packServeLog.js";
+import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNextBoundOrUnbound, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordServedBytes } from "./util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "./util/laneKey.js";
 // DESIGN-v0.15 §5 (R2): the read-request continuation store. Q/D live here, not
 // in a handle payload and not in a second store (§10 item 3).
@@ -266,7 +266,7 @@ import {
   runWithProtocolCall,
   setEnvelopeToolSurface,
 } from "./protocol/envelope.js";
-import { setEmittedToolCallValidator } from "./protocol/refusal.js";
+import { emittableToolCall, setEmittedToolCallValidator } from "./protocol/refusal.js";
 import { verifyWithholdsCompletion } from "./protocol/readFamily.js";
 import { SEARCH_FILES_CANONICAL_ACTIONS } from "./protocol/searchFamily.js";
 import { setAdvertisedToolNames } from "./protocol/advertisedTools.js";
@@ -806,6 +806,17 @@ interface TaskPackQueryResolution {
    * silently strip to nothing).
    */
   remaining?: string;
+  /**
+   * G3 (2026-09-08, qref-binding fix): set only alongside `fromRef` — the
+   * canonical task binding `state/session.ts`'s `resolveTaskQueryRefBinding`
+   * recovered for this qref, i.e. the fingerprint an earlier pack of this SAME
+   * task epoch stamped on it. Lets a handleless `read_file {qref}` re-pack's
+   * own executed-next lookups (both the fresh-build no-repeat gate and the
+   * wire-level producer exit) land in the same ledger partition an explicit
+   * `task.handle` would have, instead of the always-unbound one a call with no
+   * task fields at all otherwise computes.
+   */
+  taskBinding?: string;
 }
 
 /**
@@ -994,13 +1005,25 @@ function resolveTaskPackQueryArg(
     // reached here), so `taskPackRecoveryFor` cannot fabricate one and
     // correctly falls back to `retry:"new-task"` + `remaining` instead of a
     // dead placeholder `next`.
-    return query === undefined
-      ? {
-          query: "",
-          error: `unknown-or-stale-qref: ${requestedRef}`,
-          ...taskPackRecoveryFor(args),
-        }
-      : { query, fromRef: true };
+    if (query === undefined) {
+      return {
+        query: "",
+        error: `unknown-or-stale-qref: ${requestedRef}`,
+        ...taskPackRecoveryFor(args),
+      };
+    }
+    // G3 (2026-09-08, qref-binding fix): never carried across an explicit
+    // `taskEpoch:"new"` — that boundary deliberately severs task identity
+    // (see clearTaskQueryRef/clearPackDedupeForWorkspace above), so
+    // attaching the PRIOR task's binding here would misattribute this call's
+    // own executed-next lookups to the very task this request asked to leave
+    // behind. Resolved only on the ordinary (non-epoch-reset) continuation.
+    const taskBinding = isNewEpoch ? undefined : resolveTaskQueryRefBinding(workspace, requestedRef);
+    return {
+      query,
+      fromRef: true,
+      ...(taskBinding !== undefined ? { taskBinding } : {}),
+    };
   }
   return { query: "" };
 }
@@ -1353,7 +1376,7 @@ export const ALL_TOOLS: ToolEntry[] = [
         ...closed({
           query: { type: "string", description: "Task-pack intent, verbatim." },
           qref: { type: "string", description: "Replay token; re-pack with it." },
-          targets: { items: CANONICAL_TARGET, description: "Files/handles to read." },
+          targets: { type: "array", items: CANONICAL_TARGET, description: "Files/handles to read." },
           content: { enum: ["auto", "outline", "full"], description: "auto/outline/full hint." },
           select: { ...CANONICAL_SELECT, description: "Artifact/projection selector." },
           budget: { ...CANONICAL_BUDGET, description: "Serving budget caps." },
@@ -1368,17 +1391,41 @@ export const ALL_TOOLS: ToolEntry[] = [
           // sanctioned overrides (`budget`, `task.force_serve`).
           cursor: { type: "string", description: "Resumes a read from prior limit.next; send alone + cwd/lane/task/budget." },
         }),
+        // P1-3(a) fix (report-items.md / DESIGN-v0.15 hands-on-report wave):
+        // every SANCTIONED shape must match EXACTLY ONE branch below, so a
+        // strict ajv consumer (`advertisedSchemaExclusivity.spec.ts`) agrees
+        // with what dispatch actually executes. Before this fix, branch 3
+        // (task-only) excluded only query/targets, so a real budget-cut
+        // `{cursor, task:{force_serve:true}}` continuation — which the
+        // server has always executed correctly — matched BOTH branch 3 and
+        // branch 4, and ajv's `oneOf` rejects any 2-branch match
+        // (`passingSchemas:[3,4]`), even though nothing was wrong with the
+        // CALL. Each branch below now excludes every OTHER branch's own
+        // required field, not just the two that happened to collide first:
         oneOf: [
-          { required: ["query"], not: { required: ["targets"] } },
+          { required: ["query"], not: { anyOf: [{ required: ["targets"] }, { required: ["qref"] }] } },
           { required: ["targets"], not: { required: ["query"] } },
           { required: ["query", "targets"] },
-          { required: ["task"], not: { anyOf: [{ required: ["query"] }, { required: ["targets"] }] } },
-          // R2: the cursor-only continuation shape. No `not` clause is needed
-          // and none is paid for: `oneOf` requires EXACTLY ONE branch to match,
-          // so `{cursor, query}` or `{cursor, targets}` matches two branches and
-          // is rejected by composition. `cursorCoInputRefusal` (dispatch) then
-          // names the offending field, which a schema rejection cannot do.
-          { required: ["cursor"] },
+          // Excludes cursor/qref too (previously only query/targets), so a
+          // task-only call (bare `{task:{pull:"closure"}}`, or the P1-3(c)
+          // handle-only resume shape) never double-matches branch 4 or 5.
+          {
+            required: ["task"],
+            not: { anyOf: [{ required: ["query"] }, { required: ["targets"] }, { required: ["cursor"] }, { required: ["qref"] }] },
+          },
+          // R2: the cursor-only continuation shape, permissive for its
+          // sanctioned riders (cwd/lane/budget/task.force_serve/
+          // task.handle — none of which any branch here requires, so none
+          // can cause a double-match). `not:{required:["qref"]}` closes the
+          // one gap those riders do NOT cover: a cursor is its own opaque
+          // continuation identity, and `qref` names a DIFFERENT one, so
+          // `{cursor, qref}` must be rejected (0 matches), not silently
+          // accepted through this permissive branch alone.
+          // `{cursor, query}` / `{cursor, targets}` still match two branches
+          // (this one plus branch 0/1) and are rejected by that composition;
+          // `cursorCoInputRefusal` (dispatch) then names the offending field,
+          // which a schema rejection cannot do.
+          { required: ["cursor"], not: { required: ["qref"] } },
           // W3-4(a) (wave-2 handoff): a BARE `qref` (no query/targets/task) is
           // the sanctioned replay shape AGENTS.md documents verbatim ("Re-pack
           // with the returned `qref`, no `query`"), and the legacy dispatch
@@ -1388,7 +1435,13 @@ export const ALL_TOOLS: ToolEntry[] = [
           // spelling both ways. Only the ADVERTISED schema was missing this
           // branch (capabilityReachability.spec.ts's "read.qref-only" case,
           // filed there as a wave-3 finding rather than fixed in wave 2).
-          { required: ["qref"], not: { anyOf: [{ required: ["query"] }, { required: ["targets"] }, { required: ["task"] }] } },
+          // P1-3(a): excludes cursor (added), but deliberately NOT task —
+          // `{qref, task:{epoch:"new"}}` is a live, dispatched shape (G2's
+          // stale-qref-with-epoch-reset recipe above, and P1-3(c)'s
+          // handle-only resume redirect below both emit exactly this), so
+          // it must still validate — via THIS branch once branch 3 above
+          // starts excluding qref.
+          { required: ["qref"], not: { anyOf: [{ required: ["query"] }, { required: ["targets"] }, { required: ["cursor"] }] } },
         ],
       },
     },
@@ -1431,7 +1484,7 @@ export const ALL_TOOLS: ToolEntry[] = [
       inputSchema: {
         type: "object",
         ...closed({
-          edits: { items: CANONICAL_EDIT_ITEM, description: "Batch independent edits, ONE call." },
+          edits: { type: "array", items: CANONICAL_EDIT_ITEM, description: "Batch independent edits, ONE call." },
           artifact: {
             ...closed({
               kind: { type: "string", enum: ["xlsx", "docx", "pptx", "pdf", "zip"], description: "Artifact format." },
@@ -4813,7 +4866,7 @@ export function serveGovernedFullHead(
  * doc comment) guarantees a resend. The note is updated to match.
  */
 export const SERVED_CONTENT_RECEIPT_NOTE =
-  'served earlier this session and unchanged; pass task.force_serve:true (or allowFull:true) to force the bytes';
+  'served earlier this session and unchanged; pass task.force_serve:true to force the bytes';
 
 /**
  * Compact receipt for a read whose payload the SAME session already served for
@@ -5044,7 +5097,7 @@ async function buildFullDowngradePayload(args: {
   // wasFullyServed is true only for a genuine prior full serve of this exact
   // sha — the caller already holds these bytes. Return a compact pointer, not a
   // re-serve of what it has, and never a zero-content skeleton.
-  if (!keepComments && wasFullyServed(workspace, filePath, sha)) {
+  if (wasFullyServed(workspace, filePath, sha, keepComments)) {
     recordReadPath(workspace, filePath);
     // V10-02: repeated_range — a wasFullyServed ledger hit answered as a
     // code-unchanged receipt instead of a re-serve. This function is the
@@ -5467,7 +5520,7 @@ function buildFullServePayload(args: {
   recordReadPath(workspace, filePath);
 
   if (wholeFits) {
-    recordFullServeCompleteness(workspace, filePath, sha, true);
+    recordFullServeCompleteness(workspace, filePath, sha, true, keepComments);
     return {
       mode: "full",
       handle: handleId,
@@ -5502,7 +5555,7 @@ function buildFullServePayload(args: {
   const remainingRange = `${servedLines + 1}-${totalLines}`;
   // Record ONLY what actually went on the wire. A chunked serve must never let
   // wasFullyServed / the served-range ledger claim the whole file.
-  recordFullServeCompleteness(workspace, filePath, sha, false);
+  recordFullServeCompleteness(workspace, filePath, sha, false, keepComments);
   if (servedLines >= 1) {
     // F1 (2026-08-02 serve-honesty): "what went on the wire" also excludes any
     // comment block the head's OWN display collapsed to a `doc elided` marker.
@@ -5977,6 +6030,7 @@ async function resolveFullReadForPath(
         lineCount: fullLineCount,
         sha: fullSha,
         allowFull: false,
+        keepComments,
         fileHandle: govHEntry.id,
         autoAllowUnderCeiling: true,
       });
@@ -6060,6 +6114,7 @@ async function resolveFullReadForPath(
         lineCount: fullLineCount,
         sha: fullSha,
         allowFull: allowFullRequested,
+        keepComments,
         fileHandle: govHEntry.id,
       });
   if (govDecision !== undefined && govDecision.decision !== "allow") {
@@ -6187,11 +6242,94 @@ function mapMissRefusalCode(reason: string): RefusalCode {
       return "cap-exceeded";
     case "broad-query":
       return "broad-overview-query";
+    // P1-2 (hands-on report): a task_pack producer's OWN reason can already
+    // be the canonical RefusalCode string (features/task-pack/model.ts types
+    // `TaskPackResult.reason` as exactly this one literal) rather than a
+    // LocateAbstainData-vocabulary reason needing translation. Identity case
+    // so this switch stays the single place reason-string -> RefusalCode
+    // mapping happens, instead of a second ad hoc table at the call site.
+    case "broad-overview-query":
+      return "broad-overview-query";
     default:
       // resolveMap's own "query is required for mode=map" prose (not a
       // LocateAbstainData.reason token) lands here.
       return "invalid-input";
   }
+}
+
+/**
+ * A.2.3 wire `profile`: "answer" iff the pack's own `task_profile` echo or
+ * `profile_binding.selected` says so, else "generic". Shared by the two
+ * places that project this field onto the wire — `recordTaskPackExecution`'s
+ * ordinary dispatch exit and `projectTaskPackWire`'s archive/closure exit —
+ * which carried byte-identical copies of this same three-line expression
+ * (P1-2, hands-on report, 2026-09 de-duplication).
+ */
+function wireTaskProfile(result: Record<string, unknown>): "answer" | "generic" {
+  return result["task_profile"] === "answer"
+    || (result["profile_binding"] as { selected?: unknown } | undefined)?.selected === "answer"
+    ? "answer"
+    : "generic";
+}
+
+/**
+ * P1-2 (hands-on report, 2026-09): `buildTaskPackCore`'s
+ * `shouldRedirectToOverview` early return ships `{ok:false,
+ * reason:"broad-overview-query", next:{...}}` with no `execution_contract`/
+ * typestate. `projectTaskDecision` (protocol/decisionWire.ts) is
+ * contract-driven by construction (`canonicalKind === undefined || contract
+ * === undefined` short-circuits to `undefined`), so this producer shape used
+ * to reach the wire with NO `decision` at all — exactly the "read.task_pack
+ * with no decision" shape the hands-on report observed served silently in
+ * production, and which the strict wire invariant (ambient under vitest)
+ * catches as a thrown error instead of a malformed response.
+ *
+ * Mirrors the SAME `familyDecision` fallback pattern the archive family
+ * already uses (`archiveTaskDecision`, fed into `projectTaskPackWire`'s own
+ * `familyDecision` parameter): an EMITTER-layer projection for a producer
+ * shape the canonical projector cannot read, never a change to the canonical
+ * projector itself.
+ *
+ * The stub's own `next` is the legacy `{mode:"overview"}` dialect
+ * (AGENTS.md: "never emit" that dialect) — canonicalized here via the same
+ * `emittableToolCall` helper every other legacy-shaped internal call
+ * description in this protocol goes through (confirmed against
+ * readCodeModes.spec.ts's own "emits a canonical object continuation" case:
+ * `{tool:"read_file", arguments:{content:"outline"}}` is the established
+ * canonical spelling for a pathless repo-overview read). `discover` requires
+ * a non-optional `next` (packages/types/src/mcp/decision.ts, D-1); the
+ * `await_input` fallback only matters if canonicalization somehow fails
+ * (unreached today — the stub always sets a well-formed `next`), and reuses
+ * the SAME token `projectTaskDecision`'s own discover branch falls back to
+ * when it cannot name a call.
+ *
+ * Review-2 finding 7: this `await_input` is built INLINE rather than through
+ * `protocol/decisionWire.ts`'s shared `awaitInput(...)` builder (the one every
+ * OTHER `await_input` emission site in `projectTaskDecision` goes through).
+ * That is deliberate, not an oversight: `awaitInput` takes a non-optional
+ * `contract: TaskExecutionContract`, and every one of its `unresolved[]`
+ * sources reads either that contract (`evidence_model`, `capability_gaps`) or
+ * fields this stub's `result` never carries (`profile_binding`, `coverage`,
+ * `checks`, `missing*`) — `shouldRedirectToOverview`'s early return ships
+ * exactly `{ok:false, reason:"broad-overview-query", next:{...}}`, nothing
+ * else. Threading a fabricated/empty contract through just to reach the
+ * shared builder would derive `unresolved` from facts that do not exist
+ * rather than from ones this response discloses, which is the exact
+ * falsification `projectUnresolved`'s own doc comment forbids ("WRONG BY
+ * OMISSION" — an omission is spelled by omitting the key, never by inventing
+ * a source to fill it). An absent `unresolved` here is the honest shape: this
+ * producer has nothing to name — and this whole arm is unreached today
+ * regardless (see above), so no live response's caller-visible behavior turns
+ * on this choice.
+ */
+function overviewRedirectFamilyDecision(result: Record<string, unknown>): TaskDecision | undefined {
+  if ((result as { ok?: boolean }).ok !== false || result["reason"] !== "broad-overview-query") {
+    return undefined;
+  }
+  const next = emittableToolCall(result["next"]);
+  return next !== undefined
+    ? { kind: "discover", next }
+    : { kind: "await_input", code: "no-grounded-call-remains" };
 }
 
 /**
@@ -6472,11 +6610,22 @@ export function recordTaskPackExecution(
   query: string,
   result: Record<string, unknown>,
   contractScope?: TaskContractScope,
+  /**
+   * G3 (2026-09-08, qref-binding fix): a caller that already recovered this
+   * task's canonical binding from the request's `qref`
+   * (`resolveTaskPackQueryArg`'s `taskBinding`, via `state/session.ts`'s
+   * `resolveTaskQueryRefBinding`) passes it here as a FALLBACK — used only
+   * when `contractScope` names no `task.handle` of its own — so the
+   * wire-level no-repeat checks below partition on the SAME identity
+   * `suppressNonProgressingNextCall` uses inside the builder, instead of
+   * silently falling back to the unbound partition for a handleless re-pack.
+   */
+  recoveredTaskBinding?: string,
 ): void {
   // A task handle is a wire capability, not the durable task identity. The
   // executed-next ledger uses the authenticated task fingerprint so two tasks
   // in one workspace/lane cannot consume each other's continuation.
-  const taskBinding = canonicalTaskBindingForHandle(workspace, contractScope?.taskHandle);
+  const taskBinding = canonicalTaskBindingForHandle(workspace, contractScope?.taskHandle) ?? recoveredTaskBinding;
   const contractValue = result["execution_contract"];
   const contract = contractValue && typeof contractValue === "object"
     ? contractValue as TaskExecutionContract
@@ -6652,7 +6801,7 @@ export function recordTaskPackExecution(
   if (
     effectiveContract !== undefined
     && alreadyExecuted !== undefined
-    && hasExecutedNext(
+    && hasExecutedNextBoundOrUnbound(
       workspace,
       normalizeContractLane(contractScope?.lane),
       alreadyExecuted.tool,
@@ -6724,7 +6873,7 @@ export function recordTaskPackExecution(
     // zoom reach the wire without passing either of them, and a bundle next
     // outranks the repaired `next_call`. Binding it here is what makes the
     // consumed-fingerprint rule govern every carrier without a second gate.
-    consumed: (call) => hasExecutedNext(
+    consumed: (call) => hasExecutedNextBoundOrUnbound(
       workspace,
       normalizeContractLane(contractScope?.lane),
       call.tool,
@@ -6741,7 +6890,7 @@ export function recordTaskPackExecution(
     decision?.kind === "await_input"
     && decision.code === "no-grounded-call-remains"
     && bundle !== undefined
-    && hasExecutedNext(
+    && hasExecutedNextBoundOrUnbound(
       workspace,
       normalizeContractLane(contractScope?.lane),
       bundle.tool,
@@ -6765,7 +6914,7 @@ export function recordTaskPackExecution(
         ? undefined
         : deriveCanonicalTaskDecision(result as unknown as TaskPackResult)?.kind,
       evidence: emittedEvidence,
-      consumed: (call) => hasExecutedNext(
+      consumed: (call) => hasExecutedNextBoundOrUnbound(
         workspace,
         normalizeContractLane(contractScope?.lane),
         call.tool,
@@ -6774,6 +6923,14 @@ export function recordTaskPackExecution(
       ),
     });
   }
+  // P1-2 (hands-on report): a decision-less ok:false pack (currently only
+  // buildTaskPackCore's broad-overview-query early return) has no
+  // execution_contract for projectTaskDecision to read, so `decision` is
+  // still undefined here. Project the family decision the same way the
+  // archive family already does via projectTaskPackWire's familyDecision
+  // parameter, rather than let a decision-less task_pack reach the wire —
+  // and let the strict conformance check just below validate it too.
+  decision = decision ?? overviewRedirectFamilyDecision(result);
   // -------------------------------------------------------------------------
   // DECISION-WIRE CONFORMANCE, at the same fence and on the same terms as the
   // canonical repair above (2026-08-20).
@@ -6812,18 +6969,50 @@ export function recordTaskPackExecution(
   // uses (readCodeTaskPack.ts's `deterministicCertificate`), so a pack with no
   // certificate still reports the identity a later certified re-pack will
   // report — which is what makes "survives re-packs of the same task" true.
-  const profile = result["task_profile"] === "answer"
-    || (result["profile_binding"] as { selected?: unknown } | undefined)?.selected === "answer"
-    ? "answer"
-    : "generic";
-  const task = withTaskHandle(projectTaskRef(
+  const profile = wireTaskProfile(result);
+  // G3 (2026-09-08, qref-binding fix): captured BEFORE `withTaskHandle`
+  // overwrites `.id` with the minted wire handle. This pre-mint value is
+  // exactly the `taskFingerprint` `mintTaskHandle` stores under that handle,
+  // so it is what `canonicalTaskBindingForHandle` will resolve back to for
+  // ANY later call that presents the resulting `task.handle` — i.e. the SAME
+  // canonical binding this task's executed-next records use.
+  const taskRefBeforeHandle = projectTaskRef(
     result,
     effectiveContract,
     `task-${shaOfText(`${profile}\u0000${query}`).replace(/^sha256:/, "").slice(0, 16)}`,
-  ), contractScope);
+  );
+  const task = withTaskHandle(taskRefBeforeHandle, contractScope);
   const resolvedScope = contractScope === undefined
     ? undefined
     : bindTaskContractHandle(workspace, contractScope, task.id);
+  // G3: stamp that same fingerprint onto the qref THIS response just
+  // (re)issued, so a LATER handleless `read_file {qref}` re-pack of this task
+  // can recover it (`resolveTaskPackQueryArg` -> `resolveTaskQueryRefBinding`)
+  // and land its own executed-next lookups in this exact partition — see
+  // `state/session.ts`'s `attachTaskQueryRefBinding`. A no-op when this
+  // response minted no qref (a handle-only continuation, or no durable
+  // query-ref slot for this call) or when the fingerprint is empty.
+  //
+  // G4 (2026-09-08, qref-task-scope fix): the SAME call also stamps `task.id`
+  // — the WIRE handle, not the fingerprint — onto the qref. This is what
+  // `applyRecoveredTaskHandleFromQref` (below) later injects as a bare
+  // `read_file {qref}` re-pack's own `task_handle`, so `taskContractScopeOf`
+  // resolves the exact `{lane, taskHandle}` scope `bindTaskContractHandle`
+  // (just above) relocated the epoch's requirement/obligation ledger to.
+  // Review-2 finding 1(a): only stamp `task.id` as the wire handle when
+  // `withTaskHandle` actually minted one for THIS call — it returns `task`
+  // unchanged (same `.id` as the raw fingerprint) whenever no durable store is
+  // available for this workspace. Passing the raw fingerprint through as if it
+  // were a mintable handle would let `applyRecoveredTaskHandleFromQref` stamp
+  // a non-handle string onto a later bare-qref re-pack's `task_handle`; that
+  // call's own `resolveTaskHandle(...).ok` guard would already catch it, but
+  // the two guards are independent and either alone must close this — see
+  // that function's own doc comment.
+  const qrefForBinding = result["qref"];
+  const mintedTaskHandle = task.id !== taskRefBeforeHandle.id ? task.id : undefined;
+  if (typeof qrefForBinding === "string" && qrefForBinding !== "" && taskRefBeforeHandle.id !== "") {
+    attachTaskQueryRefBinding(workspace, qrefForBinding, taskRefBeforeHandle.id, mintedTaskHandle);
+  }
 
   // D10 (2026-08-14): `TL_LEAN_CONTRACT` is deleted. The lean projection is the
   // ONLY execution-contract shape that reaches the wire — the full internal
@@ -7058,11 +7247,8 @@ function projectTaskPackWire(
     contract,
     canonicalKind: canonical?.kind,
     evidence,
-  }) ?? familyDecision;
-  const profile = result["task_profile"] === "answer"
-    || (result["profile_binding"] as { selected?: unknown } | undefined)?.selected === "answer"
-    ? "answer"
-    : "generic";
+  }) ?? familyDecision ?? overviewRedirectFamilyDecision(result);
+  const profile = wireTaskProfile(result);
   result["task"] = withTaskHandle(projectTaskRef(
     result,
     contract,
@@ -8405,6 +8591,82 @@ function closureSessionSummary(workspace: string, checksClosed: number): Record<
 // same unknown-tool refusal as any other stranger.
 
 /**
+ * G4 (2026-09-08, qref-task-scope fix): recover a bare `read_file {qref}`
+ * re-pack's OWN task handle from the qref itself, before `taskHandleRefusal`
+ * or any task-contract-scope resolution ever runs — so a handleless re-pack
+ * behaves EXACTLY like an explicit `{qref, task:{handle:H}}` call:
+ * `taskHandleRefusal` validates the SAME live handle a real caller would have
+ * sent (and accepts it — it is a handle THIS server minted for THIS task and
+ * nothing else about the call changed), `taskContractScopeOf`/
+ * `canonicalTaskBindingOf` resolve the SAME `{lane, taskHandle}` scope
+ * `taskContractStore.ts`'s `bindTaskContractHandle` relocated the epoch's
+ * requirement/obligation ledger to when the handle was first minted, and the
+ * executed-next ledger checks land in the SAME partition. Without this, a
+ * bare-qref rebuild's `taskContractScopeOf` computes `{lane, taskHandle:
+ * undefined}` — a scope already vacated by that relocation — so `buildTaskPack`
+ * sees no memory of the epoch's previously proved required roles/concern
+ * tokens (extra discovery turns, readiness under-reporting).
+ *
+ * A no-op — `args` is left exactly as the caller sent it — whenever:
+ *  - `task_handle` is already present: an explicit `task.handle` always wins
+ *    and is never overwritten;
+ *  - `qref` is absent or empty: nothing to recover from;
+ *  - `taskEpoch:"new"` is set: an explicit new-epoch boundary must not
+ *    inherit the old task's handle — mirrors `resolveTaskPackQueryArg`'s own
+ *    G3 rule for `taskBinding` (`resolveTaskQueryRefHandle` shares the exact
+ *    same in-process/durable slot that boundary clears);
+ *  - `expected_state_version` is already present with no handle. That shape
+ *    is refused outright by `taskHandleRefusal` ("expected_state_version
+ *    guards a task_handle's state and is meaningless without one"), and this
+ *    function must not silently paper over that refusal by handing the CAS
+ *    guard a handle the caller never named. The bare-`{qref}` recipe this fix
+ *    targets never sends `expected_state_version` (the caller holds no handle
+ *    to version-guard), so this guard costs the intended path nothing;
+ *  - the recovered token does not `resolveTaskHandle(...).ok` RIGHT NOW
+ *    (review-2 finding 1, BLOCKER — fail OPEN). Three ways this happens, all
+ *    observed: (1) the qref was stamped with the raw fingerprint rather than a
+ *    real handle because `recordTaskPackExecution` never minted one for that
+ *    call (no durable state store for the workspace — e.g. a read-only root —
+ *    or `mintTaskHandle` failing for any other reason: see that call site's
+ *    own `mintedTaskHandle` guard, which now refuses to stamp a non-handle
+ *    string onto the qref in the first place, making this arm a second,
+ *    independent line of defense); (2) the handle expired; (3) the store moved
+ *    to a new generation (`stale`). In every case, injecting the token would
+ *    convert a call that used to succeed (nothing was injected pre-fix, and
+ *    the qref alone resolved fine) into a hard `handle-unknown` refusal —
+ *    recovering a scope is an optimisation, and an optimisation must never
+ *    make a working call fail. Falling through here leaves `args` exactly as
+ *    the caller sent it, so the call proceeds as a scope-less bare-qref
+ *    re-pack — a smaller guarantee (no requirement-ledger continuity), never a
+ *    wrong one, matching `withTaskHandle`'s own degradation contract.
+ *
+ * The recovered handle is a bearer capability THIS SAME SERVER minted and
+ * stamped onto the qref slot the caller's own `qref` addresses
+ * (`server.ts`'s `recordTaskPackExecution` -> `attachTaskQueryRefBinding`) —
+ * never caller-supplied, so there is no new trust boundary to authenticate;
+ * `taskHandleRefusal` still resolves and validates it exactly as it would any
+ * other `task_handle`.
+ */
+function applyRecoveredTaskHandleFromQref(args: Record<string, unknown>, workspace: string): void {
+  if (args["task_handle"] !== undefined) return;
+  if (args["expected_state_version"] !== undefined) return;
+  if (args["taskEpoch"] === "new") return;
+  const ref = typeof args["qref"] === "string" ? args["qref"].trim() : "";
+  if (ref === "") return;
+  const handle = resolveTaskQueryRefHandle(workspace, ref);
+  if (handle === undefined) return;
+  // Fail OPEN (review-2 finding 1): recovering a scope is an optimisation: it
+  // must never convert a working bare-`{qref}` call into a refusal. Only stamp
+  // the recovered handle onto this call when it is actually live right now —
+  // no durable state store for this workspace, an expired mint, or a
+  // store-epoch-`stale` handle must all fall through to the pre-recovery
+  // behaviour (args left untouched) rather than injecting a token that
+  // `taskHandleRefusal` will immediately reject as `handle-unknown`.
+  if (!resolveTaskHandle(handle, workspace).ok) return;
+  args["task_handle"] = handle;
+}
+
+/**
  * The original callTool body, unchanged: canonical tool name in, wire result
  * out. Split out so callTool (below) can wrap it with the Fix 3 cwd
  * auto-correction pre/post-processing without touching a single line of this
@@ -8628,6 +8890,78 @@ function taskHandleRefusal(
     hint,
     ...freshPack,
   };
+}
+
+/**
+ * P1-3(c) fix (report-items.md / DESIGN-v0.15 hands-on-report wave):
+ * `read_file {task:{handle:<live handle>}}` ALONE — no query/targets/qref/
+ * cursor, and not a `task.pull:"closure"` pull — is the sanctioned "continue
+ * a task by its id" recipe AGENTS.md documents verbatim ("task.id outlives a
+ * restart—resend as task.handle to continue"). Before this fix, the schema
+ * accepted the shape (branch 3 above), `taskHandleRefusal` validated the
+ * handle and returned `null` (no refusal — meaning "carry on"), and dispatch
+ * then fell through with no path/query/targets/qref left to resolve,
+ * eventually reaching the generic "path is required" refusal — a caller
+ * holding only a live `task.id` had no way to continue, and the refusal
+ * actively mislabeled the cause.
+ *
+ * Reuses the SAME replay qref `taskHandleRefusal`'s own dead/expired branch
+ * already resolves from `resolved.state.replay` (`state/stateHandles.ts`,
+ * G2's durable mirror) — deliberately a SAME-EPOCH re-pack of the bound
+ * query (no `taskEpoch` is set here), because resending `task.handle` means
+ * "continue this task", not "start a different one" (contrast the dead/
+ * expired branch's `task:{epoch:"new"}`, which is correct there precisely
+ * BECAUSE the old epoch's state is gone). Setting `args["qref"]` is
+ * sufficient to complete the redirect: `resolveTaskPackQueryArg` (above)
+ * resolves a bare qref under the current epoch, and the pathless-exploratory-
+ * query promotion further down this dispatch (`pathlessExploratoryQuery`)
+ * already turns a non-empty resolved query with no path/handle/paths into a
+ * `read.task_pack` (or, once the served-range ledger already covers it, a
+ * `read.receipt`) — no separate `mode:"task_pack"` wiring is needed here.
+ *
+ * Only fires when the handle is the ONLY addressing present, so an explicit
+ * (even empty-evidence) query/targets/qref/cursor is never silently
+ * overridden. Re-resolves the handle — a second cheap, side-effect-free
+ * store lookup (`resolveTaskHandle` is a pure read) — rather than widening
+ * `taskHandleRefusal`'s shared 3-caller return contract, so `edit_file`'s
+ * and `search_files`' own dispatch (that function's other two callers, and
+ * schema shapes that in any case require `edits`/`artifact`/`action` and so
+ * can never present as handle-only) are untouched. Returns a named refusal,
+ * never a loop, when the handle is live but no replay was ever recorded for
+ * it (`taskPackRecoveryFor` with no `query` on `args`: `retry:"new-task"` +
+ * a `remaining` telling the caller to resend the original request text with
+ * `task.epoch:"new"`) — never the unrelated "path is required" mislabel.
+ */
+function applyHandleOnlyResume(
+  args: Record<string, unknown>,
+  workspace: string,
+): Record<string, unknown> | null {
+  const token = args["task_handle"];
+  if (typeof token !== "string" || token === "") return null;
+  // A `task.pull:"closure"` call sets mode="closure" upstream (mapCanonicalTask)
+  // — that is its own, already-implemented addressing and must not be
+  // redirected here.
+  if (args["mode"] === "closure") return null;
+  const otherAddressing: readonly string[] = ["query", "qref", "path", "handle", "paths", "handles", "cursor"];
+  if (otherAddressing.some((key) => args[key] !== undefined)) return null;
+  // taskHandleRefusal (called just above this, at every one of read_file's
+  // dispatch sites) already returned a structured refusal for every
+  // non-live outcome, so a second resolution here only ever reaches the
+  // `ok: true` case in practice.
+  const resolved = resolveTaskHandle(token, workspace);
+  if (!resolved.ok) return null;
+  const replay = resolved.state.replay;
+  if (typeof replay !== "string" || replay === "") {
+    return {
+      ok: false,
+      reason: "handle-unknown",
+      requested_handle: token,
+      hint: "this task handle is live but no working set was recorded to resume it",
+      ...taskPackRecoveryFor(args),
+    };
+  }
+  args["qref"] = replay;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -9052,6 +9386,13 @@ function mapCanonicalBudget(value: unknown, args: Record<string, unknown>): void
     ["allowFull", "allowFull"],
   ];
   for (const [from, to] of names) if (budget[from] !== undefined) args[to] = budget[from];
+  // P2-1 (2026-09-08): mark THIS args["allowFull"] as canonical-sourced, so
+  // forceContentServe (dispatchTool's read_file case) can tell it apart from
+  // a raw legacy flat `allowFull` — see CANONICAL_ALLOWFULL_INPUT's own doc
+  // comment for why only the legacy dialect still forces a resend from it.
+  if (budget["allowFull"] !== undefined) {
+    Object.defineProperty(args, CANONICAL_ALLOWFULL_INPUT, { value: true, enumerable: true, configurable: true });
+  }
 }
 
 function mapCanonicalScope(value: unknown, args: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -9187,6 +9528,23 @@ const HANDLE_OVERRIDES_INPUT = Symbol("tokenlighten.read-file-handle-overrides")
 // the gate, while the wire-facing LEGACY_PATHS_SCHEMA (and its `keys` in an
 // actual caller's `unknown-arguments` refusal) never advertises `handle`.
 const LEGACY_PATHS_INTERNAL_HANDLE_INPUT = Symbol("tokenlighten.read-file-legacy-paths-internal-handle");
+
+// P2-1 (2026-09-08, hands-on report v0.14.1): `allowFull` is decoupled from
+// forced resend — `budget.allowFull` now only raises the full-read byte cap
+// (resolveFullReadForPath's `effectiveCapBytes`); it no longer makes
+// `forceContentServe` (below) bypass an otherwise-qualifying receipt. Only
+// `task.force_serve:true` does that for the CANONICAL dialect. The LEGACY
+// flat `allowFull` field (pi03DedupHonesty.spec.ts's "mode=slice: legacy
+// allowFull:true still forces a real serve..." case, exercised under this
+// package's ambient `TL_LEGACY_INPUT=accept`) keeps its old forcing meaning —
+// this Symbol is how `forceContentServe` tells the two apart under the one
+// flat `args["allowFull"]` key `mapCanonicalBudget` writes for both. Same
+// module-private Symbol pattern as HANDLE_OVERRIDES_INPUT above: unforgeable
+// from the wire, survives the `{...input}`/`{...args}` spreads between
+// normalizeWireArgs and dispatchTool. Set only by `mapCanonicalBudget`, when
+// `budget.allowFull` (not a raw legacy top-level `allowFull`) is what
+// populated `args["allowFull"]`.
+const CANONICAL_ALLOWFULL_INPUT = Symbol("tokenlighten.canonical-allowfull-input");
 
 // DESIGN-v0.15 §6.3 (R6, 2026-09-07): round-18A finding 3 / ruling (u-1) is
 // SUPERSEDED. That ruling treated "a canonical `content:"full"` repeat still
@@ -10049,11 +10407,22 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // time. Must be reassigned before any file I/O uses it.
       let workspace = resolveWorkspaceRoot(args["cwd"] as string | undefined, activeRoot);
       const cwdExplicit = isCwdExplicit(args["cwd"]);
+      // G4 (2026-09-08, qref-task-scope fix): recover this task's own handle
+      // from a bare qref BEFORE taskHandleRefusal or any task-contract-scope
+      // resolution runs — see applyRecoveredTaskHandleFromQref's own doc
+      // comment. A no-op for every call shape that is not exactly this one
+      // (explicit task_handle, no qref, taskEpoch:"new", ...).
+      applyRecoveredTaskHandleFromQref(args, workspace);
       // PI-09: a presented task_handle is validated against THIS workspace
       // before any read runs, so a wrong-purpose/stale/foreign handle can never
       // ride along as a silent no-op.
       const taskHandleRefusalRead = taskHandleRefusal(args, workspace, "read_file");
       if (taskHandleRefusalRead !== null) return toolStructuredError(taskHandleRefusalRead);
+      // P1-3(c): a bare, schema-valid, LIVE `task:{handle}}` (no other
+      // addressing) resumes the bound query instead of falling through to
+      // "path is required" — see applyHandleOnlyResume's own doc comment.
+      const handleOnlyResumeRefusal = applyHandleOnlyResume(args, workspace);
+      if (handleOnlyResumeRefusal !== null) return toolStructuredError(handleOnlyResumeRefusal);
       const credential = resolveCredentialRef(args["credentialRef"]);
       if (!credential.ok) {
         return toolStructuredError(credential as unknown as Record<string, unknown>);
@@ -10117,8 +10486,14 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       //
       // `SERVED_CONTENT_RECEIPT_NOTE` (server.ts, above) is updated to match:
       // it no longer tells a caller that `content:"full"` forces the bytes.
-      const forceContentServe = args["allowFull"] === true
-        || args["force_serve"] === true;
+      const forceContentServe = args["force_serve"] === true
+        // P2-1 (2026-09-08): `allowFull` decoupled from forcing for the
+        // CANONICAL dialect (budget.allowFull is a byte-cap extension only
+        // now) — the legacy flat `allowFull` field keeps forcing, pinned by
+        // pi03DedupHonesty.spec.ts's "legacy allowFull:true still forces"
+        // case. CANONICAL_ALLOWFULL_INPUT (declared above) tells the two
+        // apart under the one shared `args["allowFull"]` key.
+        || (args["allowFull"] === true && (args as Record<PropertyKey, unknown>)[CANONICAL_ALLOWFULL_INPUT] !== true);
 
       // -----------------------------------------------------------------------
       // DESIGN-v0.15 §5.2 (R2): CURSOR CONTINUATION.
@@ -11397,7 +11772,17 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // reason.
           const promoteLang = parseMcpLang(args["lang"]);
           const taskContractScope = taskContractScopeOf(args);
-          const taskBinding = canonicalTaskBindingOf(args, workspace);
+          // G3 (2026-09-08, qref-binding fix): a bare `{qref}` re-pack carries
+          // no `task.handle` of its own, so the direct handle-derived binding
+          // is always undefined here. Fall back to the binding recovered from
+          // THIS call's own qref (resolveTaskPackQueryArg, via
+          // state/session.ts's resolveTaskQueryRefBinding) — the SAME
+          // canonical identity an earlier pack of this task stamped onto that
+          // qref — so the builder's no-repeat gate
+          // (suppressNonProgressingNextCall) and the wire-level `consumed`
+          // predicate below see an executed next filed under an explicit
+          // `task.handle` exactly as they would if THIS call had resent it.
+          const taskBinding = canonicalTaskBindingOf(args, workspace) ?? taskPackQuery.taskBinding;
           const admission = taskPackAdmission(args, defaultResponseByteCeiling);
           if (admission !== undefined) return admission;
           declareKind("read.task_pack");
@@ -11450,7 +11835,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const supplied = issuedRef !== undefined
             ? { ...suppliedBase, qref: issuedRef }
             : suppliedBase;
-          recordTaskPackExecution(workspace, queryArg, supplied, taskContractScope);
+          recordTaskPackExecution(workspace, queryArg, supplied, taskContractScope, taskPackQuery.taskBinding);
           return toolOk(attachServerBuildOnce(supplied, workspace));
         }
       }
@@ -11479,7 +11864,15 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           ? [{ path: resolvedPath, range: resolvedRange }]
           : undefined;
         const taskContractScope = taskContractScopeForPack(args, workspace, taskPackQuery.query);
-        const taskBinding = canonicalTaskBindingForHandle(workspace, taskContractScope.taskHandle);
+        // G3 (2026-09-08, qref-binding fix): `taskContractScopeForPack` only
+        // recovers a handle-backed scope when this lane already has exactly
+        // one live task whose OWN stored query matches verbatim
+        // (`uniqueTaskScopeForExactQuery`) — it has nothing to match for the
+        // FIRST pack of an epoch, which registers its contract before any
+        // handle is minted. Fall back to the binding this call's own qref
+        // carries (resolveTaskPackQueryArg), same rationale as the sibling
+        // pathless-exploratory branch above.
+        const taskBinding = canonicalTaskBindingForHandle(workspace, taskContractScope.taskHandle) ?? taskPackQuery.taskBinding;
         const admission = taskPackAdmission(args, defaultResponseByteCeiling);
         if (admission !== undefined) return admission;
         const result = await runWithTaskContractScope(taskContractScope, () => buildTaskPack(
@@ -11560,6 +11953,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           taskPackQuery.query,
           supplied,
           taskContractScope,
+          taskPackQuery.taskBinding,
         );
         trace("task_pack_end", {
           elapsed_ms: Date.now() - taskPackStartedAt,
@@ -14486,7 +14880,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             });
         if (
           !forceContentServe
-          && (!wasFullyServed(workspace, filePath, fullSha) || fullIsTinyForDedup)
+          && (!wasFullyServed(workspace, filePath, fullSha, keepComments) || fullIsTinyForDedup)
         ) {
           const fullTotalLines = countLines(content);
           const fullCoverage = servedRangeCoverage(workspace, filePath, fullSha, fullTotalLines);
@@ -14534,12 +14928,28 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // correctly booked into `spans` — but that booking carries no
           // record of WHICH representation shipped, so it must never be read
           // as proof that a LATER `comments:"keep"` request's projection was
-          // already delivered. `comments:"keep"` therefore never takes this
-          // fast path: it always falls through to a real
-          // resolveFullReadForPath/buildFullServePayload serve below, which
-          // renders `content` verbatim (no elision) and re-books the whole
-          // file's real spans via `bookFullFileExpansionServe`.
-          const fullLedger = keepComments
+          // already delivered. `comments:"keep"` therefore falls through to a
+          // real resolveFullReadForPath/buildFullServePayload serve below
+          // (which renders `content` verbatim and re-books the whole file's
+          // real spans via `bookFullFileExpansionServe`) THE FIRST TIME — but
+          // NOT forever.
+          //
+          // P2-1 follow-up (2026-09-08): the tiny-file exemption
+          // (`fullIsTinyForDedup`) means this standalone check runs on EVERY
+          // repeat of a tiny file, so a hardcoded `keepComments ? undefined`
+          // never dedupes a `comments:"keep"` tiny-file repeat — the one
+          // shape of the R6 defect P2-1's own gates left unfixed. The
+          // projection-aware completeness ledger (`wasFullyServed`, the same
+          // booking Gate 1 above and this function's own outer `if` already
+          // consult — not a second source of truth) proves whether THIS EXACT
+          // sha was already fully served under `keepComments:true` before;
+          // only then is the `spans`-derived receipt below safe to read as
+          // proof of THIS projection (both ledgers are written together by
+          // `bookFullFileExpansionServe` at serve time). A first `keep`
+          // request — nothing recorded yet, or only an `elide` serve on
+          // record — still falls through to a real serve, so the F3 dead end
+          // above is unchanged for that case.
+          const fullLedger = keepComments && !wasFullyServed(workspace, filePath, fullSha, true)
             ? undefined
             : servedRangeReceipt(workspace, filePath, fullSha, 1, fullTotalLines, fullTotalLines);
           if (fullLedger !== undefined) {

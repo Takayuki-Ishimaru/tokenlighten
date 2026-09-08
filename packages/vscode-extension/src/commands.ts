@@ -25,6 +25,12 @@ import type { WorkspaceActivationState } from "./workspaceState.js";
 // parseSentinelBlock) on the /version and /sentinel subpaths instead of the
 // package root -- see that file's own header comment.
 import type { GuideProfile } from "@tokenlighten/agents-md";
+// P2-3(1): a RUNTIME import, so — same reason as diagnostics.ts's
+// INSTRUCTIONS_VERSION/parseSentinelBlock above — it must come from the
+// dedicated /guideProfileDefault subpath, not the package root (whose
+// index.js re-exports render.ts, which throws at module load under the
+// esbuild CJS bundle; see guideProfileDefault.ts's own header comment).
+import { defaultGuideProfileForSurface } from "@tokenlighten/agents-md/guideProfileDefault";
 import type { DisplayTier, MeasurementDisplayTiers } from "@tokenlighten/usage";
 
 const firstLine = (s: string) => s.split("\n")[0] ?? s;
@@ -236,10 +242,6 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   if (choice !== confirm) return;
   bar.setStale();
   const workspaceConfig = vscode.workspace.getConfiguration("tokenlighten", vscode.Uri.file(root));
-  const configuredProfile = workspaceConfig.get<string>("guideProfile", "full");
-  const profile: GuideProfile = configuredProfile === "medium" || configuredProfile === "compact"
-    ? configuredProfile
-    : "full";
   // DESIGN-v0.15 §8.2 (R7 Part B): keeps the generated .vscode/mcp.json /
   // .mcp.json / .codex/config.toml in sync with the SAME setting
   // mcpProvider.ts's direct-registration path reads — a Codex/Claude Code
@@ -247,6 +249,27 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   // this generated file config selects.
   const configuredToolSurface = workspaceConfig.get<string>("toolSurface", "full");
   const toolSurface: "full" | "code" = configuredToolSurface === "code" ? "code" : "full";
+  // P2-3(1): package.json's contributes.configuration declares "full" as
+  // guideProfile's own schema default, so get(key, "full") can never tell
+  // "the user never touched this setting" apart from "the user explicitly
+  // chose full" — inspect() only populates *Value fields when something
+  // actually wrote a value at that scope, which is what a real override
+  // always does. An explicit value (workspace-folder, workspace, or user
+  // scope) always wins over the toolSurface-coupled default; an unset
+  // setting defers to it so --tool-surface code stops silently writing the
+  // full 12 KB guide (P2-3(1), v0.14.1 hands-on report).
+  const guideProfileInspect = workspaceConfig.inspect<string>("guideProfile");
+  const explicitGuideProfileRaw =
+    guideProfileInspect?.workspaceFolderValue
+    ?? guideProfileInspect?.workspaceValue
+    ?? guideProfileInspect?.globalValue;
+  const explicitGuideProfile: GuideProfile | undefined =
+    explicitGuideProfileRaw === "full"
+    || explicitGuideProfileRaw === "medium"
+    || explicitGuideProfileRaw === "compact"
+      ? explicitGuideProfileRaw
+      : undefined;
+  const profile: GuideProfile = explicitGuideProfile ?? defaultGuideProfileForSurface(toolSurface);
   const result = await spawnTl(
     workspaceSetupArgs(root, profile, toolSurface === "code" ? "code" : undefined),
     { cwd: root },

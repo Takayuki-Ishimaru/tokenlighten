@@ -97,7 +97,7 @@ describe("recordReadMode", () => {
 
 describe("recordFullExpansion", () => {
   it("increments per-path count and total on first expansion", () => {
-    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa");
+    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa", false);
 
     const s = getSession(ROOT_A);
     expect(s.fullExpansionsPerPath.get("src/foo.ts")?.count).toBe(1);
@@ -106,8 +106,8 @@ describe("recordFullExpansion", () => {
   });
 
   it("increments per-path count further when sha is unchanged", () => {
-    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa");
-    const { resetByShaChange } = recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa");
+    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa", false);
+    const { resetByShaChange } = recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa", false);
 
     expect(resetByShaChange).toBe(false);
     const s = getSession(ROOT_A);
@@ -116,9 +116,9 @@ describe("recordFullExpansion", () => {
   });
 
   it("resets per-path count to 1 when sha changes", () => {
-    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa");
-    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa");
-    const { resetByShaChange } = recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:bbb");
+    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa", false);
+    recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:aaa", false);
+    const { resetByShaChange } = recordFullExpansion(ROOT_A, "src/foo.ts", "sha256:bbb", false);
 
     expect(resetByShaChange).toBe(true);
     const s = getSession(ROOT_A);
@@ -129,9 +129,9 @@ describe("recordFullExpansion", () => {
   });
 
   it("tracks different paths independently", () => {
-    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:111");
-    recordFullExpansion(ROOT_A, "src/b.ts", "sha256:222");
-    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:111");
+    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:111", false);
+    recordFullExpansion(ROOT_A, "src/b.ts", "sha256:222", false);
+    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:111", false);
 
     const s = getSession(ROOT_A);
     expect(s.fullExpansionsPerPath.get("src/a.ts")?.count).toBe(2);
@@ -205,7 +205,7 @@ describe("recordHandleEdit", () => {
   it("decays fullExpansionsTotal by floor(total/2) — total becomes ceil(total/2)", () => {
     // Put total at 10 via full expansions.
     for (let i = 0; i < 10; i++) {
-      recordFullExpansion(ROOT_A, `src/file${i}.ts`, "sha256:aaa");
+      recordFullExpansion(ROOT_A, `src/file${i}.ts`, "sha256:aaa", false);
     }
     expect(getSession(ROOT_A).fullExpansionsTotal).toBe(10);
 
@@ -238,7 +238,7 @@ describe("recordHandleEdit", () => {
 
   it("handles odd total correctly (ceil)", () => {
     for (let i = 0; i < 7; i++) {
-      recordFullExpansion(ROOT_A, `src/f${i}.ts`, "sha256:x");
+      recordFullExpansion(ROOT_A, `src/f${i}.ts`, "sha256:x", false);
     }
     recordHandleEdit(ROOT_A);
     // ceil(7/2) = 4
@@ -461,7 +461,7 @@ describe("resetWorkspace", () => {
 
   it("clears all counters for the workspace", () => {
     recordReadMode(ROOT_A, "full");
-    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:abc");
+    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:abc", false);
     recordHandleEdit(ROOT_A);
     recordPathSearchEdit(ROOT_A);
     recordRepeatedRead(ROOT_A, "src/a.ts", "1-5");
@@ -506,7 +506,7 @@ describe("snapshotForTrace", () => {
   it("returns a plain object with all counters serialized", () => {
     recordReadMode(ROOT_A, "full");
     recordReadMode(ROOT_A, "full");
-    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:111");
+    recordFullExpansion(ROOT_A, "src/a.ts", "sha256:111", false);
     recordHandleEdit(ROOT_A);
     recordPathSearchEdit(ROOT_A);
     recordRepeatedRead(ROOT_A, "src/a.ts", "1-10");

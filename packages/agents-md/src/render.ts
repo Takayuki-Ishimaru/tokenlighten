@@ -167,6 +167,14 @@ export function renderTargetPreamble(target: StubTargetId | undefined): string {
  */
 export type GuideProfile = "full" | "medium" | "compact";
 
+// P2-3(1): re-exported unchanged for existing consumers (packages/cli,
+// index.ts) — guideProfileDefault.ts is now the source of truth, split out
+// for the same CJS-bundling reason INSTRUCTIONS_VERSION is (see version.ts's
+// header comment): a consumer that only needs this pure defaulting rule
+// must be able to import it without pulling render.ts's module-load-time
+// fileURLToPath(import.meta.url) template-path resolution in at all.
+export { defaultGuideProfileForSurface } from "./guideProfileDefault.js";
+
 function loadMediumTemplate(locale: Locale): string {
   const suffix = locale === "jp" ? ".jp.tmpl" : ".tmpl";
   return readFileSync(join(TEMPLATE_DIR, `medium.md${suffix}`), "utf8");

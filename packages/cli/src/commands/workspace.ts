@@ -10,7 +10,7 @@ import {
 import { dirname, join, relative, resolve, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
 import crossSpawn from "cross-spawn";
-import { injectAll, parseSentinelBlock, VALID_PROFILES } from "@tokenlighten/agents-md";
+import { defaultGuideProfileForSurface, injectAll, parseSentinelBlock, VALID_PROFILES } from "@tokenlighten/agents-md";
 import type { GuideProfile } from "@tokenlighten/agents-md";
 import type {
   TokenLightenSetupClient,
@@ -49,7 +49,9 @@ Setup creates AI rules and project-scoped MCP settings. Status verifies one
 workspace without changing it. List reports every
 workspace registered by setup on this machine for desktop-wide management.
 TokenLighten write tools and local privacy-preserving usage logging are enabled
-by default.
+by default. With --tool-surface code and no explicit --guide-profile, the
+guide profile defaults to compact instead of full (an explicit
+--guide-profile always wins).
 `;
 
 function assertInsideRoot(root: string, target: string): void {
@@ -251,7 +253,14 @@ export async function setupWorkspace(options: {
   clients?: readonly TokenLightenSetupClient[];
   launcher?: SetupLauncher;
   rulesOnly?: boolean;
-  /** Guide profile to inject; omitted means full for backwards compatibility. */
+  /**
+   * Guide profile to inject. Omitted defers to
+   * `defaultGuideProfileForSurface(options.toolSurface)`: "full" unless
+   * `toolSurface` is "code", in which case it is "compact" (P2-3(1),
+   * v0.14.1 hands-on report — `--tool-surface code` used to still write the
+   * full 12 KB guide because nothing coupled the two flags). An explicit
+   * value here always wins over that default.
+   */
   guideProfile?: GuideProfile;
   /**
    * Override for currentMcpSchemaStamp() — tests inject a deterministic
@@ -281,11 +290,20 @@ export async function setupWorkspace(options: {
     if (!CLIENTS.has(client)) throw new Error(`Unsupported client: ${client}`);
   }
 
+  // P2-3(1): options assembly — the effective profile couples to
+  // toolSurface only when the caller left guideProfile unspecified; an
+  // explicit guideProfile always wins. toolSurface is threaded into
+  // injectAll (not just the profile) so a "code" surface actually elides
+  // the Office/archive/credential prose the full/medium... templates wrap
+  // in FULL_ONLY markers, matching the surface the generated client
+  // configs below advertise.
+  const effectiveGuideProfile = options.guideProfile ?? defaultGuideProfileForSurface(options.toolSurface);
   const rules = await injectAll({
     repoRoot: root,
     targets: ["claude", "copilot"],
     driftMode: "auto-rewrite",
-    ...(options.guideProfile !== undefined ? { profile: options.guideProfile } : {}),
+    profile: effectiveGuideProfile,
+    ...(options.toolSurface !== undefined ? { toolSurface: options.toolSurface } : {}),
   });
   const configFilesWritten: string[] = [];
   const launcher = options.launcher ?? {
@@ -761,6 +779,13 @@ export async function runWorkspace(
     process.exitCode = 1;
     return;
   }
+  // P2-3(1): arg parsing — resolve the profile setupWorkspace() will
+  // actually write so --json (and the plain-text summary) can report the
+  // real outcome instead of silently omitting it whenever --guide-profile
+  // was not passed. setupWorkspace() re-derives the identical value from
+  // the same two inputs; this mirrors that derivation for reporting only
+  // (an explicit --guide-profile still always wins, here and there).
+  const effectiveGuideProfile = guideProfile ?? defaultGuideProfileForSurface(toolSurface);
   const launcher = options.launcher
     ?? resolveStableLauncher({ allowBareFallback: true });
   const serverBuild = rulesOnly
@@ -791,6 +816,7 @@ export async function runWorkspace(
   if (rest.includes("--json")) {
     process.stdout.write(`${JSON.stringify({
       ...result,
+      guide_profile: effectiveGuideProfile,
       ...(serverBuild !== undefined ? { server_build: serverBuild } : {}),
       warnings: jsonWarnings(result, registryWarning),
     })}\n`);
@@ -802,6 +828,7 @@ export async function runWorkspace(
       + `MCP settings: ${result.configFilesWritten.length} file(s)\n`
       + "Write tools: enabled\n"
       + "Usage log: local, content-free\n"
+      + `guide_profile: ${effectiveGuideProfile}\n`
       + (serverBuild !== undefined ? "server_build: " + serverBuild + "\n" : ""),
   );
 }

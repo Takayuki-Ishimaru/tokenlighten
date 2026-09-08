@@ -5,7 +5,7 @@
 
 import { readFileSync, writeFileSync, lstatSync, readdirSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import type { StubTargetId, GenerateResult } from "@tokenlighten/types";
+import type { StubTargetId, GenerateResult, ToolSurface } from "@tokenlighten/types";
 import { STUB_TARGETS, STUB_TARGET_BY_ID } from "./stubs.js";
 import { renderBlock, renderCanonicalBlock, INSTRUCTIONS_VERSION, blockSha256 } from "./render.js";
 import { rewrite, DriftMode, restoreEol } from "./inject.js";
@@ -27,6 +27,20 @@ export interface InjectAllConfig {
   repoRoot: string;
   /** Guide profile to inject: "full" (default) | "medium" | "compact". */
   profile?: GuideProfile;
+  /**
+   * P2-3(1): the advertised MCP tool surface this guide should describe.
+   * Defaults to "full" — the exact prior behavior — so every existing
+   * caller (this repo's own `npm run generate`, `tl-agents update`, and
+   * any other direct `injectAll` consumer that has never heard of this
+   * field) renders byte-identical output. Threaded into `renderBlock`/
+   * `renderCanonicalBlock`/`blockSha256` so a "code" surface actually
+   * elides the Office/archive/credential prose those templates wrap in
+   * `render.ts`'s `FULL_ONLY_*` markers — before this field existed,
+   * `injectAll` had no way to reach that mechanism at all, so
+   * `--tool-surface code` never stripped anything from the written guide
+   * regardless of profile.
+   */
+  toolSurface?: ToolSurface;
   /**
    * Drift mode.
    * - "auto-rewrite" (default): silently rewrite outdated blocks.
@@ -68,6 +82,7 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
   const {
     repoRoot,
     profile = "full",
+    toolSurface = "full",
     driftMode = "auto-rewrite",
     targets,
     locale = resolveLocale(config.locale),
@@ -76,14 +91,22 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
     clock = RealClock,
   } = config;
   const profileRequested = config.profile !== undefined;
-  const profileSwitch = profileRequested && driftMode !== "fail-build";
+  // P2-3(1): an explicit toolSurface request forces the same immediate
+  // rewrite a profile switch does — otherwise a workspace re-run under
+  // diff-warn that only changes toolSurface (same profile, different
+  // rendered sha) would be misread as a manual edit and left alone. Inert
+  // for `tl workspace setup` today (it always passes driftMode
+  // "auto-rewrite" already) but keeps the invariant true for any other
+  // caller.
+  const toolSurfaceRequested = config.toolSurface !== undefined;
+  const profileSwitch = (profileRequested || toolSurfaceRequested) && driftMode !== "fail-build";
 
   const result: GenerateResult = { wrote: [], skipped: [], drifted: [] };
 
-  const sha = blockSha256(locale, version, undefined, profile);
+  const sha = blockSha256(locale, version, undefined, profile, toolSurface);
 
   // Process AGENTS.md (canonical primary block)
-  const agentsBlock = renderCanonicalBlock(locale, version, profile);
+  const agentsBlock = renderCanonicalBlock(locale, version, profile, toolSurface);
   await processFile({
     repoRoot,
     relPath: "AGENTS.md",
@@ -117,8 +140,8 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
       }
       continue;
     }
-    const block = renderBlock(target.id, locale, version, profile);
-    const targetSha = blockSha256(locale, version, target.id, profile);
+    const block = renderBlock(target.id, locale, version, profile, toolSurface);
+    const targetSha = blockSha256(locale, version, target.id, profile, toolSurface);
     await processFile({
       repoRoot,
       relPath: target.file,

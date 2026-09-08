@@ -9,6 +9,7 @@
     "paths": {
       "@tokenlighten/agents-md/version": ["../agents-md/dist/version.d.ts"],
       "@tokenlighten/agents-md/sentinel": ["../agents-md/dist/sentinel.d.ts"],
+      "@tokenlighten/agents-md/guideProfileDefault": ["../agents-md/dist/guideProfileDefault.d.ts"],
       "@tokenlighten/usage/diag": ["../usage/dist/diagRing.d.ts"]
     }
   },

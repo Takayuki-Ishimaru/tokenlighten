@@ -1,6 +1,6 @@
 {
   "name": "@tokenlighten/agents-md",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/index.js",
@@ -18,6 +18,10 @@
     "./sentinel": {
       "import": "./dist/sentinel.js",
       "types": "./dist/sentinel.d.ts"
+    },
+    "./guideProfileDefault": {
+      "import": "./dist/guideProfileDefault.js",
+      "types": "./dist/guideProfileDefault.d.ts"
     }
   },
   "engines": {

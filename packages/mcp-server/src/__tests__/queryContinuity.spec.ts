@@ -63,12 +63,15 @@ import {
 } from "../features/task-pack/priorPackStore.js";
 import { recordServedSurfaces, resetPackServeLogForTest } from "../util/packServeLog.js";
 import {
+  attachTaskQueryRefBinding,
   rememberTaskQuery,
   resolveTaskQueryRef,
+  resolveTaskQueryRefBinding,
   resetAll as resetAllSessions,
   taskQueryRef,
   tokenizeForEpoch,
 } from "../state/session.js";
+import { stateStoreFor } from "../state/stateStore.js";
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -211,6 +214,126 @@ describe("D1 — a `next` hint carries the whole task query", () => {
     // A ref minted for a TRUNCATED query is a different ref for a different
     // task — which is why a sliced query could never be recovered from one.
     expect(taskQueryRef(ws, BROAD_QUERY.slice(0, 80))).not.toBe(issued);
+  });
+
+  /**
+   * G3 (2026-09-08, qref-binding ledger-partition fix): `rememberTaskQuery`'s
+   * optional task-binding companion (`state/session.ts`'s
+   * `resolveTaskQueryRefBinding`) must survive the exact same restart/
+   * reconnect boundary the query text itself already does — it is what lets
+   * a handleless `read_file {qref}` re-pack recover the SAME executed-next
+   * ledger partition an earlier, `task.handle`-carrying execution of this
+   * task's own `next` was recorded under (see `util/packServeLog.ts`'s
+   * `hasExecutedNextBoundOrUnbound`). `resetAllSessions()` clears every
+   * in-memory `WorkspaceSession`, so a resolve afterward can only succeed via
+   * the durable slot (`state/stateHandles.ts`) — exactly what a restarted
+   * server or a fresh reconnect looks like. The contract record
+   * `recordTaskContract` seeds is what `rehydrateQueryRef` itself reads the
+   * recovered query text from (see that function's own doc comment); this
+   * mirrors production, where `buildTaskPack` records it on the same call
+   * that mints the qref.
+   */
+  it("a qref's task binding survives a session reset (durable rehydration)", () => {
+    const ws = makeWorkspace("d1-qref-binding");
+    recordTaskContract(ws, tokenizeForEpoch(BROAD_QUERY), { query: BROAD_QUERY });
+    const issued = rememberTaskQuery(ws, BROAD_QUERY, "task-binding-fixture-abc123");
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBe("task-binding-fixture-abc123");
+
+    resetAllSessions();
+    expect(resolveTaskQueryRef(ws, issued)).toBe(BROAD_QUERY);
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBe("task-binding-fixture-abc123");
+  });
+
+  it("a legacy qref slot with no stamped binding still resolves its query, even after a session reset", () => {
+    const ws = makeWorkspace("d1-qref-legacy-no-binding");
+    recordTaskContract(ws, tokenizeForEpoch(NARROWED_QUERY), { query: NARROWED_QUERY });
+    // No third argument: the pre-G3 call shape, and exactly what a slot
+    // minted before this field existed looks like on disk (persistQueryRef
+    // omits the key entirely rather than writing an empty one).
+    const issued = rememberTaskQuery(ws, NARROWED_QUERY);
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBeUndefined();
+
+    resetAllSessions();
+    expect(resolveTaskQueryRef(ws, issued)).toBe(NARROWED_QUERY);
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBeUndefined();
+  });
+
+  it("attachTaskQueryRefBinding late-binds onto a qref this same response already minted, durably, and is inert once superseded", () => {
+    const ws = makeWorkspace("d1-qref-attach");
+    recordTaskContract(ws, tokenizeForEpoch(BROAD_QUERY), { query: BROAD_QUERY });
+    const issued = rememberTaskQuery(ws, BROAD_QUERY);
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBeUndefined();
+
+    // `recordTaskPackExecution` learns the fingerprint only AFTER minting the
+    // task handle, which happens after the qref itself is minted — this is
+    // the late-bind seam that lets it stamp the binding on regardless.
+    attachTaskQueryRefBinding(ws, issued, "late-bound-fingerprint");
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBe("late-bound-fingerprint");
+    resetAllSessions();
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBe("late-bound-fingerprint");
+
+    // A LATER mint supersedes the single-slot qref; attaching to the now-stale
+    // ref must never resurrect it or bleed onto the new one.
+    recordTaskContract(ws, tokenizeForEpoch(NARROWED_QUERY), { query: NARROWED_QUERY });
+    const superseding = rememberTaskQuery(ws, NARROWED_QUERY);
+    expect(superseding).not.toBe(issued);
+    attachTaskQueryRefBinding(ws, issued, "stale-should-not-attach");
+    expect(resolveTaskQueryRefBinding(ws, superseding)).toBeUndefined();
+    expect(resolveTaskQueryRef(ws, issued)).toBeUndefined();
+  });
+
+  /**
+   * Finding 10 (adversarial review 2, 2026-09-08): `attachTaskQueryRefBinding`
+   * used to double the durable qref writes. `rememberTaskQuery` re-persists a
+   * BINDINGLESS copy on every re-issue — including a bare-qref re-pack of an
+   * unchanged task, which server.ts calls unconditionally and which
+   * deterministically re-mints the identical ref — and a few lines later
+   * `recordTaskPackExecution`'s own `attachTaskQueryRefBinding` call
+   * immediately re-persists the SAME binding/handle again. This proves the
+   * coalescing directly against the durable journal — the same file the
+   * reviewer's own count ("6 purpose:qref journal records for 5 read_file
+   * calls") was taken from: a fresh mint plus its late-bound fingerprint still
+   * costs two writes (the binding genuinely is not known until after the
+   * qref itself is minted), but REPEATING both calls for an UNCHANGED task
+   * (the ordinary re-pack shape) now costs zero further writes, not two more.
+   */
+  it("attachTaskQueryRefBinding + rememberTaskQuery coalesce: repeating both for an UNCHANGED task writes nothing further to the durable journal", () => {
+    const ws = makeWorkspace("d1-qref-write-coalescing");
+
+    function qrefJournalWriteCount(): number {
+      const dir = stateStoreFor(ws)!.dir;
+      let text = "";
+      try { text = fs.readFileSync(path.join(dir, "journal.ndjson"), "utf8"); } catch { return 0; }
+      return text.split("\n").filter((line) => line.includes("\"purpose\":\"qref\"")).length;
+    }
+
+    // First pack of the epoch: the fingerprint is not known until AFTER the
+    // qref is minted, so this genuinely needs two writes — unavoidable given
+    // `withTaskHandle` runs after `rememberTaskQuery`.
+    const issued = rememberTaskQuery(ws, BROAD_QUERY);
+    attachTaskQueryRefBinding(ws, issued, "fp-unchanged", "handle-unchanged");
+    expect(qrefJournalWriteCount()).toBe(2);
+
+    // A RE-PACK of the identical task: both server.ts call sites re-issue
+    // `rememberTaskQuery` unconditionally (the 2-arg, no-binding shape), and
+    // `recordTaskPackExecution` re-attaches the SAME binding/handle again —
+    // exactly this sequence, replayed with no new information at all.
+    const repacked = rememberTaskQuery(ws, BROAD_QUERY);
+    expect(repacked).toBe(issued);
+    attachTaskQueryRefBinding(ws, issued, "fp-unchanged", "handle-unchanged");
+
+    // Both calls independently concluded "nothing changed" and skipped their
+    // own write — the durable journal gained NOTHING from repeating them.
+    expect(qrefJournalWriteCount()).toBe(2);
+    // The slot itself is still exactly correct — coalescing must never lose
+    // information, only the redundant writes of it.
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBe("fp-unchanged");
+
+    // A genuinely CHANGED binding still writes normally — the skip is
+    // conditional on "unchanged", never unconditional.
+    attachTaskQueryRefBinding(ws, issued, "fp-actually-different", "handle-unchanged");
+    expect(qrefJournalWriteCount()).toBe(3);
+    expect(resolveTaskQueryRefBinding(ws, issued)).toBe("fp-actually-different");
   });
 });
 

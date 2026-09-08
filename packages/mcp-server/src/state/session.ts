@@ -19,7 +19,7 @@ import { createHash } from "crypto";
 import type { TaskExecutionContract, TaskVerifyObligation } from "@tokenlighten/types";
 import { currentSessionLane, laneScopedKey, rootOfLaneScopedKey } from "../util/laneKey.js";
 import { batchEditFrontierEnabled, receiptCoverageEnabled } from "../util/flags.js";
-import { persistQueryRef, rehydrateQueryRef, clearPersistedQueryRef } from "./stateHandles.js";
+import { persistQueryRef, rehydrateQueryRef, rehydrateQueryRefBinding, rehydrateQueryRefHandle, clearPersistedQueryRef } from "./stateHandles.js";
 // M1 (2026-09-05 R28 remediation): the ONE production reset for
 // packServeLog.ts's served-surface ledger (see `clearServedSurfaces`'s own
 // doc comment for why an explicit `task.epoch:"new"` must retire it here, not
@@ -35,6 +35,12 @@ import { clearServedSurfaces } from "../util/packServeLog.js";
 export interface PathExpansionEntry {
   count: number;
   lastSha: string;
+  /** P2-1 (2026-09-08): projection this expansion was served under — "keep"
+   * (comments preserved) vs "elide" (default). wasFullyServed only answers
+   * true when a request's own projection matches what is recorded here, so a
+   * first comments:"keep" read after an elide-only serve still falls through
+   * to real bytes (ruling F3 stays intact). */
+  keepComments: boolean;
 }
 
 export interface ServedRangeLedgerState {
@@ -611,8 +617,22 @@ export interface WorkspaceSession {
   /** read_code call counts keyed by mode string. */
   readsByMode: Map<string, number>;
 
-  /** Latest task query, exposed only through its workspace-bound opaque qref. */
-  activeTaskQuery: { ref: string; query: string } | undefined;
+  /**
+   * Latest task query, exposed only through its workspace-bound opaque qref.
+   *
+   * G3 (2026-09-08, qref-binding fix): `taskBinding`, when present, is the
+   * SAME server-derived task fingerprint `util/packServeLog.ts`'s
+   * `executedNextLedgerKey` partitions the executed-next ledger on — see
+   * `rememberTaskQuery`/`resolveTaskQueryRefBinding` below.
+   *
+   * G4 (2026-09-08, qref-task-scope fix): `taskHandle`, when present, is the
+   * WIRE `task.id` this epoch's task minted — a DIFFERENT value from
+   * `taskBinding` (see `attachTaskQueryRefBinding`'s own doc comment). Lets a
+   * later handleless re-pack inject `task_handle` so the requirement/
+   * obligation ledger scope (`taskContractStore.ts`) matches the scope an
+   * earlier pack of this same task was relocated to.
+   */
+  activeTaskQuery: { ref: string; query: string; taskBinding?: string; taskHandle?: string } | undefined;
 
   /** Per-path full-read tracking. Key is workspace-relative or absolute path. */
   fullExpansionsPerPath: Map<string, PathExpansionEntry>;
@@ -620,14 +640,14 @@ export interface WorkspaceSession {
   /**
    * B2e (2026-08-01 serving-completeness): paths whose most recent mode=full
    * "allow" was CHUNKED (only the first FULL_SERVE_CHUNK_BYTES actually went on
-   * the wire). Keyed path -> sha. decideFullRead records an expansion for every
+   * the wire). Keyed path -> {sha, keepComments}. decideFullRead records an expansion for every
    * allow, so without this marker wasFullyServed would claim the caller holds
    * bytes the response never carried — the T05c defect (a 52KB single-serve the
    * client clamped, after which every slice answered `code_unchanged`).
    * Fail-safe by construction: an entry only ever makes wasFullyServed answer
    * FALSE, so the worst outcome is one redundant serve.
    */
-  partialFullServes: Map<string, string>;
+  partialFullServes: Map<string, { sha: string; keepComments: boolean }>;
 
   /** Total full-file expansions this session; decays on handle-backed edits. */
   fullExpansionsTotal: number;
@@ -1851,13 +1871,125 @@ export function taskQueryRef(workspaceRoot: string, query: string): string {
  * doc comment for why a single persisted slot, not a table, is the right
  * shape. The in-process field stays authoritative and is written first; the
  * durable mirror is best-effort and never changes what this call returns.
+ *
+ * G3 (2026-09-08, qref-binding fix): an optional `taskBinding` — the SAME
+ * canonical task-fingerprint string `server.ts`'s `canonicalTaskBindingOf`/
+ * `canonicalTaskBindingForHandle` derive for the executed-next ledger
+ * (`util/packServeLog.ts`'s `executedNextLedgerKey`). Most callers mint the
+ * qref before that fingerprint exists (the FIRST pack of an epoch registers
+ * its task contract before a handle is minted); `attachTaskQueryRefBinding`
+ * below lets a caller stamp it on AFTER the fact, onto the SAME still-active
+ * slot, without re-minting the ref or touching the query text.
+ *
+ * Finding 10 (adversarial review 2, 2026-09-08): both `server.ts` call sites
+ * re-issue this on EVERY non-empty resolved query — including a bare-qref
+ * RE-PACK of the identical (workspace, query) pair ("a qref-driven pack never
+ * reads as a dead end after one replay") — which deterministically re-mints
+ * the SAME ref every time. A re-pack's OWN `taskBinding`/`taskHandle` (once a
+ * task has any) do not change call to call either, since `mintTaskHandle`
+ * RE-EMITS the same token per fingerprint. So a bare 2-arg re-issue used to
+ * unconditionally re-persist a bindingless copy of an already-bound slot,
+ * immediately clobbered a few lines later by `recordTaskPackExecution`'s own
+ * `attachTaskQueryRefBinding` call re-adding the SAME binding — two durable
+ * writes doing the work of (at most) one. Carrying the ACTIVE slot's own
+ * binding/handle forward when the caller passes none (never overriding an
+ * explicit one) and skipping the write entirely when nothing about the
+ * persisted shape actually changed closes that gap: a re-pack of an unchanged
+ * task now persists nothing here (the on-disk slot is already correct), and
+ * `attachTaskQueryRefBinding` a few lines later independently reaches the
+ * same "nothing changed" conclusion and also skips — net zero durable writes
+ * for the overwhelmingly common continuation case, versus two before. A
+ * fresh epoch's first pack (no prior slot to carry anything forward from)
+ * still writes twice — the binding genuinely is not known until AFTER this
+ * call returns — which is the one case this cannot coalesce away without
+ * restructuring the caller's own control flow, a larger change than this
+ * NOTE-level finding warrants.
  */
-export function rememberTaskQuery(workspaceRoot: string, query: string): string {
+export function rememberTaskQuery(workspaceRoot: string, query: string, taskBinding?: string): string {
   const normalized = query.trim();
   const ref = taskQueryRef(workspaceRoot, normalized);
-  getSession(workspaceRoot).activeTaskQuery = { ref, query: normalized };
-  persistQueryRef(workspaceRoot, ref, normalized);
+  const session = getSession(workspaceRoot);
+  const previous = session.activeTaskQuery;
+  const carriedOver = previous?.ref === ref;
+  const effectiveBinding = typeof taskBinding === "string" && taskBinding !== ""
+    ? taskBinding
+    : (carriedOver ? previous.taskBinding : undefined);
+  const effectiveHandle = carriedOver ? previous.taskHandle : undefined;
+  const unchanged = carriedOver
+    && previous.query === normalized
+    && previous.taskBinding === effectiveBinding
+    && previous.taskHandle === effectiveHandle;
+  session.activeTaskQuery = {
+    ref,
+    query: normalized,
+    ...(typeof effectiveBinding === "string" && effectiveBinding !== "" ? { taskBinding: effectiveBinding } : {}),
+    ...(typeof effectiveHandle === "string" && effectiveHandle !== "" ? { taskHandle: effectiveHandle } : {}),
+  };
+  if (!unchanged) {
+    persistQueryRef(workspaceRoot, ref, normalized, effectiveBinding, effectiveHandle);
+  }
   return ref;
+}
+
+/**
+ * Late-bind a task's canonical binding onto a qref this same response ALREADY
+ * issued via `rememberTaskQuery` — the one caller (`server.ts`'s
+ * `recordTaskPackExecution`) that only learns the fingerprint after minting
+ * the task handle, which happens after the qref is minted. A no-op when the
+ * session's active slot has moved on to a different ref (a later call already
+ * superseded this one before this could run) or holds no query for it at all:
+ * this attaches metadata to a still-live qref, never grounds to resurrect a
+ * stale one.
+ *
+ * G4 (2026-09-08, qref-task-scope fix): an optional 4th argument, `taskHandle`
+ * — the WIRE `task.id` the SAME minting call produced (`server.ts`'s
+ * `withTaskHandle`, read right after this function's caller computes
+ * `taskBinding`). A DIFFERENT value from `taskBinding`: that fingerprint
+ * partitions the executed-next ledger, while `taskHandle` is what a later
+ * handleless `read_file {qref}` re-pack must present as `task_handle` so
+ * `taskContractScopeOf` resolves the exact `{lane, taskHandle}` scope
+ * `taskContractStore.ts`'s `bindTaskContractHandle` relocated the epoch's
+ * requirement/obligation ledger to when this task's handle was first minted.
+ * Without it, a bare-qref rebuild's own `taskContractScopeOf` computes
+ * `{lane, taskHandle: undefined}` — a scope `bindTaskContractHandle` already
+ * vacated — and `buildTaskPack` sees no memory of the epoch's previously
+ * proved required roles/concern tokens. Omitted (not even an empty string)
+ * when the caller has none to give, matching `taskBinding`'s own convention.
+ *
+ * Finding 10 (adversarial review 2, 2026-09-08): skips its own durable write
+ * when the slot ALREADY carries this exact (query, taskBinding, taskHandle)
+ * triple — the ordinary shape of a re-pack continuing an unchanged task,
+ * where `rememberTaskQuery` (called a few lines earlier in both `server.ts`
+ * call sites) already carried the same binding/handle forward and, for the
+ * identical reason, already skipped ITS OWN write. The two functions reach
+ * the "nothing changed" conclusion independently but consistently, since both
+ * compare against the SAME `session.activeTaskQuery` slot; a genuinely NEW or
+ * changed binding/handle (a fresh epoch's first pack) still writes exactly as
+ * before.
+ */
+export function attachTaskQueryRefBinding(
+  workspaceRoot: string,
+  ref: string,
+  taskBinding: string,
+  taskHandle?: string,
+): void {
+  if (ref === "" || taskBinding === "") return;
+  const session = getSession(workspaceRoot);
+  const active = session.activeTaskQuery;
+  if (active === undefined || active.ref !== ref) return;
+  // The exact shape the object below is about to take — compared against
+  // what is ALREADY there, so "unchanged" means byte-identical, not merely
+  // "a handle was passed".
+  const nextHandle = typeof taskHandle === "string" && taskHandle !== "" ? taskHandle : undefined;
+  const unchanged = active.taskBinding === taskBinding && active.taskHandle === nextHandle;
+  session.activeTaskQuery = {
+    ...active,
+    taskBinding,
+    ...(nextHandle !== undefined ? { taskHandle: nextHandle } : {}),
+  };
+  if (!unchanged) {
+    persistQueryRef(workspaceRoot, ref, active.query, taskBinding, taskHandle);
+  }
 }
 
 /**
@@ -1871,14 +2003,61 @@ export function rememberTaskQuery(workspaceRoot: string, query: string): string 
  * process takes the fast, in-memory path; a ref that does not match the
  * slot's current contents (superseded, or cleared by `taskEpoch:"new"`) is
  * still a miss, on disk exactly as it already was in memory.
+ *
+ * G3: promotion also recovers the persisted `taskBinding` (if any), so a
+ * cold `resolveTaskQueryRefBinding` call right after this one never has to
+ * hit the store a second time.
+ *
+ * G4: promotion also recovers the persisted `taskHandle` (if any), the same
+ * way and for the same reason — see `resolveTaskQueryRefHandle` below.
  */
 export function resolveTaskQueryRef(workspaceRoot: string, ref: string): string | undefined {
   const active = getSession(workspaceRoot).activeTaskQuery;
   if (active !== undefined) return active.ref === ref ? active.query : undefined;
   const rehydrated = rehydrateQueryRef(workspaceRoot, ref);
   if (rehydrated === undefined) return undefined;
-  getSession(workspaceRoot).activeTaskQuery = { ref, query: rehydrated };
+  const taskBinding = rehydrateQueryRefBinding(workspaceRoot, ref);
+  const taskHandle = rehydrateQueryRefHandle(workspaceRoot, ref);
+  getSession(workspaceRoot).activeTaskQuery = {
+    ref,
+    query: rehydrated,
+    ...(taskBinding !== undefined ? { taskBinding } : {}),
+    ...(taskHandle !== undefined ? { taskHandle } : {}),
+  };
   return rehydrated;
+}
+
+/**
+ * Companion to `resolveTaskQueryRef`: the task binding recorded alongside
+ * this qref (see `rememberTaskQuery`/`attachTaskQueryRefBinding`), or
+ * undefined for a legacy slot minted before this field existed — the SAME
+ * "no stored value degrades to today's per-call inference" posture every
+ * other optional enrichment in this module already has. Delegates the
+ * in-process-hit-or-rehydrate resolution to `resolveTaskQueryRef` itself so
+ * the two accessors can never observe a different outcome for the same ref.
+ */
+export function resolveTaskQueryRefBinding(workspaceRoot: string, ref: string): string | undefined {
+  const active = getSession(workspaceRoot).activeTaskQuery;
+  if (active !== undefined) return active.ref === ref ? active.taskBinding : undefined;
+  if (resolveTaskQueryRef(workspaceRoot, ref) === undefined) return undefined;
+  return getSession(workspaceRoot).activeTaskQuery?.taskBinding;
+}
+
+/**
+ * G4 (2026-09-08, qref-task-scope fix): companion to `resolveTaskQueryRefBinding`
+ * — the WIRE task handle recorded alongside this qref (see
+ * `attachTaskQueryRefBinding`'s own doc comment for why this is a distinct
+ * value from `taskBinding`), or undefined for a legacy slot minted before
+ * this field existed. Same delegation discipline as `resolveTaskQueryRefBinding`:
+ * the in-process-hit-or-rehydrate resolution always runs through
+ * `resolveTaskQueryRef` itself, so the two accessors can never disagree about
+ * the same ref.
+ */
+export function resolveTaskQueryRefHandle(workspaceRoot: string, ref: string): string | undefined {
+  const active = getSession(workspaceRoot).activeTaskQuery;
+  if (active !== undefined) return active.ref === ref ? active.taskHandle : undefined;
+  if (resolveTaskQueryRef(workspaceRoot, ref) === undefined) return undefined;
+  return getSession(workspaceRoot).activeTaskQuery?.taskHandle;
 }
 
 /**
@@ -2440,7 +2619,12 @@ function executionRefusal(
      * back to today's frontier/challenge guidance unchanged — this is the
      * "two independent tasks' frontiers genuinely conflict" escape hatch.
      */
-    knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[] };
+    // P2-2 fix: `recoveryPaths` is the UNION of the whole batch's non-create
+    // requested targets (see guardExecutionEditCore's construction site) —
+    // what the recovery `next` below actually re-packs with. `paths`/`pairs`
+    // stay the strict outside-of-frontier subset for `alsoAdmissiblePairs`
+    // and the `cause:"capped"` diagnosis.
+    knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[]; recoveryPaths: readonly string[] };
   },
 ): ExecutionGuardDecision {
   const advanceableChallenge = challengeTemplate(fence, CHALLENGE_LEAD_EVIDENCE);
@@ -2722,7 +2906,14 @@ function executionRefusal(
         arguments: {
           mode: "task_pack",
           taskEpoch: "new",
-          paths: [...knownOutsideRepack.paths].slice(0, KNOWN_OUTSIDE_REPACK_PATH_CAP),
+          // P2-2 fix: the UNION of the batch's non-create targets, not just
+          // the outside-of-frontier subset — see knownOutsideRepack's own
+          // `recoveryPaths` doc comment above for why the subset alone
+          // needed a SECOND recovery read. Finding 3 fix: `recoveryPaths`
+          // orders the outside-of-frontier subset FIRST, so this slice keeps
+          // what the refusal is actually about even when the union exceeds
+          // the cap — `remaining` below still names whatever this drops.
+          paths: [...knownOutsideRepack.recoveryPaths].slice(0, KNOWN_OUTSIDE_REPACK_PATH_CAP),
           ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
         },
       }
@@ -2926,14 +3117,29 @@ function executionRefusal(
       // about a file the pack never named would be a false diagnosis.
       ...(withheldNextCall !== undefined && refusedWithheld.length > 0 ? { cause: "capped" } : {}),
       next_call: nextCall,
-      // v0.14.1 defect 3 fix (2026-09-07): `knownOutsideRepack.paths` can
-      // exceed KNOWN_OUTSIDE_REPACK_PATH_CAP for a genuinely large batch; the
-      // `next_call` above silently drops the tail, so name what it dropped
-      // instead of losing it -- a caller that re-issues `next_call` verbatim
-      // and then retries the SAME edit_file call is refused again for exactly
-      // the omitted paths otherwise.
-      ...(knownOutsideRepack !== undefined && knownOutsideRepack.paths.length > KNOWN_OUTSIDE_REPACK_PATH_CAP
-        ? { remaining: knownOutsideRepack.paths.slice(KNOWN_OUTSIDE_REPACK_PATH_CAP) }
+      // v0.14.1 defect 3 fix (2026-09-07): `knownOutsideRepack.recoveryPaths`
+      // can exceed KNOWN_OUTSIDE_REPACK_PATH_CAP for a genuinely large batch
+      // (P2-2 fix, 2026-09-08: this now keys off `recoveryPaths`, the same
+      // union field `next_call` above slices from — not `.paths`, the
+      // strict outside-only subset, so this overflow report always names
+      // what THIS next_call actually dropped); the `next_call` above
+      // silently drops the tail, so name what it dropped instead of losing
+      // it -- a caller that re-issues `next_call` verbatim and then retries
+      // the SAME edit_file call is refused again for exactly the omitted
+      // paths otherwise.
+      //
+      // Review finding 3 residual (2026-09-08): `recoveryPaths` orders the
+      // outside-of-frontier subset first (see its own construction comment),
+      // so the common case — a large batch with a small outside subset —
+      // fits the outside targets inside the cap and this overflow is only
+      // ever already-admissible targets that did not need the recovery read
+      // in the first place. The one case ordering cannot fix: an
+      // outside-of-frontier subset that ITSELF exceeds the cap (every target
+      // in an over-sized batch is outside the frontier). `remaining` still
+      // discloses that tail honestly, but the caller genuinely needs a
+      // SECOND recovery read to cover it — no single 64-path call can.
+      ...(knownOutsideRepack !== undefined && knownOutsideRepack.recoveryPaths.length > KNOWN_OUTSIDE_REPACK_PATH_CAP
+        ? { remaining: knownOutsideRepack.recoveryPaths.slice(KNOWN_OUTSIDE_REPACK_PATH_CAP) }
         : {}),
       // Rides the REFUSAL, never the arguments: edit_file's unknown-argument
       // layer fails closed, so a marker inside `arguments` would make the
@@ -3111,7 +3317,7 @@ function refuseExecutionEdit(
   remedyRepackPaths?: readonly string[],
   editArgs?: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
-  knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[] },
+  knownOutsideRepack?: { paths: readonly string[]; pairs: readonly HandlePathPair[]; recoveryPaths: readonly string[] },
 ): ExecutionGuardDecision {
   const full = executionRefusal(session, fence, detail, workspaceRoot, {
     editContext: true,
@@ -5616,10 +5822,51 @@ function guardExecutionEditCore(
     const knownOutsideRepackPaths = allOutsideHandlesKnown
       ? [...new Set([...outsideHandlePairs.map((pair) => pair.path), ...outsidePaths])]
       : [];
+    // P2-2 fix (report-items.md / DESIGN-v0.15 hands-on-report wave): the
+    // recovery `next` below re-packs with `taskEpoch:"new"`, which installs a
+    // FRESH certificate whose frontier is computed solely from the `paths`
+    // that call names. Naming only the outside-of-frontier subset
+    // (`knownOutsideRepackPaths`, still computed above for its OTHER
+    // consumers) left the already-admissible remainder unserved under the
+    // new epoch, so the identical batch refused a SECOND time citing exactly
+    // those paths — two recovery reads for one mixed batch. `recoveryPaths`
+    // is the UNION of the whole batch's non-create requested set
+    // (`checkPaths` plus `checkHandles` resolved to paths, both already in
+    // scope here) — every non-create target the re-packed certificate must
+    // cover so the identical batch applies in one shot. `knownOutsideRepack.
+    // paths`/`.pairs` themselves stay OUTSIDE-only, unchanged, for their
+    // other consumers (`alsoAdmissiblePairs`, the `cause:"capped"`
+    // diagnosis) — only the recovery `next` widens.
+    //
+    // Review finding 3 fix (2026-09-08): `knownOutsideRepackPaths` — the
+    // outside-of-frontier subset, i.e. what THIS refusal is actually about —
+    // is ordered FIRST, ahead of the rest of the union. `next_call` below
+    // slices this array to KNOWN_OUTSIDE_REPACK_PATH_CAP (64); before this
+    // fix the union was ordered by caller-supplied batch position, so for a
+    // >64-target batch the outside subset could sort past the cap and be
+    // silently dropped from the recovery `next` — re-opening the exact
+    // two-read case this whole mechanism exists to close, only for the
+    // large-batch shape where it matters most. `knownOutsideRepackPaths` is
+    // reliable to lead with here: this branch only ever constructs when
+    // `allOutsideHandlesKnown` is true (the gate above), so it already names
+    // EVERY outside target, never a partial view. Residual (documented, not
+    // solved by ordering alone): when the outside-of-frontier subset ITSELF
+    // exceeds the 64 cap (every target in an over-sized batch is outside the
+    // frontier, not just a handful), no ordering can fit them all in one
+    // recovery read — `remaining` still discloses the dropped tail, and the
+    // caller genuinely needs a second recovery read for it.
+    const recoveryPaths = [...new Set([
+      ...knownOutsideRepackPaths,
+      ...checkPaths,
+      ...checkHandles
+        .map((handle) => resolveHandlePath?.(handle))
+        .filter((candidate): candidate is string => typeof candidate === "string" && candidate !== ""),
+    ])];
     const knownOutsideRepack = knownOutsideRepackPaths.length > 0
       ? {
           paths: knownOutsideRepackPaths,
           pairs: [...outsideHandlePairs, ...outsidePaths.map((path) => ({ handle: "", path }))],
+          recoveryPaths,
         }
       : undefined;
     // The unified `frontier` payload (executionRefusal) now carries the epoch
@@ -5870,18 +6117,23 @@ export function recordFullExpansion(
   workspaceRoot: string,
   path: string,
   sha: string,
+  keepComments: boolean,
 ): { resetByShaChange: boolean } {
   const s = getSession(workspaceRoot);
   const prev = s.fullExpansionsPerPath.get(path);
 
   let resetByShaChange = false;
   if (prev === undefined) {
-    s.fullExpansionsPerPath.set(path, { count: 1, lastSha: sha });
+    s.fullExpansionsPerPath.set(path, { count: 1, lastSha: sha, keepComments });
   } else if (prev.lastSha !== sha) {
-    s.fullExpansionsPerPath.set(path, { count: 1, lastSha: sha });
+    s.fullExpansionsPerPath.set(path, { count: 1, lastSha: sha, keepComments });
     resetByShaChange = true;
   } else {
     prev.count += 1;
+    // P2-1 (2026-09-08): record the LATEST projection — wasFullyServed
+    // compares against it, so a repeat under a different projection is
+    // never mistaken for "already fully served".
+    prev.keepComments = keepComments;
   }
 
   s.fullExpansionsTotal += 1;
@@ -7803,15 +8055,18 @@ export function isPlausibleEditTarget(workspaceRoot: string, path: string): bool
  * re-serve of bytes the caller holds. When it is FALSE (a genuine first serve
  * that the cap is downgrading), the caller must instead serve the file head.
  */
-export function wasFullyServed(workspaceRoot: string, path: string, sha: string): boolean {
+export function wasFullyServed(workspaceRoot: string, path: string, sha: string, keepComments: boolean): boolean {
   const session = getSession(workspaceRoot);
   // B2e (2026-08-01 serving-completeness): a CHUNKED full serve records an
   // expansion (decideFullRead's "allow" always does) but only put the first
   // chunk on the wire. Treating it as "fully served" is exactly the T05c defect
   // — later slices answered `code_unchanged` for bytes the model never saw.
-  if (session.partialFullServes.get(path) === sha) return false;
+  const partial = session.partialFullServes.get(path);
+  if (partial !== undefined && partial.sha === sha && partial.keepComments === keepComments) return false;
   const entry = session.fullExpansionsPerPath.get(path);
-  return entry !== undefined && entry.lastSha === sha && entry.count >= 1;
+  // P2-1 (2026-09-08): projection-keyed — a prior serve under the OTHER
+  // projection never counts as "fully served" for this one.
+  return entry !== undefined && entry.lastSha === sha && entry.count >= 1 && entry.keepComments === keepComments;
 }
 
 /**
@@ -7825,10 +8080,11 @@ export function recordFullServeCompleteness(
   path: string,
   sha: string,
   complete: boolean,
+  keepComments: boolean,
 ): void {
   const session = getSession(workspaceRoot);
   if (complete) session.partialFullServes.delete(path);
-  else session.partialFullServes.set(path, sha);
+  else session.partialFullServes.set(path, { sha, keepComments });
 }
 
 /**

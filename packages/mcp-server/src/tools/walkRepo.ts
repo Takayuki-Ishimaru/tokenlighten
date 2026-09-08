@@ -619,20 +619,33 @@ function classifyIgnored(
 }
 
 /**
- * The durable state store is server runtime bookkeeping, not workspace
- * material.  It is deliberately rooted at `.tokenlighten/state/` so it is
- * excluded from version control, but its creation must not change a repeated
- * search's declared scope.  Keep the surrounding `.tokenlighten` namespace
- * under the ordinary ignore policy: cache/index/user files still count as
- * explicit exclusions.  We only descend through the root to omit this one
- * internal subtree without recording it in `WalkOmissions`.
+ * Review-2 finding 6 (2026-09-08): the WHOLE `.tokenlighten/` namespace is
+ * this server's own runtime bookkeeping, never workspace material — the
+ * durable state store (`.tokenlighten/state/`, keyed on-disk so a repeated
+ * search's own declared scope survives a restart) and skeleton-engine's
+ * `cache/`/`index/` caches alike. An earlier revision of this predicate
+ * exempted only the STATE subtree from `WalkOmissions` and let the walker
+ * descend into the surrounding `.tokenlighten` root anyway (deliberately, per
+ * that revision's own reasoning: "cache/index/user files still count as
+ * explicit exclusions") — but that meant the identical query, run twice on an
+ * unchanged workspace, could flip its own honesty qualifier from "scope
+ * complete" to "N paths excluded from the scan" the moment `.tokenlighten/`
+ * FIRST appeared between the two calls, purely as a side effect of this
+ * server's own first write (creating `cache/`, `index/`, or `state/`). A
+ * caller cannot act on that disclosure — it names no workspace file the
+ * caller wrote or configured — so it is not a scan omission worth reporting
+ * at all, any more than the state subtree already was not. This predicate now
+ * covers the whole namespace: every server-owned artifact directory under
+ * `.tokenlighten/`, present or future, is invisible to `WalkOmissions` the
+ * same way it is invisible to the scan itself (both call sites below `return`
+ * / `continue` on this check BEFORE any classification runs, so nothing under
+ * it is walked OR counted). `.tokenlightenignore` — the user-AUTHORED
+ * exclusions file — is unaffected: it lives at the workspace root, is a
+ * regular file the walker classifies normally, and continues to be counted
+ * via `tokenlighten_ignored` exactly as before.
  */
-function isInternalStateStorePath(relPath: string): boolean {
-  return relPath === ".tokenlighten/state" || relPath.startsWith(".tokenlighten/state/");
-}
-
-function isTokenlightenRoot(relPath: string): boolean {
-  return relPath === ".tokenlighten";
+function isTokenlightenNamespacePath(relPath: string): boolean {
+  return relPath === ".tokenlighten" || relPath.startsWith(".tokenlighten/");
 }
 
 export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundFile[] {
@@ -772,10 +785,12 @@ function walkDir(
       // Never followed (escape safety); counted so consumers can disclose it.
       if (om) om.symlinks += 1;
     } else if (entry.isDirectory()) {
-      // Descend only through the namespace root so its `state/` child can be
-      // invisible.  Other children remain subject to the usual matcher.
-      if (isInternalStateStorePath(relPath)) continue;
-      const layer = isTokenlightenRoot(relPath) ? null : classifyIgnored(layers, relPath, true);
+      // Finding 6: the whole `.tokenlighten` namespace (root and every
+      // descendant) is invisible to BOTH the scan and `WalkOmissions` — never
+      // walked, never counted. See `isTokenlightenNamespacePath`'s own doc
+      // comment for why this widened past the state-store subtree alone.
+      if (isTokenlightenNamespacePath(relPath)) continue;
+      const layer = classifyIgnored(layers, relPath, true);
       if (layer) {
         if (om) om[layer] += 1;
         continue;
@@ -786,7 +801,7 @@ function walkDir(
       }
       walkDir(workspace, absPath, allowedExts, extraExts, extraBasenames, includeArtifacts, includeGenericText, layers, out, om, sizeCapBytes, explicitSubPath, fullRecall);
     } else if (entry.isFile()) {
-      if (isInternalStateStorePath(relPath)) continue;
+      if (isTokenlightenNamespacePath(relPath)) continue;
       const layer = classifyIgnored(layers, relPath, false);
       if (layer) {
         if (om) om[layer] += 1;

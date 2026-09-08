@@ -230,9 +230,21 @@ describe("read-only archive containers", () => {
     // A.7.2 code is `act-on-served-evidence`. An `act.answer` here would need a
     // `CertificateRef` this wire-only path never issues, which is the
     // fabrication C2-3 refused to ship; this says the true thing instead.
+    // A.2.5.1 (2026-09-08): the code names the BRANCH; `unresolved` names the
+    // THING. On this arm the pack's three structured residual carriers are all
+    // empty by construction (`prepared` implies `omitted_entries === 0`,
+    // `missing: []`, and `archive-prepared-forbids-unresolved`), so the one row
+    // is drawn from the fact the pack DOES publish — `archive.read_only` — and
+    // says why no certificate is authorable here. See `archiveTaskDecision`'s
+    // own doc comment for why that source, and not `required_action`.
     expect(result["decision"]).toEqual({
       kind: "await_input",
       code: "act-on-served-evidence",
+      unresolved: [{
+        kind: "uncertifiable-terminal",
+        reason: "archive members of sample.zip are read-only virtual surfaces, so this family issues no certificate; whether the served slices answer the question is your judgement",
+        path: "sample.zip",
+      }],
     });
   }, 30_000);
 

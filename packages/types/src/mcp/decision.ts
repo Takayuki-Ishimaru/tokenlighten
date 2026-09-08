@@ -149,6 +149,57 @@ export type Candidate = {
 };
 
 // ---------------------------------------------------------------------------
+// A.2.5.1 `UnresolvedItem` — WHAT an `await_input` is waiting on
+// ---------------------------------------------------------------------------
+
+/**
+ * ONE THING THIS RESPONSE COULD NOT RESOLVE, named.
+ *
+ * WHY IT EXISTS (v0.14.1 hands-on report P2-4, and this file's own §2.1
+ * residual). `await_input` says "I cannot proceed without you" and `code` says
+ * WHICH BRANCH said so — five closed values, each a category. Neither names the
+ * THING. A caller holding `{kind:"await_input", code:"act-on-served-evidence"}`
+ * has a category and no referent: it cannot tell which surface, obligation or
+ * requirement is open, so it cannot compose the question to ask its user, and
+ * "wait for input" plus "act now" reads as a contradiction rather than as a
+ * bounded residual. `candidates` answers this only for the pick-one codes, and
+ * only when the alternatives are enumerable files.
+ *
+ * ADDITIVE, NOT A SIXTH CODE. The [R4-1] adjudication closed `AwaitInputCode`
+ * at five and that stands — this member carries the referent the code cannot,
+ * so the enum does not have to grow one value per nameable residual. A caller
+ * that ignores the field reads exactly the v1 response it read before.
+ *
+ * `kind` IS A BARE STRING, deliberately, on §10.1(b)'s rule (a value set that
+ * cannot be harvested is not an enum yet): the producers draw from four
+ * independent vocabularies (`TaskDecisionEvidenceClaim.kind`,
+ * `TaskCapabilityGap.kind`, surface roles, and this wave's own
+ * `profile-conflict`), and freezing their union today would freeze a set no
+ * reviewer can check. Same standing as `Candidate.kind` above.
+ *
+ * ADDRESSING IS OPTIONAL AND JOINS THIS RESPONSE. `path`/`handle`/`range` are
+ * emitted iff the server can point at the thing; absence means the residual is
+ * real but has no address (a role that was never served has no handle to give).
+ * `id` is the producer-side obligation/claim/gap id when one exists, so a
+ * caller can correlate with `plan.change_contract.obligations[]`.
+ */
+export type UnresolvedItem = {
+  /** What class of thing is open. See the vocabulary note above. */
+  kind: string;
+  /** Non-empty prose naming the specific residual. The one required payload:
+   *  a row that cannot say what is unresolved is not worth emitting. */
+  reason: string;
+  /** Producer-side id (obligation / evidence claim / gap), when one exists. */
+  id?: string;
+  /** Workspace-relative path, when the residual has one. */
+  path?: string;
+  /** Join key into this response's `evidence[]`, when a surface was served. */
+  handle?: string;
+  /** 1-based `N-M` window, when the residual is narrower than a whole file. */
+  range?: string;
+};
+
+// ---------------------------------------------------------------------------
 // A.2.6 `FrontierEntry`
 // ---------------------------------------------------------------------------
 
@@ -223,8 +274,24 @@ export type CreateTarget = {
  * `await_input` here would be a second adjudication of §2.1, which §10.2 forbids.
  *
  * Structural properties the union enforces, restated so they are checkable:
- *  - D-1. `next` is representable ONLY on `discover`. A `next` on `act.*` or
- *    `done` is a type error (§2.1, the P0a single-decision fence).
+ *  - D-1. `next` is NEVER representable on `act.answer` / `act.edit` / `done`:
+ *    a certified terminal that also hands the caller a discovery call is the
+ *    P0a two-decisions-in-one shape §2.1 exists to remove.
+ *
+ *    AMENDED 2026-09-08 (hands-on-report follow-up, reviewer note 5). It used
+ *    to read "representable ONLY on `discover`", which made an `await_input`
+ *    that CAN name the call that would unblock it structurally unable to say
+ *    so: the one live case is an explicit create request under a declared
+ *    read-only `task.profile:"answer"` — the pack resolves `create_target`,
+ *    honours the declaration (never silently flipping the profile), and the
+ *    only honest continuation is "re-pack this same question under the profile
+ *    it needs". Emitting that as `discover` would claim discovery is
+ *    incomplete, which is false; emitting nothing is the dead end the report
+ *    filed. So the FORBIDDEN half of D-1 is unchanged and the permitted half
+ *    grows by one kind. Two properties keep it from becoming a second
+ *    authority: `await_input` still carries no `certificate` (D-2) and no
+ *    `frontier` (D-3), so nothing is being sanctioned here — and the fence
+ *    below (FLOOR-AWAIT) requires the call to be one this response can ground.
  *  - D-2. `certificate` is representable only on `act.answer` / `act.edit`.
  *  - D-3. `frontier` is representable only on `act.edit` — an `act.answer`
  *    cannot carry an edit frontier at all (§2.1: "answering is not editing").
@@ -264,6 +331,22 @@ export type CreateTarget = {
  *     because "where may I write" has two honest spellings, not because the
  *     floor was weakened — an `act.edit` carrying NEITHER is still a breach.
  *
+ *   FLOOR-AWAIT(R) :=                                    (added 2026-09-08)
+ *     R.decision.kind === "await_input" IMPLIES
+ *       (   R.decision.unresolved === undefined
+ *           OR R.decision.unresolved.length >= 1        )
+ *       AND ( R.decision.next === undefined
+ *             OR R.decision.next is executable NOW against the state the
+ *                client holds, and is grounded in THIS response )
+ *
+ *     Two emptiness rules, not one: an OMITTED `unresolved` means "the server
+ *     could not name the residual", which stays honest and is why the member
+ *     is optional; an EMPTY ARRAY asserts a nameable set and then declines to
+ *     name it — the same decision↔delivery falsification `choose-candidate`
+ *     with no candidates commits. The projector never emits one, and
+ *     `taskDecisionWireViolations` (protocol/decisionWire.ts) is the runtime
+ *     oracle for both halves, exactly as it already is for `candidates`.
+ *
  *   DEGRADE(R) :=
  *     a shed that would falsify FLOOR-ANSWER or FLOOR-EDIT MUST produce
  *     R.decision = { kind: "discover", next: <non-empty> } — never an `act`
@@ -298,6 +381,33 @@ export type TaskDecision =
       /** Emitted iff the choice is between enumerable alternatives. Absence
        *  means the question is not a pick-one (e.g. a policy question). */
       candidates?: Candidate[];
+      /** WHAT is unresolved (A.2.5.1), bounded at 4 entries by the projector.
+       *
+       *  Emitted iff the server can name at least one residual from this
+       *  response's OWN disclosures — the evidence model's unresolved claims,
+       *  an open readiness obligation or capability gap, the ambiguity itself,
+       *  or (this wave) a declared-profile conflict. Absence means it could
+       *  name none; an EMPTY ARRAY is a breach of FLOOR-AWAIT, never a
+       *  spelling of "nothing is open" (a decision with nothing open is not an
+       *  `await_input` at all).
+       *
+       *  It does not replace `candidates`: a pick-one still enumerates the
+       *  alternatives there, and this says what the pick is FOR. */
+      unresolved?: UnresolvedItem[];
+      /** The one call that would unblock this question, when the server can
+       *  ground one (D-1 as amended 2026-09-08).
+       *
+       *  Emitted iff a call exists that is executable NOW and that this
+       *  response can vouch for — today's single producer is the
+       *  declared-profile conflict (an explicit create under
+       *  `task.profile:"answer"`), whose `next` re-packs the SAME question
+       *  under the profile the request needs. Absence is the ordinary case and
+       *  means the server has no grounded call: the caller answers the
+       *  `unresolved` question itself.
+       *
+       *  NOT a sanction and NOT a `discover`: no certificate and no frontier
+       *  ride this member, so running it changes only what the caller knows. */
+      next?: ToolCall;
     }
   | { kind: "act.answer"; certificate: CertificateRef }
   | {

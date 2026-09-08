@@ -160,6 +160,27 @@ export interface DecideFullReadArgs {
    * server never sets it otherwise.
    */
   autoAllowUnderCeiling?: boolean;
+  /**
+   * P2-1 (2026-09-08): the projection `recordFullExpansion` attributes this
+   * expansion to on the completeness ledger (`session.ts`'s
+   * `fullExpansionsPerPath`/`partialFullServes`).
+   *
+   * Review finding 8 fix (2026-09-08): REQUIRED, not optional. It used to
+   * default to `false` (elide) so an existing caller could omit it and keep
+   * compiling — but that default is exactly the hazard this fix closes: the
+   * expansion record this function writes (via `recordFullExpansion`) and the
+   * completeness record a LATER dedup check reads (`wasFullyServed`, also
+   * projection-keyed since the same P2-1 wave) must always agree on which
+   * projection actually got served. A caller that quietly omits this field
+   * while the real serve renders `comments:"keep"` would record
+   * `expansion{keep:false}` against a `keep` response — the exact T05c-shaped
+   * defect P2-1 exists to prevent, just moved one call site later. Every
+   * caller in this codebase (server.ts's two `resolveFullReadForPath` sites)
+   * already threads its own real `keepComments` through; a caller that
+   * genuinely has no projection to report (a cap/threshold-only test, never a
+   * real serve path) passes `false` explicitly, on purpose, not by omission.
+   */
+  keepComments: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +234,7 @@ export function decideFullRead(args: DecideFullReadArgs): FullReadDecision {
         alternatives: buildAlternatives(args),
       };
     }
-    recordFullExpansion(args.workspace, args.path, args.sha);
+    recordFullExpansion(args.workspace, args.path, args.sha, args.keepComments === true);
     // FIX-3a: this call site is the ordinary agent-facing tiny read (no
     // exempt-recording concept here — decideFullRead has no governorExempt
     // parameter) so it deliberately omits recordTinyFullExpansion's `exempt`
@@ -263,7 +284,7 @@ export function decideFullRead(args: DecideFullReadArgs): FullReadDecision {
         alternatives: buildAlternatives(args),
       };
     }
-    recordFullExpansion(args.workspace, args.path, args.sha);
+    recordFullExpansion(args.workspace, args.path, args.sha, args.keepComments === true);
     recordAllowFullExpansion(args.workspace);
     recordCandidatePackFullRead(args.workspace);
     return { decision: "allow" };
@@ -309,7 +330,7 @@ export function decideFullRead(args: DecideFullReadArgs): FullReadDecision {
     };
   }
 
-  recordFullExpansion(args.workspace, args.path, args.sha);
+  recordFullExpansion(args.workspace, args.path, args.sha, args.keepComments === true);
   recordCandidatePackFullRead(args.workspace);
   // G2: this allow is reached only AFTER the per-task and per-path cap checks
   // above pass — so an over-default-cap file in the C5 window is served

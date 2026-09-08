@@ -570,8 +570,38 @@ function qrefQueryHash(workspaceRoot: string, query: string): string {
  * R27 M1: no query TEXT is written here — see the section header. `query` is
  * still the parameter shape callers already pass (`rememberTaskQuery`'s own
  * signature is unchanged); only its on-disk representation changed.
+ *
+ * G3 (2026-09-08, qref-binding fix): an optional 4th field, `taskBinding` —
+ * the SAME opaque, server-derived task fingerprint the executed-next ledger
+ * partitions on (`util/packServeLog.ts`'s `executedNextLedgerKey`), never
+ * natural-language text, so it is exempt from the R27 M1 minimization this
+ * function's header argues for. Storing it here is what lets a later,
+ * handleless `read_file {qref}` re-pack recover the SAME partition a
+ * `task.handle`-carrying execution of this task's own `next` was recorded
+ * under — see `state/session.ts`'s `resolveTaskQueryRefBinding`. Omitted
+ * (not even an empty string) when the caller has none to give, so an old
+ * slot and a new bindingless mint are byte-identical on disk.
+ *
+ * G4 (2026-09-08, qref-task-scope fix): a 5th field, `taskHandle` — the
+ * WIRE `task.id` this epoch's task minted (`server.ts`'s `withTaskHandle`),
+ * a DIFFERENT value from `taskBinding` (the pre-mint canonical fingerprint):
+ * `taskBinding` partitions the executed-next ledger, `taskHandle` is what a
+ * later handleless re-pack must inject as `task_handle` so
+ * `taskContractScopeOf` resolves the SAME `{lane, taskHandle}` scope
+ * `taskContractStore.ts`'s `bindTaskContractHandle` relocated the
+ * requirement/obligation ledger to — otherwise every bare-`{qref}` rebuild
+ * reads an empty, just-vacated scope and loses the epoch's proven
+ * requirements. Also exempt from R27 M1 (an opaque handle, never query
+ * text); also omitted when absent, so a slot with only a `taskBinding` (or
+ * neither) is byte-identical to before this field existed.
  */
-export function persistQueryRef(workspaceRoot: string, ref: string, query: string): void {
+export function persistQueryRef(
+  workspaceRoot: string,
+  ref: string,
+  query: string,
+  taskBinding?: string,
+  taskHandle?: string,
+): void {
   if (ref === "" || query === "") return;
   const store = stateStoreFor(workspaceRoot);
   if (store === undefined || !store.available) return;
@@ -579,12 +609,44 @@ export function persistQueryRef(workspaceRoot: string, ref: string, query: strin
     store.put({
       key: qrefSlotKey(),
       purpose: "qref",
-      data: { ref, workspaceRoot, queryHash: qrefQueryHash(workspaceRoot, query) },
+      data: {
+        ref,
+        workspaceRoot,
+        queryHash: qrefQueryHash(workspaceRoot, query),
+        ...(typeof taskBinding === "string" && taskBinding !== "" ? { taskBinding } : {}),
+        ...(typeof taskHandle === "string" && taskHandle !== "" ? { taskHandle } : {}),
+      },
       ttlMs: QUERY_REF_TTL_MS,
     });
   } catch {
     /* best-effort, as above */
   }
+}
+
+/**
+ * Shared validation for both `rehydrateQueryRef` and `rehydrateQueryRefBinding`
+ * — everything through "this ref is the slot's CURRENT contents", stopping
+ * short of picking which field the caller actually wants. See
+ * `rehydrateQueryRef`'s own doc comment for the recovery/validation rationale;
+ * this is a pure factoring, not a behavior change.
+ */
+function _rehydrateQueryRecord(
+  workspaceRoot: string,
+  ref: string,
+): { data: Record<string, unknown>; query: string } | undefined {
+  if (ref === "") return undefined;
+  const store = stateStoreFor(workspaceRoot);
+  if (store === undefined || !store.available) return undefined;
+  const record = store.get(qrefSlotKey());
+  if (record === undefined || record.purpose !== "qref") return undefined;
+  const data = record.data;
+  if (data["ref"] !== ref) return undefined;
+  if (data["workspaceRoot"] !== workspaceRoot) return undefined;
+  if (typeof data["queryHash"] !== "string" || data["queryHash"] === "") return undefined;
+  const candidate = rawContractQueryForScope(workspaceRoot, { lane: currentSessionLane() });
+  if (candidate === undefined || candidate === "") return undefined;
+  if (qrefQueryHash(workspaceRoot, candidate) !== data["queryHash"]) return undefined;
+  return { data, query: candidate };
 }
 
 /**
@@ -606,19 +668,34 @@ export function persistQueryRef(workspaceRoot: string, ref: string, query: strin
  * truly unknown ref.
  */
 export function rehydrateQueryRef(workspaceRoot: string, ref: string): string | undefined {
-  if (ref === "") return undefined;
-  const store = stateStoreFor(workspaceRoot);
-  if (store === undefined || !store.available) return undefined;
-  const record = store.get(qrefSlotKey());
-  if (record === undefined || record.purpose !== "qref") return undefined;
-  const data = record.data;
-  if (data["ref"] !== ref) return undefined;
-  if (data["workspaceRoot"] !== workspaceRoot) return undefined;
-  if (typeof data["queryHash"] !== "string" || data["queryHash"] === "") return undefined;
-  const candidate = rawContractQueryForScope(workspaceRoot, { lane: currentSessionLane() });
-  if (candidate === undefined || candidate === "") return undefined;
-  if (qrefQueryHash(workspaceRoot, candidate) !== data["queryHash"]) return undefined;
-  return candidate;
+  return _rehydrateQueryRecord(workspaceRoot, ref)?.query;
+}
+
+/**
+ * G3 (2026-09-08): companion to `rehydrateQueryRef` — the task binding
+ * `persistQueryRef` stored alongside this qref, or undefined for a slot
+ * minted before this field existed (a legacy slot has no `taskBinding` key at
+ * all, which reads back exactly like an unset one — never a refusal). Shares
+ * every validation `rehydrateQueryRef` applies via `_rehydrateQueryRecord`, so
+ * a ref that fails to resolve its query text never reports a stale binding
+ * either.
+ */
+export function rehydrateQueryRefBinding(workspaceRoot: string, ref: string): string | undefined {
+  const binding = _rehydrateQueryRecord(workspaceRoot, ref)?.data["taskBinding"];
+  return typeof binding === "string" && binding !== "" ? binding : undefined;
+}
+
+/**
+ * G4 (2026-09-08): companion to `rehydrateQueryRefBinding` — the WIRE task
+ * handle `persistQueryRef` stored alongside this qref (see that function's
+ * own doc comment for why this is a distinct field from `taskBinding`), or
+ * undefined for a slot minted before this field existed. Same validation via
+ * `_rehydrateQueryRecord`, so a ref whose query text fails to resolve never
+ * reports a stale handle either.
+ */
+export function rehydrateQueryRefHandle(workspaceRoot: string, ref: string): string | undefined {
+  const handle = _rehydrateQueryRecord(workspaceRoot, ref)?.data["taskHandle"];
+  return typeof handle === "string" && handle !== "" ? handle : undefined;
 }
 
 /** Explicit epoch boundary, mirrored onto the durable slot. */

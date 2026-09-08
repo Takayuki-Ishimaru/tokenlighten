@@ -40,7 +40,13 @@ export function createSessionLedgerReader(workspaceRoot: string): SfServedLedger
       return getReadPaths(workspaceRoot).includes(path);
     },
     wasFullyServed(path: string, sha: string): boolean {
-      return wasFullyServed(workspaceRoot, path, sha);
+      // P2-1 (2026-09-08): this SF ledger reader interface has no projection
+      // concept of its own (SfServedLedgerReader.wasFullyServed(path,sha)
+      // takes no keepComments) — pass the pre-existing implicit default
+      // (elide) to preserve this reader's exact prior behavior; SF's
+      // byte-residency read is scoped to plain (non-projected) content,
+      // unchanged by P2-1.
+      return wasFullyServed(workspaceRoot, path, sha, false);
     },
     servedRangeCoverage(path: string, sha: string, totalLines: number) {
       return servedRangeCoverage(workspaceRoot, path, sha, totalLines);

@@ -32,13 +32,14 @@ import type {
   TaskDecision,
   TaskRef,
   ToolCall,
+  UnresolvedItem,
   WorkspaceMarker,
 } from "@tokenlighten/types";
-import type { TaskExecutionContract } from "@tokenlighten/types";
+import type { TaskExecutionContract, TaskCapabilityGap } from "@tokenlighten/types";
 import type { TaskPackResult } from "../features/task-pack/model.js";
 
 import { emittableToolCall } from "./refusal.js";
-import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor } from "../features/task-pack/canonicalDecision.js";
+import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow } from "../features/task-pack/canonicalDecision.js";
 import { semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
 import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
 import { noteSemanticFrontierDecisionSuppression, noteSemanticFrontierEvidenceSuppression, noteSemanticFrontierWithholding, semanticFrontierEvidenceWitnessId } from "./semanticFrontierTraceContext.js";
@@ -524,11 +525,53 @@ function projectCertificate(
   const workspace = projectWorkspaceMarker(contract.workspace_state)
     ?? projectWorkspaceMarker(result["workspace_state"]);
   if (workspace === undefined) return undefined;
-  const explicitGaps = Array.isArray(result["missing"])
-    ? result["missing"]
-        .filter((entry): entry is string => typeof entry === "string" && entry.startsWith("explicit-gap:"))
-        .slice(0, 8)
+  const missingExplicitGaps = Array.isArray(result["missing"])
+    ? result["missing"].filter((entry): entry is string => typeof entry === "string" && entry.startsWith("explicit-gap:"))
     : [];
+  // DESIGN-v0.15 R1 §4.2 (2026-09-08, P1-2 residual): a verified-absent
+  // request item (`TaskPackResult.request_item_absences`) must stay
+  // disclosed even when this pack's own decision certifies (act.answer/
+  // act.edit) rather than discover — `buildCapabilityGaps`'s
+  // `request-item-absent` gap only ever reaches `decision.gaps`, and D-4
+  // keeps `gaps` a discover-only wire member. Synthesized HERE, at
+  // projection time, rather than by writing into `result.missing` upstream:
+  // `result.missing` is a widely load-bearing internal field
+  // (readCodeTaskPack.ts gates fast_path/coverage/several other
+  // computations on `result.missing.length === 0`, not all of them
+  // `explicit-gap:`-aware), so adding to it demoted the single-site-
+  // unique-match fast path for any pack that also happened to name a
+  // verified-absent point (measured: a plain "Replace X in flags.ts" edit
+  // query lost its fast path once the query's own imperative verb was —
+  // correctly, by the SAME literal-scan proof — found absent from workspace
+  // content). Reading `request_item_absences` directly here is
+  // side-effect-free: it is consumed by no other gate in the file.
+  // Review finding 2(c) fix (2026-09-08): the string synthesized below used
+  // to claim "scope complete" UNCONDITIONALLY — false whenever the scan that
+  // certified this absence excluded any path (the reviewer's own
+  // counter-example: `Redis` inside `src/notes.adoc`, outside the
+  // un-widened scan's extension set — see `findText.ts`'s
+  // `widenFindUniverseForAbsence` and `readCodeTaskPack.ts`'s
+  // `RequestItemProof.absentScopeComplete`). `entry.scope_complete` (carried
+  // on every `TaskPackResult.request_item_absences` entry) is now the SOLE
+  // source of truth for which qualifier applies; the false-claiming branch
+  // is gone. Mirrors `search_files`' own `absence.caveat` phrasing ("N paths
+  // were excluded from the scan") so both surfaces read the same way.
+  const requestItemAbsenceGaps = Array.isArray(result["request_item_absences"])
+    ? result["request_item_absences"]
+        .map((entry) => entry as Record<string, unknown> | null)
+        .filter((entry): entry is Record<string, unknown> =>
+          entry !== null && typeof entry["term"] === "string" && entry["term"] !== "")
+        .map((entry) => {
+          const term = entry["term"] as string;
+          const scopeComplete = entry["scope_complete"] === true;
+          const omittedCount = typeof entry["omitted_count"] === "number" ? entry["omitted_count"] : 0;
+          const qualifier = scopeComplete
+            ? "; scope complete"
+            : `; ${omittedCount} ${omittedCount === 1 ? "path" : "paths"} excluded from the scan`;
+          return `explicit-gap:request-item-absent:${term} (no occurrence in scanned workspace files${qualifier})`;
+        })
+    : [];
+  const explicitGaps = [...missingExplicitGaps, ...requestItemAbsenceGaps].slice(0, 8);
   return {
     id,
     obligations: [obligations[0]!, ...obligations.slice(1)],
@@ -837,6 +880,407 @@ function projectCandidates(
   return candidates;
 }
 
+// ---------------------------------------------------------------------------
+// A.2.5.1 `UnresolvedItem` — WHAT the `await_input` is waiting on
+// ---------------------------------------------------------------------------
+
+/**
+ * Same bound as `SANCTIONED_ZOOM_CAP`, for the same reason: a residual list a
+ * caller cannot read in one glance is not a question, it is a dump. Four rows
+ * is what §3.4.1 already fixed as the per-response affordance budget, and the
+ * ORDER below is a precedence, so the four that survive are the four the pack
+ * itself ranks highest.
+ */
+const MAX_UNRESOLVED = 4;
+
+/**
+ * Finding 9 (adversarial review 2, 2026-09-08): `MAX_UNRESOLVED` bounds the
+ * ROW count, not bytes — a producer's `reason` (the archive producer's own
+ * row is already ~180 characters; a future gap/claim producer's prose is
+ * unbounded) is not itself length-limited. Same idiom as every other prose
+ * cap in this codebase (`slice(0, N - 1) + "…"`); applied once, centrally, in
+ * `push()` below so no row from any of the five sources can bypass it.
+ */
+const UNRESOLVED_REASON_MAX_CHARS = 160;
+
+/**
+ * The one `result.missing` prefix this projector still classifies itself: a
+ * change-contract diff residual, unrelated to the ledger-projection wire
+ * vocabulary that `canonicalDecision.ts`'s `parseLedgerMissingRow` owns
+ * exclusively (see `ledgerProjectionArchitecture.spec.ts` -- the vocabulary's
+ * literal prefixes are deliberately not spelled out again here, so this file
+ * never re-acquires a reference to them).
+ */
+const CHANGE_CONTRACT_MISSING_PREFIX = "change-contract:";
+
+function recordAt(value: unknown): Record<string, unknown> | undefined {
+  return value === null || typeof value !== "object" || Array.isArray(value)
+    ? undefined
+    : value as Record<string, unknown>;
+}
+
+function nonEmptyStrings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry !== "")
+    : [];
+}
+
+/**
+ * THE ONE LIVE CASE WHERE `await_input` CAN NAME THE CALL THAT UNBLOCKS IT
+ * (reviewer note 5, 2026-09-08).
+ *
+ * `read_file {query:"Create src/answer.ts with …", task:{epoch:"new",
+ * profile:"answer"}}` resolves a `create_target` — the path is explicit and its
+ * parent directory is proved — and then cannot act on it, because the CALLER
+ * declared a read-only profile and DESIGN-v0.15 §3 makes that declaration
+ * authoritative in both directions (mutation wording never flips `selected`).
+ * Both halves are right; the dead end is that the response said neither.
+ *
+ * The predicate is deliberately narrow — `source:"explicit"` AND
+ * `requested === "answer"` AND a resolved create target — so it names a
+ * CONFLICT BETWEEN TWO CALLER-SUPPLIED FACTS (the profile and the query), never
+ * a server inference the caller cannot see. An inferred "answer" is not this
+ * case: there the fix is the server's classification, not the caller's call.
+ */
+function declaredProfileCreateConflict(
+  result: Record<string, unknown>,
+): { path: string } | undefined {
+  const binding = recordAt(result["profile_binding"]);
+  if (binding === undefined) return undefined;
+  if (binding["source"] !== "explicit") return undefined;
+  if (binding["requested"] !== "answer" || binding["selected"] !== "answer") return undefined;
+  const target = projectCreateTarget(result);
+  return target === undefined ? undefined : { path: target.path };
+}
+
+/**
+ * The conflict's own continuation: THE SAME QUESTION, under the profile it
+ * needs. Not a widening and not a re-discovery — `qref` replays this exact
+ * pack's query, so the only thing that changes is the one declaration that
+ * blocked it, and the caller sees which one.
+ *
+ * `{qref, task:{profile}}` is a SANCTIONED request shape: it matches exactly
+ * the advertised `oneOf` qref branch (`server.ts`: required `qref`, excluding
+ * query/targets/cursor — `task` is deliberately NOT excluded there, which is
+ * what `{qref, task:{epoch:"new"}}` already relies on), and `task.profile` is
+ * an advertised property of `CANONICAL_TASK`. `cwd`/`lane` are attributed by
+ * `canonicalizeEmittedToolCalls` at the envelope, exactly as for every other
+ * minted call, so they are not spelled here.
+ *
+ * No qref (a pack the session cannot replay) means no grounded call, and the
+ * `unresolved` row travels alone — which is the honest shape, not a degraded
+ * one: the row already tells the caller which declaration to change.
+ */
+function declaredProfileConflictNext(result: Record<string, unknown>): ToolCall | undefined {
+  const qref = result["qref"];
+  if (typeof qref !== "string" || qref === "") return undefined;
+  return { tool: "read_file", arguments: { qref, task: { profile: "generic" } } };
+}
+
+/**
+ * Finding 8 (adversarial review 2, 2026-09-08): `declaredProfileCreateConflict`
+ * reads only `result` — it has no notion of WHICH `await_input` code is being
+ * assembled — so it could fire on any of the five, including the three whose
+ * own question is something else entirely: `choose-candidate` /
+ * `name-intended-target` (pick one of `candidates`) and
+ * `resolve-evidence-conflict` (say which surface is authoritative). A `next`
+ * riding alongside `candidates` is not UNSOUND (it is still grounded and
+ * consumes nothing), but the documented client rule — "run a carried `next`
+ * first; else pick a candidate" — would then silently skip the pick-one
+ * question the response also asked. This narrows the conflict to the two
+ * codes where it is genuinely the terminal's own question: the create-route
+ * terminal itself (`no-grounded-call-remains`, the reviewer's baseline
+ * repro) and the certified-but-still-open shape the note-6 repro measured
+ * (`act-on-served-evidence`). Used by BOTH `projectUnresolved`'s row 0 and
+ * `awaitInput`'s own `next` computation, so the two can never disagree about
+ * whether a grounded call exists — the doc comment on `awaitInput` promises
+ * exactly that.
+ */
+function profileConflictAppliesTo(code: AwaitInputCode): boolean {
+  return code === "no-grounded-call-remains" || code === "act-on-served-evidence";
+}
+
+/**
+ * Finding 4 (adversarial review 2, 2026-09-08): a `TaskCapabilityGap.reason`
+ * is authored as GUIDANCE for what the caller should do next (e.g. "read the
+ * contract's needs-context handles once, then batch the edits"), not as a
+ * residual statement of what is unresolved. Shipping it verbatim under
+ * `gap.kind` in `unresolved[]` falsifies both halves of the field: `kind`
+ * ("what class of thing is open") no longer matches prose that describes an
+ * action, and `reason` ("non-empty prose naming the specific residual") names
+ * an instruction instead. This builds a declarative sentence from the gap's
+ * own CLOSED six-member kind vocabulary (`TaskCapabilityGap["kind"]`) and its
+ * `obligation_ids` instead — never from `gap.reason`.
+ */
+function projectedCapabilityGapReason(gap: TaskCapabilityGap): string {
+  const ids = (gap.obligation_ids ?? []).filter((entry): entry is string => typeof entry === "string" && entry !== "");
+  const idList = ids.length > 0 ? ids.join(", ") : undefined;
+  switch (gap.kind) {
+    case "ambiguous-target":
+      return idList !== undefined
+        ? `target ambiguous across ${ids.length} candidate obligation(s): ${idList}`
+        : "target ambiguous across multiple candidates";
+    case "missing-evidence":
+      return idList !== undefined
+        ? `required evidence not served: ${idList}`
+        : "required evidence for this action is not yet served";
+    case "request-item-absent":
+      return idList !== undefined
+        ? `a requested item could not be located: ${idList}`
+        : "a requested item could not be located";
+    case "workspace-changed":
+      return "the workspace changed since this pack was built; the affected surfaces must be re-served";
+    case "unsupported-operation":
+      return idList !== undefined
+        ? `this operation is not supported for: ${idList}`
+        : "this operation is not supported for the named target";
+    case "invalid-request":
+      return "this request could not be validated as issued";
+    default: {
+      // `TaskCapabilityGap["kind"]` is a closed six-member union — this arm is
+      // unreachable under the current type, but stays fail-safe (never the
+      // raw `gap.reason`) if the union widens ahead of this switch, matching
+      // this file's own `GAP_CODES` fail-closed-floor precedent above.
+      const fallbackKind: string = gap.kind;
+      return idList !== undefined ? `${fallbackKind}: ${idList}` : `${fallbackKind} obligation is open`;
+    }
+  }
+}
+
+/**
+ * A.2.5.1: WHAT this `await_input` could not resolve, drawn only from what THIS
+ * RESPONSE already discloses.
+ *
+ * WHY IT IS A PROJECTION AND NOT A NEW COMPUTATION. Every row below restates a
+ * disclosure the pack publishes elsewhere — the contract's evidence model, its
+ * capability gaps, `result.missing` / `missing_required_surfaces` /
+ * `change_contract.missing` (the same four inputs `readCodeTaskPack.ts`'s
+ * `openEpochContractRequirements` reads to decide whether a served terminal may
+ * be certified), the candidate set, `checks`, `coverage_reason`. Deriving a
+ * residual here that the response does not otherwise state would make the
+ * decision an authority on facts nothing else can corroborate, which is the
+ * class §2.1 removes. So this function can only ever be WRONG BY OMISSION, and
+ * an omission is spelled by omitting the key.
+ *
+ * PRECEDENCE, most specific first (the cap is applied to the ordered list, so
+ * this is what survives a narrow budget):
+ *   0. the declared-profile conflict — the only row that also grounds a `next`.
+ *   1. the evidence model's own unresolved CLAIMS (id + reason + handle), then
+ *      its bare `unresolved[]` strings for a model that carries no claim rows.
+ *   2. open readiness obligations: `capability_gaps[]` (with `obligation_ids`),
+ *      `missing_required_surfaces[]`, then `result.missing` and, for an
+ *      edit-shaped pack, `change_contract.missing[]`. `explicit-gap:` rows are
+ *      excluded on `openEpochContractRequirements`'s own reasoning — a verified
+ *      absence is a PROOF, not an open requirement.
+ *   3. the code's own question, for the codes whose subject is the ambiguity
+ *      itself rather than a missing surface.
+ *   4. last resort: the pack's uncovered-concern `checks[]`, then its
+ *      `coverage_reason`. Both are this response's own words for "not closed".
+ *
+ * Returns `[]` when it can name nothing; the caller then OMITS the key
+ * (FLOOR-AWAIT: an empty array asserts a nameable set and declines to name it).
+ */
+function projectUnresolved(
+  result: Record<string, unknown>,
+  contract: TaskExecutionContract,
+  awaitCode: AwaitInputCode,
+  candidates: readonly Candidate[],
+): UnresolvedItem[] {
+  const out: UnresolvedItem[] = [];
+  const seen = new Set<string>();
+  // Finding 4: which `kind` first claimed a given `id` -- a caller correlates
+  // obligations BY id, so the same id must never point at two different
+  // kinds across this array.
+  const idKindOf = new Map<string, string>();
+  const push = (item: UnresolvedItem): void => {
+    if (out.length >= MAX_UNRESOLVED) return;
+    if (item.reason === "") return;
+    // Dedupe on the ORIGINAL (untruncated) kind+reason pair, before the
+    // finding-9 cap below -- two distinct long reasons that happen to share a
+    // truncated prefix must not collapse into one row.
+    const key = `${item.kind}\u0000${item.reason}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    let toPush = item;
+    if (item.id !== undefined) {
+      const owner = idKindOf.get(item.id);
+      if (owner === undefined) {
+        idKindOf.set(item.id, item.kind);
+      } else if (owner !== item.kind) {
+        // A DIFFERENT kind wants to reuse an id already claimed -- strip the
+        // id rather than drop the row: the disclosure is still real, only
+        // its cross-row identity correlator is not (finding 4).
+        const { id: _droppedId, ...rest } = item;
+        toPush = rest;
+      }
+    }
+    if (toPush.reason.length > UNRESOLVED_REASON_MAX_CHARS) {
+      toPush = { ...toPush, reason: toPush.reason.slice(0, UNRESOLVED_REASON_MAX_CHARS - 1).trimEnd() + "…" };
+    }
+    out.push(toPush);
+  };
+
+  // 0. The declared-profile conflict (reviewer note 5), narrowed to the two
+  // codes where it is genuinely this terminal's own question (finding 8).
+  const conflict = profileConflictAppliesTo(awaitCode) ? declaredProfileCreateConflict(result) : undefined;
+  if (conflict !== undefined) {
+    push({
+      kind: "profile-conflict",
+      reason: `explicit create of ${conflict.path} needs task.profile generic (declared: answer)`,
+      path: conflict.path,
+    });
+  }
+
+  // 1. The evidence model. Its two carriers overlap: `unresolved[]` is a list
+  // of CLAIM IDS, so an id whose claim row was just emitted (with that row's
+  // reason and handle) must not be restated as a bare, reasonless second row.
+  const model = contract.evidence_model;
+  const claimedIds = new Set<string>();
+  for (const claim of model?.claims ?? []) {
+    if (claim.status !== "unresolved") continue;
+    claimedIds.add(claim.id);
+    const handle = claim.evidence_handles.find((entry) => typeof entry === "string" && entry !== "");
+    push({
+      kind: claim.kind,
+      reason: claim.reason,
+      ...(claim.id !== "" ? { id: claim.id } : {}),
+      ...(handle !== undefined ? { handle } : {}),
+    });
+  }
+  for (const entry of nonEmptyStrings(model?.unresolved)) {
+    if (claimedIds.has(entry)) continue;
+    push({ kind: "unresolved-claim", reason: `evidence claim "${entry}" is unresolved`, id: entry });
+  }
+
+  // 2. Open readiness obligations.
+  for (const gap of contract.capability_gaps ?? []) {
+    const id = (gap.obligation_ids ?? []).find((entry) => typeof entry === "string" && entry !== "");
+    push({
+      kind: gap.kind,
+      // Finding 4: a projected declarative sentence, never `gap.reason`
+      // verbatim -- that prose is guidance, not a residual statement.
+      reason: projectedCapabilityGapReason(gap),
+      ...(id !== undefined ? { id } : {}),
+    });
+  }
+  const roles = nonEmptyStrings(result["missing_required_surfaces"]);
+  for (const role of roles) {
+    push({
+      kind: "unserved-required-role",
+      reason: `required surface role "${role}" is not served by this response`,
+    });
+  }
+  const changeContract = recordAt(result["change_contract"]);
+  const missingRows = [
+    ...nonEmptyStrings(result["missing"]),
+    ...(contract.next_action === "answer" ? [] : nonEmptyStrings(changeContract?.["missing"])),
+  ];
+  for (const entry of missingRows) {
+    const parsed = parseLedgerMissingRow(entry);
+    if (parsed !== undefined) {
+      // "explicit-gap" rows are a verified absence, not an open requirement
+      // (openEpochContractRequirements's own reasoning) — named by the
+      // parser, but never pushed as a residual here.
+      if (parsed.kind !== "explicit-gap") push(parsed);
+      continue;
+    }
+    if (entry.startsWith(CHANGE_CONTRACT_MISSING_PREFIX)) {
+      push({ kind: "change-contract", reason: entry.slice(CHANGE_CONTRACT_MISSING_PREFIX.length) });
+      continue;
+    }
+    // A bare row is the role axis's ordinary spelling (`readFamily.ts` keeps
+    // `missing` on a partial pack precisely as the unresolved-obligation
+    // disclosure), so it is stated as one rather than as anonymous prose.
+    push({
+      kind: "unserved-required-role",
+      reason: `required surface role "${entry}" is not served by this response`,
+    });
+  }
+
+  // 3. The code's own question.
+  if (awaitCode === "choose-candidate" || awaitCode === "name-intended-target") {
+    const ambiguities = Array.isArray(result["concern_ambiguities"]) ? result["concern_ambiguities"].length : 0;
+    const count = candidates.length > 0 ? candidates.length : ambiguities;
+    push({
+      kind: "ambiguous-target",
+      reason: count > 0
+        ? `${count} candidate target(s) match this request; name the intended one`
+        : "the intended target is ambiguous and this response cannot narrow it further",
+    });
+  }
+  if (awaitCode === "resolve-evidence-conflict") {
+    for (const entry of nonEmptyStrings(model?.counterexamples)) {
+      push({ kind: "evidence-conflict", reason: entry });
+    }
+    push({
+      kind: "evidence-conflict",
+      reason: "served evidence disagrees; say which surface is authoritative",
+    });
+  }
+
+  // 4. Last resort — the pack's own words for "not closed".
+  for (const entry of nonEmptyStrings(result["checks"])) {
+    if (!entry.startsWith("concern(s) not covered")) continue;
+    push({ kind: "uncovered-concern", reason: entry });
+  }
+  if (out.length === 0) {
+    const coverage = result["coverage"];
+    const reason = result["coverage_reason"];
+    if (coverage === "partial" || coverage === "focused") {
+      push({
+        kind: "incomplete-coverage",
+        reason: typeof reason === "string" && reason !== ""
+          ? `pack coverage is "${String(coverage)}" (${reason}); no served surface closes the remainder`
+          : `pack coverage is "${String(coverage)}"; no served surface closes the remainder`,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * The `await_input` member, assembled once so all four emission sites within
+ * `projectTaskDecision` agree. (A fifth, documented exception exists outside
+ * this projector entirely: `server.ts`'s `overviewRedirectFamilyDecision`
+ * builds an inline `{kind:"await_input", code:"no-grounded-call-remains"}`
+ * for a producer stub that carries no `TaskExecutionContract` at all — see
+ * that function's own doc comment, review-2 finding 7, for why it cannot
+ * route through here.)
+ *
+ * FLOOR-AWAIT is enforced HERE rather than at each call site: `unresolved` is
+ * omitted when nothing could be named, and never emitted empty; and the one
+ * `next` this kind may carry (D-1 as amended) is minted from the SAME predicate
+ * that puts its `profile-conflict` row on `unresolved`, so the two can never
+ * disagree about whether a grounded call exists.
+ *
+ * NO LOOP IS REACHABLE. The conflict predicate requires
+ * `profile_binding.requested === "answer"`; the emitted call declares
+ * `task.profile:"generic"`, so the re-pack it names cannot satisfy the
+ * predicate again.
+ */
+function awaitInput(
+  result: Record<string, unknown>,
+  contract: TaskExecutionContract,
+  code: AwaitInputCode,
+  candidates: readonly Candidate[],
+): TaskDecision {
+  const unresolved = projectUnresolved(result, contract, code, candidates);
+  // Finding 8: gated by the SAME predicate `projectUnresolved`'s own row 0
+  // uses, so `next` and the `profile-conflict` row it grounds can never
+  // disagree about whether this code is one where the conflict is the
+  // terminal's own question.
+  const next = profileConflictAppliesTo(code) && declaredProfileCreateConflict(result) !== undefined
+    ? declaredProfileConflictNext(result)
+    : undefined;
+  return {
+    kind: "await_input",
+    code,
+    ...(candidates.length > 0 ? { candidates: [...candidates] } : {}),
+    ...(unresolved.length > 0 ? { unresolved } : {}),
+    ...(next !== undefined ? { next } : {}),
+  };
+}
+
 /**
  * §2.1.1's evidence floor for `act.answer`, applied.
  *
@@ -1138,7 +1582,11 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
       const advisory = discoveryBundleAdvisory(result as never);
       return { kind: "discover", next: restoring, ...(advisory !== undefined ? { advisory } : {}), ...(gaps.length > 0 ? { gaps } : {}) };
     }
-    return { kind: "await_input", code: "no-grounded-call-remains" };
+    // A.2.5.1: name the residual. The candidate set stays EMPTY here — this is
+    // a floor breach on an `act`, not a pick-one — so this is byte-identical to
+    // the pre-2026-09-08 shape except for the `unresolved`/`next` it can now
+    // carry.
+    return awaitInput(result, contract, "no-grounded-call-remains", []);
   }
 
   if (canonicalKind === "discover") {
@@ -1150,8 +1598,9 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
     }
     // §2.1: `discover` without a `next` is unrepresentable. The honest shape
     // for "I cannot name a call" is `await_input`, and A.7.2 branch 4 is
-    // exactly that condition.
-    return { kind: "await_input", code: "no-grounded-call-remains" };
+    // exactly that condition — plus, since 2026-09-08, WHAT it could not
+    // ground (A.2.5.1).
+    return awaitInput(result, contract, "no-grounded-call-remains", []);
   }
 
   // await-input. A.7.2 / A.9.2 row 21: the code is emitted by the branch that
@@ -1302,14 +1751,10 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
         ...(gaps.length > 0 ? { gaps } : {}),
       };
     }
-    return { kind: "await_input", code: "no-grounded-call-remains" };
+    return awaitInput(result, contract, "no-grounded-call-remains", []);
   }
 
-  return {
-    kind: "await_input",
-    code: awaitCode,
-    ...(candidates.length > 0 ? { candidates } : {}),
-  };
+  return awaitInput(result, contract, awaitCode, candidates);
 }
 
 /**
@@ -1324,17 +1769,30 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
  * `evidence[]`, at the moment the decision is built. A rule about it is
  * therefore unstateable at the canonical layer and belongs to this one.
  *
- * ONE RULE TODAY, deliberately. This is not a home for restating the type
- * system: `TaskDecision` already makes `next` required on `discover` and
- * `certificate` required on both `act.*` members, so a rule for those would be
- * unreachable. `choose-candidate`'s pairing with `candidates` is the pairing
- * the TYPES CANNOT express — `candidates` is optional on `await_input` because
- * four of the five codes legitimately omit it.
+ * TWO RULES, and each is one the TYPES CANNOT express. This is not a home for
+ * restating the type system: `TaskDecision` already makes `next` required on
+ * `discover` and `certificate` required on both `act.*` members, so a rule for
+ * those would be unreachable.
+ *
+ *  1. `choose-candidate`'s pairing with `candidates` — `candidates` is optional
+ *     on `await_input` because four of the five codes legitimately omit it, so
+ *     the one code that IS a pick-one by definition cannot require it in the
+ *     type.
+ *  2. FLOOR-AWAIT's emptiness half (added 2026-09-08 with `unresolved`):
+ *     ABSENT means "the server could not name the residual" and stays honest;
+ *     an EMPTY ARRAY asserts a nameable set and then declines to name it. A
+ *     non-empty tuple type would express this, but `UnresolvedItem[]` is the
+ *     declared wire shape (a caller reading the schema sees a plain array), so
+ *     the rule lives here — the same trade `candidates` already makes.
  */
 export function taskDecisionWireViolations(decision: TaskDecision | undefined): string[] {
   if (decision === undefined || decision.kind !== "await_input") return [];
-  if (decision.code !== "choose-candidate") return [];
-  return (decision.candidates?.length ?? 0) > 0
-    ? []
-    : ["choose-candidate-requires-served-candidates"];
+  const violations: string[] = [];
+  if (decision.code === "choose-candidate" && (decision.candidates?.length ?? 0) === 0) {
+    violations.push("choose-candidate-requires-served-candidates");
+  }
+  if (decision.unresolved !== undefined && decision.unresolved.length === 0) {
+    violations.push("unresolved-present-but-empty");
+  }
+  return violations;
 }

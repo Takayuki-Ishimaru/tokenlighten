@@ -13,9 +13,9 @@ TLは必要slice+edit handleを返す. 全file作業をnative read/Explore系sub
 
 応答は必ず`{v:1,kind,...}`; field有無でなく`kind`で分岐. 未知の`kind`はSAFE-STOP: 報告のみでeditを発行せず、fieldからの推測禁止.
 
-- `read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`はdiscovery閉鎖、配信済み証拠で即行動. 独立した変更は一回の`edit_file`(`edits[]`、各item自前`path`/`handle`)にbatch. `discover`=>その`next`を実行; `await_input`=>携行`next`を実行、無ければcandidate`targets`で一度だけre-pack; `done`=>停止.
+- `read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`はdiscovery閉鎖、配信済み証拠で即行動. その`certificate.gaps`も確実な不在点を示しうる. 独立した変更は一回の`edit_file`(`edits[]`、各item自前`path`/`handle`)にbatch. `discover`=>その`next`を実行; `await_input`=>(`unresolved[]`が不明点を名指し)携行`next`を実行、無ければcandidate`targets`で一度だけre-pack; `done`=>停止.
 - `refusal`では`retry`だけが有効な遷移. 携行`next`はcall全体として逐語実行し、無ければ`retry`に従って続きの自作は禁止. hintは助言、callでない.
-- `read.receipt`はre-packの合図ではない: `next`があれば従い、無ければ再掲された証拠/certificateで行動または停止.
+- `read.receipt`はre-packの合図ではない: `next`があれば従い、無ければ再掲された証拠/certificateで行動または停止. `budget.allowFull`も再送を強制しない(強制は`task.force_serve`のみ).
 - bytesが部分的ならまず同一handleをzoom: `remaining` range(有界)を要求. 上限応答後は`next`に従う; `full`再試行や新queryでのre-pack禁止. 読みは`budget.bytes`/`budget.tokens`でも上限可.
 - Searchは`action:"find",queries:["<識別子1語>"]`; 複数識別子は一回の`queries=[…]`、逐次禁止. 呼出箇所は`references`、一覧は`tree`.
 - path+識別子+変更が平易なら単一値editは高速close. それ以外はTL handle経由で`allowPathFallback:false`によりedit; 新規fileは`create:true`+明示`cwd`. `act.edit` fence中はこのepochでTLが配信したfileのみ編集可(未配信targetは`execution-typestate`拒否 — その`next`を実行); `target:"all"`は全一致を置換(`applied[].replaced`); `create:true`は`cwd`でpinされれば混在batch可. create応答の`sha`/`bytes`/`total_lines`が書込内容を証明; 読み返し不要. `operation_id`で再試行が安全化しreplayも明示.

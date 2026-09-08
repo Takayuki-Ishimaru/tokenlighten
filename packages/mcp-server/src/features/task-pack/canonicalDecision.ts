@@ -1055,6 +1055,33 @@ function hasUnservedEpochContract(result: TaskPackResult): boolean {
 }
 
 /**
+ * Parses one already-minted `result.missing` row from the ledger-projection
+ * vocabulary (`taskContractGapProjection`'s `open`/`explicitGaps` arrays,
+ * turned into these wire prefixes by readCodeTaskPack.ts) back into a
+ * `{kind, reason}` pair. This file is the vocabulary's sole PARSER
+ * (`ledgerProjectionArchitecture.spec.ts` gatekeeps both roles to this
+ * producer/parser pair, named there explicitly) — `decisionWire.ts`'s
+ * `projectUnresolved` calls this instead of matching the prefixes itself.
+ *
+ * `explicit-gap:` rows ARE returned here (`kind: "explicit-gap"`), not
+ * swallowed — this function only PARSES; it does not decide what a caller
+ * does with the result. `projectUnresolved` is the one that skips pushing
+ * that kind as an `unresolved[]` residual, per `openEpochContractRequirements`'s
+ * own reasoning that a verified absence is a proof, not an open requirement.
+ */
+const LEDGER_MISSING_ROW_KINDS: ReadonlyArray<readonly [string, string]> = [
+  ["unresolved-ledger:", "unresolved-ledger"],
+  ["explicit-gap:", "explicit-gap"],
+  ["unserved-required-role:", "unserved-required-role"],
+  ["uncovered-concern:", "uncovered-concern"],
+];
+
+export function parseLedgerMissingRow(row: string): { kind: string; reason: string; id?: string } | undefined {
+  const matched = LEDGER_MISSING_ROW_KINDS.find(([prefix]) => row.startsWith(prefix));
+  return matched === undefined ? undefined : { kind: matched[1]!, reason: row.slice(matched[0].length) };
+}
+
+/**
  * DESIGN-v0.15 R1 (2026-09-07) / wave1-contract.md §3.4 — "the act→discover
  * demotion arbitration" seat this module owns for request items.
  *

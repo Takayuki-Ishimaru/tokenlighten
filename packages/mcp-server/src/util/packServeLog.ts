@@ -1096,6 +1096,42 @@ export function hasExecutedNext(
 }
 
 /**
+ * G3 (2026-09-08, qref-binding fix): the same "bound first, unbound fallback"
+ * question the P1-1 receipt witnesses already ask this ledger
+ * (`features/task-pack/readCodeTaskPack.ts`'s `receiptNextAlreadyExecuted`),
+ * generalized so the FRESH-BUILD no-repeat gates can ask it too —
+ * `suppressNonProgressingNextCall`/`alternativeProgressAxis` in that same
+ * file, and `server.ts`'s wire-level `consumed` predicate
+ * (`recordTaskPackExecution`).
+ *
+ * WHY BOTH PARTITIONS. A handleless re-pack can now recover a task's
+ * canonical binding from its `qref` (`state/session.ts`'s
+ * `resolveTaskQueryRefBinding`) even though the CALL BEING CHECKED never
+ * carried an explicit `task.handle`. But two different producer shapes
+ * disagree on which partition an execution was recorded under: a `next` that
+ * itself restates `task.handle` (e.g. a re-scope call) is recorded under that
+ * handle's resolved fingerprint (`canonicalTaskBindingForExecutedCall`
+ * resolves it directly from the call's own args), while a `next` with no
+ * task fields at all — the shape a plain content read's `next` has — is
+ * always recorded under the unbound partition, because that resolver only
+ * attempts a registered-scope lookup for `search_files`. Checking the
+ * recovered binding FIRST (most specific — matches a caller that supplies
+ * its own `task.handle` exactly as before) and the unbound partition SECOND
+ * (the historical fallback, still written today) finds either shape without
+ * weakening the existing bound check.
+ */
+export function hasExecutedNextBoundOrUnbound(
+  workspaceRoot: string,
+  lane: string,
+  tool: string,
+  args: Record<string, unknown>,
+  taskBinding?: string,
+): boolean {
+  if (hasExecutedNext(workspaceRoot, lane, tool, args, taskBinding)) return true;
+  return taskBinding !== undefined && taskBinding !== "" && hasExecutedNext(workspaceRoot, lane, tool, args);
+}
+
+/**
  * R1 (2026-08-28): the exact inverse of ONE `recordExecutedNext`, for the
  * dispatcher's in-flight pre-record only.
  *

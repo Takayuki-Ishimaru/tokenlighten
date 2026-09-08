@@ -2,6 +2,35 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.14.2
+
+- Continuing a task remembers completed reads and requirements established by
+  earlier calls, avoiding repeated finished steps.
+- Improved focused discovery for named files and identifiers, multi-point
+  requests, and Japanese sentences.
+- Topics that cannot be found are disclosed alongside the available content.
+- Input-waiting decisions explain what remains unresolved and include a
+  recovery call when available.
+- Repeated full reads respect the requested comment projection and avoid
+  resending content already in context.
+- Recovery from an edit batch that includes unread files gathers the context
+  needed for the whole batch.
+- Explicit file-creation requests are recognized directly.
+- Code-only workspace setup uses the compact agent guide by default; explicit
+  guide-profile settings continue to take precedence.
+- Corrected request-schema validation and improved task-state recovery after
+  an interrupted state write.
+
+### Migration
+
+`budget.allowFull:true` now only raises the full-read size cap. Clients that
+used it to force a resend should use `task.force_serve:true` instead.
+Re-run workspace setup to refresh the managed agent instructions. The three
+tools, read-only default, and temporary legacy-input migration bridge are
+unchanged. No dependency changes are declared in this release.
+
+See the [v0.14.2 release notes](release-docs/github-release-v0.14.2.md).
+
 ## 0.14.1
 
 - Task completion now waits until the returned content covers every point in

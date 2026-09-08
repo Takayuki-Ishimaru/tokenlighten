@@ -224,10 +224,52 @@ export function archiveTaskPackInvariantViolations(pack: ArchiveTaskPack): strin
  * NO `gaps`. `CapabilityGap` reports a SEMANTIC gap; "the scan matched nothing"
  * and "the scan was truncated" are delivery facts, which is precisely what
  * `TaskDecision`'s own doc says the absence of `gaps` means.
+ *
+ * P2-4 (2026-09-08) DELIBERATELY STOPS AT THE MAINLINE PRODUCER. The v0.14.1
+ * hands-on report's P2-4 item is fixed in `readCodeTaskPack.ts`'s
+ * `buildTaskExecutionContract`, which now mints a certificate for its
+ * `grantServedTerminal` state so ruling 6's step-1 re-siting arm reaches
+ * `act.*` instead of parking on this same token. That fix is NOT mirrored
+ * here, and the two paragraphs above are the reason rather than an oversight:
+ * the mainline producer certifies a state `state/session.ts` can recognise (a
+ * `needs-followup` contract, so `recordExecutionContract` clears the fence and
+ * the certificate stays wire guidance) over a frontier of real, writable
+ * workspace files. An archive pack has neither half — `projectTaskPackWire` is
+ * wire-only so no session record exists for a challenge to match, and every
+ * archive surface is a read-only virtual member, so `projectFrontier` could
+ * only ever produce the empty frontier `editFloorHolds` rejects. Minting an id
+ * here would therefore buy no `act.*` and cost one unmatched certificate.
+ *
+ * A.2.5.1 `unresolved` (2026-09-08), and WHERE ITS SOURCE COMES FROM. The three
+ * structured residual carriers an archive pack owns — `execution_contract
+ * .unresolved`, `missing`, `archive.omitted_entries` — are ALL EMPTY on this
+ * arm by construction: `prepared` is `surfaces.length > 0 && omittedEntries
+ * === 0`, `missing` is populated only when there are no surfaces, and
+ * `archiveTaskPackInvariantViolations` enforces `archive-prepared-forbids-
+ * unresolved` outright. So the row below is NOT drawn from them, and inventing
+ * one that pretended to be would be worse than saying nothing.
+ *
+ * What IS nameable is the reason this decision is an `await_input` at all, and
+ * the pack publishes it: `archive.read_only` (a literal `true` in the type).
+ * The residual is the caller's own sufficiency judgement — the archive family
+ * cannot certify a terminal, so nobody but the caller can close it. That is
+ * exactly the question P2-4 said `act-on-served-evidence` leaves unstated, and
+ * it is one row, not a dump. `required_action` is NOT reused as the reason: it
+ * is a grant ("answer from the served slices"), and a grant restated in a
+ * residual slot is the decision↔delivery falsification this field exists to
+ * remove.
  */
 export function archiveTaskDecision(pack: ArchiveTaskPack): TaskDecision {
   if (pack.execution_contract.phase === "prepared") {
-    return { kind: "await_input", code: "act-on-served-evidence" };
+    return {
+      kind: "await_input",
+      code: "act-on-served-evidence",
+      unresolved: [{
+        kind: "uncertifiable-terminal",
+        reason: `archive members of ${pack.archive.path} are read-only virtual surfaces, so this family issues no certificate; whether the served slices answer the question is your judgement`,
+        path: pack.archive.path,
+      }],
+    };
   }
   return {
     kind: "discover",

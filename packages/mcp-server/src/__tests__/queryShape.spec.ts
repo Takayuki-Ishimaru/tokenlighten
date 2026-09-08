@@ -107,3 +107,74 @@ describe("tokenizeQuery mode:\"simple\" — CJK-aware", () => {
     expect(tokens).toEqual(["investigate", "contentsufficiency", "regression"]);
   });
 });
+
+// field-report fix, 2026-09-08: a discovery-fallback task_pack fed a
+// mangled hiragana fragment ("きたときの", out of "エラーが起きたときの
+// リトライ処理を説明してください") straight into a `search_files find`
+// `queries` item — a token that can never match anything, wasting the
+// whole call. Root cause: extractCjkTokens's whole-hiragana-run token
+// (correct for cjkSpans.ts's OTHER consumer, BM25F content indexing, where
+// IDF suppresses a common term — see cjkSpans.ts's own comment) has no
+// query-tokenizer analog: a query-token pipeline can afford to just never
+// emit hiragana at all. See extractCjkQueryTokens's own comment in
+// util/queryShape.ts for the full rule set this suite pins.
+const isHiraganaOnlyToken = (t: string): boolean => /^[぀-ゟ]+$/u.test(t);
+
+describe("tokenizeQuery mode:\"identifier\" — CJK verb/particle stripping (field-report fix, 2026-09-08)", () => {
+  it("エラーが起きたときのリトライ処理を説明してください — exactly the three useful tokens, no hiragana fragment", () => {
+    const tokens = identifierMode("エラーが起きたときのリトライ処理を説明してください");
+    expect(tokens.some(isHiraganaOnlyToken)).toBe(false);
+    expect(tokens).not.toContain("きたときの");
+    // 起 (single kanji, followed by hiragana not katakana) and 説明 (a
+    // 説明する "explain" verb stem — the sentence's own instruction verb,
+    // immediately followed by してください) are both correctly dropped,
+    // leaving exactly these three. Unordered: identifier mode re-sorts by
+    // scoreTokenDistinctiveness (here, pure length, since none of the three
+    // gets an ASCII-shaped bonus) — a pre-existing behavior of this mode,
+    // unrelated to this fix; see the "simple" mode sibling test below for
+    // the first-appearance order extractCjkQueryTokens itself produces.
+    expect(tokens).toHaveLength(3);
+    expect(tokens).toEqual(expect.arrayContaining(["エラー", "リトライ", "処理"]));
+  });
+
+  it("Cache.get の有効期限判定を修正してください — dotted Latin identifier survives, no hiragana fragment, the sentence's own verb stem is dropped", () => {
+    const tokens = identifierMode("Cache.get の有効期限判定を修正してください");
+    expect(tokens.some(isHiraganaOnlyToken)).toBe(false);
+    expect(tokens).toContain("Cache.get");
+    // 修正 ("fix") is this sentence's instruction verb (修正してください),
+    // dropped the same way 説明 is above — never surfaced as its own term.
+    expect(tokens).not.toContain("修正");
+    // The kanji-run rule itself is unchanged by this fix (still one greedy
+    // Han run, no internal splitting) — assert on the resulting shape
+    // either way rather than pinning one arbitrarily.
+    const fused = tokens.includes("有効期限判定");
+    const split = tokens.includes("有効期限") && tokens.includes("判定");
+    expect(fused || split).toBe(true);
+  });
+
+  it("a single kanji immediately followed by a katakana run still survives (regression guard on the length-1 Han exception)", () => {
+    const tokens = identifierMode("語ヘルパーの実装");
+    expect(tokens).toContain("語");
+    expect(tokens).toContain("ヘルパー");
+    expect(tokens).toContain("実装");
+    expect(tokens.some(isHiraganaOnlyToken)).toBe(false);
+  });
+});
+
+describe("tokenizeQuery mode:\"simple\" — CJK verb/particle stripping (field-report fix, 2026-09-08)", () => {
+  it("エラーが起きたときのリトライ処理を説明してください — exactly the three useful tokens, first-appearance order preserved, no hiragana fragment", () => {
+    const tokens = simpleMode("エラーが起きたときのリトライ処理を説明してください");
+    expect(tokens.some(isHiraganaOnlyToken)).toBe(false);
+    expect(tokens).not.toContain("きたときの");
+    // Unlike "identifier" mode (no distinctiveness sort here), this mode
+    // preserves first-appearance order, matching the fix's own spec.
+    expect(tokens).toEqual(["エラー", "リトライ", "処理"]);
+  });
+
+  it("Cache.get の有効期限判定を修正してください — dotted Latin identifier survives even though this mode lowercases its own ASCII pass", () => {
+    const tokens = simpleMode("Cache.get の有効期限判定を修正してください");
+    expect(tokens.some(isHiraganaOnlyToken)).toBe(false);
+    expect(tokens).toContain("Cache.get");
+    expect(tokens).not.toContain("修正");
+  });
+});

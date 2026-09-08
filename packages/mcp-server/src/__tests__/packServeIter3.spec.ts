@@ -269,7 +269,7 @@ describe("applyEnvelopeWeightTrim — F4: orientation-weight shedding", () => {
       role: "contract", handle: "h1", path: "src/a.ts", range: "1-40",
       why: "anchor-focus: query-matched symbol foo",
       outline: Array.from({ length: 8 }, (_, i) => `L${i * 5 + 1}: heading ${i}`),
-      likely_edits: [{ kind: "handle-scoped-edit", handle: "h1", target: "edit_file handle=h1", confidence: 0.6 }],
+      likely_edits: [{ kind: "handle-scoped-edit", handle: "h1", confidence: 0.6 }],
       code: "export function foo() {\n" + "  // body line\n".repeat(30) + "}\n",
     };
     const partial: TaskPackSurface = {

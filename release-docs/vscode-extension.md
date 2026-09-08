@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.14.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.1/tokenlighten-vscode-extension-0.14.1.vsix)** from the v0.14.1 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.14.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.2/tokenlighten-vscode-extension-0.14.2.vsix)** from the v0.14.2 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,7 +14,7 @@ Download **[tokenlighten-vscode-extension-0.14.1.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.14.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.2.vsix
 ~~~
 
 To build from source:
@@ -33,6 +33,8 @@ The workspace switch enables or disables TokenLighten. Re-running setup enables 
 v0.13.0 includes a schema stamp in the MCP provider version. When the advertised tool schema changes, VS Code refreshes its cached definition automatically; no manual provider rename or cache reset should be needed.
 
 The `tokenlighten.toolSurface` setting (default `full`) selects the advertised tool schema: `full` includes every capability, `code` advertises code/plain-text/config `read_file`/`edit_file`/`search_files` only — a smaller schema, with Office/archive/credential inputs removed rather than merely refused. See [MCP tools](mcp-tools.md#tool-surface) for details. Changing it is a schema-affecting change like the one above, so VS Code refreshes automatically the same way.
+
+The `tokenlighten.guideProfile` setting selects the size of guide written into AGENTS.md/CLAUDE.md during setup: `full`, `medium`, or `compact`. Leave it unset to get the smart default — `full` normally, or `compact` when `tokenlighten.toolSurface` is `code` (a code-only server has nothing to gain from the full guide's Office/archive/credential instructions). Set `tokenlighten.guideProfile` explicitly to override this default in either direction.
 
 ## Status bar and Diagnostics
 
@@ -62,5 +64,6 @@ Repository indexing and context selection run locally. The extension does not ad
 | `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases for a newer VSIX at startup; installation always requires user action. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically or selects English/Japanese explicitly. |
 | `tokenlighten.toolSurface` | `full` | Advertised MCP tool surface: `full` (every capability) or `code` (code/plain-text/config only, a smaller tool schema). Changing this requires reconnecting. |
+| `tokenlighten.guideProfile` | `full` | Guide size written during setup: `full`, `medium`, or `compact`. Left unset, setup writes `compact` instead of `full` when `tokenlighten.toolSurface` is `code`; an explicit value here always wins over that default. |
 
-The desktop application is not included in the public v0.14.1 release.
+The desktop application is not included in the public v0.14.2 release.

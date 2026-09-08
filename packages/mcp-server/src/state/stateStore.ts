@@ -69,9 +69,12 @@
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -571,14 +574,68 @@ export class WorkspaceStateStore {
   // Internals
   // -------------------------------------------------------------------------
 
+  /**
+   * True when the journal file exists, is non-empty, and its LAST byte is
+   * not `\n` — i.e. appending `json + "\n"` right now would glue this new
+   * record onto whatever is already at the end of the file, corrupting BOTH
+   * into one unparseable line.
+   *
+   * WHY THIS CAN HAPPEN ON A HEALTHY, RUNNING STORE. `_replayJournal` splits
+   * on `"\n"` and tolerates a final element with no trailing separator — the
+   * ordinary, expected shape of the LAST line of a normal file. A "truncated
+   * mid-record" crash (`rc/storeCorruption.rc.spec.ts`'s own drill) can, by
+   * pure byte-offset luck, cut the file immediately AFTER a complete
+   * record's closing `}` but BEFORE the `\n` that used to follow it in the
+   * pre-crash file — `_tryPlainLoad` then loads this as a clean, if short,
+   * journal (every split element parses; nothing throws), keeping the SAME
+   * store epoch rather than resetting. That is the correct, intended
+   * degradation. But the NEXT `_appendRaw` on this same file, before this
+   * guard existed, blindly appended `json + "\n"` onto that newline-less
+   * tail, splicing the new record onto the old one's last line
+   * (`...oldRecord}{"t":"put",...}` — one line, two JSON values, unparsable)
+   * — turning a clean partial recovery into real corruption THIS PROCESS
+   * itself just caused, discovered by the very next write's pre-CAS resync
+   * (`_resyncLocked`) as a hard parse failure and reset to a FRESH epoch —
+   * silently, mid-request, well after any earlier `resolveTaskHandle` check
+   * against the OLD epoch had already told a caller its handle was live.
+   *
+   * Reads only the final byte via a raw fd, never the whole file, so this
+   * stays cheap even near `MAX_JOURNAL_BYTES`.
+   */
+  private _journalMissingTrailingNewline(): boolean {
+    let fd: number | undefined;
+    try {
+      const stat = lstatSync(this._path(JOURNAL_FILE));
+      if (!stat.isFile() || stat.size === 0) return false;
+      fd = openSync(this._path(JOURNAL_FILE), "r");
+      const buf = Buffer.alloc(1);
+      readSync(fd, buf, 0, 1, stat.size - 1);
+      return buf[0] !== 0x0a;
+    } catch {
+      // No file yet, or unreadable: appendFileSync below creates it fresh —
+      // nothing to glue onto.
+      return false;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* best-effort close; the read already happened */
+        }
+      }
+    }
+  }
+
   /** Assumes the writer lock is already held — every caller reaches this
    *  only from inside `_withWriterLock`'s `fn`. */
   private _appendRaw(line: JournalLine): boolean {
     try {
-      appendFileSync(this._path(JOURNAL_FILE), `${JSON.stringify(line)}\n`, {
-        encoding: "utf8",
-        mode: FILE_MODE,
-      });
+      const payload = `${JSON.stringify(line)}\n`;
+      appendFileSync(
+        this._path(JOURNAL_FILE),
+        this._journalMissingTrailingNewline() ? `\n${payload}` : payload,
+        { encoding: "utf8", mode: FILE_MODE },
+      );
       this._journalLines += 1;
       return true;
     } catch {

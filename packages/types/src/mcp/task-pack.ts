@@ -74,6 +74,24 @@ export interface ReadCodeTaskPackSurface {
    * never a re-locate. Present only alongside content_completeness:"partial".
    */
   remaining_ranges?: string[];
+  /**
+   * P1-3(e) (hands-on report, 2026-09): where to look/act next for THIS
+   * surface, without a second discovery call. `target` was retired — the
+   * hint is fully described by `kind` + `handle` + `confidence`; a legacy
+   * prose dialect string (e.g. `"read_file mode=slice handle=..."`) never
+   * rides the wire (AGENTS.md: "never emit" that dialect). Present only on
+   * the primary/required surface; see readCodeTaskPack.ts's buildLikelyEdits
+   * for the two `kind`s it currently emits ("inspect-slice",
+   * "handle-scoped-edit").
+   */
+  likely_edits?: LikelyEditHint[];
+}
+
+/** One `likely_edits[]` entry — see `ReadCodeTaskPackSurface.likely_edits`. */
+export interface LikelyEditHint {
+  kind: string;
+  handle?: string;
+  confidence?: number;
 }
 
 export type ReadCodeArtifactSection =

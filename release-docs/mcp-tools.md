@@ -45,11 +45,11 @@ The surface is fixed for the life of a server process — reconnecting is requir
 
 ## Completion, continuation, and receipts
 
-Task packs can return a decision to answer, edit, discover, await input, or stop. Proof-carrying completion records monotone obligations, served evidence, authoritative absence, and continuations already executed. An exhaustive request does not close while an obligation remains unproved or undisclosed.
+Task packs can return a decision to answer, edit, discover, await input, or stop. An `await_input` decision names what it is waiting on: `decision.unresolved[]` carries up to four entries, each with a `kind` and a non-empty `reason`, plus `id`/`path`/`handle`/`range` when the server can point at the thing (`handle` joins this response's `evidence[]`). The five `code` values are unchanged — the code says which branch stopped, `unresolved` says what it stopped on — and the field is omitted, never empty, when the server can name nothing. An `await_input` may also carry a `next`: today only for an explicit create request made under a declared read-only `task.profile:"answer"`, where the declared profile is kept and the `next` re-packs the same question under `task.profile:"generic"`. Run it, then act on the `act.edit` it returns. A task is ready only when its requested points are covered by returned content or explicitly disclosed as absent. Continuing the same task retains its requirements and completed steps. A certified `act.answer`/`act.edit` decision can still disclose a verified absence: `decision.certificate.gaps` names a request point with no occurrence in the scanned workspace files, and each entry says whether the scan was complete or how many paths were excluded from it (the same scope the `search_files` absence reports). This is distinct from `decision.gaps`, which appears only while the pack is still discovering.
 
-Every response has a `kind`. Follow an executable `next` exactly when present. Since v0.14.1 a bounded read or search continues through an opaque `cursor` carried by its `next`: run that call as given, changing only `budget` or `task.force_serve` if needed, and never reconstruct a cursor or re-slice by hand. A `cursor-stale` refusal carries a restart `next`; a `cursor-invalid` refusal means the original call should be re-issued.
+Every response has a `kind`. Follow an executable `next` exactly when present. Since v0.14.1 a bounded read or search continues through an opaque `cursor` carried by its `next`: run that call as given, changing only `budget` or `task.force_serve` if needed, and never reconstruct a cursor or re-slice by hand. A `cursor-stale` refusal carries a restart `next`; a `cursor-invalid` refusal means the original call should be re-issued. A `read_file` call carrying only `task:{handle:...}` resumes that bound task directly. A bare `read_file {qref}` re-pack now also recovers that same task's own handle automatically — including its required scope and its record of already-executed continuations — so it keeps the task whether or not `task.handle` is resent; an explicit `task.handle` still wins when both are given, and `task.epoch:"new"` always starts a fresh one.
 
-A `read.receipt` means the relevant content or decision is already current; it is not a request to repeat discovery. A receipt carries a `next` only when the request it answers still has undelivered content. `content:"full"` selects what to read and does not force a resend; `task.force_serve:true` is the explicit resend switch for a client that genuinely lost previously served context.
+A `read.receipt` means the relevant content or decision is already current; it is not a request to repeat discovery. A receipt carries a `next` only when the request it answers still has undelivered content. A full read is deduplicated by its requested projection: an identical repeat under the same `select:{comments:"keep"|"elide"}` choice returns a receipt, and a different projection serves the body again. `content:"full"` selects what to read and does not force a resend, and neither does `budget.allowFull:true` — it only raises the full-read size cap. `task.force_serve:true` is the explicit resend switch for a client that genuinely lost previously served context.
 
 Replay-safe writes use `operation_id`. Reusing the same identifier returns the recorded result instead of applying the mutation twice. Since v0.13 the server stores compact replay v2 outcomes while keeping old retry keys fail-safe.
 
@@ -73,7 +73,7 @@ Treat `--allow-write` as permission to change the selected workspace. Enable it 
 
 ## Client compatibility
 
-The server validates and rescues JSON-stringified canonical object parameters from schema-blind clients only when the decoded value matches the advertised structure. Advertised arrays declare their item schemas. A wire budget below the 6144-byte admission floor is refused with a structured recovery rather than a generic error.
+The server validates and rescues JSON-stringified canonical object parameters from schema-blind clients only when the decoded value matches the advertised structure. Advertised arrays declare their item schemas and are typed as arrays explicitly, so a bare string in an array-shaped field is rejected by validation rather than reaching the server. `read_file`'s addressing branches — `query`, `targets`, `qref`, `cursor`, and task-only control fields — are mutually exclusive, so a valid call matches exactly one advertised branch. A wire budget below the 6144-byte admission floor is refused with a structured recovery rather than a generic error.
 
 The VS Code extension derives a stable schema stamp from the advertised tools. When the stamp changes, the provider version and change event force VS Code to refresh cached MCP definitions. Workspace setup also records the stamp in generated client configuration.
 
@@ -91,11 +91,10 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
-## Known limitations (0.14.1)
+## Known limitations
 
 - A single multi-target read that mixes plain files with archive or artifact members is refused with a recovery path rather than routed per target; issue those reads as separate calls.
 - In a rare wire-budget fallback path the server can still return a generic JSON-RPC error instead of a structured refusal; retry with a larger `budget` or a narrower target.
-- `budget.allowFull:true` still re-sends full content that is already in the caller's context; only `content:"full"` gained receipt behavior in v0.14.1.
 - When the built-in parser cannot resolve a declaration in a file, a decision that depends on that file closes only after the whole file has been served at its current hash; the returned `next` names the unserved range.
 - When a quoted literal occurs twice in one large file, occurrence-level discovery may serve only one of the occurrences; read the other explicitly before an edit that must change both.
 - The pathless task-pack locator's primary index covers files through 1 MiB. Exact identifier routing adds a wide scan for the 1–8 MiB band; larger files remain readable by explicit path and range.

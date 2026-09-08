@@ -17,17 +17,17 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.14.1 release
+## v0.14.2 release
 
-**Public Beta.** TokenLighten v0.14.1 is a reliability update for how coding agents decide that they have read enough, and for how interrupted reads and searches continue. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.14.2 improves task continuation, interpretation of multi-point and Japanese requests, and workspace setup for code-only projects. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main changes in v0.14.1 are:
+The main changes in v0.14.2 are:
 
-- a task is not reported as ready to answer or edit until the content actually returned covers every point in the request;
-- a read that exceeds its response budget continues through a `cursor` until every requested line has been delivered;
-- a bounded search continues as a search instead of expanding into a whole-file read, and content already in context is not re-sent unless explicitly requested;
-- batch edits can create new files alongside existing-file changes, and `target:"all"` correctly replaces every matching occurrence; and
-- a smaller `code` tool surface for workspaces that contain only source code, text, and configuration.
+- continuing a task remembers completed reads and previously established requirements, so it can move on without repeating a finished step;
+- requests naming specific files, identifiers, or multiple topics keep their intended focus, with improved handling of Japanese sentences and topics that cannot be found;
+- a task waiting for input explains what remains unresolved and supplies a recovery call when available;
+- repeated full reads avoid resending content already in context, including when `budget.allowFull:true` is used; and
+- code-only workspace setup uses the compact agent guide by default, while an explicit guide-profile choice is respected.
 
 The public release includes:
 
@@ -35,7 +35,7 @@ The public release includes:
 - source code and public package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-**Compatibility:** the request format is unchanged apart from the added `cursor` field, and the legacy v0.12/v0.13 request fields remain refused by default (`TL_LEGACY_INPUT=accept` is still available on the server as a temporary migration bridge). `content:"full"` no longer forces a resend of content already in context; use `task.force_serve:true` for that. See the [v0.14.1 release notes](release-docs/github-release-v0.14.1.md) for compatibility details and known limitations.
+**Compatibility:** the three tools and canonical request fields remain available. `budget.allowFull:true` now only raises the full-read size cap; use `task.force_serve:true` when previously served context must be sent again. Refresh managed agent instructions by re-running workspace setup. Legacy v0.12/v0.13 request fields remain refused by default, with `TL_LEGACY_INPUT=accept` available as a temporary server-side migration bridge. See the [v0.14.2 release notes](release-docs/github-release-v0.14.2.md) for compatibility details and known limitations.
 
 ## Why TokenLighten
 
@@ -66,7 +66,7 @@ In a v0.14.0 comparison, total task cost was **36.7% lower with TokenLighten** t
 
 **These percentages describe cost savings, not token-count reductions.** Input, output, and cached tokens have different prices, so a cost reduction cannot be converted directly into the same token reduction. The amount of context avoided depends on how much source material the agent would otherwise read and reread.
 
-Use these results as a guide, not a guaranteed saving. The comparison was made on v0.14.0 and has not been repeated for v0.14.1. Results vary by repository, task, client, model behavior, and pricing. For your own workspace, the CLI and VS Code usage views show locally measured usage and estimates; these are not provider billing records.
+Use these results as a guide, not a guaranteed saving. The comparison was made on v0.14.0 and has not been repeated for v0.14.2. Results vary by repository, task, client, model behavior, and pricing. For your own workspace, the CLI and VS Code usage views show locally measured usage and estimates; these are not provider billing records.
 
 ### Tasks that may benefit less
 
@@ -81,7 +81,7 @@ TokenLighten also does not provide full type-aware semantic analysis. Cross-file
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.14.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.1/tokenlighten-vscode-extension-0.14.1.vsix)** from the v0.14.1 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.14.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.2/tokenlighten-vscode-extension-0.14.2.vsix)** from the v0.14.2 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -92,7 +92,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.14.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.2.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required.

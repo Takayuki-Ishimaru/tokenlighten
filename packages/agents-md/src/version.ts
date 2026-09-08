@@ -13,4 +13,4 @@
 // consumers (injectAll.ts, index.ts) — this file is the source of truth.
 
 /** Current version string. Bump when prose changes materially. */
-export const INSTRUCTIONS_VERSION = "2026-09-07-v92-edit-gate-fixed";
+export const INSTRUCTIONS_VERSION = "2026-09-08-v94-await-input-unresolved";
