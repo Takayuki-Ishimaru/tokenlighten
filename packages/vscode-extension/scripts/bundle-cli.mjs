@@ -79,7 +79,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EXT_ROOT = join(__dirname, "..");
 const REPO_ROOT = join(__dirname, "..", "..", "..");
-const DIST = join(EXT_ROOT, "dist");
+const DEFAULT_DIST = join(EXT_ROOT, "dist");
 const REPO_NODE_MODULES = join(REPO_ROOT, "node_modules");
 
 function readJson(path) {
@@ -165,8 +165,8 @@ const publicCore2ExclusionPlugin = {
 };
 
 /** Bundle one package's entry to a single CJS file, with a minimal package.json shim next to it so `require.resolve("@tokenlighten/<name>")` succeeds from tl-cli.js's dist/node_modules layout. */
-async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [] }) {
-  const pkgRoot = join(DIST, "node_modules", ...name.split("/"));
+async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [], outDir }) {
+  const pkgRoot = join(outDir, "node_modules", ...name.split("/"));
   const pkgDist = join(pkgRoot, "dist");
   mkdirSync(pkgDist, { recursive: true });
   const outfile = join(pkgDist, outBasename);
@@ -196,17 +196,24 @@ async function bundleSiblingPackage({ name, srcEntry, outBasename, plugins = [] 
   return { pkgRoot, pkgDist, outfile };
 }
 
-async function main() {
+/**
+ * Build a zero-install copy of the TokenLighten CLI (and the MCP server it
+ * spawns) into `outDir` (default: this package's own `dist/`). Exported so
+ * other build tooling (e.g. scripts/build-install-bundle.mjs) can produce
+ * the same tree at an arbitrary location without re-running this file as a
+ * subprocess.
+ */
+export async function bundleCli({ outDir = DEFAULT_DIST } = {}) {
   // Start clean so stale grammar files / shims never survive a rename.
-  rmSync(join(DIST, "tl-cli.js"), { force: true });
-  rmSync(join(DIST, "tl-cli.js.map"), { force: true });
-  rmSync(join(DIST, "node_modules"), { recursive: true, force: true });
+  rmSync(join(outDir, "tl-cli.js"), { force: true });
+  rmSync(join(outDir, "tl-cli.js.map"), { force: true });
+  rmSync(join(outDir, "node_modules"), { recursive: true, force: true });
 
   // 1. @tokenlighten/cli itself — the thin orchestrator the extension spawns.
   await build({
     ...commonOpts,
     entryPoints: [join(REPO_ROOT, "packages/cli/src/index.ts")],
-    outfile: join(DIST, "tl-cli.js"),
+    outfile: join(outDir, "tl-cli.js"),
     external: ["@tokenlighten/agents-md"],
   });
   // version.ts / help.ts read their own version via
@@ -214,7 +221,7 @@ async function main() {
   // "../.." from their own compiled location, which breaks once bundled) —
   // copy the real, unmodified package.json (it already exports
   // "./package.json") so that resolves from tl-cli.js's own location too.
-  const cliShimDir = join(DIST, "node_modules", "@tokenlighten", "cli");
+  const cliShimDir = join(outDir, "node_modules", "@tokenlighten", "cli");
   mkdirSync(cliShimDir, { recursive: true });
   cpSync(
     join(REPO_ROOT, "packages/cli/package.json"),
@@ -229,6 +236,7 @@ async function main() {
     srcEntry: join(REPO_ROOT, "packages/mcp-server/src/bin.ts"),
     outBasename: "bin.js",
     plugins: [publicCore2ExclusionPlugin],
+    outDir,
   });
 
   // Archive support (tools/archive.ts) dynamic-imports
@@ -256,6 +264,7 @@ async function main() {
     name: "@tokenlighten/skeleton-engine",
     srcEntry: join(REPO_ROOT, "packages/skeleton-engine/src/index.ts"),
     outBasename: "index.js",
+    outDir,
   });
 
   // 4. @tokenlighten/agents-md — lazy dynamic-imported by `tl agents-md
@@ -265,6 +274,7 @@ async function main() {
     name: "@tokenlighten/agents-md",
     srcEntry: join(REPO_ROOT, "packages/agents-md/src/index.ts"),
     outBasename: "index.js",
+    outDir,
   });
   cpSync(
     join(REPO_ROOT, "packages/agents-md/templates"),
@@ -277,7 +287,7 @@ async function main() {
   // approved; do not inherit the private repository's legacy MIT file here.
   cpSync(
     join(REPO_ROOT, "THIRD_PARTY_NOTICES.md"),
-    join(DIST, "THIRD_PARTY_NOTICES.md"),
+    join(outDir, "THIRD_PARTY_NOTICES.md"),
   );
 
   // 5. web-tree-sitter + tree-sitter-wasms — mcp-server's public
@@ -289,7 +299,7 @@ async function main() {
   //    map can ever request are copied (of the 36 tree-sitter-wasms ships)
   //    to avoid dragging in ~30MB of unused grammars.
   const wtsSrc = join(REPO_NODE_MODULES, "web-tree-sitter");
-  const wtsDst = join(DIST, "node_modules", "web-tree-sitter");
+  const wtsDst = join(outDir, "node_modules", "web-tree-sitter");
   mkdirSync(wtsDst, { recursive: true });
   cpSync(join(wtsSrc, "package.json"), join(wtsDst, "package.json"));
   cpSync(join(wtsSrc, "tree-sitter.wasm"), join(wtsDst, "tree-sitter.wasm"));
@@ -299,7 +309,7 @@ async function main() {
     "kotlin", "javascript", "tsx", "typescript", "html", "css",
   ];
   const tswSrc = join(REPO_NODE_MODULES, "tree-sitter-wasms");
-  const tswDst = join(DIST, "node_modules", "tree-sitter-wasms");
+  const tswDst = join(outDir, "node_modules", "tree-sitter-wasms");
   const tswOutDst = join(tswDst, "out");
   mkdirSync(tswOutDst, { recursive: true });
   cpSync(join(tswSrc, "package.json"), join(tswDst, "package.json"));
@@ -315,8 +325,23 @@ async function main() {
   process.stdout.write("bundle-cli: done\n");
 }
 
+/** Parse `--out <dir>` for direct-run invocation. */
+function parseCliArgs(argv) {
+  const options = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--out") {
+      const value = argv[i + 1];
+      if (!value) throw new Error("bundle-cli: --out requires a value");
+      options.outDir = resolve(value);
+      i += 1;
+    }
+  }
+  return options;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((err) => {
+  const { outDir } = parseCliArgs(process.argv.slice(2));
+  bundleCli(outDir ? { outDir } : undefined).catch((err) => {
     process.stderr.write(`bundle-cli: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
     process.exit(1);
   });

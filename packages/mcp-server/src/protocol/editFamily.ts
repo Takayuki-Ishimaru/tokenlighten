@@ -339,8 +339,15 @@ function editedRows(body: Body): Body[] {
 function fullAppliedEchoRequested(body: Body, braceDelta?: number): boolean {
   // W2: compact slice proof is the default. Explicit review and safety
   // exceptions retain the complete post-edit slice.
+  // FX-L soft frontier marker (user ruling 2026-09-14): deliberately asks for
+  // a FENCE reclassification (`body.reclassified`), not for the receipt
+  // `reclassificationReceipt` now also synthesizes from the marker. The full
+  // echo is a SAFETY exception — "the fence re-typed your call, so read the
+  // whole post-edit slice back" — and an advisory landing-site disclosure is
+  // not that. Keeping the marker out of this predicate is what makes the
+  // ruling's default arm a receipt and not a wire-size change.
   return body["review"] !== undefined
-    || reclassificationReceipt(body) !== undefined
+    || fenceReclassified(body)
     || (braceDelta !== undefined && braceDelta !== 0)
     || body["warning"] !== undefined
     || body["leftoverLines"] !== undefined;
@@ -368,6 +375,17 @@ function addAppliedReadback(
 }
 
 function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
+  // FX-L soft frontier marker (user ruling 2026-09-14): "a batch with mixed
+  // items marks per item". The marker names every path it covers, so the
+  // stamp below is a membership test — an item the certified decision DID
+  // authorize keeps no `frontier_status`, which is exactly how a mixed batch
+  // stays readable.
+  const marker = frontierMarkerOf(body);
+  const markedPaths = new Set(marker?.paths ?? []);
+  const markFrontier = (entry: AppliedEntry): void => {
+    if (marker === undefined || !markedPaths.has(entry.path)) return;
+    entry.frontier_status = marker.status as NonNullable<AppliedEntry["frontier_status"]>;
+  };
   const readback = new Map<string, Body>();
   if (Array.isArray(body["applied"])) {
     for (const entry of body["applied"]) {
@@ -415,6 +433,7 @@ function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
     if (typeof replaced === "number") entry.replaced = replaced;
     // INV-I-5 (FX-P2): additive-only — absent unless the row actually set it.
     if (row["path_fallback"] === true) entry.path_fallback = true;
+    markFrontier(entry);
     entries.push(entry);
   }
   // A read-back entry for a path no row named (an intent dispatch that edits a
@@ -436,6 +455,7 @@ function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
     if (typeof enclosing === "string" || isRecord(enclosing)) {
       entry.enclosing_symbol = enclosing as AppliedEntry["enclosing_symbol"];
     }
+    markFrontier(entry);
     entries.push(entry);
   }
   return entries;
@@ -472,6 +492,50 @@ function normalizationReceipt(body: Body, rows: readonly Body[]): NormalizationR
 const RECLASSIFICATION_TRIGGERS: ReadonlySet<string> = new Set(["create", "grounded-edit"]);
 
 /**
+ * True iff the EXECUTION FENCE itself re-typed this call — the exact predicate
+ * `reclassificationReceipt` applied to `body.reclassified` before the FX-L
+ * soft marker gave that function a second producer. Extracted verbatim so
+ * `fullAppliedEchoRequested`'s safety exception keeps its pre-marker meaning
+ * byte-for-byte (a malformed `reclassified` never triggered the full echo and
+ * still does not).
+ */
+function fenceReclassified(body: Body): boolean {
+  const raw = body["reclassified"];
+  if (!isRecord(raw)) return false;
+  const trigger = str(raw["trigger"]);
+  return trigger !== undefined
+    && RECLASSIFICATION_TRIGGERS.has(trigger)
+    && str(raw["certificate_id"]) !== undefined;
+}
+
+/** The three `CertifiedFrontierStatus` values (state/session.ts). */
+const FRONTIER_STATUSES: ReadonlySet<string> = new Set([
+  "read-only", "not-in-frontier", "answer-decision",
+]);
+
+/**
+ * FX-L SOFT FRONTIER MARKER (user ruling 2026-09-14), validated off the
+ * internal `frontier_marker` carrier `server.ts`'s edit funnel attaches from
+ * `ExecutionGuardDecision.frontierMarker`.
+ *
+ * A VALIDATOR, NOT A COPY — the same rule `projectCreateTarget` states on the
+ * read side: a marker that cannot name its status is dropped rather than
+ * defaulted, because a receipt claiming an unnamed frontier standing is worse
+ * than no receipt. `certificate_id` may legitimately be "" (a certified
+ * decision whose projection carried no certificate id); the status may not.
+ */
+function frontierMarkerOf(body: Body): { certificate_id: string; status: string; paths: string[] } | undefined {
+  const raw = body["frontier_marker"];
+  if (!isRecord(raw)) return undefined;
+  const status = str(raw["status"]);
+  if (status === undefined || !FRONTIER_STATUSES.has(status)) return undefined;
+  const paths = Array.isArray(raw["paths"])
+    ? raw["paths"].filter((entry): entry is string => typeof entry === "string" && entry !== "")
+    : [];
+  return { certificate_id: str(raw["certificate_id"]) ?? "", status, paths };
+}
+
+/**
  * RULE R + ruling 2: A.5.12 as a receipt on the write that actually happened.
  *
  * The in-process struct is `{from, to, trigger, certificate_id}`. `from`/`to`
@@ -483,13 +547,42 @@ const RECLASSIFICATION_TRIGGERS: ReadonlySet<string> = new Set(["create", "groun
  * against.
  */
 function reclassificationReceipt(body: Body): EditReclassification | undefined {
+  // FX-L SOFT FRONTIER MARKER (user ruling 2026-09-14): the SAME receipt
+  // carries the frontier standing, so a caller reads one field for "was this
+  // call re-typed" and one for "where did it land".
+  //
+  // TWO PRODUCERS, ONE RECEIPT, AND THE FENCE ANSWER WINS THE `trigger`. When
+  // the fence genuinely re-typed the call (`create` / `grounded-edit`) that
+  // trigger is KEPT and the marker rides beside it as `frontier_status`; the
+  // new `outside-certified-frontier` value is minted only when the marker is
+  // the sole reason a receipt exists. Overwriting a real re-typing would
+  // delete information — and `grounded-edit` in particular is the answer-fence
+  // arm the `act.answer` case (`frontier_status:"answer-decision"`) travels
+  // through, so the two are complementary readings of one event, not rivals.
+  const marker = frontierMarkerOf(body);
+  const markerOnly = (): EditReclassification | undefined => (marker === undefined
+    ? undefined
+    : {
+        trigger: "outside-certified-frontier",
+        certificate_id: marker.certificate_id,
+        frontier_status: marker.status as NonNullable<EditReclassification["frontier_status"]>,
+      });
   const raw = body["reclassified"];
-  if (!isRecord(raw)) return undefined;
+  if (!isRecord(raw)) return markerOnly();
   const trigger = str(raw["trigger"]);
   const certificateId = str(raw["certificate_id"]);
-  if (trigger === undefined || !RECLASSIFICATION_TRIGGERS.has(trigger)) return undefined;
-  if (certificateId === undefined) return undefined;
-  return { trigger: trigger as EditReclassification["trigger"], certificate_id: certificateId };
+  // A `reclassified` this module declines to emit (unnameable trigger, or a
+  // receipt that cannot name its certificate) must not take the marker down
+  // with it: the marker is a separate producer with its own proof.
+  if (trigger === undefined || !RECLASSIFICATION_TRIGGERS.has(trigger)) return markerOnly();
+  if (certificateId === undefined) return markerOnly();
+  return {
+    trigger: trigger as EditReclassification["trigger"],
+    certificate_id: certificateId,
+    ...(marker !== undefined
+      ? { frontier_status: marker.status as NonNullable<EditReclassification["frontier_status"]> }
+      : {}),
+  };
 }
 
 /**

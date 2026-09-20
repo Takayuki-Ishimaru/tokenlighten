@@ -29,7 +29,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { collectSymbols, type CollectedSymbol } from "../../../symbols/collectSymbols.js";
 import { languageForPathWithContent } from "../../../util/languages.js";
-import { MAX_RESPONSE_BYTES as FIND_MAX_RESPONSE_BYTES, MAX_INVENTORY_RESPONSE_BYTES } from "./findText.js";
+import { findResponseCapBytes, findInventoryCapBytes } from "./findText.js";
 import type { ToolCall } from "@tokenlighten/types";
 import type { FindResponse } from "./findText.js";
 
@@ -214,10 +214,12 @@ export interface FindMemberSweepOptions {
  * its own call — bounded to a handful of files by MAX_CANDIDATE_FILES.
  *
  * Never force-fits: if attaching would push the response over its OWN
- * governing byte cap (MAX_INVENTORY_RESPONSE_BYTES when the response
- * already carries a truncation inventory, else MAX_RESPONSE_BYTES), the
- * attachment is skipped rather than trimming the caller's files/matches to
- * make room.
+ * governing byte cap (findInventoryCapBytes() when the response already
+ * carries a truncation inventory, else findResponseCapBytes() — F5,
+ * 2026-09-19: both TL_FIND_WIDE_PAGE-aware accessors over the same caps this
+ * used to read as the bare MAX_INVENTORY_RESPONSE_BYTES/MAX_RESPONSE_BYTES
+ * constants), the attachment is skipped rather than trimming the caller's
+ * files/matches to make room.
  */
 export async function maybeAttachMemberSweepToFindResponse(
   response: FindResponse,
@@ -236,6 +238,6 @@ export async function maybeAttachMemberSweepToFindResponse(
     member_sweep: attachment,
     ...(response.hint ? {} : { hint: MEMBER_SWEEP_HINT_TEXT }),
   };
-  const cap = response.inventory ? MAX_INVENTORY_RESPONSE_BYTES : FIND_MAX_RESPONSE_BYTES;
+  const cap = response.inventory ? findInventoryCapBytes() : findResponseCapBytes();
   return Buffer.byteLength(JSON.stringify(withSweep), "utf8") <= cap ? withSweep : response;
 }

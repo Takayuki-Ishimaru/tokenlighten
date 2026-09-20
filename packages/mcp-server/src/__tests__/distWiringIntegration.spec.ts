@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
 import { tmpdir } from "os";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -80,9 +81,12 @@ function startDistServer(cwd: string): {
   };
 }
 
-afterEach(() => {
-  for (const server of servers.splice(0)) server.kill("SIGKILL");
-  for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+  for (const server of servers.splice(0)) {
+    server.kill("SIGKILL");
+    await waitForExit(server);
+  }
+  for (const dir of tmpDirs.splice(0)) await rmDirWithRetry(dir);
 });
 
 describe("built MCP wiring integration", () => {

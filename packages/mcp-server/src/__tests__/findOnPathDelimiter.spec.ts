@@ -62,8 +62,16 @@ describe("findOnPath splits PATH on the platform delimiter, not a hardcoded \":\
     // behavior) never separates them, so nothing on the second dir is ever
     // reachable — reproduced directly here (not through product code) so the
     // failure mode stays visible even if findOnPath's internals change.
-    const empty = mkBinDir("empty2", "unrelated-tool");
-    const withCxx = mkBinDir("cxx2", "g++");
+    // Synthetic, colon-free labels rather than mkBinDir()'s real
+    // os.tmpdir()-rooted paths: on win32 a real absolute path always embeds
+    // a drive-letter colon (e.g. "C:\Users\...\Temp\..."), which the legacy
+    // split would ALSO break on for a reason unrelated to the delimiter bug
+    // this test documents. No real filesystem directories are needed here
+    // (unlike the test above, this one never calls probeToolchain), so
+    // colon-free labels demonstrate the mechanism honestly on every
+    // platform.
+    const empty = "tl-findonpath-empty2";
+    const withCxx = "tl-findonpath-cxx2";
     const joined = `${empty};${withCxx}`;
 
     const legacySplit = joined.split(":");

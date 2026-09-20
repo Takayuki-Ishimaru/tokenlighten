@@ -401,7 +401,22 @@ export type FullDowngradeReason =
   | "allowfull-task-cap-reached"
   | "candidate-pack-full-repeat"
   | "full-downgraded"
-  | "artifact-full-downgraded";
+  | "artifact-full-downgraded"
+  /**
+   * AB1 residual R4 / MX-B (2026-09-14): a `read.batch` member that exists
+   * but is not decodable as text (`util/textDecode.ts`'s `"undecodable"`
+   * verdict). Rule T (this file's own header) deletes the per-item
+   * `omitted[] {path|handle, reason}` ledger from the wire in favor of the
+   * coarse `limit.omitted` class rollup — correctly, for a member that was
+   * simply never reached (cap-exceeded, not-found, handle-*). An undecodable
+   * member is different: the server definitively knows, at RESOLUTION time,
+   * that this source will never decode, which is exactly the fact
+   * `file-downgraded` (this same union) already exists to disclose for
+   * other "content exists, here is why you got none" cases. Reusing it here
+   * (`protocol/readFamily.ts::projectBatch`) needed one new closed-enum
+   * value, never a new array or a new required key.
+   */
+  | "not-decodable-text";
 
 // ---------------------------------------------------------------------------
 // A.5.5 `read.artifact`

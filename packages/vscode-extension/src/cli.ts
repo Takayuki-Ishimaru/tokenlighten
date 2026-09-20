@@ -133,6 +133,46 @@ export function findTlBinary(): boolean {
   return getTlVersion() !== undefined;
 }
 
+/**
+ * Runs `tl doctor --json` synchronously (matching {@link getTlVersion}'s
+ * blocking pattern — both are only ever called when the on-demand
+ * Diagnostics panel is opened, never on a hot path) and returns its
+ * `install_consistency` object (DESIGN-v0.14-mcp-only-install.md §4.6 C12:
+ * "`tl doctor` gains `install_consistency`: machine install version vs
+ * extension bundled version vs PATH `tl` version; runtime liveness; legacy
+ * shim presence; duplicate or foreign entries; workspace entries with stale
+ * identities."). The exact shape is the CLI's to define — this stays
+ * opaque and tolerates absence entirely: an older `tl` with no such field,
+ * a non-zero doctor exit code (doctor reports issues via its exit code,
+ * not just its JSON body), or unparsable output all resolve to `undefined`
+ * rather than throwing.
+ */
+export function getInstallConsistency(): Record<string, unknown> | undefined {
+  try {
+    const invocation = getCliInvocation();
+    const syncOptions = {
+      timeout: 5000,
+      env: { ...process.env, ...invocation.env },
+    };
+    const result = crossSpawn.sync(
+      invocation.command,
+      [...invocation.argsPrefix, "doctor", "--json"],
+      syncOptions,
+    );
+    const streams = result as typeof result & { stdout?: unknown };
+    const raw = String(streams.stdout ?? "").trim();
+    if (!raw) return undefined;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const consistency = (parsed as Record<string, unknown>)["install_consistency"];
+    return consistency && typeof consistency === "object" && !Array.isArray(consistency)
+      ? consistency as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function spawnTl(
   args: string[],
   options?: { cwd?: string },

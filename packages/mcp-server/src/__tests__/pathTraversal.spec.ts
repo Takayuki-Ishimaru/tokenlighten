@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 
 import { buildSmallFile } from "../tools/readCodeSmallFile.js";
 import { handleTable } from "../util/handles.js";
@@ -62,7 +63,7 @@ describe("small_file — path traversal guard", () => {
     expect(refusal.reason).toBe("path-outside-workspace");
   });
 
-  it("refuses symlink that resolves outside workspace", async () => {
+  it.skipIf(!symlinkSupported())("refuses symlink that resolves outside workspace", async () => {
     const wsDir = mkDir("pt-symlink-ws");
     const outsideDir = mkDir("pt-symlink-out");
 

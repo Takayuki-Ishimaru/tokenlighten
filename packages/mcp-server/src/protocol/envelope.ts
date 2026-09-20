@@ -63,6 +63,7 @@ import {
 } from "./disclosure.js";
 import { emitFinalizedPayload, emitOpaqueText } from "./emit.js";
 import { isEditFamilyKind, projectEditBody } from "./editFamily.js";
+import { applyAnswerLineGutter } from "./lineGutter.js";
 import { isReadFamilyKind, projectReadBody, receiptOf } from "./readFamily.js";
 import {
   applySearchDedup,
@@ -85,6 +86,7 @@ import { isTraceEnabled, responseWitnessHmac, trace, traceBounded } from "../uti
 // classifier this module still consults, and only to recognise TL's own
 // synthetic renderings (skeleton/scope views), never to widen anything.
 import { isTokenlightenSentinelLine } from "../util/sentinelComment.js";
+import { NUL_STRIPPED_SERVE_NOTE } from "../util/textDecode.js";
 import {
   runWithSemanticFrontierTrace,
   semanticFrontierDecisionWitnessId,
@@ -96,7 +98,11 @@ import type { SemanticFrontierWithholdingMarks } from "./semanticFrontierTraceCo
 // in below; decisionWire.ts's own doc comment on it says this is the file
 // meant to call it, unchanged.
 import { semanticFrontierDemotionCounters } from "./decisionWire.js";
-import { batchHintsEnabled, sfDemoteEnabled } from "../util/flags.js";
+import { batchHintsEnabled, leanCallsEnabled, sfDemoteEnabled } from "../util/flags.js";
+// WP-V1 (2026-09-20): the same pure, cycle-free client-profile lookup
+// clientAdvertisement.ts uses (see that module's own header on why it is
+// safe to import here: no dependency on server.ts either way).
+import { resolveClientProfile } from "./codec/clientProfile.js";
 
 /** §1.1, D1. One integer, one value, one server process. */
 export const PROTOCOL_VERSION = 1 as const;
@@ -198,6 +204,25 @@ export interface ProtocolCallContext {
    * path that does not also flip TL_SF_VERIFY_FIRST on.
    */
   verifyClosureWorkspace?: string;
+  /**
+   * SHOULD-FIX 57 (AB1, 2026-09-14, review round 11): THIS CALL served a body
+   * whose bytes carried one or more literal NUL characters that
+   * `util/textDecode.ts::readServedText` stripped before serving.
+   *
+   * The policy's own words are "the caller serves `text` (already NUL-free) and
+   * MUST say that it stripped". Round 10 measured five server routes serving it
+   * SILENTLY, each under a `sha` computed over the stripped text — so the pin
+   * did not describe the bytes on disk. Per-route annotation is how that was
+   * missed twice: it has to be remembered at every door. This slot is published
+   * by the ONE helper every server read route obtains served text through
+   * (`server.ts::servedTextForRoute`) and consumed once, in
+   * `projectSuccessBody`'s read-family branch, so a route added tomorrow
+   * inherits the annotation without knowing it exists.
+   *
+   * Zero wire effect unless a served file actually carried a stripped NUL, and
+   * idempotent: the funnel never appends a second copy of the sentence.
+   */
+  nulStrippedServe?: true;
   /**
    * FX-N (ruling (s), 2026-09-03): the workspace root a `read_file` /
    * `search_files` call resolved against, published so `emit.ts`'s [R5-10]
@@ -382,6 +407,16 @@ export function declareKind(kind: Kind): void {
  * at binding time could name a tree the write never touched, and the marker
  * would bind the report to the wrong state.
  */
+/**
+ * SHOULD-FIX 57: publish `ProtocolCallContext.nulStrippedServe` — see that
+ * field's doc comment. Called from `server.ts::servedTextForRoute`, the one
+ * helper every server read route obtains served text through.
+ */
+export function noteNulStrippedServe(): void {
+  const context = _protocolCall.getStore();
+  if (context !== undefined) context.nulStrippedServe = true;
+}
+
 export function noteWorkspaceRoot(root: string): void {
   const context = _protocolCall.getStore();
   if (context !== undefined && root !== "") context.workspace = root;
@@ -1068,7 +1103,14 @@ export function finalizeProtocolResponse(
   // honest ledger order) and the §2.5 `isError` stamp — belongs to `emit.ts`.
   // The split is not cosmetic: it is what makes "one measurement point" a
   // structural property instead of a convention this function has to keep.
-  const finalized = emitFinalizedPayload(canonicalPayload, kind, context);
+  // WP-S4 (2026-09-20): the answer-profile line gutter. Runs AFTER every
+  // ledger/certificate/dedupe consumer above has already looked at
+  // `canonicalPayload` and BEFORE the wire budget first measures it, mutating
+  // eligible evidence bodies in place (see lineGutter.ts's own top-of-file
+  // comment for why it must not clone the payload). No-op, same reference
+  // back, unless TL_ANSWER_LINE_GUTTER/TL_TURN_ECONOMY is on.
+  const gutteredPayload = applyAnswerLineGutter(canonicalPayload, kind, context);
+  const finalized = emitFinalizedPayload(gutteredPayload, kind, context);
   // This is deliberately outside emit.ts: its return value is the only place
   // all codec/shedding/fail-closed exits have converged.  The observer parses
   // those final bytes and consumes its seed, so no producer-time estimate can
@@ -1290,8 +1332,87 @@ function applyToolSurface(tool: string, args: Record<string, unknown>): Surfaced
 /** Construct an executable wire continuation through the one canonicalizer. */
 export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_files", args: Record<string, unknown>): ToolCall {
   const attributed = attributedContinuationArguments(canonicalToolArguments(tool, args));
-  const surfaced = applyToolSurface(tool, attributed);
+  const leaned = leanContinuationForVsCode(tool, attributed);
+  const surfaced = applyToolSurface(tool, leaned);
   return { tool: surfaced.tool, arguments: surfaced.arguments } as ToolCall;
+}
+
+/**
+ * WP-V1 (2026-09-20): sheds two purely-redundant fields from an emitted
+ * read_file/search_files continuation when BOTH hold — the resolved client
+ * is "vscode" (GitHub Copilot Chat; see codec/clientProfile.ts) and
+ * `leanCallsEnabled()` (util/flags.ts has the full rollout rationale).
+ * `edit_file` is untouched: write safety keeps `cwd`/`task.handle` explicit
+ * on every edit, always. Neither condition true: returns `args` unchanged,
+ * so a non-vscode client or a flag-off server stays byte-identical.
+ *
+ * `cwd` is dropped only when this continuation's own resolved cwd VALUE
+ * equals the workspace the triggering call itself resolved against — VS
+ * Code launches one server per single workspace root, so that call's own
+ * workspace IS the server's root, and a future call that omits `cwd`
+ * resolves there again (server.ts's `effectiveCallWorkspace`). A
+ * `continuationWorkspace` override to a genuinely DIFFERENT tree still
+ * keeps `cwd` (the values differ). Compared by VALUE, not by whether
+ * `continuationWorkspace` happens to be set, because `context.workspace` is
+ * an EDIT-dispatch-only field (see `protocol/lineGutter.ts`'s own
+ * `AnswerLineGutterContext` doc comment) — a read_file/search_files call
+ * resolves its workspace into `codecTraceWorkspace` instead, so checking
+ * `context.workspace` alone would silently never fire for the two tools
+ * this function actually leans.
+ *
+ * `task.handle` is dropped when it is no longer load-bearing: a `qref`
+ * already binds the task on its own (taskHandleRecovery.spec.ts's "a bare
+ * qref re-pack with no handle inherits through the qref's own task
+ * binding"), or the continuation is a plain targets-only read/search that
+ * needs no task continuity to be served at all. `continuationNeedsTaskHandle`
+ * below names the shapes that keep it regardless.
+ */
+function leanContinuationForVsCode(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  if (tool === "edit_file" || !leanCallsEnabled()) return args;
+  const context = protocolCallContext();
+  if (resolveClientProfile(context?.clientId).id !== "vscode") return args;
+
+  const out = { ...args };
+  const workspace = context?.workspace ?? context?.codecTraceWorkspace;
+  if (out["cwd"] !== undefined && typeof workspace === "string" && out["cwd"] === workspace) {
+    delete out["cwd"];
+  }
+
+  const task = recordOf(out["task"]);
+  if (task?.["handle"] !== undefined && !continuationNeedsTaskHandle(tool, out, task)) {
+    const restTask = { ...task };
+    delete restTask["handle"];
+    if (Object.keys(restTask).length > 0) out["task"] = restTask;
+    else delete out["task"];
+  }
+  return out;
+}
+
+/**
+ * True when `args`' `task.handle` is load-bearing and must stay on the wire
+ * even under `leanContinuationForVsCode` above: a cursor continuation, a
+ * `task.pull:"closure"` request, a challenge, or `task.expected_state_version`
+ * (CANONICAL_TASK's own `dependentRequired` ties it to `handle` — dropping
+ * the handle here would make the call schema-invalid, not merely leaner).
+ * Otherwise, a `qref` binds the task on its own, and a plain targets-only
+ * read (no `query`, for read_file) or a plain search needs no task
+ * continuity at all.
+ */
+function continuationNeedsTaskHandle(
+  tool: string,
+  args: Record<string, unknown>,
+  task: Record<string, unknown>,
+): boolean {
+  if (args["cursor"] !== undefined) return true;
+  if (task["pull"] === "closure") return true;
+  if (task["challenge"] !== undefined) return true;
+  if (task["expected_state_version"] !== undefined) return true;
+  if (args["qref"] !== undefined) return false;
+  if (tool === "read_file") {
+    const targets = args["targets"];
+    return !(Array.isArray(targets) && targets.length > 0 && args["query"] === undefined);
+  }
+  return false;
 }
 
 /**
@@ -1872,6 +1993,17 @@ function projectSuccessBody(
   // §2.3's `receipt` tag.
   // -------------------------------------------------------------------------
   if (isReadFamilyKind(kind)) {
+    // SHOULD-FIX 57: ONE attach point for the whole read family, ahead of the
+    // projector, so `keep()`'s own per-shape allowlist decides where a prose
+    // `note` is legal instead of nine routes each remembering. Idempotent — a
+    // route that already stated the strip in its own composed `note` is left
+    // alone — and a no-op for every clean serve, so no wire byte moves.
+    if (context.nulStrippedServe === true) {
+      const existing = typeof projected["note"] === "string" ? projected["note"] : "";
+      if (!existing.includes("nul-stripped")) {
+        projected["note"] = existing === "" ? NUL_STRIPPED_SERVE_NOTE : `${existing}; ${NUL_STRIPPED_SERVE_NOTE}`;
+      }
+    }
     // `workspace` + the inbound `args` ride along for the [R5-10]
     // receipt-continuation floor only (`projectReadBody`'s `read.receipt`
     // arm), which scopes its epoch-reset `next` to what this call asked for.

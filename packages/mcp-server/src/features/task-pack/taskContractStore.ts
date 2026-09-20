@@ -234,6 +234,44 @@ export function resolveExecutableNextScope(
   return resolved;
 }
 
+/**
+ * R1-S10a (2026-09-13 review round): "did a pack in this lane PRESCRIBE this
+ * exact call?", asked WITHOUT spending the capability and WITHOUT memoizing a
+ * miss.
+ *
+ * The result-ledger recorders in server.ts need this question answered before
+ * they may write certificate-grade state (a caller-initiated search must never
+ * move a task's decision), but they cannot use `resolveExecutableNextScope`:
+ *  - it MEMOIZES a miss (`_nextScopes.set(key, undefined)`), and
+ *    `registerExecutableNextScope` reads that memo as a COLLISION, so probing a
+ *    shape before a pack registers it would permanently poison that shape for
+ *    the lane;
+ *  - the sibling recorders CONSUME the same capability in the same dispatch, so
+ *    a resolve after them reports "not prescribed" for a call that was.
+ *
+ * Read-only and allocation-light: the in-process registry first, then the
+ * durable lane index (which is what survives a restart), with no writes to
+ * either. Ambiguity (more than one live task pending this exact call) answers
+ * `false` — the same fail-closed direction `resolveExecutableNextScope` takes.
+ */
+export function hasPendingExecutableNext(
+  workspaceRoot: string,
+  lane: string,
+  next: { tool: string; arguments: Record<string, unknown> },
+): boolean {
+  const normalizedLane = _scope({ lane }).lane;
+  const fingerprint = _nextFingerprint(next);
+  const memoized = _nextScopes.get(_nextScopeKey(workspaceRoot, normalizedLane, next));
+  if (memoized !== undefined) {
+    return _load(workspaceRoot, memoized)?.pendingNexts.includes(fingerprint) === true;
+  }
+  const matches = _loadLaneIndex(workspaceRoot, normalizedLane)
+    .filter((taskHandle) => taskHandle !== "")
+    .map((taskHandle) => ({ lane: normalizedLane, taskHandle }))
+    .filter((scope) => _load(workspaceRoot, scope)?.pendingNexts.includes(fingerprint));
+  return matches.length === 1;
+}
+
 /** Resolve and consume only a unique task provenance. */
 export function consumeExecutableNextScope(
   workspaceRoot: string,

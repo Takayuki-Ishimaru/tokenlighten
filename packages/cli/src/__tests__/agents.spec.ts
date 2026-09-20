@@ -101,7 +101,7 @@ describe("tl agents update (bare path -> injectAll)", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("real run writes AGENTS.md + the 5 stub files through the real injectAll API", async () => {
+  it("real run writes AGENTS.md + the 6 stub files through the real injectAll API", async () => {
     const { runAgents } = await import("../commands/agents.js");
     const cap = captureStdout();
     try {
@@ -121,6 +121,7 @@ describe("tl agents update (bare path -> injectAll)", () => {
       ".cursor/rules/tokenlighten.mdc",
       ".clinerules/tokenlighten.md",
       ".continue/rules/tokenlighten.md",
+      ".github/agents/tokenlighten-explore.agent.md",
     ];
     for (const f of expectedFiles) {
       expect(existsSync(join(sandbox, f))).toBe(true);
@@ -155,7 +156,7 @@ describe("tl agents update (bare path -> injectAll)", () => {
     const out = cap.lines.join("");
     expect(out).not.toContain("wrote");
     expect(out).not.toContain("drifted");
-    expect(out).toContain("skipped 6 file(s)");
+    expect(out).toContain("skipped 7 file(s)");
     expect(exitCode).toBeUndefined();
   });
 

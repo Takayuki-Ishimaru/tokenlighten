@@ -1,18 +1,24 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.14.2.
+This directory contains the public documentation for TokenLighten v0.14.3.
 
 ## Start here
 
 - [Getting started](getting-started.md) — install, build, and set up a workspace.
+- [Managed environments](managed-environments.md) — administrator notes for
+  fleet, policy-managed, or AppLocker/WDAC-restricted machines.
 - [MCP tools](mcp-tools.md) — the three tools and canonical v0.14 workflow.
 - [VS Code extension](vscode-extension.md) /
   [日本語](vscode-extension.ja.md) — install and diagnose the VSIX.
 - [Language support](language-support.md) — languages, formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
-- [GitHub Release v0.14.2](github-release-v0.14.2.md) — task continuation,
-  clearer input requests, Japanese request handling, and compact code guides.
+- [GitHub Release v0.14.3](github-release-v0.14.3.md) — extension-free
+  archive install with a bundled runtime, broader host registration, VS Code
+  coexistence, improved Copilot integration and task continuation, and Windows support.
+- [Historical GitHub Release v0.14.2](github-release-v0.14.2.md) — task
+  continuation, clearer input requests, Japanese request handling, and
+  compact code guides.
 - [Historical GitHub Release v0.14.1](github-release-v0.14.1.md) — evidence-gated
   completion, cursor continuation, receipts, and the `code` tool surface.
 - [Historical GitHub Release v0.14.0](github-release-v0.14.0.md) — canonical
@@ -29,8 +35,10 @@ This directory contains the public documentation for TokenLighten v0.14.2.
 
 ## Release scope
 
-The v0.14.2 public release includes the CLI, MCP server, selected developer
-source/tests, and VS Code extension. The desktop application is not included.
+The v0.14.3 public release includes four platform install archives (CLI,
+MCP server and a bundled Node.js runtime), the CLI and MCP server as source
+with selected developer tests, and the VS Code extension. The desktop
+application is not included.
 
 TokenLighten is source-available, not OSI-approved open source. See
 [Licensing](licensing.md) before redistribution or product integration.

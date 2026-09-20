@@ -796,6 +796,46 @@ function emitSideEffectViolationRefusal(
 }
 
 /**
+ * A required-set violation on a NON-side-effect kind (every read/search/
+ * task-pack response) is a producer bug in THIS process, not a caller
+ * mistake and not evidence of a write anyone needs to verify — there is no
+ * disk state to warn about. Before this fix (MX-B group 1, 2026-09-14) the
+ * two outcomes diverged by accident of configuration rather than by design:
+ * under `TL_DECISION_INVARIANT_STRICT` (this package's own test env, and the
+ * literal contract production enforces without the throw) `enforceRequiredSet`
+ * threw an unhandled `Error`, surfacing to the caller as an opaque JSON-RPC
+ * -32603 internal error; without the flag the malformed payload shipped
+ * silently (`evidence:[]` and all). Neither is the fail-closed conversion
+ * `emitSideEffectViolationRefusal` above already models for the side-effect
+ * kinds — this is that same conversion for everything else, so BOTH modes
+ * now produce the SAME structured, well-formed refusal.
+ *
+ * `retry:"none"`: the violation is about what THIS process computed for the
+ * response, not about anything the caller supplied — there is no field to
+ * fix, and re-issuing the identical call is expected to reproduce the same
+ * bug (the same reasoning `emitUnknownKindRefusal`/`emitSideEffectViolation
+ * Refusal` already apply). `describeVerdict` names the violated set (and any
+ * missing keys) in `detail`, so the violation is legible without a second,
+ * wire-level vocabulary for it.
+ */
+function emitRequiredSetViolationRefusal(
+  kind: Kind,
+  violation: ProtocolViolation,
+  context: ProtocolCallContext,
+): FinalizableResult {
+  const detail =
+    `protocol v1 required-set violation on ${kind} — ${describeVerdict(violation)}. `
+    + "This is a server-side response-construction defect, not a problem with the call as "
+    + "issued; re-issuing the identical call is expected to reproduce it.";
+  const tool = advertisedTool(context.tool);
+  if (tool === undefined) throw new Error(detail);
+  const refusal = buildRefusal(tool, { code: "invalid-input", retry: "none", detail });
+  const refusalText = JSON.stringify(refusal);
+  noteEmission(context, { limit: 0, used: measureResponseBytes(refusalText) });
+  return { content: [{ type: "text", text: refusalText }], isError: true };
+}
+
+/**
  * The MEASURE-ONLY path, for the funnel's three early returns: a response whose
  * `content[0].text` is not a string, is not a JSON object, or does not parse.
  *
@@ -1007,9 +1047,10 @@ function enforceRequiredSet(
   };
   recordProtocolViolation(context, violation);
 
+  // MX-B group 1 (2026-09-14): every mode converts to a graceful refusal now
+  // — never an opaque internal error (strict mode's old throw) and never a
+  // silently-malformed payload (non-strict mode's old pass-through). See
+  // `emitRequiredSetViolationRefusal`'s own doc comment.
   if (isSideEffectKind(kind)) return emitSideEffectViolationRefusal(kind, violation, context);
-  if (decisionInvariantStrictEnabled()) {
-    throw new Error(`protocol v1 required-set violation (strict) — ${describeVerdict(violation)}`);
-  }
-  return undefined;
+  return emitRequiredSetViolationRefusal(kind, violation, context);
 }

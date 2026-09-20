@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, lstatSync, readdirSync, existsSync, rename
 import { join, dirname, basename } from "node:path";
 import type { StubTargetId, GenerateResult, ToolSurface } from "@tokenlighten/types";
 import { STUB_TARGETS, STUB_TARGET_BY_ID } from "./stubs.js";
-import { renderBlock, renderCanonicalBlock, INSTRUCTIONS_VERSION, blockSha256 } from "./render.js";
+import { renderBlock, renderCanonicalBlock, renderTargetPreamble, INSTRUCTIONS_VERSION, blockSha256 } from "./render.js";
 import { rewrite, DriftMode, restoreEol } from "./inject.js";
 import { detectEol, stripBom, sha256hex } from "./sentinel.js";
 import type { Clock } from "./clock.js";
@@ -199,19 +199,19 @@ export async function removeAll(config: RemoveAllConfig): Promise<RemoveAllResul
   }
   const ids = config.targets
     ?? (STUB_TARGETS.map((target) => target.id) as StubTargetId[]);
-  const paths = [
-    "AGENTS.md",
+  const entries: Array<{ relPath: string; targetId?: StubTargetId }> = [
+    { relPath: "AGENTS.md" },
     ...ids.flatMap((id) => {
       const target = STUB_TARGET_BY_ID[id];
       if (!target) {
         result.skipped.push({ path: id, reason: "unknown-target-id" });
         return [];
       }
-      return [target.file];
+      return [{ relPath: target.file, targetId: target.id }];
     }),
   ];
 
-  for (const relPath of paths) {
+  for (const { relPath, targetId } of entries) {
     const absPath = join(repoRoot, relPath);
     if (!existsSync(absPath)) {
       result.skipped.push({ path: relPath, reason: "not-found" });
@@ -264,6 +264,17 @@ export async function removeAll(config: RemoveAllConfig): Promise<RemoveAllResul
 
     const next = existing.slice(0, start)
       + existing.slice(end + MANAGED_BLOCK_END.length);
+    // "copilot-agent" writes a whole VS Code Copilot Chat custom-agent file
+    // (frontmatter + managed block), not a block inside a pre-existing rules
+    // file — stripping the block alone would leave a frontmatter-only
+    // `.agent.md` that Copilot would still list as a usable custom agent
+    // with no instructions. When nothing but TL's own preamble remains
+    // (whitespace-insensitive: no user text was added inside the frontmatter
+    // or after the block), delete the file outright instead. Any real
+    // difference — an edited description, an appended paragraph, anything —
+    // keeps the file and strips only the block, same as every other target.
+    const deleteWhenBare = targetId === "copilot-agent"
+      && next.trim() === renderTargetPreamble(targetId).trim();
     const tmpPath = `${absPath}.tl-tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
     try {
       ensureSafeWriteParent(repoRoot, absPath, false);
@@ -276,13 +287,17 @@ export async function removeAll(config: RemoveAllConfig): Promise<RemoveAllResul
       ) {
         throw new Error("target-changed-during-removal");
       }
-      writeFileSync(tmpPath, next, { encoding: "utf8", flag: "wx", mode: 0o600 });
-      assertSafeWriteTarget(repoRoot, absPath);
-      const finalStat = lstatSync(absPath);
-      if (finalStat.dev !== beforeStat.dev || finalStat.ino !== beforeStat.ino) {
-        throw new Error("target-changed-before-publication");
+      if (deleteWhenBare) {
+        unlinkSync(absPath);
+      } else {
+        writeFileSync(tmpPath, next, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        assertSafeWriteTarget(repoRoot, absPath);
+        const finalStat = lstatSync(absPath);
+        if (finalStat.dev !== beforeStat.dev || finalStat.ino !== beforeStat.ino) {
+          throw new Error("target-changed-before-publication");
+        }
+        renameSync(tmpPath, absPath);
       }
-      renameSync(tmpPath, absPath);
       result.removed.push(relPath);
     } catch (error: unknown) {
       try { unlinkSync(tmpPath); } catch { /* best-effort owned temporary cleanup */ }

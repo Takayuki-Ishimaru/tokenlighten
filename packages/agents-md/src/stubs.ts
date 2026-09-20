@@ -9,8 +9,13 @@
 import type { StubTarget } from "@tokenlighten/types";
 
 /**
- * The 5 canonical stub targets for tools that do not natively read AGENTS.md.
- * Order: claude, copilot, cursor, cline, continue.
+ * The 6 canonical stub targets for tools that do not natively read AGENTS.md.
+ * Order: claude, copilot, cursor, cline, continue, copilot-agent.
+ *
+ * "copilot-agent" (added 2026-09-19) is a whole VS Code Copilot Chat custom
+ * agent file, not a managed block inside a rules file like the other 5 — see
+ * `StubTargetId`'s own doc comment in @tokenlighten/types for why it is
+ * conditionally included by callers instead of always processed.
  */
 export const STUB_TARGETS: readonly StubTarget[] = [
   {
@@ -36,6 +41,11 @@ export const STUB_TARGETS: readonly StubTarget[] = [
   {
     id: "continue",
     file: ".continue/rules/tokenlighten.md",
+    injectionMode: "managed-block",
+  },
+  {
+    id: "copilot-agent",
+    file: ".github/agents/tokenlighten-explore.agent.md",
     injectionMode: "managed-block",
   },
 ] as const;

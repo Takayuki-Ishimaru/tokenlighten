@@ -37,10 +37,22 @@ export interface SentinelBlock {
 }
 
 /**
- * The 5 agent IDs that require a generated stub (do not natively read AGENTS.md).
+ * The 6 agent IDs that require a generated stub (do not natively read AGENTS.md).
  * Windsurf and Roo are excluded — they natively read AGENTS.md (see §5 target table).
+ *
+ * "copilot-agent" is additive (2026-09-19): unlike the other 5 (a managed
+ * block inside a rules/instructions file), it renders a whole VS Code
+ * Copilot Chat custom-agent file (`.github/agents/tokenlighten-explore.agent.md`)
+ * that a parent agent's `runSubagent` tool can target by name so the child
+ * also uses TokenLighten. It is only ever included in `injectAll`/`removeAll`
+ * when the caller opts in (see `packages/cli/src/commands/workspace.ts`'s
+ * `setupWorkspace()`, which adds it to the managed-target list only while
+ * configuring the `vscode` client) and is deliberately excluded from
+ * `injectForTarget`'s `TARGET_FILES` (that flow writes generic guide text
+ * into a foreign repo with no notion of a live MCP server registration to
+ * point a custom agent's `tools:` list at).
  */
-export type StubTargetId = "claude" | "copilot" | "cursor" | "cline" | "continue";
+export type StubTargetId = "claude" | "copilot" | "cursor" | "cline" | "continue" | "copilot-agent";
 
 /**
  * Describes a single stub target: where to write and how to inject.

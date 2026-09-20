@@ -14,6 +14,7 @@ import { readCodePack } from "../tools/readCodePack.js";
 import { resetPackDedupeCache } from "../tools/readCodeTaskPack.js";
 import { handleTable } from "../util/handles.js";
 import { resetAll as resetAllSessions } from "../util/session.js";
+import { shortTmpDir } from "./helpers/shortTmpDir.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -32,7 +33,7 @@ interface ServerHandle {
 }
 
 function mkDir(tag: string): string {
-  const dir = fs.mkdtempSync(path.join(HOME, `.tl-pack-${tag}-`));
+  const dir = shortTmpDir(HOME, `.tl-pack-${tag}-`);
   tmpDirs.push(dir);
   return dir;
 }
@@ -566,7 +567,7 @@ describe("readCodePack query-pack", () => {
   });
 
   function mkUnitDir(tag: string): string {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tl-qpack-${tag}-`));
+    const dir = shortTmpDir(os.tmpdir(), `tl-qpack-${tag}-`);
     unitTmpDirs.push(dir);
     return dir;
   }

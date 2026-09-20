@@ -168,6 +168,18 @@ describe("F-A7: captured clientId reaches resolveClientProfile via a real callTo
       method: "initialize",
       params: { clientInfo: { name: "some-unregistered-client", version: "1.0.0" } },
     });
+    // VS Code / GitHub Copilot Chat disambiguation (protocol/clientAdvertisement.ts):
+    // handleRequest's "initialize" case now ALSO resolves the client profile
+    // itself (to pick VSCODE_SERVER_INSTRUCTIONS vs. the default), via the
+    // same resolvedClientId() this test's TOKENLIGHTEN_CLIENT_ID override
+    // affects — so the raw pre-override "some-unregistered-client" legitimately
+    // reaches the (mocked) resolveClientProfile once here, one line above,
+    // before the override below is even set. That is a real, intended call
+    // site for a DIFFERENT feature (client-aware `instructions`), not a
+    // regression of the property this test is about (the override winning at
+    // dispatch time) — so `seen` is cleared here to keep this test scoped to
+    // exactly what its name says: the callTool() dispatch path below.
+    seen.length = 0;
     process.env["TOKENLIGHTEN_CLIENT_ID"] = "tl-reference-client";
 
     const ws = mkWorkspace();

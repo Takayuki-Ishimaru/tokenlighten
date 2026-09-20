@@ -6,7 +6,9 @@
     "certificate": {
       "id": "$CERT",
       "obligations": [
-        "surface-content"
+        "surface-content",
+        "change:o1",
+        "change:o2"
       ]
     },
     "certified_query": "increase the premium multiplier in the rating engine and the app checkout total"

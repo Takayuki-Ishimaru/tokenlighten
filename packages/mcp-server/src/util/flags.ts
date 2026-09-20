@@ -22,6 +22,13 @@
  *
  * ---------------------------------------------------------------------------
  * D10 — env-flag disposition for the protocol v1 freeze (2026-08-14)
+ *
+ * 2026-09-14 addendum (USER ruling, DESIGN-v0.14-plan.md §10 residual 12):
+ * TL_FRONTIER_STRICT_WRITES — D10(B) out-of-contract, default OFF. Strict
+ * mode for an edit outside the task's certified frontier: refuses with
+ * `frontier-read-only` + retry:"new-task" + a re-pack `next` instead of
+ * applying with the `outside-certified-frontier` reclassification marker.
+ * Adds no kind, field or tool argument; listed in activeExperimentFlags.
  * ---------------------------------------------------------------------------
  *
  * DESIGN-v0.10-protocol-v1-contract-freeze.md §8 D10 adjudicates (a) for the
@@ -88,6 +95,14 @@
  *       inside the existing response families. The paired v3 decision run
  *       adopted it as the supported default; exact `0`/`off` remains a v0.14
  *       rollback switch while broader task-shape evidence accumulates.
+ *
+ *       TL_CONCERN_RECOVERY and TL_JA_QUERY_BRIDGE (USER ruling 2026-09-19,
+ *       shipped in v0.14.3): the FP first-pack-precision pair is promoted
+ *       from D10(B) experiment to supported policy, default ON. Explicit
+ *       `0`/`off` on either restores its pre-FP behaviour byte-for-byte and
+ *       remains the rollback path. Both reach only answer-profile task
+ *       packs; neither adds a kind, field, or tool argument. See the "FP
+ *       addendum" doc block below for the full mechanism.
  *
  *   (B) out-of-contract, experiment-only (default OFF; D10(b)). Turning one on
  *       is an unfrozen capability addition, not a supported posture:
@@ -444,6 +459,105 @@
  *   non-numeric, or non-positive; production never sets it. Class (C):
  *   test-harness/diagnostic, never a response-shape branch at the production
  *   default.
+ *
+ * ---------------------------------------------------------------------------
+ * FX-M addendum -- Task-Pack Trim Fairness (2026-09-19)
+ * ---------------------------------------------------------------------------
+ *
+ * Two more D10(B) flags, both scoped to trimToCap's/dedupeTrimAndPersist's
+ * byte-budget handling in readCodeTaskPack.ts and both default OFF:
+ *
+ *   TL_PACK_GUIDE_ELIDE -- a pre-pass in `dedupeTrimAndPersist`, immediately
+ *   before `trimToCap` runs, that replaces the INNER contents of a served
+ *   agent-guide file's TokenLighten-managed block (AGENTS.md, CLAUDE.md,
+ *   CLAUDE.local.md, GEMINI.md, and the per-host rule-file mirrors) with one
+ *   marker line, since every host that serves one of these already injects
+ *   the SAME block into the model's own instructions -- shipping it again
+ *   inside a pack's `code` is pure duplication that starves other
+ *   caller-named bodies out of the fixed byte cap. Runs unconditionally over
+ *   every eligible surface, cap-pressure or not (the block is redundant
+ *   context either way); it never touches `range`, `handle`, or any
+ *   coverage/role field.
+ *
+ *   TL_PACK_FAIR_TRIM -- replaces trimToCap Phase E's "halve every
+ *   caller-supplied body every round" ladder (>=2 caller-supplied bodies
+ *   case only) with a water-filling pass: it binary-searches the largest
+ *   shared per-body byte ceiling under which every body either fits whole
+ *   (small bodies) or is cut to the same line-boundary prefix (large
+ *   bodies), so a small caller-named file is never ground down alongside a
+ *   large one just because they share a cap. Falls through to the untouched
+ *   legacy ladder when no ceiling at or above its search floor makes the
+ *   pack fit.
+ *
+ * OFF (the default) for either flag leaves the corresponding code path
+ * byte-identical to pre-FX-M output -- wireBaselines.spec.ts and
+ * replayCorpus.spec.ts pass without regeneration with both unset. See each
+ * accessor's own doc comment below (util/flags.ts, next to
+ * compoundRetrievalEnabled) for the exact seam and fallback behavior.
+ *
+ * ---------------------------------------------------------------------------
+ * F5 addendum -- Find Wide Snippet Page (2026-09-19)
+ * ---------------------------------------------------------------------------
+ *
+ * TL_FIND_WIDE_PAGE joins class (B): out-of-contract, default OFF.
+ *
+ * Widens the explore action=find snippet-section byte cap
+ * (features/search/find/findText.ts's fitFilesToCap()/applyRoles() calls,
+ * read through the new findResponseCapBytes() accessor -- see that
+ * function's own doc comment for the full rationale and every call site it
+ * covers, including relatedLookups.ts's and memberSweep.ts's own additive
+ * byte-cap checks) from MAX_RESPONSE_BYTES (4096) to
+ * FIND_WIDE_PAGE_RESPONSE_BYTES (16384) when ON. The companion whole-response
+ * ceiling MAX_INVENTORY_RESPONSE_BYTES (findInventoryCapBytes()) widens by
+ * the same delta, to preserve the inventory's own byte headroom -- see that
+ * accessor's own doc comment.
+ *
+ * MOTIVATION (2026-09-19 measured live-session forensics): a 7-file/50-match
+ * find result truncated at the 4096-byte cap came back as four separate
+ * follow-up calls (3084 B + 1681 B + 1499 B + ...), one full priced model
+ * turn per ~1.5-3 KB page -- in one session, six consecutive pages of the
+ * SAME search were ~28% of that session's total cost. Measured host pricing
+ * makes one extra turn cost about as much as 10-20 KB of new payload, so a
+ * 4 KB page sits far below break-even on every host measured.
+ *
+ * OFF (the default) is byte-identical to pre-F5 output: both accessors
+ * return their unchanged pre-flag constants, so replayCorpus.spec.ts and
+ * wireBaselines.spec.ts pass without regeneration. ON changes only HOW MANY
+ * BYTES of the SAME fields (files[]/roles/matched_terms/hint, then
+ * inventory/rollup) ship before truncation kicks in -- same fields, same
+ * ordering, same total_files/total_matches honesty either way; no new kind,
+ * field, or tool argument.
+ *
+ * ---------------------------------------------------------------------------
+ * FP addendum -- First-Pack Precision (2026-09-19; promoted to (S) supported
+ * policy, DEFAULT ON, by USER ruling 2026-09-19 -- shipped in v0.14.3)
+ * ---------------------------------------------------------------------------
+ *
+ * Two flags, both scoped to how a task pack's FIRST candidate set is built
+ * from the caller's query. Both reach only answer-profile task packs;
+ * neither adds a kind, field, or tool argument. Explicit `0`/`off` on either
+ * is the documented rollback path and restores the pre-FP behaviour
+ * byte-for-byte:
+ *
+ *   TL_CONCERN_RECOVERY -- per-concern evidence recovery for multi-concern
+ *   queries (features/task-pack/concernRecovery.ts). The explicit-identifier
+ *   recovery reads at most three code-shaped identifiers and drops any name
+ *   without a unique definition owner, so an enumerated literal list whose
+ *   members only ever appear as values produced no surface, and one
+ *   identifier's import neighbourhood could take every embed slot. ON
+ *   recovers enumerated/backticked literal items by sibling co-occurrence
+ *   (the file where several members of the SAME list appear together) and
+ *   shares embed slots across concerns.
+ *
+ *   TL_JA_QUERY_BRIDGE -- Japanese-to-identifier query bridging
+ *   (features/retrieval/jaQueryBridge.ts). A Japanese query against an
+ *   English codebase shares no lexical token with it, so the first pack can
+ *   come back empty. ON expands katakana loanwords and common software-domain
+ *   terms into Latin tokens, keeping ONLY expansions that occur in the
+ *   workspace's own identifier/path vocabulary.
+ *
+ * OFF (explicit `0`/`off`) for either flag remains byte-identical to pre-FP
+ * output -- the rollback path. Neither adds a kind, field, or tool argument.
  */
 import { appendFileSync, statSync } from "node:fs";
 
@@ -761,10 +875,38 @@ export function activeExperimentFlags(): readonly string[] {
   if (fastPathV2Enabled()) active.push("TL_FAST_PATH_V2");
   if (deltaContextEnabled()) active.push("TL_DELTA_CONTEXT");
   if (batchEditFrontierEnabled()) active.push("TL_BATCH_EDIT_FRONTIER");
+  // FX-L strict frontier writes (user ruling 2026-09-14). Default OFF, so a
+  // stock session's `flags_active` is byte-identical to before this flag.
+  if (frontierStrictWritesEnabled()) active.push("TL_FRONTIER_STRICT_WRITES");
   // Default OFF since 2026-09-02 (paired paid evidence showed no consistent
   // cost benefit). It remains a D10(B) treatment because its carrier
   // selection is observable content.
   if (semanticFrontierGuardEnabled()) active.push("TL_SEMANTIC_FRONTIER_GUARD");
+  // FX-M (2026-09-19): task-pack trim fairness pair. Both default OFF; see
+  // this file's "FX-M addendum" doc block above.
+  if (packGuideElideEnabled()) active.push("TL_PACK_GUIDE_ELIDE");
+  if (packFairTrimEnabled()) active.push("TL_PACK_FAIR_TRIM");
+  // F5 (2026-09-19): find wide snippet page. Default OFF; see this file's
+  // "F5 addendum" doc block above.
+  if (findWidePageEnabled()) active.push("TL_FIND_WIDE_PAGE");
+  // Turn economy (2026-09-20): the per-host umbrella and each member policy
+  // it governs. Both default OFF, so a stock session's `flags_active` is
+  // byte-identical to before them; a member is reported whenever it is
+  // effectively on, whether by its own override or by the umbrella.
+  if (turnEconomyEnabled()) active.push("TL_TURN_ECONOMY");
+  if (seededGenerousEnabled()) active.push("TL_SEEDED_GENEROUS");
+  if (identifierGroundingEnabled()) active.push("TL_IDENTIFIER_GROUNDING");
+  if (answerLineGutterEnabled()) active.push("TL_ANSWER_LINE_GUTTER");
+  if (namedTargetResolutionEnabled()) active.push("TL_NAMED_TARGET_RESOLUTION");
+  if (foldSmallRemainderEnabled()) active.push("TL_FOLD_SMALL_REMAINDER");
+  if (callerExpansionEnabled()) active.push("TL_CALLER_EXPANSION");
+  if (reserveSmallWindowsEnabled()) active.push("TL_RESERVE_SMALL_WINDOWS");
+  // WP-V1 (2026-09-20): lean vscode-only calls/schemas -- reported whenever
+  // effectively on (own override or the umbrella); a non-"vscode" client
+  // still reports this the same way `activeExperimentFlags` reports every
+  // other member, since this trace is about the FLAG'S value, not about
+  // whether the current call happens to be vscode-scoped.
+  if (leanCallsEnabled()) active.push("TL_LEAN_CALLS");
   // v0.15 W-CORE-FLAGS: Semantic Frontier v2 program flags -- registration
   // only today (no production branch reads them yet, see their own doc
   // blocks above); reported here for trace-inventory parity with every
@@ -864,6 +1006,32 @@ export function batchEditFrontierEnabled(): boolean {
 }
 
 /**
+ * D10 (B): FX-L STRICT FRONTIER WRITES (user ruling 2026-09-14,
+ * review-findings-6 SHOULD-FIX 38). Default OFF.
+ *
+ * OFF — the ruling's default behaviour: an `edit_file` whose target the LATEST
+ * certified decision did not authorize still APPLIES, and the `edit.applied`
+ * response discloses the fact through `EditReclassification.frontier_status`
+ * (`state/session.ts`'s `certifiedFrontierMarkerFor`). FX-L is untouched: the
+ * hard fence still admits exactly the bytes this session served this epoch.
+ *
+ * ON — the same condition REFUSES the whole batch with `frontier-read-only`,
+ * `retry:"new-task"` and an executable re-pack `next`. This is the one
+ * direction FX-L's ruling (r) says this file may never move in by default
+ * ("the gate refuses a handle this server itself served"), which is exactly
+ * why it is a flag and not a behaviour change: an operator who wants
+ * explain-only enforcement at dispatch opts in, and the T09/T10 regression
+ * class stays closed for everyone else.
+ *
+ * Class (B), not (C): it selects response SHAPE (an `edit.applied` with a
+ * receipt vs. a `refusal`), so it is reported by `activeExperimentFlags`
+ * below like every other (B) treatment.
+ */
+export function frontierStrictWritesEnabled(): boolean {
+  return parseBool(process.env["TL_FRONTIER_STRICT_WRITES"], false);
+}
+
+/**
  * D10 (B): V11-05's compound retrieval (v0.11 wave B). CONSOLIDATED (v0.14
  * flag inventory, 2026-08-31): the former TL_COMPOUND_RETRIEVAL env var is
  * folded into `TL_GRAPH_EVIDENCE=compound` — the seam always required BOTH
@@ -874,6 +1042,618 @@ export function batchEditFrontierEnabled(): boolean {
  */
 export function compoundRetrievalEnabled(): boolean {
   return graphEvidenceMode() === "compound";
+}
+
+/**
+ * FX-M (2026-09-19), D10 (B): out-of-contract, default OFF. See this file's
+ * "FX-M addendum" doc block above for the full rationale.
+ *
+ * ON: `dedupeTrimAndPersist` (readCodeTaskPack.ts) elides the INNER contents
+ * of a served agent-guide file's TokenLighten-managed block (between the
+ * sentinel comment lines) to one marker line before `trimToCap` ever runs,
+ * stamping `content_completeness:"partial"` + the elided absolute line span
+ * in `remaining_ranges`. The sentinel lines themselves, and any content
+ * outside them, are untouched; a file whose basename/path is not on the
+ * fixed agent-guide list is never considered, even if it happens to embed
+ * the same sentinel text.
+ *
+ * OFF (the default): the pre-pass never runs, so a served guide file's body
+ * is byte-identical to pre-FX-M output.
+ */
+export function packGuideElideEnabled(): boolean {
+  // Turn economy (2026-09-20): presence-first member of the per-host umbrella,
+  // same shape as `seededGenerousEnabled()` — the member's own variable wins in
+  // either direction when set; unset follows `TL_TURN_ECONOMY` (default OFF,
+  // so a stock server is byte-identical).
+  const raw = process.env["TL_PACK_GUIDE_ELIDE"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * FX-M (2026-09-19), D10 (B): out-of-contract, default OFF. See this file's
+ * "FX-M addendum" doc block above for the full rationale.
+ *
+ * ON: `trimToCap`'s Phase E (readCodeTaskPack.ts), when it already has >= 2
+ * caller-supplied (explicitly named) bodies to balance, tries a
+ * water-filling pass BEFORE the legacy "halve every body every round"
+ * ladder: binary-search the largest shared per-body byte ceiling at which
+ * every body either survives whole (at/under the ceiling) or is cut to a
+ * shared line-boundary prefix (over the ceiling), verified against the
+ * pack's real byte cap and backed off geometrically to correct for
+ * `capForResult`'s non-monotonic (step-function) behavior. On success the
+ * trimmed pack is returned immediately, same early-return shape as the
+ * legacy loop. On failure (no per-body ceiling at or above the search floor
+ * makes the pack fit) every touched body is restored to its original bytes
+ * and the UNMODIFIED legacy halving loop runs exactly as it would with this
+ * flag off.
+ *
+ * OFF (the default): Phase E's caller-supplied-body handling is the exact
+ * pre-FX-M legacy code path, byte-identical.
+ */
+export function packFairTrimEnabled(): boolean {
+  // Turn economy (2026-09-20): presence-first member of the per-host umbrella
+  // (see `packGuideElideEnabled()` above). Measured on a recorded Copilot call
+  // (query + 8 caller-named files, `budget.bytes:30000`): the legacy Phase E
+  // halving cut EVERY body to its first half and used 20.5 KB of the 30 KB the
+  // caller allowed, so the model re-requested all eight remainders; the
+  // water-filling trim serves the small files whole and spends the budget.
+  const raw = process.env["TL_PACK_FAIR_TRIM"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * F5 (2026-09-19), D10 (B): out-of-contract, default OFF. See this file's
+ * "F5 addendum" doc block above for the full rationale.
+ *
+ * ON: `features/search/find/findText.ts`'s `findResponseCapBytes()` (the
+ * explore action=find snippet-section cap) and `findInventoryCapBytes()`
+ * (the companion whole-response-with-inventory ceiling) both widen — see
+ * each accessor's own doc comment for the exact bytes.
+ *
+ * OFF (the default): both accessors return their pre-flag constants
+ * unchanged, so the find response family is byte-identical to pre-F5
+ * output.
+ *
+ * 2026-09-20 addendum: joined the TL_TURN_ECONOMY umbrella as a member,
+ * with exactly the override semantics `seededGenerousEnabled` documents —
+ * its own TL_FIND_WIDE_PAGE variable wins outright whenever it is set
+ * (including explicit "0"); only an UNSET variable falls back to
+ * `turnEconomyEnabled()`. Unset both and this reads exactly as before.
+ */
+export function findWidePageEnabled(): boolean {
+  const raw = process.env["TL_FIND_WIDE_PAGE"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * FP (2026-09-19), (S) supported first-pack policy: DEFAULT ON by USER
+ * ruling 2026-09-19, shipped in v0.14.3. See this file's "FP addendum" doc
+ * block above for the full rationale.
+ *
+ * ON (the default): a task pack's answer-evidence stage additionally runs
+ * features/task-pack/concernRecovery.ts -- enumerated/backticked literal
+ * items of the query are located by fixed-string scan and resolved by sibling
+ * co-occurrence, and embed slots are shared across the query's concerns so a
+ * single identifier's import neighbourhood cannot take all of them. Reaches
+ * only answer-profile task packs; adds no kind, field, or tool argument.
+ *
+ * OFF (explicit `0`/`off`): the stage is never entered; packs are
+ * byte-identical to pre-FP output -- the rollback path, restoring pre-FP
+ * behaviour byte-for-byte.
+ */
+export function concernRecoveryEnabled(): boolean {
+  return parseBool(process.env["TL_CONCERN_RECOVERY"], true);
+}
+
+/**
+ * FP (2026-09-19), (S) supported first-pack policy: DEFAULT ON by USER
+ * ruling 2026-09-19, shipped in v0.14.3. See this file's "FP addendum" doc
+ * block above for the full rationale.
+ *
+ * ON (the default): query tokenisation additionally runs
+ * features/retrieval/jaQueryBridge.ts -- katakana loanwords and common
+ * software-domain Japanese terms are expanded into Latin tokens, and only
+ * expansions present in the workspace's own identifier/path vocabulary are
+ * kept. Expansions are weak lexical tokens, never explicit identifiers.
+ * Reaches only answer-profile task packs; adds no kind, field, or tool
+ * argument.
+ *
+ * OFF (explicit `0`/`off`): the bridge is never consulted; query tokens are
+ * byte-identical to pre-FP output -- the rollback path, restoring pre-FP
+ * behaviour byte-for-byte.
+ */
+export function jaQueryBridgeEnabled(): boolean {
+  return parseBool(process.env["TL_JA_QUERY_BRIDGE"], true);
+}
+
+/**
+ * TL_TASK_HANDLE_RECOVERY (2026-09-19), (S) supported policy — DEFAULT ON;
+ * explicit "0"/"off" is the rollback path, restoring today's behaviour
+ * byte-for-byte. `read_file`/`search_files` only; `edit_file` keeps strict
+ * authentication always (see server.ts's `recoverAuthFailedTaskHandle`,
+ * never wired into the edit_file dispatch arm).
+ *
+ * ON (the default): when a presented `task.handle` fails authentication,
+ * server.ts's `recoverAuthFailedTaskHandle` tries, in order, (0) a live
+ * handle of this (workspace, lane) that the presented string merely extends
+ * by a few trailing characters (`isTailExtendedHandle` - the authentic token
+ * is all there), (a) the SAME call's own `qref` bound to exactly one live
+ * handle of this (workspace, lane), then (b) exactly one live lane lineage
+ * handle that is a `state/laneTaskHandles.ts` `isMidSplicedHandle` match for
+ * the presented string. On a match the call proceeds as if that recovered handle had been
+ * presented — same task, same wire `task.id` on the way out — instead of
+ * refusing `handle-unknown`. Two or more qualifying candidates is ambiguous
+ * and recovers nothing. Adds no kind, field, or tool argument: an
+ * already-defined refusal turns into an already-defined success on the SAME
+ * schema, nothing new ships either way.
+ *
+ * OFF (explicit "0"): `recoverAuthFailedTaskHandle` returns immediately;
+ * every call reaches `taskHandleRefusal` exactly as it does today.
+ */
+export function taskHandleRecoveryEnabled(): boolean {
+  return parseBool(process.env["TL_TASK_HANDLE_RECOVERY"], true);
+}
+
+/**
+ * TL_TURN_ECONOMY (2026-09-20), DEFAULT OFF — the per-host opt-in written by
+ * `tl workspace setup` into the VS Code MCP entry; enables the turn-economy
+ * serving policies as a set.
+ *
+ * WHY AN UMBRELLA, AND WHY OFF: these policies trade served BYTES for model
+ * TURNS, and the exchange rate is a property of the HOST, not of the server —
+ * one extra turn prices at roughly 9-14 KB of source on the hosts measured,
+ * but the Claude Code paired bench must not move against v0.14.0 (USER ruling
+ * 2026-09-20). So the whole family stays off by default on every host and is
+ * switched on for the hosts where it pays, by setup, through this one
+ * variable, rather than by each policy flag being flipped independently.
+ *
+ * Each member flag keeps its OWN env var as an explicit per-policy override:
+ * set it to "0"/"1" and that value wins outright; leave it unset and the
+ * member follows this umbrella. Unset both and the server is byte-identical
+ * to pre-turn-economy output.
+ */
+export function turnEconomyEnabled(): boolean {
+  return parseBool(process.env["TL_TURN_ECONOMY"], false);
+}
+
+/**
+ * WP-S2 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above: an explicit `TL_SEEDED_GENEROUS` value
+ * (either "0"/"off" or "1"/"on") always wins; unset, this flag follows
+ * `turnEconomyEnabled()`. With neither variable set the seeded/anchor paths
+ * are byte-identical to pre-WP-S2 output. Scoped to `readCodeTaskPack.ts`'s
+ * SEEDED pack (`buildSeededTaskPack` — a `read_file {query, targets:[{path},…]}`
+ * where the CALLER named the files) and to `selectAnchorFocus`'s member
+ * ranking.
+ *
+ * MOTIVATION (measured 2026-09-20, live GitHub Copilot sessions): cost on
+ * every host is dominated by model TURNS — one extra turn prices at roughly
+ * 9-14 KB of served source — so a pack that under-serves a file the caller
+ * NAMED is more expensive than one that serves it whole. A named file whose
+ * RAW size exceeded MAX_SURFACE_CODE_BYTES was re-pointed at its single best
+ * anchor symbol; on an 18 KB service class that shipped the 754-byte
+ * CONSTRUCTOR and certified `act.answer`, and the same query with NO targets
+ * served the whole class — naming the files made the pack worse.
+ *
+ * ON, four changes, all on the caller-NAMED seed path:
+ *   1. the whole-file "fits" decision is taken on the size the surface would
+ *      really EMBED (after the same doc-comment elision the embed applies),
+ *      not on raw bytes;
+ *   2. on an `answer` (read-only) profile a named file with no caller
+ *      range/symbol is served WHOLE up to SEEDED_ANSWER_SURFACE_CODE_BYTES,
+ *      water-filled smallest-first across the named set, and a seeded answer
+ *      pack naming >= 2 files may reach the existing 32 KB budget tier.
+ *      `generic` keeps today's 12,288-byte per-surface allowance;
+ *   3. a named file that still does not fit serves up to four distinct,
+ *      non-overlapping query-ranked symbol windows (answer profile) instead
+ *      of one, with `remaining_ranges` partitioned across them exactly once;
+ *   4. when the top-scoring anchor symbol is the file's own enclosing TYPE
+ *      and it does not fit, the members are re-ranked on the query tokens
+ *      MINUS that type's name tokens, with light whole-word inflection
+ *      tolerance on the name match (all profiles).
+ *
+ * OFF (the default, and explicit "0"/"off"): every one of those branches is
+ * skipped and the seeded/anchor paths are byte-identical to pre-WP-S2 output.
+ * Adds no kind, field, or tool argument — only WHICH bytes of the existing
+ * `code`/`remaining_ranges`/`range` fields a named file's surface carries.
+ */
+export function seededGenerousEnabled(): boolean {
+  // The member's own variable is an OVERRIDE, so it is read for PRESENCE
+  // first: `parseBool(raw, turnEconomyEnabled())` would make an unparseable
+  // value silently inherit the umbrella instead of meaning what the operator
+  // wrote, and `parseBool(raw, false)` alone would make "unset" mean "off"
+  // even under the umbrella.
+  const raw = process.env["TL_SEEDED_GENEROUS"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * WP-S5 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above with exactly the override semantics
+ * `seededGenerousEnabled` documents. With neither variable set the readiness
+ * obligations a pack mints are byte-identical to pre-WP-S5 output. Scoped to
+ * `readCodeTaskPack.ts`'s `buildReadinessObligations` explicit-identifier loop.
+ *
+ * MOTIVATION (measured 2026-09-20, the recommended `query: <verbatim request>`
+ * shape): a request that names its own PRODUCT ("このリポジトリ(ShopFlow)で…")
+ * mints `identifier:ShopFlow` as a BLOCKING obligation, because the word is
+ * PascalCase and that is all the shape oracle can see. No symbol in the
+ * workspace is named `ShopFlow` (only neighbours such as `ShopFlowApiClient`),
+ * so the pack's own prescribed `next` — `search_files find ["ShopFlow"]` — is a
+ * call the server can predict will find nothing useful: following it returned
+ * fuzzy symbol hits and a re-pack that served an unrelated file and REGRESSED
+ * the decision. Two model turns bought a worse task state. A stop-list
+ * (`PROSE_ACRONYMS`) closes vocabulary words like API/JSON/URL; it cannot
+ * generalize to product, repository, or brand names.
+ *
+ * SCOPE (widened 2026-09-20, second live Copilot session): this flag now
+ * carries ONE rule in three places — AN OBLIGATION MUST BE GROUNDED IN CODE
+ * SHAPE, and the server never prescribes a call whose own execution it can
+ * predict is useless.
+ *   (1) identifiers, below;
+ *   (2) ENUMERATED AND REQUEST ITEMS. A list item or clause blocks a pack only
+ *       when the caller wrote it as code (backticked/quoted, an uppercase
+ *       letter after the first character, a digit, `_`, `.`, `/`, `::`, `#`,
+ *       `(`, or an ALL-CAPS token). `PAID, CANCELLED` and `order.quantity`
+ *       keep their obligations; "inventory restoration", "line numbers" and
+ *       "read-only" become ranking hints only. A clause that constrains the
+ *       ANSWER'S FORM or the AGENT'S BEHAVIOUR ("need exact file paths and
+ *       line numbers", "read-only, do not edit", "簡潔に", "変更しないで") asks
+ *       nothing about the repository and mints no request item at all.
+ *   (3) TOKENLIGHTEN'S OWN MANAGED GUIDE TEXT. A scan hit inside the managed
+ *       block of an agents-md target (AGENTS.md, CLAUDE.md, GEMINI.md,
+ *       .github/copilot-instructions.md, the Copilot explore-agent file, the
+ *       per-host rule mirrors) is not a discovery candidate: the host already
+ *       gave the model that text. Detection is the FX-M path list plus the
+ *       `<!-- tokenlighten:mcp-instructions:start -->` sentinel, so only the
+ *       BLOCK's lines are unmatchable and a guide file that also carries the
+ *       project's own guidance stays a first-class candidate. A point whose
+ *       only occurrences were in a block is closed as "not repository
+ *       evidence" — never as a verified absence, since the word does occur.
+ *
+ * Measured, second session (VS Code Copilot, umbrella on): three prose
+ * `enumerated-item:` obligations plus a `request-item` for "do not edit." held
+ * a complete pack at `discover`, and its `next` re-packed the same query
+ * against TL's own three guide files. The model ran it verbatim: one wasted
+ * turn, junk evidence.
+ *
+ * ON, for identifiers: a query word becomes a blocking `identifier:<name>`
+ * obligation only when it is GROUNDED — backticked, qualified (`A.b`, `A::b`,
+ * `A#b`), call-shaped (`name(`), snake_case/`$`-bearing, or carrying at least
+ * one whole-word, definition-shaped occurrence in a source file of the
+ * workspace. A bare camelCase/PascalCase word that fails all of those over a
+ * COMPLETE workspace walk mints no obligation, so no `find` is prescribed for
+ * it and the decision follows from the remaining obligations. Anything the
+ * grounding scan cannot decide (an incomplete walk, an unreadable workspace)
+ * keeps today's behaviour, fail-closed.
+ *
+ * OFF (the default, and explicit "0"/"off"): the grounding check is never
+ * consulted and every identifier the shape oracle admits mints its obligation
+ * exactly as before. Adds no kind, field, or tool argument — only WHICH
+ * obligations (and therefore which `decision.kind`/`next`) a pack derives.
+ */
+export function identifierGroundingEnabled(): boolean {
+  // Same PRESENCE-first read as `seededGenerousEnabled` above, for the same
+  // reason: the member's own variable is an override, not a defaulted value.
+  const raw = process.env["TL_IDENTIFIER_GROUNDING"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * WP-S4 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above with exactly the override semantics
+ * `seededGenerousEnabled`/`identifierGroundingEnabled` document: an explicit
+ * `TL_ANSWER_LINE_GUTTER` value (either "0"/"off" or "1"/"on") always wins;
+ * unset, this flag follows `turnEconomyEnabled()`. With neither variable set
+ * the read family's served bodies are byte-identical to pre-WP-S4 output.
+ * Scoped to one seam in `protocol/envelope.ts`'s `finalizeProtocolResponse` —
+ * immediately before `emit.ts`'s `emitFinalizedPayload` measures the payload
+ * — which calls the pure renderer in `protocol/lineGutter.ts`.
+ *
+ * MOTIVATION (measured 2026-09-19, recorded GitHub Copilot sessions): TL
+ * evidence carries a `range` such as "256-308" plus a body whose multi-line
+ * doc comments are collapsed by `elideDocCommentsWithWindows`
+ * (util/formatCompress.ts) into a single marker line naming the elided span,
+ * so the true source line of a statement inside the body cannot be counted
+ * off the wire (a method actually starting at file line 274 is unreachable by
+ * counting from a body that opens at line 256). The model issued serial
+ * `search_files find` calls on exact code text purely to learn line numbers
+ * — 3 extra model turns in one session, 1 in another — and a turn prices at
+ * roughly the same as 9-14 KB of served bytes on every host measured, so
+ * serving the numbers in-band is strictly cheaper than the native escape.
+ *
+ * ON, for CODE evidence only (a path whose language `elideDocCommentsWithWindows`
+ * actually renders — see `protocol/lineGutter.ts`'s own allowlist; Markdown,
+ * plain text, config, Office and archive evidence are untouched) inside an
+ * ANSWER-profile response (`read.task_pack` with `profile:"answer"`, or a
+ * `read.text`/`read.batch` whose OWN call args declare `task.profile:"answer"`
+ * — never a `generic`/change task, whose bodies must stay copy-exact for
+ * `edit_file` search/replace): each body line gains a source-line-number
+ * gutter, re-derived from the renderer per ruling (aa) (never by re-parsing
+ * marker-shaped text) and applied ONLY when the served body is byte-equal to
+ * `elideDocCommentsWithWindows`'s own rendering of that path+range, or a
+ * whole-line prefix of it (a cap-cut body). Anything else — comments kept, a
+ * trimmed middle, a synthetic outline, a stale file — ships un-numbered.
+ *
+ * OFF (the default, and explicit "0"/"off"): `protocol/lineGutter.ts`'s
+ * transform is never invoked and every read-family body is byte-identical to
+ * pre-WP-S4 output. Adds no kind, field, or tool argument — only WHICH BYTES
+ * of an existing `evidence[].body` / `entries[].content` a numbered line
+ * carries.
+ */
+export function answerLineGutterEnabled(): boolean {
+  // Same PRESENCE-first read as `seededGenerousEnabled`/
+  // `identifierGroundingEnabled` above, for the same reason: the member's own
+  // variable is an override, not a defaulted value.
+  const raw = process.env["TL_ANSWER_LINE_GUTTER"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * WP-S8 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above with exactly the override semantics
+ * `seededGenerousEnabled`/`identifierGroundingEnabled` document: an explicit
+ * `TL_NAMED_TARGET_RESOLUTION` value (either "0"/"off" or "1"/"on") always
+ * wins; unset, this flag follows `turnEconomyEnabled()`. With neither
+ * variable set a seeded pack's surfaces and `missing` are byte-identical to
+ * pre-WP-S8 output. Scoped to `buildSeededTaskPack`
+ * (features/task-pack/readCodeTaskPack.ts) — nothing else reads it.
+ *
+ * MOTIVATION (recorded GitHub Copilot session 2026-09-20): the model's FIRST
+ * call named ten `targets`, each with a `purpose`. Three were file paths it
+ * had GUESSED the folder for (`frontend/order.js` where `frontend/js/order.js`
+ * exists) and three were DIRECTORIES. The pack served the four paths that
+ * happened to be exact, reported the three guesses as `missing`, and drew
+ * NOTHING out of the three directories — including the service directory
+ * holding the three classes the question was about. The model spent two more
+ * turns (three parallel `find`s, then a second pack) recovering what it had
+ * already named, and a turn prices at roughly 9-14 KB of served bytes on
+ * every host measured.
+ *
+ * ON, for a seeded pack only:
+ *   - a caller-named FILE path that does not exist resolves to the workspace's
+ *     UNIQUE same-basename file (preferring, when several exist, the unique
+ *     one under the named path's own parent subtree) and is then seeded
+ *     exactly as if the caller had spelled it, its `why` carrying a
+ *     `resolved-from:<named path>` marker; ambiguity, an existing path, a
+ *     range/symbol the resolved file cannot honor, and anything outside the
+ *     workspace or ignored all stay unresolved and reported as today;
+ *   - a caller-named DIRECTORY contributes locate evidence, on the FIRST pack
+ *     of an ANSWER task only (never a `qref` replay, never a change pack —
+ *     readiness and obligations are untouched), through the same per-clause
+ *     locate recovery `concernRecovery.ts` already runs for the answer path,
+ *     driven by that target's own `purpose` text and confined to the
+ *     directory. Additions are strictly additive after the caller-named file
+ *     surfaces and bounded per directory and in total.
+ *
+ * OFF (the default, and explicit "0"/"off"): neither branch is entered. Adds
+ * no kind, field, or tool argument — only WHICH surfaces an existing seeded
+ * pack carries and which named paths its existing `missing` reports.
+ */
+export function namedTargetResolutionEnabled(): boolean {
+  // Same PRESENCE-first read as `seededGenerousEnabled`/
+  // `identifierGroundingEnabled` above, for the same reason: the member's own
+  // variable is an override, not a defaulted value.
+  const raw = process.env["TL_NAMED_TARGET_RESOLUTION"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * WP-S7 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above with exactly the override semantics
+ * `seededGenerousEnabled`/`identifierGroundingEnabled`/`answerLineGutterEnabled`/
+ * `namedTargetResolutionEnabled` document: an explicit `TL_FOLD_SMALL_REMAINDER`
+ * value (either "0"/"off" or "1"/"on") always wins; unset, this flag follows
+ * `turnEconomyEnabled()`. With neither variable set a pack's surfaces and
+ * `remaining_ranges` are byte-identical to pre-WP-S7 output. Scoped to
+ * `readCodeTaskPack.ts`'s `dedupeTrimAndPersist` — the single choke point
+ * every pack builder (`buildTaskPack`, `buildSeededTaskPack`, `buildPartialPack`,
+ * `buildDiffTaskPack`) already funnels through — via the `applyFoldSmallRemainder`
+ * pass, run once over the FULL surface list before `trimToCap` and therefore
+ * before the served-range ledger books what shipped.
+ *
+ * MOTIVATION (measured 2026-09-20, live GitHub Copilot session, turn-economy
+ * umbrella on): an answer pack served a class from its declaration line and
+ * listed the file's own head as `remaining` — e.g. `OrderService.java:27-420
+ * remaining:["1-26"]` — a package line, imports and a blank line nobody asked
+ * about. The model then spent a WHOLE extra turn
+ * (`read_file {targets:[{handle,range:"1-14"}]}`) fetching the 14 import lines
+ * it needed; one extra turn prices at roughly 9-14 KB of served source on
+ * every host measured, so withholding ~400 bytes nobody needed cost far more
+ * than it saved, and the standing `remaining` entry is itself a standing
+ * invitation to zoom.
+ *
+ * ON: when a CODE file (never Markdown, never an artifact surface) is
+ * represented in the pack by exactly ONE surface, no other surface names the
+ * same path, that surface carries embedded `code`, its `remaining_ranges`
+ * total 40 lines or fewer whose own elided embed is 2,048 bytes or fewer, and
+ * the surface is neither a caller-explicit range
+ * (`sfWithholdingMarks.ts`'s `isCallerRangeSurface`) nor one the semantic
+ * frontier already withheld a body from (`wasSemanticFrontierBodyWithheld`) —
+ * the surface is widened to the whole file (`1-<lastLine>`), rendered through
+ * the exact same `centeredSliceForCap`/`sliceCode` whole-file path a
+ * fits-the-cap serve already uses (same doc-comment elision), and
+ * `remaining_ranges` is dropped. The widen is REJECTED, leaving the surface
+ * exactly as it was, when the whole body would not fit the per-surface cap or
+ * would push the pack past its own byte budget (`fitsInCap`) — checked
+ * directly, never left for `trimToCap` to discover after the fact. Applies to
+ * every profile and to both the answer path's symbol/identifier-focused
+ * surfaces and the seeded path's anchor-focus windows — the economics do not
+ * depend on whether the task is read-only.
+ *
+ * OFF (the default, and explicit "0"/"off"): `applyFoldSmallRemainder` returns
+ * immediately and every pack is byte-identical to pre-WP-S7 output. Adds no
+ * kind, field, or tool argument — only WHICH bytes of the existing
+ * `code`/`range`/`remaining_ranges` fields a surface carries.
+ */
+export function foldSmallRemainderEnabled(): boolean {
+  // Same PRESENCE-first read as `seededGenerousEnabled`/
+  // `identifierGroundingEnabled`/`answerLineGutterEnabled`/
+  // `namedTargetResolutionEnabled` above, for the same reason: the member's
+  // own variable is an override, not a defaulted value.
+  const raw = process.env["TL_FOLD_SMALL_REMAINDER"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * WP-S9 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above with exactly the override semantics
+ * `seededGenerousEnabled`/`identifierGroundingEnabled` document: an explicit
+ * `TL_CALLER_EXPANSION` value (either "0"/"off" or "1"/"on") always wins;
+ * unset, this flag follows `turnEconomyEnabled()`. With neither variable set
+ * an answer pack's surfaces are byte-identical to pre-WP-S9 output. Scoped to
+ * `readCodeTaskPack.ts`'s `buildAnswerTaskPack` — the FIRST pack of an answer
+ * task only (never a `qref` replay, exactly like the concern recovery it
+ * merges through) — and the pure helpers in
+ * `features/task-pack/callerExpansion.ts`.
+ *
+ * MOTIVATION (measured 2026-09-20, live GitHub Copilot session, umbrella on):
+ * a query asking where order cancellation ENTERS the system ("the cancellation
+ * API endpoint, the OrderService cancellation method, the PaymentService
+ * refund method, where OrderStatus is defined") got a pack carrying the
+ * service class, the enum and the refund method — and not the HTTP handler
+ * that calls `orderService.cancel(id)`. The clause's own words ("API",
+ * "endpoint", "route", "entry point") do not occur in that file at all, so
+ * LEXICAL location cannot reach it however wide the search: a caller is a
+ * STRUCTURAL relation. The pack still certified `act.answer`, and the model
+ * spent three more turns (one `find` for the member name and two ranged reads)
+ * walking the one call edge the server already had every ingredient to walk —
+ * 1,303 mAIU against the 986 mAIU the same question cost when the model
+ * happened to name the controller file itself. "Who calls this / where does
+ * the request enter" is among the most common trace questions.
+ *
+ * ON, for the first answer pack only, AFTER the normal selection: up to two
+ * FOCAL MEMBERS are read off the evidence already selected (a surface focused
+ * on a method, or the method(s) of a served TYPE that the query names under
+ * the same inflection-tolerant match the anchor scorer uses). Call sites of
+ * those members OUTSIDE their own file, within the pack's own scope, are
+ * admitted only when the occurrence is CALL-shaped and its receiver is
+ * compatible with the focal type (the receiver's normalized form equals or
+ * ends with the type's name, or the file names the type independently);
+ * comments, strings, declarations and test files are excluded. The enclosing
+ * function of at most the best two — at most 4,096 embedded bytes — is folded
+ * in through the SAME additive merge (`mergeConcernAdditions`) with a ZERO
+ * displacement budget, so a selected surface is never replaced, reordered or
+ * dropped. No compatible call site adds nothing: the mechanism abstains rather
+ * than guessing, and readiness/obligation logic is untouched (the addition is
+ * evidence, not an obligation).
+ *
+ * OFF (the default, and explicit "0"/"off"): the hook returns before any scan
+ * and every answer pack is byte-identical to pre-WP-S9 output. Adds no kind,
+ * field, or tool argument — only WHICH surfaces an existing pack carries.
+ */
+export function callerExpansionEnabled(): boolean {
+  // Same PRESENCE-first read as `seededGenerousEnabled`/
+  // `identifierGroundingEnabled`/`foldSmallRemainderEnabled` above, for the
+  // same reason: the member's own variable is an override, not a defaulted
+  // value.
+  const raw = process.env["TL_CALLER_EXPANSION"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * WP-S10 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above with exactly the override semantics
+ * `seededGenerousEnabled`/`identifierGroundingEnabled`/`foldSmallRemainderEnabled`/
+ * `callerExpansionEnabled` document: an explicit `TL_RESERVE_SMALL_WINDOWS`
+ * value (either "0"/"off" or "1"/"on") always wins; unset, this flag follows
+ * `turnEconomyEnabled()`. With neither variable set, `read_file`'s dedupe
+ * receipts are byte-identical to pre-WP-S10 output. Scoped to ONE seam in
+ * `server.ts`'s `read_file` dispatch, immediately before the S1-A1 qref-repack
+ * reprojection: when this flag is on, the call addresses one or more explicit
+ * line windows (a single target's `range`/`ranges`/`symbol`, or a
+ * `paths[]`/`handles[]` batch whose every entry does, by path or handle, with
+ * or without `qref`), and the TOTAL requested size is small (their lines sum
+ * to at most 120 AND their raw bytes to at most 4,096, measured against live
+ * file content), `args["force_serve"]` is set to `true` for the rest of this
+ * call — the SAME flat field `task.force_serve:true` maps onto, so every
+ * downstream dedupe door (the S1-A1 reprojection guard, the prepared-fence
+ * `executionGuard`/`guardExecutionDiscovery` short-circuit, the A7
+ * handles=[] batch loop, and the ordinary mode=slice/symbol served-range
+ * ledger) sees the SAME effective value a genuine `force_serve:true` call
+ * would have set, and serves real bytes exactly as that call does.
+ *
+ * MOTIVATION (measured live GitHub Copilot sessions, 2026-09-19 and
+ * 2026-09-20): before answering, the model often re-reads a few exact ranges
+ * it already holds ("verification read"). TokenLighten answered an
+ * already-served range with a body-less receipt (`read.receipt`,
+ * `code-unchanged`/`decision-unchanged`), and the model then repeated the
+ * SAME call with `task.force_serve:true` to get the bytes — recorded: a
+ * 2-range, ~1.2 KB re-ask receipted at 487 B, then cost a whole extra turn to
+ * recover. One model turn costs as much as ~9-14 KB of served bytes on every
+ * host measured, so refusing to re-send 1.2 KB is the expensive choice: the
+ * receipt saves ~300 tokens and costs a whole turn.
+ *
+ * OFF (the default, and explicit "0"/"off"): this seam is never consulted and
+ * `args["force_serve"]` keeps whatever value the caller itself sent — every
+ * dedupe door serves today's exact byte-for-byte receipt. Adds no kind,
+ * field, or tool argument — only WHETHER a small, already-served, unchanged
+ * window ships as a receipt or as the SAME bytes a caller's own
+ * `task.force_serve:true` would have gotten. A whole-file re-read
+ * (`mode:"full"`), an archive/artifact/Office read, and a task-pack re-issue
+ * naming no explicit window at all (a bare `{qref}`, or the identical query
+ * re-sent) are out of this seam's scope by construction — see server.ts's
+ * `collectSmallWindowTargets` for the exact eligibility rule.
+ */
+export function reserveSmallWindowsEnabled(): boolean {
+  // Same PRESENCE-first read as `seededGenerousEnabled`/
+  // `identifierGroundingEnabled`/`foldSmallRemainderEnabled`/
+  // `callerExpansionEnabled` above, for the same reason: the member's own
+  // variable is an override, not a defaulted value.
+  const raw = process.env["TL_RESERVE_SMALL_WINDOWS"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * WP-V1 (2026-09-20), turn-economy policy — DEFAULT OFF, and a member of the
+ * TL_TURN_ECONOMY umbrella above with exactly the override semantics
+ * `seededGenerousEnabled` documents. Unlike the other members, this one is
+ * further scoped to the resolved client profile "vscode" (GitHub Copilot
+ * Chat — see codec/clientProfile.ts's `resolveClientProfile`); every other
+ * client is unaffected regardless of this flag's value.
+ *
+ * ON, and the resolved client is "vscode": `protocol/envelope.ts`'s
+ * `canonicalToolCall` omits `cwd` from an emitted read_file/search_files
+ * continuation when it targets the same workspace the triggering call is
+ * already resolved against (VS Code launches one server per single
+ * workspace root, so that call's own workspace IS the server's root), and
+ * omits `task.handle` when the continuation already carries a `qref` (which
+ * binds the task on its own) or is a plain targets-only read/search that
+ * needs no task continuity to be served. A cursor continuation,
+ * `task.pull:"closure"`, a challenge, or `task.expected_state_version`
+ * still keep the handle explicit — each genuinely needs it.
+ * `edit_file` continuations are unchanged: write safety keeps `cwd`/
+ * `task.handle` explicit always. `server.ts`'s `advertisedTools()`
+ * additionally sheds read_file's `budget.bytes`/`budget.tokens`, each
+ * tool's top-level `oneOf`/`anyOf`, `task`'s `dependentRequired` and every
+ * nested property description from the advertised schema for that same
+ * vscode+flag case (`targets[].purpose` STAYS advertised, described as a
+ * directory-target field: it is what the directory-confined recovery of a
+ * seeded pack locates with) — Copilot's own schema validator
+ * rejects `oneOf`/`anyOf`/`dependentRequired` outright, and the server
+ * enforces every one of these constraints at dispatch regardless of what is
+ * advertised, so nothing served becomes stricter or looser than today.
+ *
+ * OFF (the default), or any other client: every emitted call and every
+ * advertised schema is byte-identical to pre-WP-V1 output.
+ */
+export function leanCallsEnabled(): boolean {
+  // Same PRESENCE-first read as `seededGenerousEnabled`/
+  // `reserveSmallWindowsEnabled` above, for the same reason: the member's
+  // own variable is an override, not a defaulted value.
+  const raw = process.env["TL_LEAN_CALLS"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
 }
 
 // ---------------------------------------------------------------------------

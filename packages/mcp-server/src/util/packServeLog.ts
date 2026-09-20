@@ -815,6 +815,324 @@ export function clearFunctionalValidationObligation(workspaceRoot: string): void
 interface ExecutedNextRecord { taskEpoch?: string; resultDigest?: string; }
 const _executedNextFingerprints = new Map<string, Map<string, ExecutedNextRecord>>();
 
+// ---------------------------------------------------------------------------
+// TL142-01A/01B (2026-09-13, v0.14.2 hands-on report §4 TL142-01) —
+// THE RESULT-CARRYING EXECUTED-SEARCH LEDGER.
+//
+// Every ledger above this line is PURELY NEGATIVE. `_executedNextFingerprints`
+// remembers "this exact call shape was spent"; the served-range ledger
+// remembers "these bytes crossed the wire"; `executedLocates` remembers a
+// `locate`'s candidate HANDLES and nothing for any other action (server.ts
+// records `find`/`references`/`tree` there with a deliberately EMPTY candidate
+// list, so that store can only ever suppress a repeat, never use a result).
+//
+// So when a pack asks the caller to run `search_files find <identifier>` and
+// the caller runs it, the fact the search ESTABLISHED — "the symbol is at
+// src/auth.ts:7", or "the token occurs in no scanned file" — is discarded. The
+// next rebuild of that task re-derives everything from scratch, and when its
+// own upstream classification does not independently reach the same
+// conclusion, the decision degrades with nothing to catch it: 01A rotates
+// through an already-served surface and a redundant re-search, 01B answers a
+// proven absence with `await_input:"no-grounded-call-remains"`.
+//
+// This store is the missing POSITIVE half. Same lifetime, same key shape and
+// the same bound/LRU discipline as `_executedNextFingerprints` (so nothing new
+// has to be reasoned about for cleanup or growth), and deliberately
+// IN-MEMORY: a restart loses it, exactly as a restart loses the executed-call
+// ledger, and a task resumed after a restart falls back to today's behaviour
+// (re-propose the search) rather than to a false claim.
+//
+// KEYING. One entry per (ledger key, TERM) — the term exactly as the caller
+// spelled it, case-sensitive, with NO action in the key. `find`, `symbols` and
+// `locate` are three spellings of one question ("where is this term"), and the
+// shapes a pack proposes and a caller executes differ freely in ways that are
+// not semantic (`queries:["t"]` vs `query:"t"`, with or without
+// `scope.kind:"symbol"`). Keying on the action is exactly the mistake
+// `consultExecutedLocate` made — hard-wired to `"locate"`, so it could never
+// answer for the `find` the pack itself proposes. `references` and `tree`
+// answer DIFFERENT questions and are deliberately not recorded here.
+// ---------------------------------------------------------------------------
+
+/** One recorded location for an executed term search. */
+export interface ExecutedSearchHit {
+  readonly path: string;
+  /** 1-based line, when the executing response named one (`find`'s `lines[0]`, `symbols`' `line`). */
+  readonly line?: number;
+  /** The enclosing/declared symbol, when the executing response named one (`symbols` does; `find` does not). */
+  readonly symbol?: string;
+}
+
+/**
+ * A scope-COMPLETE absence verdict. Recorded only from a workspace-wide,
+ * literal, un-narrowed search whose own absence certificate carried no
+ * `caveat` (findText.ts's `FindAbsence`: a caveat means paths were excluded,
+ * so the claim is not about the workspace). A partial-scope zero-result is NOT
+ * a proof and is never recorded — the pack keeps proposing the search, which
+ * is the fail-closed direction.
+ */
+export interface ExecutedSearchAbsence {
+  readonly scannedFiles: number;
+  /**
+   * R1-B1 (2026-09-13 review round): the recording response's OWN disclosed
+   * exclusion count (`omitted`, minus `outside_workspace` which cannot hide an
+   * in-workspace occurrence), carried instead of asserted downstream.
+   *
+   * A proof is recorded only when this is 0 — but `promoteExecutedSearchAbsences`
+   * previously hard-coded `omitted_count: 0` on the WIRE gap it mints, so the
+   * projection asserted a fact it had never been told. Carrying it means the
+   * certificate says what the search actually established, and a future recorder
+   * that relaxes the gate cannot make the projection lie on its behalf.
+   */
+  readonly omittedCount: number;
+  /**
+   * R1-B1: true only when the recording response's own absence certificate was
+   * workspace-wide, literal, un-narrowed AND caveat-free (server.ts's
+   * `provenFindAbsence`). Consumers MUST check it rather than assume it: the
+   * `queries[]` find branch used to read per-term `scope.completeness`, which
+   * `findText.ts` stamps `"complete"` for any issued per-term absence — dropping
+   * the `caveat` the same certificate carried, so a `.tokenlightenignore`d or
+   * unreadable path silently backed a "scope complete" claim.
+   */
+  readonly scopeComplete: boolean;
+  /**
+   * R2-B14 (2026-09-13 review round 2): WALL-CLOCK WITNESS OF WHEN THE SCAN RAN.
+   *
+   * An absence is a claim about the workspace AT A MOMENT. Nothing invalidated
+   * one: hits are re-statted on every promotion (`executedSearchHitSeeds`), but
+   * an absence was projected onto a CERTIFIED decision forever — so creating the
+   * term's declaring file mid-task produced one response that both served
+   * `src/quantum.ts` and certified `request-item-absent:quantumTeleportationMode
+   * (… scope complete)`.
+   *
+   * `promoteExecutedSearchAbsences` compares this against the mtime of every
+   * surface the pack is serving: a surface younger than the scan is content the
+   * scan cannot have seen, so the proof is stale and the search is re-proposed.
+   * Optional because the invalidation must not DEPEND on it — the "the term
+   * occurs in a served body" check runs unconditionally and is what closes the
+   * reported input.
+   */
+  readonly recordedAtMs?: number;
+}
+
+export interface ExecutedSearchResult {
+  /** The term exactly as executed (case-sensitive). */
+  readonly term: string;
+  /** Which action produced this result — provenance for traces, never part of the key. */
+  readonly action: string;
+  readonly hits: readonly ExecutedSearchHit[];
+  /** Present only for a proven, scope-complete absence; mutually exclusive with a non-empty `hits`. */
+  readonly absence?: ExecutedSearchAbsence;
+  /**
+   * Monotonic recording sequence, from this module's shared `_seq`.
+   *
+   * This is the staleness clock a compact "nothing changed" re-serve needs. A
+   * stored pack record captures the sequence that was current when it was
+   * built; if the live sequence has since moved, a search result landed AFTER
+   * that capture, so re-serving the record as unchanged would deny a proof the
+   * caller has already established (TL142-01A/01B's receipt door). Assigned by
+   * `recordExecutedSearchResult`, never by a caller.
+   */
+  readonly sequence: number;
+}
+
+const _executedSearchResults = new Map<string, Map<string, ExecutedSearchResult>>();
+
+/** Bound on distinct (workspace, lane, task) result ledgers — mirrors MAX_EXECUTED_NEXT_LEDGERS. */
+export const MAX_EXECUTED_SEARCH_RESULT_LEDGERS = 256;
+/** Bound on distinct terms tracked per ledger. */
+export const MAX_EXECUTED_SEARCH_RESULT_TERMS = 64;
+/** Bound on hits retained per term (a promotion reads the first few; an unbounded list is a leak). */
+export const MAX_EXECUTED_SEARCH_RESULT_HITS = 8;
+
+function touchExecutedSearchResultLedger(key: string, ledger: Map<string, ExecutedSearchResult>): void {
+  _executedSearchResults.delete(key);
+  _executedSearchResults.set(key, ledger);
+  while (_executedSearchResults.size > MAX_EXECUTED_SEARCH_RESULT_LEDGERS) {
+    const oldest = _executedSearchResults.keys().next().value;
+    if (oldest === undefined) break;
+    _executedSearchResults.delete(oldest);
+  }
+}
+
+/**
+ * Record what an executed term search FOUND (or proved absent).
+ *
+ * Idempotent-by-replacement per term: a later execution of the same term
+ * supersedes an earlier one (the workspace may have changed between them, and
+ * the fresher answer is the true one). A record with neither hits nor a proven
+ * absence is still stored — it says "this term was searched and settled
+ * nothing", which is what stops a rebuild re-proposing it as if it were new.
+ */
+export function recordExecutedSearchResult(
+  workspaceRoot: string,
+  lane: string,
+  result: Omit<ExecutedSearchResult, "sequence">,
+  taskBinding?: string,
+): void {
+  if (result.term.length === 0) return;
+  const key = executedNextLedgerKey(workspaceRoot, lane, taskBinding);
+  const ledger = _executedSearchResults.get(key) ?? new Map<string, ExecutedSearchResult>();
+  ledger.delete(result.term);
+  ledger.set(result.term, {
+    term: result.term,
+    action: result.action,
+    hits: result.hits.slice(0, MAX_EXECUTED_SEARCH_RESULT_HITS),
+    ...(result.absence !== undefined ? { absence: result.absence } : {}),
+    sequence: ++_seq,
+  });
+  while (ledger.size > MAX_EXECUTED_SEARCH_RESULT_TERMS) {
+    const oldest = ledger.keys().next().value;
+    if (oldest === undefined) break;
+    ledger.delete(oldest);
+  }
+  touchExecutedSearchResultLedger(key, ledger);
+}
+
+/**
+ * What an executed search established for `term`, or undefined.
+ *
+ * BOUND FIRST, UNBOUND SECOND — the same two-partition question
+ * `hasExecutedNextBoundOrUnbound` asks the executed-call ledger, and for the
+ * identical reason: a `find` the dispatcher could bind to a resolved task
+ * handle lands in the task partition, while the same call issued before a
+ * handle existed lands in the unbound one. A rebuild that checked only its own
+ * recovered binding would miss half the executions it is meant to learn from.
+ */
+export function consultExecutedSearchResult(
+  workspaceRoot: string,
+  lane: string,
+  term: string,
+  taskBinding?: string,
+): ExecutedSearchResult | undefined {
+  if (term.length === 0) return undefined;
+  const bound = _executedSearchResults
+    .get(executedNextLedgerKey(workspaceRoot, lane, taskBinding))
+    ?.get(term);
+  if (bound !== undefined) return bound;
+  if (taskBinding === undefined || taskBinding === "") return undefined;
+  return _executedSearchResults.get(executedNextLedgerKey(workspaceRoot, lane))?.get(term);
+}
+
+// ---------------------------------------------------------------------------
+// R1-S10a (2026-09-13 review round): WHICH TERMS A PACK ACTUALLY ASKED THE
+// CALLER TO SEARCH FOR.
+//
+// The result ledger above is certificate-grade state: a hit becomes a surface of
+// the next rebuild, and a proven absence becomes a `request-item-absent` gap on a
+// CERTIFIED decision. It was written by EVERY find/symbols/locate, prescribed or
+// not, while the sibling concern recorders in server.ts have always required a
+// server-prescribed call (`consumeExecutableNextScope`). So a search no pack ever
+// asked for could move a task's decision.
+//
+// The obvious fence — the executable-next registry in taskContractStore.ts — does
+// not answer this question for the packs that need it: that registry is fed from
+// `effectiveContract.next_call`, and the answer-pack `discover` shape that
+// prescribes an identifier find carries its next on the WIRE decision with
+// `next_call` unset (measured: `R1DBG-reg next=undefined` while
+// `decision.next = search_files find [..]`). That is exactly why the pre-existing
+// fenced recorders never fire on those chains — and a fence that is always shut
+// would not make the ledger honest, it would delete the feature.
+//
+// So the prescription is recorded where it is actually made, keyed by TERM — the
+// orchestrator's "equivalent prescribed-next check on term equality". Same key
+// shape, bounds and LRU discipline as the ledgers above.
+//
+// LANE-LEVEL, deliberately and narrowly: written to the unbound partition and
+// read through the same bound-then-unbound merge the result ledger uses, because
+// the question is "did a pack in this lane ask about this term", and a
+// prescription is made before the caller's own execution has any binding to speak
+// of. It is a necessary condition, never a sufficient one: every consumer of the
+// result ledger additionally requires the term to appear VERBATIM in its own
+// query, so one task's prescription cannot authorize learning for another's.
+// ---------------------------------------------------------------------------
+
+const _prescribedSearchTerms = new Map<string, Set<string>>();
+
+/** Bound on distinct prescribed terms tracked per ledger — mirrors MAX_EXECUTED_SEARCH_RESULT_TERMS. */
+export const MAX_PRESCRIBED_SEARCH_TERMS = 64;
+
+/** Record that a pack prescribed a term search (find/symbols/locate) in this lane. */
+export function recordPrescribedSearchTerms(
+  workspaceRoot: string,
+  lane: string,
+  terms: readonly string[],
+  taskBinding?: string,
+): void {
+  const key = executedNextLedgerKey(workspaceRoot, lane, taskBinding);
+  const ledger = _prescribedSearchTerms.get(key) ?? new Set<string>();
+  for (const term of terms) {
+    if (term.length === 0) continue;
+    ledger.delete(term);
+    ledger.add(term);
+  }
+  while (ledger.size > MAX_PRESCRIBED_SEARCH_TERMS) {
+    const oldest = ledger.values().next().value;
+    if (oldest === undefined) break;
+    ledger.delete(oldest);
+  }
+  _prescribedSearchTerms.delete(key);
+  _prescribedSearchTerms.set(key, ledger);
+  while (_prescribedSearchTerms.size > MAX_EXECUTED_SEARCH_RESULT_LEDGERS) {
+    const oldest = _prescribedSearchTerms.keys().next().value;
+    if (oldest === undefined) break;
+    _prescribedSearchTerms.delete(oldest);
+  }
+}
+
+/** Did a pack in this lane (bound partition first, then unbound) prescribe a search for `term`? */
+export function hasPrescribedSearchTerm(
+  workspaceRoot: string,
+  lane: string,
+  term: string,
+  taskBinding?: string,
+): boolean {
+  if (term.length === 0) return false;
+  if (_prescribedSearchTerms.get(executedNextLedgerKey(workspaceRoot, lane, taskBinding))?.has(term) === true) return true;
+  return _prescribedSearchTerms.get(executedNextLedgerKey(workspaceRoot, lane))?.has(term) === true;
+}
+
+/**
+ * Every term this task has already searched, newest last — the two partitions
+ * merged the same way `consultExecutedSearchResult` prefers them (a bound
+ * record wins over an unbound one for the same term).
+ */
+export function executedSearchResults(
+  workspaceRoot: string,
+  lane: string,
+  taskBinding?: string,
+): ExecutedSearchResult[] {
+  const merged = new Map<string, ExecutedSearchResult>();
+  if (taskBinding !== undefined && taskBinding !== "") {
+    for (const entry of _executedSearchResults.get(executedNextLedgerKey(workspaceRoot, lane))?.values() ?? []) {
+      merged.set(entry.term, entry);
+    }
+  }
+  for (const entry of _executedSearchResults.get(executedNextLedgerKey(workspaceRoot, lane, taskBinding))?.values() ?? []) {
+    merged.set(entry.term, entry);
+  }
+  return [...merged.values()];
+}
+
+/**
+ * The highest recording sequence this task has, or 0.
+ *
+ * The staleness clock `ServedPackRecord.executedSearchSequence` compares
+ * against — see `ExecutedSearchResult.sequence`. Both partitions are consulted
+ * for the same reason `consultExecutedSearchResult` consults both: an execution
+ * the dispatcher could bind and one it could not are the same task's work.
+ */
+export function executedSearchResultSequence(
+  workspaceRoot: string,
+  lane: string,
+  taskBinding?: string,
+): number {
+  let highest = 0;
+  for (const entry of executedSearchResults(workspaceRoot, lane, taskBinding)) {
+    if (entry.sequence > highest) highest = entry.sequence;
+  }
+  return highest;
+}
+
 /**
  * P1-c(ii) (2026-08-28 review-fix wave): named bounds + LRU, the same
  * discipline as MAX_LOGGED_PATHS above and MAX_TASK_CONTRACTS_PER_LANE in
@@ -1237,6 +1555,22 @@ export function clearExecutedNextForLane(workspaceRoot: string, lane: string): v
       _executedNextFingerprints.delete(key);
     }
   }
+  // TL142-01A/01B: the result ledger shares this key space, so it shares every
+  // lifetime rule — a lane cleared of its executed calls must not keep
+  // claiming what those calls found.
+  for (const key of _executedSearchResults.keys()) {
+    if (key === base || key.startsWith(`${base}${String.fromCharCode(0)}`)) {
+      _executedSearchResults.delete(key);
+    }
+  }
+  // R1-S10a: the prescription ledger shares the same key space and the same
+  // lifetime — a cleared lane must not keep authorizing what its retired packs
+  // once asked for.
+  for (const key of _prescribedSearchTerms.keys()) {
+    if (key === base || key.startsWith(`${base}${String.fromCharCode(0)}`)) {
+      _prescribedSearchTerms.delete(key);
+    }
+  }
 }
 
 /** Legacy/internal no-lane callers: forget every ledger for this workspace, both key spellings a caller may pass (see clearPackDedupeForWorkspace). */
@@ -1245,12 +1579,22 @@ export function clearExecutedNextForWorkspace(workspaceRoot: string): void {
   for (const key of _executedNextFingerprints.keys()) {
     if (key.startsWith(prefix)) _executedNextFingerprints.delete(key);
   }
+  // TL142-01A/01B: same key space, same lifetime — see clearExecutedNextForLane.
+  for (const key of _executedSearchResults.keys()) {
+    if (key.startsWith(prefix)) _executedSearchResults.delete(key);
+  }
+  // R1-S10a: same key space, same lifetime.
+  for (const key of _prescribedSearchTerms.keys()) {
+    if (key.startsWith(prefix)) _prescribedSearchTerms.delete(key);
+  }
 }
 
 /** Clear ALL per-workspace state — used by specs' beforeEach for isolation. */
 export function resetPackServeLogForTest(): void {
   _logs.clear();
   _executedNextFingerprints.clear();
+  _executedSearchResults.clear();
+  _prescribedSearchTerms.clear();
   _servedBytes.clear();
   _servedWindows.clear();
   _seq = 0;

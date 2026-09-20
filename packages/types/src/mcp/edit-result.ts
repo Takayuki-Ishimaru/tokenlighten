@@ -147,6 +147,16 @@ export type AppliedEntry = {
    * never emitted as `false`.
    */
   path_fallback?: boolean;
+  /**
+   * FX-L SOFT FRONTIER MARKER, PER FILE (user ruling 2026-09-14). Same three
+   * values and same meaning as `EditReclassification.frontier_status`, carried
+   * here so a MIXED batch — some items inside the certified frontier, some
+   * outside it — says which of its files the marker is about. Absent on every
+   * row the latest certified decision did authorize, and absent entirely when
+   * no certified decision is bound to this call. Additive (§1.4(a)); the
+   * top-level receipt carries the first marked row's status once.
+   */
+  frontier_status?: "read-only" | "not-in-frontier" | "answer-decision";
 };
 
 /**
@@ -171,8 +181,41 @@ export type AppliedEntry = {
  * `string` to be narrowed after publication (§1.4).
  */
 export type EditReclassification = {
-  trigger: "create" | "grounded-edit";
+  trigger: "create" | "grounded-edit" | "outside-certified-frontier";
   certificate_id: string;
+  /**
+   * FX-L SOFT FRONTIER MARKER (user ruling 2026-09-14, review-findings-6
+   * SHOULD-FIX 38). ADDITIVE, §1.4(a): a new optional field plus one new
+   * `trigger` value; every pre-existing emission is byte-identical.
+   *
+   * WHAT IT SAYS. FX-L stays the hard fence — bytes this session served this
+   * epoch are executable, and `state/session.ts` may never refuse a handle it
+   * itself served (the T09/T10 direction). So an edit of a file the LATEST
+   * certified decision did not authorize still APPLIES; this field is how the
+   * response says so, naming where the written path stood relative to that
+   * decision:
+   *   `read-only`        the decision listed the path in its frontier with
+   *                      `writable:false`;
+   *   `not-in-frontier`  the decision was `act.edit` and its frontier omitted
+   *                      the path (SHOULD-FIX 38's measured case: an
+   *                      explain-only file served beside a writable one);
+   *   `answer-decision`  the decision was `act.answer`, so it certified no
+   *                      writable frontier at all.
+   *
+   * WHY IT IS NOT ALWAYS PAIRED WITH `trigger:"outside-certified-frontier"`.
+   * `trigger` answers "why was this call re-typed", and two of its values
+   * (`create`, `grounded-edit`) already describe a real re-typing performed by
+   * the fence. When one of those fires, it is KEPT and this field rides
+   * beside it; the new `trigger` value is minted only when the marker is the
+   * sole reason a receipt is emitted at all. A caller therefore reads
+   * `frontier_status` for the frontier question and `trigger` for the fence
+   * question, and neither answer displaces the other.
+   *
+   * `TL_FRONTIER_STRICT_WRITES=1` (default OFF) turns the same condition into
+   * a `frontier-read-only` refusal instead, in which case nothing is written
+   * and no `edit.applied` — hence no marker — is produced.
+   */
+  frontier_status?: "read-only" | "not-in-frontier" | "answer-decision";
 };
 
 /**

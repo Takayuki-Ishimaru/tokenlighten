@@ -669,18 +669,30 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
   // language-filtered walk or duplicates files selected by the semantic lane.
   const includeGenericText = !opts.lang && opts.includeGenericText === true;
   const fullRecall = opts.fullRecall ?? false;
-  const layers = buildLayerMatchers(workspace, fullRecall, opts.respectGitignore ?? false, opts.subPath);
   const om = opts.omissions;
   const sizeCapBytes = opts.sizeCapBytes ?? MAX_FILE_SIZE_BYTES;
   const out: FoundFile[] = [];
   const workspaceResolved = path.resolve(workspace);
 
+  // The out-of-workspace escape check runs BEFORE buildLayerMatchers, not
+  // after it. buildLayerMatchers hands `subPath` straight to the `ignore`
+  // matcher (to decide whether the walk is pointed AT a hidden subtree), and
+  // on win32 that package REFUSES a drive-letter-absolute path outright —
+  // `RangeError: path should be a \`path.relative()\`d string, but got
+  // "C:/Users/..."` — so an ABSOLUTE out-of-tree subPath, which is exactly
+  // the Finding 1 shape this counter exists for, CRASHED the walk instead of
+  // being counted. Whether a path escapes the workspace is a property of the
+  // path alone; no matcher is needed to decide it, so it belongs ahead of
+  // every matcher construction rather than after one.
+  const subPathAbs = opts.subPath ? path.resolve(workspace, opts.subPath) : undefined;
+  if (subPathAbs !== undefined && !isWithin(subPathAbs, workspaceResolved)) {
+    if (om) om.outside_workspace += 1;
+    return out;
+  }
+  const layers = buildLayerMatchers(workspace, fullRecall, opts.respectGitignore ?? false, opts.subPath);
+
   if (opts.subPath) {
-    const abs = path.resolve(workspace, opts.subPath);
-    if (!isWithin(abs, workspaceResolved)) {
-      if (om) om.outside_workspace += 1;
-      return out;
-    }
+    const abs = subPathAbs!;
     let resolvedAbs = abs;
     let workspaceReal = workspaceResolved;
     let stat: fs.Stats;

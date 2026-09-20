@@ -116,10 +116,30 @@ export interface IgnoreMatcher {
  * - strip leading "./" or "/" so path is workspace-relative.
  * Returns "" for paths that normalize to empty.
  */
+/**
+ * True when the `ignore` package would REFUSE `p` as non-relative rather than
+ * answer false for it. Its win32 branch (activated by `process.platform` or
+ * its own `IGNORE_TEST_WIN32` escape hatch, both read at module load) adds a
+ * drive-letter-absolute rule on top of the leading-slash rule this module
+ * already strips — so `C:/Users/x` reaches `ignores()` looking relative and
+ * throws `RangeError: path should be a \`path.relative()\`d string`. The two
+ * activation conditions are mirrored here so the guard is live in exactly the
+ * cases the throw is.
+ */
+const IGNORE_REJECTS_DRIVE_ABSOLUTE =
+  process.platform === "win32" || Boolean(process.env["IGNORE_TEST_WIN32"]);
+
 function normalizePath(relPath: string): string {
   let p = relPath.replace(/\\/g, "/");
   while (p.startsWith("./")) p = p.slice(2);
   while (p.startsWith("/")) p = p.slice(1);
+  // An absolute path cannot be matched by a relative ignore pattern anyway,
+  // so the honest answer is "not ignored" — which every caller below reads
+  // from the empty string. Returning it here turns a win32-only CRASH inside
+  // a third-party matcher into the same false those callers already handle.
+  // POSIX is untouched: `c:` is an ordinary relative segment there, and no
+  // `ignore` version rejects it.
+  if (IGNORE_REJECTS_DRIVE_ABSOLUTE && /^[a-z]:\//i.test(p)) return "";
   return p;
 }
 

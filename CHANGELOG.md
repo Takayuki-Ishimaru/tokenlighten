@@ -2,6 +2,71 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.14.3
+
+- Install from a platform archive with `tl-setup <workspace>`: no editor
+  extension and no separate Node.js install. Each archive bundles its own
+  Node.js runtime, registers every detected AI-agent host (Claude Code, Codex,
+  Gemini CLI, Copilot CLI, and GitHub Copilot Chat in VS Code), and sets up
+  the workspace. Re-running upgrades in place; `--use` rolls back;
+  `--uninstall` removes the machine install and what it wrote.
+- The VS Code extension's **Set up this workspace** performs the same machine
+  install, no longer adds a second server definition on top of the workspace
+  file, and gains an uninstall command.
+- `tl doctor` reports machine-install consistency; `tl clients snippet` prints
+  a pasteable entry for hosts that cannot be written directly.
+- Task continuation no longer repeats an executed search, loses a pending
+  file creation, or resends an already returned body; requests naming
+  several files or edits are read more precisely in English and Japanese.
+- A read-only question that asks several things at once now finds evidence
+  for each point in its first response more often, and a Japanese question
+  against an English codebase is retried with English search terms derived
+  from it (katakana loanwords matched by sound, common software vocabulary
+  translated, only words the workspace itself uses). Both are on by default;
+  `TL_CONCERN_RECOVERY=0` and `TL_JA_QUERY_BRIDGE=0` turn them off. The same
+  applies when the call also names files (the form GitHub Copilot sends), a
+  type the request names is served from the file that carries its name, and
+  a named file is opened at the member the request describes rather than at
+  its constructor.
+- A read-only task stays read-only when a continuation omits
+  `task.profile`, so the task keeps one handle; and a task handle the model
+  garbled (two handles merged, or trailing characters repeated) continues
+  the caller's own live task on `read_file` and `search_files` instead of
+  ending it. `TL_TASK_HANDLE_RECOVERY=0` restores the strict refusal.
+- GitHub Copilot in VS Code: workspace setup raises Copilot's 8 KB
+  tool-result spill threshold (opt out with `--copilot-inline-results keep`),
+  `.github/copilot-instructions.md` becomes a short pointer with
+  Copilot-specific notes, and a read-only exploration agent limited to
+  TokenLighten's tools is added for VS Code workspaces.
+- VS Code integration returns more relevant context per response and uses
+  shorter host-specific tool definitions. Workspace setup enables this
+  behavior for VS Code; other hosts keep their existing defaults. The
+  extension offers a compact guide for Copilot-only workspaces.
+- A `read_file` call naming several files with a line range each no longer
+  loses lines when its response is shortened: following `next` to the end
+  delivers every requested line of every file.
+- A read-only request made of several independent questions is no longer
+  reported as ready to answer while one of them has no served evidence, and
+  a word is no longer certified absent when only its inflection differs from
+  the code (`validated` vs `validate`).
+- Every served file body goes through one decoding policy; undecodable or
+  NUL-heavy files are disclosed instead of served.
+- Windows: archive reads, client registration and the bundled runtime work,
+  including from a folder extracted by Explorer.
+
+### Migration
+
+Existing VS Code extension and source installs keep working. The first run of
+any v0.14.3 entry point migrates the earlier `~/.tokenlighten/bin/tl` launcher
+into a forwarder and re-points the host entries it manages. After upgrading, re-run
+`tl workspace setup` or the extension's **Set up this workspace** to refresh
+the managed instructions and Copilot configuration. Three transitive runtime dependencies move to patched
+versions within their existing ranges; no runtime dependency is added. The
+three tools, read-only default, and temporary legacy-input migration bridge
+are unchanged.
+
+See the [v0.14.3 release notes](release-docs/github-release-v0.14.3.md).
+
 ## 0.14.2
 
 - Continuing a task remembers completed reads and requirements established by

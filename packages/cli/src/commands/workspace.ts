@@ -8,11 +8,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, win32 } from "node:path";
+import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import crossSpawn from "cross-spawn";
 import { defaultGuideProfileForSurface, injectAll, parseSentinelBlock, VALID_PROFILES } from "@tokenlighten/agents-md";
 import type { GuideProfile } from "@tokenlighten/agents-md";
 import type {
+  CopilotInlineResultsReport,
   TokenLightenSetupClient,
   TokenLightenWorkspaceListResult,
   TokenLightenWorkspaceSetupResult,
@@ -29,6 +31,13 @@ import {
   writeConfig,
 } from "../config.js";
 import { resolveStableLauncher } from "../launcher.js";
+import {
+  isDefaultInstallHome,
+  readInstallRecord,
+  resolveInstallHome,
+  upsertInstallWorkspace,
+  writeInstallRecord,
+} from "../installHome.js";
 import { configFilePath } from "../paths.js";
 import { wantsHelp } from "../util/helpFlag.js";
 import { resolveMcpBin } from "./mcp.js";
@@ -41,7 +50,7 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--tool-surface code|full] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--rules-only] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
@@ -51,7 +60,14 @@ workspace registered by setup on this machine for desktop-wide management.
 TokenLighten write tools and local privacy-preserving usage logging are enabled
 by default. With --tool-surface code and no explicit --guide-profile, the
 guide profile defaults to compact instead of full (an explicit
---guide-profile always wins).
+--guide-profile always wins). GitHub Copilot attaches AGENTS.md in full to
+every request (~3k tokens for the full TokenLighten block); a Copilot-only
+workspace may pass --guide-profile compact (VS Code setting
+tokenlighten.guideProfile); Codex and Claude Code users should keep full.
+With --clients including vscode,
+--copilot-inline-results raise (default) raises GitHub Copilot's inline
+tool-result limit in the workspace's .vscode/settings.json so Copilot can
+read TokenLighten's answers; pass keep to leave that file untouched.
 `;
 
 function assertInsideRoot(root: string, target: string): void {
@@ -67,10 +83,25 @@ function assertNotSymlink(target: string): void {
   }
 }
 
-function writeJsonAtomic(
+/** Optional serialization style for `writeJsonAtomic` — lets a caller that
+ * read an existing file reproduce its indentation unit and trailing-newline
+ * convention instead of always normalizing to 2 spaces (used by the Copilot
+ * settings.json merge below, which must not needlessly reformat a file it
+ * did not create). Omitted entirely, behavior is unchanged: 2-space indent,
+ * trailing newline. */
+export interface JsonWriteStyle {
+  indent?: string | number;
+  trailingNewline?: boolean;
+}
+
+// Exported so `mcpConfigFile.ts` (DESIGN-v0.14-mcp-only-install.md §4.3
+// "Config-file writer" mechanism) reuses the same atomic-write primitive
+// instead of maintaining a second implementation.
+export function writeJsonAtomic(
   root: string,
   target: string,
   value: Record<string, unknown>,
+  style?: JsonWriteStyle,
 ): void {
   assertInsideRoot(root, target);
   assertNotSymlink(target);
@@ -79,14 +110,16 @@ function writeJsonAtomic(
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   const temporary =
     `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+  const body = JSON.stringify(value, null, style?.indent ?? 2);
+  const trailingNewline = style?.trailingNewline ?? true;
+  writeFileSync(temporary, trailingNewline ? `${body}\n` : body, {
     encoding: "utf8",
     mode: 0o600,
   });
   renameSync(temporary, target);
 }
 
-function readJsonObject(target: string): Record<string, unknown> {
+export function readJsonObject(target: string): Record<string, unknown> {
   if (!existsSync(target)) return {};
   assertNotSymlink(target);
   const parsed: unknown = JSON.parse(readFileSync(target, "utf8"));
@@ -96,7 +129,7 @@ function readJsonObject(target: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function objectMember(
+export function objectMember(
   parent: Record<string, unknown>,
   key: string,
 ): Record<string, unknown> {
@@ -110,6 +143,205 @@ function objectMember(
     throw new Error(`Expected '${key}' to be a JSON object`);
   }
   return value as Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Copilot inline tool-result limit (VS Code GitHub Copilot Chat) — see the
+// task's design note: Copilot's agent mode hides any MCP tool result whose
+// text exceeds `github.copilot.chat.agent.largeToolResultsToDisk.thresholdBytes`
+// (default 8192) from the model, replacing it with a "written to file"
+// notice. Raising it in the workspace's `.vscode/settings.json` (paired with
+// TOKENLIGHTEN_TASK_PACK_MAX_BYTES=0 in the generated VS Code MCP entry,
+// which lifts TL's own client-profile ceiling) is what lets a VS Code
+// Copilot agent actually read TokenLighten's answers instead of abandoning
+// the tool. No mcp-server change is involved: TOKENLIGHTEN_TASK_PACK_MAX_BYTES=0
+// is an existing, documented env override.
+export const COPILOT_INLINE_RESULTS_VALUES = ["raise", "keep"] as const;
+export type CopilotInlineResultsMode = typeof COPILOT_INLINE_RESULTS_VALUES[number];
+
+export function isCopilotInlineResultsMode(value: string): value is CopilotInlineResultsMode {
+  return (COPILOT_INLINE_RESULTS_VALUES as readonly string[]).includes(value);
+}
+
+export const COPILOT_SETTINGS_KEY = "github.copilot.chat.agent.largeToolResultsToDisk.thresholdBytes";
+const COPILOT_ENABLED_KEY = "github.copilot.chat.agent.largeToolResultsToDisk.enabled";
+export const COPILOT_RAISED_THRESHOLD_BYTES = 65536;
+export const COPILOT_TASK_PACK_ENV_VAR = "TOKENLIGHTEN_TASK_PACK_MAX_BYTES";
+
+function copilotSettingsPath(root: string): string {
+  return join(root, ".vscode", "settings.json");
+}
+
+/** Shortest leading-whitespace run seen on any line — a simple, good-enough
+ * sniff of whether a JSON file is 2-space, 4-space, or tab indented.
+ * Defaults to 2 spaces when nothing is indented (new/minified file). */
+function detectIndentUnit(raw: string): string | number {
+  let best: string | undefined;
+  for (const line of raw.split(/\r?\n/)) {
+    const match = /^[ \t]+/.exec(line);
+    if (!match) continue;
+    if (best === undefined || match[0].length < best.length) best = match[0];
+  }
+  return best ?? 2;
+}
+
+function manualCopilotReport(target: string, reason: string, previousThresholdBytes?: number): CopilotInlineResultsReport {
+  return {
+    status: "manual",
+    settingsFile: target,
+    thresholdBytes: COPILOT_RAISED_THRESHOLD_BYTES,
+    ...(previousThresholdBytes !== undefined ? { previousThresholdBytes } : {}),
+    reason: `${reason}; add "${COPILOT_SETTINGS_KEY}": ${COPILOT_RAISED_THRESHOLD_BYTES} to ${target} by hand`,
+  };
+}
+
+/** Ensures `<root>/.vscode/settings.json` raises Copilot's inline
+ * tool-result threshold — see the module header comment above. Never
+ * throws: any content problem (JSONC, non-object, unreadable) or path
+ * safety violation (outside root, symlinked) degrades to a `manual` report
+ * instead of failing the surrounding `setupWorkspace()` call. */
+function ensureCopilotSettings(root: string): CopilotInlineResultsReport {
+  const target = copilotSettingsPath(root);
+  try {
+    assertInsideRoot(root, target);
+    assertNotSymlink(target);
+    assertNotSymlink(dirname(target));
+  } catch (error) {
+    return manualCopilotReport(target, error instanceof Error ? error.message : String(error));
+  }
+
+  if (!existsSync(target)) {
+    try {
+      writeJsonAtomic(root, target, { [COPILOT_SETTINGS_KEY]: COPILOT_RAISED_THRESHOLD_BYTES });
+      return { status: "raised", settingsFile: target, thresholdBytes: COPILOT_RAISED_THRESHOLD_BYTES };
+    } catch (error) {
+      return manualCopilotReport(target, `could not create ${target}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(target, "utf8");
+  } catch (error) {
+    return manualCopilotReport(target, `could not read ${target}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return manualCopilotReport(target, `${target} is not strict JSON (VS Code settings allow comments/trailing commas, which this safe merge does not parse)`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return manualCopilotReport(target, `${target} does not contain a JSON object`);
+  }
+
+  const document = parsed as Record<string, unknown>;
+  const existingThreshold = document[COPILOT_SETTINGS_KEY];
+  const previousThresholdBytes = typeof existingThreshold === "number" ? existingThreshold : undefined;
+  const alreadySufficient =
+    (previousThresholdBytes !== undefined && previousThresholdBytes >= COPILOT_RAISED_THRESHOLD_BYTES)
+    || document[COPILOT_ENABLED_KEY] === false;
+  if (alreadySufficient) {
+    return {
+      status: "already-sufficient",
+      settingsFile: target,
+      thresholdBytes: previousThresholdBytes ?? COPILOT_RAISED_THRESHOLD_BYTES,
+    };
+  }
+
+  document[COPILOT_SETTINGS_KEY] = COPILOT_RAISED_THRESHOLD_BYTES;
+  try {
+    writeJsonAtomic(root, target, document, {
+      indent: detectIndentUnit(raw),
+      trailingNewline: raw.length === 0 || raw.endsWith("\n"),
+    });
+  } catch (error) {
+    return manualCopilotReport(
+      target,
+      `could not write ${target}: ${error instanceof Error ? error.message : String(error)}`,
+      previousThresholdBytes,
+    );
+  }
+  return {
+    status: "raised",
+    settingsFile: target,
+    thresholdBytes: COPILOT_RAISED_THRESHOLD_BYTES,
+    ...(previousThresholdBytes !== undefined ? { previousThresholdBytes } : {}),
+  };
+}
+
+// Uninstall symmetry (workspace.ts owns the key/constants; called from
+// install.ts's uninstall flow). Only ever removes the key — per the task's
+// own fallback rule ("if you cannot know [a file was TL-created], never
+// delete the file") this never unlinks settings.json, even when the key
+// removal leaves it at `{}`: there is no persisted marker of whether TL
+// created the file, so proving that is impossible and deletion stays
+// refused. Best-effort and silent: a JSONC file was never touched by setup
+// either (it degrades to `manual`), so there is nothing to revert here.
+export function removeCopilotThresholdIfManaged(root: string): void {
+  const target = copilotSettingsPath(root);
+  try {
+    if (!existsSync(target) || lstatSync(target).isSymbolicLink()) return;
+    const raw = readFileSync(target, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const document = parsed as Record<string, unknown>;
+    if (document[COPILOT_SETTINGS_KEY] !== COPILOT_RAISED_THRESHOLD_BYTES) return;
+    delete document[COPILOT_SETTINGS_KEY];
+    writeJsonAtomic(root, target, document, {
+      indent: detectIndentUnit(raw),
+      trailingNewline: raw.length === 0 || raw.endsWith("\n"),
+    });
+  } catch {
+    // Best-effort cleanup only — never block or warn during uninstall.
+  }
+}
+
+/** Shared by `tl workspace setup`'s and `tl install`'s plain-text summaries.
+ * Returns undefined (print nothing) for `not-applicable`, or a caller with
+ * an odd/future status this build does not recognize. */
+export function formatCopilotInlineResultsLine(
+  workspaceRoot: string,
+  report: CopilotInlineResultsReport | undefined,
+): string | undefined {
+  if (!report) return undefined;
+  const displayPath = report.settingsFile
+    ? relative(workspaceRoot, report.settingsFile) || report.settingsFile
+    : ".vscode/settings.json";
+  switch (report.status) {
+    case "raised":
+      return `Copilot inline results: raised to ${report.thresholdBytes ?? COPILOT_RAISED_THRESHOLD_BYTES} bytes (${displayPath})`;
+    case "already-sufficient":
+      return `Copilot inline results: already sufficient (${report.thresholdBytes ?? COPILOT_RAISED_THRESHOLD_BYTES} bytes, ${displayPath})`;
+    case "kept":
+      return "Copilot inline results: kept (Copilot hides tool results over 8 KB; re-run without --copilot-inline-results keep to raise)";
+    case "manual":
+      return `Copilot inline results: manual: ${report.reason ?? `add "${COPILOT_SETTINGS_KEY}": ${COPILOT_RAISED_THRESHOLD_BYTES} to ${displayPath}`}`;
+    case "not-applicable":
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+// GitHub Copilot Chat fixed-overhead reduction (WP-C1 §3): defaultGuideProfileForSurface's
+// default must not change — AGENTS.md is a shared file, and Codex/Claude Code can be
+// registered machine-wide with no per-workspace record, so TL cannot know a workspace is
+// "VS Code only", and silently writing the compact block would change what those clients
+// read too. This only makes the existing explicit opt-in (--guide-profile compact /
+// tokenlighten.guideProfile) discoverable, in the human-readable setup summary alone —
+// never in --json, which has no free-text notes field for it, and never a warning (the
+// full profile is not wrong, just costlier for a Copilot-only workspace).
+export function formatGuideProfileAdviceLine(
+  clients: readonly TokenLightenSetupClient[],
+  effectiveGuideProfile: GuideProfile,
+): string | undefined {
+  if (!clients.includes("vscode") || effectiveGuideProfile !== "full") return undefined;
+  return "note: GitHub Copilot attaches AGENTS.md in full to every request (~3k tokens for "
+    + "the full TokenLighten block); a Copilot-only workspace may pass --guide-profile "
+    + "compact (VS Code setting tokenlighten.guideProfile); Codex and Claude Code users "
+    + "should keep full.";
 }
 
 /**
@@ -157,6 +389,11 @@ function serverConfig(
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
   toolSurface: ToolSurface | undefined,
+  // Only ever true for the vscode entry, and only when this run raised (or
+  // found already sufficient) Copilot's inline tool-result limit — see
+  // `ensureCopilotSettings`/`setupWorkspace` below. Never passed true for
+  // "claude-code": Claude Code and Codex never get this env var.
+  linkTaskPackCeiling = false,
 ): Record<string, unknown> {
   return {
     command: launcher.command,
@@ -178,8 +415,73 @@ function serverConfig(
       TOKENLIGHTEN_CLIENT: client,
       TOKENLIGHTEN_USAGE_LOG: "on",
       ...(schemaStamp !== undefined ? { TOKENLIGHTEN_SCHEMA_STAMP: schemaStamp } : {}),
+      // GitHub Copilot Chat fixed-overhead reduction (WP-C1): TOKENLIGHTEN_CLIENT_ID
+      // pins the VS Code advertisement profile (protocol/clientAdvertisement.ts) even
+      // on a transport leg that never threads a real clientInfo.name through to
+      // resolvedClientId() — see that module's header. TL_TURN_ECONOMY is the
+      // server's default-OFF umbrella flag (util/flags.ts's turnEconomyEnabled())
+      // that turns on turn-economy serving policies for this host only. Both are
+      // unconditional for vscode (not tied to linkTaskPackCeiling below) and never
+      // set for "claude-code" — Claude Code's and Codex's paired bench must stay
+      // byte-identical.
+      ...(client === "vscode" ? { TOKENLIGHTEN_CLIENT_ID: "vscode", TL_TURN_ECONOMY: "1" } : {}),
+      // Links VS Code's raised Copilot inline-result limit to TL's own
+      // client-profile response ceiling (packages/mcp-server/src/protocol/
+      // codec/clientProfile.ts): "0" is the existing, documented override
+      // meaning "ignore the client-profile ceiling, use the type-specific
+      // default". Regenerated from scratch on every setup run (this whole
+      // env object is), so switching back to `keep`/`manual` on a re-run
+      // drops it automatically — no separate removal step needed.
+      ...(linkTaskPackCeiling ? { [COPILOT_TASK_PACK_ENV_VAR]: "0" } : {}),
     },
   };
+}
+
+// DESIGN-v0.14-mcp-only-install.md §4.6 C9 (portability): a committed
+// `.vscode/mcp.json` or `.mcp.json` must work for a teammate on the same OS.
+// Only meaningful when the install home is the platform *default* (no
+// `--home`, no TOKENLIGHTEN_HOME/TOKENLIGHTEN_DATA_HOME override) — a custom
+// home is inherently machine-specific and stays absolute. Substitutes ONLY
+// the identity's two paths (`command` and `argsPrefix[0]`, i.e.
+// `<home>/bin/node` and `<home>/bin/tl.js`); everything else (env,
+// `--workspace <root>`, ...) is untouched.
+function portableIdentity(
+  launcher: SetupLauncher,
+  varName: string,
+  base: string | undefined,
+): SetupLauncher {
+  if (!base) return launcher;
+  const substitute = (value: string): string =>
+    value.startsWith(base) ? `${varName}${value.slice(base.length)}` : value;
+  const first = launcher.argsPrefix[0];
+  return {
+    ...launcher,
+    command: substitute(launcher.command),
+    argsPrefix: first !== undefined
+      ? [substitute(first), ...launcher.argsPrefix.slice(1)]
+      : launcher.argsPrefix,
+  };
+}
+
+function portableIdentityFor(
+  launcher: SetupLauncher,
+  form: "vscode-user" | "mcp-json",
+  installHomeDefault: boolean,
+  platform: NodeJS.Platform = process.platform,
+): SetupLauncher {
+  if (!installHomeDefault) return launcher;
+  if (platform === "win32") {
+    const varName = form === "vscode-user" ? "${env:LOCALAPPDATA}" : "${LOCALAPPDATA}";
+    return portableIdentity(launcher, varName, process.env["LOCALAPPDATA"]);
+  }
+  const varName = form === "vscode-user" ? "${userHome}" : "${HOME}";
+  let home: string | undefined;
+  try {
+    home = homedir();
+  } catch {
+    home = undefined;
+  }
+  return portableIdentity(launcher, varName, home);
 }
 
 function configureVsCode(
@@ -187,11 +489,15 @@ function configureVsCode(
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
   toolSurface: ToolSurface | undefined,
+  installHomeDefault: boolean,
+  platform: NodeJS.Platform,
+  linkTaskPackCeiling: boolean,
 ): string {
   const target = join(root, ".vscode", "mcp.json");
   const document = readJsonObject(target);
   const servers = objectMember(document, "servers");
-  servers["tokenlighten"] = serverConfig(root, "vscode", launcher, schemaStamp, toolSurface);
+  const portable = portableIdentityFor(launcher, "vscode-user", installHomeDefault, platform);
+  servers["tokenlighten"] = serverConfig(root, "vscode", portable, schemaStamp, toolSurface, linkTaskPackCeiling);
   writeJsonAtomic(root, target, document);
   return target;
 }
@@ -201,13 +507,16 @@ function configureClaude(
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
   toolSurface: ToolSurface | undefined,
+  installHomeDefault: boolean,
+  platform: NodeJS.Platform,
 ): string {
   const target = join(root, ".mcp.json");
   const document = readJsonObject(target);
   const servers = objectMember(document, "mcpServers");
+  const portable = portableIdentityFor(launcher, "mcp-json", installHomeDefault, platform);
   servers["tokenlighten"] = {
     type: "stdio",
-    ...serverConfig(root, "claude-code", launcher, schemaStamp, toolSurface),
+    ...serverConfig(root, "claude-code", portable, schemaStamp, toolSurface),
   };
   writeJsonAtomic(root, target, document);
   return target;
@@ -275,6 +584,25 @@ export async function setupWorkspace(options: {
    * existing workspace's regenerated config is byte-for-byte unchanged.
    */
   toolSurface?: ToolSurface;
+  /**
+   * DESIGN-v0.14-mcp-only-install.md §4.6 C9: whether the launcher's install
+   * home is the platform default (no `--home`/env override) — controls
+   * whether `.vscode/mcp.json`/`.mcp.json` write the identity's two paths
+   * as a host variable form. Defaults to `isDefaultInstallHome()` (the
+   * standalone `tl workspace setup` case has no `--home` flag of its own).
+   */
+  installHomeDefault?: boolean;
+  /** Test seam for §4.6 C9's win32/POSIX branch; defaults to `process.platform`. */
+  platform?: NodeJS.Platform;
+  /**
+   * VS Code GitHub Copilot Chat hides any MCP tool result over its own
+   * inline-result threshold (default 8192 bytes) from the model. "raise"
+   * (the default) ensures the workspace's `.vscode/settings.json` sets a
+   * higher threshold and links TL's own response ceiling to it, whenever
+   * this run configures the vscode client; "keep" leaves that file and the
+   * link untouched. See `ensureCopilotSettings` below.
+   */
+  copilotInlineResults?: CopilotInlineResultsMode;
 }): Promise<TokenLightenWorkspaceSetupResult> {
   const requestedRoot = resolve(options.root);
   if (!existsSync(requestedRoot) || !lstatSync(requestedRoot).isDirectory()) {
@@ -298,9 +626,17 @@ export async function setupWorkspace(options: {
   // in FULL_ONLY markers, matching the surface the generated client
   // configs below advertise.
   const effectiveGuideProfile = options.guideProfile ?? defaultGuideProfileForSurface(options.toolSurface);
+  // "copilot-agent" (.github/agents/tokenlighten-explore.agent.md) is a VS
+  // Code Copilot Chat custom-agent file whose `tools:` list names this
+  // workspace's own ".vscode/mcp.json" "tokenlighten" server entry — it is
+  // only meaningful, and only added here, while THIS run is configuring the
+  // vscode client (never for --rules-only, and never for e.g. --clients
+  // codex alone, both of which leave "vscode" out of `clients`).
   const rules = await injectAll({
     repoRoot: root,
-    targets: ["claude", "copilot"],
+    targets: clients.includes("vscode")
+      ? ["claude", "copilot", "copilot-agent"]
+      : ["claude", "copilot"],
     driftMode: "auto-rewrite",
     profile: effectiveGuideProfile,
     ...(options.toolSurface !== undefined ? { toolSurface: options.toolSurface } : {}),
@@ -317,15 +653,32 @@ export async function setupWorkspace(options: {
   const schemaStamp = clients.length > 0
     ? (options.schemaStamp !== undefined ? options.schemaStamp() : currentMcpSchemaStamp(options.toolSurface))
     : undefined;
+  const installHomeDefault = options.installHomeDefault ?? isDefaultInstallHome();
+  const platform = options.platform ?? process.platform;
+
+  // Resolved once, before configureVsCode runs, so its result can gate the
+  // TOKENLIGHTEN_TASK_PACK_MAX_BYTES link in the SAME write. `not-applicable`
+  // when this run does not configure vscode at all (rules-only, or a
+  // `clients` list that omits it); `kept` skips touching settings.json
+  // entirely when the caller opted out.
+  const copilotMode = options.copilotInlineResults ?? "raise";
+  const copilotInlineResults: CopilotInlineResultsReport = !clients.includes("vscode")
+    ? { status: "not-applicable" }
+    : copilotMode === "keep"
+      ? { status: "kept" }
+      : ensureCopilotSettings(root);
+  const linkTaskPackCeiling = copilotInlineResults.status === "raised"
+    || copilotInlineResults.status === "already-sufficient";
+
   for (const client of clients) {
     if (client === "vscode") {
-      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface));
+      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, linkTaskPackCeiling));
     }
     if (client === "codex") {
       configFilesWritten.push(configureCodex(root, launcher, schemaStamp, options.toolSurface));
     }
     if (client === "claude-code") {
-      configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface));
+      configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform));
     }
   }
   return {
@@ -337,6 +690,7 @@ export async function setupWorkspace(options: {
     rulesWritten: rules.wrote,
     configFilesWritten,
     warnings: rules.drifted.map((item) => `Rule drift: ${item.path}`),
+    copilotInlineResults,
   };
 }
 
@@ -427,6 +781,9 @@ export interface WorkspaceStatusResult {
   reason: WorkspaceStatusReason;
   writeEnabled?: boolean;
   usageLoggingEnabled?: boolean;
+  /** Only populated on the `--json` CLI path (`runWorkspace`), not by
+   * `workspaceStatus()` itself — see `machineInstallSummary()` below. */
+  machine_install?: MachineInstallSummary | null;
   /**
    * Whether CLAUDE.md at the workspace root currently contains a
    * TokenLighten-managed guide block. Natural delivery (AGENTS.md/CLAUDE.md
@@ -678,6 +1035,59 @@ export interface RunWorkspaceOptions {
   readonly registryPath?: string;
   readonly launcher?: SetupLauncher;
   readonly versionCheck?: (launcher: SetupLauncher) => string;
+  /** DESIGN-v0.14-mcp-only-install.md §4.6: when a machine install exists at
+   * this home, a successful setup also upserts this workspace into
+   * `install.json`'s `workspaces[]` (single source of truth, §4.6 C1).
+   * Defaults to `resolveInstallHome()`. */
+  readonly installHome?: string;
+}
+
+/** `tl workspace status --json`'s `machine_install` field (the VS Code
+ * extension's C4 version-precedence check consumes this). */
+export interface MachineInstallSummary {
+  version: string;
+  install_home: string;
+  identity: { command: string; argsPrefix: string[]; env: Record<string, string> };
+}
+
+function machineInstallSummary(installHomeOverride?: string): MachineInstallSummary | null {
+  const installHome = installHomeOverride ?? resolveInstallHome();
+  const record = readInstallRecord(installHome);
+  if (!record) return null;
+  return {
+    version: record.version,
+    install_home: installHome,
+    identity: {
+      command: record.identity.command,
+      argsPrefix: [...record.identity.argsPrefix],
+      env: { ...record.identity.env },
+    },
+  };
+}
+
+/** Best-effort: record this workspace in `install.json` when a machine
+ * install exists. Never throws — `tl workspace setup` remains usable from a
+ * source checkout that never ran `tl install`, and a failure here must not
+ * undo an otherwise-successful workspace setup. */
+function recordWorkspaceInInstall(
+  installHome: string,
+  result: TokenLightenWorkspaceSetupResult,
+): void {
+  try {
+    const record = readInstallRecord(installHome);
+    if (!record) return;
+    const files = [...result.rulesWritten, ...result.configFilesWritten];
+    writeInstallRecord(
+      installHome,
+      upsertInstallWorkspace(record, {
+        root: result.workspaceRoot,
+        files,
+        guide_block: result.rulesWritten.length > 0,
+      }),
+    );
+  } catch {
+    // best effort — workspace setup itself already succeeded
+  }
 }
 
 function jsonWarnings(
@@ -709,7 +1119,10 @@ export async function runWorkspace(
       valueAfter(rest, "--root") ?? process.cwd(),
     );
     if (rest.includes("--json")) {
-      process.stdout.write(`${JSON.stringify(result)}\n`);
+      process.stdout.write(`${JSON.stringify({
+        ...result,
+        machine_install: machineInstallSummary(options.installHome),
+      })}\n`);
       return;
     }
     process.stdout.write(
@@ -779,6 +1192,16 @@ export async function runWorkspace(
     process.exitCode = 1;
     return;
   }
+  const rawCopilotInlineResults = valueAfter(rest, "--copilot-inline-results");
+  const copilotInlineResults: CopilotInlineResultsMode | undefined =
+    rawCopilotInlineResults !== undefined && isCopilotInlineResultsMode(rawCopilotInlineResults)
+      ? rawCopilotInlineResults
+      : undefined;
+  if (rawCopilotInlineResults !== undefined && copilotInlineResults === undefined) {
+    process.stderr.write(`tl workspace: unrecognized --copilot-inline-results value '${rawCopilotInlineResults}' (expected ${COPILOT_INLINE_RESULTS_VALUES.join(" | ")})\n`);
+    process.exitCode = 1;
+    return;
+  }
   // P2-3(1): arg parsing — resolve the profile setupWorkspace() will
   // actually write so --json (and the plain-text summary) can report the
   // real outcome instead of silently omitting it whenever --guide-profile
@@ -787,7 +1210,7 @@ export async function runWorkspace(
   // (an explicit --guide-profile still always wins, here and there).
   const effectiveGuideProfile = guideProfile ?? defaultGuideProfileForSurface(toolSurface);
   const launcher = options.launcher
-    ?? resolveStableLauncher({ allowBareFallback: true });
+    ?? resolveStableLauncher({ allowBareFallback: true, installHome: options.installHome });
   const serverBuild = rulesOnly
     ? undefined
     : (options.versionCheck ?? verifyLauncherVersion)(launcher);
@@ -798,8 +1221,10 @@ export async function runWorkspace(
     rulesOnly,
     ...(guideProfile !== undefined ? { guideProfile } : {}),
     ...(toolSurface !== undefined ? { toolSurface } : {}),
+    ...(copilotInlineResults !== undefined ? { copilotInlineResults } : {}),
   });
   const registryTarget = options.registryPath ?? configFilePath();
+  recordWorkspaceInInstall(options.installHome ?? resolveInstallHome(), result);
   let registryWarning: WorkspaceSetupJsonWarning | undefined;
   try {
     recordWorkspaceSetup(result, registryTarget);
@@ -822,6 +1247,8 @@ export async function runWorkspace(
     })}\n`);
     return;
   }
+  const copilotLine = formatCopilotInlineResultsLine(result.workspaceRoot, result.copilotInlineResults);
+  const guideProfileAdviceLine = formatGuideProfileAdviceLine(result.clients, effectiveGuideProfile);
   process.stdout.write(
     `TokenLighten is ready for ${result.clients.join(", ")}.\n`
       + `AI rules: ${result.rulesWritten.length} file(s)\n`
@@ -829,6 +1256,8 @@ export async function runWorkspace(
       + "Write tools: enabled\n"
       + "Usage log: local, content-free\n"
       + `guide_profile: ${effectiveGuideProfile}\n`
-      + (serverBuild !== undefined ? "server_build: " + serverBuild + "\n" : ""),
+      + (serverBuild !== undefined ? "server_build: " + serverBuild + "\n" : "")
+      + (copilotLine !== undefined ? copilotLine + "\n" : "")
+      + (guideProfileAdviceLine !== undefined ? guideProfileAdviceLine + "\n" : ""),
   );
 }

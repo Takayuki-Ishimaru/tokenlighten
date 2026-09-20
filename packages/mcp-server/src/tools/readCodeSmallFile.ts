@@ -26,7 +26,7 @@ import { TINY_BYTES, TINY_LINES } from "../util/fullGovernor.js";
 import { elideDocCommentsForDisplay, spansExcludingWindows } from "../util/formatCompress.js";
 import { languageForPath } from "../util/languages.js";
 import { safeResolve, safeRealPath, resolveReal, isWithin, checkReadTarget } from "../util/safePath.js";
-import { decodeTextBuffer } from "../util/textDecode.js";
+import { NUL_STRIPPED_SERVE_NOTE, readServedText } from "../util/textDecode.js";
 import { isWorkspaceCandidateAccepted } from "../workspace/candidates.js";
 import { getFileSkeleton } from "./getFileSkeleton.js";
 import { countLines } from "../util/countLines.js";
@@ -87,6 +87,8 @@ export interface SmallFileResult {
   content?: string;
   bytes?: number;
   lines?: number;
+  /** MX-B group 1 (2026-09-14): stated on the full-content serve so a genuinely empty file still names a decoded fact (see `buildSmallFile`'s own comment). */
+  total_lines?: number;
   outline?: string[];
   edit_hints?: SmallFileEditHint[];
   next?: ToolCall;
@@ -354,6 +356,7 @@ export async function buildSmallFile(
         : `not a readable regular file: ${resolvedPath}`,
     );
   }
+  // served-bytes: readServedText
   const rawBuf = await fs.readFile(real);
   const byteSize = rawBuf.byteLength;
   // T1 (v0.13 review-fix wave, UTF-16 read parity): same
@@ -366,7 +369,46 @@ export async function buildSmallFile(
   // only the served `content` string -- and therefore its sha
   // (shaOfText(content) below) -- changes basis to the DECODED text. See
   // this wave's B-REPORT addendum for why that pairing was chosen.
-  const content = decodeTextBuffer(rawBuf) ?? rawBuf.toString("utf8");
+  // SHOULD-FIX 32 (2026-09-14, review round 4/5): the inline formula above is
+  // now `decodeTextBufferLenient` (util/textDecode.ts) -- the exact same
+  // expression, extracted so `readCodeTaskPack.ts`'s query-named-file
+  // disclosure can ask THIS reader's own question ("can I serve this at
+  // all?") through one shared function instead of two independently
+  // maintained copies of the same fallback.
+  // AA1 (2026-09-14, review round 10): ONE decode policy for every served body
+  // (util/textDecode.ts::readServedText). This route -- the direct slice/tiny-
+  // file serve a caller reaches as `targets:[{path}]`, and the destination of
+  // several task-pack `next`s -- was the LAST door still serving text on its own
+  // terms: `decodeTextBufferLenient` is TOTAL, so rounds 6-9 measured it happily
+  // shipping a BOM-less UTF-16 file's 63 raw NULs, and a 1-NUL 73-byte file's
+  // NUL, onto the wire while the task-pack doors disclosed the very same files
+  // (review round 9, residuals W1-3 and X1-1). SHOULD-FIX 37 had narrowed that
+  // to the `"stripped"` case only, deliberately leaving `"undecodable"` served
+  // raw and filing the disagreement as a chip. This is that chip:
+  //
+  //   - `"clean"`/`"stripped"`  -> serve the verdict's (NUL-free) text; a strip
+  //     is STATED via `nulStrippedNote`, exactly as before.
+  //   - `"undecodable"` -> FAIL CLOSED, the same way this function already fails
+  //     for a non-regular file: `throw`, which every caller turns into an
+  //     honest refusal (`server.ts` -> `read-error`) or an omission
+  //     (`readCodePack`), instead of putting unverifiable bytes on the wire
+  //     under a sha and a handle that claim to pin them.
+  // served-bytes: readServedText
+  const servedVerdict = readServedText(rawBuf);
+  if (servedVerdict.kind === "undecodable") {
+    throw new Error(
+      `not decodable as UTF-8 text: ${resolvedPath} (${servedVerdict.reason}) — re-save the file as UTF-8`,
+    );
+  }
+  const content = servedVerdict.text;
+  // SHOULD-FIX 57 (AB1, round 11): the ONE shared sentence, not a second
+  // wording. `projectSuccessBody`'s funnel appends the same sentence for any
+  // route that did not state the strip itself, and recognises an
+  // already-stated strip by the `nul-stripped` token — a route with its own
+  // differently-worded note got BOTH.
+  const nulStrippedNote = servedVerdict.kind === "stripped"
+    ? NUL_STRIPPED_SERVE_NOTE
+    : undefined;
   // BUG FIX: was content.split(/\r?\n/).length — feeds the isTiny threshold
   // gate AND the suggested "1-<N>" slice ranges below (a phantom-inflated
   // count previously suggested a range one line past a real short file's end).
@@ -540,6 +582,14 @@ export async function buildSmallFile(
     );
   }
 
+  // SHOULD-FIX 37 (2026-09-14, review round 6): `elisionNote` and
+  // `nulStrippedNote` disclose two independent facts about `displayContent`
+  // (doc-comment elision; NUL stripping) and either, both, or neither may
+  // apply to the same file — combined rather than one silently overwriting
+  // the other.
+  const combinedNote = elisionNote && nulStrippedNote
+    ? `${elisionNote}; ${nulStrippedNote}`
+    : elisionNote ?? nulStrippedNote;
   return {
     mode: "small_file",
     path: resolvedPath,
@@ -547,9 +597,24 @@ export async function buildSmallFile(
     // C10.1: short display sha (response only) — the handle above (hEntry) was
     // minted on the FULL sha; this only shortens the value in the JSON body.
     sha: shortSha(sha),
+    // MX-B group 1 (2026-09-14): `total_lines` was never stated on this
+    // route's full-content serve. For any non-empty tiny file this was
+    // harmless — `readFamily.ts::textEvidence` derives `Evidence.range` from
+    // the served content's own length when no `range`/`total_lines` is
+    // present — but for a genuinely EMPTY (0-byte / BOM-only) tiny file
+    // `content` is `""`, which `textEvidence` treats as an absent body, so
+    // NEITHER of its two branches had enough information left to emit even a
+    // bodyless `FreshEvidence` entry: a bare handle re-read of this route's
+    // own mint shipped `evidence:[]`, failing `read.text`'s required set
+    // (`protocol/budget/requiredSets.ts`'s `read.text/evidence-fresh-
+    // addressed`). `total_lines` is exactly what `textEvidence`'s existing
+    // "genuinely empty file" branch (DESIGN-v0.15 §5.1 (R2)) already checks
+    // for; stating it here — as mode=full/mode=slice already do — lets that
+    // branch fire instead of adding a second, parallel one.
+    total_lines: lineCount,
     content: displayContent,
     edit_hints,
-    ...(elisionNote ? { note: elisionNote } : {}),
+    ...(combinedNote ? { note: combinedNote } : {}),
   };
 }
 

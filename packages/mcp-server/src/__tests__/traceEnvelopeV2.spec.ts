@@ -156,12 +156,16 @@ describe("trace envelope — always-present fields", () => {
     trace("ordinary", {}, WS_ROOT);
     const attestation = readRecords().find((r) => r["event"] === "p1_causal_attestation");
     expect(attestation).toBeDefined();
-    expect(attestation!["workspaceRef"]).toBe(workspaceRefOf(WS_ROOT));
+    // WS_ROOT is a fake, non-existent path: realpathSync fails and the
+    // server falls back to path.resolve(WS_ROOT) before hashing/stamping it
+    // (util/trace.ts), a no-op on POSIX but a drive-rooted rewrite on
+    // Windows — both comparisons below must use the same resolved form.
+    expect(attestation!["workspaceRef"]).toBe(workspaceRefOf(path.resolve(WS_ROOT)));
     expect(typeof attestation!["trace_id"]).toBe("string");
     // The attestation's OWN workspace_root (raw canonical path, needed to
     // join a trace file to a bench cell) and the envelope's workspaceRef
     // (opaque sha) coexist as distinct fields.
-    expect(attestation!["workspace_root"]).toBe(WS_ROOT);
+    expect(attestation!["workspace_root"]).toBe(path.resolve(WS_ROOT));
   });
 });
 

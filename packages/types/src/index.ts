@@ -248,6 +248,20 @@ export type {
 export type { TLConfig } from "./config.js";
 
 export type {
+  InstallSource,
+  InstallRuntimeSource,
+  InstallWritePosture,
+  InstallGuideProfile,
+  InstallRuntime,
+  InstallIdentity,
+  InstallHostMechanism,
+  InstallHostEntry,
+  InstallWorkspaceEntry,
+  InstallAppEntry,
+  InstallRecord,
+} from "./install.js";
+
+export type {
   TokenLightenClient,
   TokenLightenTool,
   TokenLightenUsageEvent,
@@ -266,6 +280,8 @@ export type {
   TokenLightenWorkspaceSetupResult,
   TokenLightenWorkspaceSummary,
   TokenLightenWorkspaceListResult,
+  CopilotInlineResultsStatus,
+  CopilotInlineResultsReport,
 } from "./setup.js";
 
 export type {

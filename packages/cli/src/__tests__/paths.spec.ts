@@ -149,8 +149,12 @@ describe("resolvePath / configFilePath", () => {
     process.env["TOKENLIGHTEN_CONFIG_HOME"] = "/tmp/tl-leaf-test";
     vi.resetModules();
     const { resolvePath } = await import("../paths.js");
+    // path.join here matches what the umbrella-env test above already
+    // does for the same reason: on Windows, path.join produces a
+    // backslash-separated result, so a hardcoded forward-slash literal
+    // never matches even though resolvePath is platform-neutral itself.
     expect(resolvePath("config", "config.toml")).toBe(
-      "/tmp/tl-leaf-test/config.toml"
+      join("/tmp/tl-leaf-test", "config.toml")
     );
     delete process.env["TOKENLIGHTEN_CONFIG_HOME"];
   });

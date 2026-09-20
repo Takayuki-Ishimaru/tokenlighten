@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import JSZip from "jszip";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 
 type CalibrationClient =
   | "vscode"
@@ -211,7 +212,7 @@ describe("AI log workspace attribution", () => {
     expect(sessionCwd("codex", [{ type: "event" }])).toBeNull();
   });
 
-  it("normalizes real paths and rejects sibling-prefix paths", async () => {
+  it.skipIf(!symlinkSupported())("normalizes real paths and rejects sibling-prefix paths", async () => {
     const { symlinkSync } = await import("node:fs");
     const directory = join(tmpdir(), `tokenlighten-ai-path-${randomUUID()}`);
     const root = join(directory, "workspace");
@@ -230,7 +231,7 @@ describe("AI log workspace attribution", () => {
     expect(cwdBelongsToRoot(join(alias, "packages"), normalizedRoot)).toBe(true);
   });
 
-  it("derives one workspaceId for symlinked, trailing-sep, and direct roots", async () => {
+  it.skipIf(!symlinkSupported())("derives one workspaceId for symlinked, trailing-sep, and direct roots", async () => {
     const { symlinkSync } = await import("node:fs");
     const directory = join(tmpdir(), `tokenlighten-ws-id-${randomUUID()}`);
     const logDirectory = join(directory, "log");

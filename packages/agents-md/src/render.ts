@@ -42,8 +42,100 @@ const CLAUDE_IMPORT_TEMPLATE = `${SENTINEL_START}
 ${SENTINEL_END}
 `;
 
+// GitHub Copilot Chat injects BOTH AGENTS.md and this file into every
+// request (unlike Claude Code's native @AGENTS.md import), so a full guide
+// copy here used to double the fixed per-request cost and hasten
+// compaction. It also collided with Copilot's own built-in `read_file`
+// tool name. Keep this a short pointer + Copilot-specific operational
+// notes instead of duplicating the protocol prose — see AGENTS.md for
+// that. WP-V1 (2026-09-20, still under INSTRUCTIONS_VERSION's v97 label —
+// v97 itself has not shipped yet, so this is a further edit of it, not a
+// new version): tool identity (the tokenlighten_* names), deferred-tool
+// reload, and query-language guidance are cut here -- VS Code's own
+// `initialize`-time instructions (clientAdvertisement.ts's
+// VSCODE_SERVER_INSTRUCTIONS, injected on every single request regardless
+// of whether a tool has been loaded yet) already say all three, so this
+// stub only needs the notes that are NOT there: the large-result
+// workaround, the do-not-target-AGENTS.md/omit-budget rule, the
+// answer-as-soon-as-act.answer rule, and the delegation-cost warning.
+const COPILOT_IMPORT_TEMPLATE = `${SENTINEL_START}
+<!-- tl-instructions-version: {{VERSION}} -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+# TokenLighten MCP - GitHub Copilot notes
+
+TL protocol: \`AGENTS.md\`; follow it. Copilot notes:
+
+- A "Large tool result ... written to file" reply means the host hid it: re-issue with \`budget.bytes\` <= 7000; \`tl workspace setup\` raises Copilot's inline-result threshold.
+- Do not list \`AGENTS.md\`/\`CLAUDE.md\` as targets (already in your instructions), and omit \`budget\` unless you want LESS than TL's default; follow a \`limit\`/\`next\` instead of a built-in read.
+- Answer or edit as soon as \`decision.kind\` is \`act.answer\`/\`act.edit\`. To read more, make ONE \`read_file {targets:[...]}\` call naming all of them (a \`qref\` is optional); never fetch a \`remaining\` range you do not need.
+- Do not delegate what one or two TL calls can answer: a subagent re-pays the whole context (~5 of your turns just to start). Only for a large independent investigation, pass \`agentName:"tokenlighten-explore"\` to \`runSubagent\` so the subagent also uses TL.
+${SENTINEL_END}
+`;
+
+// VS Code Copilot Chat's `runSubagent` tool auto-lists every enabled
+// `.github/agents/*.agent.md` custom agent (by name + description) in every
+// agent's own system prompt and tells the parent to invoke it by name — see
+// the frontmatter enum/parser at workbench.desktop.main.js offset ~4181396
+// and ~4305944 (`e.header.userInvocable`/`e.header.disableModelInvocation`).
+// This is a whole file (frontmatter + body), never a managed block inside an
+// existing rules file, so — unlike CLAUDE_IMPORT_TEMPLATE/COPILOT_IMPORT_TEMPLATE
+// above — its "preamble" (YAML frontmatter) is what makes Copilot treat the
+// file as a custom agent at all, not an optional tool-native prologue.
+//
+// `tools:` entries are MCP "full reference names" (`<server-referenceName>/<tool
+// referenceName>`), verified against workbench.desktop.main.js: `Upe()`
+// (~offset 13517256) builds a tool's full reference name as
+// `${toolSet.referenceName}/${tool.toolReferenceName}`; the MCP toolset's own
+// `referenceName` is `serverDefinition.label.toLowerCase().replace(/\s+/g,"-")`
+// (contrib/mcp languageModelTools sync, ~offset 14364943) — `label` here is
+// literally the `.vscode/mcp.json` `servers` object key this repo's own
+// `configureVsCode()` writes (`servers["tokenlighten"] = ...`,
+// packages/cli/src/commands/workspace.ts), already lowercase with no
+// whitespace, so it round-trips unchanged. `toToolAndToolSetEnablementMap()`
+// (~offset 13514017) is what actually resolves a custom agent's parsed
+// `tools:` array against these full reference names. Deliberately two
+// explicit tool entries, never the `tokenlighten/*` toolset wildcard
+// (`Fbn()`, ~offset 13517431) — the wildcard would also enable
+// `tokenlighten/edit_file`, breaking this agent's read-only-by-construction
+// guarantee.
+const COPILOT_AGENT_FRONTMATTER = `---
+name: tokenlighten-explore
+description: Use ONLY when you have already decided to hand a LARGE, independent read-only investigation (many files across the repository) to a subagent. Do NOT delegate an ordinary question or trace - a subagent starts a whole new context and costs more than calling the TokenLighten tools yourself. Read-only; cannot edit.
+tools:
+  - tokenlighten/read_file
+  - tokenlighten/search_files
+user-invocable: false
+---
+
+`;
+
+// Locale-independent and profile-independent (like CLAUDE_IMPORT_TEMPLATE/
+// COPILOT_IMPORT_TEMPLATE above): this file's whole job is to point a
+// runSubagent child at TL in a few lines, never to duplicate AGENTS.md's
+// protocol prose.
+const COPILOT_AGENT_IMPORT_TEMPLATE = `${SENTINEL_START}
+<!-- tl-instructions-version: {{VERSION}} -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+# TokenLighten MCP - exploration subagent
+
+Explore using ONLY the TokenLighten (TL) MCP tools (\`tokenlighten/read_file\`, \`tokenlighten/search_files\`); follow the protocol in \`AGENTS.md\`.
+
+- Start with \`read_file {query:"<the subtask, with likely code identifiers>", task:{epoch:"new"}}\`.
+- To read more files or ranges, make ONE \`read_file {targets:[...]}\` call naming all of them; answer as soon as \`decision.kind\` is \`act.answer\`.
+- Use \`search_files\` for identifiers, references, and tree/inventory lookups.
+- Put every known file into ONE \`targets:[...]\` call, not one call per file.
+- When a reply carries \`limit\`/\`remaining\`, run its \`next\`.
+- Omit \`budget\` unless you want LESS than TL's default.
+- You cannot edit; never call \`edit_file\` or any write tool.
+- Report findings with exact file paths and line ranges, not just summaries.
+${SENTINEL_END}
+`;
+
 function loadTemplateForTarget(target: StubTargetId | undefined, locale: Locale): string {
-  return target === "claude" ? CLAUDE_IMPORT_TEMPLATE : loadTemplate(locale);
+  if (target === "claude") return CLAUDE_IMPORT_TEMPLATE;
+  if (target === "copilot") return COPILOT_IMPORT_TEMPLATE;
+  if (target === "copilot-agent") return COPILOT_AGENT_IMPORT_TEMPLATE;
+  return loadTemplate(locale);
 }
 
 /**
@@ -150,6 +242,7 @@ alwaysApply: true
 export function renderTargetPreamble(target: StubTargetId | undefined): string {
   if (target === "cursor") return CURSOR_FRONTMATTER;
   if (target === "continue") return CONTINUE_FRONTMATTER;
+  if (target === "copilot-agent") return COPILOT_AGENT_FRONTMATTER;
   return "";
 }
 
@@ -192,6 +285,14 @@ function loadTemplateForProfile(
   toolSurface: ToolSurface,
 ): string {
   if (target === "claude") return applyToolSurface(CLAUDE_IMPORT_TEMPLATE, toolSurface);
+  // Copilot's stub is fixed regardless of profile (like Claude's import
+  // block above): the short pointer replaces medium/compact too, since the
+  // whole point is to never duplicate protocol prose in this file, at any
+  // guide profile or tool surface.
+  if (target === "copilot") return applyToolSurface(COPILOT_IMPORT_TEMPLATE, toolSurface);
+  // Same reasoning as "copilot" above: a custom-agent file body stays fixed
+  // across every guide profile/tool surface.
+  if (target === "copilot-agent") return applyToolSurface(COPILOT_AGENT_IMPORT_TEMPLATE, toolSurface);
   if (profile === "medium") return applyToolSurface(loadMediumTemplate(locale), toolSurface);
   if (profile === "compact") return applyToolSurface(loadCompactTemplate(locale), toolSurface);
   return applyToolSurface(loadTemplateForTarget(target, locale), toolSurface);

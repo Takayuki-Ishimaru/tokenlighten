@@ -18,7 +18,7 @@
 import { createHash } from "crypto";
 import type { TaskExecutionContract, TaskVerifyObligation } from "@tokenlighten/types";
 import { currentSessionLane, laneScopedKey, rootOfLaneScopedKey } from "../util/laneKey.js";
-import { batchEditFrontierEnabled, receiptCoverageEnabled } from "../util/flags.js";
+import { batchEditFrontierEnabled, frontierStrictWritesEnabled, receiptCoverageEnabled } from "../util/flags.js";
 import { persistQueryRef, rehydrateQueryRef, rehydrateQueryRefBinding, rehydrateQueryRefHandle, clearPersistedQueryRef } from "./stateHandles.js";
 // M1 (2026-09-05 R28 remediation): the ONE production reset for
 // packServeLog.ts's served-surface ledger (see `clearServedSurfaces`'s own
@@ -590,6 +590,63 @@ export interface ExecutionCreateAuthorization {
   paths: string[];
 }
 
+/**
+ * FX-L SOFT FRONTIER MARKER (user ruling 2026-09-14, review-findings-6
+ * SHOULD-FIX 38): where an applied edit's path stood relative to the LATEST
+ * certified decision bound to this lane+task. Projected verbatim onto
+ * `EditReclassification.frontier_status` / `AppliedEntry.frontier_status`
+ * (`protocol/editFamily.ts`), which carry the normative definitions.
+ */
+export type CertifiedFrontierStatus = "read-only" | "not-in-frontier" | "answer-decision";
+
+/**
+ * The LATEST certified decision this lane was handed, as the CALLER saw it —
+ * recorded by `server.ts` from the projected `decision` (protocol/decisionWire.
+ * ts) at the one site that also installs the fence, never re-derived here.
+ *
+ * SCOPE. Lane+workspace, because it lives on `WorkspaceSession` and
+ * `getSession` keys on `laneScopedKey` (see `util/laneKey.ts`'s module header:
+ * every lane-partitioned store answers "whose call is this?" the same way).
+ * Epoch, because BOTH guards clear it on `task.epoch:"new"` exactly where they
+ * clear `intentEditObserved` — so "the lane's latest certified decision,
+ * produced in this epoch" is a structural property, not a timestamp compare.
+ *
+ * NOT A PERMISSION RECORD. Nothing admits or refuses an edit because of this
+ * by default; FX-L's shipped-bytes fence remains the sole authority (ruling
+ * (r)). It exists so an edit the fence admits can SAY where it landed —
+ * and, only under `TL_FRONTIER_STRICT_WRITES`, so an operator can opt into
+ * refusing there instead.
+ */
+export interface CertifiedDecisionRecord {
+  /** `decision.certificate.id`; "" when the decision carried no certificate. */
+  certificateId: string;
+  kind: "act.edit" | "act.answer";
+  /** `decision.frontier`, verbatim — `act.answer` has none, so this is empty. */
+  frontier: ReadonlyArray<{ path: string; writable: boolean }>;
+  /**
+   * `decision.create_target.path`, when the decision certified one. A create
+   * target is an AUTHORIZED write that is absent from the frontier by
+   * construction (the file does not exist yet), so it is never marked.
+   */
+  createTargetPath: string;
+  /** `task.id` this decision was served under; "" when none was minted. */
+  taskId: string;
+  /** `qref` this decision was served under; "" when none was minted. */
+  qref: string;
+}
+
+/**
+ * One derived FX-L soft marker, carried on an ALLOWED guard decision and
+ * projected by `protocol/editFamily.ts`. `paths` is every marked target in
+ * request order (a mixed batch marks per item); `status` is the FIRST marked
+ * target's status, which is what the single top-level receipt reports.
+ */
+export interface ExecutionFrontierMarker {
+  certificate_id: string;
+  status: CertifiedFrontierStatus;
+  paths: string[];
+}
+
 export type ExecutionGuardDecision =
   | {
       allowed: true;
@@ -599,6 +656,17 @@ export type ExecutionGuardDecision =
       postReadyTrim?: true;
       reclassified?: ExecutionReclassification;
       createAuthorization?: ExecutionCreateAuthorization;
+      /**
+       * FX-L soft frontier marker (user ruling 2026-09-14). Deliberately a
+       * SEPARATE field from `reclassified`, not a widening of it: the
+       * dispatcher hands `reclassified` to `recordExecutionEditResult`, whose
+       * reclassification branch commits `terminalAction:"edit"` and
+       * `phase:"verifying"` on the fence. Folding an advisory marker into that
+       * struct would silently re-type every marked edit's fence — a behaviour
+       * change the ruling does not ask for. This field is read by the wire
+       * projection only.
+       */
+      frontierMarker?: ExecutionFrontierMarker;
     }
   | { allowed: false; refusal: Record<string, unknown> };
 
@@ -871,6 +939,18 @@ export interface WorkspaceSession {
    * this, reset-tagged or not.
    */
   intentEditObserved: boolean;
+
+  /**
+   * FX-L soft frontier marker (user ruling 2026-09-14): the LATEST certified
+   * decision this lane was handed in the current epoch. See
+   * `CertifiedDecisionRecord` for the scope rules, and
+   * `certifiedFrontierMarkerFor` for the one predicate that reads it.
+   *
+   * Absent means "no certified decision is bound to this lane+epoch" — a plain
+   * `targets:[{path}]` read-then-edit flow, or a fresh epoch — and that is
+   * exactly the state in which no marker is ever emitted.
+   */
+  certifiedDecision?: CertifiedDecisionRecord;
 
   /**
    * VF-5 hand-off: the active task epoch's `TaskChangeContract.verify_obligations`,
@@ -4892,6 +4972,12 @@ export function guardExecutionDiscovery(
     // declared task has observed no edit of its own yet, even when reached
     // via a discovery call rather than an edit_file call.
     session.intentEditObserved = false;
+    // FX-L soft frontier marker (user ruling 2026-09-14): the latest CERTIFIED
+    // decision is as task-shaped as `intentEditObserved` directly above — a
+    // newly declared task has been handed no certified decision of its own
+    // yet. Clearing it HERE is what makes the ruling's "only when it was
+    // produced in this epoch" fallback structural rather than a clock compare.
+    session.certifiedDecision = undefined;
     // M1 (2026-09-05 R28 remediation): `referencesObserved` (sfIntent.ts,
     // backed by packServeLog.ts's `executedLocates` ledger) is exactly as
     // task-shaped as `intentEditObserved` just above — "a `references` call
@@ -5173,6 +5259,277 @@ function requestedItemCreatePaths(args: Record<string, unknown>): string[] {
   return [...new Set(paths)];
 }
 
+// ---------------------------------------------------------------------------
+// FX-L SOFT FRONTIER MARKER (user ruling 2026-09-14, review-findings-6
+// SHOULD-FIX 38)
+//
+// THE RULING, AND WHAT IT DELIBERATELY DOES NOT MOVE. review-findings-6
+// finding 38 measured that an `edit_file` on a served evidence handle applies
+// even when the certified decision named that file read-only (or named it
+// not at all): `act.edit` with frontier `[{src/retry.ts}]` still wrote
+// `src/cache.ts`; `act.answer` with no frontier still wrote its served file.
+// That is FX-L's RATIFIED design — "THE CERTIFICATE IS NOT WRITE AUTHORITY …
+// Write authority comes only from SHIPPED BYTES" — and consulting
+// `writable:false` at dispatch inverts its one-way rule (it would REFUSE a
+// handle this server itself served, the T09/T10 regression class). So the
+// fence below is untouched, `nul-stripped` still refuses physically, and
+// IL-W2's `editObserved` exemption is unaffected. What is ADDED is a
+// disclosure: the edit lands and SAYS where it landed.
+//
+// WHERE THE LOOKUP LIVES. On the session (lane+workspace via `laneScopedKey`),
+// written by `server.ts` from the decision it just projected — never
+// re-derived here from the certificate, because the question is "what did the
+// CALLER last certify about this path", and the caller saw the projected
+// `decision.frontier`, not `action_frontier`. Cleared on `task.epoch:"new"` in
+// both guards beside `intentEditObserved`, which is what makes "produced in
+// this epoch" structural.
+// ---------------------------------------------------------------------------
+
+/**
+ * Records the latest certified (`act.edit` / `act.answer`) decision for this
+ * lane. Called from `server.ts`'s single decision-emission site.
+ *
+ * Only the two CERTIFIED kinds are recorded. A later `discover` / `await_input`
+ * / `done` pack does NOT retire an earlier certified decision: it certifies
+ * nothing, so "the latest certified decision" is still the earlier one. Only
+ * `task.epoch:"new"` retires it.
+ */
+export function recordCertifiedDecision(workspaceRoot: string, record: CertifiedDecisionRecord): void {
+  getSession(workspaceRoot).certifiedDecision = record;
+}
+
+/** The latest certified decision for this lane+epoch, if any. */
+export function certifiedDecisionFor(workspaceRoot: string): CertifiedDecisionRecord | undefined {
+  return getSession(workspaceRoot).certifiedDecision;
+}
+
+/**
+ * PURE (unit-testable) half of the marker: where `path` stands relative to
+ * `record`. `undefined` means the decision authorized it — no marker.
+ *
+ * Order matters and is the ruling's own: an explicit frontier entry answers
+ * first (it is the decision's most specific statement about that path),
+ * `act.answer` answers next (it certified no writable frontier at all), and
+ * "the decision was `act.edit` and simply did not name this path" is the
+ * remainder.
+ */
+export function certifiedFrontierStatusOf(
+  record: CertifiedDecisionRecord,
+  path: string,
+): CertifiedFrontierStatus | undefined {
+  if (path === "") return undefined;
+  // A certified create target is an AUTHORIZED write that no frontier can
+  // contain (`projectFrontier` drops an entry whose path cannot be named, and
+  // the file does not exist yet) — marking it would call the decision's own
+  // `act.edit`+`create_target` floor a violation of itself.
+  if (path === record.createTargetPath) return undefined;
+  const entry = record.frontier.find((candidate) => candidate.path === path);
+  if (entry !== undefined) return entry.writable ? undefined : "read-only";
+  if (record.kind === "act.answer") return "answer-decision";
+  return "not-in-frontier";
+}
+
+/** One requested edit target, with the argument address that named it. */
+interface RequestedEditTarget {
+  path: string;
+  /** `edits[i].path` / `edits[i].handle` / `path` / `handle` — the refusal's `field`. */
+  field: string;
+  /** True iff THIS item is a create (`create:true`, or the legacy call-wide flag). */
+  create: boolean;
+}
+
+/**
+ * Every edit target this call names, IN REQUEST ORDER, each resolved to a
+ * workspace-relative path and labelled with the argument that named it.
+ *
+ * Deliberately not `requestedEditPaths ∪ requestedEditHandles`: those two are
+ * deduped sets with no positional correspondence, and both the per-item
+ * `applied[]` marker and the strict refusal's `field` need to say WHICH item.
+ */
+function requestedEditTargets(
+  args: Record<string, unknown>,
+  resolveHandlePath?: (handle: string) => string | undefined,
+): RequestedEditTarget[] {
+  const callWideCreate = isCreateEditRequest(args);
+  const targets: RequestedEditTarget[] = [];
+  const push = (path: string | undefined, field: string, create: boolean): void => {
+    if (typeof path !== "string" || path === "") return;
+    if (targets.some((existing) => existing.path === path)) return;
+    targets.push({ path, field, create });
+  };
+  if (typeof args["path"] === "string") push(args["path"], "path", callWideCreate);
+  if (typeof args["handle"] === "string") {
+    push(resolveHandlePath?.(args["handle"] as string), "handle", callWideCreate);
+  }
+  if (Array.isArray(args["edits"])) {
+    args["edits"].forEach((edit, index) => {
+      if (edit === null || typeof edit !== "object") return;
+      const item = edit as Record<string, unknown>;
+      const create = callWideCreate || item["create"] === true;
+      if (typeof item["path"] === "string") push(item["path"], `edits[${index}].path`, create);
+      if (typeof item["handle"] === "string") {
+        push(resolveHandlePath?.(item["handle"] as string), `edits[${index}].handle`, create);
+      }
+    });
+  }
+  return targets;
+}
+
+/**
+ * True iff this `edit_file` call's own task binding (if it carries one) still
+ * names the lane+epoch the recorded decision belongs to.
+ *
+ * WHY THIS IS A GUARD AND NOT A COMPARISON OF IDENTIFIERS IN EVERY CASE.
+ * `server.ts`'s `taskHandleRefusal` already refuses a `task_handle` that is
+ * unknown, expired, wrong-purpose, from another workspace or from another lane
+ * BEFORE this guard runs, and `applyRecoveredTaskHandleFromQref` only ever
+ * stamps a handle this same server minted onto the qref the caller supplied.
+ * So by the time we are here, a binding that is PRESENT is already known to
+ * belong to this workspace+lane. What is left to check is the one thing those
+ * gates do not answer — whether it names the same TASK the record does — and
+ * that is only checkable when the record actually captured an identifier
+ * (`withTaskHandle` degrades to no handle when no durable store is available,
+ * and a pack can be served without a qref). When the record captured none, the
+ * epoch rule alone governs, which is the ruling's own fallback.
+ */
+function certifiedDecisionBindingHolds(record: CertifiedDecisionRecord, args: Record<string, unknown>): boolean {
+  const handle = typeof args["task_handle"] === "string" ? args["task_handle"] : "";
+  if (handle !== "" && record.taskId !== "" && handle !== record.taskId) return false;
+  const qref = typeof args["qref"] === "string" ? args["qref"].trim() : "";
+  if (qref !== "" && record.qref !== "" && qref !== record.qref) return false;
+  return true;
+}
+
+/**
+ * The FX-L soft marker for this `edit_file` call, or `undefined` when the
+ * latest certified decision authorized every target it names (and when there
+ * is no certified decision bound to this lane+epoch at all).
+ *
+ * Exported for the unit spec; the production readers are `guardExecutionEdit`
+ * (which attaches it to an allowed decision) and its strict-mode refusal.
+ */
+export function certifiedFrontierMarkerFor(
+  workspaceRoot: string,
+  args: Record<string, unknown>,
+  resolveHandlePath?: (handle: string) => string | undefined,
+): ExecutionFrontierMarker | undefined {
+  // An edit_file that carries its OWN `task.epoch:"new"` opens a new task, and
+  // a new task has been handed no certified decision yet. `guardExecutionEditCore`
+  // retires the record for exactly this reason — but it does so INSIDE the call
+  // this marker describes, and the wrapper reads the record before that (see
+  // `guardExecutionEdit`'s ordering note), so the same rule is applied here
+  // rather than left to depend on which of the two ran first.
+  if (args["taskEpoch"] === "new") return undefined;
+  const record = getSession(workspaceRoot).certifiedDecision;
+  if (record === undefined) return undefined;
+  if (!certifiedDecisionBindingHolds(record, args)) return undefined;
+  const marked: Array<{ path: string; status: CertifiedFrontierStatus; field: string }> = [];
+  for (const target of requestedEditTargets(args, resolveHandlePath)) {
+    // A create names a file that does not exist yet: it has no frontier
+    // standing to report, and `guardExecutionEditCore`'s own create branches
+    // (pack-named target, or an explicit workspace pin) already decide it.
+    if (target.create) continue;
+    const status = certifiedFrontierStatusOf(record, target.path);
+    if (status === undefined) continue;
+    marked.push({ path: target.path, status, field: target.field });
+  }
+  const first = marked[0];
+  if (first === undefined) return undefined;
+  return {
+    certificate_id: record.certificateId,
+    status: first.status,
+    paths: marked.map((entry) => entry.path),
+  };
+}
+
+/**
+ * The `field` the strict-mode refusal names: the argument address of the FIRST
+ * offending item, in request order. Recomputed rather than carried on
+ * `ExecutionFrontierMarker` so the advisory marker's wire shape stays minimal
+ * (`field` is a refusal concept, meaningless on `edit.applied`).
+ */
+function firstMarkedEditField(
+  record: CertifiedDecisionRecord,
+  args: Record<string, unknown>,
+  resolveHandlePath?: (handle: string) => string | undefined,
+): string {
+  for (const target of requestedEditTargets(args, resolveHandlePath)) {
+    if (target.create) continue;
+    if (certifiedFrontierStatusOf(record, target.path) !== undefined) return target.field;
+  }
+  return "edits";
+}
+
+/**
+ * FX-L STRICT MODE (`TL_FRONTIER_STRICT_WRITES=1`, default OFF): the same
+ * condition the soft marker discloses, as a refusal of the WHOLE batch.
+ *
+ * "Rollback, consistent with execution-typestate" is structural here: this
+ * runs BEFORE `guardExecutionEditCore`, so no fence transition, no admissible-
+ * union write and no disk write is attempted — the §2.4 "nothing was
+ * attempted" row holds by construction rather than by undoing anything.
+ *
+ * NEVER A DEAD END (§2.6). `retry:"new-task"` names the only transition that
+ * can change the answer — a re-pack that states the edit intent explicitly —
+ * and `next_call` IS that call, executable verbatim: `edit <path>` as the
+ * query, the offending path as an explicit target (so the new certificate's
+ * frontier is computed over it), and `profile:"generic"`, because a `generic`
+ * task is a CHANGE task and an `answer` one is not. Measured: that call
+ * returns `act.edit` with `frontier:[{path, writable:true}]` and the identical
+ * edit then applies unmarked.
+ *
+ * DISCLOSED DEVIATION FROM THE RULING'S WORDING (2026-09-14). The ruling reads
+ * "`query:<original query if recorded, else "edit <P>">`". The original query
+ * is measurably the one query that CANNOT recover this refusal: it is what
+ * produced P's read-only / omitted / answer standing in the first place, so
+ * re-packing it narrowed to P re-derives the same verdict — measured on the
+ * ruling's own JA fixture, the recorded query plus `targets:[{path:"src/
+ * cache.ts"}]` returns `act.answer` with `evidence_files:0` (cache.ts is not
+ * even served), which is exactly the dead end the same sentence of the ruling
+ * forbids. The overriding "Never a dead end" clause therefore wins: the query
+ * is always the intent-stating `edit <path>` form, and the recorded query is
+ * NOT lost — it is named in `detail` below, so the caller can restate it.
+ */
+function refuseStrictFrontierWrite(
+  session: WorkspaceSession,
+  workspaceRoot: string,
+  args: Record<string, unknown>,
+  record: CertifiedDecisionRecord,
+  marker: ExecutionFrontierMarker,
+  resolveHandlePath?: (handle: string) => string | undefined,
+): ExecutionGuardDecision {
+  const path = marker.paths[0] ?? "";
+  const lane = currentSessionLane();
+  const recordedQuery = session.executionFence?.epochQuery ?? "";
+  const reason = marker.status === "read-only"
+    ? "names it read-only"
+    : marker.status === "answer-decision"
+      ? "is an act.answer and certified no writable frontier"
+      : "is an act.edit whose frontier omits it";
+  return {
+    allowed: false,
+    refusal: {
+      ok: false,
+      reason: "frontier-read-only",
+      retry: "new-task",
+      retry_same_call: false,
+      field: firstMarkedEditField(record, args, resolveHandlePath),
+      certificate_id: record.certificateId,
+      detail: `TL_FRONTIER_STRICT_WRITES: ${marker.paths.join(",")} is outside the writable frontier of the latest certified decision (${record.certificateId || "no certificate id"}) — that decision ${reason}. Nothing was written. Run the next call to re-pack with the edit intent stated${recordedQuery !== "" ? `; the task this decision closed was "${recordedQuery}"` : ""}.`,
+      next_call: {
+        tool: "read_file",
+        arguments: {
+          query: `edit ${path}`,
+          targets: [{ path }],
+          task: { epoch: "new", profile: "generic" },
+          ...(workspaceRoot ? { cwd: workspaceRoot } : {}),
+          ...(lane !== "" ? { lane } : {}),
+        },
+      },
+    },
+  };
+}
+
 /**
  * FX-P1: the refusal for an edit that no CERTIFICATE fences but the ONE
  * admissibility predicate rejects — a withheld address (INV-I-1) or a
@@ -5389,6 +5746,11 @@ function guardExecutionEditCore(
     // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): same epoch reset as the
     // discovery guard's identical clear above — see there.
     session.intentEditObserved = false;
+    // FX-L soft frontier marker (user ruling 2026-09-14): same epoch reset as
+    // the discovery guard's identical clear above — see there. An `edit_file`
+    // that opens its own epoch is bound to no certified decision, so it is
+    // never marked (and, under TL_FRONTIER_STRICT_WRITES, never refused).
+    session.certifiedDecision = undefined;
     // M1 (2026-09-05 R28 remediation): same epoch reset as the discovery
     // guard's identical clear above — see there. An `edit_file` call carrying
     // its OWN `task.epoch:"new"` is exactly as much "a new task" as a
@@ -5939,9 +6301,44 @@ export function guardExecutionEdit(
   resolveHandlePath?: (handle: string) => string | undefined,
   opts?: GuardExecutionEditOpts,
 ): ExecutionGuardDecision {
+  // -----------------------------------------------------------------------
+  // FX-L SOFT FRONTIER MARKER (user ruling 2026-09-14). Derived in the SAME
+  // wrapper IL-W2 already owns, for the same reason: it reads the finished
+  // question without moving a single booking inside `guardExecutionEditCore`.
+  //
+  // ORDER. The marker is computed BEFORE the core runs, because the strict
+  // arm must refuse with nothing attempted — the core's `task.epoch:"new"`
+  // branch would otherwise have already retired the very record the decision
+  // is about (and cleared this epoch's ledgers). In the DEFAULT arm the
+  // ordering is immaterial: the core neither reads nor writes
+  // `session.certifiedDecision`.
+  //
+  // STRICT PRE-EMPTS, DELIBERATELY. When the flag is on, a target the latest
+  // certified decision did not authorize is refused here even if the core
+  // would have refused it for a different reason. That is the honest reading
+  // of "the same condition REFUSES the whole batch": the condition is about
+  // AUTHORITY, and an authority failure is not improved by first computing a
+  // byte-residency diagnosis for a write that may not happen at all. The one
+  // refusal this can never mask is the physical one — a `nul-stripped` file
+  // is never certified writable in the first place (BLOCKER 62's
+  // `writeAuthorityVeto` gate 3 degrades that pack to `await_input`, which is
+  // not a certified decision), so no record exists for it to be marked
+  // against and `detectWriteEncodingRisk` still owns that refusal, flag or no
+  // flag.
+  // -----------------------------------------------------------------------
+  const session = getSession(workspaceRoot);
+  const certified = session.certifiedDecision;
+  const marker = certifiedFrontierMarkerFor(workspaceRoot, args, resolveHandlePath);
+  if (frontierStrictWritesEnabled() && certified !== undefined && marker !== undefined) {
+    return refuseStrictFrontierWrite(session, workspaceRoot, args, certified, marker, resolveHandlePath);
+  }
   const decision = guardExecutionEditCore(workspaceRoot, args, resolveHandlePath, opts);
   if (decision.allowed) {
-    getSession(workspaceRoot).intentEditObserved = true;
+    session.intentEditObserved = true;
+    // Attached only on the allowed arm: a REFUSED edit wrote nothing, so it
+    // has no landing site to report. Never folded into `reclassified` — see
+    // `ExecutionGuardDecision.frontierMarker`'s own doc comment.
+    if (marker !== undefined) return { ...decision, frontierMarker: marker };
   }
   return decision;
 }

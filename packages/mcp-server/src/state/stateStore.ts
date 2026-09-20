@@ -288,6 +288,7 @@ export class WorkspaceStateStore {
   private _tryPlainLoad(): boolean {
     let epoch: string | undefined;
     try {
+      // served-bytes: not-served (TokenLighten's OWN session meta file, never a caller's file)
       const raw = JSON.parse(readFileSync(this._path(META_FILE), "utf8")) as Record<string, unknown>;
       if (raw["v"] === 1 && typeof raw["epoch"] === "string" && /^[0-9a-f]{8}$/.test(raw["epoch"])) {
         epoch = raw["epoch"];
@@ -320,6 +321,7 @@ export class WorkspaceStateStore {
    *  original fail-closed contract exactly. */
   private _hasValidMeta(): boolean {
     try {
+      // served-bytes: not-served (TokenLighten's OWN session meta file, never a caller's file)
       const raw = JSON.parse(readFileSync(this._path(META_FILE), "utf8")) as Record<string, unknown>;
       return raw["v"] === 1 && typeof raw["epoch"] === "string" && /^[0-9a-f]{8}$/.test(raw["epoch"]);
     } catch {
@@ -396,6 +398,7 @@ export class WorkspaceStateStore {
   private _loadSnapshot(): void {
     let raw: string;
     try {
+      // served-bytes: not-served (TokenLighten's OWN state snapshot, never a caller's file)
       raw = readFileSync(this._path(SNAPSHOT_FILE), "utf8");
     } catch {
       return; // no snapshot yet: a journal-only store is normal
@@ -424,6 +427,7 @@ export class WorkspaceStateStore {
     try {
       const stat = lstatSync(this._path(JOURNAL_FILE));
       if (stat.size > MAX_JOURNAL_BYTES) throw new Error("journal too large");
+      // served-bytes: not-served (TokenLighten's OWN state journal, never a caller's file)
       raw = readFileSync(this._path(JOURNAL_FILE), "utf8");
     } catch (err) {
       if (err instanceof Error && err.message === "journal too large") throw err;

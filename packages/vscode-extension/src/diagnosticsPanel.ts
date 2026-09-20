@@ -16,7 +16,7 @@ import {
 } from "./diagnostics.js";
 import { getDisplayLanguage } from "./statusBar.js";
 import type { DisplayLanguage } from "./statusBar.js";
-import { workspaceMcpSettingsCached } from "./workspaceState.js";
+import { machineInstallCached, workspaceMcpSettingsCached } from "./workspaceState.js";
 
 const WATCH_DEBOUNCE_MS = 300;
 
@@ -65,6 +65,10 @@ const COPY = {
     disabledCalls: "Recording is disabled for this workspace.",
     ok: "ok",
     error: "error",
+    machineInstall: "Machine install",
+    installConsistency: "Install consistency (doctor)",
+    copilotInlineResults: "Copilot inline tool results",
+    copilotInlineResultsSpilling: "Copilot may still hide TokenLighten's answers at this threshold",
   },
   ja: {
     title: "TokenLighten 診断",
@@ -97,6 +101,10 @@ const COPY = {
     disabledCalls: "このワークスペースでは記録が無効です。",
     ok: "成功",
     error: "エラー",
+    machineInstall: "マシンへのインストール",
+    installConsistency: "インストール整合性（doctor）",
+    copilotInlineResults: "Copilotのインライン結果表示",
+    copilotInlineResultsSpilling: "この上限ではCopilotがTokenLightenの応答を隠す可能性があります",
   },
 } as const;
 
@@ -142,6 +150,22 @@ function renderPanelHtml(
     : `${escapeHtml(snapshot.guide.installedVersion)} [${escapeHtml(snapshot.guide.source ?? "")}] — ${
       snapshot.guide.upToDate ? escapeHtml(copy.upToDate) : escapeHtml(copy.outOfDate)
     } (${escapeHtml(copy.bundled)}: ${escapeHtml(snapshot.guide.bundledVersion)})`;
+  // DESIGN-v0.14-mcp-only-install.md §4.6 C12.
+  const machineInstallLine = snapshot.machineInstall === null
+    ? escapeHtml(copy.notInstalled)
+    : `${escapeHtml(snapshot.machineInstall.version)} (${escapeHtml(snapshot.machineInstall.installHome)})`;
+  const installConsistencyRow = snapshot.installConsistency === undefined
+    ? ""
+    : `<div class="row"><span class="label">${escapeHtml(copy.installConsistency)}</span><span class="value">${escapeHtml(JSON.stringify(snapshot.installConsistency))}</span></div>`;
+  const copilotInlineResultsRow = snapshot.copilotInlineResults === null
+    ? ""
+    : `<div class="row"><span class="label">${escapeHtml(copy.copilotInlineResults)}</span><span class="value">${
+      escapeHtml(boolText(copy, snapshot.copilotInlineResults.enabled))
+    }, ${snapshot.copilotInlineResults.thresholdBytes}${
+      snapshot.copilotInlineResults.spillingActive
+        ? ` — ${escapeHtml(copy.copilotInlineResultsSpilling)}`
+        : ""
+    }</span></div>`;
   const callsHtml = snapshot.ring.status === "ok" && snapshot.ring.calls.length > 0
     ? `<ul class="calls">${snapshot.ring.calls.map((call) => renderCall(copy, call)).join("")}</ul>`
     : `<p class="muted">${
@@ -220,12 +244,15 @@ function renderPanelHtml(
 <h1>${escapeHtml(copy.title)}</h1>
 
 <div class="row"><span class="label">${escapeHtml(copy.extensionVersion)}</span><span class="value">${escapeHtml(snapshot.extensionVersion)}</span></div>
+<div class="row"><span class="label">${escapeHtml(copy.machineInstall)}</span><span class="value">${machineInstallLine}</span></div>
 <div class="row"><span class="label">${escapeHtml(copy.tlVersion)}</span><span class="value">${escapeHtml(snapshot.tlVersion ?? copy.unknown)}</span></div>
 <div class="row"><span class="label">${escapeHtml(copy.serverBuild)}</span><span class="value">${escapeHtml(snapshot.ring.serverBuild ?? copy.unknown)}</span></div>
 <div class="row"><span class="label">${escapeHtml(copy.nodeExecutable)}</span><span class="value">${escapeHtml(snapshot.nodeExecutable)}</span></div>
 <div class="row"><span class="label">${escapeHtml(copy.serverLaunch)}</span><span class="value">${escapeHtml(snapshot.serverLaunch.command)} ${escapeHtml(snapshot.serverLaunch.args.join(" "))}</span></div>
 <div class="row"><span class="label">${escapeHtml(copy.workspaceRoot)}</span><span class="value">${escapeHtml(snapshot.workspaceRoot)}</span></div>
 <div class="row"><span class="label">${escapeHtml(copy.writeEnabled)}</span><span class="value">${escapeHtml(boolText(copy, snapshot.writeEnabledSetting))}</span></div>
+${installConsistencyRow}
+${copilotInlineResultsRow}
 
 <h2>${escapeHtml(copy.registration)}</h2>
 ${renderRegistrationRow(copy, ".mcp.json (Claude Code)", snapshot.registrations.claudeMcpJson)}
@@ -287,6 +314,15 @@ export function showDiagnosticsPanel(context: vscode.ExtensionContext): void {
   const render = (): void => {
     const settings = workspaceMcpSettingsCached();
     const currentLanguage = getDisplayLanguage();
+    const machineInstall = machineInstallCached();
+    // Same reason as machineInstall above: diagnostics.ts never imports
+    // vscode, so this reads the live effective setting (defaults mirror
+    // Copilot's own package.json schema defaults) and passes only the two
+    // plain values in.
+    const copilotConfig = vscode.workspace.getConfiguration(
+      "github.copilot.chat.agent.largeToolResultsToDisk",
+      vscode.Uri.file(workspaceRoot),
+    );
     const snapshot = collectDiagnostics({
       extensionVersion: typeof context.extension.packageJSON["version"] === "string"
         ? context.extension.packageJSON["version"]
@@ -294,6 +330,16 @@ export function showDiagnosticsPanel(context: vscode.ExtensionContext): void {
       workspaceRoot,
       writeEnabledSetting: settings?.writeEnabled ?? null,
       usageLoggingEnabledSetting: settings?.usageLoggingEnabled ?? null,
+      // DESIGN-v0.14-mcp-only-install.md §4.6 C12: reduced to the two
+      // fields Diagnostics displays (diagnostics.ts never imports vscode,
+      // so this workspaceState.ts lookup has to happen here).
+      machineInstall: machineInstall
+        ? { version: machineInstall.version, installHome: machineInstall.installHome }
+        : null,
+      copilotInlineResults: {
+        enabled: copilotConfig.get<boolean>("enabled", true),
+        thresholdBytes: copilotConfig.get<number>("thresholdBytes", 8192),
+      },
     });
     latestSnapshot = snapshot;
     panel.webview.html = renderPanelHtml(panel.webview, snapshot, currentLanguage);

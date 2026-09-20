@@ -291,3 +291,82 @@ describe("OB-GAP — CapabilityGap.code is a CLOSED 5-value union with no lossy 
     expect(decision.gaps?.[0]?.refs).toEqual(["o1", "o2"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// SHOULD-FIX 65 (AC1, 2026-09-14, review round 12) — `unreadable-named-path`
+// says "this request names X" only when the request names it.
+//
+// Round 11: a query naming ONE file produced THREE rows, each claiming the
+// request named it. AB1 had correctly made the disclosure a property of the
+// VERDICT (any candidate path the serve policy will not read), and reused the
+// message written when the only callers were query-named paths. `await_input`
+// means "`unresolved[]` names the blocker", so a caller acting on those rows
+// asks the user to re-save two files it never mentioned.
+//
+// Unit-pinned at the projector, which is the one place the sentence is built.
+// ---------------------------------------------------------------------------
+describe("SHOULD-FIX 65 — the unreadable-named-path disclosure states its own provenance", () => {
+  function awaitContract(): TaskExecutionContract {
+    return {
+      version: 1,
+      state: "awaiting-user-input",
+      readiness: "needs-followup",
+      discovery_complete: false,
+      next_action: "await-input",
+      max_additional_discovery_calls: 0,
+      reason: "synthetic contract for the unresolved projection",
+      typestate: { phase: "discovery", certificate_id: "cert-provenance" },
+      await_input_code: "no-grounded-call-remains",
+    } as unknown as TaskExecutionContract;
+  }
+
+  function unresolvedFor(rows: unknown): Array<{ kind: string; reason: string; path?: string }> {
+    const decision = projectTaskDecision({
+      result: { unreadable_named_paths: rows },
+      contract: awaitContract(),
+      canonicalKind: "await-input",
+      evidence: [],
+    });
+    expect(decision?.kind).toBe("await_input");
+    return ((decision as { unresolved?: Array<{ kind: string; reason: string; path?: string }> })
+      .unresolved ?? []);
+  }
+
+  it("a REQUEST-named path keeps the round-11 wording verbatim", () => {
+    const rows = unresolvedFor([
+      { path: "src/u16nobom.ts", reason: "undecodable", provenance: "request" },
+    ]);
+    expect(rows[0]?.kind).toBe("unreadable-named-path");
+    expect(rows[0]?.reason)
+      .toBe("this request names src/u16nobom.ts, which this response could not serve (undecodable)");
+    expect(rows[0]?.path).toBe("src/u16nobom.ts");
+  });
+
+  it("a RESOLUTION-reached path never claims the request named it", () => {
+    const rows = unresolvedFor([
+      { path: "src/latin1.ts", reason: "undecodable", provenance: "resolution" },
+    ]);
+    expect(rows[0]?.reason)
+      .toBe("a file this task needed (src/latin1.ts) could not be read/decoded (undecodable)");
+    expect(rows[0]?.reason).not.toContain("this request names");
+    // The path is still addressable — this is a wording fix, not a disclosure cut.
+    expect(rows[0]?.path).toBe("src/latin1.ts");
+  });
+
+  it("a row with NO provenance reads as `request` — the only spelling a pre-round-12 row could have", () => {
+    const rows = unresolvedFor([{ path: "src/locked.ts", reason: "unreadable" }]);
+    expect(rows[0]?.reason)
+      .toBe("this request names src/locked.ts, which this response could not serve (unreadable)");
+  });
+
+  it("round 11's exact input: one named path, two reached — one true sentence, two honest ones", () => {
+    const rows = unresolvedFor([
+      { path: "src/latin1.ts", reason: "undecodable", provenance: "resolution" },
+      { path: "src/short73.ts", reason: "undecodable", provenance: "resolution" },
+      { path: "src/u16nobom.ts", reason: "undecodable", provenance: "request" },
+    ]);
+    const claiming = rows.filter((row) => row.reason.includes("this request names"));
+    expect(claiming.map((row) => row.path)).toEqual(["src/u16nobom.ts"]);
+    expect(rows).toHaveLength(3);
+  });
+});

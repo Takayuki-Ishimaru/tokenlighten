@@ -17,7 +17,7 @@ import {
   type CoverageProbeSurface,
 } from "../../util/surfaceServedCoverage.js";
 import { trace } from "../../util/trace.js";
-import { markSemanticFrontierWithheldBody } from "./sfWithholdingMarks.js";
+import { markSemanticFrontierWithheldBody, isCallerRangeSurface } from "./sfWithholdingMarks.js";
 
 type ContinuationCall = ToolCall;
 type SemanticSurfaceCarrier = { readonly surfaces?: unknown };
@@ -822,11 +822,98 @@ export function projectCompletion(
   };
 }
 
+/**
+ * FIXALL-A (2026-09-14) — round 12's residual R2, and the FX-R3c D8 (b)
+ * regression it turns out to BE: an `incomplete-coverage` await_input that names
+ * no call at all, while its own `frontier_index` lists rows it minted handles
+ * for and never served.
+ *
+ * Measured shape (`fxR3cNamedFrontier.spec.ts` (b), under `budget.bytes: 8000`):
+ * `frontier_index` carries four addressable rows, exactly one of which has a
+ * body, and the decision is `await_input`/`no-grounded-call-remains` whose only
+ * `unresolved` row says "pack coverage is partial (candidate-list); no served
+ * surface closes the remainder". That is true and it is a dead end — the pack
+ * is telling the caller it cannot proceed while holding three addresses that
+ * would let it.
+ *
+ * LOOP FREEDOM, which is what round 12 could not establish for a GENERAL
+ * search-next and what makes this one safe: every target is a handle THIS
+ * response minted and did NOT serve. The call asks for exactly those bodies and
+ * invents nothing — no path, no query, no widening — so the next response either
+ * serves them (the unserved-addressable set strictly shrinks) or refuses them,
+ * and the wire's own `consumed` filter (`hasExecutedNext`) drops a call already
+ * spent on this lane before it can be offered twice. `anyServed` additionally
+ * requires the pack to have served SOMETHING, so a pack that is stuck at zero
+ * evidence never proposes a re-pack of nothing.
+ *
+ * LAST RESORT BY CONSTRUCTION: both seats consult it only after every other
+ * producer returned undefined, so it can never displace a better call — it can
+ * only replace the absence of one.
+ */
+export function unservedAddressableRepack(result: TaskPackResult): ToolCall | undefined {
+  const surfaces = Array.isArray(result.surfaces) ? result.surfaces : [];
+  const served = new Set<string>();
+  let anyServed = false;
+  for (const surface of surfaces) {
+    const row = surface as unknown as Record<string, unknown>;
+    const code = row["code"];
+    if (typeof code !== "string" || code === "") continue;
+    anyServed = true;
+    if (typeof row["handle"] === "string") served.add(row["handle"]);
+  }
+  if (!anyServed) return undefined;
+  const index = (result as unknown as Record<string, unknown>)["frontier_index"];
+  if (!Array.isArray(index)) return undefined;
+  // A path the pack ALREADY disclosed it could not read is not "unserved but
+  // addressable" — it IS the answer to what cannot be obtained. Re-packing it
+  // would loop, and (measured) it would also displace that disclosure out of
+  // `unresolved[]` into a `gaps` row, which is exactly what SHOULD-FIX 36's own
+  // chain exists to forbid.
+  const unreadable = new Set<string>();
+  const disclosed = (result as unknown as Record<string, unknown>)["unreadable_named_paths"];
+  if (Array.isArray(disclosed)) {
+    for (const entry of disclosed) {
+      if (entry === null || typeof entry !== "object") continue;
+      const path = (entry as Record<string, unknown>)["path"];
+      if (typeof path === "string" && path !== "") unreadable.add(path);
+    }
+  }
+  const targets: Array<{ handle: string }> = [];
+  const seenPaths = new Set<string>();
+  for (const entry of index) {
+    if (entry === null || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    const handle = row["handle"];
+    const path = row["path"];
+    if (typeof handle !== "string" || handle === "" || served.has(handle)) continue;
+    if (typeof path !== "string" || path === "" || seenPaths.has(path) || unreadable.has(path)) continue;
+    seenPaths.add(path);
+    targets.push({ handle });
+    if (targets.length >= UNSERVED_ADDRESSABLE_REPACK_CAP) break;
+  }
+  return targets.length === 0 ? undefined : { tool: "read_file", arguments: { targets } };
+}
+const UNSERVED_ADDRESSABLE_REPACK_CAP = 6;
+
 /** Returns a bounded re-pack using only paths already related by this pack. */
 export function discoveryBundleNext(
   result: TaskPackResult,
   guardEnabled = semanticFrontierGuardEnabled(),
 ): ToolCall | undefined {
+  // F2 fix (2026-09-19): checked FIRST, ahead of the qref gate below. The
+  // wire projector (protocol/decisionWire.ts's `projectSemanticFrontierNext`)
+  // calls THIS function — not `deriveCanonicalTaskDecisionRaw` — to build the
+  // actual wire `next` for a `discover` decision, so a caller-ranged bundle
+  // that only ever set `next_call` inside `deriveCanonicalTaskDecisionRaw`
+  // never reached the wire (measured: it computed the correct 5-target
+  // bundle, but the wire still shipped the single-target
+  // `requiredAnswerDocumentZoom` shape via `contract.next_call`). Riding this
+  // already-wired carrier instead of `decisionWire.ts` keeps the fix inside
+  // canonicalDecision.ts. Independent of `result.qref` (a caller-ranged
+  // request rarely has one) and of `guardEnabled` (`unservedCallerRangedTargetsNext`
+  // applies its own per-surface SF-guard check).
+  const callerRangedBundle = unservedCallerRangedTargetsNext(result);
+  if (callerRangedBundle !== undefined) return callerRangedBundle;
   if (!semanticFrontierNextAllowed(result, guardEnabled) || result.coverage === "complete" || typeof result.qref !== "string" || result.qref === "") return undefined;
   const surfaces = semanticSurfaces(result);
   const paths: string[] = [];
@@ -1074,6 +1161,21 @@ const LEDGER_MISSING_ROW_KINDS: ReadonlyArray<readonly [string, string]> = [
   ["explicit-gap:", "explicit-gap"],
   ["unserved-required-role:", "unserved-required-role"],
   ["uncovered-concern:", "uncovered-concern"],
+  // BLOCKER 25 (2026-09-14, review round 4): a file the REQUEST NAMED BY PATH
+  // that the pack resolved but could not read. Produced by
+  // `readCodeTaskPack.ts`'s `discloseUnreadableNamedPaths`
+  // (`UNREADABLE_NAMED_PATH_PREFIX`); parsed here so `projectUnresolved` states
+  // it as its own class instead of mislabelling it an unserved surface ROLE,
+  // which is what a bare, unparsed row falls through to.
+  ["unreadable-named-path:", "unreadable-named-path"],
+  // BLOCKER 62 (AC1, 2026-09-14, review round 12): a file this request asks to
+  // CHANGE that was served with its NUL characters stripped, so the write guard
+  // (`util/textDecode.ts::detectWriteEncodingRisk`) refuses every `edits[]`
+  // shape. Produced by `readCodeTaskPack.ts`'s `discloseUnwritableStrippedPaths`
+  // (`UNWRITABLE_ENCODING_RISK_PREFIX`); parsed here so `projectUnresolved`
+  // states the encoding risk that cost the request its write authority instead
+  // of degrading to a frontier-less `await_input` that names nothing.
+  ["unwritable-encoding-risk:", "unwritable-encoding-risk"],
 ];
 
 export function parseLedgerMissingRow(row: string): { kind: string; reason: string; id?: string } | undefined {
@@ -1214,6 +1316,77 @@ export function decisionGradeLiteralAbsenceSubject(
  * below wraps it with the §10.0 `next` arbitration seat; every early-return
  * branch and its reasoning here stays exactly as written.
  */
+/**
+ * F2 (DESIGN-v0.15-exploration-continuation-reliability.md §5.1 "D =
+ * Q-(C∪S)", §5.3 "単独の小範囲nextで残りtargetsを失わせない"): when SEVERAL
+ * of the caller's OWN named, ranged targets still carry undelivered lines,
+ * bundle EVERY one of them into ONE next — never just the first
+ * markdown/highest-sort match, which is what `servedDocumentZoom` /
+ * `requiredAnswerDocumentZoom` do BY DESIGN for the single relevant-document
+ * answer case (kept untouched below; this function returns `undefined` and
+ * lets that path run whenever fewer than 2 targets qualify).
+ *
+ * SCOPE GUARD: `isCallerRangeSurface` (sfWithholdingMarks.ts) must mark the
+ * surface — set from `why` containing "caller-supplied" BEFORE trimToCap can
+ * clear it (its own Phase B unconditionally drops `why`; see
+ * `reconcileCallerRangeRemaining`'s doc comment for why a post-trim `why`
+ * check silently matches nothing). A surface TL located FOR a query is never
+ * marked, so a genuine query/answer-route pack's single-document zoom is
+ * never redirected here — only a pack seeded directly from the caller's own
+ * `targets[]`/`paths[]` request.
+ *
+ * `remaining_ranges` is read AS RECONCILED by
+ * `reconcileCallerRangeRemaining` (one precise window per affected surface
+ * in the common case), so each surface normally contributes exactly one
+ * `{handle, range}`; a surface that still carries more than one window
+ * contributes each of them, and `dropped-by-byte-budget:` rows in
+ * `missing[]` (a caller-named surface `shedSurface` removed entirely, not
+ * just its body) contribute a bare `{handle}` so a wholly-dropped target is
+ * still re-requested, from its handle's own full range.
+ */
+const CALLER_RANGED_BUNDLE_CAP = 8;
+const DROPPED_BY_BYTE_BUDGET_RE = /^dropped-by-byte-budget:.*? \(re-request via read_file targets=\[\{handle:"([^"]+)"\}\]\)/;
+
+function unservedCallerRangedTargetsNext(result: TaskPackResult): ToolCall | undefined {
+  // `discoveryBundleNext` is reached from the WIRE projector
+  // (decisionWire.ts projectSemanticFrontierNext), which is also driven with
+  // minimal decision-shaped results that carry no `surfaces` at all. Nothing
+  // caller-ranged can be pending there, and the projector must never throw.
+  if (!Array.isArray(result.surfaces)) return undefined;
+  const affected = codeTaskPackSurfaces(result.surfaces).filter((surface) =>
+    isCallerRangeSurface(surface)
+    && Array.isArray((surface as { remaining_ranges?: unknown }).remaining_ranges)
+    && ((surface as { remaining_ranges?: unknown[] }).remaining_ranges?.length ?? 0) > 0
+    && typeof surface.handle === "string"
+    && (!semanticFrontierGuardEnabled() || !isSemanticFrontierContinuationOptional(surface)));
+
+  const droppedHandles: string[] = [];
+  if (Array.isArray(result.missing)) {
+    for (const entry of result.missing) {
+      if (typeof entry !== "string") continue;
+      const match = DROPPED_BY_BYTE_BUDGET_RE.exec(entry);
+      if (match?.[1] !== undefined && match[1] !== "") droppedHandles.push(match[1]);
+    }
+  }
+
+  if (affected.length + droppedHandles.length < 2) return undefined;
+
+  const targets: Array<{ handle: string; range?: string }> = [];
+  for (const surface of affected) {
+    const ranges = (surface as { remaining_ranges?: string[] }).remaining_ranges ?? [];
+    for (const range of ranges) {
+      if (targets.length >= CALLER_RANGED_BUNDLE_CAP) break;
+      targets.push({ handle: surface.handle, range });
+    }
+    if (targets.length >= CALLER_RANGED_BUNDLE_CAP) break;
+  }
+  for (const handle of droppedHandles) {
+    if (targets.length >= CALLER_RANGED_BUNDLE_CAP) break;
+    targets.push({ handle });
+  }
+  return targets.length < 2 ? undefined : { tool: "read_file", arguments: { targets } };
+}
+
 function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDecision | undefined {
   const contract = result.execution_contract;
   if (contract === undefined) return undefined;
@@ -1229,7 +1402,44 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
   // Applying it here can turn a viable raw bundle into await-input before that
   // attribution point, yielding neither an executable primary continuation
   // nor an honest suppression attestation.
-  const canonicalNextAllowed = semanticFrontierNextAllowed(result, false);
+  /**
+   * FIXALL-A group D (2026-09-14) — NOTHING TO SEARCH FOR IS NOT A REASON TO
+   * SEARCH.
+   *
+   * `request_names_no_target` (see its own doc on `TaskPackResult`) says the
+   * whole request was a verb, an optional pronoun and an optional bare value.
+   * Round 11 closed the half where such a clause minted the VERB as a locator
+   * symbol; the decision layer still answered `discover` for it, because a
+   * discovery `next` was available — and the only thing it could propose was a
+   * repository-wide find for that same verb
+   * (`Increase it to 5.` -> `search_files{queries:["increase"]}`). That is a
+   * dead end dressed as progress: no amount of grep closes a request whose
+   * object was never stated.
+   *
+   * Suppressing the `next` here lands the pack on this function's own
+   * fail-closed exit (`await-input`), whose `unresolved[]` names what the
+   * caller can supply. The certificate branches above are untouched — they do
+   * not consult `canonicalNextAllowed` — so a pack that genuinely earned
+   * `act.*` still gets it; only the "propose a search" arms are closed.
+   */
+  const canonicalNextAllowed = semanticFrontierNextAllowed(result, false)
+    && result.request_names_no_target !== true;
+
+  // F2 (2026-09-19): a pack seeded from >=2 of the CALLER'S OWN named ranged
+  // targets must not let any single-document zoom below pick just one of
+  // them and strand the rest — see unservedCallerRangedTargetsNext's own
+  // doc comment. Checked first (ahead of requiredZoom) so it wins whenever
+  // it applies; it returns undefined for every other pack shape (fewer than
+  // 2 caller-supplied ranged targets with undelivered lines), so a genuine
+  // query/answer-route pack's single-document zoom below is unaffected.
+  const callerRangedBundle = canonicalNextAllowed ? unservedCallerRangedTargetsNext(result) : undefined;
+  if (callerRangedBundle !== undefined) {
+    return {
+      kind: "discover",
+      next_call: callerRangedBundle,
+      reason: "caller-named ranged targets still have undelivered lines",
+    };
+  }
 
   // A stale ready certificate must not hide the one remaining document range
   // that the answer route explicitly says is needed. This is intentionally
@@ -1309,6 +1519,32 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
     return {
       kind: "act-answer",
       reason: "the inventory-complete workspace proves the directed literal source is absent",
+    };
+  }
+
+  // BLOCKER 25 (2026-09-14, review round 4) — A FILE THE REQUEST NAMED AND THIS
+  // RESPONSE COULD NOT READ IS NOT CLOSED DISCOVERY.
+  //
+  // Same seat and same reasoning as the two zooms above (a certificate
+  // certifies against THIS query, and this response has just disclosed that a
+  // file the query itself named is unserved), one axis out: those two have a
+  // bounded call to name, and this one does NOT — `readCached` failed, so no
+  // re-read this server can vouch for produces the bytes. So it refuses the
+  // terminal and falls through to the chain's own honest exits: `discover` when
+  // some other grounded call still exists, otherwise `await-input`, whose
+  // `unresolved[]` names the path and the cause (`decisionWire.ts`'s
+  // `projectUnresolved`).
+  //
+  // UNGATED, unlike `epochContractZoom`'s `hasCertificateBinding` fence: that
+  // fence exists so a pack with no certificate keeps its own evidence-grounded
+  // `next` rather than being hijacked toward a requirement the workspace may be
+  // unable to satisfy. Nothing is hijacked here — this arm names no call — so
+  // the only effect is to withhold the terminal, which is exactly the finding.
+  const unreadableNamed = result.unreadable_named_paths ?? [];
+  if (unreadableNamed.length > 0) {
+    return {
+      kind: "await-input",
+      reason: `this request names ${unreadableNamed.map((entry) => `${entry.path} (${entry.reason})`).join(", ")}; no served evidence covers ${unreadableNamed.length === 1 ? "it" : "them"} and this server cannot read ${unreadableNamed.length === 1 ? "it" : "them"}`,
     };
   }
 
@@ -1399,6 +1635,10 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
     ?? sanitizeSemanticFrontierNext(result, isReadOnlyCall(contract.next_call)
       ? contract.next_call
       : firstReadOnlyContinuation(result), false)
+    // FIXALL-A (2026-09-14), LAST RESORT: the rows this pack addressed and did
+    // not serve. Reached only when every producer above declined, so it can
+    // only replace the absence of a call — see `unservedAddressableRepack`.
+    ?? unservedAddressableRepack(result)
     : undefined;
   if (next !== undefined) {
     return { kind: "discover", next_call: next, reason: contract.reason };

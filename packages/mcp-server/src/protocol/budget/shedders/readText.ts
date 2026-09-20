@@ -28,6 +28,7 @@ import {
   arrayAt,
   isRecord,
   peelOrdered,
+  carriesStripDisclosure,
   str,
   withKey,
   type ShedOutcome,
@@ -89,7 +90,10 @@ import {
 const TEXT_PROSE: readonly string[] = ["note", "focus", "hint", "headings_note", "concern_note"];
 
 function shedTextProse(payload: ShedPayload): ShedOutcome | undefined {
-  return peelOrdered(payload, TEXT_PROSE, 1);
+  // SHOULD-FIX 63 (AC1, round 12): a `note` carrying the NUL-strip statement is
+  // NOT prose — see `registry.ts::carriesStripDisclosure` for the argument. The
+  // test is on the VALUE, so a clean serve's `note` still sheds first.
+  return peelOrdered(payload, TEXT_PROSE.filter((key) => !carriesStripDisclosure(payload[key])), 1);
 }
 
 // ---------------------------------------------------------------------------

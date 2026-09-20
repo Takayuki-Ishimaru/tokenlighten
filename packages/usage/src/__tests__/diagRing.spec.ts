@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 import {
   DIAG_RING_MAX_CALLS,
   diagRingFilePath,
@@ -46,7 +47,7 @@ describe("diagWorkspaceKey", () => {
     expect(diagWorkspaceKey(root)).toHaveLength(16);
   });
 
-  it("is stable across a symlink to the same real directory", () => {
+  it.skipIf(!symlinkSupported())("is stable across a symlink to the same real directory", () => {
     const parent = tmp("key-symlink");
     const real = join(parent, "real");
     const link = join(parent, "link");
@@ -144,7 +145,11 @@ describe("recordDiagCall / readDiagRingFile", () => {
     });
   });
 
-  it("writes atomically at mode 0600 and leaves no tmp file behind", () => {
+  // POSIX permission bits are a platform-fundamental gap on Windows (no
+  // amount of privilege makes NTFS honor a 0600 mode), unlike the symlink
+  // cases above which are privilege-dependent — a plain platform check,
+  // not a capability probe, is the honest condition here.
+  it.skipIf(process.platform === "win32")("writes atomically at mode 0600 and leaves no tmp file behind", () => {
     const root = tmp("atomic-root");
     const directory = tmp("atomic-diag");
     recordDiagCall({ workspaceRoot: root, serverVersion: "0.11.0", call: baseCall, directory });

@@ -224,8 +224,28 @@ describe("symbolRegexHardening — get_symbol_with_context / task_pack paths[].s
     if (!result.ok) return;
     expect(result.data.code).toContain("sibling signatures");
     expect(result.data.code).toContain("resize");
-    const siblingSection = result.data.code.split("sibling signatures:")[1]?.split("target:")[0] ?? "";
-    expect(siblingSection).not.toContain("render(");
+    // 2026-09-14 (v0.14.2 eval fix wave, GATE-B): Trim A (getSymbolWithContext.ts's
+    // `SMALL_FILE_SCOPE_HEADER_OMIT_BYTES`) omits the trailing blank line +
+    // `// target:` label before the target's own body for files this small,
+    // so a naive `.split("sibling signatures:")[1]?.split("target:")[0]` no
+    // longer isolates just the sibling-signatures block — with no `target:`
+    // label to split on, it also swallows the target's own body, appended
+    // directly after. That body is correctly UNELIDED (it is the real
+    // requested symbol), so it legitimately contains its own declaration
+    // ("render(") — that is not a leak, and the section-boundary split was
+    // never a reliable way to test for one. The actual invariant this test
+    // exists to prove is narrower and unaffected by Trim A: the target's
+    // OWN signature must never appear in its ELIDED form (`isTargetElidedSignatureLine`'s
+    // job inside `extractSiblingSignatures`) anywhere in the response. Assert
+    // that directly, per line, the same way the product decides elision —
+    // independent of whether a `target:` label separates sections.
+    const leakedElidedTarget = result.data.code
+      .split(/\r?\n/)
+      .some((line) => isTargetElidedSignatureLine(line, "render"));
+    expect(
+      leakedElidedTarget,
+      "the target's own ELIDED signature ('render(...) { ... }') must never survive the sibling filter",
+    ).toBe(false);
   });
 });
 

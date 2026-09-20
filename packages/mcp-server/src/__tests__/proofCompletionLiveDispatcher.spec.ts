@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -60,9 +61,12 @@ function start(cwd: string, mode: "on" | "off", tracePath: string): { initialize
   };
 }
 
-afterEach(() => {
-  for (const child of children.splice(0)) child.kill("SIGKILL");
-  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  for (const child of children.splice(0)) {
+    try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    await waitForExit(child);
+  }
+  for (const root of roots.splice(0)) await rmDirWithRetry(root);
 });
 
 describe("proof completion live dispatcher flag", () => {

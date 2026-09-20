@@ -947,19 +947,41 @@ function mockControlRefs(
  * Directories are checked in PATH order so a prepended/local dir wins over a
  * later system one; fs-only — no child_process, no shelling out to `which`.
  */
+function executableSuffixes(): readonly string[] {
+  // POSIX: an executable carries no mandatory extension, so the bare
+  // candidate name is the whole probe — byte-identical to the pre-fix loop.
+  if (process.platform !== "win32") return [""];
+  // win32: a real toolchain ships `clang++.exe` / `g++.exe` and NEVER an
+  // extensionless twin on PATH, so a bare-name `existsSync` reports "no C/C++
+  // toolchain found" on every Windows box that HAS one installed. PATHEXT is
+  // the platform's own answer to "which suffixes make this name runnable";
+  // the fallback matches cmd.exe's built-in default. The bare name still
+  // comes first so an extensionless MSYS/Cygwin shim keeps winning.
+  const raw = process.env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD";
+  const exts = raw.split(";").map((ext) => ext.trim()).filter((ext) => ext.length > 0);
+  return ["", ...exts];
+}
+
 function findOnPath(candidates: readonly string[]): string | undefined {
   // path.delimiter is ";" on win32 and ":" elsewhere — a hardcoded ":" both
   // fails to split a win32 PATH and mis-splits inside each entry's drive
   // letter ("C:\\..."); see core2/config.ts's TOKENLIGHTEN_ALLOWED_PARENTS
   // parsing for the same pattern.
   const dirs = (process.env.PATH ?? "").split(path.delimiter);
+  const suffixes = executableSuffixes();
   for (const dir of dirs) {
     if (dir.length === 0) continue;
     for (const name of candidates) {
-      try {
-        if (fs.existsSync(path.join(dir, name))) return name;
-      } catch {
-        // unreadable PATH entry — keep scanning
+      for (const suffix of suffixes) {
+        try {
+          // The BARE name is returned, never `name + suffix`: the value is
+          // spelled into a verification command, and every Windows shell
+          // resolves `clang++` through PATHEXT itself — so the emitted
+          // manifest stays identical across platforms.
+          if (fs.existsSync(path.join(dir, name + suffix))) return name;
+        } catch {
+          // unreadable PATH entry — keep scanning
+        }
       }
     }
   }

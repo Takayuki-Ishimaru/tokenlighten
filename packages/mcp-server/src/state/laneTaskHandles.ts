@@ -64,6 +64,28 @@ export function laneTaskHandles(workspaceRoot: string, lane: string): readonly s
   return _laneHandles.get(key(workspaceRoot, lane)) ?? [];
 }
 
+// WP-V1 (2026-09-20): the profile ("answer"/"generic") of the most recent
+// task pack this process minted for (workspace, lane) — the smallest
+// possible accessor `protocol/lineGutter.ts` needs to keep numbering a
+// task-less zoom read once a leaned continuation (see util/flags.ts's
+// `leanCallsEnabled`) stops carrying `task.profile` at all. Same
+// (workspace, lane) keying as `_laneHandles` above, and the same
+// never-enumerated-on-the-wire registry discipline: this is read back only
+// to DECIDE whether to number a body already about to be served, never
+// surfaced as a field of its own.
+const _laneProfile = new Map<string, string>();
+
+/** Record the profile of the most recent task pack this process minted for `lane`. */
+export function recordLaneTaskProfile(workspaceRoot: string, lane: string, profile: string): void {
+  if (workspaceRoot === "" || profile === "") return;
+  _laneProfile.set(key(workspaceRoot, lane), profile);
+}
+
+/** The profile of the most recent task pack this process minted for `lane`, if any. */
+export function laneTaskProfile(workspaceRoot: string, lane: string): string | undefined {
+  return _laneProfile.get(key(workspaceRoot, lane));
+}
+
 /**
  * Is `supplied` the same handle as `live` with ONE contiguous chunk removed?
  *
@@ -157,6 +179,103 @@ export function isEllipsisAbbreviatedHandle(supplied: string, live: string): boo
 }
 
 /**
+ * TL_TASK_HANDLE_RECOVERY route (b) (2026-09-19). `isSplicedHandle` and
+ * `isEllipsisAbbreviatedHandle` both require `supplied` STRICTLY SHORTER than
+ * `live` — a deletion shape. A caller that merges two of ITS OWN near-identical
+ * live handles (e.g. a re-pack that legitimately minted a new id for the same
+ * task — content-addressed identity means the id changes whenever the hashed
+ * profile/query text does, even under a still-valid presented handle) produces
+ * a SAME-LENGTH splice instead: one contiguous run of `live`'s characters
+ * replaced by the sibling handle's bytes at that position.
+ *
+ * Measured shape (task prompt, 2026-09-19 GitHub Copilot / gpt-5.6-luna
+ * session): a 12-character run exactly at the `payloadRef` field's own
+ * base64 span (state/handleCodec.ts's `OFF_PAYLOAD_REF`/`PAYLOAD_REF_BYTES`)
+ * — the one header field that genuinely differs between two mintings of what
+ * a caller experiences as "the same task"; every other header field (key id,
+ * workspace/subject/issuer refs, store epoch) is identical between two
+ * mintings from the same process/workspace/epoch. 16 is a small multiple of
+ * that measured 12-character span, not a round-number guess.
+ *
+ * Pure and unconditional — detection only. Whether a caller ACTS on a match
+ * is server.ts's `recoverAuthFailedTaskHandle`, gated by
+ * TL_TASK_HANDLE_RECOVERY, so this predicate's own truth table stays the
+ * same regardless of the flag.
+ */
+const MAX_MIDSPLICE_RUN = 16;
+
+export function isMidSplicedHandle(supplied: string, live: string): boolean {
+  if (supplied === live) return false;
+  if (supplied.length !== live.length) return false;
+  if (supplied.length < MIN_SUPPLIED_LENGTH) return false;
+  if (!supplied.startsWith(TASK_HANDLE_SCHEME_PREFIX) || !live.startsWith(TASK_HANDLE_SCHEME_PREFIX)) {
+    return false;
+  }
+  let prefix = 0;
+  while (prefix < supplied.length && supplied[prefix] === live[prefix]) prefix++;
+  if (prefix < MIN_SHARED_PREFIX) return false;
+  let suffix = 0;
+  while (
+    suffix < supplied.length - prefix
+    && supplied[supplied.length - 1 - suffix] === live[live.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  const middle = supplied.length - prefix - suffix;
+  return middle > 0 && middle <= MAX_MIDSPLICE_RUN;
+}
+
+/**
+ * The lane's own live handle that is an `isMidSplicedHandle` match for
+ * `supplied` — same contract as `laneTaskHandleNearMiss` just below (most
+ * recent MAX_HANDLES_PER_LANE candidates, `isLive`-checked, ambiguity when
+ * two or more qualify resolves nothing).
+ */
+export function laneTaskHandleMidSpliceMatch(
+  workspaceRoot: string,
+  lane: string,
+  supplied: string,
+  isLive: (candidate: string) => boolean,
+): string | undefined {
+  const candidates = laneTaskHandles(workspaceRoot, lane)
+    .filter((candidate) => candidate !== supplied && isMidSplicedHandle(supplied, candidate))
+    .filter((candidate) => isLive(candidate));
+  const unique = new Set(candidates);
+  return unique.size === 1 ? [...unique][0] : undefined;
+}
+
+/**
+ * TL_TASK_HANDLE_RECOVERY route (0) (2026-09-19, second live GitHub Copilot
+ * session). The caller sent the WHOLE live handle followed by a few more
+ * characters — its own last seven repeated (`…qtWOo` sent as
+ * `…qtWOoAGqtWOo`), a copying stutter. The presented string CONTAINS the
+ * authentic handle, MAC included, so resolving that prefix proves possession
+ * more strongly than any other route here: nothing is guessed, the caller
+ * demonstrably holds the real token. Bounded so an arbitrary long string that
+ * merely begins with a handle is not quietly accepted.
+ */
+const MAX_TAIL_EXTENSION = 16;
+
+export function isTailExtendedHandle(supplied: string, live: string): boolean {
+  return supplied.length > live.length
+    && supplied.length - live.length <= MAX_TAIL_EXTENSION
+    && live.length >= MIN_SUPPLIED_LENGTH
+    && live.startsWith(TASK_HANDLE_SCHEME_PREFIX)
+    && supplied.startsWith(live);
+}
+
+/** The lane's own live handle that `supplied` merely extends — at most one can, handles of one codec being equally long. */
+export function laneTaskHandleTailExtensionMatch(
+  workspaceRoot: string,
+  lane: string,
+  supplied: string,
+  isLive: (candidate: string) => boolean,
+): string | undefined {
+  return laneTaskHandles(workspaceRoot, lane)
+    .find((candidate) => isTailExtendedHandle(supplied, candidate) && isLive(candidate));
+}
+
+/**
  * The lane's live task handle `supplied` is a mangled copy of, or `undefined`.
  *
  * `isLive` is injected (rather than imported) so this module stays free of the
@@ -184,4 +303,5 @@ export function laneTaskHandleNearMiss(
 /** Focused regression seam; also keeps cross-test state from leaking. */
 export function resetLaneTaskHandlesForTest(): void {
   _laneHandles.clear();
+  _laneProfile.clear();
 }

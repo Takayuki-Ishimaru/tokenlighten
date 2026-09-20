@@ -611,6 +611,28 @@ export type TypestateCode =
   | "prescribed-step-executed-target-still-inadmissible"     // state/session.ts (grep "prescribed-step-executed-target-still-inadmissible")
   | "create-target-not-servable"                             // state/session.ts (grep "create-target-not-servable")
   | "create-target-exists"                                   // server.ts (grep "create-target-exists")
+  /**
+   * FX-L STRICT MODE (user ruling 2026-09-14, review-findings-6 SHOULD-FIX
+   * 38), minted ADDITIVELY under §1.4(a) — "A code found later is ADDITIVE
+   * under §1.4(a) and costs nothing", the membership rule above is satisfied
+   * (it can only appear as `Refusal.code` on a `kind:"refusal"` response) and
+   * nothing was attempted when it is emitted.
+   *
+   * The edit target is a path the LATEST certified decision bound to this
+   * lane+task did not authorize: listed `writable:false`, omitted from an
+   * `act.edit` frontier, or covered by an `act.answer` (no writable frontier
+   * at all). DEFAULT-OFF: only `TL_FRONTIER_STRICT_WRITES=1` refuses; the
+   * default behaviour applies the edit and discloses the same fact as
+   * `EditReclassification.frontier_status`.
+   *
+   * Distinct from `execution-typestate`, which is about BYTES ("you have not
+   * been given this yet" / "this address is outside the fence's shipped
+   * projection"). This one is about AUTHORITY over bytes the caller demonstrably
+   * holds, so its recovery is a re-pack that states the edit intent, not a read
+   * — `retry:"new-task"` with a `read_file` `next` naming the path under
+   * `task:{epoch:"new",profile:"generic"}`.
+   */
+  | "frontier-read-only"                                     // state/session.ts (grep "frontier-read-only")
   | "repeated-all-served-find";                              // features/search/find/servedFindEscalation.ts (grep "repeated-all-served-find")
 
 /** Write preconditions and edit validation. Nothing was attempted. */

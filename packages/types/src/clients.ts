@@ -1,10 +1,19 @@
-export type TokenLightenRegistrationClient = "claude-code" | "codex";
+export type TokenLightenRegistrationClient =
+  | "claude-code"
+  | "codex"
+  | "gemini"
+  | "copilot-cli";
 
 export type TokenLightenClientRegistrationState =
   | "client-absent"
   | "not-registered"
   | "registered-managed"
-  | "registered-foreign";
+  | "registered-foreign"
+  // A vendor-CLI entry whose command still points at the pre-v0.14.3
+  // `~/.tokenlighten/bin/tl` shim (design §4.6 C7). Ours, but stale:
+  // register/activate replace it without --force; status reports it
+  // distinctly from both "managed" and "foreign".
+  | "registered-legacy";
 
 export type TokenLightenLauncherState =
   | "launcher-ok"

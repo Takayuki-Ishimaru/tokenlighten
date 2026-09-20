@@ -21,6 +21,7 @@ import {
   setTraceEnabledForTest,
 } from "../util/trace.js";
 import { SEMANTIC_FRONTIER_V2_FLAG_REGISTRY, traceEnabled } from "../util/flags.js";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -243,7 +244,12 @@ describe("trace() when enabled", () => {
       event: "p1_causal_attestation",
       source: "tokenlighten-mcp-server",
       config_sha256: "f".repeat(64),
-      workspace_root: WS_ROOT,
+      // realpathSync(WS_ROOT) fails (WS_ROOT is a fake, non-existent path),
+      // so the product falls back to path.resolve(WS_ROOT) — a no-op on
+      // POSIX for an already-absolute path, but a drive-rooted rewrite on
+      // Windows (see the sibling "falls back to the resolved raw path when
+      // realpath fails" test, which already asserts this fallback directly).
+      workspace_root: path.resolve(WS_ROOT),
       trace_file: path.basename(getTracePath(WS_ROOT)),
       run_nonce: "n10-v07-natural-unit",
     });
@@ -391,7 +397,7 @@ describe("trace() when enabled", () => {
   // /private/var, which is exactly the asymmetry that would silently drop
   // every attestation.
   // -------------------------------------------------------------------------
-  it("uses the realpath-canonical workspace for BOTH the filename and the payload", () => {
+  it.skipIf(!symlinkSupported())("uses the realpath-canonical workspace for BOTH the filename and the payload", () => {
     const real = fs.mkdtempSync(path.join(tmpHome, "real-ws-"));
     const link = path.join(tmpHome, "linked-ws");
     fs.symlinkSync(real, link);
@@ -437,7 +443,9 @@ describe("trace() when enabled", () => {
       event: "p1_causal_attestation",
       source: "tokenlighten-mcp-server",
       config_sha256: "a".repeat(64),
-      workspace_root: WS_ROOT,
+      // See the sibling causal-identity test above for why this must be
+      // resolved, not the raw literal.
+      workspace_root: path.resolve(WS_ROOT),
       trace_file: path.basename(getTracePath(WS_ROOT)),
       run_nonce: "n10-v07-natural-normalize",
       // v0.14 flag inventory (2026-08-31): the P1 evidence-completion lever

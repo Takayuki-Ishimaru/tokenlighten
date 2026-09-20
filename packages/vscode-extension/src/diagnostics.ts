@@ -18,10 +18,50 @@ import { parse as parseToml } from "smol-toml";
 import { INSTRUCTIONS_VERSION } from "@tokenlighten/agents-md/version";
 import { parseSentinelBlock } from "@tokenlighten/agents-md/sentinel";
 import { readDiagRingFile, type DiagRingCall } from "@tokenlighten/usage/diag";
-import { getMcpLaunchConfig, getTlVersion } from "./cli.js";
+import { getInstallConsistency, getMcpLaunchConfig, getTlVersion } from "./cli.js";
 
 export type GuideSource = "AGENTS.md" | "CLAUDE.md";
 export type RingStatus = "ok" | "empty" | "disabled" | "unknown";
+
+/** Below this, Copilot is very likely still hiding some real TL answers
+ * from the model — well under the 65536 `tl workspace setup`/`tl install`
+ * raise to, but above VS Code's own 8192 default, so a workspace that was
+ * never set up with TL still gets a clear warning rather than silence. */
+const COPILOT_SPILLING_WARNING_BYTES = 32768;
+
+/** `vscode.workspace.getConfiguration()` section for Copilot's own
+ * `largeToolResultsToDisk.*` settings — matches the literal
+ * diagnosticsPanel.ts's live snapshot reads separately (not imported from
+ * here: its `vi.mock("../diagnostics.js", ...)` in diagnosticsPanel.spec.ts
+ * enumerates this module's exports explicitly, so adding a consumer there
+ * is a test-mock change of its own, out of scope here). mcpProvider.ts's
+ * never-set-up fallback link check is this constant's only import site. */
+export const COPILOT_LARGE_RESULTS_SECTION = "github.copilot.chat.agent.largeToolResultsToDisk";
+
+/** The same raise target `tl workspace setup`/`tl install` write into a
+ * workspace's `.vscode/settings.json` (`COPILOT_RAISED_THRESHOLD_BYTES` in
+ * packages/cli/src/commands/workspace.ts) — kept as a plain duplicate
+ * constant rather than an import, since this package does not depend on
+ * @tokenlighten/cli and the value is a stable, already-published contract.
+ * Distinct from `COPILOT_SPILLING_WARNING_BYTES` above: that is a lower,
+ * Diagnostics-only "still probably spilling" warning boundary, not this
+ * link/no-link decision — do not merge the two. */
+export const COPILOT_SUFFICIENT_THRESHOLD_BYTES = 65536;
+
+/** True once Copilot will not hide a TokenLighten tool result behind a
+ * "written to file" notice: either inline results are switched off
+ * entirely, or the threshold was raised to (or past) the same target `tl
+ * workspace setup` uses. Mirrors `ensureCopilotSettings()`'s
+ * `alreadySufficient` check in packages/cli/src/commands/workspace.ts —
+ * keep the two in sync if either changes. */
+export function isCopilotInlineResultsSufficient(settings: {
+  enabled: boolean;
+  thresholdBytes: number;
+}): boolean {
+  return settings.enabled === false
+    || (Number.isFinite(settings.thresholdBytes)
+      && settings.thresholdBytes >= COPILOT_SUFFICIENT_THRESHOLD_BYTES);
+}
 
 export interface RegistrationStatus {
   /** Absolute path checked, whether or not it exists. */
@@ -48,6 +88,26 @@ export interface RingSummary {
   updatedAt?: string;
 }
 
+/** DESIGN-v0.14-mcp-only-install.md §4.6 C2/C5 — the machine-scoped `tl
+ * install` this workspace's provider fallback would use, if any (see
+ * workspaceState.ts's `MachineInstallInfo`, reported by `machine_install`
+ * on `tl workspace status --json`). `null` when no machine install exists
+ * for this host; the extension's OWN bundled version is the separate,
+ * always-present `DiagnosticsSnapshot.extensionVersion` field above. */
+export interface DiagnosticsMachineInstall {
+  version: string;
+  installHome: string;
+}
+
+/** Effective `github.copilot.chat.agent.largeToolResultsToDisk.*` values —
+ * `spillingActive` is precomputed by `collectDiagnostics` (below 32768
+ * while enabled) rather than left for each renderer to recompute. */
+export interface CopilotInlineResultsDiagnostic {
+  enabled: boolean;
+  thresholdBytes: number;
+  spillingActive: boolean;
+}
+
 export interface DiagnosticsSnapshot {
   extensionVersion: string;
   tlVersion: string | undefined;
@@ -62,6 +122,15 @@ export interface DiagnosticsSnapshot {
   };
   guide: GuideStatus;
   ring: RingSummary;
+  machineInstall: DiagnosticsMachineInstall | null;
+  /** DESIGN-v0.14-mcp-only-install.md §4.6 C12: `tl doctor --json`'s
+   * `install_consistency` object, opaque and tolerated-absent — `undefined`
+   * on an older `tl` that does not report it, or when the doctor probe
+   * itself fails, NOT a display value in its own right. */
+  installConsistency: Record<string, unknown> | undefined;
+  /** `null` when the caller did not look up the setting (equivalent to
+   * "unknown", same convention as `machineInstall`). */
+  copilotInlineResults: CopilotInlineResultsDiagnostic | null;
 }
 
 export interface CollectDiagnosticsInput {
@@ -73,6 +142,17 @@ export interface CollectDiagnosticsInput {
   usageLoggingEnabledSetting: boolean | null;
   /** Test-only override; production always resolves defaultDiagDir() (~/.tokenlighten/diag). */
   ringDirectory?: string;
+  /** workspaceState.ts's machineInstallCached(), reduced to the two fields
+   * Diagnostics displays — `null` when absent, `undefined` (the default)
+   * when the caller has not looked it up (equivalent to `null` here).
+   * Caller-supplied (not fetched internally) because workspaceState.ts
+   * imports `vscode`, which this module deliberately never does. */
+  machineInstall?: DiagnosticsMachineInstall | null;
+  /** `vscode.workspace.getConfiguration("github.copilot.chat.agent.largeToolResultsToDisk", uri)`'s
+   * `enabled`/`thresholdBytes` (defaulted to true/8192 by the caller, same
+   * as VS Code's own schema defaults) — caller-supplied for the same
+   * vscode-import reason as `machineInstall` above. */
+  copilotInlineResults?: { enabled: boolean; thresholdBytes: number } | null;
 }
 
 function readJsonObject(path: string): Record<string, unknown> | null {
@@ -228,6 +308,19 @@ export function collectDiagnostics(input: CollectDiagnosticsInput): DiagnosticsS
     },
     guide: readGuideStatus(input.workspaceRoot),
     ring: readRingSummary(input.workspaceRoot, input.usageLoggingEnabledSetting, input.ringDirectory),
+    machineInstall: input.machineInstall ?? null,
+    installConsistency: getInstallConsistency(),
+    copilotInlineResults: input.copilotInlineResults
+      ? {
+        enabled: input.copilotInlineResults.enabled,
+        thresholdBytes: input.copilotInlineResults.thresholdBytes,
+        // Independent of the workspace's own raise attempt at setup time —
+        // this reads Copilot's CURRENT effective setting, which the user
+        // (or a different extension) may have changed since.
+        spillingActive: input.copilotInlineResults.enabled
+          && input.copilotInlineResults.thresholdBytes < COPILOT_SPILLING_WARNING_BYTES,
+      }
+      : null,
   };
 }
 
@@ -258,6 +351,10 @@ interface DiagnosticsTextCopy {
   at: string;
   ok: string;
   error: string;
+  machineInstall: string;
+  installConsistency: string;
+  copilotInlineResults: string;
+  copilotInlineResultsSpilling: string;
 }
 
 const TEXT_COPY: Record<"en" | "ja", DiagnosticsTextCopy> = {
@@ -288,6 +385,10 @@ const TEXT_COPY: Record<"en" | "ja", DiagnosticsTextCopy> = {
     at: "at",
     ok: "ok",
     error: "error",
+    machineInstall: "Machine install",
+    installConsistency: "Install consistency (doctor)",
+    copilotInlineResults: "Copilot inline tool results",
+    copilotInlineResultsSpilling: "Copilot may still hide TokenLighten's answers at this threshold",
   },
   ja: {
     title: "TokenLighten 診断",
@@ -316,6 +417,10 @@ const TEXT_COPY: Record<"en" | "ja", DiagnosticsTextCopy> = {
     at: "日時",
     ok: "成功",
     error: "エラー",
+    machineInstall: "マシンへのインストール",
+    installConsistency: "インストール整合性（doctor）",
+    copilotInlineResults: "Copilotのインライン結果表示",
+    copilotInlineResultsSpilling: "この上限ではCopilotがTokenLightenの応答を隠す可能性があります",
   },
 };
 
@@ -368,7 +473,21 @@ export function formatDiagnosticsText(
       : `${copy.guideVersion}: ${snapshot.guide.installedVersion} [${snapshot.guide.source}] (${
         snapshot.guide.upToDate ? copy.upToDate : copy.outOfDate
       }, ${copy.bundled}: ${snapshot.guide.bundledVersion})`,
+    // DESIGN-v0.14-mcp-only-install.md §4.6 C12.
+    snapshot.machineInstall === null
+      ? `${copy.machineInstall}: ${copy.notInstalled}`
+      : `${copy.machineInstall}: ${snapshot.machineInstall.version} (${snapshot.machineInstall.installHome})`,
   ];
+  if (snapshot.installConsistency !== undefined) {
+    lines.push(`${copy.installConsistency}: ${JSON.stringify(snapshot.installConsistency)}`);
+  }
+  if (snapshot.copilotInlineResults !== null) {
+    const { enabled, thresholdBytes, spillingActive } = snapshot.copilotInlineResults;
+    lines.push(
+      `${copy.copilotInlineResults}: ${formatBoolean(copy, enabled)}, ${thresholdBytes}`
+        + (spillingActive ? ` (${copy.copilotInlineResultsSpilling})` : ""),
+    );
+  }
   if (snapshot.ring.status === "ok" && snapshot.ring.calls.length > 0) {
     lines.push(`${copy.lastCalls}:`);
     for (const call of snapshot.ring.calls) lines.push(formatCall(copy, call));

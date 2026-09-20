@@ -1,4 +1,9 @@
 import { TextDecoder } from "node:util";
+import { createRequire } from "node:module";
+import { Worker } from "node:worker_threads";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import type {
   ArchiveFailureCode,
@@ -421,6 +426,190 @@ function failure(code: ArchiveFailureCode, error: string, path?: string, member?
   };
 }
 
+// PORTABILITY (Windows worker path): libarchive.js's own module-init code
+// (node_modules/libarchive.js/dist/libarchive-node.mjs, top-level side
+// effect run once at first `import()`) computes its Node worker's
+// directory via `new URL(".", import.meta.url).pathname` and hands that
+// STRING straight to `new Worker(str)`. On win32 `URL.pathname` produces a
+// leading-slash form (`/C:/Users/.../dist`); passed as a bare string,
+// `node:worker_threads`' `Worker` resolves it relative to `cwd` instead of
+// treating it as absolute, so the two collapse into
+// `C:\C:\...\worker-bundle-node.mjs` (MODULE_NOT_FOUND). A plain absolute
+// native path has no such ambiguity on any platform, so the fix below is
+// applied unconditionally (no `process.platform` branch) — a no-op-
+// equivalent correction on macOS/Linux, a real fix on Windows.
+//
+// `Archive._options` is a plain (non-private) static the library sets via
+// `Archive.init(...)` as that same module side effect; re-calling
+// `Archive.init` REPLACES `_options` wholesale, so we must spread the
+// CURRENT value rather than pass `{ getWorker }` alone — the library's own
+// `createClient` there adapts a raw `worker_threads.Worker` (EventEmitter-
+// based) to the `addEventListener`/`postMessage` shape comlink expects;
+// dropping it breaks every platform, not just Windows.
+let libarchiveWorkerPathPatched = false;
+
+/** Resolve worker-bundle-node.mjs's real on-disk path. Exported for direct
+ * unit testing (path exists, no drive-letter-duplication pattern). */
+export interface ResolveLibarchiveWorkerPathDeps {
+  /** `require.resolve`-shaped resolver; the real default is bound to THIS
+   *  module's own URL, not the caller's. */
+  resolveFromRequire?: (specifier: string) => string;
+  /** This module's own `import.meta.url` (or a bundle's, once inlined). */
+  moduleUrl?: string;
+  /** `fs.existsSync`-shaped existence check for the sibling-file fallback. */
+  exists?: (path: string) => boolean;
+}
+
+export function resolveLibarchiveWorkerPath(
+  deps: ResolveLibarchiveWorkerPathDeps = {},
+): string | undefined {
+  // (a) Real node_modules resolution — works in the source checkout and any
+  // layout where libarchive.js's own package is actually on disk.
+  const resolveFromRequire =
+    deps.resolveFromRequire ?? ((specifier: string) => createRequire(import.meta.url).resolve(specifier));
+  try {
+    return resolveFromRequire("libarchive.js/dist/worker-bundle-node.mjs");
+  } catch {
+    // Not on disk as a separate package — fall through to (b).
+  }
+
+  // (b) A sibling file next to the module CURRENTLY RUNNING this code: the
+  // shipped VSIX / install-archive layout, where esbuild inlines
+  // libarchive.js's JS into one CJS bundle (no separate `libarchive.js`
+  // package on disk to resolve) and bundle-cli.mjs instead copies
+  // worker-bundle-node.mjs as a literal sibling of that bundle's own
+  // dist/bin.js (see bundle-cli.mjs's archive-support comment). Deliberately
+  // uses `fileURLToPath`, never `new URL(...).pathname` (windowsPathname
+  // Doors.spec.ts) — a raw `.pathname` keeps a leading "/" that doubles the
+  // drive letter once resolved as a native Windows path, which is the exact
+  // `C:\C:\...` bug this whole file works around.
+  const moduleUrl = deps.moduleUrl ?? import.meta.url;
+  const exists = deps.exists ?? existsSync;
+  try {
+    const siblingPath = join(dirname(fileURLToPath(moduleUrl)), "worker-bundle-node.mjs");
+    if (exists(siblingPath)) return siblingPath;
+  } catch {
+    // Malformed moduleUrl, etc. — no worker path could be resolved.
+  }
+  return undefined;
+}
+
+/** Idempotent (init once per process): only the first call does any work —
+ * later calls are no-ops, so repeated `openArchive()` invocations never
+ * re-resolve the path or re-touch `Archive._options`. Exported for direct
+ * unit testing of the createClient-preservation contract. */
+let libarchiveWorkerPathCache: string | undefined;
+
+/**
+ * Idempotent: patches Archive._options.getWorker at most once per process.
+ * Returns the resolved worker path (or `undefined` if none could be
+ * resolved) on EVERY call, including calls after the first — callers
+ * (openArchive) need this on every read to decide whether it is safe to
+ * fall through to libarchive's own default worker resolution, which is
+ * known-broken on win32 (see shouldRefuseMissingWorkerPath below).
+ */
+export function patchLibarchiveWorkerPath(
+  ArchiveClass: unknown,
+  deps: ResolveLibarchiveWorkerPathDeps = {},
+): string | undefined {
+  if (!libarchiveWorkerPathPatched) {
+    libarchiveWorkerPathPatched = true;
+    libarchiveWorkerPathCache = resolveLibarchiveWorkerPath(deps);
+    const workerPath = libarchiveWorkerPathCache;
+    if (workerPath) {
+      const ArchiveStatic = ArchiveClass as {
+        init?: (options: Record<string, unknown>) => unknown;
+        _options?: Record<string, unknown>;
+      };
+      if (typeof ArchiveStatic.init === "function") {
+        ArchiveStatic.init({
+          ...(ArchiveStatic._options ?? {}),
+          getWorker: () => createLibarchiveWorker(workerPath),
+        });
+      }
+    }
+  }
+  return libarchiveWorkerPathCache;
+}
+
+/**
+ * Construct the Node worker libarchive.js's comlink client talks to, with a
+ * defensive `error` listener attached. `Worker` is an EventEmitter; Node's
+ * default behavior for an `error` event with no listener is to raise it as
+ * an uncaught exception, which takes the WHOLE mcp-server process down
+ * (confirmed against a real worker_threads.Worker pointed at a missing
+ * module: identical `MessagePort.<anonymous>
+ * (node:internal/main/worker_thread:223:26)` stack to the B1 2026-09-17
+ * Windows install crash report) — a worker that fails to bootstrap (e.g.
+ * MODULE_NOT_FOUND) must surface as a bounded read failure instead (see
+ * withLibarchiveWorkerTimeout below), never a process crash. Exported for
+ * direct unit testing against a deliberately-missing path.
+ */
+export function createLibarchiveWorker(workerPath: string): Worker {
+  const worker = new Worker(workerPath);
+  worker.on("error", () => {
+    worker.terminate().catch(() => {
+      // Best-effort cleanup only; the bounded wait in openArchive is what
+      // actually surfaces this failure to the caller.
+    });
+  });
+  return worker;
+}
+
+/**
+ * True iff a read must refuse rather than let libarchive fall through to
+ * its own default worker-path resolution, which is known-broken on win32
+ * (the `C:\C:\...` MODULE_NOT_FOUND crash this file works around — see
+ * resolveLibarchiveWorkerPath above). POSIX's default happens to still work
+ * even when OUR resolution fails (a leading "/" from `.pathname` is already
+ * a valid absolute POSIX path), so this is intentionally platform-gated
+ * rather than a blanket refusal.
+ */
+export function shouldRefuseMissingWorkerPath(
+  workerPath: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return workerPath === undefined && platform === "win32";
+}
+
+/**
+ * Bound on how long we wait for libarchive's worker to answer
+ * `Archive.open()`. A worker that fails to bootstrap never sends the
+ * comlink handshake `Archive.open()` awaits, so without this bound a broken
+ * worker hangs the read forever instead of surfacing a clean structured
+ * failure (B1, 2026-09-17 Windows install crash report).
+ */
+// 30 s: the bound only exists to turn an infinite hang into a structured
+// failure. A healthy open of the largest admitted archive (25 MiB) takes
+// well under a second, but the first open also compiles the wasm backend and
+// may run under a loaded test suite on a slow host — keep generous headroom.
+const LIBARCHIVE_WORKER_TIMEOUT_MS = 30_000;
+
+/**
+ * Race `opener()` against a fixed bound; a genuine rejection from `opener()`
+ * still propagates (only a silent hang is converted to `{ ok: false }`).
+ * Exported so a test can inject a never-resolving opener without spawning a
+ * real (or broken) worker thread.
+ */
+export async function withLibarchiveWorkerTimeout<T>(
+  opener: () => Promise<T>,
+  timeoutMs: number = LIBARCHIVE_WORKER_TIMEOUT_MS,
+): Promise<{ ok: true; value: T } | { ok: false }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<{ ok: false }>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false }), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race<{ ok: true; value: T } | { ok: false }>([
+      opener().then((value) => ({ ok: true as const, value })),
+      bound,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function openArchive(
   bytes: Uint8Array,
   outerPath: string,
@@ -459,7 +648,26 @@ async function openArchive(
   let encrypted = false;
   try {
     const { Archive } = await import("libarchive.js/dist/libarchive-node.mjs");
-    reader = await Archive.open(new Blob([Uint8Array.from(bytes)])) as LibarchiveReader;
+    const resolvedWorkerPath = patchLibarchiveWorkerPath(Archive);
+    if (shouldRefuseMissingWorkerPath(resolvedWorkerPath)) {
+      // "archive-unsupported", not "archive-corrupt": the ARCHIVE is fine, this
+      // host cannot run the backend — an agent should fall back to another
+      // way of reading it, not tell the user their file is broken.
+      return failure(
+        "archive-unsupported",
+        "archive backend worker path could not be resolved on this platform; refusing the known-broken default worker resolution",
+        outerPath,
+      );
+    }
+    const opened = await withLibarchiveWorkerTimeout(() => Archive.open(new Blob([Uint8Array.from(bytes)])));
+    if (!opened.ok) {
+      return failure(
+        "archive-unsupported",
+        `archive backend worker did not respond within ${LIBARCHIVE_WORKER_TIMEOUT_MS}ms`,
+        outerPath,
+      );
+    }
+    reader = opened.value as LibarchiveReader;
     if (password !== undefined) await reader.usePassword(password);
     encrypted = await reader.hasEncryptedData() === true;
     if (encrypted && password === undefined) {

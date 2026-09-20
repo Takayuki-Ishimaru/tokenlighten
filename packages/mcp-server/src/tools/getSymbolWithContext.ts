@@ -833,6 +833,23 @@ async function buildNotFoundRecovery(
   return { candidates, ...(skeleton ? { skeleton } : {}) };
 }
 
+// Trim A (2026-09-13, §5 lightweight-path record): below this whole-file
+// byte size, getSymbolWithContext's assembled `code` omits the injected
+// `// tokenlighten:scope path=... symbol=... lang=...` header, the blank
+// line after it, and the `// target:` label right before the body -- their
+// combined bytes routinely exceed the tiny symbol body they are marking
+// (measured: a 100 B file's 3-line function paid 78 B of header/label
+// against 69 B of actual code). Nothing is lost: the read's own
+// handle/path/range/sha already carry the same path/symbol provenance, and
+// `data.scopeHeader` itself is still unconditionally computed and returned
+// (server.ts's existing C10.2 step already drops that field before the wire
+// either way) -- only whether the header text is ALSO spelled out inside
+// the served body changes. A single absolute whole-file threshold (rather
+// than a header-to-body ratio) is the rule actually documented in the guide,
+// because it does not depend on the symbol being read. Larger files are
+// unaffected: the header stays.
+const SMALL_FILE_SCOPE_HEADER_OMIT_BYTES = 2048;
+
 // ---------------------------------------------------------------------------
 // Main tool function
 // ---------------------------------------------------------------------------
@@ -909,8 +926,11 @@ export async function getSymbolWithContext(
   // Build scope header.
   const scopeHeader = commentNote(language, `tokenlighten:scope path=${path} symbol=${resolvedSymbol} lang=${language}`);
 
+  // Trim A: see SMALL_FILE_SCOPE_HEADER_OMIT_BYTES above the function.
+  const omitScopeHeader = Buffer.byteLength(fileContent, "utf8") <= SMALL_FILE_SCOPE_HEADER_OMIT_BYTES;
+
   // Build output block per docs/components/02-mcp-server.md §4.1.
-  const parts: string[] = [scopeHeader];
+  const parts: string[] = omitScopeHeader ? [] : [scopeHeader];
 
   if (usedImports.length > 0) {
     parts.push(commentNote(language, "imports (used in body):"));
@@ -935,9 +955,16 @@ export async function getSymbolWithContext(
     parts.push(...siblings);
   }
 
-  parts.push("");
-  parts.push(commentNote(language, "target:"));
-  parts.push(bodyText);
+  if (omitScopeHeader) {
+    // Trim A: no header was pushed above either, so the body stands alone --
+    // handle/path/range/sha (minted by the read caller) already carry the
+    // provenance this label would restate.
+    parts.push(bodyText);
+  } else {
+    parts.push("");
+    parts.push(commentNote(language, "target:"));
+    parts.push(bodyText);
+  }
 
   const rawCode = parts.join("\n");
 

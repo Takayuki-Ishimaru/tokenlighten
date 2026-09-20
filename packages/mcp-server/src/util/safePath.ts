@@ -11,7 +11,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { realpathSync, statSync, type Stats } from "fs";
 import { trace } from "./trace.js";
-import { decodeTextBuffer } from "./textDecode.js";
+import { decodeTextBuffer, readServedText, type ServedTextVerdict } from "./textDecode.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 const WINDOWS_DRIVE_ABSOLUTE = /^[A-Za-z]:[\\/]/;
@@ -261,6 +261,43 @@ export async function readFileSafe(
     // text" failure mode rippling through all of them -- see this wave's
     // B-REPORT addendum for the full reasoning.
     return decodeTextBuffer(buf) ?? buf.toString("utf8");
+  } catch { return null; }
+}
+
+/**
+ * AA1 (2026-09-14, review round 10): the SERVE-side counterpart to
+ * `readFileSafe` above. Same confinement, realpath, FIFO/size and raced-growth
+ * guards -- and then ONE `readServedText` verdict (util/textDecode.ts) instead
+ * of `readFileSafe`'s deliberately lenient "give me whatever text you can"
+ * fallback.
+ *
+ * `readFileSafe` stays exactly as it is: its ~40-80 call sites include scans,
+ * absence checks and edit preconditions whose mandate is explicitly NOT a new
+ * "can't read this as text" failure mode (see its own comment). This function
+ * is for the call sites that are about to put the text ON THE WIRE as evidence,
+ * where "these bytes are not text in this encoding" is exactly the fact the
+ * caller must disclose rather than paper over.
+ *
+ * Returns `null` for the SAME reasons `readFileSafe` returns null (outside the
+ * workspace, unreadable, a directory, over the size cap) so a caller can keep
+ * its existing null handling verbatim; otherwise the verdict, whose
+ * `"undecodable"` arm the caller must DISCLOSE (never serve).
+ */
+export async function readServedTextSafe(
+  rel: string,
+  root: string,
+  options?: SafeReadOptions,
+): Promise<ServedTextVerdict | null> {
+  const abs = safeResolve(rel, root);
+  if (!abs) return null;
+  const real = await safeRealPath(abs, resolveReal(root));
+  if (!real) return null;
+  const verdict = await checkReadTarget(real, root, options);
+  if (!verdict.ok) return null;
+  try {
+    const buf = await fs.readFile(real);
+    if (refuseIfGrown(buf.byteLength, real, root, verdict.maxBytes)) return null;
+    return readServedText(buf);
   } catch { return null; }
 }
 

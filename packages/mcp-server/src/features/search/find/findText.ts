@@ -30,18 +30,21 @@ import { languageForPath } from "../../../util/languages.js";
 import { classifyCommentLines } from "../../../util/lineClassify.js";
 import { handleTable } from "../../../util/handles.js";
 import { isWithin } from "../../../util/safePath.js";
+import { findWidePageEnabled } from "../../../util/flags.js";
 // L3 (2026-08-08 find-honesty): recovery affordances rank by what the SERVED
 // surface actually contains, and the edit-grade hint is gated on whether the
 // file it names could be an edit target at all. state/session.ts imports
 // nothing from this feature (only node builtins and @tokenlighten/types),
 // so this direction cannot form a cycle.
 import { getReadPaths, isPlausibleEditTarget } from "../../../state/session.js";
-// Type-only: memberSweep.ts imports VALUES from this file (MAX_RESPONSE_BYTES/
-// MAX_INVENTORY_RESPONSE_BYTES), so this direction must stay type-only to
-// avoid a real runtime import cycle — erased at compile time either way.
+// Type-only: memberSweep.ts imports VALUES from this file (findResponseCapBytes/
+// findInventoryCapBytes, F5 2026-09-19 — formerly the bare MAX_RESPONSE_BYTES/
+// MAX_INVENTORY_RESPONSE_BYTES constants), so this direction must stay
+// type-only to avoid a real runtime import cycle — erased at compile time
+// either way.
 import type { MemberSweepAttachment } from "./memberSweep.js";
-// Type-only, same reason: relatedLookups.ts also imports MAX_RESPONSE_BYTES/
-// MAX_INVENTORY_RESPONSE_BYTES from this file.
+// Type-only, same reason: relatedLookups.ts also imports findResponseCapBytes/
+// findInventoryCapBytes from this file.
 import type { RelatedLookups } from "./relatedLookups.js";
 // PI-05 generalization (beta.1+): the search family's shared hint/next
 // arbitration — see that module's header for the normative precedence
@@ -274,7 +277,16 @@ export function totalOmittedPaths(omissions: WalkOmissions): number {
 // Constants — exported so budget tests (P3.3) can import them.
 // ---------------------------------------------------------------------------
 
-/** Hard byte cap for the full JSON response (matches array + query/truncated/total). */
+/**
+ * Hard byte cap for the full JSON response (matches array + query/truncated/
+ * total). This is the OFF-flag value `findResponseCapBytes()` (below)
+ * returns; every fitFilesToCap()/applyRoles() call site in this file (and
+ * relatedLookups.ts's/memberSweep.ts's own additive byte-cap checks) reads
+ * the cap through that accessor now, not this constant directly — except
+ * findText()'s own low-level primitive further down, which intentionally
+ * keeps using this bare constant regardless of TL_FIND_WIDE_PAGE (see that
+ * function's doc comment).
+ */
 export const MAX_RESPONSE_BYTES = 4096;
 
 /**
@@ -288,9 +300,82 @@ export const MAX_RESPONSE_BYTES = 4096;
  * and the inventory/rollup spliced on after fitting. ~24 KiB is generous
  * enough that even a pathological multi-thousand-file match count fits via
  * the per-directory rollup (with a final defensive trim as an absolute
- * backstop — see attachInventory).
+ * backstop — see attachInventory). This is the OFF-flag value
+ * `findInventoryCapBytes()` (below) returns; attachInventory() and
+ * relatedLookups.ts's/memberSweep.ts's own additive byte-cap checks read the
+ * ceiling through that accessor now.
  */
 export const MAX_INVENTORY_RESPONSE_BYTES = 24 * 1024;
+
+/**
+ * F5 (2026-09-19 find-wide-page): TL_FIND_WIDE_PAGE's widened value for the
+ * snippet-section cap `findResponseCapBytes()` (below) returns when the flag
+ * is ON.
+ */
+export const FIND_WIDE_PAGE_RESPONSE_BYTES = 16 * 1024;
+
+/**
+ * F5 (2026-09-19 find-wide-page) — the ONE accessor for the explore
+ * action=find snippet-section byte cap. Every `fitFilesToCap()`/
+ * `applyRoles()` call site in this file, plus relatedLookups.ts's and
+ * memberSweep.ts's own additive byte-cap checks (both call this instead of
+ * importing the raw constant, as of this wave), read the cap through here —
+ * so TL_FIND_WIDE_PAGE has exactly one place to move the number.
+ *
+ * OFF (default, TL_FIND_WIDE_PAGE unset/false/"0"/"no"/"off"): returns
+ * MAX_RESPONSE_BYTES (4096) — byte-identical to pre-F5 output;
+ * replayCorpus.spec.ts and wireBaselines.spec.ts pass without regeneration.
+ *
+ * ON: returns FIND_WIDE_PAGE_RESPONSE_BYTES (16384). MOTIVATION: measured
+ * live-session forensics (2026-09-19) — a 7-file/50-match result truncated
+ * at the 4096-byte cap came back as four separate follow-up calls (3084 B +
+ * 1681 B + 1499 B + …), one full priced model turn per ~1.5-3 KB page.
+ * Measured host pricing makes one extra turn cost about as much as 10-20 KB
+ * of new payload, so a 4 KB page sits far below break-even; a wider first
+ * page trades bytes the host was already going to spend across several
+ * turns for fewer turns instead.
+ *
+ * Deliberately does NOT touch findText()'s own use of the bare
+ * MAX_RESPONSE_BYTES constant further down — that is the low-level
+ * flat-match primitive's cap, a DIFFERENT consumer (locateTaskContext.ts,
+ * server.ts's edit-review pass — see findText()'s own doc comment) than the
+ * explore action=find response this flag targets, and it must keep its
+ * existing behavior regardless of this flag.
+ */
+export function findResponseCapBytes(): number {
+  return findWidePageEnabled() ? FIND_WIDE_PAGE_RESPONSE_BYTES : MAX_RESPONSE_BYTES;
+}
+
+/**
+ * F5 (2026-09-19 find-wide-page) — companion widening for
+ * MAX_INVENTORY_RESPONSE_BYTES, the ceiling attachInventory() (below) fits
+ * the WHOLE response (the already-capped files[] section PLUS
+ * inventory/rollup) against — see that constant's own doc comment for why it
+ * bounds more than just the inventory array.
+ *
+ * DECISION: raise it under the flag, by the SAME delta the snippet cap grows
+ * (FIND_WIDE_PAGE_RESPONSE_BYTES - MAX_RESPONSE_BYTES = 12288 bytes), rather
+ * than leaving it at 24576. MAX_INVENTORY_RESPONSE_BYTES technically still
+ * bounds every response either way — shrinkArrayToFit's one-item floor
+ * always fits well inside 24576, even against a 16384-byte files[] section,
+ * so nothing breaks if left unraised — but leaving it flat would shrink the
+ * inventory's own headroom from ~20480 bytes (24576-4096, today) to ~8192
+ * bytes (24576-16384) exactly when a response is large enough to still need
+ * truncation under the wider cap, which is disproportionately the case with
+ * big match sprawls (100-200+ files) where a same-sized inventory listing is
+ * most likely to need every one of those bytes. Raising the ceiling by the
+ * identical delta preserves the EXACT same ~20480-byte inventory headroom on
+ * both sides of the flag, so "snippets may truncate; the inventory never
+ * lies" keeps the same practical margin it has today instead of degrading
+ * only for large results. Still far under wireBudget.ts's independent
+ * `search.matches` wire ceiling (131072 bytes), so the generic wire-shedding
+ * backstop is unaffected by this change either way.
+ */
+export function findInventoryCapBytes(): number {
+  return findWidePageEnabled()
+    ? MAX_INVENTORY_RESPONSE_BYTES + (FIND_WIDE_PAGE_RESPONSE_BYTES - MAX_RESPONSE_BYTES)
+    : MAX_INVENTORY_RESPONSE_BYTES;
+}
 
 /**
  * Above this many distinct matched files, the per-file inventory collapses
@@ -700,6 +785,10 @@ export function findText(input: FindTextInput, workspace: string): FindTextResul
   let truncated = matchTruncated;
 
   // Enforce byte cap: drop trailing matches until JSON fits, keeping MIN_MATCHES.
+  // F5 (2026-09-19): intentionally the bare constant, not findResponseCapBytes()
+  // — this primitive's callers (locateTaskContext.ts, server.ts's edit-review
+  // pass) are a different consumer than explore action=find and must stay
+  // unaffected by TL_FIND_WIDE_PAGE. See findResponseCapBytes()'s doc comment.
   function serialize(m: TextMatch[]): string {
     return JSON.stringify({ query, matches: m, truncated: true, total: all.length });
   }
@@ -1157,15 +1246,39 @@ function repeatedHitHint(workspace: string, candidate: FindFileGroup): string {
 export const MAX_LINES_PER_FILE = 8;
 
 /**
+ * F6 (2026-09-20 find-page-economy), under TL_FIND_WIDE_PAGE: the per-file
+ * bound on bare `lines` entries once a file's matches exceed
+ * MAX_LINES_PER_FILE. `snippets` keeps the original MAX_LINES_PER_FILE cap
+ * regardless of the flag -- a snippet costs ~80 bytes, a bare line number a
+ * handful -- so a file whose true match count sits between
+ * MAX_LINES_PER_FILE and this bound ships every one of its line numbers up
+ * front, no `more_lines` follow-up call needed just to learn them. OFF (the
+ * default), findWidePageEnabled() is false and capFileGroup never consults
+ * this constant.
+ */
+export const FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE = 64;
+
+/**
  * Truncate one file's `lines`/`snippets` to MAX_LINES_PER_FILE; a no-op
  * below that. Deliberately does NOT set `more_lines` — fitFilesToCap's
  * `finalize` (below) is the single place that computes it, against
  * whatever the response ultimately shows, so it can never go stale as
  * `lines` is trimmed further downstream (footholds, drop-from-tail).
+ *
+ * F6 addendum: under TL_FIND_WIDE_PAGE, `lines` is capped at the wider
+ * FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE instead of MAX_LINES_PER_FILE;
+ * `snippets` is always capped at MAX_LINES_PER_FILE, flag or not, so the two
+ * arrays can come out different lengths. FindFileGroup's own doc comment
+ * already describes `snippets` as "same order as lines", not same-length —
+ * every reader checked for this change (the wire budget shedder, the
+ * search-request continuation ledger) already indexes `snippets[i]`
+ * defensively, where out-of-range is `undefined`, not a crash.
  */
 function capFileGroup(group: FindFileGroup): FindFileGroup {
-  if (group.lines.length <= MAX_LINES_PER_FILE) return group;
-  const capped: FindFileGroup = { ...group, lines: group.lines.slice(0, MAX_LINES_PER_FILE) };
+  const lineCap = findWidePageEnabled() ? FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE : MAX_LINES_PER_FILE;
+  const snippetsOverCap = group.snippets !== undefined && group.snippets.length > MAX_LINES_PER_FILE;
+  if (group.lines.length <= lineCap && !snippetsOverCap) return group;
+  const capped: FindFileGroup = { ...group, lines: group.lines.slice(0, lineCap) };
   if (group.snippets) capped.snippets = group.snippets.slice(0, MAX_LINES_PER_FILE);
   return capped;
 }
@@ -1198,6 +1311,22 @@ function capWideFiles(groups: FindFileGroup[]): FindFileGroup[] {
  * truncate; the inventory never lies" already documents.
  */
 export const SOFT_DEGRADE_BYTES = 6 * 1024;
+
+/**
+ * F6 (2026-09-20 find-page-economy): under TL_FIND_WIDE_PAGE, the
+ * soft-degrade signal below scales with the wider response cap instead of
+ * staying pinned at SOFT_DEGRADE_BYTES -- otherwise a natural render in the
+ * band between SOFT_DEGRADE_BYTES and findResponseCapBytes() would still
+ * collapse to the compact one-line-per-file footholds form even though the
+ * wider cap has room to serve it whole (F5's own doc comment names this as
+ * the reason F5 alone only ever helped a 4-6 KB natural render). 3/4 of the
+ * cap leaves headroom for `inventory`/other fields once spliced on. OFF
+ * (the default), this returns the unchanged SOFT_DEGRADE_BYTES constant, so
+ * the degrade decision below is byte-identical to pre-F6 output.
+ */
+function softDegradeThresholdBytes(): number {
+  return findWidePageEnabled() ? Math.floor(findResponseCapBytes() * 3 / 4) : SOFT_DEGRADE_BYTES;
+}
 
 /**
  * Trim a grouped file list to fit `maxBytes`, guaranteeing every matched FILE
@@ -1284,7 +1413,7 @@ function fitFilesToCap(
   // F3 must never make a response bigger than a plain foothold-per-file
   // listing would have needed, so both candidates are measured and the
   // smaller one wins, never the footholds one unconditionally.
-  const softDegradeSignal = bytesOf(capped) > SOFT_DEGRADE_BYTES;
+  const softDegradeSignal = bytesOf(capped) > softDegradeThresholdBytes();
 
   // Pass 2: widen footholds back toward full (F2-capped) per-file line
   // lists, in file order, spending remaining budget round-robin so no
@@ -1304,12 +1433,23 @@ function fitFilesToCap(
       if (w.lines.length >= full.lines.length) continue;
       const nextIdx = w.lines.length;
       const candidateLines = [...w.lines, full.lines[nextIdx]!];
-      const candidateSnippets = full.snippets ? [...(w.snippets ?? []), full.snippets[nextIdx]!] : undefined;
-      const candidate: FindFileGroup = { ...w, lines: candidateLines, ...(candidateSnippets ? { snippets: candidateSnippets } : {}) };
+      // F6: under TL_FIND_WIDE_PAGE, `full.lines` can run past
+      // `full.snippets`'s own (still MAX_LINES_PER_FILE-capped) length --
+      // once `nextIdx` is past it there is no real snippet text left to
+      // pair with the next line number, so `snippets` must stop growing
+      // here rather than have `full.snippets[nextIdx]` (`undefined`) pushed
+      // into it.
+      const hasSnippetAtNext = full.snippets !== undefined && nextIdx < full.snippets.length;
+      const candidateSnippets = full.snippets === undefined
+        ? undefined
+        : hasSnippetAtNext
+          ? [...(w.snippets ?? []), full.snippets[nextIdx]!]
+          : w.snippets;
+      const candidate: FindFileGroup = { ...w, lines: candidateLines, ...(candidateSnippets !== undefined ? { snippets: candidateSnippets } : {}) };
       const trialFiles = widened.map((x) => (x.path === w.path ? candidate : x));
       if (bytesOf(trialFiles) <= maxBytes) {
         w.lines = candidateLines;
-        if (candidateSnippets) w.snippets = candidateSnippets;
+        if (candidateSnippets !== undefined) w.snippets = candidateSnippets;
         progressed = true;
       }
     }
@@ -1625,14 +1765,14 @@ function attachInventory(
     return shrinkArrayToFit(
       rollup,
       (items): FindResponse => ({ ...withTotals, inventory: items, inventory_complete: "by-directory", note }),
-      MAX_INVENTORY_RESPONSE_BYTES,
+      findInventoryCapBytes(),
     );
   }
 
   return shrinkArrayToFit(
     fileInventory,
     (items): FindResponse => ({ ...withTotals, inventory: items, inventory_complete: true, note }),
-    MAX_INVENTORY_RESPONSE_BYTES,
+    findInventoryCapBytes(),
   );
 }
 
@@ -2792,8 +2932,8 @@ export function buildFindResponse(
       ...(matchedVariant ? { literal: false, matched_variant: matchedVariant } : {}),
     };
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
-    const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
-    const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
+    const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+    const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
     return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   };
 
@@ -2814,8 +2954,8 @@ export function buildFindResponse(
     const hint = composeHint(editHint, extraHint);
     const responseExtra: Record<string, unknown> = { ...omittedExtra, ...(hint ? { hint } : {}) };
     const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
-    const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
-    const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
+    const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+    const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
     return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
   }
 
@@ -2845,8 +2985,8 @@ export function buildFindResponse(
       };
       const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
       const grouped = groupByFile(variantHit.matches);
-      const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
-      const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
+      const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+      const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
       return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
     }
   }
@@ -3015,8 +3155,8 @@ export function buildFindResponse(
   };
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
   const grouped = groupByFile(source);
-  const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
-  const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
+  const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+  const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
 
   return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
 }
@@ -3270,8 +3410,8 @@ export function buildFindResponseForQueries(input: FindTextMultiInput, workspace
   const buildWithExtra = (fs: FindFileGroup[]): FindResponse => build(fs, responseExtra);
 
   const grouped = groupByFile(mergedMatches);
-  const fitted = fitFilesToCap(grouped, buildWithExtra, MAX_RESPONSE_BYTES);
-  const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, MAX_RESPONSE_BYTES);
+  const fitted = fitFilesToCap(grouped, buildWithExtra, findResponseCapBytes());
+  const roledFiles = applyRoles(fitted.files, (p) => deriveFileRole(workspace, p), buildWithExtra, findResponseCapBytes());
 
   return attachInventory(buildWithExtra(roledFiles), grouped, fitted.truncated, anyWalkOmission(walkOmissions) || coverage.undecodable.size > 0);
 }

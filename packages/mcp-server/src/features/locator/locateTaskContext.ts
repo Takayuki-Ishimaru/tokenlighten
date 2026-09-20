@@ -52,6 +52,10 @@ import {
   sfStructuralConcernsEnabled,
 } from "../../util/flags.js";
 import { fileNamesInPathSpans, isEnumLikeQuery, stripPathSpans } from "../../util/queryShape.js";
+// BLOCKER 61 (AC1, review round 12): `features/task-pack/requestItems.ts` is
+// pure and imports NOTHING (its own module header states the contract), so this
+// one clause-shape import introduces no cycle into the locator.
+import { stripLeadVerbTokens, stripValueOnlyLeadClauses } from "../task-pack/requestItems.js";
 import { extractCjkTokens } from "../../util/cjkSpans.js";
 import { tokenizeForEpoch } from "../../state/session.js";
 import { isNativeExtPath, widenNativeRange } from "../../util/nativeSymbolRange.js";
@@ -5355,7 +5359,20 @@ export function extractClassMethodPairs(query: string): Array<{ className: strin
  * and the extraction was silently dropped for lack of a matching surface.
  */
 export function extractIdentifiers(query: string): string[] {
-  const cleaned = [stripPathSpans("", query), ...fileNamesInPathSpans(query)].join(" ");
+  // BLOCKER 61 (AC1, 2026-09-14, review round 12): a VALUE-ONLY clause
+  // ("… and then set it to 5.", "… and then remove it.") names nothing — so its
+  // verb must not become a symbol-search token. Round 11 measured the leak this
+  // closes: `set` matched `SET_COOKIE` in an unrelated file, which was then
+  // admitted as evidence and marked WRITABLE. See
+  // `requestItems.ts::stripValueOnlyLeadClauses` for the full argument; that
+  // module is pure and import-free, so this carries no cycle.
+  // FIXALL-A group E (2026-09-14): and the same is true of the lead VERB of a
+  // clause that DOES name an object — `Update the changelog.` lost its target to
+  // a `update`/`UPDATE_MODE` collision while `Replace the changelog?` resolved
+  // correctly. See `stripLeadVerbTokens`'s own doc; it blanks the verb token
+  // only, never the object beside it.
+  const scoped = stripLeadVerbTokens(stripValueOnlyLeadClauses(query));
+  const cleaned = [stripPathSpans("", scoped), ...fileNamesInPathSpans(scoped)].join(" ");
   // Also extract quoted strings literally.
   const tokens: string[] = [];
   // Grab camelCase, PascalCase, snake_case identifiers.

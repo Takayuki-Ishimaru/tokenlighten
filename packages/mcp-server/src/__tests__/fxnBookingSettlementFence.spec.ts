@@ -225,7 +225,10 @@ describe("FX-N static fence: no read-family booking producer runs before the fun
         }
         if (!entry.name.endsWith(".ts")) continue;
         const text = withoutComments(fs.readFileSync(abs, "utf8"));
-        const rel = path.relative(SRC, abs);
+        // Windows: path.relative returns native backslashes; both the
+        // exclusion literal below and the final "protocol/emit.ts" assertion
+        // are forward-slash, so normalize once here for both.
+        const rel = path.relative(SRC, abs).split(path.sep).join("/");
         if (rel === "state/session.ts") continue;
         if (/\bsettleServedCallBookings\(/.test(text) || /\bsettleServedRanges\(/.test(text)) callers.push(rel);
       }
@@ -816,6 +819,7 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
     { id: "server.ts: buildLedgerDifferenceFullPayload's appendFresh (mode=full/auto/symbol/slice)", category: "a1-elided" },
     { id: "server.ts: dropServedBody (mode=verification-kit)", category: "a2-verification-kit" },
     { id: "server.ts: handles-batch item (mode=handles)", category: "a1-elided" },
+    { id: "server.ts: multi-target paths-batch item (mode=paths)", category: "a1-elided" },
     { id: "server.ts: markdown section (mode=markdown-section)", category: "a2-markdown" },
     {
       id: "server.ts: ranges-batch segment, already-held sub-branch (mode=slice)",
@@ -845,7 +849,7 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
       serverSites.length,
       "server.ts's recordServedRange call-site count must match this file's enumeration "
       + "exactly — a new site (or a deleted one) must update SITES above, not pass silently",
-    ).toBe(13);
+    ).toBe(14);
     expect(smallFileSites.length, "readCodeSmallFile.ts's one known site").toBe(1);
     expect(taskPackSites.length, "readCodeTaskPack.ts's one known site").toBe(1);
     expect(
@@ -948,7 +952,11 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
 
   it("the symbol scope view books spansExcludingWindows over an elideDocCommentsWithWindows scan of the modeled symbol body", () => {
     expect(SERVER).toMatch(
-      /elideDocCommentsWithWindows\(symBodyRaw, languageForPath\(filePath\), symStart\)\.elided;\s*const symSpans = spansExcludingWindows\(symStart, symEnd, symBodyElided\);[\s\S]{0,1600}?recordServedRange\(\s*workspace,\s*filePath,\s*shaOfText\(content\),\s*spanStart,\s*spanEnd,\s*symTotalLines,\s*\{\s*mode: "symbol",/,
+      // 2026-09-14 (v0.14.2 evaluation follow-up): window {0,1600} -> {0,2600}. The
+      // symbol path gained the Trim A / `path` provenance comments (report §5,
+      // review BLOCKER 5), growing the gap to 1815 chars; the booking call is
+      // unchanged, so the fence widens instead of the comments being cut.
+      /elideDocCommentsWithWindows\(symBodyRaw, languageForPath\(filePath\), symStart\)\.elided;\s*const symSpans = spansExcludingWindows\(symStart, symEnd, symBodyElided\);[\s\S]{0,2600}?recordServedRange\(\s*workspace,\s*filePath,\s*shaOfText\(content\),\s*spanStart,\s*spanEnd,\s*symTotalLines,\s*\{\s*mode: "symbol",/,
     );
   });
 

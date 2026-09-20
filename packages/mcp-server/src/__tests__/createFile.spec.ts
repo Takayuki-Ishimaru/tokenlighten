@@ -13,6 +13,7 @@ import * as os from "os";
 import * as path from "path";
 import { createFile } from "../tools/createFile.js";
 import { unsafeGuardedWorkspaceRootForTests, type GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -141,7 +142,7 @@ describe("createFile — path_escapes_root", () => {
   // (createFile.ts's "verify the parent directory doesn't resolve outside
   // workspace" loop), which had no coverage at all before this wave — the
   // lexical prefix check above cannot see through a symlink.
-  it("rejects a create through a symlinked directory that escapes the workspace", async () => {
+  it.skipIf(!symlinkSupported())("rejects a create through a symlinked directory that escapes the workspace", async () => {
     const ws = mkWorkspace();
     const outside = mkWorkspace();
     fs.mkdirSync(path.join(outside, "loot"), { recursive: true });
@@ -155,7 +156,7 @@ describe("createFile — path_escapes_root", () => {
     expect(fs.existsSync(path.join(outside, "loot/pwned.ts"))).toBe(false);
   });
 
-  it("rejects a create whose nearest EXISTING ancestor is an escaping symlink", async () => {
+  it.skipIf(!symlinkSupported())("rejects a create whose nearest EXISTING ancestor is an escaping symlink", async () => {
     // The walk climbs to the first ancestor that exists; a deep not-yet-created
     // sub-path under an escaping link must be caught at that ancestor rather
     // than mkdir-p'd into the foreign tree.
@@ -172,7 +173,7 @@ describe("createFile — path_escapes_root", () => {
     expect(fs.existsSync(path.join(outside, "loot/deep"))).toBe(false);
   });
 
-  it("refuses to write THROUGH an existing symlink at the target path", async () => {
+  it.skipIf(!symlinkSupported())("refuses to write THROUGH an existing symlink at the target path", async () => {
     const ws = mkWorkspace();
     const outside = mkWorkspace();
     const victim = path.join(outside, "victim.ts");
@@ -187,7 +188,7 @@ describe("createFile — path_escapes_root", () => {
     expect(fs.readFileSync(victim, "utf8")).toBe("original\n");
   });
 
-  it("still allows a symlinked directory that stays INSIDE the workspace", async () => {
+  it.skipIf(!symlinkSupported())("still allows a symlinked directory that stays INSIDE the workspace", async () => {
     // The check is containment, not a blanket symlink ban: a link that resolves
     // back inside the workspace is ordinary workspace content.
     const ws = mkWorkspace();
@@ -200,7 +201,7 @@ describe("createFile — path_escapes_root", () => {
     expect(fs.readFileSync(path.join(ws, "real/inside.ts"), "utf8")).toBe("ok\n");
   });
 
-  it("tolerates a workspace root that is itself reached through a symlink", async () => {
+  it.skipIf(!symlinkSupported())("tolerates a workspace root that is itself reached through a symlink", async () => {
     // macOS hands out /var/folders/... paths whose realpath is /private/var/...
     // Comparing the un-realpath'd root against a realpath'd ancestor would
     // refuse every legitimate create in such a tree.

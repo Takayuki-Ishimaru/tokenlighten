@@ -187,7 +187,17 @@ export function rewrite(
     yamlPrefixOnly &&
     !exactPrefixMatch &&
     (existingYamlPrefix.includes("name: TokenLighten MCP workflow") ||
-      existingYamlPrefix.includes("description: TokenLighten MCP "));
+      existingYamlPrefix.includes("description: TokenLighten MCP ") ||
+      // The copilot-agent custom-agent file's `name:` is fixed and
+      // version-independent (render.ts's COPILOT_AGENT_FRONTMATTER), unlike
+      // its `description:`, which a wording wave may reword entirely (as
+      // v97 did). Without this marker an outdated description would never
+      // auto-upgrade -- compatibleYamlPrefix only checks frontmatter SHAPE
+      // (starts with `---`, has a closing `---` before the block), not
+      // content -- so every `tl workspace setup` re-run on an existing
+      // workspace would silently keep serving the stale, more expensive
+      // wording forever.
+      existingYamlPrefix.includes("name: tokenlighten-explore"));
   const prefixMatch =
     exactPrefixMatch || (compatibleYamlPrefix && !managedYamlPrefixMismatch);
 

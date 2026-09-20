@@ -8,6 +8,7 @@ import * as path from "node:path";
 
 import { __testOnlyOperationV2KeyPrefix } from "../server.js";
 import { resetStateStoresForTests, stateStoreFor } from "../state/stateStore.js";
+import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
 
 type Body = Record<string, unknown>;
 
@@ -19,10 +20,10 @@ const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
 
 const workspaces: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   resetStateStoresForTests();
   for (const workspace of workspaces.splice(0)) {
-    fs.rmSync(workspace, { recursive: true, force: true });
+    await rmDirWithRetry(workspace);
   }
 });
 
@@ -102,13 +103,13 @@ function oldDispatchDecision(recorded: string | undefined): OldDispatchDecision 
 interface ServerHandle {
   initialize(): Promise<void>;
   call(name: string, args: Body): Promise<Body>;
-  kill(): void;
+  kill(): Promise<void>;
 }
 
 const spawnedServers: ServerHandle[] = [];
 
-afterAll(() => {
-  for (const s of spawnedServers.splice(0)) s.kill();
+afterAll(async () => {
+  for (const s of spawnedServers.splice(0)) await s.kill();
 });
 
 function startWriteServer(cwd: string): ServerHandle {
@@ -170,7 +171,7 @@ function startWriteServer(cwd: string): ServerHandle {
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
   }
 
-  function kill(): void { try { child.kill("SIGKILL"); } catch { /* ok */ } }
+  async function kill(): Promise<void> { try { child.kill("SIGKILL"); } catch { /* ok */ } await waitForExit(child); }
 
   return { initialize, call: callFn, kill };
 }
@@ -269,5 +270,10 @@ describe("B-2/B-F1 structured replay compatibility and downgrade safety", () => 
     expect(second["replayed"]).toBe(true);
     // No double apply: the file still reflects exactly one mutation.
     expect(fs.readFileSync(file, "utf8")).toBe("export const COUNT = 2;\n");
+    // Kill THIS test's own server now rather than deferring to the file-end
+    // afterAll: the shared per-test afterEach (above) removes `workspace`
+    // immediately after this test returns, and on Windows a still-live
+    // server process with `workspace` as its cwd makes that removal EPERM.
+    await srv.kill();
   }, 45000);
 });

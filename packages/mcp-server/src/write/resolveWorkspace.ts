@@ -33,16 +33,54 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
+/**
+ * `c:\x` and `C:\x` are ONE directory on win32, and `fs.realpathSync` returns
+ * whichever drive-letter case it was HANDED rather than canonicalizing it. So
+ * a client that spells its `cwd` with a lowercase drive letter — legal, and
+ * what several Windows shells hand out — failed every containment test in this
+ * module against a pinned root realpath'd from an uppercase spelling, and drew
+ * an `invalid-cwd` refusal for its OWN workspace.
+ *
+ * `util/safePath.ts` carries these same two lines, for the same reason, behind
+ * its `resolveReal`/`isWithin`. They are repeated here rather than imported
+ * because this module is deliberately dependency-free (see the file header:
+ * "Pure module: no MCP/transport coupling") and safePath's import graph
+ * reaches the transport layer through `util/trace.ts`. Keep the two in sync.
+ *
+ * POSIX is untouched: an absolute path there starts with `/` and never
+ * matches, so every comparison below stays byte-for-byte what it was.
+ */
+const WINDOWS_DRIVE_ABSOLUTE = /^[A-Za-z]:[\\/]/;
+
+function normalizeWindowsDriveLetter(value: string): string {
+  return WINDOWS_DRIVE_ABSOLUTE.test(value)
+    ? value.charAt(0).toUpperCase() + value.slice(1)
+    : value;
+}
+
 /** True when `child` is `base` itself or nested beneath it. */
 function isWithin(child: string, base: string): boolean {
-  return child === base || child.startsWith(base + path.sep);
+  const normalizedChild = normalizeWindowsDriveLetter(child);
+  const normalizedBase = normalizeWindowsDriveLetter(base);
+  // Two drive-absolute paths are win32 paths whatever this process's
+  // `path.sep` happens to be — the same arithmetic util/safePath.ts's
+  // `isWithin` already applies.
+  const separator = WINDOWS_DRIVE_ABSOLUTE.test(normalizedChild)
+    && WINDOWS_DRIVE_ABSOLUTE.test(normalizedBase)
+    ? path.win32.sep
+    : path.sep;
+  return normalizedChild === normalizedBase
+    || normalizedChild.startsWith(normalizedBase + separator);
 }
 
 /** Resolve an existing directory to its canonical path. */
 export function realDirectory(candidate: string): string | undefined {
   try {
     const real = fs.realpathSync(candidate);
-    return fs.statSync(real).isDirectory() ? real : undefined;
+    // Normalized HERE, at the single point every caller obtains a canonical
+    // directory from, so the `===` comparisons and `path.relative` arithmetic
+    // downstream all see one spelling per directory.
+    return fs.statSync(real).isDirectory() ? normalizeWindowsDriveLetter(real) : undefined;
   } catch {
     return undefined;
   }
@@ -253,7 +291,12 @@ export function isWorkspaceOverrideAccepted(
  * by falling back to the input. Use sync to keep call sites synchronous.
  */
 export function realpathWorkspaceRoot(p: string): string {
-  try { return fs.realpathSync(p); } catch { return p; }
+  // Drive-letter-canonical on both branches, exactly like `realDirectory`
+  // above and `util/safePath.ts`'s `resolveReal`: this value is stored in
+  // handles and echoed on the wire as `workspace`, so two calls that differ
+  // only in how the caller spelled `C:` must not mint two different roots.
+  try { return normalizeWindowsDriveLetter(fs.realpathSync(p)); }
+  catch { return normalizeWindowsDriveLetter(p); }
 }
 
 /**

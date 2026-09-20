@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -15,6 +16,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { injectAll, removeAll } from "../injectAll.js";
 import { FakeClock } from "../clock.js";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 
 const STUB_FILES = [
   "CLAUDE.md",
@@ -22,7 +24,15 @@ const STUB_FILES = [
   ".cursor/rules/tokenlighten.mdc",
   ".clinerules/tokenlighten.md",
   ".continue/rules/tokenlighten.md",
+  ".github/agents/tokenlighten-explore.agent.md",
 ] as const;
+
+// removeAll deletes this one outright when nothing but its own YAML
+// frontmatter remains after the block is stripped (see injectAll.ts's
+// removeAll — Copilot would otherwise still list a frontmatter-only custom
+// agent with no instructions); every other file in ALL_FILES is preserved
+// with just the block removed.
+const COPILOT_AGENT_FILE = ".github/agents/tokenlighten-explore.agent.md";
 
 const ALL_FILES = ["AGENTS.md", ...STUB_FILES] as const;
 
@@ -53,7 +63,7 @@ describe("removeAll managed guide blocks", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  it("previews then removes all six exact managed blocks while preserving user text", async () => {
+  it("previews then removes all seven exact managed blocks while preserving user text", async () => {
     await injectAll({ repoRoot: repo, force: true });
     const agents = join(repo, "AGENTS.md");
     writeFileSync(agents, `user-owned prefix\n${readFileSync(agents, "utf8")}`, "utf8");
@@ -64,12 +74,22 @@ describe("removeAll managed guide blocks", () => {
     expect(preview.planned).toHaveLength(ALL_FILES.length);
     expect(preview.removed).toEqual([]);
     expect(readFileSync(agents, "utf8")).toBe(before);
+    // A dry run never mutates — even the file removeAll would otherwise
+    // delete outright (copilot-agent) is untouched.
+    expect(existsSync(join(repo, COPILOT_AGENT_FILE))).toBe(true);
 
     const removed = await removeAll({ repoRoot: repo });
     expect(removed.errors).toEqual([]);
     expect(removed.removed).toHaveLength(ALL_FILES.length);
     expect(readFileSync(agents, "utf8")).toContain("user-owned prefix");
     for (const file of ALL_FILES) {
+      if (file === COPILOT_AGENT_FILE) {
+        // Nothing but its own YAML frontmatter preceded the block (no user
+        // text was ever added to it in this test) — removeAll deletes the
+        // whole file rather than leaving a frontmatter-only custom agent.
+        expect(existsSync(join(repo, file))).toBe(false);
+        continue;
+      }
       expect(readFileSync(join(repo, file), "utf8"))
         .not.toContain("tokenlighten:mcp-instructions:start");
     }
@@ -86,7 +106,7 @@ describe("removeAll managed guide blocks", () => {
     });
   });
 
-  it("fails closed on a symlink and preserves its external target", async () => {
+  it.skipIf(!symlinkSupported())("fails closed on a symlink and preserves its external target", async () => {
     await injectAll({ repoRoot: repo, force: true });
     const external = `${repo}-external.md`;
     const stub = join(repo, "CLAUDE.md");
@@ -117,7 +137,7 @@ describe("injectAll idempotency", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
-  it("first run writes AGENTS.md + all 5 stub files", async () => {
+  it("first run writes AGENTS.md + all 6 stub files", async () => {
     const clock = new FakeClock(1_000_000);
     const result1 = await injectAll({
       repoRoot: repo,
@@ -125,8 +145,8 @@ describe("injectAll idempotency", () => {
       clock,
     });
 
-    // AGENTS.md + 5 stubs = 6 files written on first run
-    expect(result1.wrote).toHaveLength(6);
+    // AGENTS.md + 6 stubs = 7 files written on first run
+    expect(result1.wrote).toHaveLength(7);
     expect(result1.wrote).toContain("AGENTS.md");
     for (const f of STUB_FILES) {
       expect(result1.wrote).toContain(f);
@@ -134,7 +154,7 @@ describe("injectAll idempotency", () => {
     expect(result1.skipped).toHaveLength(0);
   });
 
-  it("second run writes 0 files and skips all 6 as already-up-to-date", async () => {
+  it("second run writes 0 files and skips all 7 as already-up-to-date", async () => {
     const clock = new FakeClock(1_000_000);
     const config = { repoRoot: repo, driftMode: "auto-rewrite" as const, clock };
 
@@ -144,7 +164,7 @@ describe("injectAll idempotency", () => {
     const result2 = await injectAll(config);
 
     expect(result2.wrote).toHaveLength(0);
-    expect(result2.skipped).toHaveLength(6);
+    expect(result2.skipped).toHaveLength(7);
     for (const item of result2.skipped) {
       expect(item.reason).toBe("already-up-to-date");
     }

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -105,7 +106,7 @@ describe("loadManifest / writeManifest", () => {
     await expect(loadManifest(tmpDir)).resolves.toBeNull();
   });
 
-  it("refuses to write a cache through a symlinked parent", async () => {
+  it.skipIf(!symlinkSupported())("refuses to write a cache through a symlinked parent", async () => {
     const outside = await fs.mkdtemp(join(tmpdir(), "indexStore-outside-"));
     try {
       await fs.symlink(outside, join(tmpDir, ".tokenlighten"), "dir");

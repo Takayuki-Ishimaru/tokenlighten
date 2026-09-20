@@ -37,6 +37,7 @@ import { pathlessExactEdit, pathlessSymbolEdit } from "../write/pathlessEdit.js"
 import { resetNestedWorkspaceCache } from "../write/workspaceBoundary.js";
 import { resetTokenlightenIgnoreCache } from "../tools/walkRepo.js";
 import { unsafeGuardedWorkspaceRootForTests, type GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
+import { symlinkSupported } from "./helpers/symlinkSupported.js";
 
 const SESSION = "test-session";
 const tmpDirs: string[] = [];
@@ -96,7 +97,7 @@ function addNestedWorktreeAt(repo: string, relPath: string, branch: string): str
 // ---------------------------------------------------------------------------
 
 describe("createFile — no-replace hardening (CWE-59/CWE-367)", () => {
-  it("(a) refuses creation onto a DANGLING symlink; the link itself is left untouched", async () => {
+  it.skipIf(!symlinkSupported())("(a) refuses creation onto a DANGLING symlink; the link itself is left untouched", async () => {
     const ws = mkWorkspace();
     const missingTarget = path.join(ws, "does-not-exist.ts");
     const linkPath = path.join(ws, "dangling.ts");
@@ -116,7 +117,7 @@ describe("createFile — no-replace hardening (CWE-59/CWE-367)", () => {
     expect(fs.existsSync(missingTarget)).toBe(false);
   });
 
-  it("(b) refuses creation onto a symlink pointing at an EXISTING file; the target is untouched", async () => {
+  it.skipIf(!symlinkSupported())("(b) refuses creation onto a symlink pointing at an EXISTING file; the target is untouched", async () => {
     const ws = mkWorkspace();
     const outside = mkWorkspace();
     const victim = path.join(outside, "victim.ts");

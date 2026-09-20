@@ -205,6 +205,26 @@ describe("stopMcp — shutdown sequence order", () => {
     const dir = makeTmpDir();
     const pidPath = join(dir, "mcp.pid");
 
+    // On win32, sendTermSignal (process.ts) shells out to `taskkill` via
+    // spawnSync by design -- it never calls process.kill(pid, "SIGTERM")
+    // there. Node core modules' ESM namespace exports are non-configurable
+    // (vi.spyOn cannot redefine them: "Cannot redefine property"), so mock
+    // the whole module instead of spying on it. Every call other than a
+    // taskkill invocation still reaches the real spawnSync; this is a no-op
+    // on POSIX, where sendTermSignal never calls spawnSync at all.
+    const spawnSyncCalls: unknown[][] = [];
+    vi.doMock("child_process", async () => {
+      const actual = await vi.importActual<typeof import("child_process")>("child_process");
+      return {
+        ...actual,
+        spawnSync: (...args: Parameters<typeof actual.spawnSync>) => {
+          spawnSyncCalls.push(args);
+          if (args[0] === "taskkill") return { status: 0 } as ReturnType<typeof actual.spawnSync>;
+          return actual.spawnSync(...args);
+        },
+      };
+    });
+
     const { writePidFile, stopMcp } = await import("../process.js");
     writePidFile(pidPath, {
       pid: 99996,
@@ -228,11 +248,18 @@ describe("stopMcp — shutdown sequence order", () => {
     await stopMcp(pidPath, 99996, { verifyIdentity: () => true });
 
     expect(existsSync(pidPath)).toBe(false);
-    // SIGTERM was sent
-    const termCalls = killMock.mock.calls.filter(([, sig]) => sig === "SIGTERM");
-    expect(termCalls.length).toBeGreaterThan(0);
+    if (process.platform === "win32") {
+      // taskkill was invoked (never a raw SIGTERM signal on win32).
+      const taskkillCalls = spawnSyncCalls.filter(([cmd]) => cmd === "taskkill");
+      expect(taskkillCalls.length).toBeGreaterThan(0);
+    } else {
+      // SIGTERM was sent
+      const termCalls = killMock.mock.calls.filter(([, sig]) => sig === "SIGTERM");
+      expect(termCalls.length).toBeGreaterThan(0);
+    }
 
     killMock.mockRestore();
+    vi.doUnmock("child_process");
     rmSync(dir, { recursive: true });
   });
 

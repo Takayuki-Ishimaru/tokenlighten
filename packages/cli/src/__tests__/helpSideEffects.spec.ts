@@ -297,6 +297,45 @@ describe("tl logs reset --help / -h", () => {
 // ─── tl clients activate --help / -h ───────────────────────────────────────
 
 describe("tl clients activate --help / -h", () => {
+  // `runClients` never accepts injected options (see the shared spawn-mock
+  // comment above), so the positive control below resolves the launcher
+  // for real via resolveStableLauncher(). Isolate TOKENLIGHTEN_HOME so that
+  // write lands in a throwaway directory instead of this machine's real
+  // per-user data dir (S3, v0.14.3 pre-release fix wave: in-process test
+  // isolation leak into the managed launcher shim).
+  //
+  // TOKENLIGHTEN_HOME alone is NOT enough (found 2026-09-18 on the
+  // developer's real files): the same positive control also reaches the
+  // config-file host writer, which addresses `~/.copilot/mcp-config.json`
+  // through `os.homedir()`. On a machine where `~/.copilot` exists, every
+  // full test run since the writer landed (2026-09-13) rewrote the user's
+  // REAL Copilot CLI configuration, lately to a temp launcher path that the
+  // afterEach below deletes — a dangling `tokenlighten` server entry. The
+  // OS home must be isolated too: `os.homedir()` reads HOME (POSIX) or
+  // USERPROFILE (Windows) on every call, so redirecting both for the
+  // duration of each test is sufficient for this in-process call.
+  let tlHomeRoot: string;
+  const savedEnv: Record<string, string | undefined> = {};
+  const ISOLATED_ENV_KEYS = ["TOKENLIGHTEN_HOME", "HOME", "USERPROFILE"] as const;
+
+  beforeEach(() => {
+    tlHomeRoot = join(tmpdir(), `tl-clients-activate-help-test-${randomUUID()}`);
+    mkdirSync(join(tlHomeRoot, "os-home"), { recursive: true });
+    for (const key of ISOLATED_ENV_KEYS) savedEnv[key] = process.env[key];
+    process.env["TOKENLIGHTEN_HOME"] = tlHomeRoot;
+    process.env["HOME"] = join(tlHomeRoot, "os-home");
+    process.env["USERPROFILE"] = join(tlHomeRoot, "os-home");
+  });
+
+  afterEach(() => {
+    for (const key of ISOLATED_ENV_KEYS) {
+      const value = savedEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(tlHomeRoot, { recursive: true, force: true });
+  });
+
   it.each(["--help", "-h"])("activate %s prints usage and spawns no vendor CLI", async (flag: string) => {
     const stdout = captureStdout();
     const exit = stubExit();

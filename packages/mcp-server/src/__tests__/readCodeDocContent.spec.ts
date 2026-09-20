@@ -138,7 +138,9 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     // pointing at the real regression rather than weakened to pass falsely.
     const limit = body["limit"] as Record<string, unknown> | undefined;
     expect(limit?.["next"]).toBeUndefined();
-    expect(String(body["hint"] ?? "")).toContain("mode=full");
+    // 2026-09-20 legacy-spelling sweep: the hint names the canonical whole-file
+    // read, not the `mode=full path=…` spelling the server refuses by default.
+    expect(String(body["hint"] ?? "")).toContain('content:"full"');
   });
 
   it("single-line file WITH a trailing newline behaves the same (countLines is trailing-newline aware)", async () => {
@@ -157,7 +159,9 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     // same-handle no-progress `next` here too.
     const limit = body["limit"] as Record<string, unknown> | undefined;
     expect(limit?.["next"]).toBeUndefined();
-    expect(String(body["hint"] ?? "")).toContain("mode=full");
+    // 2026-09-20 legacy-spelling sweep: the hint names the canonical whole-file
+    // read, not the `mode=full path=…` spelling the server refuses by default.
+    expect(String(body["hint"] ?? "")).toContain('content:"full"');
   });
 
   it("giant first line with real lines after it still emits a VALID in-bounds remainder next", async () => {

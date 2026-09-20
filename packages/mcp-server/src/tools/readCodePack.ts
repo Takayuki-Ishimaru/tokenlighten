@@ -174,6 +174,7 @@ export async function readCodePack(
       continue;
     }
 
+    // served-bytes: readServedText (via the injected reader; server.ts gates it with servedTextForRoute)
     const raw = await readFileSafe(entry.path);
     if (raw === null) {
       omitted.push({ path: entry.path, reason: "not-found" });
@@ -219,7 +220,19 @@ export async function readCodePack(
       // TINY_TASK_CAP (governorExempt — an explicit N-file pack is
       // one-call-complete by design; see item G1). A no-content result here is
       // "not-tiny" (the file exceeded the tiny threshold), NOT a range failure.
-      const sfResult = await buildSmallFile(workspace, entry.path, undefined, { content: "full", governorExempt: true });
+      // AA1 (2026-09-14, review round 10): `buildSmallFile` now FAILS CLOSED for
+      // a file the one serve-side decode policy refuses (raw NULs, invalid
+      // UTF-8, a BOM-less UTF-16 save) rather than serving those bytes. A batch
+      // entry must not take the whole pack down for one such file, and the
+      // omission vocabulary is a wire contract (`packages/types`), so it is
+      // reported with the existing "buildSmallFile produced no content" reason.
+      let sfResult: Awaited<ReturnType<typeof buildSmallFile>> | undefined;
+      try {
+        sfResult = await buildSmallFile(workspace, entry.path, undefined, { content: "full", governorExempt: true });
+      } catch {
+        omitted.push({ path: entry.path, range: entry.range, reason: "not-tiny" });
+        continue;
+      }
       if (!("mode" in sfResult) || sfResult.content === undefined) {
         omitted.push({ path: entry.path, range: entry.range, reason: "not-tiny" });
         continue;
@@ -323,6 +336,7 @@ async function assemblePack(
       continue;
     }
 
+    // served-bytes: readServedText (via the injected reader; server.ts gates it with servedTextForRoute)
     const raw = await readFileSafe(entry.path);
     if (raw === null) {
       omitted.push({ path: entry.path, range: entry.range, reason: "not-found" });

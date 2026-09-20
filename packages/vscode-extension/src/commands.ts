@@ -12,6 +12,7 @@ import {
 } from "./statusBar.js";
 import type { StatusBarManager } from "./statusBar.js";
 import {
+  invalidateWorkspaceConfigured,
   setWorkspaceConfigured,
   workspaceActivationState,
   workspaceMcpSettingsCached,
@@ -39,18 +40,38 @@ function localized(en: string, ja: string): string {
   return getDisplayLanguage() === "ja" ? ja : en;
 }
 
+/**
+ * DESIGN-v0.14-mcp-only-install.md §4.2/§4.6 C2: "Set up this workspace" now
+ * runs `tl install --from-extension` instead of `tl workspace setup`
+ * directly. `--from-extension` stages the VSIX's bundled tree the same way
+ * `tl-setup` stages an archive (§4.6 C2 "same landing zone"), and
+ * `--workspace <root>` still runs the per-workspace step
+ * (`.vscode/mcp.json` / `.mcp.json` / `.codex/config.toml` / guide blocks)
+ * exactly as `tl workspace setup` did. `--clients none` keeps MACHINE-WIDE
+ * vendor-CLI registration (Claude Code, Codex user scope) opt-in through
+ * the extension's own clients UI, not bundled into every "Set up this
+ * workspace" click — it does not affect the workspace files written by
+ * install's workspace step.
+ */
 export function workspaceSetupArgs(
   root: string,
   profile: GuideProfile = "full",
   toolSurface?: "full" | "code",
+  // Undefined (the default "Set up TokenLighten" button) omits the flag —
+  // `tl install` itself already defaults to "raise" — so this function's
+  // default invocation stays byte-for-byte what the existing exact-array
+  // test expects. Only "keep" (the modal's second button) ever appends it.
+  copilotInlineResults?: "raise" | "keep",
 ): string[] {
   return [
-    "workspace",
-    "setup",
-    "--root",
+    "install",
+    "--from-extension",
+    "--workspace",
     root,
     "--clients",
-    "vscode,codex,claude-code",
+    "none",
+    "--yes",
+    "--json",
     "--guide-profile",
     profile,
     // DESIGN-v0.15 §8.2 (R7 Part B): omitted (not merely "full") when the
@@ -58,8 +79,40 @@ export function workspaceSetupArgs(
     // this wave touches, and keeps this function's default invocation
     // (and its existing exact-array test) byte-for-byte unchanged.
     ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : []),
-    "--json",
+    ...(copilotInlineResults === "keep" ? ["--copilot-inline-results", "keep"] : []),
   ];
+}
+
+/**
+ * The relevant subset of `tl install --json`'s report envelope
+ * (`packages/cli/src/commands/install.ts`'s `InstallReport`, wrapped in
+ * `{ok, exitCode, report?, message?}` by `runInstall`) — only the fields
+ * this extension actually reads.
+ */
+interface TlInstallJsonResult {
+  ok?: unknown;
+  exitCode?: unknown;
+  message?: unknown;
+  report?: {
+    writePosture?: unknown;
+    workspaces?: Array<{
+      copilotInlineResults?: {
+        status?: unknown;
+        reason?: unknown;
+      };
+    }>;
+  };
+}
+
+function parseTlInstallJson(stdout: string): TlInstallJsonResult | null {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as TlInstallJsonResult
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export function registerSetupCommand(
@@ -112,6 +165,54 @@ export function registerCommands(
   });
   reg("tokenlighten.usage.show", () => { void showUsageDashboard(context); });
   reg("tokenlighten.logs.export", () => { void exportUsageLogs(); });
+  reg("tokenlighten.uninstallMachine", () => { void uninstallMachine(); });
+}
+
+/**
+ * DESIGN-v0.14-mcp-only-install.md §4.6 C10: "Removing the VSIX leaves the
+ * machine install; `tl install --uninstall` (also exposed as an extension
+ * command) removes it." Machine-scoped (not tied to any open workspace), so
+ * this is spawned without a `cwd` — unlike setupWorkspace's `--workspace`
+ * flow. Modal confirmation because uninstalling is destructive and affects
+ * every workspace/host this machine's `tl install` reaches, not just the
+ * current one.
+ */
+export async function uninstallMachine(): Promise<void> {
+  const confirmLabel = localized("Uninstall TokenLighten", "TokenLightenをアンインストール");
+  const choice = await vscode.window.showWarningMessage(
+    localized(
+      "Uninstall TokenLighten from this machine? This removes the machine-scoped install (staged runtime, host identity) and managed host registrations (Claude Code, Codex). It also removes TokenLighten's managed guide blocks and managed MCP entries from every workspace this install set up (a .tl-backup copy is kept next to each edited MCP file); your own content and other servers' entries stay untouched.",
+      "このマシンからTokenLightenをアンインストールしますか？マシン単位のインストール（ステージ済みランタイムとホストID）と管理対象のホスト登録（Claude Code、Codex）に加えて、このインストールがセットアップした各ワークスペースのTokenLighten管理ブロックと管理対象のMCPエントリも削除されます（編集したMCPファイルのそばに.tl-backupのコピーを保持します）。独自に記述した内容や他のMCPサーバーのエントリはそのまま残ります。",
+    ),
+    { modal: true },
+    confirmLabel,
+  );
+  if (choice !== confirmLabel) return;
+
+  const result = await spawnTl(["install", "--uninstall", "--yes", "--json"]);
+  const installJson = parseTlInstallJson(result.stdout);
+  const succeeded = result.code === 0 && installJson?.ok === true;
+  const summary = typeof installJson?.message === "string"
+    ? installJson.message
+    : firstLine(result.stderr || result.stdout);
+
+  if (!succeeded) {
+    vscode.window.showErrorMessage(localized(
+      `TokenLighten uninstall failed: ${summary}`,
+      `TokenLightenのアンインストールに失敗しました: ${summary}`,
+    ));
+    return;
+  }
+  // G2: the status bar / sidebar / provider cached "this workspace is set
+  // up" from the last probe — without this they kept saying so until the
+  // next probe/reload even though the machine install (and every
+  // workspace entry it owned) was just removed. The listeners this
+  // notifies already refresh all three.
+  invalidateWorkspaceConfigured();
+  vscode.window.showInformationMessage(localized(
+    `TokenLighten: ${summary}`,
+    `TokenLighten: ${summary}`,
+  ));
 }
 
 export async function enableWorkspace(): Promise<void> {
@@ -131,7 +232,7 @@ export async function disableWorkspace(): Promise<void> {
 }
 
 interface StatusMenuItem extends vscode.QuickPickItem {
-  action: "diagnostics" | "enable" | "disable" | "setup" | "sidebar" | "status";
+  action: "diagnostics" | "enable" | "disable" | "setup" | "sidebar" | "uninstallMachine" | "status";
 }
 
 /**
@@ -180,6 +281,10 @@ export async function showStatusMenu(
     label: localized("Open TokenLighten Sidebar", "TokenLightenサイドバーを開く"),
   });
   items.push({
+    action: "uninstallMachine",
+    label: localized("Uninstall TokenLighten from This Machine", "このマシンからTokenLightenをアンインストール"),
+  });
+  items.push({
     action: "status",
     label: localized("Status", "ステータス"),
     description: statusMessage(state),
@@ -193,6 +298,9 @@ export async function showStatusMenu(
   switch (picked.action) {
     case "diagnostics":
       showDiagnosticsPanel(context);
+      return;
+    case "uninstallMachine":
+      await uninstallMachine();
       return;
     case "enable":
       await enableWorkspace();
@@ -214,6 +322,10 @@ export async function showStatusMenu(
   }
 }
 
+interface GuideProfileQuickPickItem extends vscode.QuickPickItem {
+  profile: Extract<GuideProfile, "full" | "compact">;
+}
+
 export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   if (!vscode.workspace.isTrusted) {
     vscode.window.showWarningMessage(localized(
@@ -231,15 +343,24 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
     return;
   }
   const confirm = localized("Set up TokenLighten", "TokenLightenをセットアップ");
+  // Second button: the user's consent to skip ONLY the Copilot setting
+  // change below — everything else about setup (rules, MCP entries, usage
+  // measurement) proceeds exactly as the first button.
+  const keepCopilotSettings = localized(
+    "Set up without changing Copilot settings",
+    "Copilotの設定を変更せずにセットアップ",
+  );
   const choice = await vscode.window.showInformationMessage(
     localized(
-      "Set up or repair TokenLighten for VS Code, Copilot, Codex, and Claude Code in this workspace? Write tools and local privacy-safe usage measurement are enabled only for this workspace.",
-      "このワークスペースでVS Code、Copilot、Codex、Claude Code向けのTokenLighten設定をセットアップまたは修復しますか？書き込みツールとローカルのプライバシー保護使用量計測は、このワークスペースだけで有効になります。",
+      "Set up or repair TokenLighten for VS Code, Copilot, Codex, and Claude Code in this workspace? Write tools and local privacy-safe usage measurement are enabled only for this workspace. Setup will also raise GitHub Copilot's inline tool-result limit for this workspace (written to .vscode/settings.json) so Copilot can read TokenLighten's answers.",
+      "このワークスペースでVS Code、Copilot、Codex、Claude Code向けのTokenLighten設定をセットアップまたは修復しますか？書き込みツールとローカルのプライバシー保護使用量計測は、このワークスペースだけで有効になります。また、CopilotがTokenLightenの応答を読み取れるように、このワークスペースのGitHub Copilotのインライン結果表示の上限も引き上げます（.vscode/settings.jsonに書き込みます）。",
     ),
     { modal: true },
     confirm,
+    keepCopilotSettings,
   );
-  if (choice !== confirm) return;
+  if (choice !== confirm && choice !== keepCopilotSettings) return;
+  const copilotInlineResults: "raise" | "keep" = choice === keepCopilotSettings ? "keep" : "raise";
   bar.setStale();
   const workspaceConfig = vscode.workspace.getConfiguration("tokenlighten", vscode.Uri.file(root));
   // DESIGN-v0.15 §8.2 (R7 Part B): keeps the generated .vscode/mcp.json /
@@ -269,13 +390,87 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
     || explicitGuideProfileRaw === "compact"
       ? explicitGuideProfileRaw
       : undefined;
-  const profile: GuideProfile = explicitGuideProfile ?? defaultGuideProfileForSurface(toolSurface);
+  let profile: GuideProfile = explicitGuideProfile ?? defaultGuideProfileForSurface(toolSurface);
+  // USER RULING (2026-09-20): TL must not guess that a workspace is "VS Code
+  // only" — AGENTS.md is a shared file, and Codex / Claude Code can be
+  // registered machine-wide with no workspace file of their own, so silently
+  // writing the compact guide here would change what those other tools read
+  // too. The choice has to be the user's own, explicit and informed — ask
+  // only when nothing has already decided the profile: an explicit
+  // guideProfile setting at any scope (handled above) or the `code` tool
+  // surface (which already defaults to compact on its own — see
+  // defaultGuideProfileForSurface) both skip the question entirely.
+  if (explicitGuideProfile === undefined && toolSurface === "full") {
+    const picked = await vscode.window.showQuickPick<GuideProfileQuickPickItem>(
+      [
+        {
+          profile: "full",
+          label: localized(
+            "Full guide (recommended if Codex or Claude Code also work in this folder)",
+            "フルガイド（このフォルダーでCodexやClaude Codeも使う場合におすすめ）",
+          ),
+          description: localized(
+            "AGENTS.md carries the complete TokenLighten protocol (~12.5 KB)",
+            "AGENTS.mdにTokenLightenの完全なプロトコル（約12.5KB）が含まれます",
+          ),
+        },
+        {
+          profile: "compact",
+          label: localized(
+            "Compact guide (GitHub Copilot only)",
+            "コンパクトガイド（GitHub Copilotのみ）",
+          ),
+          description: localized(
+            "about 2,600 fewer tokens on every Copilot conversation; Codex / Claude Code in this folder would read the compact guide too",
+            "Copilotの会話ごとに約2,600トークン節約できます。このフォルダー内のCodex / Claude Codeもコンパクトガイドを読み込むことになります",
+          ),
+        },
+      ],
+      {
+        title: localized("TokenLighten guide size", "TokenLighten ガイドのサイズ"),
+        ignoreFocusOut: true,
+      },
+    );
+    // Dismissing (Esc / undefined) or picking the first (Full) item is
+    // today's behaviour exactly: `profile` already resolved to "full" above
+    // and nothing is persisted. Only Compact changes anything — and it also
+    // persists the choice so later repair runs and the status bar's own
+    // setupWorkspace call never ask again.
+    if (picked?.profile === "compact") {
+      profile = "compact";
+      await workspaceConfig.update(
+        "guideProfile",
+        "compact",
+        getTokenLightenConfigurationTarget(),
+      );
+    }
+  }
   const result = await spawnTl(
-    workspaceSetupArgs(root, profile, toolSurface === "code" ? "code" : undefined),
+    workspaceSetupArgs(
+      root,
+      profile,
+      toolSurface === "code" ? "code" : undefined,
+      copilotInlineResults === "keep" ? "keep" : undefined,
+    ),
     { cwd: root },
   );
-  if (result.code !== 0) {
-    const detail = firstLine(result.stderr || result.stdout);
+  const installJson = parseTlInstallJson(result.stdout);
+  const succeeded = result.code === 0 && installJson?.ok === true;
+  // `tl install` exit code 3 means every workspace file WAS written but its
+  // own post-install verification (doctor + a real MCP handshake) failed —
+  // under Electron's handshake timeout this is not rare, and is a strictly
+  // weaker failure than exit 1/2 (nothing written: a bad workspace path, a
+  // declined confirmation, or no host to register). Treat it as a warning:
+  // still enable the workspace and reload so the just-written configuration
+  // takes effect, but say verification failed instead of claiming full
+  // success (getting-started.md's exit-code table; hands-on report P?).
+  const verificationWarning = !succeeded && result.code === 3;
+  if (!succeeded && !verificationWarning) {
+    const detail = firstLine(
+      (typeof installJson?.message === "string" ? installJson.message : "")
+      || result.stderr
+      || result.stdout,
+    );
     bar.setError(detail);
     vscode.window.showErrorMessage(localized(
       `TokenLighten setup failed: ${detail}`,
@@ -285,14 +480,42 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   }
   await enableWorkspace();
   setWorkspaceConfigured(root, true, {
-    writeEnabled: true,
+    writeEnabled: installJson?.report?.writePosture !== "read-only",
+    // `tl install`'s report has no separate usage-logging toggle — the
+    // workspace step it runs always writes TOKENLIGHTEN_USAGE_LOG="on" the
+    // same way `tl workspace setup` did (workspace.ts's configureVsCode).
     usageLoggingEnabled: true,
   });
   bar.setFresh();
-  await vscode.window.showInformationMessage(localized(
-    "TokenLighten is ready for VS Code, Copilot, Codex, and Claude Code in this workspace. Full MCP tools and local usage measurement are enabled here.",
-    "このワークスペースでVS Code、Copilot、Codex、Claude Code向けのTokenLightenを利用できます。全MCPツールとローカル使用量計測が有効です。",
-  ));
+  if (verificationWarning) {
+    const detail = firstLine(
+      (typeof installJson?.message === "string" ? installJson.message : "")
+      || result.stderr
+      || result.stdout,
+    );
+    await vscode.window.showWarningMessage(localized(
+      `TokenLighten workspace files were written, but verification failed: ${detail}. Run "tl doctor" to check further.`,
+      `TokenLightenのワークスペースファイルは書き込まれましたが、検証に失敗しました: ${detail}。詳細は"tl doctor"で確認してください。`,
+    ));
+  } else {
+    await vscode.window.showInformationMessage(localized(
+      "TokenLighten is ready for VS Code, Copilot, Codex, and Claude Code in this workspace. Full MCP tools and local usage measurement are enabled here.",
+      "このワークスペースでVS Code、Copilot、Codex、Claude Code向けのTokenLightenを利用できます。全MCPツールとローカル使用量計測が有効です。",
+    ));
+  }
+  // `tl install --json`'s report.workspaces[0] is this one workspace root
+  // (the extension only ever sets up the first workspace folder above).
+  // `manual` means the file exists but is not strict JSON (VS Code
+  // settings allow JSONC comments/trailing commas) — tell the user the
+  // exact fix instead of leaving Copilot's limit silently unraised.
+  const copilotStatus = installJson?.report?.workspaces?.[0]?.copilotInlineResults;
+  if (copilotStatus?.status === "manual") {
+    const reason = typeof copilotStatus.reason === "string" ? copilotStatus.reason : "";
+    await vscode.window.showWarningMessage(localized(
+      `TokenLighten could not automatically raise GitHub Copilot's inline tool-result limit. ${reason}`,
+      `TokenLightenはGitHub Copilotのインライン結果表示の上限を自動的には引き上げられませんでした。${reason}`,
+    ));
+  }
   await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 

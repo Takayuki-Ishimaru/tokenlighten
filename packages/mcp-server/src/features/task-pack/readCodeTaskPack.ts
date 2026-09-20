@@ -30,16 +30,27 @@ import {
   anyWalkOmission,
   createWalkOmissions,
   genericTextDiscoveryEnabled,
+  isSourceOnlyExcludedPath,
   walkCodeFiles,
 } from "../../tools/walkRepo.js";
 import { buildCompactTree } from "../../tools/exploreTree.js";
 import { getCurrentDiff } from "../../tools/getCurrentDiff.js";
 import { callWorkspace, handleTable, shaOfBytes, shaOfText } from "../../util/handles.js";
 import { classifySurface, surfaceInventory, deriveTokenVariants } from "../../util/impact.js";
-import { readFileSafe, safeResolve, isWithin, resolveReal, statReadTargetSync } from "../../util/safePath.js";
-import { decodeTextBuffer } from "../../util/textDecode.js";
+import { readFileSafe, readServedTextSafe, safeResolve, isWithin, resolveReal, statReadTargetSync } from "../../util/safePath.js";
+import { decodeTextBuffer, readServedText, servedTextOrUndefined, type ServedTextVerdict } from "../../util/textDecode.js";
 import { languageForPath, languageForPathWithContent } from "../../util/languages.js";
-import { elideDocComments } from "../../util/formatCompress.js";
+// R1-B2 (2026-09-13 review round): the parse-free comment classifier the
+// locator's own comment-only precision penalty uses — reused here so "this hit
+// is prose about the code, not the code" is decided the same way in both places.
+import {
+  blockCommentOpenerFor,
+  classifyCommentLines,
+  commentSyntaxIsKnown,
+  commentSyntaxLanguageForPath,
+  lineCommentPrefixesFor,
+} from "../../util/lineClassify.js";
+import { elideDocComments, elideDocCommentsWithWindows } from "../../util/formatCompress.js";
 import { isEnumLikeQuery, stripPathSpans, tokenizeQuery } from "../../util/queryShape.js";
 import { maskCommentsAndStrings } from "./sfCodeMask.js";
 import { expandOneHop } from "./openUniverseExpansion.js";
@@ -104,13 +115,38 @@ import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recor
 import {
   extractRequestItems,
   createRequestItemIndexView,
+  // SHOULD-FIX 55 (AB1, round 11): the ONE mutation-verb vocabulary, declared in
+  // requestItems.ts beside the edit-lead set it must stay a superset of.
+  MUTATION_VERBS_EN,
+  // FIXALL-A group C (2026-09-14): the JA half of that same ONE vocabulary —
+  // see MIXED_INTENT_MUTATION_JA / MIXED_INTENT_ENUMERATION_JA_RE below, both
+  // now derived from these instead of hand-mirroring a subset of them.
+  EDIT_VERB_JA_ROOTS,
+  READ_VERB_JA_SURU_ROOTS,
+  READ_VERB_JA_STEM_ROOTS,
+  // FIXALL-A group F (2026-09-14): the ONE structural test for "the request
+  // offers these paths as alternatives" — see writeAuthorityVeto below.
+  alternativeCoordinatedPaths,
+  // FIXALL-A group D (2026-09-14): BLOCKER 61's own "a value-only clause names
+  // nothing" predicate, used here to stamp request_names_no_target.
+  stripValueOnlyLeadClauses,
   salientWords,
   sharesSignificantSubstring,
   looksLikeFileTerm,
   isCjkRun,
   isGenericJapaneseAbsenceTerm,
+  explicitMultiEditRequestPaths,
+  explicitMixedEditReadRequestPaths,
+  queryHasQuotedLiteral,
+  requestItemLeads,
+  splitIntoLeadClauses,
+  isIndependentQuestionClause,
   type RequestItem,
 } from "./requestItems.js";
+// H-1/H-2 (2026-09-19, narrow false-completion fix): whole-word,
+// variant-aware absence veto — see salientWordMatch.ts's own module doc
+// comment for the const/constant false-positive this replaces.
+import { inflectionVariants, textHasWordVariant } from "./salientWordMatch.js";
 import {
   recordServedSurfaces,
   queryServedSurfaces,
@@ -127,6 +163,9 @@ import {
   getFunctionalValidationObligation,
   consultExecutedLocate,
   consultExecutedSearch,
+  consultExecutedSearchResult,
+  executedSearchResults,
+  executedSearchResultSequence,
   hasExecutedSearchAction,
   hasExecutedNext,
   hasExecutedNextBoundOrUnbound,
@@ -141,18 +180,27 @@ import {
   clearServedWindowsForScope,
   type ServedSurfaceEntry,
   type AwaitingInputLatch,
+  type ExecutedSearchResult,
 } from "../../util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "../../util/laneKey.js";
 import { surfaceAlreadyCoversWholeFile } from "../../util/surfaceServedCoverage.js";
 import { computeClosureStateSafe } from "../../util/closureTracking.js";
 import { mustFetchPackCap } from "../../util/mustFetch.js";
 import {
+  callerExpansionEnabled,
+  concernRecoveryEnabled,
   coveragePackerEnabled,
   coveragePackerV2Enabled,
+  foldSmallRemainderEnabled,
   graphEvidenceEnabled,
+  identifierGroundingEnabled,
   literalFirstRoutingEnabled,
+  namedTargetResolutionEnabled,
   noteProofCompletionPack,
+  packFairTrimEnabled,
+  packGuideElideEnabled,
   proofCompletionEnabled,
+  seededGenerousEnabled,
   semanticFrontierGuardEnabled,
   sfContinuationBundleEnabled,
   sfDemoteEnabled,
@@ -161,6 +209,61 @@ import {
   sfStructuralConcernsEnabled,
   sfVerifyFirstEnabled,
 } from "../../util/flags.js";
+import {
+  recoverConcernGroupCandidates,
+  countSiblingGroups,
+  diversifyByConcern,
+  hygienicClauseWorkList,
+  runClauseLocateRecovery,
+  mergeConcernAdditions,
+  recordClauseLocateAttempt,
+  clauseCoverageTokenSet,
+  collectNeighbourWords,
+  distinctMatchedTokenCount,
+  isClauseCoveredBySeededSurfaces,
+  isProseAcronym,
+  namedDefinitionFiles,
+  namedMemberAfterIdentifier,
+  recordSeededClauseRecoveryEntry,
+  CUMULATIVE_LOCATE_BUDGET_MS,
+  MAX_CLAUSE_LOCATES,
+  type ClauseHygieneItem,
+  type ClauseRecoveryLocateResult,
+  type DiversifyCandidate,
+  type NamedDefinitionFile,
+  type ConcernCandidate,
+  type ConcernRecoveryItem,
+  type ConcernFixedStringScanner,
+  type ConcernEnclosingSymbolReader,
+  type SeededCoverageSurface,
+} from "./concernRecovery.js";
+import {
+  boundedCallerWindow,
+  callerExpansionWhy,
+  definitionSegment,
+  fileNamesType,
+  findCallOccurrences,
+  hasHashComments,
+  maskNonCode,
+  opensBlockDeclaration,
+  pickFocalMembers,
+  queryMentionsTests,
+  rankCallSites,
+  receiverStrength,
+  sharedPathPrefixSegments,
+  MAX_CALLER_EXPANSION_BYTES,
+  MAX_CALLER_FILES_EXAMINED,
+  MAX_CALLER_SURFACES,
+  type CallerFocalMember,
+  type CallerSiteCandidate,
+  type FocalMemberCandidate,
+} from "./callerExpansion.js";
+import { tokenizeQuery as tokenizeQueryForDiversification } from "../retrieval/tokenize.js";
+// FX-M (2026-09-19, TL_PACK_GUIDE_ELIDE): the canonical managed-block sentinel
+// strings, reused exactly the way locateTaskContext.ts's own
+// findManagedBlockLineRange already does ("so a future sentinel-format change
+// cannot silently desync the two packages") rather than re-deriving them here.
+import { SENTINEL_START, SENTINEL_END } from "@tokenlighten/agents-md";
 import { createSessionLedgerReader } from "../../task-state/sfLedgerReader.js";
 import {
   markConcernSatisfied,
@@ -233,6 +336,15 @@ import {
 } from "./taskContractStore.js";
 import { hasOpenUniverseIntent, isAdditiveEnumIntent } from "./openUniverseIntent.js";
 import { trace, isTraceEnabled, currentTraceCallId } from "../../util/trace.js";
+import {
+  jaBridgeExpansionTokens,
+  jaBridgeRecoveryQuery,
+  vocabularyStemNeighbours,
+  expansionsSupportCandidate,
+  wordsFromIdentifierLikeText,
+} from "../retrieval/queryRecoveryTerms.js";
+import { containsJapanese } from "../retrieval/jaQueryBridge.js";
+import { getWorkspaceJaBridgeVocabulary } from "../retrieval/jaBridgeWorkspaceVocab.js";
 import { noteSemanticFrontierTraceSeed } from "../../protocol/semanticFrontierTraceContext.js";
 import { annotateSemanticFrontierContinuation, prepareSemanticFrontierTraceSeed } from "./semanticFrontier.js";
 import { xlsxRoster, xlsxTable } from "../../office/xlsx.js";
@@ -329,8 +441,8 @@ function deriveNextFromPlan(plan: ContinuationPlan): ContinuationCall | undefine
   return plan.stages[0]?.calls[0] as ContinuationCall | undefined;
 }
 
-import { applySemanticFrontierDemotion, attachSfDemotionResidency, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
-import { markSemanticFrontierNamedJoin } from "./sfWithholdingMarks.js";
+import { applySemanticFrontierDemotion, attachSfDemotionResidency, hasCertificateBinding, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
+import { markSemanticFrontierNamedJoin, markCallerRangeSurface, isCallerRangeSurface, wasSemanticFrontierBodyWithheld } from "./sfWithholdingMarks.js";
 
 export {
   applyCanonicalTaskDecision,
@@ -560,6 +672,46 @@ const MAX_REMAINING_SECTION_IDS = 6;
  */
 const MAX_SURFACE_CODE_BYTES = 12288;
 
+/**
+ * WP-S2 (2026-09-20, TL_SEEDED_GENEROUS): per-surface embedded-code cap for a
+ * file the CALLER NAMED, with no range/symbol, in an `answer` (read-only)
+ * seeded pack. Measured host pricing makes one extra model turn cost about as
+ * much as 9-14 KB of served source, so a named file the caller will read in
+ * full anyway is cheaper served whole than re-served window by window: a
+ * plain `content:"full"` batch of the same files is one call on every host.
+ * Deliberately NOT the generic (change-profile) allowance, which keeps
+ * MAX_SURFACE_CODE_BYTES — an edit frontier wants the narrow window.
+ */
+const SEEDED_ANSWER_SURFACE_CODE_BYTES = 24576;
+
+/**
+ * WP-S2: bytes held back from the pack tier when water-filling the named
+ * files' whole bodies, for the envelope (task/decision/profile_binding/qref)
+ * and for JSON escaping of the bodies themselves. trimToCap remains the final,
+ * honest governor — this only keeps the common case from reaching it.
+ */
+const SEEDED_ANSWER_ENVELOPE_RESERVE = 4096;
+/**
+ * Pack budget a seeded ANSWER pack may claim when the caller named several
+ * files (TL_SEEDED_GENEROUS only). Measured 2026-09-20 on a recorded Copilot
+ * call — query + 8 caller-named files with `content:"full"`: the files total
+ * ~44 KB embedded, the 32 KB multi-concern tier forced a second call for the
+ * remainders, and that second turn costs the caller about as much as 9-14 KB
+ * of served source on every host, while a native agent reads the same eight
+ * files whole in one parallel turn. 48 KB keeps such a request to one call and
+ * still sits well inside the task_pack wire budget; a client-profile ceiling
+ * and a caller `budget.bytes` both still win (`Math.min` at the use sites).
+ * The base multi-concern tier stays the floor for 2-3 named files.
+ */
+const SEEDED_GENEROUS_PACK_BYTES = 48 * 1024;
+const SEEDED_GENEROUS_PACK_MIN_FILES = 4;
+
+/** WP-S2: how many distinct symbol windows one oversized caller-named file may serve (rule 3). */
+const SEEDED_ANSWER_MAX_ANCHOR_WINDOWS = 4;
+
+/** WP-P2 B: headroom a post-`trimToCap` body reduction takes on top of the measured overflow, so the honesty fields it stamps (`content_completeness`, the added `remaining_ranges` entry) cannot themselves put the pack back over the cap and cost a second surface its bytes. */
+const SHED_REDUCTION_SLACK_BYTES = 512;
+
 /** Maximum surfaces when all roles are distinct. */
 const MAX_SURFACES_DISTINCT = 6;
 
@@ -625,16 +777,37 @@ const READ_FAILED = Symbol("read-failed");
 // Exported alongside `sfNamedFrontierRow` for the FX-OH F1 pin.
 export class FileReadCache {
   private readonly content = new Map<string, string | typeof READ_FAILED>();
+  private readonly verdicts = new Map<string, ServedTextVerdict>();
   private readonly symbols = new Map<string, ParsedSymbols | null>();
 
-  /** Read `relPath` under `workspace` once; subsequent calls return the memo. Returns undefined on any I/O error OR undecodable content (P3, 2026-08-27: BOM-sniffed/NUL-probed via decodeTextBuffer, never a raw utf8 mis-decode); cached as a failure so it is not retried. */
+  /**
+   * Read `relPath` under `workspace` once; subsequent calls return the memo.
+   * Returns undefined on any I/O error OR content the ONE serve-side decode
+   * policy refuses; cached as a failure so it is not retried.
+   *
+   * AA1 (2026-09-14, review round 10): this is the reader behind nearly every
+   * task-pack BODY (`readCached` -> candidateToSurface / anchorFocusFor-
+   * LocatorCandidate / centeredSliceForCap / sliceRange), so it is where the
+   * single `readServedText` verdict (util/textDecode.ts) belongs. It used to
+   * call `decodeTextBuffer`, whose NUL probe stops at
+   * `UNDECODABLE_PROBE_BYTES` -- which is why a file whose NULs begin at byte
+   * 4260 was read, sliced, embedded and CERTIFIED with 300 escaped NULs on the
+   * wire (review round 9, findings 49/50). Now: `"clean"` and `"stripped"`
+   * memoize the verdict's own (NUL-free) text, so no downstream consumer can
+   * ever see a NUL this cache handed out; `"undecodable"` memoizes the failure,
+   * exactly as an unreadable file always did. The verdict itself is kept so a
+   * caller that must ANNOTATE the strip can ask (`verdictFor`), instead of
+   * re-deriving the judgment with a second, differently-spelled predicate.
+   */
   read(workspace: string, relPath: string): string | undefined {
     const hit = this.content.get(relPath);
     if (hit !== undefined) return hit === READ_FAILED ? undefined : hit;
     let raw: string | typeof READ_FAILED;
     try {
-      const decoded = decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath)));
-      raw = decoded === null ? READ_FAILED : decoded;
+      // served-bytes: readServedText
+      const verdict = readServedText(fs.readFileSync(path.join(workspace, relPath)));
+      this.verdicts.set(relPath, verdict);
+      raw = verdict.kind === "undecodable" ? READ_FAILED : verdict.text;
     } catch {
       raw = READ_FAILED;
     }
@@ -642,9 +815,59 @@ export class FileReadCache {
     return raw === READ_FAILED ? undefined : raw;
   }
 
-  /** Seed the cache with content already read elsewhere (e.g. the seeded-pack parallel reads), so downstream slice/widen calls reuse it. */
-  seed(relPath: string, content: string): void {
-    if (!this.content.has(relPath)) this.content.set(relPath, content);
+  /**
+   * AA1 (round 10): the serve-side decode verdict `read` recorded for
+   * `relPath`, when this cache is the one that read it. `undefined` means this
+   * cache never read that path itself (a `seed`/`reseed` caller supplied the
+   * text, or nothing read it at all) -- never "the verdict was clean".
+   */
+  verdictFor(relPath: string): ServedTextVerdict | undefined {
+    return this.verdicts.get(relPath);
+  }
+
+  /**
+   * Seed the cache with content already read elsewhere (e.g. the seeded-pack
+   * parallel reads), so downstream slice/widen calls reuse it.
+   *
+   * SHOULD-FIX 57 (AB1, 2026-09-14, review round 11): the seeding caller ALREADY
+   * HAS the `readServedText` verdict for those bytes (`buildSeededTaskPack`'s
+   * loop reads through `readServedTextSafe`), and dropping it here is what made
+   * `verdictFor` empty for every seeded path — so `candidateToSurface`'s
+   * annotation (AA1's door 7, "the ONE place a strip is STATED") could not cover
+   * a seeded path at all, and the seeded door had to keep a SECOND register
+   * (`nulStrippedSeedPaths`) that an anchor-focus `why` rewrite then dropped on
+   * a 16 KiB fixture. Record it, so `verdictFor` is the single source.
+   */
+  seed(relPath: string, content: string, verdict?: ServedTextVerdict): void {
+    if (this.content.has(relPath)) return;
+    this.content.set(relPath, content);
+    if (verdict !== undefined) this.verdicts.set(relPath, verdict);
+  }
+
+  /**
+   * SHOULD-FIX 37 (2026-09-14, review round 6): `seed` above is
+   * deliberately a no-op once `relPath` is already memoized — including a
+   * memoized `READ_FAILED` — so it can never clobber real content another
+   * caller already cached. That is wrong for a caller who tried the
+   * STRICT read first (via `readCached`/`read`, which memoizes the
+   * `READ_FAILED` failure itself), then successfully recovered via a
+   * lenient re-decode: the recovered text is exactly what SHOULD replace
+   * the memoized failure, not be silently dropped by it. `reseed`
+   * unconditionally overwrites the memo (clearing any `READ_FAILED` for
+   * this path too), so every later `read`/`readCached` call for the SAME
+   * `FileReadCache` instance — including the ones `augmentQueryNamedFileSurfaces`
+   * itself makes right after seeding, to slice/anchor/build the surface
+   * body — observes the SAME recovered text instead of re-hitting the
+   * stale strict failure. `seed`'s own 4 pre-existing call sites are
+   * untouched; only a caller that just proved a memoized failure is now
+   * stale should ever reach for this.
+   */
+  reseed(relPath: string, content: string, verdict?: ServedTextVerdict): void {
+    this.content.set(relPath, content);
+    // SHOULD-FIX 57: see `seed` above — the verdict is recorded unconditionally
+    // here because `reseed`'s whole purpose is to REPLACE what an earlier read
+    // concluded, including that read's verdict.
+    if (verdict !== undefined) this.verdicts.set(relPath, verdict);
   }
 
   /** Parse `relPath`'s symbols once (given its already-cached content + language); memoized including the null (parse-failure) result. */
@@ -662,14 +885,18 @@ export class FileReadCache {
   }
 }
 
-/** Read `relPath` under `workspace`, using `cache` when supplied. Returns undefined on I/O error or undecodable content (P3, 2026-08-27). */
+/**
+ * Read `relPath` under `workspace`, using `cache` when supplied. Returns
+ * undefined on I/O error or content the serve-side decode policy refuses.
+ *
+ * AA1 (2026-09-14, round 10): the cache-less branch runs the SAME
+ * `readServedText` policy `FileReadCache.read` does, so "which reader did I
+ * happen to get" can never decide whether a NUL reaches the wire.
+ */
 function readCached(workspace: string, relPath: string, cache?: FileReadCache): string | undefined {
   if (cache) return cache.read(workspace, relPath);
-  try {
-    return decodeTextBuffer(fs.readFileSync(path.join(workspace, relPath))) ?? undefined;
-  } catch {
-    return undefined;
-  }
+  // served-bytes: readServedText
+  return servedTextOrUndefined(path.join(workspace, relPath));
 }
 
 // ---------------------------------------------------------------------------
@@ -718,7 +945,14 @@ function elisionLeftMarkersOnly(elided: string): boolean {
   return sawMarker;
 }
 
-function sliceCode(workspace: string, relPath: string, range: string, cache?: FileReadCache): string | undefined {
+function sliceCode(
+  workspace: string,
+  relPath: string,
+  range: string,
+  cache?: FileReadCache,
+  /** WP-S2: overridden ONLY by `centeredSliceForCap`'s `wholeFileParity` opt-in; every other caller keeps the shared per-surface cap. */
+  maxBytes = MAX_SURFACE_CODE_BYTES,
+): string | undefined {
   const m = range.match(/^(\d+)-(\d+)$/);
   if (!m) return undefined;
   const start = parseInt(m[1]!, 10);
@@ -735,11 +969,32 @@ function sliceCode(workspace: string, relPath: string, range: string, cache?: Fi
   // rehearsal's utf16 scenario three_way_consistent check).
   const slice = sliceLinesToText(raw, start, end);
   if (slice.length === 0) return undefined;
-  if (Buffer.byteLength(slice, "utf8") > MAX_SURFACE_CODE_BYTES) return undefined;
+  if (Buffer.byteLength(slice, "utf8") > maxBytes) return undefined;
   // item 11: pass the slice's true file start line so elision markers carry
   // file line numbers, not slice-relative ones.
   const elided = elideDocComments(slice, languageForPath(relPath), start);
   return elisionLeftMarkersOnly(elided) ? slice : elided;
+}
+
+/**
+ * WP-S2 rule 1 (TL_SEEDED_GENEROUS): how many bytes a WHOLE-FILE surface for
+ * `content` would really put on the wire — i.e. what `centeredSliceForCap`
+ * (via `candidateToSurface`) will actually embed, which is the elided text
+ * whenever elision leaves real code behind, and the raw text when the file is
+ * nothing but comments (`sliceCode`'s markers-only fallback).
+ *
+ * The seeded loop used to take its "does this file fit?" decision on RAW
+ * bytes, so a comment-heavy file whose executable body fits the cap outright
+ * was re-pointed at a single anchor symbol anyway — the embed layer below it
+ * has measured the elided form since DESIGN-v0.8 §C3, but the decision above
+ * it never asked. Pure; no workspace access (the seed content is already in
+ * hand), so this adds no read.
+ */
+function wholeFileEmbedBytes(content: string, relPath: string): number {
+  const rawBytes = Buffer.byteLength(content, "utf8");
+  const elided = elideDocComments(content, languageForPath(relPath), 1);
+  if (elisionLeftMarkersOnly(elided)) return rawBytes;
+  return Math.min(rawBytes, Buffer.byteLength(elided, "utf8"));
 }
 
 // Comment-heavy implementation ranges can exceed the raw per-surface cap even
@@ -877,6 +1132,20 @@ export function centeredSliceForCap(
   cache?: FileReadCache,
   centerLine?: number,
   maxBytes = MAX_SURFACE_CODE_BYTES,
+  opts?: {
+    fullRemainder?: boolean;
+    /**
+     * WP-S2 (TL_SEEDED_GENEROUS): take the fits-case slice through `sliceCode`
+     * even though `maxBytes` is not the shared cap, so a whole-file body served
+     * under the widened caller-named allowance keeps sliceCode's exact read
+     * semantics — `sliceLinesToText`'s trailing-newline restoration at EOF (the
+     * T1b three-way read parity fix) and the markers-only elision fallback.
+     * Opt-in, because every OTHER caller that passes a custom `maxBytes` (the
+     * wiring/hub embeds) is serving a WINDOW, not a whole file, and its bytes
+     * must stay exactly as they are.
+     */
+    wholeFileParity?: boolean;
+  },
 ): { code: string; remaining_ranges: string[] } | undefined {
   const m = range.match(/^(\d+)-(\d+)$/);
   if (!m) return undefined;
@@ -900,7 +1169,9 @@ export function centeredSliceForCap(
   if (Buffer.byteLength(whole, "utf8") <= maxBytes) {
     const fit = maxBytes === MAX_SURFACE_CODE_BYTES
       ? sliceCode(workspace, relPath, range, cache)
-      : elideDocComments(whole, lang, start);
+      : opts?.wholeFileParity === true
+        ? sliceCode(workspace, relPath, range, cache, maxBytes) ?? elideDocComments(whole, lang, start)
+        : elideDocComments(whole, lang, start);
     if (fit !== undefined) return { code: fit, remaining_ranges: [] };
   }
 
@@ -961,12 +1232,23 @@ export function centeredSliceForCap(
   // there. Both canonicalDecision.ts's servedDocumentZoom (the discover-next
   // builder) and every other remaining_ranges reader take this verbatim, so
   // capping it here is sufficient without touching any downstream consumer.
+  // RANGE PRESERVATION (2026-09-19, reliability design 5.1: D = Q - (C u S)):
+  // the nearest-chunk cap above is right for a surface TL discovered -- the
+  // far end is optional context. It is wrong for a range the CALLER named:
+  // every line of it is owed, and a remainder cut to the nearest 200 lines
+  // made the continuation chain end there with the tail never scheduled
+  // (requested 1-300, served window 1-99, remaining 100-299, line 300 lost;
+  // a denser file lost 276-300). `fullRemainder` reports the whole remainder
+  // and leaves paging to the follow-up read's own continuation.
+  const chunkLines = opts?.fullRemainder === true
+    ? Number.MAX_SAFE_INTEGER
+    : MAX_REMAINING_RANGE_CHUNK_LINES;
   if (winStart > start) {
-    const chunkStart = Math.max(start, winStart - MAX_REMAINING_RANGE_CHUNK_LINES);
+    const chunkStart = Math.max(start, winStart - chunkLines);
     remaining.push(`${chunkStart}-${winStart - 1}`);
   }
   if (winEnd < end) {
-    const chunkEnd = Math.min(end, winEnd + MAX_REMAINING_RANGE_CHUNK_LINES);
+    const chunkEnd = Math.min(end, winEnd + chunkLines);
     remaining.push(`${winEnd + 1}-${chunkEnd}`);
   }
   return { code: elideDocComments(windowText, lang, winStart), remaining_ranges: remaining };
@@ -1257,6 +1539,7 @@ function mintArtifactSurface(
     // Stat-first (FIFO/device/oversize) before materializing a discovered
     // artifact: this read happens before any container preflight can run.
     statReadTargetSync(file.absPath, workspace);
+    // served-bytes: not-served (artifact mint: shaOfBytes for the handle; the artifact's own extractor serves its sections)
     const bytes = fs.readFileSync(file.absPath);
     const handle = handleTable.upsert({
       kind: "file",
@@ -1279,11 +1562,11 @@ function mintArtifactSurface(
         artifactKind: (file.ext === ".tsv" ? "csv" : file.ext.slice(1)) as ArtifactKind,
         size: bytes.byteLength,
         handle: handle.id,
-        extract: `read_file mode=artifact path=${file.relPath}${
+        extract: `read_file {targets:[{path:${JSON.stringify(file.relPath)}${
           args?.credentialRef !== undefined
-            ? ` credentialRef=${JSON.stringify(args.credentialRef)}`
+            ? `, credentialRef:${JSON.stringify(args.credentialRef)}`
             : ""
-        }`,
+        }}]}`,
       },
     };
   } catch {
@@ -1380,6 +1663,249 @@ export function dedupeAgentGuideSurfaces(
     for (const guide of guides) if (!keep.has(guide.handle)) dropped.add(guide.handle);
   }
   return dropped.size === 0 ? surfaces : surfaces.filter((surface) => !dropped.has(surface.handle));
+}
+
+// ---------------------------------------------------------------------------
+// FX-M Change A (TL_PACK_GUIDE_ELIDE, 2026-09-19): elide the redundant
+// TokenLighten-managed guide block from a served agent-guide surface. Kept
+// deliberately separate from dedupeAgentGuideSurfaces/AGENT_GUIDE_PRIORITY
+// just above -- that logic keeps ONE guide surface per directory when two
+// resolve there; this one shrinks whichever guide surface(s) DO end up
+// served, regardless of how many there are.
+// ---------------------------------------------------------------------------
+
+/**
+ * Basenames (case-insensitive) that qualify a surface for guide-block
+ * elision regardless of directory, plus the exact repo-relative paths of the
+ * per-host rule-file mirrors whose bare basenames ("tokenlighten.md",
+ * "tokenlighten.mdc") are not distinctive enough to match on their own. ONE
+ * constant, deliberately: a file that merely CONTAINS the sentinel text but
+ * is not on this list (a spec/fixture in this very repo, for instance) must
+ * never be elided.
+ */
+const AGENT_GUIDE_ELIDE_BASENAMES: ReadonlySet<string> = new Set([
+  "agents.md",
+  "claude.md",
+  "claude.local.md",
+  "gemini.md",
+]);
+const AGENT_GUIDE_ELIDE_PATHS: ReadonlySet<string> = new Set([
+  ".github/copilot-instructions.md",
+  ".cursor/rules/tokenlighten.mdc",
+  ".clinerules/tokenlighten.md",
+  ".continue/rules/tokenlighten.md",
+]);
+
+/** True when `rawPath` names a file this pre-pass may elide the managed block from. */
+function isAgentGuideElidePath(rawPath: string): boolean {
+  const normalized = normalizedRequestPath(rawPath);
+  if (AGENT_GUIDE_ELIDE_PATHS.has(normalized)) return true;
+  return AGENT_GUIDE_ELIDE_BASENAMES.has(path.posix.basename(normalized));
+}
+
+// ---------------------------------------------------------------------------
+// WP-S5 (B) (TL_IDENTIFIER_GROUNDING, 2026-09-20): TokenLighten's OWN managed
+// guide text is never a discovery candidate.
+// ---------------------------------------------------------------------------
+//
+// Measured on a live VS Code Copilot session: a read-only question about order
+// cancellation came back `discover`, and the pack's own `next` re-packed the
+// SAME query against `.github/agents/tokenlighten-explore.agent.md`,
+// `.github/copilot-instructions.md` and `AGENTS.md`. Those files are TL's own
+// injected instructions — they talk about "edit", "read", "targets", "paths",
+// so a residual request-item's salient-word scan matches them for almost any
+// request — and the HOST already puts that same text in the model's system
+// prompt. Fetching it back as workspace "evidence" is a wasted turn by
+// construction (the session paid one, ~210 mAIU, for junk).
+//
+// Detection reuses FX-M's list-plus-sentinel discipline on purpose. The list
+// (this file's `AGENT_GUIDE_ELIDE_PATHS`/`_BASENAMES`, plus the sixth canonical
+// agents-md stub target, `.github/agents/tokenlighten-explore.agent.md`) bounds
+// WHICH files may be treated this way, so a spec or fixture in some repo that
+// merely contains the sentinel text is never silently hidden from discovery;
+// the SENTINEL then bounds WHICH LINES of such a file are TL's, so an AGENTS.md
+// that also carries the project's own hand-written guidance keeps every line
+// outside the managed block fully discoverable.
+//
+// The sixth target is kept in a separate constant rather than appended to
+// `AGENT_GUIDE_ELIDE_PATHS`: that set is read by TL_PACK_GUIDE_ELIDE, a
+// different flag with its own pinned behaviour, and this change must not move
+// it.
+
+/** The sixth canonical agents-md stub target (packages/agents-md/src/stubs.ts): a whole Copilot custom-agent file, not a managed block inside a pre-existing rules file, so FX-M's elide list never needed it. */
+const MANAGED_GUIDE_EXTRA_PATHS: ReadonlySet<string> = new Set([
+  ".github/agents/tokenlighten-explore.agent.md",
+]);
+
+/** True when `rawPath` is one of the files the agents-md package writes a managed block into. */
+function isManagedGuidePath(rawPath: string): boolean {
+  return isAgentGuideElidePath(rawPath) || MANAGED_GUIDE_EXTRA_PATHS.has(normalizedRequestPath(rawPath));
+}
+
+/**
+ * The 1-based, inclusive line span of the TokenLighten-managed block in
+ * `relPath`, or undefined when the file is not a managed-guide target or
+ * carries no sentinel pair. Bounded, and memoized per (workspace, path) for the
+ * life of the process: the block is written by `tl workspace setup`, not during
+ * a task, and a stale verdict could only ever mis-size a discovery exclusion —
+ * never a served byte, a range, or an absence claim.
+ */
+const managedGuideBlockSpans = new Map<string, readonly [number, number] | null>();
+const MANAGED_GUIDE_SPAN_CACHE_CAP = 64;
+
+function managedGuideBlockSpan(workspace: string, relPath: string): readonly [number, number] | undefined {
+  if (!isManagedGuidePath(relPath)) return undefined;
+  const key = `${workspace}::${normalizedRequestPath(relPath)}`;
+  const cached = managedGuideBlockSpans.get(key);
+  if (cached !== undefined) return cached ?? undefined;
+  let span: readonly [number, number] | null = null;
+  const text = boundedWorkspaceText(workspace, relPath);
+  if (text !== undefined) {
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex((line) => line.includes(SENTINEL_START));
+    if (start >= 0) {
+      const endOffset = lines.slice(start).findIndex((line) => line.includes(SENTINEL_END));
+      span = [start + 1, endOffset >= 0 ? start + endOffset + 1 : lines.length];
+    }
+  }
+  if (managedGuideBlockSpans.size >= MANAGED_GUIDE_SPAN_CACHE_CAP) {
+    const oldest = managedGuideBlockSpans.keys().next().value as string | undefined;
+    if (oldest !== undefined) managedGuideBlockSpans.delete(oldest);
+  }
+  managedGuideBlockSpans.set(key, span);
+  return span ?? undefined;
+}
+
+export function resetManagedGuideBlockSpanCacheForTest(): void {
+  managedGuideBlockSpans.clear();
+}
+
+/** Test hook for the (B) rule's boundary: which LINES of a managed-guide file are TokenLighten's own, and therefore unmatchable. `undefined` for any file this policy does not cover. */
+export function managedGuideBlockSpanForTest(workspace: string, relPath: string): readonly [number, number] | undefined {
+  return managedGuideBlockSpan(workspace, relPath);
+}
+
+/** True when a scan hit at `line` of `relPath` fell inside TokenLighten's own injected instructions — text the host already gave the model, so never evidence about the caller's repository. */
+function matchIsManagedGuideText(workspace: string, relPath: string, line: number | undefined): boolean {
+  const span = managedGuideBlockSpan(workspace, relPath);
+  if (span === undefined) return false;
+  // A hit with no line (a filename-only match) in a managed-guide file is
+  // attributed to the block: there is no line to place outside it.
+  if (line === undefined) return true;
+  return line >= span[0] && line <= span[1];
+}
+
+/** One elided-block outcome: the rewritten body plus the 0-based line offsets (within the ORIGINAL `code`) the marker replaced. */
+interface AgentGuideElisionResult {
+  code: string;
+  elidedLineCount: number;
+  /** 0-based line offset, within the ORIGINAL `code`, of the first elided line. */
+  elidedStartLineOffset: number;
+  /** 0-based line offset, within the ORIGINAL `code`, of the last elided line (inclusive). */
+  elidedEndLineOffset: number;
+}
+
+/**
+ * Finds the managed block's start sentinel line in `code` and replaces its
+ * INNER content (strictly between the sentinel lines) with one marker line,
+ * when that inner content is longer than 3 lines. The sentinel lines
+ * themselves are always kept.
+ *
+ * UNLIKE locateTaskContext.ts's own findManagedBlockLineRange (which fails
+ * closed -- returns null -- on an unterminated start sentinel), a served
+ * `code` body that carries only the START sentinel means the real block
+ * continues past the served slice: this elides through the body's own last
+ * line rather than declining to act, per this flag's design (the block is
+ * redundant context either way, terminated or not).
+ *
+ * Returns undefined when there is no start sentinel, or the inner content is
+ * too short (<=3 lines) to be worth eliding.
+ */
+function elideAgentGuideManagedBlock(code: string): AgentGuideElisionResult | undefined {
+  const lines = code.split("\n");
+  // A `code` body that ends with "\n" (the normal case for a served line
+  // range) splits into one TRAILING EMPTY-STRING artifact that is not a real
+  // line -- e.g. "a\nb\n".split("\n") === ["a","b",""]. Excluded from the
+  // "no end sentinel" fallback below via the same "-1" adjustment the legacy
+  // halving loop already applies to this exact split() quirk
+  // (`Math.ceil((lines.length - 1) / 2)`), so the reported elided-line count
+  // is exact and the reconstructed body still ends on its own last line.
+  const realLineCount = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+
+  let startIdx = -1;
+  for (let i = 0; i < realLineCount; i++) {
+    if (lines[i]!.includes(SENTINEL_START)) { startIdx = i; break; }
+  }
+  if (startIdx === -1) return undefined;
+
+  let endIdx = -1;
+  for (let i = startIdx + 1; i < realLineCount; i++) {
+    if (lines[i]!.includes(SENTINEL_END)) { endIdx = i; break; }
+  }
+
+  const innerStart = startIdx + 1;
+  // No end sentinel in the served body => the block runs off the end of what
+  // was served; elide straight through the last REAL line (see doc comment
+  // above) -- `lines.slice(innerEndExclusive)` below still naturally picks up
+  // the trailing empty-string artifact (if any), so the reconstructed body's
+  // own trailing newline is preserved either way.
+  const innerEndExclusive = endIdx === -1 ? realLineCount : endIdx;
+  const elidedLineCount = innerEndExclusive - innerStart;
+  if (elidedLineCount <= 3) return undefined;
+
+  const marker = `<!-- tokenlighten: managed guide block elided (${elidedLineCount} lines) - it is already in your instructions; zoom this handle to read it -->`;
+  const newLines = [
+    ...lines.slice(0, innerStart), // through & including the start sentinel line
+    marker,
+    ...lines.slice(innerEndExclusive), // the end sentinel line onward, if any; nothing otherwise
+  ];
+  return {
+    code: newLines.join("\n"),
+    elidedLineCount,
+    elidedStartLineOffset: innerStart,
+    elidedEndLineOffset: innerEndExclusive - 1,
+  };
+}
+
+/**
+ * Absolute "<start>-<end>" span covering the given 0-based, inclusive line
+ * OFFSETS of a surface's `code`, anchored at `range`'s own start line.
+ * Falls back to `range` unchanged when it is not the plain "<digits>-<digits>"
+ * shape trimToCap's own Phase E already assumes for `remaining_ranges` --
+ * the same "whole range" fallback that loop's `surf.remaining_ranges = ...`
+ * line uses when it cannot express a finer-grained remainder.
+ */
+function absoluteElidedSpan(range: string, offsetStart: number, offsetEnd: number): string {
+  const match = /^(\d+)-(\d+)$/.exec(range);
+  if (match === null) return range;
+  const rangeStart = Number(match[1]);
+  return `${rangeStart + offsetStart}-${rangeStart + offsetEnd}`;
+}
+
+/**
+ * FX-M Change A entry point: elide the managed block of every eligible,
+ * code-bearing agent-guide surface in `result`. Called from
+ * dedupeTrimAndPersist immediately before trimToCap, gated on
+ * TL_PACK_GUIDE_ELIDE -- see that flag's doc comment (util/flags.ts) for the
+ * full rationale. Mutates surfaces in place; runs regardless of whether the
+ * pack is currently over cap (the block is redundant context either way).
+ *
+ * Exported (not otherwise part of the public task-pack API) purely for direct
+ * unit testing against constructed TaskPackResult values, the same rationale
+ * trimToCap/dedupeAgentGuideSurfaces are already exported under -- the real
+ * entry point remains dedupeTrimAndPersist/buildTaskPack.
+ */
+export function applyAgentGuideElision(result: TaskPackResult): void {
+  for (const surf of codeTaskPackSurfaces(result.surfaces)) {
+    if (typeof surf.code !== "string") continue;
+    if (!isAgentGuideElidePath(surf.path)) continue;
+    const elided = elideAgentGuideManagedBlock(surf.code);
+    if (elided === undefined) continue;
+    surf.code = elided.code;
+    surf.content_completeness = "partial";
+    const span = absoluteElidedSpan(surf.range, elided.elidedStartLineOffset, elided.elidedEndLineOffset);
+    surf.remaining_ranges = [...new Set([...(surf.remaining_ranges ?? []), span])];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,6 +2039,7 @@ function remintPackArtifact(
   try {
     const absPath = path.join(workspace, surface.path);
     statReadTargetSync(absPath, workspace);
+    // served-bytes: not-served (artifact re-mint: shaOfBytes for the handle only)
     const bytes = fs.readFileSync(absPath);
     return {
       file: {
@@ -1828,7 +2355,15 @@ export async function buildTaskPack(
     workspace,
     args.query ?? args.symbol ?? args.path ?? "",
   );
-  return requestItemPrewalkStorage.run(requestItemPrewalk, () =>
+  // SHOULD-FIX 11 (2026-09-13, review round): scope the query-named-file
+  // walk cache to this ONE call, same reasoning as the two ALS runs already
+  // nested here — see queryNamedFilesWalkStorage's own doc comment.
+  return queryNamedFilesWalkStorage.run(new Map(), () =>
+    // BLOCKER 25 (2026-09-14, review round 4): scope the unreadable-named-path
+    // ledger to this ONE call, same reasoning as the walk cache it rides with —
+    // see unreadableNamedPathStorage's own doc comment.
+    unreadableNamedPathStorage.run(new Map(), () =>
+    requestItemPrewalkStorage.run(requestItemPrewalk, () =>
     packByteCeilingStorage.run(byteCeiling, async () => {
     try {
       await prefetchArtifactSurfaceSections(args, workspace);
@@ -1839,6 +2374,11 @@ export async function buildTaskPack(
     }
     try {
       const built = await buildTaskPackCore(args, workspace);
+      // FIXALL-A group D (2026-09-14): `request_names_no_target` is stamped
+      // inside `buildTaskExecutionContract` — the one choke point every decision
+      // path passes through BEFORE the decision is derived. Stamping it here,
+      // after the core returns, was too late: the core derives and applies the
+      // canonical decision itself.
       const explicitBudget = resolveCallerByteCeiling(args.maxBytes, args.maxTokens, undefined);
       if (explicitBudget !== undefined && explicitBudget < DEFAULT_RESPONSE_BYTE_FLOOR) {
         (built as unknown as Record<string, unknown>).budget_floor_applied = {
@@ -1879,7 +2419,7 @@ export async function buildTaskPack(
     } finally {
       artifactSectionPrefetch.delete(workspace);
     }
-  }));
+  }))));
 }
 
 // ---------------------------------------------------------------------------
@@ -3257,12 +3797,27 @@ function singleSiteShortCircuitSeed(
 
   let buf: Buffer;
   try {
+    // served-bytes: readServedText
     buf = fs.readFileSync(real);
   } catch {
     return undefined;
   }
-  const content = decodeTextBuffer(buf);
-  if (content === null) return undefined;
+  // served-bytes: readServedText
+  // SHOULD-FIX 58 (AB1, 2026-09-14, review round 11). AA1 listed this binder as
+  // a NON-door because "a file it matches is then sliced through door 1, which
+  // refuses it: consistent fail-closed". It is not consistent: BINDING here is
+  // what surfaces the path, and `augmentQueryNamedFileSurfaces` — the only
+  // caller of `noteUnreadableNamedPath` on door 1 — skips a path the locator
+  // already surfaced (`if (already.has(rel)) continue;`). So an undecodable
+  // named file bound here came back as `evidence:[{why:"filename-match", len:0}]`
+  // with NO disclosure and a prescribed `next` that refuses — measured for 4 of
+  // AA1's own 5 undecodable fixtures in `aa1-doors-final.log`. Declining here
+  // hands the file to the augmentation path, which discloses it. Also removes
+  // the last `decodeTextBuffer` (4 KB NUL probe) from a path that decides which
+  // lines a pack serves.
+  // served-bytes: readServedText
+  const content = servedTextOrUndefined(buf);
+  if (content === undefined) return undefined;
 
   // Bind to a literal already provable inside this exact file: the parsed
   // replacement's search text when T1 recognized one, else the strongest
@@ -3296,7 +3851,8 @@ function singleSiteShortCircuitSeed(
   // already decoded above so this does not re-read the file from disk.
   const totalLines = content.split(/\r?\n/).length;
   const sliceCache = new FileReadCache();
-  sliceCache.seed(relPath, content);
+  // served-bytes: readServedText
+  sliceCache.seed(relPath, content, readServedText(buf));
   const slice = centeredSliceForCap(
     workspace, relPath, `1-${totalLines}`, sliceCache, matchLine, SINGLE_SITE_SHORT_CIRCUIT_MAX_CODE_BYTES,
   );
@@ -3319,6 +3875,421 @@ function singleSiteShortCircuitSeed(
     else if (remStart > matchLine) end = remStart - 1;
   }
   return { path: relPath, range: `${start}-${end}` };
+}
+
+/** TL142-01A: at most this many located paths may be promoted to seeds on one rebuild. */
+const MAX_EXECUTED_SEARCH_SEED_PATHS = 4;
+
+/**
+ * R1-B2 (2026-09-13 review round): the `why` for a path a server-prescribed
+ * search LOCATED. Deliberately carries no `caller-supplied` marker — the readers
+ * that key off that marker (`whySummary`'s summarizer, the caller-scoped
+ * evidence-trust gates) must not mistake a server-derived promotion for the
+ * caller's own explicit location.
+ */
+const EXECUTED_SEARCH_LOCATED_WHY = "executed-search-located";
+
+/**
+ * SHOULD-FIX 28 (2026-09-14, review round 4): the same provenance with the
+ * weaker claim stated on the wire — an executed search DID locate this file for
+ * a term the query names, and this server cannot classify the file's comment
+ * syntax, so it cannot say the occurrence is a declaration rather than a comment.
+ *
+ * The caller gets the bytes and judges for itself; the certificate stays open
+ * (nothing discharges `identifier:<term>` from such a surface). The alternative
+ * this replaces was to discard the file, which left the chain with no `next` at
+ * all one call after the search had found it.
+ */
+/**
+ * EXACTLY 60 CHARACTERS, deliberately: `whySummary`'s default branch passes a
+ * raw `why` through untouched up to 60 and hard-truncates past it, so a longer
+ * spelling would reach the wire cut mid-word. Keep it at or under 60 if it is
+ * ever reworded.
+ */
+const EXECUTED_SEARCH_UNCLASSIFIED_WHY = "executed-search-located; language not classified, unverified";
+
+/**
+ * R1-B2 (2026-09-13 review round): file classes whose occurrence of an
+ * identifier is PROSE ABOUT code, never the code.
+ *
+ * Extension-driven and deliberately coarse: `classifySurface` answers "doc" only
+ * for markdown outside `docs/`, so `docs/notes.md` — the exact shape that
+ * produced the false certificate — falls through it entirely. Office/PDF
+ * containers are here for the same reason: a find hit in one is text, not a
+ * declaration.
+ */
+const PROSE_HIT_EXTENSIONS = [
+  ".md", ".markdown", ".mdx", ".rst", ".txt", ".adoc", ".asciidoc", ".rtf", ".log",
+  ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".pdf", ".csv", ".tsv",
+] as const;
+
+/**
+ * R2-B13 (2026-09-13 review round 2): interface-markup and stylesheet
+ * extensions, whose CONTENT is presentation rather than a declaration.
+ *
+ * The `classifySurface` rule below catches most of these (`"ui"`/`"style"`), but
+ * only by directory or filename convention: `src/page.html` is `"ui"` while
+ * `src/markup.html` is `"unknown"`, and the same markup would then be credited as
+ * this identifier's declaration purely because of where it happens to live. This
+ * makes the class decide, not the path — and matches this wave's own
+ * `looksLikeMarkupOrCssWindow`, which already refuses such a window as answer
+ * evidence.
+ */
+const MARKUP_HIT_EXTENSIONS = [
+  ".html", ".htm", ".xhtml", ".xml", ".svg", ".vue", ".svelte",
+  ".css", ".scss", ".less", ".sass", ".styl",
+] as const;
+
+/** Cap on the file a code-bearing check will read (mirrors the locator's own comment-scan ceiling). */
+const EXECUTED_SEARCH_HIT_SCAN_MAX_BYTES = 512 * 1024;
+
+/**
+ * R2-B13 (2026-09-13 review round 2): `classifySurface` classes whose content is
+ * PROSE, INTERFACE MARKUP or STYLING — never a declaration that may discharge an
+ * `identifier:<term>` obligation.
+ *
+ * Round 1 closed the markdown carrier by extension; round 2 reached the exact
+ * same false certificate through `src/page.html`, whose class is `"ui"` and
+ * whose extension is in no prose list. This wave's own
+ * `looksLikeMarkupOrCssWindow` already treats markup/CSS windows as non-evidence
+ * for an answer — the promotion gate must agree with it rather than credit the
+ * same bytes as a declaration.
+ *
+ * `"unknown"` is deliberately NOT here: it is the class of an ordinary
+ * `src/auth.ts` / `src/retry.ts`, so refusing it would delete TL142-01A/01B
+ * altogether. The fail-closed treatment of an unclassifiable file happens on the
+ * LANGUAGE axis instead (`commentSyntaxIsKnown` below) — an extension whose
+ * comment syntax this server cannot recognize never counts as code.
+ *
+ * BLOCKER 30 (2026-09-14, review round 5): round 4 widened this set to
+ * `{"doc","ui","style"}`, reasoning (correctly) that `"ui"`/`"style"` catch the
+ * SAME `src/page.html` shape the extension lists already independently close.
+ * What that missed: `classifySurface`'s `"ui"`/`"style"` rules are NOT
+ * extension-only — `"ui"` also fires for ANY path containing `/component`,
+ * `/page`, `/web/`; `"style"` also fires for ANY path containing `/theme`. So
+ * `src/components/settings.ts` (an ordinary `.ts` file whose declaration is
+ * real code) was refused solely because of a DIRECTORY NAME, while the
+ * byte-identical `src/core/settings.ts` was not — a path-segment heuristic
+ * deciding code-bearing-ness, exactly the failure mode this constant's own
+ * original doc comment (above) warns against ("This makes the class decide,
+ * not the path"). `"doc"` is kept — `classifySurface` returns it ONLY for a
+ * bare `.md` outside `docs/`/`proto/` (`util/impact.ts`'s case 2e), which
+ * `PROSE_HIT_EXTENSIONS`'s unconditional `.md` entry and the
+ * `languageForPath === "markdown"` check below already refuse regardless of
+ * directory — so keeping it here is redundant with, never narrower than,
+ * those two extension-driven checks, and every markup/stylesheet EXTENSION
+ * R1-B2/R2-B13 actually closed (`.html/.htm/.xhtml/.xml/.svg/.vue/.svelte/
+ * .css/.scss/.less/.sass/.styl`) stays refused via `MARKUP_HIT_EXTENSIONS`
+ * below, which is extension-only by construction. `.tsx`/`.jsx` deliberately
+ * fall OUT of this set now: JSX/TSX source is code, and `pathClassCanCarryCode`
+ * still requires `termOccursOutsideComments` to pass — a comment-only mention
+ * there is refused by that conjunct, not this one.
+ */
+const NON_CODE_HIT_SURFACE_CLASSES: ReadonlySet<string> = new Set(["doc"]);
+
+/**
+ * R1-B2: is this recorded hit CODE-BEARING EVIDENCE FOR THIS TERM — i.e. may it
+ * discharge an `identifier:<term>` obligation?
+ *
+ * `find` matches anywhere in a file: comments, string literals, markdown prose.
+ * Promoting such a hit to a surface made the pack's own certificate assert that
+ * `identifier:quantumTeleportationMode` was proved by served evidence whose text
+ * said *"it is not implemented anywhere in this codebase"* — the certificate and
+ * the bytes backing it disagreed.
+ *
+ * Four conjuncts, all fail-closed (a hit that cannot be shown code-bearing is
+ * treated as "no code hit", which leaves the obligation uncovered and the
+ * discovery open — never a certificate):
+ *  - the file is not a prose/document class (`PROSE_HIT_EXTENSIONS`,
+ *    `languageForPath` = markdown, or `classifySurface` = doc);
+ *  - R2-B13: the file's `classifySurface` class is not prose/interface-markup/
+ *    styling (`NON_CODE_HIT_SURFACE_CLASSES`);
+ *  - R2-B13: this server actually KNOWS the file's comment syntax
+ *    (`commentSyntaxIsKnown`). Round 1's conjunct below is only as strong as
+ *    `util/lineClassify.ts`'s table, whose `default: []` meant "this language has
+ *    no comments" for every language the table never learned — so a term inside
+ *    an HTML `<!-- ... -->` comment, a SQL `--` comment or an ini `;` comment read
+ *    as code and minted the round-1 certificate again. An unknown language is now
+ *    "not provably code", not "comment-free";
+ *  - the term occurs at least once OUTSIDE comments and outside a trailing
+ *    inline comment, via the same parse-free classifier the locator's
+ *    comment-only precision penalty uses (`util/lineClassify.ts`). A word-
+ *    boundary match, so `quantumTeleportationModeFlag` does not prove
+ *    `quantumTeleportationMode`.
+ *
+ * Deliberately NOT a declaration-only rule: a call site is real code evidence
+ * for the identifier, and requiring a declaration would drop the common
+ * "defined in a dependency, used here" answer. Deliberately NOT string-aware
+ * either — that is the documented imprecision of the cheap lexical pass this
+ * shares with the locator, and it errs toward ADMITTING a string occurrence in a
+ * code file, which is the same direction the pre-existing
+ * `exactIdentifierEvidence` test already takes for any served surface.
+ */
+/**
+ * SHOULD-FIX 28/29 (2026-09-14, review round 4): does `term` occur at least once
+ * in `content` OUTSIDE every comment, for a language whose comment syntax is
+ * KNOWN?
+ *
+ * Extracted verbatim from the original `executedSearchHitIsCodeBearing`'s tail so the
+ * promotion gate (does a `find` hit deserve a surface?) and the obligation gate
+ * (may a served surface DISCHARGE `identifier:<term>`? — finding 29) can never
+ * disagree about what "occurs in code" means. Word-boundary, so
+ * `quantumTeleportationModeFlag` does not prove `quantumTeleportationMode`.
+ *
+ * Fails closed on an unknown language: `classifyCommentLines` would then be
+ * asked with an EMPTY prefix list and answer "not a comment" for every line,
+ * which is not a fact about the file (R2-B13). Deliberately NOT string-aware —
+ * the documented imprecision of this cheap lexical pass, shared with the
+ * locator.
+ */
+function termOccursOutsideComments(content: string, relPath: string, term: string): boolean {
+  // SHOULD-FIX 28: ask THIS module's own comment-syntax map after the grammar
+  // map, so `.swift` / `.sql` / `.ini` (taught in `LINE_COMMENT_PREFIXES`, absent
+  // from `EXT_TO_LANGUAGE`) resolve instead of reading as "unknown language".
+  const language = commentSyntaxLanguageForPath(relPath, languageForPathWithContent(relPath, content));
+  if (!commentSyntaxIsKnown(language)) return false;
+  const matcher = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  const commentFlags = classifyCommentLines(content, language!);
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!matcher.test(line)) continue;
+    if (commentFlags[i] === true) continue;
+    // A trailing line comment on an otherwise-real code line: the classifier
+    // above deliberately leaves such a line unflagged (its code portion is
+    // real), so test the code portion itself before crediting the match.
+    const codePortion = codePortionOfLine(line, language!);
+    if (matcher.test(codePortion)) return true;
+  }
+  return false;
+}
+
+/**
+ * SHOULD-FIX 27/28/29 (2026-09-14, review round 4): one bounded, symlink-safe
+ * whole-file text read for the three honesty gates that need to ask a file a
+ * question rather than trust a stamp.
+ *
+ * Returns `undefined` for anything the caller must treat as unknowable: outside
+ * the workspace real root, not a regular file, over
+ * `EXECUTED_SEARCH_HIT_SCAN_MAX_BYTES`, unreadable, or undecodable. Every caller
+ * fails CLOSED on `undefined` — none of them may read "I could not look" as "the
+ * answer is no".
+ */
+function boundedWorkspaceText(workspace: string, relPath: string): string | undefined {
+  const abs = safeResolve(relPath, workspace);
+  if (abs === undefined) return undefined;
+  try {
+    const real = fs.realpathSync(abs);
+    if (!isWithin(real, resolveReal(workspace))) return undefined;
+    const stat = fs.statSync(real);
+    if (!stat.isFile() || stat.size > EXECUTED_SEARCH_HIT_SCAN_MAX_BYTES) return undefined;
+    // served-bytes: not-served (executed-search hit VERIFICATION: undefined means 'I could not look', never 'the answer is no')
+    return decodeTextBuffer(fs.readFileSync(real)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * SHOULD-FIX 28 (2026-09-14, review round 4): is this path's CONTENT CLASS
+ * capable of carrying a declaration at all?
+ *
+ * The path/class refusals the original `executedSearchHitIsCodeBearing`
+ * always applied, factored out: prose/document extensions, markdown, interface
+ * markup/stylesheet extensions, and (BLOCKER 30, 2026-09-14 review round 5:
+ * narrowed from `doc`/`ui`/`style` back to `doc` alone — see
+ * `NON_CODE_HIT_SURFACE_CLASSES`'s own doc for why `ui`/`style` were a
+ * path-segment heuristic in disguise, not a content-class one) the `doc`
+ * surface class. Unlike the LANGUAGE axis, a refusal here is about the file's
+ * kind and is never softened to "serve it anyway" — a README or a stylesheet
+ * is not an unclassified declaration, it is a non-declaration.
+ */
+function pathClassCanCarryCode(relPath: string): boolean {
+  const lower = relPath.toLowerCase();
+  if (PROSE_HIT_EXTENSIONS.some((ext) => lower.endsWith(ext))) return false;
+  // R2-B13: markup/stylesheet content is presentation, not a declaration.
+  if (MARKUP_HIT_EXTENSIONS.some((ext) => lower.endsWith(ext))) return false;
+  if (languageForPath(relPath) === "markdown") return false;
+  // BLOCKER 30 (2026-09-14, review round 5): EXTENSION-only from here down —
+  // `classifySurface`'s `doc` class is a strict subset of the `.md` checks
+  // above, so this conjunct never refuses anything the extension lists
+  // above did not already refuse. It no longer consults `ui`/`style`, which
+  // mixed in `classifySurface`'s directory-name heuristics
+  // (`/component`, `/page`, `/web/`, `/theme`) — a path's ROLE, not what its
+  // bytes are — and refused an ordinary `src/components/settings.ts`
+  // declaration purely for living under `components/`.
+  return !NON_CODE_HIT_SURFACE_CLASSES.has(classifySurface(relPath));
+}
+
+/**
+ * SHOULD-FIX 28 (2026-09-14, review round 4) — THREE ANSWERS, NOT TWO.
+ *
+ * The original `executedSearchHitIsCodeBearing` conflated two facts behind one
+ * `false`: "these bytes are not a declaration" and "this server cannot TELL
+ * whether these bytes are a declaration". The second answer was costing real
+ * recall: a `let quantumTeleportationMode = true` in `src/feature.swift`, or a
+ * `plasmaConduitMode=true` in an extensionless `bin/tool`, was LOCATED by the
+ * prescribed `find` and then discarded — the pack never served the file and the
+ * chain dead-ended at `await_input:"no-grounded-call-remains"` with no `next`,
+ * one call after TL had the answer in hand. The `.mjs` control certified.
+ *
+ *  - `"code"`    — a known language, term outside comments. May be promoted AND
+ *                  may discharge the `identifier:<term>` obligation.
+ *  - `"located"` — the file's CLASS can carry code, but this server cannot
+ *                  classify its comment syntax, so it cannot prove the
+ *                  occurrence is a declaration rather than a comment. Promoted
+ *                  and SERVED (the caller reads it and judges), never allowed to
+ *                  discharge anything: `exactIdentifierEvidence` runs the same
+ *                  `termOccursOutsideComments` test on the served surface, so an
+ *                  unclassified language leaves the obligation uncovered and the
+ *                  certificate open. Certification is unchanged — fail-closed —
+ *                  and only the SERVE decision is relaxed.
+ *  - `"refused"`  — prose/markup/doc-class content, an unreadable/oversize file,
+ *                  or a KNOWN language whose only occurrences are inside
+ *                  comments (round 1's BLOCKER 2 and round 2's BLOCKER 13 —
+ *                  those must stay out of the pack entirely, because serving a
+ *                  markdown sentence as the identifier's surface is what minted
+ *                  the false certificate in the first place).
+ */
+function classifyExecutedSearchHit(
+  workspace: string,
+  relPath: string,
+  term: string,
+): "code" | "located" | "refused" {
+  if (!pathClassCanCarryCode(relPath)) return "refused";
+  const content = boundedWorkspaceText(workspace, relPath);
+  if (content === undefined) return "refused";
+  const language = commentSyntaxLanguageForPath(relPath, languageForPathWithContent(relPath, content));
+  // R2-B13/SHOULD-FIX 28: an unknown language is still not provably code — but
+  // it is now SERVED under its own `why` instead of vanishing.
+  if (!commentSyntaxIsKnown(language)) return "located";
+  return termOccursOutsideComments(content, relPath, term) ? "code" : "refused";
+}
+
+/**
+ * R1-B2's original predicate now reads `classifyExecutedSearchHit(...) === "code"`
+ * at each call site: `"code"` is the only verdict that may DISCHARGE an
+ * `identifier:<term>` obligation, and both promotion sites additionally admit
+ * `"located"` for SERVING only (SHOULD-FIX 28). A single boolean cannot express
+ * that split, so the wrapper is gone rather than kept as a lossy alias.
+ */
+
+/**
+ * R1-B2: the part of one line that is not a trailing comment.
+ *
+ * R2-B13: reads `util/lineClassify.ts`'s OWN table instead of guessing a prefix
+ * from the path. The guess was `["#"]` for five languages and `["//"]` for
+ * everything else — so it stripped a `//` that is not a comment in CSS, SQL or
+ * an ini file, and stripped nothing at all where the real syntax is `--`, `;` or
+ * `<!--`. One table, one answer: whatever `classifyCommentLines` treats as
+ * comment syntax is exactly what this strips. The caller has already refused an
+ * unknown language, so `lineCommentPrefixesFor` never returns `undefined` here;
+ * the `?? []` keeps this total (an unknown language then keeps the whole line,
+ * which is the pre-existing conservative behaviour).
+ */
+function codePortionOfLine(line: string, language: string): string {
+  let cut = line.length;
+  for (const prefix of lineCommentPrefixesFor(language) ?? []) {
+    if (prefix.length === 0) continue;
+    const at = line.indexOf(prefix);
+    if (at >= 0 && at < cut) cut = at;
+  }
+  const opener = blockCommentOpenerFor(language);
+  if (opener !== undefined) {
+    const at = line.indexOf(opener);
+    if (at >= 0 && at < cut) cut = at;
+  }
+  return line.slice(0, cut);
+}
+
+/**
+ * TL142-01A: the workspace-relative paths an executed search LOCATED for a term
+ * this query itself names, in deterministic order.
+ *
+ * Three gates, all fail-closed:
+ *  - the recorded term must occur VERBATIM in the query (case-sensitive). The
+ *    result ledger merges this lane's unbound partition, so without this a
+ *    search another task ran could seed files into an unrelated pack.
+ *  - the hit must still exist on disk (a stale ledger entry seeds nothing).
+ *  - at most `MAX_EXECUTED_SEARCH_SEED_PATHS` paths, so a broad find cannot
+ *    turn a focused rebuild into a sweep.
+ *
+ * Deliberately NOT filtered on whether the epoch already served the path: a
+ * seed says which files this pack is ABOUT, and the pack's own dedup passes
+ * (`applyPackDedupe`/`applyResidentFileDedup`) decide whether its bytes are
+ * re-sent. Filtering here would drop the located file from the surface set on
+ * the very next rebuild and re-open the obligation it just closed.
+ */
+function executedSearchHitSeeds(
+  workspace: string,
+  args: TaskPackArgs,
+  query: string,
+): { code: string[]; unclassified: string[] } {
+  const recorded = executedSearchResults(workspace, currentSessionLane(), args.taskBinding);
+  if (recorded.length === 0) return { code: [], unclassified: [] };
+  const code: string[] = [];
+  const unclassified: string[] = [];
+  for (const entry of recorded) {
+    if (entry.hits.length === 0) continue;
+    if (!query.includes(entry.term)) continue;
+    for (const hit of entry.hits) {
+      if (code.includes(hit.path) || unclassified.includes(hit.path)) continue;
+      if (statKindCached(workspace, workspace, hit.path) !== "file") continue;
+      // R1-B2 (2026-09-13 review round): a hit is promoted to this rebuild's
+      // surface only when it is CODE-BEARING EVIDENCE FOR THE TERM. `find`
+      // matches prose too, and a markdown sentence mentioning the identifier
+      // was being promoted as that identifier's surface — which the ordinary
+      // obligation pass (`exactIdentifierEvidence`, a word-boundary text test)
+      // then accepted as proof, certifying `act.answer` over a doc whose own
+      // body said the identifier is not implemented anywhere.
+      //
+      // SHOULD-FIX 28 (2026-09-14, review round 4): `"refused"` still keeps the
+      // hit out of the pack entirely — that is R1-B2/R2-B13's own rule. What
+      // changes is `"located"`: a file whose class CAN carry code but whose
+      // comment syntax this server cannot classify (`.swift`, `bin/tool`) is
+      // SERVED under its own `why` instead of being discarded, so the chain
+      // progresses. It still cannot DISCHARGE anything —
+      // `exactIdentifierEvidence` applies the same code-bearing test to the
+      // served surface — so certification stays exactly as fail-closed as before.
+      const verdict = classifyExecutedSearchHit(workspace, hit.path, entry.term);
+      if (verdict === "refused") continue;
+      (verdict === "code" ? code : unclassified).push(hit.path);
+      if (code.length + unclassified.length >= MAX_EXECUTED_SEARCH_SEED_PATHS) {
+        return { code: code.sort(), unclassified: unclassified.sort() };
+      }
+    }
+  }
+  return { code: code.sort(), unclassified: unclassified.sort() };
+}
+
+/**
+ * R1-B2 (2026-09-13 review round): the still-valid surfaces THIS EPOCH already
+ * served, carried alongside an executed search's located paths so promoting a
+ * hit cannot evict evidence the task already proved from.
+ *
+ * `queryServedSurfaces` does the honest work: it is epoch-gated (a different
+ * task's surfaces are never returned) and it re-stats every entry it returns, so
+ * a file edited or deleted since it was served is invalidated rather than
+ * carried. Bounded by the same seed cap the located list uses — this is a
+ * continuation aid, not a licence to re-pack the whole session.
+ */
+function retainedServedSeedPaths(
+  workspace: string,
+  query: string,
+  located: readonly string[],
+): string[] {
+  const exclude = new Set(located);
+  const carried: string[] = [];
+  for (const entry of queryServedSurfaces(workspace, workspace, {
+    excludePaths: exclude,
+    epochTokens: tokenizeForEpoch(query),
+  })) {
+    if (carried.includes(entry.path)) continue;
+    if (statKindCached(workspace, workspace, entry.path) !== "file") continue;
+    carried.push(entry.path);
+    if (carried.length >= MAX_EXECUTED_SEARCH_SEED_PATHS) break;
+  }
+  return carried;
 }
 
 async function buildTaskPackCore(
@@ -3396,7 +4367,7 @@ async function buildTaskPackCore(
   // task.profile:"answer" silently echoed back as "generic". Threading the
   // already-computed binding onto that stub is additive; every other reader
   // of `cleanedProfile` is unaffected.
-  const taskProfileBinding = bindTaskProfile(args.taskProfile, query, args.writeAllowed);
+  const taskProfileBinding = noteInheritedTaskProfile(bindTaskProfile(args.taskProfile, query, args.writeAllowed), args);
   const cleanedProfile = taskProfileBinding.selected;
   const directoryLike = (candidatePath: string): boolean =>
     isDirectoryWithin(candidatePath, workspace) || path.extname(candidatePath) === "";
@@ -3426,10 +4397,32 @@ async function buildTaskPackCore(
     )
       ? inferredNamedProjectScope
       : undefined;
+  // WP-S8 (TL_NAMED_TARGET_RESOLUTION, 2026-09-20): the repair above was
+  // written for a directory the model GUESSED before it had located the
+  // project ("src", "backend") -- but it drops EVERY directory entry once an
+  // inferred scope stands in for them. A caller-named directory that really
+  // EXISTS in this workspace is not that guess. On the recorded GitHub Copilot
+  // session the caller named three existing directories, each with its own
+  // `purpose`, and one inferred scope replaced all three before the seeded
+  // builder ever saw them -- so the directory-evidence rule in
+  // `buildSeededTaskPack` had nothing left to work with, and the service
+  // directory holding the classes the question was about was never opened.
+  // Keep those entries, AHEAD of the inference (which is the weaker claim,
+  // being this server's own reading of the query rather than something the
+  // caller wrote); an extensionless path that does NOT exist is still a guess
+  // and is still repaired exactly as before. OFF, this list is empty and
+  // `repairedEntries` is byte-identical to before this flag.
+  const keptNamedDirEntries = namedProjectScope !== undefined && namedTargetResolutionEnabled()
+    ? directoryEntries.filter((entry) =>
+        isDirectoryWithin(entry.path, workspace)
+        && normalizedRequestPath(entry.path) !== normalizedRequestPath(namedProjectScope)
+      )
+    : [];
   const repairedEntries = namedProjectScope
     ? directoryOnly || cleanedEntries.length === 0
-      ? [{ path: namedProjectScope }]
+      ? [...keptNamedDirEntries, { path: namedProjectScope }]
       : [
+          ...keptNamedDirEntries,
           { path: namedProjectScope },
           ...exactFileEntries.filter((entry) =>
             normalizedRequestPath(entry.path) !== normalizedRequestPath(namedProjectScope)
@@ -3501,6 +4494,75 @@ async function buildTaskPackCore(
     }
   }
 
+  // -------------------------------------------------------------------------
+  // TL142-01A (2026-09-13, v0.14.2 hands-on report §4 TL142-01 "A") —
+  // WHAT AN EXECUTED SEARCH LOCATED IS THIS REBUILD'S SEED.
+  //
+  // A pack that cannot place an identifier the query names asks the caller to
+  // run `search_files` for it. The caller runs it, the search finds the file —
+  // and before this wave that fact reached nothing: the next rebuild of the
+  // same task re-derived its candidate set from the query alone, did not
+  // include the located file, left the identifier obligation uncovered, and
+  // fell through to re-reading an already-served window of an UNRELATED
+  // surface (which answers as a `read.receipt`) or to re-proposing the same
+  // search under a different argument spelling. Reproduced end-to-end: first
+  // pack serves `src/auth.ts`, prescribes `find MAX_RETRIES`, the search
+  // returns `src/retry.ts:1`, and three successive resumes never serve
+  // retry.ts.
+  //
+  // Promoting the hit to a SEED (rather than only to a `next`, which
+  // `alternativeProgressAxis`' Rule 1b now also does as the second line of
+  // defence) is what makes the located file a REQUIRED SURFACE of this
+  // rebuild: the ordinary serve path ships its body, the ordinary obligation
+  // pass proves the identifier from it, and the certificate covers it. Marked
+  // `autoDiscoveredLocation` for the same reason the literal-first seed at
+  // `buildPropagationTaskPack` is — the paths did not come from the caller.
+  //
+  // CONTINUATIONS ONLY. A fresh `task.epoch:"new"` build is left byte-identical
+  // to before: the ledger is a continuation aid, and two fresh builds of one
+  // query must still agree with each other. Terms are matched VERBATIM against
+  // the query text, so a search another task ran in this lane can never inject
+  // its files here.
+  // -------------------------------------------------------------------------
+  if (
+    !args.path && !args.symbol && !(args.paths?.length)
+    && query.trim().length > 0
+    && args.taskEpoch !== "new"
+  ) {
+    const { code: locatedCode, unclassified: locatedUnclassified } = executedSearchHitSeeds(workspace, args, query);
+    // SHOULD-FIX 28: both classes are SEEDS (the file is served either way);
+    // only the `why` stamp and what may discharge an obligation differ.
+    const located = [...locatedCode, ...locatedUnclassified].sort();
+    if (located.length > 0) {
+      // R1-B2 (2026-09-13 review round): SEEDS ADD, THEY DO NOT REPLACE.
+      //
+      // Setting `paths` routes the build through `buildSeededTaskPack`, which
+      // treats that list as the WHOLE located set — so promoting one hit
+      // silently evicted every surface this task had already served, re-opening
+      // an obligation the earlier pack had closed (observed: a resume whose pack
+      // was only the newly-located file, with the previously served, correct
+      // surface gone from `evidence` entirely). The still-valid surfaces this
+      // epoch already served are carried alongside the located paths, located
+      // FIRST so the new evidence keeps first claim on the byte budget and the
+      // carried ones dedupe to `prior` instead of re-sending bytes.
+      const carried = retainedServedSeedPaths(workspace, query, located);
+      args = {
+        ...args,
+        paths: [...located, ...carried].map((relPath) => ({ path: relPath })),
+        autoDiscoveredLocation: true,
+        // R1-B2: the seeded paths' honest provenance. Routing them through
+        // `paths` made `buildSeededTaskPack` stamp `why:"caller-supplied"` on a
+        // path the caller never supplied (and `whySummary` then doubled it to
+        // "caller-supplied; caller-supplied"). Naming them here lets that
+        // builder say where they actually came from.
+        executedSearchLocated: locatedCode,
+        // SHOULD-FIX 28: stamped separately so the surface SAYS the declaration
+        // is unverified rather than implying a classified code hit.
+        executedSearchLocatedUnclassified: locatedUnclassified,
+      };
+    }
+  }
+
   if (shouldRedirectToOverview(args, locatingQuery)) {
     return {
       mode: "task_pack",
@@ -3511,9 +4573,9 @@ async function buildTaskPackCore(
       reason: "broad-overview-query",
       next: { tool: "read_file", arguments: { mode: "overview" } },
       alternatives: [
-        "read_file mode=overview",
-        "read_file mode=map query=<specific subsystem>",
-        "search_files action=symbols query=<specific symbol>",
+        "search_files {action:\"tree\"}",
+        "read_file {query:\"<specific subsystem>\", content:\"outline\"}",
+        "search_files {action:\"find\", queries:[\"<specific symbol>\"], scope:{kind:\"symbol\"}}",
       ],
       // P1-2 (hands-on report): thread the already-computed profile binding
       // through this early return too, mirroring dedupeTrimAndPersist's own
@@ -3592,6 +4654,70 @@ async function buildTaskPackCore(
     const shortCircuitSeed = singleSiteShortCircuitSeed(query, workspace);
     if (shortCircuitSeed !== undefined) {
       return buildSeededTaskPack({ ...args, paths: [shortCircuitSeed], autoDiscoveredLocation: true }, query, workspace);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // TL142-02 (2026-09-13, v0.14.2 hands-on report §4 TL142-02) — "N >= 2
+  // INDEPENDENT NAMED EDITS" is its own recognized query shape, checked
+  // AHEAD of both the multi-concern classifier immediately below and
+  // literalFirstRelation's single-relation grammar (further below): a query
+  // naming >=2 explicit (file, identifier) pairs is counted by TARGETS, not
+  // matched by a single-relation verb regex that can only ever describe one
+  // rename ("replace/rename/change A to/with/into B") — that regex has zero
+  // tolerance for the "in <path> from <old> to <new>" clause shape English
+  // (and, coincidentally, a Japanese digit fragment) actually use, which is
+  // why "Change DEFAULT_TTL_MS in src/cache.ts from 60000 to 30000, and
+  // MAX_RETRIES in src/retry.ts from 3 to 5." fell through to the ambiguous
+  // role-locator and dead-ended in choose-candidate (missing:["contract",
+  // "api","domain"]) despite naming both files, both identifiers, and both
+  // old/new values explicitly, and why a two-SENTENCE phrasing of the same
+  // request landed in the multi-concern builder instead (whose own `next`
+  // separately dead-ends into a bodyless read.receipt — a distinct defect
+  // this recognizer also sidesteps by claiming the query first). Reuses
+  // extractRequestItems (requestItems.ts's `explicitMultiEditRequestPaths`)
+  // — the one part of this pipeline the report's own repro already showed
+  // generalizes correctly across EN "and"/comma/two-sentences/bullets and JA
+  // "、" — so this recognizer is language-neutral BY CONSTRUCTION, not by a
+  // second, parallel EN/JA regex pair. A single directed rename ("rename X
+  // to Y") never qualifies (one item, or one item naming no separate
+  // identifier alongside its file); a genuinely ambiguous alternative list
+  // ("change X to Y or Z") never qualifies either (no item names an
+  // explicit file at all) — both keep falling through to
+  // literalFirstRelation/the role-locator's choose-candidate exactly as
+  // before. Routes into the SAME builder the JA phrasing already reaches
+  // (buildSeededTaskPack, via literalFirstRelation below) — never the
+  // multi-concern builder — so the result is always `act.edit` with one
+  // "edit" obligation per named file, never `await_input`.
+  // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Round 4 (2026-09-14, T4 — review-findings-3.md SHOULD-FIX 15's wire-
+  // routing residual / fix-notes-t3.md's EN-sibling caveat): the recognizer
+  // above only ever seeds the WRITABLE set (`explicitMultiEditRequestPaths`
+  // itself drops any path whose own governing lead is "read", by design), so
+  // a genuinely MIXED request ("Explain X in a.ts, and change Y in b.ts.")
+  // has only ONE qualifying path, fails the ">=2" gate, and — since this
+  // exact clause shape also defeats `literalFirstRelation` below — falls all
+  // the way through to the ambiguous role-locator and dead-ends in
+  // `choose-candidate`, despite naming both files and both identifiers
+  // explicitly. `explicitMixedEditReadRequestPaths` (requestItems.ts) is the
+  // exact same `requestItemLeads` classification, seeding the READ-lead
+  // path ALONGSIDE the edit-lead one instead of dropping it entirely —
+  // `buildTaskChangeContract`'s own `readOnlyLeadPaths` veto (below) then
+  // assigns `action:"review"` to it and `action:"edit"` only to the genuine
+  // target, so the result is `act.edit` with exactly the edit-lead path(s)
+  // writable and the read-lead path(s) served as evidence — never
+  // `choose-candidate`. Tried only after the pure multi-edit recognizer
+  // declines, so a genuinely ambiguous alternative list (no second path at
+  // all) still falls through unchanged.
+  // -------------------------------------------------------------------------
+  if (
+    !args.path && !args.symbol && !(args.paths?.length)
+    && literalFirstRoutingEnabled()
+  ) {
+    const explicitEditPaths = explicitMultiEditRequestPaths(query) ?? explicitMixedEditReadRequestPaths(query);
+    if (explicitEditPaths !== undefined) {
+      return buildSeededTaskPack({ ...args, paths: explicitEditPaths, autoDiscoveredLocation: true }, query, workspace);
     }
   }
 
@@ -4093,6 +5219,81 @@ async function buildAnswerTaskPack(
       }
     }
   }
+  // TL_JA_QUERY_BRIDGE ((S) supported first-pack policy, default ON since
+  // 2026-09-19 (USER ruling); explicit `=0` is the rollback path; MISS-ONLY
+  // recovery, orchestrator Phase 3, 2026-09-19): a Japanese query against an
+  // English-only codebase shares no lexical token with it. This never runs
+  // unless the query above (and the text recovery above it) both already
+  // abstained -- it can only ever turn a miss into a hit, never touch a
+  // query that already resolves.
+  if (!locateResult.hit) {
+    const jaRecoveryQuery = jaBridgeRecoveryQuery(query, workspace);
+    if (jaRecoveryQuery !== undefined) {
+      const jaRecovered = await locateTaskContext(workspace, {
+        action: "locate",
+        query: jaRecoveryQuery,
+        ...(args.path ? { path: args.path } : {}),
+        ...(args.symbol ? { symbol: args.symbol } : {}),
+        ...(args.lang ? { lang: args.lang } : {}),
+        limit: Math.min(args.limit ?? MAX_SURFACES_DISTINCT, MAX_SURFACES_DISTINCT),
+      });
+      const jaCurrentCandidates: ImpactCandidate[] = [...(locateResult.candidateDetails ?? [])];
+      const jaRecoveredCandidates: ImpactCandidate[] = jaRecovered.hit
+        ? [...jaRecovered.primary, ...jaRecovered.related]
+        : [...(jaRecovered.candidateDetails ?? [])];
+      const jaCurrentHasImplementation = jaCurrentCandidates.some((c) => !isNonImplementationAnswerCandidate(c));
+      const jaRecoveredHasImplementation = jaRecoveredCandidates.some((c) => !isNonImplementationAnswerCandidate(c));
+      const jaExpansions = jaBridgeExpansionTokens(query, workspace);
+      // Defect 3 (orchestrator Phase 4, 2026-09-19): a locator hit is not by
+      // itself proof the TOP candidate is what the expansions actually
+      // named -- require the top candidate's own path/symbol (and, when
+      // read, its served text) to be EVIDENCED by the expansions before
+      // ever adopting. This is the fix for the reported dangerous defect
+      // (a confident act-answer serving an unrelated file): the locator
+      // hit alone used to be sufficient.
+      // Two measured misses shaped this (2026-09-19, dev eval): (1) the
+      // locator often matches BODY text (why "exact-text") in a file whose
+      // path says little -- "orderStateMachine.ts" for a cancel/coupon/stock
+      // question -- so the window around the matched line counts as evidence
+      // too, not only path and symbol words; (2) an ABSTAIN's loudest
+      // candidate can be an unsupported filename match ("errorCodes.ts" for
+      // コード) standing in front of supported ones, so an abstain is judged
+      // on, and adopted with, its SUPPORTED candidates only.
+      const jaSupportCache = new FileReadCache();
+      const jaCandidateWords = (candidate: ImpactCandidate): { pathAndSymbolWords: string[]; textWords: string[] } => {
+        const pathAndSymbolWords = [
+          ...wordsFromIdentifierLikeText(candidate.path),
+          ...(candidate.symbol ? wordsFromIdentifierLikeText(candidate.symbol) : []),
+        ];
+        const content = readCached(workspace, candidate.path, jaSupportCache);
+        if (content === undefined) return { pathAndSymbolWords, textWords: [] };
+        const lines = content.split(/\r?\n/);
+        const span = /^(\d+)-(\d+)$/.exec(candidate.range ?? "");
+        const from = Math.max(1, (span ? Number(span[1]) : candidate.line) - 12);
+        const to = Math.min(lines.length, (span ? Number(span[2]) : candidate.line) + 24);
+        return { pathAndSymbolWords, textWords: wordsFromIdentifierLikeText(lines.slice(from - 1, to).join("\n")) };
+      };
+      const jaSupportedCandidates = jaRecoveredCandidates.filter((candidate) =>
+        expansionsSupportCandidate(jaExpansions, jaCandidateWords(candidate)));
+      const jaSupported = jaRecovered.hit
+        ? jaRecoveredCandidates[0] !== undefined && jaSupportedCandidates.includes(jaRecoveredCandidates[0])
+        : jaSupportedCandidates.length > 0;
+      const jaAdopted = jaSupported && (jaRecovered.hit || (jaRecoveredHasImplementation && !jaCurrentHasImplementation));
+      trace("ja_bridge", {
+        expansions: jaExpansions,
+        vocab_partial: getWorkspaceJaBridgeVocabulary(workspace).partial,
+        adopted: jaAdopted,
+        ...(jaAdopted ? {} : { reason: jaSupported ? "no-implementation-gain" : "unsupported" }),
+      }, workspace);
+      if (jaAdopted) {
+        const jaSupportedSet = new Set<ImpactCandidate>(jaSupportedCandidates);
+        locateResult = jaRecovered.hit
+          ? jaRecovered
+          : { ...jaRecovered, candidateDetails: (jaRecovered.candidateDetails ?? []).filter((c) => jaSupportedSet.has(c)) };
+        rankingQuery = jaRecoveryQuery;
+      }
+    }
+  }
   // 2026-08-21 answer-path-inherits-locator fix (W4-B, defect 1): the text
   // recovery above can still leave an "ambiguous" abstain when the
   // candidate pool is crowded by same- or higher-confidence noise a plain-
@@ -4295,7 +5496,7 @@ async function buildAnswerTaskPack(
     || (locateResult.hit
       && rankedAnswerCandidates[0]?.exactIdentifier === true
       && exactLocatedPaths.size === 1));
-  const candidates = exactLocatedAnswer
+  let candidates = exactLocatedAnswer
     ? [rankedAnswerCandidates[0]!.candidate]
     : strongEvidenceAnswer
     ? rankedAnswerCandidates
@@ -4305,13 +5506,250 @@ async function buildAnswerTaskPack(
     : strongRecoveredAnswer
     ? [rankedAnswerCandidates[0]!.candidate]
     : orderByLocatorVerdict(rankedAnswerCandidates, requiredLocatorPaths, primaryLocatorPath);
-  const selectionLimit = locateResult.hit
+  let selectionLimit = locateResult.hit
     ? exactLocatedAnswer ? 1 : MAX_SURFACES_DISTINCT
     : strongEvidenceAnswer
     ? 3
     : strongRecoveredAnswer
     ? 1
     : 3;
+  // TL_CONCERN_RECOVERY / prose diversification (Phase 3, orchestrator
+  // adjudication 2026-09-19). Both gated on concernRecoveryEnabled() and both
+  // computed ONLY from `candidates`/`selectionLimit` as derived above this
+  // line — every decision value above (recoveredExactAnswer,
+  // strongEvidenceAnswer, exactLocatedPaths, responsibilityResolved,
+  // strongRecoveredAnswer, exactLocatedAnswer) was computed from
+  // rankedAnswerCandidates BEFORE either mechanism ever runs, so both
+  // evaluate identically to the flag-off case (Blocker 1: an earlier version
+  // injected into rankedAnswerCandidates itself and collapsed a
+  // multi-concern query to one certified surface — see concernRecovery.ts's
+  // module doc).
+  const concernRecoveredPaths = new Set<string>();
+  if (concernRecoveryEnabled()) {
+    concernRecoveryEntryCountForTest += 1;
+    // Diversification only reorders the multi-surface orderByLocatorVerdict
+    // list — never a mode that already certified a narrow single/triple
+    // answer, and it never adds or drops a candidate the locator produced.
+    // FX-CR3 (2026-09-19): pinned to `primaryCount` (floored at 1, same
+    // floor mergeConcernAdditions's own displacement math uses below) so
+    // diversify can freely reorder everything ELSE but never pulls the
+    // locator's own top-ranked candidate out of the front slot --
+    // extractRequestItems does not promise clause order follows query-text
+    // order, so clause-order-first reordering could otherwise swap it out
+    // from under downstream consumers that key off slot 0 (SF-demote's
+    // primary/non-demotable classification; see diversifyByConcern's own
+    // doc for the measured sfShippedBookings.spec.ts failure this closes).
+    if (!exactLocatedAnswer && !strongEvidenceAnswer && !strongRecoveredAnswer) {
+      const clauseTexts = extractRequestItems(query).map((requestItem) => requestItem.text);
+      candidates = diversifyByConcern(candidates, clauseTexts, tokenizeQueryForDiversification, Math.max(1, primaryCount));
+    }
+    const concernCandidates = await recoverConcernCandidates(args, query, workspace, cache);
+    const existingConcernKeys = new Set(
+      candidates.map((c) => `${c.path}\0${c.symbol ?? ""}\0${c.range ?? c.line}`),
+    );
+    let concernDisplacementBudget = 2;
+    // Named definitions (concernRecovery.ts's own block doc): a type the
+    // request names, whose name is the stem of exactly one implementation
+    // file, is served in THIS pack. Merged before the literal and per-clause
+    // mechanisms so a stated name outranks an inferred one for the room and
+    // the two-slot displacement budget all three share.
+    const namedIdentifiers = explicitCodeIdentifiers(query);
+    const namedFiles = namedIdentifiers.length === 0 ? [] : namedDefinitionFiles(
+      namedIdentifiers,
+      walkedFilesForQueryNamedResolution(workspace, false),
+      {
+        ...(args.path ? { scopePath: args.path } : {}),
+        isTestPath: isTestConcernPath,
+        servedPaths: new Set(candidates.slice(0, Math.min(candidates.length, selectionLimit)).map((c) => c.path)),
+      },
+    );
+    if (namedFiles.length > 0) {
+      const namedAdditions: ImpactCandidate[] = [];
+      for (const named of namedFiles) {
+        const addition = await namedDefinitionCandidate(named, query, namedIdentifiers, workspace, cache);
+        if (addition === undefined) continue;
+        const key = `${addition.path}\0${addition.symbol ?? ""}\0${addition.range ?? addition.line}`;
+        if (existingConcernKeys.has(key)) continue;
+        existingConcernKeys.add(key);
+        namedAdditions.push(addition);
+      }
+      const namedMerge = mergeConcernAdditions(
+        candidates,
+        selectionLimit,
+        namedAdditions,
+        primaryCount,
+        concernDisplacementBudget,
+        MAX_SURFACES_DISTINCT,
+      );
+      candidates = namedMerge.candidates;
+      selectionLimit = namedMerge.selectionLimit;
+      concernDisplacementBudget -= namedMerge.displacedUsed;
+      for (const path of namedMerge.appliedPaths) concernRecoveredPaths.add(path);
+    }
+    if (concernCandidates.length > 0) {
+      const additions: ImpactCandidate[] = [];
+      for (const concernCandidate of concernCandidates) {
+        const impact: ImpactCandidate = {
+          path: concernCandidate.path,
+          line: concernCandidate.line,
+          range: concernCandidate.range,
+          surface: classifySurface(concernCandidate.path),
+          why: "answer-explicit-identifier-recovery",
+          confidence: 0.95,
+          ...(concernCandidate.symbol ? { symbol: concernCandidate.symbol } : {}),
+        };
+        const key = `${impact.path}\0${impact.symbol ?? ""}\0${impact.range ?? impact.line}`;
+        if (existingConcernKeys.has(key)) continue;
+        existingConcernKeys.add(key);
+        additions.push(impact);
+      }
+      // Additive only: candidates gained, selectionLimit only ever raised
+      // (never lowered), by the count of entries actually promoted or added.
+      // Where the additions go decides whether they are ever selected.
+      // FX-CR1 (2026-09-19): a concern whose file is ALREADY inside the
+      // selection window is DROPPED outright -- the window's own entry
+      // stands, never a duplicate row for the same path (this used to be
+      // "appended harmlessly", but "harmlessly" was false whenever a later
+      // stage keyed off row identity, e.g. TL_SF_DEMOTE's sibling-window
+      // check). A concern whose file exists in `candidates` beyond the
+      // window PROMOTES that same existing entry into the window (never a
+      // second object for the same path); a genuinely new path is added.
+      // Either way: free room first, then one of the window's LAST slots --
+      // at most two combined across both mechanisms, and never a locator
+      // primary. mergeConcernAdditions (concernRecovery.ts) implements this
+      // so the per-clause mechanism below can share it, spending ONE
+      // two-slot displacement budget ACROSS both mechanisms via
+      // `concernDisplacementBudget` rather than two-per-mechanism.
+      const literalMerge = mergeConcernAdditions(
+        candidates,
+        selectionLimit,
+        additions,
+        primaryCount,
+        concernDisplacementBudget,
+        MAX_SURFACES_DISTINCT,
+      );
+      candidates = literalMerge.candidates;
+      selectionLimit = literalMerge.selectionLimit;
+      concernDisplacementBudget -= literalMerge.displacedUsed;
+      for (const path of literalMerge.appliedPaths) concernRecoveredPaths.add(path);
+    }
+    // Per-CLAUSE locate recovery (Phase 4/5, Agent D, 2026-09-19): the two
+    // mechanisms above close a clause that names an enumerated/sibling
+    // LITERAL. A clause with no literal at all -- a plain prose question,
+    // e.g. "..., and where is user authentication performed?" -- seeds
+    // nothing in either of them, and reordering cannot manufacture a
+    // candidate the locator's ONE fused search over the WHOLE query never
+    // produced in the first place. Re-locates on each UNCOVERED clause's
+    // OWN text (never the whole query, never `symbol`) and folds in at
+    // most one pick per clause through the same merge planning above.
+    // hygienicClauseWorkList (concernRecovery.ts) first collapses the
+    // budget-burning shapes diagnosed in the Phase 4 report -- several
+    // BYTE-IDENTICAL relation-clause copies (one per enumerated actor noun),
+    // and one topic item PER enumerated/backtick literal member -- to one
+    // representative each, and orders genuinely literal-free prose clauses
+    // first, so a real per-clause locate is never starved by its own
+    // query's fragmentation. Cost guard: never locates when the query has
+    // <2 clauses after hygiene, or every clause is already covered.
+    const clauseWorkList = hygienicClauseWorkList(extractRequestItems(query));
+    if (clauseWorkList.length >= 2) {
+      const coverageWindowSize = Math.min(candidates.length, selectionLimit);
+      const coverageWindow = candidates.slice(0, coverageWindowSize);
+      const clauseRecovery = await runClauseLocateRecovery<ImpactCandidate>(clauseWorkList, coverageWindow, {
+        tokenize: tokenizeQueryForDiversification,
+        // `limit` is decided PER CALL by runClauseLocateRecovery itself
+        // (FIRST_ATTEMPT_LOCATE_LIMIT vs the wider RETRY_LOCATE_LIMIT) --
+        // measured (diagnose_phase2_limit.mts): a uniformly narrow limit
+        // does not meaningfully reduce locate wall-clock (the underlying
+        // multi-layer search/walk still runs; `limit` mostly truncates
+        // OUTPUT) but DOES actively crowd out a retry's own rescue
+        // candidate behind closer-but-wrong lexical matches, defeating the
+        // mechanism outright.
+        locate: (queryText, limit) => locateTaskContext(workspace, {
+          action: "locate",
+          query: queryText,
+          ...(args.path ? { path: args.path } : {}),
+          ...(args.lang ? { lang: args.lang } : {}),
+          limit,
+        }),
+        rankAbstain: rankAbstainCandidates,
+        isImplementation: (candidate) => !isNonImplementationAnswerCandidate(candidate),
+        hasSymbol: (candidate) => candidate.symbol !== undefined,
+        isTestPath: (candidate) => isTestConcernPath(candidate.path),
+        isDocPath: (candidate) => candidate.surface === "doc",
+        containsJapanese,
+        stemNeighbours: (token) => vocabularyStemNeighbours(token, workspace),
+        jaExpansionTokens: (clauseText) => jaBridgeExpansionTokens(clauseText, workspace),
+        jaRecoveryQuery: (clauseText) => jaBridgeRecoveryQuery(clauseText, workspace),
+        now: () => Date.now(),
+        onLocateAttempt: recordClauseLocateAttempt,
+      });
+      if (clauseRecovery.picks.length > 0) {
+        const clauseAdditions: ImpactCandidate[] = [];
+        for (const { candidate } of clauseRecovery.picks) {
+          const key = `${candidate.path}\0${candidate.symbol ?? ""}\0${candidate.range ?? candidate.line}`;
+          if (existingConcernKeys.has(key)) continue;
+          existingConcernKeys.add(key);
+          clauseAdditions.push(candidate);
+        }
+        if (clauseAdditions.length > 0) {
+          // Same rule as the literal merge above (FX-CR1): drop/promote/add
+          // by path, never a duplicate row for a path already in `candidates`.
+          const clauseMerge = mergeConcernAdditions(
+            candidates,
+            selectionLimit,
+            clauseAdditions,
+            primaryCount,
+            concernDisplacementBudget,
+            MAX_SURFACES_DISTINCT,
+          );
+          candidates = clauseMerge.candidates;
+          selectionLimit = clauseMerge.selectionLimit;
+          concernDisplacementBudget -= clauseMerge.displacedUsed;
+          for (const path of clauseMerge.appliedPaths) concernRecoveredPaths.add(path);
+        }
+      }
+    }
+  }
+  // TL_CALLER_EXPANSION (WP-S9, 2026-09-20; DEFAULT OFF — util/flags.ts's
+  // `callerExpansionEnabled` carries the full rationale). Runs AFTER every
+  // mechanism above, on the selection those mechanisms settled, and only on
+  // the FIRST pack of the task (a `qref` replay re-serves a decided pack, the
+  // same rule the seeded per-clause recovery applies to itself). "Where does
+  // the request enter" is a STRUCTURAL relation: the entry point's file holds
+  // none of the clause's words, so no amount of lexical locating above can
+  // reach it, and a re-pack cannot either.
+  //
+  // Strictly additive, and more conservative than the concern mechanisms
+  // above: the displacement budget passed to mergeConcernAdditions is ZERO, so
+  // an addition takes free room inside the window or lands beyond it, and a
+  // surface the pack already selected is never replaced, reordered or dropped.
+  // Readiness and obligations are untouched — a caller is evidence, not an
+  // obligation — and the additions ride the SAME candidateToSurface/served
+  // ledger path as every other surface, so `remaining`, the served ledger and
+  // the certificates keep describing exactly what shipped.
+  if (callerExpansionEnabled() && args.taskQueryRefReplay !== true) {
+    callerExpansionEntryCountForTest += 1;
+    const callerWindow = candidates.slice(0, Math.min(candidates.length, selectionLimit));
+    const callerAdditions = await recoverCallerExpansionCandidates(args, query, workspace, cache, callerWindow);
+    if (callerAdditions.length > 0) {
+      const callerMerge = mergeConcernAdditions(
+        candidates,
+        selectionLimit,
+        callerAdditions,
+        primaryCount,
+        0, // never displace: a caller is a bonus surface, never a replacement
+        MAX_SURFACES_DISTINCT,
+      );
+      candidates = callerMerge.candidates;
+      selectionLimit = callerMerge.selectionLimit;
+      // Same drop-rule exemption the concern additions take below: an addition
+      // whose call site has no resolvable enclosing symbol carries no
+      // `.symbol`, and the "range-only hit past primaryCount is locator noise"
+      // rule would otherwise silently drop the very surface this mechanism
+      // went and proved.
+      for (const path of callerMerge.appliedPaths) concernRecoveredPaths.add(path);
+    }
+  }
   if (candidates.length === 0) return undefined;
   // 2026-08-21 directory-scoped-answer fix (Issue #4 follow-up): a candidate
   // past the locator's own primary/required-related front (index >=
@@ -4344,6 +5782,7 @@ async function buildAnswerTaskPack(
       && candidate.symbol === undefined
       && !responsibilityCandidates.some((responsibility) => responsibility.path === candidate.path)
       && !strongEvidencePaths.has(candidate.path)
+      && !concernRecoveredPaths.has(candidate.path)
     ) continue;
     const range = candidate.range ?? `${candidate.line}-${candidate.line}`;
     const key = `${candidate.path}\0${candidate.symbol ?? ""}\0${range}`;
@@ -4483,6 +5922,19 @@ async function buildAnswerTaskPack(
     // reconstruct a structural answer from several handles.
     const primarySurface = surfaces[0]!;
     for (const member of members) {
+      // TL_SEEDED_GENEROUS (2026-09-20): the appends below exist because the
+      // primary surface used to be a bounded class-header slice that did NOT
+      // contain the member. Under the widened answer allowance the primary
+      // body can already hold the whole class, and then an excerpt of one of
+      // its own members is a duplicate that also merges the excerpt's
+      // `remaining_ranges` into a surface that has no such hole -- measured on
+      // a live GitHub Copilot pack: `27-420` served whole, followed by an
+      // appended `query-focused member place (80-197)` tail and a false
+      // `remaining:["80-179"]`, which also made the body unequal to its own
+      // rendering, so the answer line gutter refused to number it and the
+      // model spent three requests re-reading lines it already held. Flag
+      // off, the primary slice keeps today's bounds and nothing is skipped.
+      if (seededGenerousEnabled() && surfaceBodyCoversRange(primarySurface, member.range)) continue;
       const distinctFacetWindows = member.facetWindows.filter((window, index, all) =>
         all.findIndex((candidate) => candidate.range === window.range) === index
       );
@@ -4550,6 +6002,24 @@ async function buildAnswerTaskPack(
   // target ships a candidate list — and T05c's live candidate lists contained
   // none of the three files the query named. Serve those first, content-bearing.
   await augmentQueryNamedFileSurfaces(surfaces, query, workspace, [], cache);
+  // TL142-05 (2026-09-13): now that every explicitly-named file has its own
+  // slot, the general fallback admission may not ALSO add an unrelated file
+  // alongside them — see the function's own doc comment for the exact gate.
+  gateAnswerQueryEvidenceFocusOnNamedPathRelation(surfaces, query, workspace, cache);
+  // BLOCKER 12 (review round 3, 2026-09-13): the two passes above each carry
+  // their own "never drop the last surviving surface" floor at their splice
+  // sites (see there), but this is a second, independent backstop at the one
+  // place every downstream read in THIS function dereferences `surfaces[0]`
+  // unconditionally (`surfaces[0]!.range` a few lines below, and more after
+  // it) — the exact site a named-but-unreadable path (queryNamedWorkspaceFiles
+  // resolves it, readCached cannot read it, e.g. chmod 000) used to crash on
+  // when the gate above emptied `surfaces` with no floor of its own. Same
+  // contract as every other early `return undefined` already in this
+  // function (e.g. `candidates.length === 0`/`selected.length === 0` above):
+  // buildTaskPack's caller falls through to its own further strategies
+  // instead of this function ever throwing a bare, unstructured JSON-RPC
+  // error with no `v:1` envelope.
+  if (surfaces.length === 0) return undefined;
 
   // Issue #3 dominance tie-break: computed once, reused below (after `result`
   // exists) to serve the winner's body — see `applyDominancePromotion`.
@@ -4662,6 +6132,11 @@ async function buildAnswerTaskPack(
     verifiedAbsentIdentifiersByResult.set(finalResult, verifiedAbsentIdentifiers);
     if (result !== finalResult) verifiedAbsentIdentifiersByResult.set(result, verifiedAbsentIdentifiers);
   }
+  // TL142-05 (2026-09-13): last-of-all — after dedupeTrimAndPersist's own
+  // counterexample/trim pass AND the post-trim import/anchor augmenters
+  // above have all had their chance to add surfaces, cap non-named evidence
+  // relative to the named files' own size (report's own 1.25x bound).
+  capExtraEvidenceRelativeToNamedPaths(finalResult.surfaces, query, workspace);
   return finalResult;
 }
 
@@ -4985,6 +6460,7 @@ async function literalConcernCandidates(
   const nonTests = entries.filter((entry) => !isTestConcernPath(entry.path));
   if (nonTests.length > 0) entries = nonTests;
   await Promise.all(entries.map(async (entry) => {
+    // served-bytes: not-served (concern-defect scoring: marker counting, no body derived from it)
     const content = await readFileSafe(entry.path, workspace);
     // Causal warning markers are useful only when lexical grounding is weak.
     // With several independent query tokens they can belong to an unrelated
@@ -5129,6 +6605,7 @@ async function layeredControlCompanionCandidates(
 
   const ranked: Array<ImpactCandidate & { score: number }> = [];
   await Promise.all(paths.map(async (candidatePath) => {
+    // served-bytes: not-served (companion-candidate discovery predicate: no body derived from it)
     const content = await readFileSafe(candidatePath, workspace);
     if (content === null) return;
     const markers = [
@@ -5335,7 +6812,13 @@ function literalFirstRelation(query: string, symbol?: string): LiteralFrontierTe
       if (part.length >= 2 && part !== term.value) add(part, "measurement-only", `segment-of:${term.roleSource}`, false);
     }
   }
-  return terms;
+  // TL142-02 Decision 2 (2026-09-13): every `add()` above can reject its
+  // candidate (literalFrontierAtom's own length guard) and leave `terms`
+  // EMPTY while still having matched english/japanese — an empty array is
+  // not undefined, so the routing gate below (`!== undefined`) used to
+  // treat a garbage digit-only match as a successful relation extraction.
+  // Callers must see "nothing usable" and undefined mean the same thing.
+  return terms.length > 0 ? terms : undefined;
 }
 
 /**
@@ -6477,7 +7960,7 @@ async function buildMultiConcernTaskPack(
     ...(concernAmbiguities.length > 0 ? { concern_ambiguities: concernAmbiguities } : {}),
     ...(discoverableUnresolved.length > 0 ? {
       blocking_next_steps: discoverableUnresolved.map(({ group }) =>
-        `search_files action=find query="${representativeTokenFor(group)}"`
+        `search_files {action:"find", queries:["${representativeTokenFor(group)}"]}`
       ),
     } : {}),
     route: {
@@ -7279,6 +8762,17 @@ async function buildArtifactTaskPack(
 const MAX_SEEDED_CODE_SURFACES = MAX_SURFACES_DISTINCT;
 
 /**
+ * EXPERIMENT (TL_PACK_FAIR_TRIM): embed-attempt limit for caller-named paths
+ * when trimToCap's water-filling pass shares the byte budget across them.
+ * With the legacy limit (6) every 7th+ caller-named file came back body-less
+ * no matter how much budget was left (live: 13 named targets -> 6 files at
+ * 0 B, each re-requested in a later turn, and a round trip costs far more
+ * than the bytes it saves). The byte cap + fair trim now do the bounding, so
+ * the attempt limit only has to stop a pathological list.
+ */
+const MAX_SEEDED_CODE_SURFACES_FAIR = 16;
+
+/**
  * Workspace-relative POSIX directory that contains every path in `relPaths`.
  * Returns "" when the paths share no ancestor below the workspace root
  * itself (locator fill is then confined to the whole workspace, i.e.
@@ -7297,6 +8791,26 @@ function commonAncestorDir(relPaths: string[]): string {
     if (common.length === 0) break;
   }
   return common.join("/");
+}
+
+/**
+ * True when `surface` already SERVES every line of `range`: it carries a
+ * body, its own range contains `range`, and none of the windows it admits it
+ * did not serve (`remaining_ranges`) intersects it. Anything unparseable is
+ * "not covered" -- the callers use this to SKIP work, so the safe answer is no.
+ */
+function surfaceBodyCoversRange(surface: TaskPackSurface, range: string): boolean {
+  if (surface.code === undefined) return false;
+  const outer = parsePackLineRange(surface.range);
+  const inner = parsePackLineRange(range);
+  if (outer === undefined || inner === undefined) return false;
+  if (inner[0] < outer[0] || inner[1] > outer[1]) return false;
+  for (const window of surface.remaining_ranges ?? []) {
+    const hole = parsePackLineRange(window);
+    if (hole === undefined) return false;
+    if (hole[0] <= inner[1] && hole[1] >= inner[0]) return false;
+  }
+  return true;
 }
 
 /** True when `relPath` lies at or under the ancestor directory `dir` (both workspace-relative POSIX). An empty `dir` scopes to the whole workspace (no filtering). */
@@ -7325,6 +8839,328 @@ function isDirectoryWithin(relPath: string, workspace: string): boolean {
   }
 }
 
+/**
+ * WP-S8 (TL_NAMED_TARGET_RESOLUTION, 2026-09-20): at most this many
+ * locate-recovered surfaces per caller-named DIRECTORY, and across every
+ * caller-named directory in one pack. A directory is a "look here" scope, not
+ * an earned file list, so its evidence is bounded independently of the
+ * surface budget it also has to fit inside: three is the same per-scope width
+ * `MAX_CLAUSE_LOCATES` already gives the answer path's own clause recovery,
+ * and six is `MAX_SURFACES_DISTINCT` — a pack whose caller-named files
+ * already fill the budget adds nothing here.
+ */
+const MAX_NAMED_DIR_SURFACES = 3;
+const MAX_NAMED_DIR_SURFACES_TOTAL = MAX_SURFACES_DISTINCT;
+/**
+ * WP-S8: shared wall-clock ceiling across every caller-named directory in one
+ * pack. `runClauseLocateRecovery` budgets each CALL independently
+ * (CUMULATIVE_LOCATE_BUDGET_MS), so N directories would otherwise cost N
+ * times that; this stops starting a further directory once the pack as a
+ * whole has spent twice one call's budget, which keeps the worst case at the
+ * same order as the answer path's own single recovery pass.
+ */
+const NAMED_DIR_LOCATE_BUDGET_MS = 2 * CUMULATIVE_LOCATE_BUDGET_MS;
+/** WP-S8: symbol-less candidates one directory-confined locate may re-point (see `namedDirClauseLocate`). Bounded because each re-point parses one file. */
+const MAX_NAMED_DIR_ANCHOR_REPOINTS = 3;
+
+/**
+ * WP-S8: ONE directory-confined locate for the per-clause recovery below,
+ * with every symbol-less candidate re-pointed at its best query-matching
+ * symbol.
+ *
+ * WHY THE RE-POINT: `pickCoveredClauseLocateCandidate` accepts a symbol-less
+ * ABSTAIN candidate only under a much stricter self-coverage bar than a
+ * symbol-bearing one (its doc comment explains why: an abstain's top rank is
+ * lexical confidence, not relevance). A locate confined to a directory the
+ * caller NAMED routinely abstains with exactly the right files and no symbol
+ * -- measured on the recorded session, the three service classes came back
+ * symbol-less and every one of them was rejected. The re-point is the SAME
+ * one the required-role and directory fills above already apply
+ * (`anchorFocusForLocatorCandidate`), minus its oversized-file gate: there the
+ * symbol only decides which slice to embed, here it is what makes the
+ * candidate addressable at all, and a class that answers exactly one clause of
+ * the request is routinely well under that gate's size.
+ * `selectAnchorFocus` abstains (nothing scores above zero overlap) rather than
+ * guessing, which leaves the candidate exactly as the locator ranked it, and
+ * the clause coverage check still has to pass afterwards.
+ *
+ * `queryText` is whatever `runClauseLocateRecovery` is locating with -- the
+ * clause itself on the first attempt, and its neighbour-expanded or
+ * TL_JA_QUERY_BRIDGE-recovered form on the retry, which is what gives a
+ * Japanese clause English tokens to anchor against.
+ */
+async function namedDirClauseLocate(
+  queryText: string,
+  limit: number,
+  context: {
+    dir: string;
+    workspace: string;
+    lang: TaskPackArgs["lang"];
+    cache: FileReadCache;
+    focusByCandidate: Map<ImpactCandidate, AnchorFocusResult>;
+  },
+): Promise<ClauseRecoveryLocateResult<ImpactCandidate>> {
+  const { dir, workspace, lang, cache, focusByCandidate } = context;
+  const result = await locateTaskContext(workspace, {
+    action: "locate",
+    query: queryText,
+    path: dir,
+    ...(lang ? { lang } : {}),
+    limit,
+  });
+  const ranked: ImpactCandidate[] = result.hit ? [...result.primary] : [...(result.candidateDetails ?? [])];
+  if (!result.hit && ranked.length > 1) {
+    // WP-P2 A (2026-09-20): on an ABSTAIN the locator's order is lexical
+    // confidence, not relevance -- the same fact the re-point above exists for
+    // -- and every candidate inside one named directory routinely ties at the
+    // top confidence. `pickCoveredClauseLocateCandidate` then takes the FIRST
+    // one that clears its coverage bar, and that bar is met by a SINGLE shared
+    // token of >= DIVERSIFY_MIN_LONG_TOKEN_CHARS: measured on the recorded
+    // session, the clause "order service cancellation" was answered by the
+    // first unrelated `*Service` class in the tie, purely on the word
+    // "service", while the class the clause actually names sat third. Order the
+    // tie by how much of the CLAUSE each candidate matches (its own path/symbol
+    // tokens, the same scorer every coverage check in `concernRecovery.ts`
+    // uses), keeping the locator's order as the stable tie-break. This also
+    // spends the bounded re-point budget below on the closest candidates first.
+    const clauseTokens = clauseCoverageTokenSet(queryText, tokenizeQueryForDiversification);
+    const overlap = new Map<ImpactCandidate, number>(
+      ranked.map((candidate) => [
+        candidate,
+        distinctMatchedTokenCount(clauseTokens, candidate, tokenizeQueryForDiversification),
+      ]),
+    );
+    if (new Set(overlap.values()).size > 1) {
+      const order = new Map(ranked.map((candidate, index) => [candidate, index]));
+      ranked.sort((left, right) =>
+        (overlap.get(right) ?? 0) - (overlap.get(left) ?? 0)
+        || (order.get(left) ?? 0) - (order.get(right) ?? 0)
+      );
+    }
+  }
+  const anchored: ImpactCandidate[] = [];
+  let repointed = 0;
+  for (const candidate of ranked) {
+    if (candidate.symbol !== undefined || repointed >= MAX_NAMED_DIR_ANCHOR_REPOINTS) {
+      anchored.push(candidate);
+      continue;
+    }
+    const content = cache.read(workspace, candidate.path);
+    if (content === undefined) {
+      anchored.push(candidate);
+      continue;
+    }
+    repointed += 1;
+    // eslint-disable-next-line no-await-in-loop -- at most MAX_NAMED_DIR_ANCHOR_REPOINTS per locate, and each parse is only worth starting once the previous candidate failed to be the answer.
+    const focus = await selectAnchorFocus(content, candidate.path, queryText, cache);
+    if (focus === undefined) {
+      anchored.push(candidate);
+      continue;
+    }
+    // WP-P2 C3 (2026-09-20) -- DEFECT. Keyed by the RE-POINTED CANDIDATE, not
+    // by its path: this locate runs once per clause, and two clauses of the
+    // same request routinely re-point the SAME file at different symbols
+    // ("OrderService" at its constructor, "cancel" at the cancel method). A
+    // path-keyed map kept only the last focus, so the pack served the window
+    // one clause picked under the symbol NAME another clause picked -- a row
+    // that said `cancel` and carried the constructor. Candidate identity is
+    // preserved end to end (`runClauseLocateRecovery` passes picks through
+    // untouched), so the focus that named a window always travels with it.
+    const anchoredCandidate: ImpactCandidate = {
+      ...candidate,
+      symbol: focus.best.name,
+      range: focus.best.range,
+      line: anchorWindowStartLine(focus.best.range) ?? candidate.line,
+    };
+    focusByCandidate.set(anchoredCandidate, focus);
+    anchored.push(anchoredCandidate);
+  }
+  return result.hit ? { hit: true, primary: anchored } : { hit: false, candidateDetails: anchored };
+}
+
+/**
+ * WP-S8: the workspace's unique file whose basename is exactly the one
+ * `namedPath` spells — case-sensitive, extension included. When several
+ * exist, the unique one under the named path's OWN parent directory subtree
+ * wins (`frontend/order.js` -> `frontend/js/order.js`, because the caller got
+ * the folder wrong, not the file); anything still ambiguous stays
+ * unresolved. Never a fuzzy/nearest-name match: a basename the caller did not
+ * spell exactly is a different file, and serving it would be a guess.
+ */
+function uniqueBasenameResolution(
+  namedPath: string,
+  byBasename: ReadonlyMap<string, readonly string[]>,
+): string | undefined {
+  const matches = byBasename.get(path.posix.basename(namedPath));
+  if (matches === undefined || matches.length === 0) return undefined;
+  if (matches.length === 1) return matches[0];
+  const parent = path.posix.dirname(namedPath);
+  if (parent === "" || parent === "." || parent === "/") return undefined;
+  const underParent = matches.filter((relPath) => relPath.startsWith(parent + "/"));
+  return underParent.length === 1 ? underParent[0] : undefined;
+}
+
+/**
+ * WP-S8 (TL_NAMED_TARGET_RESOLUTION): re-point caller-named FILE paths that
+ * do NOT exist at the workspace's unique same-basename file, in place, before
+ * the seed read below — so a resolved target is then read, embedded, budgeted
+ * and trimmed exactly as if the caller had spelled it. Recorded in
+ * `resolvedFromByPath` (resolved path -> the path the caller wrote) so the
+ * surface's `why` can disclose the inference and `missing` can still name
+ * what the caller actually wrote if the resolution later fails to hold.
+ *
+ * Deliberately narrow, because every resolution is this server's own guess:
+ *   - a path that EXISTS is never re-pointed (that includes a directory, and
+ *     a file this server cannot read -- unreadable is not "not there");
+ *   - a path outside the workspace is never re-pointed;
+ *   - the inventory is `walkCodeFiles`, the SAME walk (and therefore the same
+ *     ignore rules) the seeded builder's own directory locate uses, widened
+ *     by exactly the extensions/basenames the unresolved paths spell, so an
+ *     ignored file can never become a resolution target;
+ *   - a resolution onto a path this pack ALREADY seeds is dropped rather than
+ *     duplicated -- the caller who named both spellings still gets the honest
+ *     `missing` entry for the one that does not exist.
+ * Artifact extensions never reach here (`ARTIFACT_EXT_SET` is handled and
+ * reported before `toRead` is built), so this resolves text/code targets only.
+ */
+function resolveGuessedSeedPaths(
+  toRead: TaskPackPathEntry[],
+  workspace: string,
+  seenPaths: Set<string>,
+  resolvedFromByPath: Map<string, string>,
+): void {
+  const guessedIndexes: number[] = [];
+  for (let index = 0; index < toRead.length; index += 1) {
+    const relPath = toRead[index]!.path;
+    const abs = safeResolve(relPath, workspace);
+    if (abs === undefined) continue;
+    try {
+      if (fs.existsSync(abs)) continue;
+    } catch {
+      continue;
+    }
+    guessedIndexes.push(index);
+  }
+  if (guessedIndexes.length === 0) return;
+  // Widen the walk by exactly what the unresolved paths spell. `extraExts`/
+  // `extraBasenames` are additive extension/name matches, so this costs one
+  // directory walk and reads no file content -- unlike the generic-text lane,
+  // which has to decode every untracked file to classify it.
+  const wantedExts = new Set<string>();
+  const wantedBasenames = new Set<string>();
+  for (const index of guessedIndexes) {
+    const basename = path.posix.basename(toRead[index]!.path);
+    const ext = path.posix.extname(basename).toLowerCase();
+    if (ext.length > 0) wantedExts.add(ext);
+    else wantedBasenames.add(basename);
+  }
+  const byBasename = new Map<string, string[]>();
+  for (const file of walkCodeFiles(workspace, {
+    ...(wantedExts.size > 0 ? { extraExts: [...wantedExts] } : {}),
+    ...(wantedBasenames.size > 0 ? { extraBasenames: [...wantedBasenames] } : {}),
+  })) {
+    const basename = path.posix.basename(file.relPath);
+    const bucket = byBasename.get(basename);
+    if (bucket === undefined) byBasename.set(basename, [file.relPath]);
+    else bucket.push(file.relPath);
+  }
+  for (const index of guessedIndexes) {
+    const entry = toRead[index]!;
+    const resolved = uniqueBasenameResolution(entry.path, byBasename);
+    if (resolved === undefined) continue;
+    if (seenPaths.has(resolved)) continue;
+    seenPaths.add(resolved);
+    resolvedFromByPath.set(resolved, entry.path);
+    toRead[index] = { ...entry, path: resolved };
+  }
+}
+
+/**
+ * WP-S8: does the caller's own `range`/`symbol` still mean something on the
+ * file this server resolved their path to? A range whose START is past the
+ * end of the resolved file, or a symbol the resolved file does not define,
+ * means the resolution does not hold -- report the named path as today
+ * instead of serving a slice the caller never asked for. (An END past the
+ * last line is NOT a failure: every other seeded path has its end clamped by
+ * the slicer, and holding a resolution to a stricter contract than a spelled
+ * path would be arbitrary.)
+ */
+async function resolvedSeedHonorsSlice(entry: TaskPackPathEntry, content: string): Promise<boolean> {
+  if (entry.range !== undefined) {
+    // An unparseable range is not a claim this check can falsify -- the
+    // slicer normalizes it for a spelled path too.
+    const parsed = /^(\d+)-\d+$/.exec(entry.range);
+    if (parsed !== null) {
+      const start = parseInt(parsed[1]!, 10);
+      if (!(start >= 1 && start <= countLines(content))) return false;
+    }
+  }
+  if (entry.symbol !== undefined && entry.symbol.length > 0) {
+    const symbols = await extractSymbolsFromFile(content, entry.path, 256, [entry.symbol]);
+    if (!symbols.some((symbol) => identifierNamesSymbol(symbol.name, entry.symbol!))) return false;
+  }
+  return true;
+}
+
+/**
+ * WP-S8: insert a qualifier into a seed's `why` BEFORE a trailing
+ * "caller-supplied" token rather than appending after it -- exactly the
+ * placement SHOULD-FIX 37's "nul-stripped" qualifier uses, and for the same
+ * reason (`candidateToSurface` re-appends "; caller-supplied" whenever any
+ * `;`-separated segment is exactly that token, so appending after it would
+ * sandwich the qualifier between two provenance tokens).
+ */
+function whyWithQualifier(why: string, qualifier: string): string {
+  const segments = why.split("; ");
+  if (segments[segments.length - 1] === "caller-supplied") {
+    segments.splice(segments.length - 1, 0, qualifier);
+    return segments.join("; ");
+  }
+  return `${why}; ${qualifier}`;
+}
+
+/**
+ * WP-S8: the clauses a caller-named DIRECTORY is located with. The target's
+ * OWN `purpose` leads -- it is the caller saying what this directory is for --
+ * and the task query's own clauses fill any remaining per-directory slot, so a
+ * one-line purpose ("order / refund / inventory services") still reaches the
+ * several distinct concerns the request spells. A purpose that
+ * `extractRequestItems` does not split is kept whole rather than dropped.
+ * Order is significant: `runClauseLocateRecovery` takes the first
+ * MAX_CLAUSE_LOCATES clauses its coverage window leaves uncovered.
+ */
+/**
+ * Clause-id prefixes for `namedDirClauseWorkList`. They are what tells the
+ * per-clause coverage window (WP-P2 A, at the WP-S8 call site) a concern the
+ * caller wrote ON this directory apart from one it wrote in the task query.
+ */
+const NAMED_DIR_PURPOSE_CLAUSE_PREFIX = "dir-purpose-";
+const NAMED_DIR_QUERY_CLAUSE_PREFIX = "dir-query-";
+
+function namedDirClauseWorkList(purposeText: string, query: string): ClauseHygieneItem[] {
+  const out: ClauseHygieneItem[] = [];
+  const seen = new Set<string>();
+  const add = (items: readonly ClauseHygieneItem[], prefix: string): void => {
+    for (const item of items) {
+      const key = item.text.trim().toLowerCase();
+      if (key.length === 0 || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ id: `${prefix}${item.id}`, text: item.text });
+    }
+  };
+  if (purposeText.length > 0) {
+    const purposeClauses = hygienicClauseWorkList(extractRequestItems(purposeText));
+    add(
+      purposeClauses.length > 0 ? purposeClauses : [{ id: "whole", text: purposeText }],
+      NAMED_DIR_PURPOSE_CLAUSE_PREFIX,
+    );
+  }
+  if (out.length < MAX_CLAUSE_LOCATES && query.trim().length > 0) {
+    add(hygienicClauseWorkList(extractRequestItems(query)), NAMED_DIR_QUERY_CLAUSE_PREFIX);
+  }
+  return out;
+}
+
 async function buildSeededTaskPack(
   args: TaskPackArgs,
   query: string,
@@ -7338,6 +9174,12 @@ async function buildSeededTaskPack(
   // before, regardless of whether the caller supplied bare strings, objects,
   // or a mix of both.
   const entries = args.paths!.map(normalizePathEntry);
+  // R1-B2: paths this build promoted out of the executed-search ledger — see
+  // `TaskPackArgs.executedSearchLocated` and the `why` stamp in the seed loop.
+  const executedSearchLocatedPaths = new Set(args.executedSearchLocated ?? []);
+  // SHOULD-FIX 28 (2026-09-14, review round 4): same provenance, weaker claim —
+  // see `EXECUTED_SEARCH_UNCLASSIFIED_WHY`.
+  const executedSearchUnclassifiedPaths = new Set(args.executedSearchLocatedUnclassified ?? []);
   // DESIGN-v0.8 coverage-honesty: the caller-supplied paths ARE the located
   // set, so scope the ui/style requirement to their dominant root.
   // An explicit answer profile is evidence retrieval, not change planning.
@@ -7409,11 +9251,32 @@ async function buildSeededTaskPack(
     }
     toRead.push(entry);
   }
+  // WP-S8 (TL_NAMED_TARGET_RESOLUTION, 2026-09-20): a caller-named file path
+  // that does not exist is re-pointed at the workspace's unique same-basename
+  // file BEFORE the read below, so a resolved target is read, embedded,
+  // budgeted and trimmed exactly as if the caller had spelled it -- see
+  // `resolveGuessedSeedPaths`. Live GitHub Copilot sessions guess the FOLDER
+  // routinely (`frontend/order.js` for `frontend/js/order.js`), and every
+  // guess costs the model a whole recovery turn for a file this server could
+  // already name. OFF (the default) the list below is untouched and every
+  // such path falls through to `missing` exactly as before.
+  const namedTargetResolution = namedTargetResolutionEnabled();
+  const resolvedFromByPath = new Map<string, string>();
+  if (namedTargetResolution) {
+    resolveGuessedSeedPaths(toRead, workspace, seenPaths, resolvedFromByPath);
+  }
   const uniqueReadPaths = [...new Set(toRead.map((entry) => entry.path))];
-  const contentByPath = new Map(await Promise.all(
-    uniqueReadPaths.map(async (relPath) => [relPath, await readFileSafe(relPath, workspace)] as const),
+  // AA1 (2026-09-14, review round 10): `readServedTextSafe`, not `readFileSafe`
+  // — the same confinement/size/FIFO guards, plus the ONE serve-side decode
+  // verdict (see the comment on the loop below). `null` still means exactly
+  // what `readFileSafe`'s `null` meant (outside the workspace, unreadable, a
+  // directory, over the cap), so the directory-vs-missing branch below is
+  // unchanged.
+  const verdictByPath = new Map(await Promise.all(
+    // served-bytes: readServedText
+    uniqueReadPaths.map(async (relPath) => [relPath, await readServedTextSafe(relPath, workspace)] as const),
   ));
-  const readResults = toRead.map((entry) => ({ entry, content: contentByPath.get(entry.path) ?? null }));
+  const readResults = toRead.map((entry) => ({ entry, verdict: verdictByPath.get(entry.path) ?? null }));
   const seeds: SeedInfo[] = [];
   // Behavior 2: caller-supplied paths[] entries that resolve to a DIRECTORY
   // (readFileSafe null → in-workspace directory) are not surfaces themselves —
@@ -7421,17 +9284,91 @@ async function buildSeededTaskPack(
   // confined locate below (fill candidates), so a supplied dir stops being a
   // bare `missing` entry with an empty pack.
   const dirEntries: TaskPackPathEntry[] = [];
-  for (const { entry, content } of readResults) {
-    if (content === null) {
+  // SHOULD-FIX 37 (2026-09-14, review round 7): this read used to go through
+  // `readFileSafe`, the LENIENT decoder -- unlike `FileReadCache.read`'s own
+  // decode, it never fails on undecodable content, so a NUL-riddled or
+  // BOM-less-UTF-16 buffer used to reach `cache.seed`/`seeds.push` as mojibake,
+  // unexamined. That is the "seeded-targets door" the review found certifying
+  // `act.answer` over a literal NUL on the wire -- including on a re-pack that
+  // runs the pack's OWN prescribed `next` (`qref` + `targets`) -- for a file
+  // `augmentQueryNamedFileSurfaces` would have disclosed as unreadable, or
+  // served nul-stripped, for the identical reason.
+  //
+  // AA1 (2026-09-14, review round 10): rounds 7-9 fixed that by importing a
+  // SECOND predicate here (`classifyLenientText`), then gating it (BLOCKER 40),
+  // then discovering the gate's own two blind spots (findings 50 and 51). This
+  // door now asks the ONE question every other door asks -- `readServedText`
+  // via `readServedTextSafe` -- so the doors agree BY CONSTRUCTION rather than
+  // by two hand-aligned approximations of each other:
+  //
+  //   - `"undecodable"` is disclosed exactly like a query-named file this server
+  //     cannot read (never seeded, never served): `noteUnreadableNamedPath`
+  //     feeds `unreadable_named_paths`/`missing`/`coverage` via
+  //     `discloseUnreadableNamedPaths`, the same choke point this builder's own
+  //     `dedupeTrimAndPersist` call below already reaches. This now covers BOTH
+  //     of round 9's escapes: a file whose NULs begin past byte 4096 (finding
+  //     50 -- the old 4 KB probe said "decodable", the density rule says
+  //     otherwise), and a buffer that is 63% U+FFFD because its bytes were
+  //     never valid UTF-8 at all (finding 51 -- strict decode refuses it, and
+  //     no ratio has to be guessed).
+  //   - `"clean"` includes an ordinary UTF-8 file that happens to CONTAIN a
+  //     literal U+FFFD character (round 8's BLOCKER 40 repro): strict decode
+  //     accepts those bytes, so every door serves them unchanged.
+  //   - `"stripped"` (a RARE incidental NUL) is seeded via `reseed` (not `seed`
+  //     -- this loop is this `cache`'s first use, so both are equivalent today,
+  //     but `reseed` states the intent: this content deliberately replaces what
+  //     a naive read produced) with the NUL-stripped text, so every downstream
+  //     step for that seed (line count, anchor-focus, `candidateToSurface`'s own
+  //     `cache.read`, sha/handle minting) sees the same clean text; its `why`
+  //     records the stripping below, the same way the augmentation's does.
+  const nulStrippedSeedPaths = new Set<string>();
+  for (const { entry, verdict } of readResults) {
+    if (verdict === null) {
       if (isDirectoryWithin(entry.path, workspace)) {
         dirEntries.push(entry);
       } else {
-        missing.push(entry.path);
+        // WP-S8: a resolution whose target turns out unreadable is reported as
+        // the path the CALLER wrote -- re-pointing it was this server's own
+        // inference, so `missing` must never name a path they did not ask for.
+        // Empty unless TL_NAMED_TARGET_RESOLUTION resolved something.
+        missing.push(resolvedFromByPath.get(entry.path) ?? entry.path);
+        resolvedFromByPath.delete(entry.path);
       }
       continue;
     }
-    cache.seed(entry.path, content);
-    seeds.push({ entry, content, role: classifySurface(entry.path, entry.symbol) });
+    if (verdict.kind === "undecodable") {
+      // WP-S8: same reasoning as the `null` branch above -- a resolved path is
+      // not a path the request named, so it must not be disclosed through
+      // `unreadable_named_paths`; the resolution simply does not hold.
+      const undecodableNamedAs = resolvedFromByPath.get(entry.path);
+      if (undecodableNamedAs !== undefined) {
+        resolvedFromByPath.delete(entry.path);
+        missing.push(undecodableNamedAs);
+        continue;
+      }
+      // SHOULD-FIX 65 (AC1, round 12): a caller-supplied `targets[]` entry IS
+      // named by the request.
+      noteUnreadableNamedPath(workspace, entry.path, "request");
+      continue;
+    }
+    // WP-S8: the caller's own range/symbol has to still mean something on the
+    // file this server resolved their path to, or the resolution does not
+    // hold and the named path is reported as today.
+    const resolvedNamedAs = resolvedFromByPath.get(entry.path);
+    if (resolvedNamedAs !== undefined && !(await resolvedSeedHonorsSlice(entry, verdict.text))) {
+      resolvedFromByPath.delete(entry.path);
+      seenPaths.delete(entry.path);
+      missing.push(resolvedNamedAs);
+      continue;
+    }
+    if (verdict.kind === "stripped") {
+      nulStrippedSeedPaths.add(entry.path);
+      cache.reseed(entry.path, verdict.text, verdict);
+      seeds.push({ entry, content: verdict.text, role: classifySurface(entry.path, entry.symbol) });
+      continue;
+    }
+    cache.seed(entry.path, verdict.text, verdict);
+    seeds.push({ entry, content: verdict.text, role: classifySurface(entry.path, entry.symbol) });
   }
 
   // 2. Priority order for the embed budget: required-role seeds first (item
@@ -7439,12 +9376,107 @@ async function buildSeededTaskPack(
   //    supplied order. Both groups still get a surface either way; this only
   //    decides which ones get embedded `code` vs handle+skeleton-only.
   const requiredSet = new Set(requiredRoles);
+  // EXPERIMENT (TL_PACK_GUIDE_ELIDE): an agent-guide file (AGENTS.md, ...)
+  // is already in the model's instructions and its managed block is elided
+  // before trimming, so it must not spend one of the embed slots that a
+  // caller-named source file needs -- models routinely list it FIRST. OFF
+  // keeps the legacy order byte-for-byte.
+  const guideLast = packGuideElideEnabled();
   const prioritized = [...seeds].sort((a, b) => {
+    if (guideLast) {
+      const aGuide = isAgentGuideElidePath(a.entry.path) ? 1 : 0;
+      const bGuide = isAgentGuideElidePath(b.entry.path) ? 1 : 0;
+      if (aGuide !== bGuide) return aGuide - bGuide;
+    }
     const aReq = requiredSet.has(a.role) ? 0 : 1;
     const bReq = requiredSet.has(b.role) ? 0 : 1;
     if (aReq !== bReq) return aReq - bReq;
     return seeds.indexOf(a) - seeds.indexOf(b); // stable: preserve supplied order within each group
   });
+
+  // WP-S2 rules 1+2 (TL_SEEDED_GENEROUS): per-seed whole-file embed allowance.
+  //
+  // Today every seed is measured against MAX_SURFACE_CODE_BYTES on RAW bytes,
+  // so a caller-NAMED file over that cap is re-pointed at ONE anchor symbol
+  // (the loop below) even when the caller will obviously read all of it. On an
+  // `answer` (read-only) profile the file is evidence, not an edit frontier:
+  // serve it whole while it fits SEEDED_ANSWER_SURFACE_CODE_BYTES and the
+  // pack budget allows, and let only the genuinely oversized ones fall to the
+  // multi-window anchor focus (rule 3). Allocation is water-filling —
+  // SMALLEST embedded size first — so one large file cannot starve the small
+  // ones that would each have fitted on their own; the loser of the
+  // water-filling keeps exactly today's MAX_SURFACE_CODE_BYTES allowance.
+  // `generic` (change) packs keep that allowance for every seed: rule 1 (the
+  // elided-size measure) still applies to them, rule 2 does not.
+  const seededGenerous = seededGenerousEnabled();
+  const wholeFileSeedAllowance = new Map<SeedInfo, number>();
+  let seededGenerousBudgetTier = false;
+  let seededGenerousTierBytes = MAX_TASK_PACK_BYTES_MULTI_CONCERN;
+  let seededWindowBudget = MAX_SURFACE_CODE_BYTES;
+  if (seededGenerous) {
+    const namedWholeFileSeeds = prioritized.filter(
+      (seed, idx) =>
+        idx < (packFairTrimEnabled() ? MAX_SEEDED_CODE_SURFACES_FAIR : MAX_SEEDED_CODE_SURFACES)
+        && seed.entry.range === undefined
+        && seed.entry.symbol === undefined,
+    );
+    if (answerProfile && namedWholeFileSeeds.length > 0) {
+      // The 32 KB tier is the one a multi-concern pack already uses for the
+      // same reason: several independently required bodies have a real
+      // additive floor. Claimed only for a seeded ANSWER pack naming >= 2
+      // files, and only as a floor on rawCapForResult (never a narrowing).
+      //
+      // T1 CEILING (measured 2026-09-20): a client profile's own ceiling
+      // (VS Code: 14,336) clamps `capForResult` BELOW any tier this builder
+      // can claim, so granting a body the pack cannot carry does not serve it
+      // -- `trimToCap` halves every caller body and the response comes back
+      // capped, with a `limit`, which is strictly worse than the single
+      // anchor window it replaced. Water-fill against whichever is smaller.
+      const packBudget = Math.min(
+        namedWholeFileSeeds.length >= SEEDED_GENEROUS_PACK_MIN_FILES
+          ? SEEDED_GENEROUS_PACK_BYTES
+          : namedWholeFileSeeds.length >= 2 ? MAX_TASK_PACK_BYTES_MULTI_CONCERN : MAX_TASK_PACK_BYTES,
+        activePackByteCeiling() ?? Number.MAX_SAFE_INTEGER,
+      );
+      const bodyBudget = Math.max(0, packBudget - SEEDED_ANSWER_ENVELOPE_RESERVE);
+      let spent = 0;
+      const bySize = namedWholeFileSeeds
+        .map((seed) => ({ seed, bytes: wholeFileEmbedBytes(seed.content, seed.entry.path) }))
+        .sort((a, b) => a.bytes - b.bytes);
+      for (const { seed, bytes } of bySize) {
+        // A file that already fits today's allowance is served whole either
+        // way; it is charged, not granted, so the big file's decision is made
+        // against what is actually LEFT rather than the whole budget.
+        if (bytes <= MAX_SURFACE_CODE_BYTES) {
+          spent += bytes;
+          continue;
+        }
+        if (bytes > SEEDED_ANSWER_SURFACE_CODE_BYTES) continue;
+        if (spent + bytes > bodyBudget) continue;
+        spent += bytes;
+        wholeFileSeedAllowance.set(seed, SEEDED_ANSWER_SURFACE_CODE_BYTES);
+      }
+      // What is left after the whole bodies is what rule 3's windows may
+      // spend on ONE file — never more than the shared per-surface cap, and
+      // never more than this pack can actually carry (same ceiling reasoning
+      // as `packBudget` above: windows the pack cannot carry come back
+      // halved and capped, which is worse than fewer honest windows).
+      seededWindowBudget = Math.max(0, Math.min(MAX_SURFACE_CODE_BYTES, bodyBudget - spent));
+      // The additive tier is claimed when a mid-size body was granted whole
+      // (the original rule), AND — measured on a live Copilot call naming ten
+      // targets, none of them over the base per-surface allowance — whenever
+      // the caller named SEEDED_GENEROUS_PACK_MIN_FILES or more files: their
+      // bodies are individually small but additively exceed the base tier, and
+      // the shared trimmer then sheds the LARGEST caller-named body whole (the
+      // resolved `frontend/js/api.js` in that recording), which the caller
+      // immediately re-requests.
+      seededGenerousBudgetTier = namedWholeFileSeeds.length >= 2
+        && (wholeFileSeedAllowance.size > 0 || namedWholeFileSeeds.length >= SEEDED_GENEROUS_PACK_MIN_FILES);
+      seededGenerousTierBytes = namedWholeFileSeeds.length >= SEEDED_GENEROUS_PACK_MIN_FILES
+        ? SEEDED_GENEROUS_PACK_BYTES
+        : MAX_TASK_PACK_BYTES_MULTI_CONCERN;
+    }
+  }
 
   // 3. Build ImpactCandidates and convert via the SAME candidateToSurface
   //    used by the locate path, so handle-minting, the embed gate, and
@@ -7455,8 +9487,12 @@ async function buildSeededTaskPack(
   //    handle=<handle>`) — sliceCode's own per-surface byte cap (and
   //    trimToCap's byte cap below) still bound how much code actually
   //    survives even within the "wants embed" group.
-  const seededSurfaces: TaskPackSurface[] = await Promise.all(
-    prioritized.map(async (seed, idx) => {
+  //
+  // WP-S2: one seed can now produce SEVERAL surfaces (rule 3's multi-window
+  // anchor focus), so the map returns an array and the result is flattened.
+  // Every other path returns exactly one, as before.
+  const seededSurfaces: TaskPackSurface[] = (await Promise.all(
+    prioritized.map(async (seed, idx): Promise<TaskPackSurface[]> => {
       // BUG FIX: was raw.split(/\r?\n/).length, which counts a phantom final
       // segment for trailing-newline content and mints a whole-file range
       // one line past the end (see util/countLines.ts doc comment).
@@ -7494,21 +9530,79 @@ async function buildSeededTaskPack(
       // best query-matching symbol instead of the whole file. Never a
       // guess: selectAnchorFocus returns undefined (today's whole-file
       // behavior, unchanged) when nothing scores above zero overlap.
+      //
+      // WP-S2 rules 1+2 (TL_SEEDED_GENEROUS): the OVERFLOW test is the only
+      // thing that moved. ON, it asks what the surface would really EMBED
+      // (`wholeFileEmbedBytes` — the elided text this layer's own
+      // centeredSliceForCap measures) against this seed's allowance from the
+      // water-filling pass above, which is SEEDED_ANSWER_SURFACE_CODE_BYTES
+      // for a named file an answer pack can afford whole and
+      // MAX_SURFACE_CODE_BYTES otherwise. OFF, it is the raw-byte test
+      // against MAX_SURFACE_CODE_BYTES, byte-for-byte as before.
+      const seedEmbedAllowance = wholeFileSeedAllowance.get(seed) ?? MAX_SURFACE_CODE_BYTES;
+      const overflowsEmbedAllowance = seededGenerous
+        ? wholeFileEmbedBytes(seed.content, seed.entry.path) > seedEmbedAllowance
+        : Buffer.byteLength(seed.content, "utf8") > MAX_SURFACE_CODE_BYTES;
       let anchorFocus: AnchorFocusResult | undefined;
+      let anchorWindows: AnchorFocusCandidate[] = [];
       if (
         identifierContext === undefined &&
         seed.entry.range === undefined &&
         seed.entry.symbol === undefined &&
         query.trim().length > 0 &&
-        Buffer.byteLength(seed.content, "utf8") > MAX_SURFACE_CODE_BYTES
+        overflowsEmbedAllowance
       ) {
       anchorFocus = await selectAnchorFocus(seed.content, seed.entry.path, query, cache);
         if (anchorFocus) {
           range = anchorFocus.best.range;
           symbol = anchorFocus.best.name;
+          // WP-S2 rule 3: on an answer profile a file that STILL does not fit
+          // serves several distinct windows instead of one — see
+          // `multiWindowAnchorFocus`. `[]` (never entered, or nothing extra
+          // qualified) keeps the single-window shape exactly as before.
+          if (seededGenerous && answerProfile) {
+            anchorWindows = multiWindowAnchorFocus(
+              anchorFocus, seed.content, seed.entry.path, seededWindowBudget,
+            );
+          }
         }
       }
-      const wantsEmbed = idx < MAX_SEEDED_CODE_SURFACES;
+      const wantsEmbed = idx < (packFairTrimEnabled() ? MAX_SEEDED_CODE_SURFACES_FAIR : MAX_SEEDED_CODE_SURFACES);
+      // SHOULD-FIX 37 (2026-09-14, review round 7): disclose when this
+      // seed's content is not byte-identical to the file on disk (the
+      // NUL-stripped case the read loop above records in
+      // `nulStrippedSeedPaths`) -- mirroring `augmentQueryNamedFileSurfaces`'s
+      // own "query-named-file; nul-stripped" suffix so both routes disclose
+      // the same fact about the same file the same way. Inserted BEFORE a
+      // trailing "caller-supplied" token (rather than appended after it)
+      // because `candidateToSurface` (below) re-appends "; caller-supplied"
+      // whenever ANY `;`-separated segment of this `why` is exactly
+      // "caller-supplied" (`surfaceWhyHasMarker`) -- appending "nul-stripped"
+      // after that segment would still trigger the same re-append (see the
+      // R1-B2 comment just below for the pre-existing, unrelated case where
+      // that re-append fires on a bare "caller-supplied" why too) and
+      // sandwich "nul-stripped" between two "caller-supplied" tokens instead
+      // of reading as one clean qualifier list.
+      const nulStripped = nulStrippedSeedPaths.has(seed.entry.path);
+      const baseWhy = executedSearchLocatedPaths.has(seed.entry.path)
+        ? nulStripped ? `${EXECUTED_SEARCH_LOCATED_WHY}; nul-stripped` : EXECUTED_SEARCH_LOCATED_WHY
+        : executedSearchUnclassifiedPaths.has(seed.entry.path)
+        ? nulStripped ? `${EXECUTED_SEARCH_UNCLASSIFIED_WHY}; nul-stripped` : EXECUTED_SEARCH_UNCLASSIFIED_WHY
+        : seed.entry.purpose === undefined
+        ? identifierContext
+          ? nulStripped ? "query-identifier-test-match; nul-stripped" : "query-identifier-test-match"
+          : nulStripped ? "nul-stripped; caller-supplied" : "caller-supplied"
+        : nulStripped
+        ? `${seed.entry.purpose}; nul-stripped; caller-supplied`
+        : `${seed.entry.purpose}; caller-supplied`;
+      // WP-S8: disclose that THIS server picked the file, not the caller --
+      // the pack served a path they did not spell, and the ledger has to say
+      // which of their paths it stands in for. Empty unless
+      // TL_NAMED_TARGET_RESOLUTION resolved this seed.
+      const resolvedFromNamedPath = resolvedFromByPath.get(seed.entry.path);
+      const seedWhy = resolvedFromNamedPath === undefined
+        ? baseWhy
+        : whyWithQualifier(baseWhy, `resolved-from:${resolvedFromNamedPath}`);
       const candidate: ImpactCandidate = {
         path: seed.entry.path,
         line: focusedLine,
@@ -7516,22 +9610,71 @@ async function buildSeededTaskPack(
         ...(seed.entry.range !== undefined ? { callerRange: true } : {}),
         ...(symbol ? { symbol } : {}),
         surface: seed.role,
-        why: seed.entry.purpose === undefined
-          ? (identifierContext ? "query-identifier-test-match" : "caller-supplied")
-          : `${seed.entry.purpose}; caller-supplied`,
+        // R1-B2 (2026-09-13 review round): an executed search’s located path is
+        // NOT caller-supplied. Stamping it so put a false provenance claim on the
+        // wire (and `whySummary`, seeing the marker it appends, doubled it to
+        // "caller-supplied; caller-supplied"). Every OTHER seeding site keeps its
+        // existing `why` byte-for-byte — only paths this build promoted out of
+        // the executed-search ledger are renamed.
+        why: seedWhy,
         confidence: wantsEmbed ? 0.85 : 0.3,
         required: requiredSet.has(seed.role),
       };
+      // WP-S2 rule 2: spend the widened allowance ONLY on the whole-file body
+      // the water-filling pass actually budgeted for, and only when the body
+      // genuinely needs it. A seed that overflowed the allowance (and is
+      // therefore serving an anchor window, or abstained back to a trimmed
+      // whole-file window) keeps the shared MAX_SURFACE_CODE_BYTES — and so
+      // does a named file that already fitted it, whose bytes then stay
+      // byte-identical to the flag-off output.
+      const surfaceCodeBytes = !overflowsEmbedAllowance
+        && seedEmbedAllowance > MAX_SURFACE_CODE_BYTES
+        && wholeFileEmbedBytes(seed.content, seed.entry.path) > MAX_SURFACE_CODE_BYTES
+        ? seedEmbedAllowance
+        : undefined;
       const surface = await candidateToSurface(
-        candidate, workspace, requiredRoles, query, cache, { answerProfile },
+        candidate, workspace, requiredRoles, query, cache,
+        { answerProfile, ...(surfaceCodeBytes !== undefined ? { surfaceCodeBytes } : {}) },
       );
       // Transparency + a ready-to-run follow-up (see
       // attachAnchorFocusAffordance — factored out verbatim so the
       // fill/dir locator-candidate paths attach the identical affordance).
       if (anchorFocus) attachAnchorFocusAffordance(surface, anchorFocus, seed.entry.path, workspace);
-      return surface;
+      // WP-S2 rule 3: the extra windows, built through the SAME
+      // candidateToSurface so handle-minting and the embed gate stay
+      // identical, then re-stamped so the file's uncovered spans are
+      // partitioned across the windows exactly once.
+      if (anchorWindows.length > 1) {
+        const extras = await Promise.all(
+          anchorWindows.slice(1).map(async (window) => {
+            const extra = await candidateToSurface(
+              {
+                ...candidate,
+                line: anchorWindowStartLine(window.range) ?? candidate.line,
+                range: window.range,
+                symbol: window.name,
+              },
+              workspace,
+              requiredRoles,
+              query,
+              cache,
+              { answerProfile },
+            );
+            // Same wording the primary window gets, so every window of the
+            // file states which symbol it is and why it is here. No
+            // runner-up outline: the primary window already carries it.
+            attachAnchorFocusAffordance(extra, { best: window, runnerUps: [] }, seed.entry.path, workspace);
+            return extra;
+          }),
+        );
+        const windows = [surface, ...extras]
+          .sort((a, b) => (anchorWindowStartLine(a.range) ?? 0) - (anchorWindowStartLine(b.range) ?? 0));
+        partitionAnchorWindowRemainders(windows, lineCount);
+        return windows;
+      }
+      return [surface];
     }),
-  );
+  )).flat();
   // Snapshot the surfaces built DIRECTLY from caller-supplied paths (object
   // identity, not array position) before augmentation/locator-fill append
   // more surfaces — augmentNativeSurfaceClosure splices new sibling surfaces
@@ -7667,6 +9810,11 @@ async function buildSeededTaskPack(
   // (or there is no query to locate with), the directory becomes a clearer
   // `missing` marker telling the caller HOW to make it usable — never a bare
   // path that reads as "file not found".
+  // WP-S8 (TL_NAMED_TARGET_RESOLUTION): shared bounds for the per-directory
+  // clause recovery below -- see MAX_NAMED_DIR_SURFACES_TOTAL /
+  // NAMED_DIR_LOCATE_BUDGET_MS.
+  let namedDirSurfacesAdded = 0;
+  let namedDirLocateElapsedMs = 0;
   for (const dirEntry of dirEntries) {
     const dir = dirEntry.path;
     let foldedAny = false;
@@ -7702,8 +9850,28 @@ async function buildSeededTaskPack(
       ].filter((identifier, index, all) =>
         all.findIndex((candidate) => normIdent(candidate) === normIdent(identifier)) === index
       );
+      // WP-P2 C2 (2026-09-20, TL_NAMED_TARGET_RESOLUTION, answer profile only):
+      // resolve a query identifier to its DEFINITION inside the named
+      // directory, not just to its first literal occurrence.
+      //
+      // MEASURED: the identical question asked with ONLY the directory routes
+      // through the pathless answer path, which resolves definitions
+      // (`answer-explicit-symbol-focus` / `answer-explicit-identifier-recovery`)
+      // and served the service class, the status enum and the refund member.
+      // Adding ONE doc file to the same targets routes it HERE instead, where
+      // `explicitCodeIdentityKeys` only admits DELIMITED identities -- a prose
+      // question (the recorded one is Japanese, with the class names spelled
+      // bare) has none, so every identifier fell to the literal arm below,
+      // whose `exactMatches[0]` is whichever file merely MENTIONS the name
+      // first: a config class and a controller, which then won the role slots
+      // the real definitions needed. The caller paid three extra requests for
+      // that. Trying the definition arm first costs one symbol extraction per
+      // identifier and falls through to exactly today's literal candidate
+      // whenever no definition exists.
+      const resolveDirDefinitions = namedTargetResolution && answerProfile;
+      let resolvedDirDefinition = false;
       for (const identifier of explicitDirIdentifiers.slice(0, 6)) {
-        const codeIdentity = explicitCodeIdentityKeys.has(normIdent(identifier));
+        const codeIdentity = explicitCodeIdentityKeys.has(normIdent(identifier)) || resolveDirDefinitions;
         const exactMatches = scanLiteral(identifier, workspace, {
           caseInsensitive: false,
           onlyFiles: dirFiles,
@@ -7752,6 +9920,7 @@ async function buildSeededTaskPack(
             || left.line - right.line
           );
           if (preferredDefinitions.length > 0) {
+            resolvedDirDefinition = true;
             for (const definition of preferredDefinitions.slice(0, MAX_SURFACES_DISTINCT)) {
               const existingIndex = dirRaw.findIndex((candidate) => candidate.path === definition.path);
               if (existingIndex >= 0) dirRaw[existingIndex] = definition;
@@ -7813,11 +9982,31 @@ async function buildSeededTaskPack(
         // fill loop above — real packs open with paths=["<dir>"]+query, so
         // THIS loop is where a >4KB file's candidate must consult the query
         // for symbol selection. Zero overlap keeps today's behavior.
-        const anchored = await anchorFocusForLocatorCandidate(c, workspace, query, cache);
-        const explicitAnchor = (anchored?.focus.best.score ?? 0) >= ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT;
-        const explicitIdentity = singularExplicitCodeIdentity
+        // WP-P2 C2: a candidate THIS build resolved to the DEFINITION of an
+        // identifier the query spells is already symbol-exact, so it keeps its
+        // own window -- anchor focus exists to pick a symbol for a candidate
+        // that has none (or whose symbol is a bare literal line), and letting
+        // it re-point a resolved definition serves a different member than the
+        // one the caller asked about.
+        const resolvedDefinitionCandidate = resolveDirDefinitions
           && c.why === "explicit-query-identifier"
           && c.symbol !== undefined;
+        const anchored = resolvedDefinitionCandidate
+          ? undefined
+          : await anchorFocusForLocatorCandidate(c, workspace, query, cache);
+        const explicitAnchor = (anchored?.focus.best.score ?? 0) >= ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT;
+        const explicitIdentity = (singularExplicitCodeIdentity || resolveDirDefinitions)
+          && c.why === "explicit-query-identifier"
+          && c.symbol !== undefined;
+        // WP-P2 C2: once a definition the QUERY names has resolved inside this
+        // directory, a candidate that is only a FILE (no resolved symbol) is a
+        // role fill, and the answer path this shape is supposed to match does
+        // not make them -- it is how the recorded pack came back carrying a
+        // whole `AdminController` and a framework config class while the two
+        // classes the question named were absent. Symbol-precise candidates
+        // (the definitions themselves, and the locator's own query-symbol
+        // hits) still compete normally.
+        if (resolveDirDefinitions && resolvedDirDefinition && c.symbol === undefined) continue;
         if (
           (coveredRoles.has(c.surface) || dirRolesFilled.has(c.surface))
           && !explicitAnchor
@@ -7841,6 +10030,172 @@ async function buildSeededTaskPack(
         seededSurfaces.push(surface);
         coveredRoles.add(c.surface);
         foldedAny = true;
+      }
+    }
+    // WP-S8 (TL_NAMED_TARGET_RESOLUTION, 2026-09-20): a caller-named DIRECTORY
+    // still contributes NOTHING when the locate above abstains -- which is what
+    // the whole-query locate does on a multi-point question, and what it did on
+    // every one of the three directories in the recorded GitHub Copilot session
+    // (the service directory holding the three classes the question was about
+    // came back empty, and the model spent two turns recovering it). Locate
+    // inside the directory ONE MORE TIME, through the SAME per-clause recovery
+    // `concernRecovery.ts` already runs for the answer path -- which is also
+    // what brings the Japanese query bridge along (`jaBridgeExpansionTokens`/
+    // `jaBridgeRecoveryQuery` are themselves TL_JA_QUERY_BRIDGE-gated, so this
+    // re-uses that policy rather than restating it) -- driven by the target's
+    // OWN `purpose` text first and confined to this directory.
+    //
+    // ANSWER profile only, and never on a `qref` replay: a change pack derives
+    // required-role coverage and obligations from its surface set, and this is
+    // evidence, not a role fill -- an answer pack has no required roles at all
+    // (`requiredRoles` is `[]` above), so readiness and obligations are
+    // untouched by construction rather than by careful bookkeeping. The replay
+    // rule is the seeded clause recovery's own, for its own reason: a replay
+    // adds files to a working set the caller already holds.
+    //
+    // Strictly ADDITIVE: every pick is appended after the caller-named file
+    // surfaces (never a replacement, reorder or promotion of them), deduped
+    // against what is already seeded, bounded per directory and per pack, and
+    // NOT added to `protectedSurfaces` -- so `trimToCap` sheds these before any
+    // caller-named body, which is what "subject to the pack budget" means here.
+    // A directory whose recovery abstains contributes nothing; there is no
+    // fallback guess.
+    //
+    // NOT gated on `MAX_SURFACES_DISTINCT`, unlike the confined loop above:
+    // that is the LOCATE path's distinct-surface budget, and a seeded pack
+    // deliberately does not honor it for caller-named paths (see
+    // MAX_SEEDED_CODE_SURFACES's own doc -- every supplied path still gets a
+    // surface). On the recorded session the ten named targets had already
+    // filled it, so the pre-existing directory fill could not have run whatever
+    // it located. MAX_NAMED_DIR_SURFACES(_TOTAL) is this mechanism's own bound;
+    // the BYTE budget is `trimToCap`'s, and it sheds these first.
+    if (
+      namedTargetResolution
+      && answerProfile
+      && args.taskQueryRefReplay !== true
+      && namedDirSurfacesAdded < MAX_NAMED_DIR_SURFACES_TOTAL
+      && namedDirLocateElapsedMs < NAMED_DIR_LOCATE_BUDGET_MS
+    ) {
+      // WP-P2 A (2026-09-20): a caller may name the SAME directory more than
+      // once, each time with a DIFFERENT purpose -- the recorded session named
+      // the service directory twice ("order service cancellation, payment
+      // refund, inventory restoration" and "payment and inventory service
+      // implementations"). The targets de-dupe above keys on path+range+symbol,
+      // so only the first entry survives into `dirEntries`; read every purpose
+      // the caller attached to THIS directory back off their own entry list,
+      // because each one is a "look in here for this" the pack owes an answer
+      // to. One entry (the ordinary case) yields exactly that entry's purpose.
+      const dirPurposeText = entries
+        .filter((entry) => entry.path === dir)
+        .map((entry) => entry.purpose?.trim() ?? "")
+        .filter((text, index, all) => text.length > 0 && all.indexOf(text) === index)
+        .join("; ");
+      const dirClauses = namedDirClauseWorkList(dirPurposeText, query);
+      if (dirClauses.length > 0) {
+        // What this pack ALREADY serves is the coverage window, so a clause the
+        // caller-named files already answer does not spend one of this
+        // directory's slots -- the directory gets the concerns nothing else
+        // covered, which on the recorded session is exactly the service-layer,
+        // refund and inventory ones.
+        const dirCoverageWindow: DiversifyCandidate[] = seededSurfaces.map((surface) => ({
+          path: surface.path,
+          ...(surface.symbol !== undefined ? { symbol: surface.symbol } : {}),
+        }));
+        // WP-P2 A: ... EXCEPT for a concern the caller wrote on the DIRECTORY
+        // itself. "Look IN HERE for this" is not discharged by a file that
+        // lies somewhere else, and on the recorded session that is precisely
+        // what happened: the whole-pack window let the caller's own
+        // `PaymentController.java` seed cover the directory purpose "payment
+        // refund" and `OrderController.java` cover "order service
+        // cancellation", so `PaymentService.refund` and `OrderService.cancel`
+        // -- the centre of the question -- were never located, and the pack
+        // still certified `act.answer`. A `dir-purpose-*` clause is therefore
+        // judged only against what this pack serves from UNDER this directory;
+        // a `dir-query-*` clause comes from the request's own query, carries no
+        // scope of its own, and keeps the whole-pack window unchanged.
+        const dirPurposeCoverageWindow = dirCoverageWindow.filter((candidate) =>
+          isUnderAncestor(candidate.path, dir)
+        );
+        const dirLocateStartedAt = Date.now();
+        const dirFocusByCandidate = new Map<ImpactCandidate, AnchorFocusResult>();
+        const dirClauseRecovery = await runClauseLocateRecovery<ImpactCandidate>(
+          dirClauses,
+          (clause) => clause.id.startsWith(NAMED_DIR_PURPOSE_CLAUSE_PREFIX)
+            ? dirPurposeCoverageWindow
+            : dirCoverageWindow,
+          {
+            tokenize: tokenizeQueryForDiversification,
+            locate: (queryText, limit) => namedDirClauseLocate(queryText, limit, {
+              dir,
+              workspace,
+              lang: args.lang,
+              cache,
+              focusByCandidate: dirFocusByCandidate,
+            }),
+            rankAbstain: rankAbstainCandidates,
+            isImplementation: (candidate) => !isNonImplementationAnswerCandidate(candidate),
+            hasSymbol: (candidate) => candidate.symbol !== undefined,
+            isTestPath: (candidate) => isTestConcernPath(candidate.path),
+            isDocPath: (candidate) => candidate.surface === "doc",
+            containsJapanese,
+            stemNeighbours: (token) => vocabularyStemNeighbours(token, workspace),
+            jaExpansionTokens: (clauseText) => jaBridgeExpansionTokens(clauseText, workspace),
+            jaRecoveryQuery: (clauseText) => jaBridgeRecoveryQuery(clauseText, workspace),
+            now: () => Date.now(),
+            onLocateAttempt: recordClauseLocateAttempt,
+          },
+        );
+        namedDirLocateElapsedMs += Date.now() - dirLocateStartedAt;
+        let addedForThisDir = 0;
+        for (const { candidate } of dirClauseRecovery.picks) {
+          if (addedForThisDir >= MAX_NAMED_DIR_SURFACES) break;
+          if (namedDirSurfacesAdded >= MAX_NAMED_DIR_SURFACES_TOTAL) break;
+          if (seenPaths.has(candidate.path)) continue;
+          // Defense-in-depth beyond locate's own hard-scope filter, exactly as
+          // the confined loop above re-checks it: this directory is the scope
+          // the caller named, and nothing outside it was asked for.
+          if (!isUnderAncestor(candidate.path, dir)) continue;
+          seenPaths.add(candidate.path);
+          // WP-P2 C (2026-09-20): the clause locate above re-points EVERY
+          // symbol-less candidate at one symbol window, because that is what
+          // makes it addressable to `pickCoveredClauseLocateCandidate` -- but
+          // narrowing is only worth its cost on a file too large to serve
+          // whole. `anchorFocusForLocatorCandidate` draws that line at
+          // MAX_SURFACE_CODE_BYTES and the same line applies here: an 80-line
+          // controller costs ~2 KB whole and answers the request item outright,
+          // where the 8-line endpoint window it was narrowed to did not, and
+          // the caller paid a follow-up request for the rest.
+          const pickContent = cache.read(workspace, candidate.path);
+          const serveWhole = pickContent !== undefined
+            && Buffer.byteLength(pickContent, "utf8") <= MAX_SURFACE_CODE_BYTES;
+          const { symbol: _narrowedSymbol, ...pickWithoutSymbol } = candidate;
+          const surface = await candidateToSurface(
+            serveWhole
+              ? {
+                ...pickWithoutSymbol,
+                line: 1,
+                range: `1-${Math.max(1, countLines(pickContent))}`,
+                why: "caller-supplied-dir",
+              }
+              : { ...candidate, why: "caller-supplied-dir" },
+            workspace,
+            requiredRoles,
+            query,
+            cache,
+            { answerProfile },
+          );
+          // Same transparency + ready-to-run widen affordance every other
+          // anchor-focused surface in this builder carries, so a caller whose
+          // answer needs more than the one window can ask for it directly.
+          const dirFocus = dirFocusByCandidate.get(candidate);
+          if (dirFocus !== undefined) {
+            attachAnchorFocusAffordance(surface, dirFocus, candidate.path, workspace);
+          }
+          seededSurfaces.push(surface);
+          addedForThisDir += 1;
+          namedDirSurfacesAdded += 1;
+          foldedAny = true;
+        }
       }
     }
     // The marker means "this directory contributed NOTHING to the pack". The
@@ -7975,6 +10330,85 @@ async function buildSeededTaskPack(
     }
   }
   finalizePrimarySurface(seededSurfaces);
+
+  // TL_CONCERN_RECOVERY / seeded-pack clause coverage (Agent J, 2026-09-19):
+  // the GitHub Copilot call shape -- read_file {query:"<multi-point
+  // question>", targets:[1-4 guessed files]} -- routes HERE (caller-supplied
+  // paths), never through buildAnswerTaskPack, so the per-clause locate
+  // recovery there never ran before this hook existed: a query clause the
+  // guessed files do not cover stayed silently unserved even though this
+  // pack still reported every caller-named path found. Same flag, same
+  // MAX_CLAUSE_LOCATES/time budget as the answer path's own mechanism
+  // (concernRecovery.ts) -- the coverage GATE differs: a locate-path clause
+  // is judged covered by a ranked candidate's path/symbol alone, but a
+  // seeded pack has already READ every caller-named file (`seeds`), so a
+  // seeded clause is judged against real served content too
+  // (isClauseCoveredBySeededSurfaces). Strictly additive: a pick becomes a
+  // brand NEW surface appended after every caller-named one -- never a
+  // replacement/reorder/promotion of them, and mergeConcernAdditions's
+  // window/displacement machinery does not apply here (a seeded pack has no
+  // selection window to begin with; every caller path already stands).
+  // First pack of the task only: a qref replay adds files to a working set
+  // the caller already holds (the C2 rule at the dispatch site -- a
+  // context-only addition never re-derives coverage), and judging the
+  // request's clauses against THIS call's few added files alone would find
+  // them all "uncovered" and spend the locate budget a second time.
+  if (answerProfile && concernRecoveryEnabled() && args.taskQueryRefReplay !== true) {
+    const seededClauseWorkList = hygienicClauseWorkList(extractRequestItems(query));
+    if (seededClauseWorkList.length >= 2) {
+      recordSeededClauseRecoveryEntry();
+      const seededCoverageSurfaces: SeededCoverageSurface[] = seededSurfaces.map((surface) => ({
+        path: surface.path,
+        symbol: surface.symbol,
+        bodyText: surface.code,
+      }));
+      const seededUncoveredClauses = seededClauseWorkList.filter((clause) => {
+        const isJapanese = containsJapanese(clause.text);
+        const jaExtras = isJapanese ? jaBridgeExpansionTokens(clause.text, workspace) : [];
+        const baseTokens = clauseCoverageTokenSet(clause.text, tokenizeQueryForDiversification, jaExtras);
+        const stemExtras = isJapanese
+          ? []
+          : collectNeighbourWords(baseTokens, (token) => vocabularyStemNeighbours(token, workspace));
+        const tokens = stemExtras.length > 0 ? new Set([...baseTokens, ...stemExtras]) : baseTokens;
+        return !isClauseCoveredBySeededSurfaces(tokens, seededCoverageSurfaces, tokenizeQueryForDiversification);
+      });
+      if (seededUncoveredClauses.length > 0) {
+        const seededClauseRecovery = await runClauseLocateRecovery<ImpactCandidate>(
+          seededUncoveredClauses,
+          [],
+          {
+            tokenize: tokenizeQueryForDiversification,
+            locate: (queryText, limit) => locateTaskContext(workspace, {
+              action: "locate",
+              query: queryText,
+              ...(args.path ? { path: args.path } : {}),
+              ...(args.lang ? { lang: args.lang } : {}),
+              limit,
+            }),
+            rankAbstain: rankAbstainCandidates,
+            isImplementation: (candidate) => !isNonImplementationAnswerCandidate(candidate),
+            hasSymbol: (candidate) => candidate.symbol !== undefined,
+            isTestPath: (candidate) => isTestConcernPath(candidate.path),
+            isDocPath: (candidate) => candidate.surface === "doc",
+            containsJapanese,
+            stemNeighbours: (token) => vocabularyStemNeighbours(token, workspace),
+            jaExpansionTokens: (clauseText) => jaBridgeExpansionTokens(clauseText, workspace),
+            jaRecoveryQuery: (clauseText) => jaBridgeRecoveryQuery(clauseText, workspace),
+            now: () => Date.now(),
+            onLocateAttempt: recordClauseLocateAttempt,
+          },
+        );
+        const seededPresentPaths = new Set(seededSurfaces.map((s) => s.path));
+        for (const { candidate } of seededClauseRecovery.picks) {
+          if (seededSurfaces.length >= MAX_SURFACES_DISTINCT) break;
+          if (seededPresentPaths.has(candidate.path)) continue;
+          seededPresentPaths.add(candidate.path);
+          const surface = await candidateToSurface(candidate, workspace, requiredRoles, query, cache, { answerProfile });
+          seededSurfaces.push(surface);
+        }
+      }
+    }
+  }
 
   // 5. Route/checks/verify/coverage, same shape as the locate path.
   // Derive from the ACTUAL surface set (not the running `coveredRoles` tally)
@@ -8206,6 +10640,11 @@ async function buildSeededTaskPack(
     : [];
   if (verifiedAbsent.length > 0) verifiedAbsentIdentifiersByResult.set(result, verifiedAbsent);
   attachPartialTree(result, workspace);
+  // WP-S2 rule 2 (TL_SEEDED_GENEROUS): claim the additive tier for a pack whose
+  // caller named >= 2 files this build decided to serve whole. Marked HERE, the
+  // last point before `dedupeTrimAndPersist` hands this exact object to
+  // `trimToCap`, whose `fitsInCap` -> `capForResult` chain is the only reader.
+  if (seededGenerousBudgetTier) markSeededGenerousPack(result, seededGenerousTierBytes);
   const finalResult = dedupeTrimAndPersist(workspace, result, {
     ...(protectedSurfaces.size > 0 ? { protectedSurfaces } : {}),
     query,
@@ -8398,7 +10837,10 @@ function explicitCodeIdentifiers(query: string): string[] {
       || token.includes("$")
       || /^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$/.test(token)
       || isPascalCaseIdentifier(token)
-      || /^[A-Z][A-Z0-9_]{2,}$/.test(token)
+      // "the cancel API endpoint" asks about an endpoint; "API" is vocabulary,
+      // not a symbol to find (concernRecovery.ts's PROSE_ACRONYMS). Backticks
+      // below still make it one.
+      || (/^[A-Z][A-Z0-9_]{2,}$/.test(token) && !isProseAcronym(token))
       || backticked.has(key)
       || parenthesizedPascal.has(key);
     if (!codeShaped) continue;
@@ -8826,7 +11268,20 @@ export async function selectAnchorFocus(
     }
   }
 
-  const scored: Array<AnchorFocusCandidate & { fits: boolean; exactIdentifier: boolean }> = [];
+  const scored: Array<AnchorFocusCandidate & {
+    fits: boolean;
+    exactIdentifier: boolean;
+    ownTypeSpan?: number;
+    /** WP-S2 rule 4, words form: set when the query spells this file's own type as separate WORDS that cover the whole symbol name ("order service …" for `OrderService`) rather than as the identifier. Read only by the member re-ranking below; it never earns or loses the explicit-identifier weight. */
+    ownTypeWordsSpan?: number;
+    /** WP-S2 rule 4: the lexical ingredients, kept so the member re-ranking below can re-score against a narrowed query without a second parse. */
+    lexical: AnchorLexicalParts;
+  }> = [];
+  /** WP-S2 rule 4: symbols the whole-query score dropped, reconsidered ONLY by the member re-ranking below (see its own comment). */
+  const deferred: typeof scored = [];
+  // The type this file is named after: a constructor carries the same name,
+  // so it needs telling apart from the type below (see the ownTypeSpan pass).
+  const ownTypeKey = normIdent(path.basename(filePath, path.extname(filePath)));
   const seenSymbolRanges = new Set<string>();
   for (const sym of symbols) {
     const symbolRangeKey = `${sym.name.toLowerCase()}\0${sym.range}`;
@@ -8838,9 +11293,10 @@ export async function selectAnchorFocus(
     if (!Number.isFinite(startLine) || !Number.isFinite(endLine) || startLine < 1 || endLine < startLine) continue;
     const body = lines.slice(startLine - 1, endLine).join("\n");
     const symbolTokens = tokenizeForEpoch(sym.name);
+    const bodyTokens = tokenizeForEpoch(body);
     const nameOverlap = lexicalOverlapFraction(queryTokens, symbolTokens);
     const symbolCoverage = lexicalOverlapFraction(symbolTokens, queryTokens);
-    const bodyOverlap = lexicalOverlapFraction(queryTokens, tokenizeForEpoch(body));
+    const bodyOverlap = lexicalOverlapFraction(queryTokens, bodyTokens);
     const declaration = body.split(/\r?\n/, 1)[0] ?? "";
     const callable = /\b(function|method|def|fn|fun)\b|=>/.test(declaration) ? 1 : 0;
     const typeOnly = /\b(interface|type|enum)\b/.test(declaration) ? 1 : 0;
@@ -8862,7 +11318,24 @@ export async function selectAnchorFocus(
       : lexicalScore <= 0
       ? 0
       : lexicalScore + callable * ANCHOR_FOCUS_CALLABLE_WEIGHT - typeOnly;
-    if (score <= 0) continue;
+    if (score <= 0) {
+      // WP-S2 rule 4: a member the WHOLE query shares no token with is
+      // dropped here, which is right for the ordinary ranking but is exactly
+      // where a request that says "cancellation" loses a method called
+      // `cancel`. Hold the zero-scorers aside (never in `scored`, so nothing
+      // below sees them) so the member re-ranking can reconsider them under
+      // the narrowed, inflection-tolerant query — and only there.
+      deferred.push({
+        name: sym.name,
+        range: sym.range,
+        score: 0,
+        ...(sym.kind ? { kind: sym.kind } : {}),
+        fits: Buffer.byteLength(body, "utf8") <= MAX_SURFACE_CODE_BYTES,
+        exactIdentifier: false,
+        lexical: { symbolTokens, bodyTokens, callable, typeOnly },
+      });
+      continue;
+    }
     scored.push({
       name: sym.name,
       range: sym.range,
@@ -8870,7 +11343,100 @@ export async function selectAnchorFocus(
       ...(sym.kind ? { kind: sym.kind } : {}),
       fits: Buffer.byteLength(body, "utf8") <= MAX_SURFACE_CODE_BYTES,
       exactIdentifier: explicitIdentifier,
+      lexical: { symbolTokens, bodyTokens, callable, typeOnly },
+      ...(explicitIdentifier && normIdent(unqualifiedSymbolTail(sym.name)) === ownTypeKey
+        ? { ownTypeSpan: endLine - startLine }
+        : {}),
+      ...(!explicitIdentifier
+        && symbolCoverage >= 1
+        && seededGenerousEnabled()
+        && normIdent(unqualifiedSymbolTail(sym.name)) === ownTypeKey
+        ? { ownTypeWordsSpan: endLine - startLine }
+        : {}),
     });
+  }
+  // A CONSTRUCTOR IS NOT THE TYPE (2026-09-19, live GitHub Copilot sessions).
+  // "OrderService cancel method ..." names the type this file is named after;
+  // the class and its constructor share that name, both took the
+  // explicit-identifier weight, the 400-line class did not fit the window, and
+  // the first FITTING candidate was the 15-line constructor — so the pack
+  // opened a named file at its constructor and the caller spent three more
+  // reads finding the method it had described. Of the symbols named after the
+  // file's own type only the WIDEST (the type itself) is the named identifier;
+  // the others compete on their lexical score like any other member, so when
+  // the type does not fit, the member the request describes wins the window.
+  const ownTypeNamed = scored.filter((entry) => entry.ownTypeSpan !== undefined);
+  if (ownTypeNamed.length > 1) {
+    const widest = Math.max(...ownTypeNamed.map((entry) => entry.ownTypeSpan!));
+    let typeKept = false;
+    for (const entry of ownTypeNamed) {
+      if (!typeKept && entry.ownTypeSpan === widest) {
+        typeKept = true;
+        continue;
+      }
+      entry.score -= ANCHOR_FOCUS_EXPLICIT_IDENTIFIER_WEIGHT;
+      entry.exactIdentifier = false;
+    }
+  }
+  // WP-S2 rule 4 (TL_SEEDED_GENEROUS) — the SECOND half of the same defect.
+  // Stripping the +100 off the constructor is not enough: the type's own name
+  // is still in the query, so every member NAMED AFTER THE TYPE (the
+  // constructor first of all) keeps a full ANCHOR_FOCUS_SYMBOL_COVERAGE_WEIGHT
+  // from it, while the member the caller actually described earns only a
+  // fraction. Measured: `OrderService` the constructor scored 5.6 and `cancel`
+  // 0.625 on "…order cancellation … OrderService cancellation implementation
+  // …", so the pack opened an 18 KB service class at its 15-line constructor.
+  //
+  // When the type itself is the top-scoring candidate but does NOT fit the
+  // window, the window is going to a MEMBER — so rank the members on what is
+  // left of the query once the type's own name tokens are removed, which is
+  // exactly the part of the request that distinguishes one member from
+  // another. The type keeps its own score and stays `scored[0]`; only the
+  // members are re-ordered among themselves, and a member that matches
+  // nothing in the narrowed query falls to the bottom instead of riding the
+  // type's name. The NAME terms additionally tolerate light inflection, so a
+  // request that says "cancellation" reaches a method called `cancel`.
+  //
+  // WORDS FORM (2026-09-20, replayed from a recorded GitHub Copilot call): a
+  // purpose such as "Order service cancellation" names the same type in words.
+  // No symbol is an explicit identifier then, so neither the constructor pass
+  // above nor the exact form of this rule fired, and `OrderService` the
+  // constructor (7.7) beat `cancel` (1.0) on the two words that merely located
+  // the file. When the query's tokens cover the WHOLE name of the file's own
+  // type, those tokens have done their job; the widest such symbol stands for
+  // the type and the members compete on the rest, exactly as above.
+  if (seededGenerousEnabled()) {
+    const topEntry = [...scored].sort((a, b) => b.score - a.score)[0];
+    const typeEntry = topEntry !== undefined && topEntry.ownTypeSpan === undefined && topEntry.ownTypeWordsSpan !== undefined
+      ? scored
+          .filter((entry) => entry.ownTypeWordsSpan !== undefined)
+          .sort((a, b) => b.ownTypeWordsSpan! - a.ownTypeWordsSpan!)[0]
+      : topEntry;
+    if (
+      typeEntry !== undefined
+      && (
+        (typeEntry.ownTypeSpan !== undefined && typeEntry.exactIdentifier)
+        || typeEntry.ownTypeWordsSpan !== undefined
+      )
+      && !typeEntry.fits
+    ) {
+      const typeNameTokens = new Set(tokenizeForEpoch(typeEntry.name));
+      const memberTokens = queryTokens.filter((token) => !typeNameTokens.has(token));
+      if (memberTokens.length > 0) {
+        for (const entry of scored) {
+          if (entry === typeEntry) continue;
+          entry.score = anchorMemberScore(entry.lexical, memberTokens);
+        }
+        for (const entry of deferred) {
+          // Same admission rule the scoring loop itself applies: the LEXICAL
+          // terms must be positive. The callable bonus alone must never
+          // readmit a symbol the query says nothing about.
+          if (anchorMemberLexicalScore(entry.lexical, memberTokens) <= 0) continue;
+          entry.score = anchorMemberScore(entry.lexical, memberTokens);
+          scored.push(entry);
+        }
+      }
+    }
   }
   // D2 (2026-08-07): the file's leading comment block competes as a candidate.
   // Symbols were the only anchor candidates, so on a query whose answer lives
@@ -8903,6 +11469,9 @@ export async function selectAnchorFocus(
         kind: "module-header",
         fits: Buffer.byteLength(header.text, "utf8") <= MAX_SURFACE_CODE_BYTES,
         exactIdentifier: false,
+        // WP-S2: the header is pushed AFTER the member re-ranking above, so
+        // these parts are never re-scored — carried only to keep one shape.
+        lexical: { symbolTokens: headerNameTokens, bodyTokens: tokenizeForEpoch(header.text), callable: 0, typeOnly: 0 },
       });
     }
   }
@@ -9060,6 +11629,100 @@ function lexicalOverlapFraction(queryTokens: string[], candidateTokens: string[]
   return hits / queryTokens.length;
 }
 
+// ---------------------------------------------------------------------------
+// WP-S2 rule 4 (TL_SEEDED_GENEROUS): member re-ranking for a file whose own
+// enclosing type is the top anchor candidate but does not fit the window.
+// ---------------------------------------------------------------------------
+
+/** The scoring ingredients `selectAnchorFocus` already computes per symbol, kept so the member re-ranking can re-score against a narrowed query without re-parsing. */
+interface AnchorLexicalParts {
+  symbolTokens: string[];
+  bodyTokens: string[];
+  callable: number;
+  typeOnly: number;
+}
+
+/** Minimum stem length for the prefix rule below — shorter stems ("can", "pay") are prefixes of far too many unrelated words. */
+const ANCHOR_INFLECTION_MIN_STEM = 4;
+
+/**
+ * Suffixes a name stem may pick up and still be the same concept. Kept short
+ * and derivational on purpose: "ant" is absent so `const` never evidences
+ * `constant`, which is the exact false positive salientWordMatch.ts's own
+ * module header exists to warn about.
+ */
+const ANCHOR_INFLECTION_SUFFIXES: ReadonlySet<string> = new Set([
+  "s", "es", "ed", "ing", "er", "ers", "or", "ors",
+  "ion", "ions", "ation", "ations", "ment", "ments",
+]);
+
+/** Per-process memo for `inflectionVariants`, whose input alphabet here is a handful of query/symbol tokens. */
+const anchorInflectionVariants = new Map<string, ReadonlySet<string>>();
+
+function anchorVariantsOf(token: string): ReadonlySet<string> {
+  let variants = anchorInflectionVariants.get(token);
+  if (variants === undefined) {
+    variants = new Set(inflectionVariants(token));
+    anchorInflectionVariants.set(token, variants);
+  }
+  return variants;
+}
+
+/**
+ * True when two whole words are the same concept under light inflection.
+ *
+ * First asks `salientWordMatch.ts`'s `inflectionVariants` — the repository's
+ * existing whole-word, bidirectional variant family (validate/validated/
+ * validation, cancel/cancelled/cancelling), reused rather than re-derived.
+ * That family does not reach across the doubled-consonant nominalisation
+ * "cancel" -> "cancellation", which is precisely the shape a request uses when
+ * it names a concept and the code names an action, so one conservative prefix
+ * rule is added on top: the shorter word must be at least
+ * ANCHOR_INFLECTION_MIN_STEM long, must be a literal prefix of the longer one
+ * (optionally absorbing one doubled consonant), and what remains must be a
+ * member of ANCHOR_INFLECTION_SUFFIXES. Never a bare substring test.
+ */
+function anchorInflectionMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (anchorVariantsOf(a).has(b) || anchorVariantsOf(b).has(a)) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length < ANCHOR_INFLECTION_MIN_STEM) return false;
+  if (!long.startsWith(short)) return false;
+  let rest = long.slice(short.length);
+  const lastLetter = short[short.length - 1]!;
+  if (rest[0] === lastLetter && !"aeiou".includes(lastLetter)) rest = rest.slice(1);
+  return ANCHOR_INFLECTION_SUFFIXES.has(rest);
+}
+
+/** `lexicalOverlapFraction` with `anchorInflectionMatch` instead of exact set membership. Used ONLY on the short NAME term lists (never on a symbol body). */
+function inflectedOverlapFraction(queryTokens: string[], candidateTokens: string[]): number {
+  if (queryTokens.length === 0) return 0;
+  const candidateSet = new Set(candidateTokens);
+  let hits = 0;
+  for (const t of queryTokens) {
+    if (candidateSet.has(t) || candidateTokens.some((candidate) => anchorInflectionMatch(t, candidate))) hits++;
+  }
+  return hits / queryTokens.length;
+}
+
+/**
+ * The same weighted sum `selectAnchorFocus`'s scoring loop builds, re-evaluated
+ * against the query MINUS the enclosing type's own name tokens, with the two
+ * NAME terms matched inflection-tolerantly. The BODY term stays exact: a body
+ * is long and noisy, and loosening it would let any file-wide vocabulary win.
+ */
+function anchorMemberLexicalScore(parts: AnchorLexicalParts, memberTokens: string[]): number {
+  return inflectedOverlapFraction(memberTokens, parts.symbolTokens) * ANCHOR_FOCUS_NAME_WEIGHT
+    + inflectedOverlapFraction(parts.symbolTokens, memberTokens) * ANCHOR_FOCUS_SYMBOL_COVERAGE_WEIGHT
+    + lexicalOverlapFraction(memberTokens, parts.bodyTokens) * ANCHOR_FOCUS_BODY_WEIGHT;
+}
+
+function anchorMemberScore(parts: AnchorLexicalParts, memberTokens: string[]): number {
+  return anchorMemberLexicalScore(parts, memberTokens)
+    + parts.callable * ANCHOR_FOCUS_CALLABLE_WEIGHT
+    - parts.typeOnly;
+}
+
 /**
  * Ready-to-run `read_file mode=slice handle=<id>` hints for the anchor-focus
  * runner-up symbols — mints one real "symbol"-kind handle per named
@@ -9081,6 +11744,16 @@ function anchorFocusRunnerUpOutline(
       symbol: r.name,
       workspaceRoot: workspace,
     });
+    // WP-S11 (Part B) deliberately does NOT canonicalize this one string.
+    // `surface.outline` is not prose: `contentFollowupTarget` regex-parses
+    // these lines back (`/:\s+(read_file\s+.+)$/`, then `\bhandle=(h…)\b` and
+    // `nextStringToCall`) and feeds the PARSED call into `next_call`, which is
+    // what the wire decision actually projects — canonically, via
+    // `canonicalContinuationCall`. See the `continuationQuery` doc block's own
+    // ruling for the identical case: "Emitting an unparseable [canonical] form
+    // would delete the hint from the decision instead of improving it." The
+    // caller therefore never sees this spelling; it is an internal dialect
+    // whose grammar lives in util/continuation.ts.
     return `${r.name}: read_file mode=slice handle=${handle.id}`;
   });
 }
@@ -9122,6 +11795,126 @@ function attachAnchorFocusAffordance(
   surface.why = callerScoped ? `${focusWhy}; caller-supplied` : focusWhy;
   if (focus.runnerUps.length > 0) {
     surface.outline = anchorFocusRunnerUpOutline(focus.runnerUps, filePath, workspace);
+  }
+}
+
+/** First line of a `"<start>-<end>"` range, or undefined for any other shape. */
+function anchorWindowStartLine(range: string | undefined): number | undefined {
+  const match = range === undefined ? null : /^(\d+)-(\d+)$/.exec(range);
+  return match === null ? undefined : Number(match[1]);
+}
+
+/** Inclusive line bounds of a `"<start>-<end>"` range, or undefined for any other shape. */
+function anchorWindowBounds(range: string | undefined): { start: number; end: number } | undefined {
+  const match = range === undefined ? null : /^(\d+)-(\d+)$/.exec(range);
+  if (match === null) return undefined;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? { start, end } : undefined;
+}
+
+/**
+ * WP-S2 rule 3 (TL_SEEDED_GENEROUS, answer profile only): the windows a
+ * caller-NAMED file that is too large to serve whole should carry, instead of
+ * the single `focus.best` pick.
+ *
+ * A caller who names four files and describes four things wants four answers;
+ * the single-pick anchor gives one, and the recorded sessions then spent 2-4
+ * turns zooming for the rest — which, at one turn per ~9-14 KB, costs more
+ * than the windows would have. So take the SAME ranked candidate list
+ * `selectAnchorFocus` already produced (`best` plus its runner-ups, in score
+ * order) and keep up to SEEDED_ANSWER_MAX_ANCHOR_WINDOWS of them, subject to:
+ *
+ *   - `best` is always window 0 (the seed's own range/symbol was set from it);
+ *   - a candidate whose body does not fit MAX_SURFACE_CODE_BYTES is skipped —
+ *     that is the enclosing type this fix exists to get past;
+ *   - a candidate that CONTAINS or is CONTAINED BY an already-kept one is
+ *     skipped, so the windows are disjoint and nothing is served twice;
+ *   - the running total stays within `fileBudget` (never more than
+ *     MAX_SURFACE_CODE_BYTES, and less when the pack's own byte ceiling has
+ *     already been spent on the other named files), so multi-window never
+ *     spends more on one file than the single-window path was already
+ *     allowed, and never more than the response can actually carry.
+ *
+ * Returns `[]` when only `best` qualifies, which keeps the caller on today's
+ * single-surface shape.
+ */
+function multiWindowAnchorFocus(
+  focus: AnchorFocusResult,
+  content: string,
+  relPath: string,
+  fileBudget: number,
+): AnchorFocusCandidate[] {
+  const bestBounds = anchorWindowBounds(focus.best.range);
+  if (bestBounds === undefined) return [];
+  const lines = content.split(/\r?\n/);
+  const windowBytes = (bounds: { start: number; end: number }): number =>
+    Buffer.byteLength(
+      elideDocComments(lines.slice(bounds.start - 1, bounds.end).join("\n"), languageForPath(relPath), bounds.start),
+      "utf8",
+    );
+  const budget = Math.min(MAX_SURFACE_CODE_BYTES, Math.max(0, fileBudget));
+  const keptBounds: Array<{ start: number; end: number }> = [bestBounds];
+  const kept: AnchorFocusCandidate[] = [focus.best];
+  let spent = windowBytes(bestBounds);
+  if (spent > budget) return [];
+  for (const candidate of focus.runnerUps) {
+    if (kept.length >= SEEDED_ANSWER_MAX_ANCHOR_WINDOWS) break;
+    // A runner-up that scored nothing is a list entry, not evidence: serving
+    // it would spend the file's window budget on a symbol the query never
+    // mentioned. It still reaches the caller through the surface `outline`.
+    if (candidate.score <= 0) continue;
+    const bounds = anchorWindowBounds(candidate.range);
+    if (bounds === undefined) continue;
+    if (keptBounds.some((k) => bounds.start <= k.end && k.start <= bounds.end)) continue;
+    const bytes = windowBytes(bounds);
+    if (bytes > budget || spent + bytes > budget) continue;
+    spent += bytes;
+    keptBounds.push(bounds);
+    kept.push(candidate);
+  }
+  return kept.length > 1 ? kept : [];
+}
+
+/**
+ * WP-S2 rule 3: make the windows of ONE file account for that file exactly
+ * once. `partialityStamp` stamps every surface with the complement of its own
+ * range within the whole file, which is correct for a lone surface and
+ * duplicated N times across N windows of the same file — the caller would
+ * then re-read the same spans once per window. Replace those stamps with a
+ * partition: each uncovered span is attached to the window it immediately
+ * follows (the leading span goes to the first window), so the union of served
+ * ranges and disclosed `remaining_ranges` is the file, with no span twice.
+ *
+ * `content_completeness` is left exactly as `partialityStamp` set it — it
+ * labels an embed-level TRIM of the served slice, which this does not change.
+ */
+function partitionAnchorWindowRemainders(windows: TaskPackSurface[], totalLines: number): void {
+  const served: Array<{ start: number; end: number; surface: TaskPackSurface }> = [];
+  for (const surface of windows) {
+    const bounds = anchorWindowBounds(surface.range);
+    if (bounds === undefined) return; // non-plain range: leave every stamp alone
+    served.push({ ...bounds, surface });
+  }
+  served.sort((a, b) => a.start - b.start);
+  const gapsFor = new Map<TaskPackSurface, string[]>(windows.map((surface) => [surface, []]));
+  let cursor = 1;
+  for (let i = 0; i < served.length; i++) {
+    const entry = served[i]!;
+    if (entry.start > cursor) {
+      // The leading gap has no predecessor; give it to the first window.
+      const owner = i === 0 ? entry.surface : served[i - 1]!.surface;
+      gapsFor.get(owner)!.push(`${cursor}-${entry.start - 1}`);
+    }
+    cursor = Math.max(cursor, entry.end + 1);
+  }
+  if (cursor <= totalLines && served.length > 0) {
+    gapsFor.get(served[served.length - 1]!.surface)!.push(`${cursor}-${totalLines}`);
+  }
+  for (const surface of windows) {
+    const gaps = gapsFor.get(surface) ?? [];
+    if (gaps.length === 0) delete surface.remaining_ranges;
+    else surface.remaining_ranges = gaps.slice(0, MAX_REMAINING_RANGE_ENTRIES);
   }
 }
 
@@ -9469,11 +12262,16 @@ function rootMarkdownTitleMatch(workspace: string, query: string): string | unde
       try {
         const abs = path.join(workspace, entry.name);
         statReadTargetSync(abs, workspace);
-        // P3 (2026-08-27): decode via BOM/NUL-aware decodeTextBuffer, never a
+        // P3 (2026-08-27): decode via the shared BOM/NUL-aware policy, never a
         // raw utf8 read — an undecodable file is skipped like any other probe
         // failure, never served as garbled title text.
-        const decoded = decodeTextBuffer(fs.readFileSync(abs));
-        if (decoded === null) return undefined;
+        // AA1 (2026-09-14, round 10): the title line DOES reach the wire, so it
+        // goes through the ONE serve-side verdict like every other served text
+        // (the old `decodeTextBuffer` would have handed back a mojibake heading
+        // for an invalid-UTF-8 markdown file).
+        // served-bytes: readServedText
+        const decoded = servedTextOrUndefined(abs);
+        if (decoded === undefined) return undefined;
         title = decoded.split(/\r?\n/, 1)[0] ?? "";
       } catch {
         return undefined;
@@ -10865,7 +13663,27 @@ function concernTokenMatchesSurface(token: string, s: TaskPackSurface): boolean 
   // case out of concernAnchorTokens' output) and silently never matched.
   const lowerToken = token.toLowerCase();
   const normalizedToken = normIdent(token);
-  const body = `${s.code ?? ""}\n${s.code_unchanged ?? ""}`.toLowerCase();
+  // p11c (2026-09-13): read via `servedSurfaceText`, not `s.code`/
+  // `s.code_unchanged` concatenated raw. Once TL142-03's taskBinding-aware
+  // `applyPackDedupe` legitimately demotes a REQUIRED surface to
+  // `code_unchanged` on a proven-same-task repeat (previously impossible —
+  // the pre-TL142-03 guard protected every required surface from demotion
+  // unconditionally), `s.code_unchanged` is a short pointer string like
+  // "<handle> — see prior pack", never the original body. Matching a query
+  // concern token against that pointer text made a token this task had
+  // ALREADY served (just compacted) look "unmatched", so
+  // `unmatchedConcernTokens`/Rule 5 (alternativeProgressAxis) proposed a
+  // redundant `search_files find <token>` re-ask for content already in the
+  // pack's own evidence — observed live: p11c's forced-fresh-build bare qref
+  // re-pack needed 3 repacks instead of <=2, the extra round finding nothing
+  // new (the search's own response even disclosed `served_this_session:
+  // true`) and leaving coverage no better (an additional, still-unresolved
+  // "api" role). `servedSurfaceText` already recovers the real pre-demotion
+  // body from `dedupedSurfaceBody` for exactly this situation (see its own
+  // doc comment) and is what server-side readiness/proof checks use
+  // elsewhere; `concernTokenMatchesSurface` was the one reader still doing
+  // its own raw concatenation.
+  const body = servedSurfaceText(s).toLowerCase();
   return body.includes(lowerToken) || normIdent(body).includes(normalizedToken);
 }
 
@@ -11782,6 +14600,462 @@ async function recoverExplicitIdentifierAnswerCandidates(
 }
 
 /**
+ * TL_CONCERN_RECOVERY (Agent B, Phase 2 2026-09-19, fixed Phase 3
+ * 2026-09-19): sibling co-occurrence recovery for a MULTI-member query list
+ * — see concernRecovery.ts's module doc for the full rationale (picking one
+ * arbitrary occurrence of an ambiguous literal is a guess; the file where
+ * several members of the SAME user-written list occur together is evidence
+ * a lone literal never was).
+ *
+ * Gathers literals from the three sources the query already yields
+ * elsewhere in this file — the enumerated-item list parser
+ * (currentEnumeratedQueryItems), the backticked/quoted/slash-joined facet
+ * extractor (requiredQueryFacets), and explicitCodeIdentifiers's own
+ * code-shape oracle, reused here ONLY as a membership test, never
+ * re-derived — and hands them to the pure grouping/scoring/windowing module.
+ * Never writes a second list parser or a second shape classifier.
+ */
+/**
+ * Test-only observability (Phase 3, 2026-09-19, matching the existing
+ * `sfAwaitInputInvariantFallbackCountForTest`-style counters in
+ * canonicalDecision.ts): increments exactly once per `buildAnswerTaskPack`
+ * call that enters the `concernRecoveryEnabled()` block — the ONLY place
+ * `diversifyByConcern`/`recoverConcernCandidates` are ever reached from. A
+ * spec can assert this stays 0 across a whole run with the flag unset,
+ * proving OFF-inertness directly rather than only inferring it from
+ * unchanged output bytes.
+ */
+let concernRecoveryEntryCountForTest = 0;
+export function concernRecoveryEntryCount(): number {
+  return concernRecoveryEntryCountForTest;
+}
+export function resetConcernRecoveryEntryCountForTest(): void {
+  concernRecoveryEntryCountForTest = 0;
+}
+
+function buildConcernRecoveryItems(query: string): ConcernRecoveryItem[] {
+  const cleaned = stripPathSpans("", query);
+  const codeShapedOracle = new Set(explicitCodeIdentifiers(query).map((token) => token.toLowerCase()));
+  const byText = new Map<string, ConcernRecoveryItem>();
+  const add = (text: string, start: number): void => {
+    if (start < 0 || text.trim().length === 0) return;
+    const key = text.toLowerCase();
+    const codeShaped = codeShapedOracle.has(key);
+    const existing = byText.get(key);
+    if (!existing || start < existing.start) {
+      byText.set(key, { text, start, codeShaped: codeShaped || (existing?.codeShaped ?? false) });
+    } else if (codeShaped && !existing.codeShaped) {
+      byText.set(key, { ...existing, codeShaped: true });
+    }
+  };
+  for (const item of currentEnumeratedQueryItems(query)) add(item.facet, item.start);
+  for (const literal of requiredQueryFacets(query)) add(literal, cleaned.toLowerCase().indexOf(literal.toLowerCase()));
+  for (const identifier of explicitCodeIdentifiers(query)) {
+    add(identifier, cleaned.toLowerCase().indexOf(identifier.toLowerCase()));
+  }
+  return [...byText.values()];
+}
+
+/**
+ * The candidate for one named-definition file (concernRecovery.ts's
+ * `namedDefinitionFiles`): the member the request asks about right after the
+ * type's name when the file defines one ("PaymentService の refund メソッド" →
+ * `refund`), else the type's own definition, else the head of the file. Same
+ * `why` and confidence as the literal recovery's candidates — both are
+ * evidence the request named, merged by the caller after the answer-mode
+ * decision.
+ */
+async function namedDefinitionCandidate(
+  named: NamedDefinitionFile,
+  query: string,
+  identifiers: readonly string[],
+  workspace: string,
+  cache: FileReadCache,
+): Promise<ImpactCandidate | undefined> {
+  const content = readCached(workspace, named.path, cache);
+  if (content === undefined) return undefined;
+  const lang = languageForPath(named.path);
+  const parsed = (lang ? await cache.parsedSymbols(content, lang, named.path) : null) ?? [];
+  const tailOf = (name: string): string => unqualifiedSymbolTail(name).toLowerCase();
+  const member = namedMemberAfterIdentifier(
+    query,
+    named.identifier,
+    identifiers.filter((name) => name !== named.identifier),
+    new Set(parsed.map((symbol) => tailOf(symbol.name))),
+  );
+  const wanted = member ?? named.identifier.toLowerCase();
+  const symbol = parsed.find((entry) => tailOf(entry.name) === wanted);
+  return {
+    path: named.path,
+    line: symbol?.startLine ?? 1,
+    ...(symbol ? { range: `${symbol.startLine}-${symbol.endLine}`, symbol: symbol.name } : {}),
+    surface: classifySurface(named.path),
+    why: "answer-explicit-identifier-recovery",
+    confidence: 0.95,
+  };
+}
+
+/**
+ * Runs the pure recovery pipeline and returns its candidates for the caller
+ * to MERGE into `candidates` AFTER the answer-mode decision (Blocker 1,
+ * Phase 3, 2026-09-19: this function used to unshift its results into
+ * `rankedAnswerCandidates` directly, which made `recoveredExactAnswer`
+ * / `exactLocatedAnswer` see them and collapse a multi-concern query down
+ * to ONE certified surface — the opposite of the goal. It now never touches
+ * `rankedAnswerCandidates` and carries no `exactIdentifier`/`strongEvidence`
+ * marking of its own; the caller alone decides how these merge in).
+ *
+ * `args.path` is threaded into the scan exactly like
+ * recoverExplicitIdentifierAnswerCandidates's own scanLiteral call (Blocker
+ * 2: a prior version dropped this, letting a path-scoped pack recover
+ * evidence from outside the caller's scope).
+ */
+async function recoverConcernCandidates(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<ConcernCandidate[]> {
+  const items = buildConcernRecoveryItems(query);
+  const groupCount = countSiblingGroups(items);
+  if (groupCount === 0) return [];
+  const scan: ConcernFixedStringScanner = (needle) =>
+    scanLiteral(needle, workspace, {
+      caseInsensitive: false,
+      ...(args.path ? { path: args.path } : {}),
+    }).map((match) => {
+      const text = match.text ?? "";
+      const at = text.indexOf(needle);
+      const before = at >= 0 ? text.slice(0, at) : "";
+      const after = at >= 0 ? text.slice(at + needle.length) : "";
+      return {
+        path: match.path,
+        line: match.line,
+        definitionShaped: IDENTIFIER_DEFINITION_KEYWORD_RE.test(before) || /^\s*[=:]/.test(after),
+        isTestPath: isTestConcernPath(match.path),
+        isDocPath: /\.(?:md|markdown|txt|rst|adoc)$/i.test(match.path),
+      };
+    });
+  const enclosingSymbol: ConcernEnclosingSymbolReader = async (filePath, line) => {
+    const content = readCached(workspace, filePath, cache);
+    if (content === undefined) return undefined;
+    const lang = languageForPath(filePath);
+    const parsed = lang ? await cache.parsedSymbols(content, lang, filePath) : null;
+    const enclosing = (parsed ?? [])
+      .filter((sym) => line >= sym.startLine && line <= sym.endLine)
+      .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+    return enclosing ? { startLine: enclosing.startLine, endLine: enclosing.endLine, symbol: enclosing.name } : undefined;
+  };
+  return recoverConcernGroupCandidates(items, scan, enclosingSymbol);
+}
+
+// ---------------------------------------------------------------------------
+// WP-S9 (TL_CALLER_EXPANSION, 2026-09-20): a caller is found structurally.
+// ---------------------------------------------------------------------------
+//
+// See callerExpansion.ts's module doc for the measured defect. The hook below
+// is the ONLY place that module is reached from; it turns a real workspace
+// scan and tree-sitter parse into the plain data those pure helpers take, in
+// exactly the shape recoverConcernCandidates does for concernRecovery.ts.
+//
+// Kinds tree-sitter reports for a CALLABLE symbol, versus the type-shaped ones
+// whose own members are the interesting focal candidates.
+const CALLER_EXPANSION_CALLABLE_KINDS: ReadonlySet<string> = new Set(["function", "method"]);
+const CALLER_EXPANSION_TYPE_KINDS: ReadonlySet<string> = new Set(["class", "interface", "enum", "type", "trait", "struct"]);
+/** Doc/prose surfaces can never hold a call site; skipped before any file is read. */
+const CALLER_EXPANSION_DOC_PATH_RE = /\.(?:md|markdown|txt|rst|adoc)$/i;
+
+/**
+ * Test-only observability, mirroring `concernRecoveryEntryCount` above:
+ * increments exactly once per `buildAnswerTaskPack` call that actually enters
+ * the caller-expansion hook, so a spec can prove OFF-inertness directly
+ * instead of only inferring it from unchanged output bytes.
+ */
+let callerExpansionEntryCountForTest = 0;
+export function callerExpansionEntryCount(): number {
+  return callerExpansionEntryCountForTest;
+}
+export function resetCallerExpansionEntryCountForTest(): void {
+  callerExpansionEntryCountForTest = 0;
+}
+
+/** The file's own declared type: the outermost type-shaped symbol, else the file stem (languages that declare no type at all). */
+function callerExpansionTypeNameFor(parsed: ParsedSymbols, relPath: string): string {
+  const declared = parsed
+    .filter((symbol) => CALLER_EXPANSION_TYPE_KINDS.has(symbol.kind) && symbol.enclosingSymbol === undefined)
+    .sort((a, b) => (b.endLine - b.startLine) - (a.endLine - a.startLine))[0];
+  return unqualifiedSymbolTail(declared?.name ?? path.basename(relPath, path.extname(relPath)));
+}
+
+/**
+ * The focal members one selected surface contributes. Either the surface is
+ * FOCUSED on a callable (tier 0 — the pack already decided that member is the
+ * answer), or it carries a whole type and the QUERY names one or more of its
+ * members (tier 1), matched with the same inflection-tolerant whole-word rule
+ * the anchor scorer uses, so "cancellation" reaches `cancel`. A constructor is
+ * never a focal member: its callers are object construction, not the
+ * behaviour the request asked about.
+ */
+async function focalMembersForSurface(
+  candidate: ImpactCandidate,
+  surfaceIndex: number,
+  queryTokens: readonly string[],
+  lowerQuery: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<FocalMemberCandidate[]> {
+  const content = readCached(workspace, candidate.path, cache);
+  if (content === undefined) return [];
+  const lang = languageForPath(candidate.path);
+  const parsed = (lang ? await cache.parsedSymbols(content, lang, candidate.path) : null) ?? [];
+  if (parsed.length === 0) return [];
+  const typeName = callerExpansionTypeNameFor(parsed, candidate.path);
+  const focusedTail = candidate.symbol === undefined ? undefined : unqualifiedSymbolTail(candidate.symbol);
+  const focused = focusedTail === undefined
+    ? undefined
+    : parsed.find((symbol) => unqualifiedSymbolTail(symbol.name) === focusedTail);
+  if (focused !== undefined && CALLER_EXPANSION_CALLABLE_KINDS.has(focused.kind)) {
+    const member = unqualifiedSymbolTail(focused.name);
+    if (normIdent(member) === normIdent(typeName)) return [];
+    return [{
+      path: candidate.path,
+      typeName: unqualifiedSymbolTail(focused.enclosingSymbol?.name ?? typeName),
+      member,
+      surfaceIndex,
+      tier: 0,
+      queryPosition: Number.MAX_SAFE_INTEGER,
+      redundant: false,
+    }];
+  }
+  // A whole type (or a whole file): the query decides which of its members
+  // this pack is really about.
+  const out: FocalMemberCandidate[] = [];
+  for (const symbol of parsed) {
+    if (!CALLER_EXPANSION_CALLABLE_KINDS.has(symbol.kind)) continue;
+    const member = unqualifiedSymbolTail(symbol.name);
+    if (normIdent(member) === normIdent(typeName)) continue; // constructor
+    let position: number | undefined;
+    for (const word of splitIdentifierWords(member)) {
+      const lowerWord = word.toLowerCase();
+      if (lowerWord.length < ANCHOR_INFLECTION_MIN_STEM) continue;
+      for (const token of queryTokens) {
+        if (!anchorInflectionMatch(token, lowerWord)) continue;
+        // Same position trick buildConcernRecoveryItems uses for its own
+        // literals: the token's first occurrence in the query text orders
+        // "the concern named first" ahead of a later one.
+        const at = lowerQuery.indexOf(token);
+        if (at >= 0 && (position === undefined || at < position)) position = at;
+      }
+    }
+    if (position === undefined) continue;
+    out.push({
+      path: candidate.path,
+      typeName: unqualifiedSymbolTail(symbol.enclosingSymbol?.name ?? typeName),
+      member,
+      surfaceIndex,
+      tier: 1,
+      queryPosition: position,
+      redundant: false,
+    });
+  }
+  return out;
+}
+
+/** Compatible call sites of ONE focal member, ranked. Bounded by MAX_CALLER_FILES_EXAMINED and by the caller's own wall clock. */
+function callSitesForFocalMember(
+  focal: CallerFocalMember,
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+  allowTestPaths: boolean,
+  deadline: number,
+): CallerSiteCandidate[] {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = scanLiteral(focal.member, workspace, {
+      caseInsensitive: false,
+      ...(args.path ? { path: args.path } : {}),
+    });
+  } catch {
+    return [];
+  }
+  const linesByPath = new Map<string, number[]>();
+  for (const match of scanned) {
+    if (match.path === focal.path) continue; // never its own caller
+    if (!allowTestPaths && isTestConcernPath(match.path)) continue;
+    if (CALLER_EXPANSION_DOC_PATH_RE.test(match.path)) continue;
+    const existing = linesByPath.get(match.path);
+    if (existing) existing.push(match.line);
+    else linesByPath.set(match.path, [match.line]);
+  }
+  // Nearest files first, so a wall-clock or file-count cut keeps the files the
+  // ranking would have preferred anyway rather than an alphabetical prefix.
+  const paths = [...linesByPath.keys()].sort((a, b) =>
+    sharedPathPrefixSegments(b, focal.path) - sharedPathPrefixSegments(a, focal.path)
+    || a.localeCompare(b)
+  ).slice(0, MAX_CALLER_FILES_EXAMINED);
+  const sites: CallerSiteCandidate[] = [];
+  for (const relPath of paths) {
+    if (Date.now() >= deadline) break;
+    const content = readCached(workspace, relPath, cache);
+    if (content === undefined) continue;
+    const lines = content.split(/\r?\n/);
+    const hashComment = hasHashComments(relPath);
+    const namesType = fileNamesType(lines, focal.typeName, hashComment);
+    const inFile: Array<{ line: number; strength: 1 | 2 }> = [];
+    for (const line of linesByPath.get(relPath) ?? []) {
+      const text = lines[line - 1];
+      if (text === undefined) continue;
+      const masked = maskNonCode(text, hashComment);
+      for (const occurrence of findCallOccurrences(masked, focal.member)) {
+        if (occurrence.qualifier === "bare" || occurrence.qualifier === "scope") {
+          // A declaration is not a call. The keyword list is the shared
+          // IDENTIFIER_DEFINITION_KEYWORD_RE, applied to the segment that
+          // could actually govern this name (see `definitionSegment`).
+          if (IDENTIFIER_DEFINITION_KEYWORD_RE.test(definitionSegment(occurrence.before))) continue;
+          if (occurrence.qualifier === "bare" && opensBlockDeclaration(masked, occurrence.before)) continue;
+        }
+        const strength = receiverStrength(occurrence.receiver, focal.typeName, namesType);
+        if (strength === 0) continue;
+        inFile.push({ line, strength });
+        break; // one site per line is enough; the window is the same either way
+      }
+    }
+    for (const site of inFile) {
+      sites.push({
+        path: relPath,
+        line: site.line,
+        strength: site.strength,
+        callsInFile: inFile.length,
+        proximity: sharedPathPrefixSegments(relPath, focal.path),
+      });
+    }
+  }
+  return rankCallSites(sites);
+}
+
+/** What a caller window would really put on the wire — the same elided-embed measure `wholeFileEmbedBytes` takes, over one range. */
+function callerWindowEmbedBytes(content: string, relPath: string, start: number, end: number): number {
+  const slice = sliceLinesToText(content, start, end);
+  if (slice.length === 0) return Number.MAX_SAFE_INTEGER;
+  const rawBytes = Buffer.byteLength(slice, "utf8");
+  const elided = elideDocComments(slice, languageForPath(relPath), start);
+  if (elisionLeftMarkersOnly(elided)) return rawBytes;
+  return Math.min(rawBytes, Buffer.byteLength(elided, "utf8"));
+}
+
+/**
+ * The caller-expansion additions for one answer pack, for the caller to MERGE
+ * (never to inject into the ranking): at most MAX_CALLER_SURFACES surfaces and
+ * MAX_CALLER_EXPANSION_BYTES embedded bytes, one per file, never a file the
+ * pack already selected, never the focal file itself. Abstains — returns [] —
+ * whenever no focal member or no compatible call site can be established.
+ *
+ * `args.path` is threaded into the scan exactly like recoverConcernCandidates
+ * threads it, so a path-scoped pack never recovers a caller from outside the
+ * caller's own scope.
+ */
+async function recoverCallerExpansionCandidates(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+  selected: readonly ImpactCandidate[],
+): Promise<ImpactCandidate[]> {
+  if (selected.length === 0) return [];
+  const deadline = Date.now() + CUMULATIVE_LOCATE_BUDGET_MS;
+  const queryTokens = tokenizeQueryForDiversification(query);
+  if (queryTokens.length === 0) return [];
+  const lowerQuery = query.toLowerCase();
+  const focalCandidates: FocalMemberCandidate[] = [];
+  for (const [index, candidate] of selected.entries()) {
+    if (Date.now() >= deadline) break;
+    focalCandidates.push(
+      ...await focalMembersForSurface(candidate, index, queryTokens, lowerQuery, workspace, cache),
+    );
+  }
+  // A member name another surface is already FOCUSED on is the same question
+  // asked twice; rank it last rather than dropping it (see pickFocalMembers).
+  const focusedNames = new Set(
+    focalCandidates.filter((entry) => entry.tier === 0).map((entry) => normIdent(entry.member)),
+  );
+  const focal = pickFocalMembers(focalCandidates.map((entry) =>
+    entry.tier === 1 && focusedNames.has(normIdent(entry.member)) ? { ...entry, redundant: true } : entry
+  ));
+  if (focal.length === 0) return [];
+  const allowTestPaths = queryMentionsTests(query);
+  const selectedPaths = new Set(selected.map((candidate) => candidate.path));
+  const ranked = focal.map((member) =>
+    Date.now() >= deadline ? [] : callSitesForFocalMember(member, args, workspace, cache, allowTestPaths, deadline)
+  );
+  const additions: ImpactCandidate[] = [];
+  const takenPaths = new Set<string>();
+  let bytesUsed = 0;
+  // Round-robin across focal members first, so two focal members contribute
+  // one caller each before either contributes a second.
+  const depth = Math.max(...ranked.map((sites) => sites.length), 0);
+  for (let rank = 0; rank < depth && additions.length < MAX_CALLER_SURFACES; rank++) {
+    for (const [index, sites] of ranked.entries()) {
+      if (additions.length >= MAX_CALLER_SURFACES) break;
+      const site = sites[rank];
+      const member = focal[index];
+      if (site === undefined || member === undefined) continue;
+      if (selectedPaths.has(site.path) || takenPaths.has(site.path)) continue;
+      const content = readCached(workspace, site.path, cache);
+      if (content === undefined) continue;
+      const lang = languageForPath(site.path);
+      const parsed = (lang ? await cache.parsedSymbols(content, lang, site.path) : null) ?? [];
+      const enclosing = parsed
+        .filter((symbol) =>
+          CALLER_EXPANSION_CALLABLE_KINDS.has(symbol.kind)
+          && site.line >= symbol.startLine
+          && site.line <= symbol.endLine
+        )
+        .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+      const window = enclosing !== undefined
+        ? { start: enclosing.startLine, end: enclosing.endLine }
+        : boundedCallerWindow(site.line, countLines(content));
+      // A THIN calling file is served WHOLE (measured 2026-09-20, live Copilot
+      // session on the build carrying this mechanism): the handler window
+      // alone answers "which method", but "which API endpoint" lives in the
+      // class header the window cuts off — the base route on the type, the
+      // injected field that proves the receiver, the imports. The model paid a
+      // whole extra turn (~170 mAIU) re-reading the same 2.2 KB file as
+      // `{handle, range:"1-80"}`, and one turn prices at roughly 9-14 KB of
+      // served source. An entry layer is thin by construction, so whenever the
+      // WHOLE file fits what is left of this mechanism's own allowance it is
+      // strictly cheaper to ship it than to ship a window plus the follow-up.
+      // Anything that does not fit keeps today's enclosing window.
+      const wholeFile = { start: 1, end: countLines(content) };
+      const wholeBytes = callerWindowEmbedBytes(content, site.path, wholeFile.start, wholeFile.end);
+      const serveWhole = bytesUsed + wholeBytes <= MAX_CALLER_EXPANSION_BYTES;
+      const served = serveWhole ? wholeFile : window;
+      const bytes = serveWhole ? wholeBytes : callerWindowEmbedBytes(content, site.path, window.start, window.end);
+      if (bytesUsed + bytes > MAX_CALLER_EXPANSION_BYTES) continue;
+      bytesUsed += bytes;
+      takenPaths.add(site.path);
+      additions.push({
+        path: site.path,
+        // The CALL SITE, not the window head: `centeredSliceForCap` centers an
+        // oversize body on `line`, and the call is the point of interest (same
+        // choice recoverExplicitIdentifierAnswerCandidates makes for its own
+        // enclosing-symbol candidates).
+        line: site.line,
+        range: `${served.start}-${served.end}`,
+        surface: classifySurface(site.path),
+        why: callerExpansionWhy(member),
+        confidence: 0.9,
+        // A whole-file serve carries NO symbol pin: `candidateToSurface`
+        // re-points a symbol-pinned candidate at that symbol's own range,
+        // which would silently undo the widening.
+        ...(!serveWhole && enclosing !== undefined ? { symbol: enclosing.name } : {}),
+      });
+    }
+  }
+  return additions;
+}
+
+/**
  * Verified-absent identifiers ride OUTSIDE the wire envelope: the readiness
  * obligation builder consults this map to upgrade its uncovered reason to
  * decision-grade absence. WeakMap keyed by the result object so trim/dedupe
@@ -11790,8 +15064,521 @@ async function recoverExplicitIdentifierAnswerCandidates(
  */
 const verifiedAbsentIdentifiersByResult = new WeakMap<object, readonly string[]>();
 
+/**
+ * SHOULD-FIX 28 (2026-09-14, review round 4) — NO RESPONSE MAY SERVE A BODY
+ * CONTAINING AN IDENTIFIER AND CERTIFY THAT IDENTIFIER ABSENT.
+ *
+ * R2-B14 established that invariant for the EXECUTED-SEARCH ledger's absences
+ * (`recordedAbsenceIsStale` test (a)). The INTERNAL absence prover writes here
+ * directly and had no such check — `buildSeededTaskPack`'s `scanLiteral` over the
+ * bounded SOURCE universe, which does not enumerate extensionless files, while
+ * `search_files find`'s generic-text floor does. So a pack that served
+ * `bin/tool` (`plasmaConduitMode=true`, located by that very find) certified
+ * `identifier:plasmaConduitMode` with the decision-grade wording "has zero
+ * literal occurrences in the workspace". Latent before SHOULD-FIX 28 only
+ * because such a file was never served at all; serving it is what made the
+ * disagreement reachable, so the guard belongs with the change that reached it.
+ *
+ * Enforced at the single READER rather than at the four writers: a claim is
+ * withdrawn whenever this pack's own bytes contradict it, whichever prover made
+ * it, and a future prover inherits the guard. Word-boundary over
+ * `servedSurfaceText` plus the surface's anchor `symbol` — byte-for-byte the same
+ * test (a) uses, including its deliberate indifference to whether the occurrence
+ * is code-bearing: an occurrence of ANY kind withdraws a claim, even though only
+ * a code-bearing one may PROVE something (SHOULD-FIX 29).
+ *
+ * The obligation then falls back to "no served evidence", which keeps discovery
+ * open and makes `uncoveredIdentifierFindCall` propose the workspace-wide find —
+ * a bounded extra call rather than a false certificate. No I/O.
+ */
 function verifiedAbsentIdentifiersFor(result: TaskPackResult): readonly string[] {
-  return verifiedAbsentIdentifiersByResult.get(result) ?? [];
+  const recorded = verifiedAbsentIdentifiersByResult.get(result) ?? [];
+  if (recorded.length === 0) return recorded;
+  const surfaces = codeTaskPackSurfaces(result.surfaces ?? []);
+  if (surfaces.length === 0) return recorded;
+  return recorded.filter((identifier) => {
+    const matcher = new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+    return !surfaces.some((surface) =>
+      matcher.test(servedSurfaceText(surface))
+      || (surface.symbol !== undefined && matcher.test(surface.symbol)));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// WP-S5 (2026-09-20), TL_IDENTIFIER_GROUNDING — an ungrounded "identifier" must
+// not send the caller on a relay loop.
+// ---------------------------------------------------------------------------
+//
+// `explicitCodeIdentifiers` is a SHAPE oracle: it reads how a word is SPELLED,
+// never what the workspace contains. That is the right input for RANKING, and
+// the wrong one for minting a BLOCKING obligation, because the only recovery a
+// blocking `identifier:<name>` has is a `find` for that name — a call this
+// server can often predict will close nothing. Measured 2026-09-20 on the
+// recommended `query: <verbatim request>` shape: "このリポジトリ(ShopFlow)で…"
+// names the PRODUCT, `identifier:ShopFlow` blocked an otherwise complete pack,
+// and following the pack's own `next` returned fuzzy neighbours
+// (`ShopFlowApiClient`) whose re-pack served an unrelated file. Two model turns
+// bought a WORSE task state. A stop-list (`PROSE_ACRONYMS`) closes vocabulary
+// words like API/JSON/URL by name; it cannot generalize to product, repository
+// or brand names, which is why this gate asks the workspace instead.
+//
+// GROUNDING is the missing half of the oracle, and it judges ONLY the shape
+// that produced the defect: a BARE camelCase/PascalCase word. Every form in
+// which the caller made the code intent EXPLICIT keeps its obligation on
+// spelling alone — backticks, a qualified `A.b`/`A::b`/`A#b`, a call-shaped
+// `name(`, or an `_`/`$` in the token — because there the caller has SAID this
+// is code. A bare capitalised word has said only that it is capitalised.
+// Parentheses are deliberately NOT such a form (`delimitedExplicitCodeIdentifiers`
+// treats them as one for RANKING, which is a different question): "(X)" is
+// ordinary prose apposition, and the measured defect wrote its product name in
+// exactly that position.
+//
+// Nothing here is an absence CLAIM. A dropped obligation only stops the pack
+// from owing evidence for the word and from prescribing a find for it; no wire
+// field asserts it is missing, so the absence-honesty contract (a literal is
+// certified absent only by a complete scan) is untouched — and indeed
+// `ShopFlow` is NOT absent from that workspace, it simply defines nothing.
+// Fail-closed everywhere else: an incomplete walk, an unreadable workspace, or
+// any definition-shaped hit at all keeps today's obligation.
+
+/** Languages whose files declare no symbols — a heading or a mapping key in one must never ground a name. */
+const NON_DECLARING_LANGUAGES: ReadonlySet<string> = new Set([
+  "markdown", "html", "css", "json", "jsonc", "yaml", "toml",
+]);
+
+/** Grounding scans per pack. The explicit-identifier obligation loop already caps itself at six identifiers; this bounds the I/O to the same ceiling even when every one of them is uncovered. */
+const MAX_IDENTIFIER_GROUNDING_SCANS = 6;
+
+/**
+ * Test-only observability, same convention as `concernRecoveryEntryCount`
+ * above: increments once per workspace scan `workspaceDefinesIdentifier`
+ * actually performs. A spec asserts it stays 0 across a whole run with the flag
+ * unset, which proves OFF-inertness DIRECTLY rather than only inferring it from
+ * unchanged output bytes.
+ */
+let identifierGroundingScanCountForTest = 0;
+export function identifierGroundingScanCount(): number {
+  return identifierGroundingScanCountForTest;
+}
+export function resetIdentifierGroundingScanCountForTest(): void {
+  identifierGroundingScanCountForTest = 0;
+}
+
+/**
+ * Per-pack grounding memo. `buildReadinessObligations` runs several times for
+ * one pack (its own call site says so), so without this the same workspace walk
+ * would repeat once per pass. Keyed by the result object exactly like
+ * `verifiedAbsentIdentifiersByResult` above: a trim/dedupe clone simply loses
+ * the memo and re-scans, and nothing survives into another pack.
+ */
+interface IdentifierGroundingMemo {
+  readonly verdicts: Map<string, boolean | undefined>;
+  scans: number;
+}
+const identifierGroundingByResult = new WeakMap<object, IdentifierGroundingMemo>();
+
+/**
+ * True when `identifier` is a BARE camelCase/PascalCase word in `query` — the
+ * only shape this gate judges. Every explicit code form returns false and keeps
+ * its obligation unconditionally; see this section's own doc block above.
+ */
+/** `queryQualifiedSymbolKeys`'s own `qualifier<NUL>member` joiner, built at runtime so this source file stays free of raw NUL bytes (the repo's `source_no_nul_bytes` doctor check). */
+const QUALIFIED_SYMBOL_KEY_SEPARATOR = String.fromCharCode(0);
+
+function identifierNeedsGrounding(query: string, identifier: string): boolean {
+  if (identifier.includes("_") || identifier.includes("$")) return false;
+  const camelOrPascal = isPascalCaseIdentifier(identifier)
+    || /^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$/.test(identifier);
+  if (!camelOrPascal) return false;
+  const key = normIdent(identifier);
+  for (const match of query.matchAll(/`([A-Za-z_$][A-Za-z0-9_$]*)`/g)) {
+    if (normIdent(match[1]!) === key) return false;
+  }
+  for (const qualified of queryQualifiedSymbolKeys(query)) {
+    const [qualifier, member] = qualified.split(QUALIFIED_SYMBOL_KEY_SEPARATOR);
+    if (normIdent(qualifier ?? "") === key || normIdent(member ?? "") === key) return false;
+  }
+  if (new RegExp(`(?:^|[^A-Za-z0-9_$])${escapeRegExp(identifier)}\\s*\\(`).test(query)) return false;
+  return true;
+}
+
+/**
+ * Does the workspace DEFINE `identifier`? `true` = at least one whole-word,
+ * definition-shaped occurrence in a symbol-declaring source file; `false` = a
+ * COMPLETE walk found none; `undefined` = undecidable, which keeps today's
+ * behaviour.
+ *
+ * Reuses `recoverExplicitIdentifierAnswerCandidates`'s own literal scan and its
+ * `IDENTIFIER_DEFINITION_KEYWORD_RE` test rather than building a second index.
+ * Two deliberate narrowings versus that caller, both required here and not
+ * there: the occurrence must be a WHOLE WORD (a substring hit inside
+ * `class ShopFlowApiClient` must not ground `ShopFlow`), and it must sit in a
+ * file of a symbol-declaring language (`ShopFlow: an order demo` in a README
+ * otherwise reads as a binding).
+ */
+function workspaceDefinesIdentifier(workspace: string, identifier: string): boolean | undefined {
+  identifierGroundingScanCountForTest += 1;
+  const omissions = createWalkOmissions();
+  let matches: ReturnType<typeof scanLiteral>;
+  try {
+    matches = scanLiteral(identifier, workspace, { caseInsensitive: false, omissions });
+  } catch {
+    return undefined;
+  }
+  // An omitted path could hold the very declaration this asks about, so the
+  // scan has not PROVED anything about it — same fail-closed rule the absence
+  // provers in this file apply to their own universes.
+  if (anyWalkOmission(omissions)) return undefined;
+  for (const match of matches) {
+    const language = languageForPath(match.path);
+    if (language === undefined || NON_DECLARING_LANGUAGES.has(language)) continue;
+    const text = match.text ?? "";
+    for (let at = text.indexOf(identifier); at >= 0; at = text.indexOf(identifier, at + 1)) {
+      const before = text.slice(0, at);
+      const after = text.slice(at + identifier.length);
+      if (/[A-Za-z0-9_$]$/.test(before) || /^[A-Za-z0-9_$]/.test(after)) continue;
+      if (IDENTIFIER_DEFINITION_KEYWORD_RE.test(before) || /^\s*[=:]/.test(after)) return true;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// WP-S5 (A) (TL_IDENTIFIER_GROUNDING, 2026-09-20): prose is not a literal
+// obligation.
+// ---------------------------------------------------------------------------
+//
+// The same defect one level out from the identifier gate above. A blocking
+// obligation's only recovery is a call that looks for its wording in the
+// workspace, so minting one for a plain natural-language word asks the server
+// to go find "restoration", "numbers" or "read-only" in Java source. Measured
+// on a live VS Code Copilot session: three such `enumerated-item:` obligations
+// plus a `request-item` for "do not edit." held an otherwise complete pack at
+// `discover` and produced a `next` that re-read TokenLighten's own guide files.
+//
+// The line is CODE SHAPE, not a vocabulary list: a phrase earns an obligation
+// when the caller wrote it as code (backticked/quoted, an uppercase letter
+// after the first character, a digit, `_`, `.`, `/`, `::`, `#`, `(`, or an
+// ALL-CAPS token). `PAID, CANCELLED` keeps its obligation; `inventory
+// restoration` does not. Everything filtered here remains a ranking token —
+// `buildConcernRecoveryItems` and `requiredQueryFacets` are untouched — so the
+// pack still PREFERS surfaces that mention it; it simply stops BLOCKING on it.
+//
+// Second half: a clause that constrains the ANSWER'S FORM or the AGENT'S
+// BEHAVIOUR ("need exact file paths and line numbers", "read-only, do not
+// edit", "簡潔に", "コードは変更しないで") asks nothing about the repository, so
+// it is not an evidence point at all. It is recognized structurally — no
+// code-shaped token AND a generic cue — and the two cue lists below are
+// deliberately short, English+Japanese, and made of words that cannot name
+// workspace code. A clause with ANY code shape is never classified this way, so
+// "do not edit `OrderService`" keeps its obligation.
+
+/** Paired quotes only: a lone apostrophe ("don't") is prose, not a quoted literal. */
+const QUOTED_LITERAL_SPAN_RE = /`[^`]+`|"[^"]+"|'[^']+'|「[^」]+」|『[^』]+』/u;
+
+/** Characters that continue ONE code token around a facet — `order.quantity`, `Order::cancel`, `a/b.ts`. Whitespace and ordinary punctuation stop the expansion, so a neighbouring sentence can never glue itself on. */
+const CODE_TOKEN_CHAR_RE = /[A-Za-z0-9_$.#/:]/u;
+
+/** Structural code shape — the one test both WP-S5 (A) gates share. */
+function phraseCarriesCodeShape(phrase: string): boolean {
+  if (QUOTED_LITERAL_SPAN_RE.test(phrase)) return true;
+  if (/\d/u.test(phrase)) return true;
+  if (/[_/(]/u.test(phrase) || phrase.includes("::") || phrase.includes("#")) return true;
+  if (/\.[A-Za-z]/u.test(phrase)) return true;
+  if (/\b[A-Z][A-Z0-9]+\b/u.test(phrase)) return true;
+  return /\b[A-Za-z][A-Za-z0-9]*[A-Z]/u.test(phrase);
+}
+
+/** Generic cues that a clause constrains how to ANSWER, EN + JA. None of these words can name workspace code. */
+const ANSWER_FORMAT_CUE_RE =
+  /\b(?:concise|concisely|brief|briefly|bullet|bulleted|verbatim|cite|citation|summari[sz]e|summary)\b|\bfile\s*paths?\b|\bline\s*numbers?\b|簡潔|箇条書き|要約|ファイルパス|行番号/iu;
+
+/** Generic cues that a clause constrains what the AGENT may DO, EN + JA. */
+const AGENT_BEHAVIOUR_CUE_RE =
+  /\bread[-\s]?only\b|\b(?:do|does)\s+not\s+(?:edit|change|modify|write|commit)\b|\bdon'?t\s+(?:edit|change|modify|write)\b|\bno\s+edits?\b|\bwithout\s+(?:editing|changing|modifying)\b|読み取り専用|変更しない|編集しない|書き換えない/iu;
+
+/**
+ * True when `text` only tells the agent HOW TO ANSWER or WHAT NOT TO DO. Both
+ * conditions are required: a cue alone would misread "do not edit
+ * `OrderService`" (which names code and is a real point), and the absence of
+ * code shape alone would swallow ordinary prose questions.
+ *
+ * The brief's third condition — "no workspace-vocabulary noun beyond the
+ * request's shared topic words" — is deliberately NOT implemented as a separate
+ * vocabulary probe: it would add a workspace read per clause for a test the
+ * code-shape half already answers for every case measured, and a wrong
+ * vocabulary hit would be the one failure mode that silently drops a real
+ * question. If a counterexample appears, add it here, not in the cue lists.
+ */
+function isFormatOrBehaviourClause(text: string): boolean {
+  if (phraseCarriesCodeShape(text)) return false;
+  return ANSWER_FORMAT_CUE_RE.test(text) || AGENT_BEHAVIOUR_CUE_RE.test(text);
+}
+
+/**
+ * True when an enumerated item may mint a BLOCKING obligation: its own span in
+ * the request carries code shape. Epoch-carried items (`start < 0`, replayed
+ * from the stored task contract) have no span, so the item's facet is located
+ * in the current request and judged in its original casing — never re-derived
+ * from the lower-cased facet, which would read every item as prose.
+ */
+function enumeratedItemCarriesCodeShape(query: string, item: EnumeratedQueryItem): boolean {
+  const cleaned = stripPathSpans("", query);
+  // The FACET's own occurrence, in its original casing — never the whole
+  // segment. A LEADING segment is a sentence whose tail supplies the facet
+  // ("Explain cancellation in OrderService: state transition"), so judging the
+  // segment would let an unrelated identifier elsewhere in that sentence
+  // certify a prose item as code.
+  // Searched in the ORIGINAL request, not in `cleaned`: `stripPathSpans`
+  // removes exactly the dotted/slashed forms (`order.quantity`) whose shape
+  // this test is looking for. Any occurrence carrying code shape keeps the
+  // obligation — the conservative direction.
+  void cleaned;
+  const facet = item.facet.toLowerCase();
+  const haystack = query.toLowerCase();
+  for (let at = haystack.indexOf(facet); at >= 0; at = haystack.indexOf(facet, at + 1)) {
+    let from = at;
+    while (from > 0 && CODE_TOKEN_CHAR_RE.test(query[from - 1]!)) from -= 1;
+    let to = at + facet.length;
+    while (to < query.length && CODE_TOKEN_CHAR_RE.test(query[to]!)) to += 1;
+    const before = from > 0 ? query[from - 1]! : "";
+    const after = query[to] ?? "";
+    const quoted = (before === "`" && after === "`")
+      || (before === "\"" && after === "\"")
+      || (before === "'" && after === "'");
+    if (quoted || phraseCarriesCodeShape(query.slice(from, to))) return true;
+  }
+  return false;
+}
+
+/**
+ * The gate `buildReadinessObligations` consults: true when this identifier must
+ * NOT mint a blocking obligation. Every early return is the conservative one
+ * (mint it), including the scan budget — a query that names seven unresolved
+ * camel-case words keeps today's behaviour for the seventh rather than trading
+ * honesty for I/O.
+ */
+function identifierIsUngrounded(
+  result: TaskPackResult,
+  workspace: string | undefined,
+  query: string,
+  identifier: string,
+): boolean {
+  if (workspace === undefined) return false;
+  if (!identifierNeedsGrounding(query, identifier)) return false;
+  let memo = identifierGroundingByResult.get(result);
+  if (memo === undefined) {
+    memo = { verdicts: new Map(), scans: 0 };
+    identifierGroundingByResult.set(result, memo);
+  }
+  const key = identifier.toLowerCase();
+  if (!memo.verdicts.has(key)) {
+    if (memo.scans >= MAX_IDENTIFIER_GROUNDING_SCANS) return false;
+    memo.scans += 1;
+    memo.verdicts.set(key, workspaceDefinesIdentifier(workspace, identifier));
+  }
+  return memo.verdicts.get(key) === false;
+}
+
+/**
+ * R2-B14 (2026-09-13 review round 2): IS THIS RECORDED ABSENCE STILL TRUE?
+ *
+ * The hit half of the executed-search ledger is re-validated on every promotion
+ * (`executedSearchHitSeeds` re-stats each hit). The absence half was not
+ * re-validated at all — so a `find` that honestly proved a term absent kept
+ * minting `explicit-gap:request-item-absent:<term> (… scope complete)` on a
+ * CERTIFIED decision for the rest of the lane, including after the term's
+ * declaring file appeared. The reported response served `src/quantum.ts 1-1`
+ * (`export const quantumTeleportationMode = true;`) and certified that same
+ * identifier absent, scope complete.
+ *
+ * Two independent staleness tests, either of which drops the record. Dropping is
+ * always the safe direction: the obligation goes back to uncovered and the pack
+ * re-proposes the search, which is what a caller can act on.
+ *
+ *  (a) THE TERM OCCURS IN A BODY THIS RESPONSE IS SERVING. A word-boundary scan
+ *      of `servedSurfaceText` (the same reader P11C uses, so a demoted
+ *      "see prior pack" surface is scanned as its real text) plus the surface's
+ *      own anchor symbol. No I/O, and it makes "certify absent while serving the
+ *      declaration" structurally impossible rather than merely unlikely.
+ *      Deliberately NOT narrowed to code-bearing occurrences: the code-bearing
+ *      rule exists to decide whether bytes may PROVE something, and here an
+ *      occurrence of any kind is enough to withdraw a claim.
+ *
+ *  (b) A SERVED SURFACE IS YOUNGER THAN THE SCAN, AND ITS CURRENT TEXT CONTAINS
+ *      THE TERM. `ExecutedSearchAbsence` carries `recordedAtMs`; a file whose
+ *      mtime is strictly newer holds content the scan cannot have read. Skipped
+ *      when the record predates that field (an older in-memory entry) — test (a)
+ *      still runs, per its own contract.
+ *
+ *      SHOULD-FIX 27 (2026-09-14, review round 4): the mtime alone used to be
+ *      the whole test, and it over-dropped on every UNRELATED edit — which is
+ *      what an `act.edit` + verify task does to a served file as a matter of
+ *      course. So the changed file is now re-read IN FULL (test (a) only sees the
+ *      served slice) and the record survives unless the term actually occurs in
+ *      it now. Fail-closed: an unreadable / undecodable / oversize changed file
+ *      drops the record exactly as the bare witness did. Bounded by the hit
+ *      scan's own ceiling and reached only when a record has `recordedAtMs` and a
+ *      served file is younger — never on an ordinary pack.
+ *
+ * Residual (deliberate, and the reviewer's own structural chip): a file created
+ * mid-task that this pack does NOT serve and does not touch is caught by neither
+ * test. The general answer is "invalidate every ledger entry on any workspace
+ * mutation since `sequence`", which needs a mutation clock this ledger does not
+ * yet have.
+ *
+ * SHOULD-FIX 27: this predicate now has a SECOND reader —
+ * `alternativeProgressAxis`' Rule 5 `alreadySearchedTerms` — so the rebuild that
+ * withdraws a proof also re-proposes the find that would restore it. A stale
+ * record neither certifies nor suppresses. Rule 5 applies it to ABSENCE records
+ * only (see there).
+ */
+function recordedAbsenceIsStale(
+  workspace: string,
+  result: TaskPackResult,
+  entry: ExecutedSearchResult,
+): boolean {
+  const surfaces = result.surfaces ?? [];
+  if (surfaces.length === 0) return false;
+  const matcher = new RegExp(`\\b${entry.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+  for (const surface of surfaces) {
+    if (matcher.test(servedSurfaceText(surface))) return true;
+    if (surface.symbol !== undefined && matcher.test(surface.symbol)) return true;
+  }
+  const recordedAtMs = entry.absence?.recordedAtMs;
+  if (recordedAtMs === undefined) return false;
+  const seen = new Set<string>();
+  for (const surface of surfaces) {
+    if (seen.has(surface.path)) continue;
+    seen.add(surface.path);
+    const abs = safeResolve(surface.path, workspace);
+    if (abs === undefined) continue;
+    let changed: boolean;
+    try {
+      changed = fs.statSync(abs).mtimeMs > recordedAtMs;
+    } catch {
+      // A surface whose file no longer stats is the pack's own problem, not this
+      // absence's: stay silent and let the other tests decide.
+      continue;
+    }
+    if (!changed) continue;
+    // SHOULD-FIX 27 (2026-09-14, review round 4): ASK THE FILE, DON'T ASSUME.
+    //
+    // The mtime alone used to drop the record. It is a witness that the scan's
+    // bytes are out of date, not that its CONCLUSION is — and an `act.edit` +
+    // verify task edits a served file mid-flight as a matter of course, so the
+    // common case was: append one unrelated comment line to `src/auth.ts`, and a
+    // pair of genuinely-absent identifiers lost their honest gaps. Worse, the
+    // same rebuild also suppressed the find that would restore them (Rule 5's
+    // `alreadySearchedTerms`, now staleness-aware too), so the chain dead-ended
+    // at `await_input:"no-grounded-call-remains"` with nothing asking for the
+    // re-search.
+    //
+    // So the changed file is RE-READ IN FULL (not just its served slice, which
+    // test (a) above already covers) and asked the only question that matters:
+    // does the term occur in it NOW? If not, this file cannot have falsified the
+    // absence and the record survives. Word-boundary, and deliberately NOT
+    // code-bearing — same reasoning as test (a): an occurrence of ANY kind is
+    // enough to WITHDRAW a claim, even though only a code-bearing one may PROVE
+    // something (that asymmetry is SHOULD-FIX 29's subject, at the obligation
+    // boundary).
+    //
+    // FAIL-CLOSED, so the precision never costs honesty: an unreadable,
+    // undecodable or oversize changed file drops the record exactly as the bare
+    // mtime witness did. Bounded by the same ceiling the hit scan uses, and
+    // reached only when a record carries `recordedAtMs` AND a served file is
+    // younger than it — i.e. never on an ordinary pack.
+    const current = boundedWorkspaceText(workspace, surface.path);
+    if (current === undefined) return true;
+    if (matcher.test(current)) return true;
+  }
+  return false;
+}
+
+/**
+ * TL142-01B (2026-09-13, v0.14.2 hands-on report §4 TL142-01 "B") —
+ * A SEARCH THE CALLER ALREADY RAN IS A PROOF THIS PACK MAY USE.
+ *
+ * `Explain validateToken and quantumTeleportationMode.` opens with a pack that
+ * serves `validateToken` and prescribes `search_files find
+ * quantumTeleportationMode`. The caller runs it; the response is an exhaustive,
+ * literal, un-narrowed absence certificate ("no file under the scanned root
+ * references this token"). Resuming then returned
+ * `await_input:"no-grounded-call-remains"` — the pack had nothing left to
+ * search, nothing left to serve, and no way to say so — because the only
+ * absence this file could act on was the one it scanned for ITSELF
+ * (`distinctiveSalientAbsence`/`proveUnbindableRequestItem`, both gated behind
+ * `extractRequestItems(query).length >= 2`, which a two-identifier explain
+ * query does not reach).
+ *
+ * This folds the EXTERNAL proof into the two mechanisms the internal one
+ * already feeds, so there is exactly one absence vocabulary on the wire:
+ *  - the verified-absent identifier set, which `buildReadinessObligations`
+ *    reads to mark `identifier:<term>` PROVED with decision-grade wording and
+ *    `uncoveredIdentifierFindCall` reads to stop re-searching it;
+ *  - `result.request_item_absences`, which `buildCapabilityGaps` projects onto
+ *    a `discover` decision's `gaps` and `decisionWire.ts`'s
+ *    `projectCertificate` projects onto a CERTIFIED decision's
+ *    `certificate.gaps` — the latter being what makes the resume reach
+ *    `act.answer` while still disclosing the absent term.
+ *
+ * Only scope-COMPLETE absences count (`ExecutedSearchAbsence` is recorded only
+ * for a workspace-wide, literal, caveat-free certificate — see server.ts's
+ * `provenFindAbsence`), and only for a term the query itself names verbatim.
+ * A partial-scope zero result is not a proof and leaves the pack proposing the
+ * search, which is the fail-closed direction.
+ *
+ * R2-B14 (2026-09-13 review round 2): and only while the absence is still TRUE —
+ * see `recordedAbsenceIsStale`. A recorded absence used to be projected forever,
+ * so a file created after the scan made one response serve the declaration and
+ * certify the identifier absent "scope complete" in the same breath.
+ */
+function promoteExecutedSearchAbsences(
+  workspace: string,
+  query: string,
+  result: TaskPackResult,
+  taskBinding?: string,
+): void {
+  const recorded = executedSearchResults(workspace, currentSessionLane(), taskBinding)
+    .filter((entry) => entry.absence !== undefined && entry.hits.length === 0 && query.includes(entry.term))
+    // R1-B1 (2026-09-13 review round): READ the recorded scope verdict, never
+    // assume it. `server.ts`'s `provenFindAbsence` is the only writer that sets
+    // `scopeComplete`, and this projection mints a `request-item-absent` gap on a
+    // CERTIFIED decision — so a recorder that ever relaxes its gate must not be
+    // able to make this certificate lie on its behalf. Fail-closed: an absence
+    // this filter drops leaves the obligation uncovered and the search proposed.
+    .filter((entry) => entry.absence?.scopeComplete === true)
+    // R2-B14 (2026-09-13 review round 2): RE-VALIDATE. Nothing checked a recorded
+    // absence against the workspace it claims to describe, so it outlived its own
+    // truth — see `recordedAbsenceIsStale`.
+    .filter((entry) => !recordedAbsenceIsStale(workspace, result, entry));
+  if (recorded.length === 0) return;
+  const priorAbsent = verifiedAbsentIdentifiersFor(result);
+  const absentIdentifiers = [...priorAbsent];
+  for (const entry of recorded) {
+    if (!absentIdentifiers.includes(entry.term)) absentIdentifiers.push(entry.term);
+  }
+  if (absentIdentifiers.length > priorAbsent.length) {
+    verifiedAbsentIdentifiersByResult.set(result, absentIdentifiers);
+  }
+  const absences = [...(result.request_item_absences ?? [])];
+  for (const entry of recorded) {
+    if (absences.some((existing) => existing.term === entry.term)) continue;
+    absences.push({
+      id: `identifier:${entry.term}`,
+      term: entry.term,
+      // R1-B1: the RECORDED facts, not two literals. Both were hard-coded here
+      // (`scope_complete: true, omitted_count: 0`) while the `queries[]` recorder
+      // could reach this with a caveated per-term verdict over a workspace that
+      // disclosed `omitted:{tokenlighten_ignored:1}` — so the wire gap asserted
+      // "scope complete" and "nothing omitted" about a scan that was neither.
+      // The recorder now proves both (server.ts's `provenFindAbsence`) and this
+      // projection carries them.
+      scope_complete: entry.absence!.scopeComplete,
+      omitted_count: entry.absence!.omittedCount,
+    });
+  }
+  if (absences.length > 0) result.request_item_absences = absences;
 }
 
 /** P2(b): dedupes the proof-completion engagement counter to one increment per pack — see buildTaskExecutionContract's own comment at the increment site. */
@@ -11963,14 +15750,14 @@ async function augmentConcernGroupSurfaces(
 }
 
 /**
- * Build one `explore action=find` suggestion per unmatched concern token, so
- * the agent's next TL call is scoped to exactly what this pack could not
- * confirm coverage for — rather than a vague "locate more" or a full re-run
+ * Build one `search_files action:"find"` suggestion per unmatched concern
+ * token, so the agent's next TL call is scoped to exactly what this pack could
+ * not confirm coverage for — rather than a vague "locate more" or a full re-run
  * of the same query that already produced this pack.
  */
 function buildBlockingNextSteps(query: string, surfaces: TaskPackSurface[]): string[] {
   const tokens = unmatchedConcernTokens(query, surfaces);
-  return tokens.map((t) => `search_files action=find query="${t}"`);
+  return tokens.map((t) => `search_files {action:"find", queries:["${t}"]}`);
 }
 
 /**
@@ -12497,7 +16284,35 @@ const WIRING_INTENT_JA: readonly string[] = [
 // words: the mutation action must be imperative/modal (English) or carry a
 // request/volitional ending (Japanese).  Mentioning "fix", "connect", or
 // "実装" as a report label or analysis topic is insufficient.
-const REQUESTED_MUTATION_EN_RE = /(?:^|[\n.!?;:]\s*|\bthen\s+)(?:[①②③④⑤⑥⑦⑧⑨⑩]|\(?\d{1,2}[.)])?\s*(?:please\s+)?(?:using\b[^,\n]{0,80},\s*)?(?:fix|add|implement|change|replace|rename|refactor|wire|connect|integrate|plumb|route|propagate|feed|forward|expose|create|generate|update)\b|\b(?:please|must|should|need(?:s)?\s+to|want(?:s)?\s+(?:you\s+)?to|can\s+you|could\s+you|would\s+you)\b[^.!?\n]{0,100}\b(?:fix|add|implement|change|replace|rename|refactor|wire|connect|integrate|plumb|route|propagate|feed|forward|expose|create|generate|update)\b/i;
+// SHOULD-FIX 44 (2026-09-14, review round 8): a clause-initial mutation verb
+// immediately followed by a colon can be a memo/prose LABEL/HEADING ("Update:
+// explain how MAX_RETRIES works in src/retry.ts.") rather than an imperative.
+// SHOULD-FIX 46 (2026-09-14, review round 9->10): round 8's guard was a bare
+// `(?!\s*:)`, which discarded the whole conventional-commit / ticket register --
+// `Update: MAX_RETRIES in src/retry.ts to 5.`, `Fix: src/retry.ts retries
+// forever.`, `Rename: shouldRetry -> canRetry in src/retry.ts.`,
+// `Create: src/newfile.ts with a default export.` all stopped reading as
+// mutation requests (measured: lead `read`, `discover`, empty frontier, while
+// each one's colon-less twin reached `act.edit` with a writable frontier). The
+// colon is not the signal; what FOLLOWS it is. Discount it only when it
+// introduces a READ request, which is the actual difference between a heading
+// and an imperative. Shared spelling with requestItems.ts's
+// `COLON_INTRODUCES_READ_LEAD` (mirrored, not imported: that module's own regex
+// is clause-initial-anchored and separately pinned).
+const COLON_INTRODUCES_READ_REQUEST = "(?!\\s*:\\s*(?:please\\s+)?(?:explain|describe|clarify|summar|tell\\s+me|show\\s+me|why|how|what|which)\\b)";
+// SHOULD-FIX 55 (AB1, 2026-09-14, review round 11): IMPORTED, not restated.
+// This list and `MIXED_INTENT_MUTATION_EN_RE`'s (below) were two hand-maintained
+// alternations in this one file that had to agree and did not: this one omitted
+// `set`, `bump`, `remove`, `delete`, `modify`, `increase`, `decrease`, `switch`,
+// `toggle`, `enable`, `disable` and `insert`, so `What does MAX_RETRIES do in
+// src/retry.ts? Set it to 5.` carried no requested-mutation signal at all and
+// reached a certified read-only `act.answer`. One declaration now lives in
+// `requestItems.ts` (see `MUTATION_VERBS_EN` there) and both predicates read it.
+const REQUESTED_MUTATION_EN_RE = new RegExp(
+  `(?:^|[\\n.!?;:]\\s*|\\bthen\\s+)(?:[①②③④⑤⑥⑦⑧⑨⑩]|\\(?\\d{1,2}[.)])?\\s*(?:please\\s+)?(?:using\\b[^,\\n]{0,80},\\s*)?(?:${MUTATION_VERBS_EN})\\b${COLON_INTRODUCES_READ_REQUEST}`
+  + `|\\b(?:please|must|should|need(?:s)?\\s+to|want(?:s)?\\s+(?:you\\s+)?to|can\\s+you|could\\s+you|would\\s+you)\\b[^.!?\\n]{0,100}\\b(?:${MUTATION_VERBS_EN})\\b${COLON_INTRODUCES_READ_REQUEST}`,
+  "i",
+);
 const REQUESTED_MUTATION_EN_CONDITIONAL_RE = /\b(?:when|if|after|once|while|where)\b[^.!?\n,]{0,160},\s*(?:please\s+)?(?:fix|add|implement|change|replace|rename|refactor|wire|connect|integrate|plumb|route|propagate|feed|forward|expose|create|generate|update)\b/i;
 const REQUESTED_MUTATION_EN_RELATION_RE = /\b(?:and|then)\s+(?:please\s+)?(?:(?:wire|connect|integrate|plumb|route|propagate|feed|forward|expose)\s+[^,.;\n]{1,100}\s+(?:to|into|with|through)\b|rename\s+[^,.;\n]{1,80}\s+to\s+[^,.;\n]+)/i;
 const REQUESTED_MUTATION_JA_RE = /(?:修正|追加|実装|変更|置換|改名|リファクタ|接続|連携|配線|結線|組み込|組み入れ|流し込|受け渡|反映|作成|生成)(?:を)?(?:してください|して下さい|してほしい|して欲しい|したい|しろ|せよ|をお願いします|を行って(?:ください|下さい)?)|直(?:してください|して下さい|してほしい|して欲しい|したい|せ|す)|(?:修正|追加|実装|変更|接続|連携|作成|生成)(?:して)?(?:もらえますか|いただけますか)/;
@@ -12637,9 +16452,57 @@ function hasPropagationIntentMarker(query: string): boolean {
 // shared classifier below (rather than adding a second guardrail at the route
 // layer) closes both consumers at once.
 // ---------------------------------------------------------------------------
+// FIXALL-A group C (2026-09-14): DERIVED, never mirrored. Round 8 fixed this
+// list once by hand-copying 設定/更新 out of requestItems.ts's own edit-lead
+// vocabulary ("mirrored, not shared, per that module's own 'fix only at that
+// door' scoping"); the copy then went stale the moment 置換/改名/リネーム were
+// added there, so "置換して"/"改名して"/"リネームして" inferred
+// profile:"answer" and blocked act.edit for the whole pipeline (matrix cells
+// profile-c122/131/138/139/140/149). The shared half is now IMPORTED from the
+// one declaration (EDIT_VERB_JA_ROOTS), exactly as MUTATION_VERBS_EN already
+// is on the EN side, so it cannot drift again.
+//
+// 直す/実装 stay listed separately below because they are NOT edit-LEAD verbs
+// in requestItems.ts's sense (neither is tail-anchored there); they belong to
+// THIS door's own bare-te-form instruction-chain vocabulary (T07: "修正して、
+// 影響の出る型一覧も列挙して。"), and adding them to the lead set would widen
+// a different, tail-anchored gate. Every marker here is still a bare te-form,
+// so JA_PROGRESSIVE_CONTINUATION_RE below applies to all of them uniformly.
 const MIXED_INTENT_MUTATION_JA: readonly string[] = [
-  "修正して", "直して", "実装して", "追加して", "変更して", "削除して",
+  ...EDIT_VERB_JA_ROOTS.map((root) => `${root}して`),
+  "直して", "実装して",
 ];
+/**
+ * FIXALL-A group C (2026-09-14) — the SAME roots in the two OTHER request
+ * conjugations this door was blind to. The te-form list above is scanned as a
+ * plain substring (with JA_PROGRESSIVE_CONTINUATION_RE below rejecting the
+ * descriptive ている/ています/… continuations); these two shapes cannot be, because
+ * each needs its own following-context guard:
+ *
+ *  - IMPERATIVE (〜しろ / 〜せよ). Unambiguous, no guard needed, and already
+ *    sanctioned request endings for an overlapping root list one door up
+ *    (`REQUESTED_MUTATION_JA_RE`'s own `しろ|せよ` alternatives) — this adds no new
+ *    request vocabulary, only the roots that door happens not to list.
+ *  - CONTINUATIVE (〜し) at a CLAUSE BOUNDARY, i.e. 「…にリネームし、…」. This is
+ *    the same instruction-chain register T07 is shaped like, just with the
+ *    clauses joined by a touten instead of repeated te-forms, and it is exactly
+ *    what `requestItems.ts::EDIT_VERB_JA_ROOT_RE` recognizes with its own
+ *    `(?:し|して)?…$` tail anchor (that regex is handed ONE clause at a time, so
+ *    "tail-anchored" and "followed by a clause boundary" are the same test).
+ *    The lookahead is what keeps it off the descriptive forms: 「…を設定している」
+ *    leaves ている after the し and never matches, so SHOULD-FIX 43/48's own
+ *    progressive cases stay read-only.
+ *
+ * 直 is deliberately absent: it is a godan verb (直す), whose imperative is 直せ
+ * and whose continuative is 直し — different conjugations that would have to be
+ * spelled out rather than derived, and nothing in scope needs them.
+ */
+const MIXED_INTENT_MUTATION_JA_SURU_ROOTS: readonly string[] = [...EDIT_VERB_JA_ROOTS, "実装"];
+const MIXED_INTENT_MUTATION_JA_NON_TE_RE = new RegExp(
+  `(?:${MIXED_INTENT_MUTATION_JA_SURU_ROOTS.join("|")})`
+  + "(?:しろ|せよ|し(?=[、，,。．.!?！？\\s]|$))",
+  "u",
+);
 // Symmetric with the JA half above but deliberately NOT clause-anchored
 // (unlike REQUESTED_MUTATION_EN_RE, which already recognizes a clause-initial
 // or modal-led imperative on its own via hasRequestedMutationIntent — this
@@ -12657,15 +16520,185 @@ const MIXED_INTENT_MUTATION_JA: readonly string[] = [
 // QuoteOrchestrator; do not change code" (taskProfileBinding.spec.ts) pairs
 // "explain" with two now-excluded "implement"/"change" occurrences and must
 // stay off this predicate entirely.
-const MIXED_INTENT_MUTATION_EN_RE = /(?<!\b(?:a|an|the|this|that|some|any|to|not|never|no)\s)\b(?:fix|implement|add|change|remove|update)\b\s+\S/i;
-const MIXED_INTENT_ENUMERATION_JA: readonly string[] = ["列挙", "一覧", "教えて", "説明して"];
-const MIXED_INTENT_ENUMERATION_EN_RE = /\b(?:list|enumerate|explain|which)\b/i;
+// Round-8 residual fix (adopted chip; classifyTaskProfile edit-verb
+// alignment, x1_probe39e.mjs): widened to mirror requestItems.ts's own
+// edit-lead vocabulary (EDIT_VERB_LEAD_RE: change/rename/replace/update/
+// modify/set) plus this round's explicit "at least" list (bump/increase/
+// decrease/switch/toggle/enable/disable/insert/delete) -- "Explain X, and
+// SET it to 5." inferred profile:"answer" (blocking act.edit) while the
+// otherwise-identical "...and CHANGE it to 5." correctly inferred
+// "generic", solely because "set" was absent here. Mirrored, not
+// byte-shared, with requestItems.ts's list: EDIT_VERB_LEAD_RE itself stays
+// untouched (its own clause-initial anchor and BLOCKER-34/SHOULD-FIX-39
+// pinned behavior are a materially different, narrower question -- see
+// fix-notes-y1.md for the scope call). The same determiner-exclusion
+// lookbehind and trailing-object requirement that already protect "the set
+// of tests" / "the settings page" / "the update log" from the pre-existing
+// verbs protect the new ones identically.
+// SHOULD-FIX 43 (2026-09-14, review round 8): the verb alternation above
+// matches ANY occurrence of one of these words, anywhere in the query, with
+// no clause anchor -- so a pure READ question phrased as a relative/
+// interrogative clause ("Explain which callers modify MAX_RETRIES in
+// src/retry.ts.", "...which files set the default TTL...") matched too: the
+// verb there describes EXISTING behavior ("callers [that] modify"), it is
+// not a request to perform one. The negative lookbehind excludes a verb
+// preceded by a WH-word within a short span -- the hallmark of a question
+// ABOUT behavior rather than a request FOR it.
+//
+// SHOULD-FIX 45 (2026-09-14, review round 9->10): round 8 tried to bound that
+// exclusion with a character budget (`[^.!?\n]{0,24}`), and the budget crossed
+// CLAUSE boundaries. Measured: the exclusion reached 17 characters past the WH
+// word -- straight across `, and `/`; then ` -- so 14 sentences carrying an
+// EXPLICIT edit request lost their only mutation signal and `classifyTaskProfile`
+// certified a read-only `act.answer` over them (`In src/retry.ts, explain what it
+// does and set it to 5.`, `Explain what the TTL is and change it to 5.`,
+// `Tell me what changed, and update the comment in src/a.ts.`, ...). No span
+// limit can fix that, because a clause has no maximum length.
+//
+// So the span stays as it was, and the CALLER (hasMixedIntentMutationMarkerEn
+// below) evaluates it ONE CLAUSE AT A TIME. A lookbehind that cannot see past
+// the clause it is judging cannot reach into the next clause's imperative:
+// clause-locality by construction instead of by calibration. The 9 WH attacks
+// keep their WH word and their verb in the SAME clause and stay excluded; every
+// regression above has them in DIFFERENT clauses and is admitted again.
+// SHOULD-FIX 55: the verb alternation is the SHARED `MUTATION_VERBS_EN`
+// (requestItems.ts). The two lookbehinds and the trailing `\s+\S` object
+// requirement are this predicate's own and unchanged.
+const MIXED_INTENT_MUTATION_EN_RE = new RegExp(
+  `(?<!\\b(?:a|an|the|this|that|some|any|to|not|never|no)\\s)`
+  + `(?<!\\b(?:which|what|who|whom|how)\\b[^.!?\\n]{0,24})`
+  + `\\b(?:${MUTATION_VERBS_EN})\\b\\s+\\S`,
+  "i",
+);
+// SHOULD-FIX 41 (2026-09-14, review round 8): "説明し" (continuative, no
+// ください) added -- every round since 5 uses this exact JA phrasing
+// ("…役割を説明し、5 に更新してください。"), and it was invisible to this list
+// (only the polite "説明して" was present), so an explicit edit request
+// paired with this continuative explain clause classified profile:"answer"
+// instead of "generic" for JA while the byte-identical EN phrasing did not.
+// A prefix of "説明して", so this `includes`-based list gains no false
+// positive from adding it.
+// NOTE 66 (2026-09-14, review round 9): round 8 added the bare continuative
+// "説明し" to this list, which an `includes` test also satisfies for 説明しない
+// ("do NOT explain") and 説明しづらい ("hard to explain") -- and this is the
+// PERMISSIVE half of the mixed-intent predicate, so a refusal-to-explain would
+// have counted as an enumeration sub-request. Expressed as one regex so the
+// continuative can exclude those two endings while every other entry keeps its
+// plain substring semantics.
+/**
+ * FIXALL-A group C (2026-09-14): DERIVED from requestItems.ts's own JA read-verb
+ * vocabulary (`READ_VERB_JA_SURU_ROOTS`/`READ_VERB_JA_STEM_ROOTS`) instead of
+ * hand-listing a strict subset of it. The hand-written list knew 説明 but not
+ * 確認 — declared side by side in requestItems.ts since SHOULD-FIX 26 — and knew
+ * 教えて but neither 述べて nor 調べて nor 読んで, so a request pairing a genuine
+ * edit clause with a 「…を確認してください」 reporting clause found no enumeration
+ * marker and still certified a read-only `answer` (matrix cells
+ * profile-c131/139/149).
+ *
+ * The `(?![なづ])` guard the old list carried on 説明し is preserved and now
+ * applies to every suru-root uniformly (it excludes the negative 〜しない and the
+ * difficulty form 〜しづらい, neither of which asks for a report). 列挙/一覧 stay
+ * as literal nouns — they are this door's own enumeration vocabulary, not read
+ * VERBS, and requestItems.ts has no equivalent.
+ *
+ * Safe by position, per SHOULD-FIX 55's own argument just below: this half only
+ * ever runs once a mutation marker has already matched, so widening it can only
+ * stop a read-only certificate over a query that ALREADY carries an
+ * unambiguous mutation request — it can never create one.
+ */
+const MIXED_INTENT_ENUMERATION_JA_RE = new RegExp(
+  `列挙|一覧|(?:${READ_VERB_JA_SURU_ROOTS.join("|")})し(?![なづ])`
+  + `|(?:${READ_VERB_JA_STEM_ROOTS.join("|")})て|読んで`,
+  "u",
+);
+/**
+ * SHOULD-FIX 55 (AB1, 2026-09-14, review round 11): the WH words belong here.
+ *
+ * This is the RESCUE half of `hasMixedMutationAndEnumerationIntent` — it only
+ * ever runs once a mutation marker has already been found, and all it decides is
+ * whether the request ALSO carries a reporting sub-question, in which case
+ * `classifyTaskProfile` must not certify a read-only answer. A WH question is
+ * the single commonest way to ask one, and the list had none: `What does
+ * MAX_RETRIES do in src/retry.ts? Set it to 5.` carried the mutation marker
+ * (`MIXED_INTENT_MUTATION_EN_RE` has `set`), found no enumeration marker, and so
+ * fell through to `return "answer"` — dropping the caller's explicit edit
+ * request under a CERTIFIED read-only decision.
+ *
+ * Safe by position: a PURE WH read question ("Explain which callers modify
+ * MAX_RETRIES in src/retry.ts.") never reaches this test, because the mutation
+ * half is false for it — SHOULD-FIX 43's clause-local WH lookbehind is what
+ * decides that, and it is untouched. Widening this list can therefore only ever
+ * stop a read-only certificate over a query that ALREADY carries an
+ * unambiguous mutation request.
+ */
+const MIXED_INTENT_ENUMERATION_EN_RE = /\b(?:list|enumerate|explain|which|what|why|who|whom|where|when|how)\b/i;
+
+// SHOULD-FIX 43 (2026-09-14, review round 8): every MIXED_INTENT_MUTATION_JA
+// marker is a bare te-form (Xして) -- also the shared leading substring of
+// that SAME verb's progressive/conditional form (Xしている/Xしていた/
+// Xしていれば), which describes ongoing or existing behavior ("どの関数が
+// TTL を設定しているか説明してください。" = "explain WHICH FUNCTION IS
+// SETTING the TTL", a read-only question), never a request to perform the
+// action. A plain `.includes` cannot tell "設定して" apart from
+// "設定している"'s own leading substring. Scans every occurrence of every
+// marker (not just the first) so one progressive occurrence never blocks a
+// LATER, genuine imperative occurrence of the same marker from counting.
+// SHOULD-FIX 48 (2026-09-14, review round 9->10): round 8's guard covered only
+// いる/いた/いれば, i.e. the three LEAST common of the forms it exists for. います
+// is the commonest polite progressive in real Japanese query text, so
+// 「…を設定していますか。説明してください。」 (a read-only question) still
+// classified `generic`; so did the negative 設定していない and the contracted
+// 設定してる. Every one of these makes the te-form marker DESCRIPTIVE:
+//   ている / ています / ていた / ていました / ていない / ていません / ていれば
+//   てる / てた            (contracted -- the remainder starts with る/た directly)
+const JA_PROGRESSIVE_CONTINUATION_RE = /^(?:い(?:る|た|れば|ま[すし]|な(?:い|かった)|ません)|[るた])/u;
+
+/**
+ * True when some clause of `query` uses one of the JA mutation markers as a
+ * REQUEST rather than a description. Scans every occurrence of every marker (not
+ * just the first) so one progressive occurrence never blocks a LATER, genuine
+ * imperative use of the same marker.
+ */
+function hasMixedIntentMutationMarkerJa(text: string): boolean {
+  // FIXALL-A group C (2026-09-14): the imperative/continuative conjugations of
+  // the SAME roots (see MIXED_INTENT_MUTATION_JA_NON_TE_RE). Each carries its
+  // own following-context guard inside the regex, so neither needs — nor would
+  // be served by — the te-form progressive scan below.
+  if (MIXED_INTENT_MUTATION_JA_NON_TE_RE.test(text)) return true;
+  return MIXED_INTENT_MUTATION_JA.some((marker) => {
+    for (let from = 0; ;) {
+      const at = text.indexOf(marker, from);
+      if (at === -1) return false;
+      if (!JA_PROGRESSIVE_CONTINUATION_RE.test(text.slice(at + marker.length))) return true;
+      from = at + marker.length;
+    }
+  });
+}
+
+/**
+ * AA1 (2026-09-14, review round 10): CLAUSE-LOCAL mutation detection -- the
+ * structural half of finding 45's fix. `splitIntoLeadClauses` (requestItems.ts,
+ * `splitCoordinators` on) is the ONE clause splitter; each clause is judged on
+ * its own, so `MIXED_INTENT_MUTATION_EN_RE`'s WH-word lookbehind can never reach
+ * from a question clause into the NEXT clause's imperative. The whole query is
+ * still tested as well, which can only ADD matches (a verb whose object sits
+ * across a boundary), never remove one: the predicate is an OR over clauses.
+ */
+function hasMixedIntentMutationMarkerEn(query: string): boolean {
+  if (MIXED_INTENT_MUTATION_EN_RE.test(query)) return true;
+  return splitIntoLeadClauses(query, { splitCoordinators: true })
+    .some((clause) => MIXED_INTENT_MUTATION_EN_RE.test(clause));
+}
 
 function hasMixedMutationAndEnumerationIntent(query: string): boolean {
-  const hasMutationVerb = MIXED_INTENT_MUTATION_JA.some((marker) => query.includes(marker))
-    || MIXED_INTENT_MUTATION_EN_RE.test(query);
+  // The mutation half is clause-local (see above); the ENUMERATION half stays
+  // whole-query on purpose -- this predicate is about a request that carries BOTH
+  // an edit and a reporting sub-question, and those live in DIFFERENT clauses by
+  // definition (「…してください。説明してください。」).
+  const hasMutationVerb = hasMixedIntentMutationMarkerJa(query)
+    || hasMixedIntentMutationMarkerEn(query);
   if (!hasMutationVerb) return false;
-  return MIXED_INTENT_ENUMERATION_JA.some((marker) => query.includes(marker))
+  return MIXED_INTENT_ENUMERATION_JA_RE.test(query)
     || MIXED_INTENT_ENUMERATION_EN_RE.test(query);
 }
 
@@ -12855,10 +16888,15 @@ function bindTaskProfile(
       selected,
       source: "inferred",
       confidence: selected === "generic" ? 0.4 : 0.8,
+      // P1 (hands-on report, 2026-09-20): these two strings named the LEGACY
+      // argument `taskProfile`, which the server refuses by default
+      // (TL_LEGACY_INPUT), and recorded sessions show models copying the name
+      // straight out of this advice into their next call and collecting an
+      // `unknown-arguments` refusal for it. Canonical spelling only.
       reason: inferred === "answer" && selected === "generic"
-        ? "answer-shaped query served as generic per §14 misfire guardrail; declare taskProfile:\"answer\" for a read-only pack"
+        ? "answer-shaped query served as generic per §14 misfire guardrail; declare task.profile:\"answer\" for a read-only pack"
         : inferred === "answer" && selected === "answer" && !explicitNoEdit
-          ? "answer-shaped query with no mutation or defect-symptom marker; declare taskProfile to override"
+          ? "answer-shaped query with no mutation or defect-symptom marker; declare task.profile to override"
           : selected === "generic"
             ? "no high-confidence task-shape marker"
             : `query matched ${selected}`,
@@ -12949,6 +16987,36 @@ function bindTaskProfile(
     source: "explicit",
     confidence: 0.98,
     reason: `caller supplied validated ${request} task shape`,
+  };
+}
+
+/**
+ * What an UNDECLARED call would bind `query` to — `bindTaskProfile`'s own auto
+ * branch, exposed for the dispatcher's continuation check (server.ts's
+ * `inheritDeclaredTaskProfile`), which carries a task's profile over only when
+ * omitting it would otherwise bind a different one.
+ */
+export function autoBoundTaskProfile(query: string): TaskProfile {
+  return bindTaskProfile(undefined, query).selected;
+}
+
+/**
+ * A profile the dispatcher carried over from the task this call continues
+ * (server.ts's `inheritDeclaredTaskProfile`) binds exactly like a restated
+ * declaration — that is the point — but the caller did not send it on THIS
+ * call, and `profile_binding` is the field the guide tells callers to
+ * observe. The reason says where the declaration came from and how to change
+ * it; `requested`/`selected`/`source`/`confidence` stay what a restated
+ * declaration would have produced.
+ */
+function noteInheritedTaskProfile(
+  binding: TaskProfileBinding,
+  args: Pick<TaskPackArgs, "taskProfileInherited"> | undefined,
+): TaskProfileBinding {
+  if (args?.taskProfileInherited !== true) return binding;
+  return {
+    ...binding,
+    reason: `${binding.reason}; declared when this task was opened and kept for this continuation — send task.profile to change it`,
   };
 }
 
@@ -13062,7 +17130,7 @@ function buildRoute(
     && (surface.content_completeness === "partial" || (surface.remaining_ranges?.length ?? 0) > 0)
   ).length;
   const zoomNote = partialRequired > 0
-    ? `${partialRequired} surface(s) have remaining_ranges (re-slice to zoom, or ONE read_file mode=full of that handle when most of the file is needed)`
+    ? `${partialRequired} surface(s) have remaining_ranges (re-slice to zoom, or ONE read_file {targets:[{handle}], content:"full"} when most of the file is needed)`
     : undefined;
   const doneRoute = (reason: string): NonNullable<TaskPackResult["route"]> =>
     zoomNote !== undefined
@@ -13098,7 +17166,7 @@ function buildRoute(
     }
     return {
       action: "confirm_candidates",
-      reason: "multiple candidate primaries returned; confirm the target before editing — if required sites are missing from the candidates, ONE task_pack with paths=[chosen + missing] is sanctioned",
+      reason: "multiple candidate primaries returned; confirm the target before editing — if required sites are missing from the candidates, ONE read_file {query, targets:[chosen + missing]} is sanctioned",
       max_additional_tl_calls: 2,
     };
   }
@@ -13901,6 +17969,38 @@ const QUERY_NAMED_EXTRA_EXTS = [
  * walked file's relative path or be its path SUFFIX (so a bare basename works),
  * and the extension must be alphabetic-leading so version strings ("v0.9") and
  * numeric fragments never look like filenames.
+ *
+ * TL142-05 (2026-09-13, v0.14.2 hands-on report): originally landed here as
+ * an unconditional `fullRecall: true` on the walk below. Root cause,
+ * confirmed directly (not inferred): a query naming
+ * `src/generated/schemaStamp.ts` verbatim, by its own full path and
+ * extension — the strongest possible "this is a stated requirement" signal —
+ * still failed to resolve, because the DEFAULT walk drops any path under a
+ * `/generated/` segment as build noise (`BUILD_DIR_EXCLUDED_SEGMENTS` in
+ * walkRepo.ts), the same class of exclusion `findReferences`/`renameSymbol`
+ * already opt out of via `fullRecall` for the identical reason ("legitimately
+ * -named source... not silently dropped" — that option's own doc comment).
+ *
+ * BLOCKER 3 (2026-09-13, review round): unconditional `fullRecall` was too
+ * broad — it re-includes EVERY class the fullRecall re-inclusion covers
+ * (`dist/`, `build/`, `out/`, `*.min.*`, `*.generated.*`, `*.map`, `*.pb.*`),
+ * not only the `/generated/` segment TL142-05 needed. Live regression: a
+ * workspace with both `src/cache.ts` (source) and `dist/cache.ts` (its own
+ * compiled copy) resolved the bare-basename token "cache.ts" to
+ * `dist/cache.ts` — first alphabetically among the fullRecall walk's suffix
+ * matches — making a BUILD ARTIFACT the stated requirement and demoting the
+ * real source to supporting evidence. Fix: resolve against the DEFAULT
+ * (non-fullRecall) walk FIRST; consult the fullRecall walk only when the
+ * token is unresolved there, and only for a token that ITSELF names a
+ * directory (a path separator, e.g. "src/generated/schemaStamp.ts" — the
+ * same signal that made this file's resolution correct in the first place).
+ * A bare basename ("cache.ts") therefore never falls through to the
+ * fullRecall walk at all, so it can never resolve to build output — and
+ * because the default walk is always consulted first and used immediately
+ * when it resolves, a source file the default walk finds always wins over a
+ * compiled copy the fullRecall walk would otherwise have offered. Never a
+ * broader recall than the ONE token this function was already given to
+ * resolve.
  */
 export function queryNamedWorkspaceFiles(
   query: string,
@@ -13913,30 +18013,257 @@ export function queryNamedWorkspaceFiles(
       .map((token) => token.replace(/^\.\//, "")),
   )];
   if (tokens.length === 0) return [];
-  const walked = walkCodeFiles(workspace, { extraExts: QUERY_NAMED_EXTRA_EXTS }).map((file) => file.relPath).sort();
   // R0 (2026-08-21, W4-A): a bare basename token (no directory component,
   // e.g. "server.ts") can suffix-match MULTIPLE workspace files when the
   // same name exists under more than one project root (routinely true for a
   // `bench/fixtures/` tree hosting several independent synthetic projects).
-  // Without a root preference, `.find()` silently took whichever candidate
-  // `walked`'s alphabetical sort put first — an arbitrary, workspace-layout-
+  // Without a root preference, resolution silently took whichever candidate
+  // the walk's alphabetical sort put first — an arbitrary, workspace-layout-
   // dependent pick with no relation to the task at hand. When the caller
   // supplies anchor paths (its own already-trusted surfaces), prefer a
-  // suffix match inside THEIR root over one outside it; falls back to the
-  // prior first-match behavior when no anchors are supplied or none of the
-  // candidates is in-root, so recall is never reduced versus before this fix.
+  // suffix match that IS one of them outright (BLOCKER 3: stronger than mere
+  // root membership — the caller's own already-served surface, never just
+  // alphabetical order), else one inside THEIR root; falls back to the prior
+  // first-match behavior when no anchors are supplied or none of the
+  // candidates is in-root, so recall is never reduced versus before either
+  // fix.
   const scopePrefixes = roleSearchScopePrefixes(anchorPaths);
   const resolved: string[] = [];
   for (const token of tokens) {
-    const exact = walked.find((rel) => rel === token);
-    const suffixMatches = exact === undefined ? walked.filter((rel) => rel.endsWith(`/${token}`)) : [];
-    const match = exact
-      ?? suffixMatches.find((rel) => isWithinRoleSearchScope(rel, scopePrefixes))
-      ?? suffixMatches[0];
+    let match = resolveQueryNamedToken(
+      token, walkedFilesForQueryNamedResolution(workspace, false), anchorPaths, scopePrefixes,
+    );
+    // BLOCKER 3: only a token that names a directory of its own (a path
+    // separator) may consult the wider, build-output-inclusive walk, and
+    // only once the default walk has already failed to resolve it.
+    if (match === undefined && token.includes("/")) {
+      match = resolveQueryNamedToken(
+        token, walkedFilesForQueryNamedResolution(workspace, true), anchorPaths, scopePrefixes,
+      );
+    }
     if (match !== undefined && !resolved.includes(match)) resolved.push(match);
     if (resolved.length >= MAX_QUERY_NAMED_FILES) break;
   }
   return resolved;
+}
+
+/**
+ * BLOCKER 3: single-token resolution against ONE already-walked file list —
+ * shared by the default-walk pass and the fullRecall fallback above so both
+ * apply the IDENTICAL anchor-preference order: an exact anchor-path match
+ * wins outright, then a same-root suffix match (R0's pre-existing
+ * behaviour), then the first alphabetical suffix match. Never mixes
+ * candidates across the two walks — the caller decides which list to pass,
+ * and a match found in the default list is returned before the fullRecall
+ * list is ever computed, so a source file always wins over a compiled copy.
+ */
+function resolveQueryNamedToken(
+  token: string,
+  walked: readonly string[],
+  anchorPaths: readonly string[],
+  scopePrefixes: readonly string[] | null,
+): string | undefined {
+  const exact = walked.find((rel) => rel === token);
+  if (exact !== undefined) return exact;
+  const suffixMatches = walked.filter((rel) => rel.endsWith(`/${token}`));
+  if (suffixMatches.length === 0) return undefined;
+  return suffixMatches.find((rel) => anchorPaths.includes(rel))
+    ?? suffixMatches.find((rel) => isWithinRoleSearchScope(rel, scopePrefixes))
+    ?? suffixMatches[0];
+}
+
+/**
+ * SHOULD-FIX 11 (2026-09-13, review round): the walked file list above
+ * depends only on `workspace` and which walk (default vs fullRecall) is
+ * being consulted — never on `query`/`anchorPaths` — yet `queryNamedWorkspaceFiles`
+ * has five call sites across one answer-pack build, each of which used to pay
+ * for its OWN walk. Measured (rev-probe-walkperf.mts, this repo): default
+ * walk ~2171 files/81-143ms, fullRecall ~2987 files/105-135ms — a
+ * path-naming answer pack was paying roughly +3 redundant walks, and (pre
+ * BLOCKER 3) enumerating `dist/` on every one of them. Scoped via ALS, not a
+ * bare module-level `Map`, so a cached listing never survives past the ONE
+ * `buildTaskPack` call that populated it (see the `.run()` wrapping it in
+ * `buildTaskPack` below) — a file an `edit_file` call creates between two
+ * SEPARATE `read_file` calls in the same session must still be visible to
+ * the next call's own resolution; a process-lifetime cache
+ * (roleInventoryCache's own choice, justified there by role membership
+ * rarely changing) would be the wrong tradeoff for a resolution that names
+ * EXACT files. Outside a tracked build (e.g. a unit test calling
+ * queryNamedWorkspaceFiles directly), `getStore()` is undefined and the walk
+ * simply runs uncached — same result as before this fix, just unmemoized.
+ */
+const queryNamedFilesWalkStorage = new AsyncLocalStorage<Map<string, string[]> | undefined>();
+
+/**
+ * BLOCKER 25 (2026-09-14, review round 4): the query-named files THIS CALL
+ * resolved but could not READ, keyed by workspace-relative path.
+ *
+ * Recorded by `augmentQueryNamedFileSurfaces`' own `content === undefined`
+ * branch — the one place in the build that holds the fact — and consumed at
+ * `dedupeTrimAndPersist`, the choke point EVERY builder funnels through. The
+ * indirection is what makes the disclosure survive the answer pack giving up:
+ * `buildAnswerTaskPack` can return `undefined` (an empty surface set after the
+ * focus gate drops a markup/CSS sole survivor), and the fallback builder that
+ * then produces the shipped pack never calls `augmentQueryNamedFileSurfaces`
+ * again — so a value returned from that function, or stashed on its `surfaces`
+ * array, would be thrown away exactly in the case the finding is about.
+ *
+ * ALS, not a module-level Map, for the same reason the walk cache above is one:
+ * scoped to ONE `buildTaskPack` call (see the `.run()` in `buildTaskPack`), so
+ * a file a later call can read is never reported unreadable on its account, and
+ * two interleaved calls cannot see each other's rows.
+ */
+/**
+ * SHOULD-FIX 65 (AC1, 2026-09-14, review round 12): the value carries the
+ * PROVENANCE alongside the cause.
+ *
+ * Round 11 measured a 5-file workspace where a query naming ONE file produced
+ * THREE `unreadable-named-path` rows, each saying "this request names <file>" —
+ * two of them about files the request never mentions. AB1 correctly made the
+ * disclosure a property of the VERDICT (`candidateToSurface` notes ANY candidate
+ * path the serve policy will not read), but reused the message written when the
+ * only callers were query-named paths. `await_input` means "`unresolved[]` names
+ * the blocker", so a caller acting on that asks the user to re-save two files it
+ * never mentioned. Direction is over-disclosure, so this is honesty, not safety —
+ * and the fix is to say WHICH it is, not to stop disclosing.
+ */
+type UnreadableNamedPathProvenance = "request" | "resolution";
+
+interface UnreadableNamedPathRow {
+  readonly reason: "unreadable" | "undecodable";
+  readonly provenance: UnreadableNamedPathProvenance;
+}
+
+const unreadableNamedPathStorage = new AsyncLocalStorage<Map<string, UnreadableNamedPathRow> | undefined>();
+
+/*
+ * AA1 (2026-09-14, review round 10): `readNamedFileTextLenient` lived here from
+ * SHOULD-FIX 32 (round 4/5) through round 9. Its whole job was to ask a SECOND,
+ * more permissive reader whether bytes the STRICT `readCached` had refused could
+ * be served anyway — because the slice route (`buildSmallFile`) used a
+ * different, more permissive rule and the two doors disagreed about the same
+ * file. That disagreement is what findings 32/35/37/40/49/50/51 kept re-
+ * discovering at one door after another.
+ *
+ * It is deleted, not adjusted: `FileReadCache.read` now applies the ONE
+ * `readServedText` policy (util/textDecode.ts) that `buildSmallFile`, the
+ * seeded-targets loop, the direct slice route and `probeFileText` also apply, so
+ * a second opinion is definitionally unobtainable — asking again can only return
+ * the same verdict. `augmentQueryNamedFileSurfaces` below therefore trusts
+ * `readCached` outright and asks `cache.verdictFor(rel)` only for the one thing
+ * the text alone cannot tell it: whether a NUL was STRIPPED, which it must state
+ * in `why`.
+ */
+
+/**
+ * BLOCKER 25: WHY `readCached` could not serve this file — the two causes are
+ * different facts for the caller ("fix the permissions" vs "this is not text"),
+ * and the response says which.
+ *
+ * Only ever called on the failure path (at most once per named path per call),
+ * so the extra `readFileSync` costs nothing on a normal pack. Fails toward
+ * `"unreadable"`: if the re-read throws we know only that the read failed.
+ *
+ * AA1 (2026-09-14, review round 10): both branches are live and mean exactly
+ * what they say, because ONE policy decides. `noteUnreadableNamedPath` is now
+ * called from three places -- this augmentation (a path `readCached` refused),
+ * the seeded-targets loop (an `"undecodable"` verdict) and nothing else -- and
+ * all three refusals come from `readServedText`. So: `"unreadable"` = the READ
+ * failed (ENOENT/permissions/a directory); `"undecodable"` = the read succeeded
+ * but the bytes are not text in this encoding (invalid UTF-8, a BOM-less UTF-16
+ * save, or NULs too dense to be incidental). The history this comment used to
+ * record -- SHOULD-FIX 32's lenient second reader and SHOULD-FIX 35's re-
+ * reachability argument -- is obsolete: that second reader is gone.
+ */
+function classifyUnreadableNamedPath(workspace: string, relPath: string): "unreadable" | "undecodable" {
+  // AA1 (2026-09-14, review round 10): re-derive through the SAME
+  // `readServedText` policy the serve doors are gated on, never a
+  // differently-spelled second predicate. Round 9's finding 50 measured the
+  // consequence of the old `decodeTextBuffer` re-derivation: for a file whose
+  // NULs begin past `UNDECODABLE_PROBE_BYTES`, the strict-ish decoder SUCCEEDED
+  // here while the serve door refused the bytes, so the wire said
+  // `"unreadable"` — "this server could not read the file" — about a file it
+  // had read and certified one call earlier. With one policy the two can no
+  // longer disagree: `"unreadable"` now means only that the READ ITSELF failed
+  // (ENOENT/permissions/a directory), and every "these bytes are not text in
+  // this encoding" case reports `"undecodable"`.
+  // served-bytes: readServedText
+  const verdict = readServedText(path.join(workspace, relPath));
+  if (verdict.kind !== "undecodable") return "unreadable";
+  return verdict.reason === "unreadable" ? "unreadable" : "undecodable";
+}
+
+/**
+ * BLOCKER 25: record one file this call resolved but could not read.
+ *
+ * SHOULD-FIX 65 (AC1, round 12): `provenance` says whether the REQUEST named this
+ * path (`"request"` — the query's own text, or a caller-supplied target) or the
+ * server reached it while RESOLVING the request (`"resolution"` — a locator
+ * candidate). `"request"` UPGRADES an existing `"resolution"` note for the same
+ * path: the same file can be reached both ways within one call, and the stronger
+ * statement is the true one.
+ */
+function noteUnreadableNamedPath(
+  workspace: string,
+  relPath: string,
+  provenance: UnreadableNamedPathProvenance,
+): void {
+  const store = unreadableNamedPathStorage.getStore();
+  if (store === undefined) return;
+  const existing = store.get(relPath);
+  if (existing !== undefined) {
+    if (existing.provenance === "request" || provenance === "resolution") return;
+    store.set(relPath, { reason: existing.reason, provenance });
+    return;
+  }
+  store.set(relPath, { reason: classifyUnreadableNamedPath(workspace, relPath), provenance });
+}
+
+/** BLOCKER 25: this call's unreadable files, deterministically ordered. */
+function unreadableNamedPathRows(): Array<{
+  path: string;
+  reason: "unreadable" | "undecodable";
+  provenance: UnreadableNamedPathProvenance;
+}> {
+  const store = unreadableNamedPathStorage.getStore();
+  if (store === undefined || store.size === 0) return [];
+  return [...store.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([relPath, row]) => ({ path: relPath, reason: row.reason, provenance: row.provenance }));
+}
+
+/**
+ * BLOCKER 25: the `result.missing` row spelling — one vocabulary, parsed by
+ * `canonicalDecision.ts`'s `parseLedgerMissingRow`.
+ *
+ * Exported (SHOULD-FIX 32, 2026-09-14) only so `readCodeTaskPack.spec.ts` can
+ * pin `parseUnreadableNamedPathRow`'s round trip against this exact prefix.
+ */
+export const UNREADABLE_NAMED_PATH_PREFIX = "unreadable-named-path:";
+
+/**
+ * BLOCKER 62 (AC1, 2026-09-14, review round 12) — the `result.missing` spelling
+ * for "this request asks to change a file this release cannot write".
+ *
+ * Same producer/parser discipline as `UNREADABLE_NAMED_PATH_PREFIX`: minted only
+ * here, parsed only by `canonicalDecision.ts`'s `parseLedgerMissingRow`. Round 11
+ * measured `act.edit` + a writable frontier over a NUL-STRIPPED file whose edit
+ * `detectWriteEncodingRisk` refuses unconditionally, with `retry:"call"` and no
+ * `edits[]` shape that can succeed. `writeAuthorityVeto` now declines the
+ * authority; this is the other half the mandate requires — the response SAYS
+ * why, instead of silently degrading to a frontier-less `await_input`.
+ */
+export const UNWRITABLE_ENCODING_RISK_PREFIX = "unwritable-encoding-risk:";
+
+function walkedFilesForQueryNamedResolution(workspace: string, fullRecall: boolean): string[] {
+  const store = queryNamedFilesWalkStorage.getStore();
+  const key = `${workspace}|${fullRecall ? "fullRecall" : "default"}`;
+  const cached = store?.get(key);
+  if (cached !== undefined) return cached;
+  const walked = walkCodeFiles(workspace, { extraExts: QUERY_NAMED_EXTRA_EXTS, fullRecall })
+    .map((file) => file.relPath).sort();
+  store?.set(key, walked);
+  return walked;
 }
 
 /**
@@ -13956,6 +18283,13 @@ export function queryNamedWorkspaceFiles(
  * rather than being silently dropped because weaker evidence happened to
  * fill the budget first. A no-op, as before, when every present surface is
  * required/protected/grounded.
+ *
+ * TL142-05 (2026-09-13): the candidate below is now stamped `required: true`
+ * — this doc comment already called it a "STATED REQUIREMENT", but nothing
+ * actually marked the surface that way, so a later byte-budget pass
+ * (trimToCap) could still strip or drop it like any ordinary evidence
+ * surface. A file the query names by its own full, extension-qualified path
+ * must survive exactly like any other caller-explicit target.
  */
 async function augmentQueryNamedFileSurfaces(
   surfaces: TaskPackSurface[],
@@ -13990,15 +18324,41 @@ async function augmentQueryNamedFileSurfaces(
       const [evicted] = surfaces.splice(fallbackEvictIndex, 1);
       if (evicted) already.delete(evicted.path);
     }
+    // AA1 (2026-09-14, review round 10): ONE reader, ONE verdict. Rounds 4-9
+    // had this door try `readCached` (strict) and then, on failure, a SECOND
+    // more permissive reader (`readNamedFileTextLenient` + `classifyLenientText`)
+    // so it would not disclose a file the slice route was willing to serve.
+    // `FileReadCache.read` now applies the SAME `readServedText` policy every
+    // other door applies, so the second attempt could only ever return the same
+    // verdict: a file this returns `undefined` for is a file NO door serves.
+    // `verdictFor` supplies the one fact the text cannot carry — whether a rare
+    // incidental NUL was stripped — which `why` must state, exactly as before.
     const content = readCached(workspace, rel, cache);
-    if (content === undefined) continue;
+    if (content === undefined) {
+      // BLOCKER 25 (2026-09-14, review round 4): a path the QUERY named,
+      // resolved by `queryNamedWorkspaceFiles`, that this server cannot serve —
+      // mode 000, ENOENT, a directory, or bytes that are not text in this
+      // encoding. Before this, the `continue` was silent: `namedPaths.length > 0`
+      // with no named surface, and nothing downstream could say the request had
+      // named a file at all. The pack then certified `act.answer` over whatever
+      // weak lexical window happened to survive, with the named path disclosed
+      // NOWHERE. Recorded here (the one site that holds the fact) and disclosed
+      // at `dedupeTrimAndPersist`.
+      // SHOULD-FIX 65 (AC1, round 12): these paths come from the QUERY's own text.
+      noteUnreadableNamedPath(workspace, rel, "request");
+      continue;
+    }
+    const queryNamedWhy = cache.verdictFor(rel)?.kind === "stripped"
+      ? "query-named-file; nul-stripped"
+      : "query-named-file";
     const candidate: ImpactCandidate = {
       path: rel,
       line: 1,
       range: `1-${Math.max(1, countLines(content))}`,
       surface: classifySurface(rel),
-      why: "query-named-file",
+      why: queryNamedWhy,
       confidence: 1,
+      required: true,
     };
     const anchored = await anchorFocusForLocatorCandidate(candidate, workspace, query, cache);
     const surface = await candidateToSurface(
@@ -14008,6 +18368,311 @@ async function augmentQueryNamedFileSurfaces(
     surfaces.push(surface);
     protectedSurfaces?.add(surface);
     already.add(rel);
+  }
+}
+
+/**
+ * TL142-05 (2026-09-13): when the request itself names explicit path(s) in
+ * its query text (queryNamedWorkspaceFiles), the general answer-evidence
+ * FALLBACK admission (`why:"answer-query-evidence-focus"` —
+ * rankAnswerEvidenceCandidates' weakest tier: a surface admitted purely
+ * because SOME line in it scored as lexically relevant, no symbol anchor, no
+ * relation check of any kind) may no longer add an unrelated file. It
+ * survives only with a stated relation to a named path (statedRelation-
+ * ToNamedPath — import / is-imported-by / calls / is-called-by / config /
+ * test), and its `why` is rewritten to STATE that relation — report's own
+ * acceptance: "追加evidenceには質問との関係を説明できる理由を持たせる" — in
+ * the shape `"<relation> (answer-query-evidence-focus)"`. An unrelated
+ * surface is dropped outright (never merely trimmed later). A no-op when the
+ * query names no explicit path (namedPaths.length === 0): every OTHER query
+ * shape's existing fallback-admission behaviour is unchanged. Also a no-op
+ * for a surface that IS itself one of the named paths (the STATED
+ * REQUIREMENT, not "extra" evidence at all).
+ *
+ * Deliberately a POST-pass over the assembled `surfaces` array rather than a
+ * change to rankAnswerEvidenceCandidates' own scoring — that ranking loop's
+ * output feeds several OTHER branches (strongEvidenceAnswer,
+ * exactLocatedAnswer, orderByLocatorVerdict's front-loading), so gating
+ * admission there risks moving unrelated decisions; this targets exactly the
+ * one `why` tag the report names, nothing else.
+ *
+ * SHOULD-FIX 8 (2026-09-13, review round): a PATHLESS query used to make this
+ * whole function a no-op (an early `return` on `namedPaths.length === 0`),
+ * so its relevance bar never ran for the far more common pathless case —
+ * only `runInternalReadinessFalsification`'s counterexample admission had a
+ * pathless bar. Live regression: a pathless schemaStamp query still shipped
+ * an unrelated `readme.md` tagged with the bare, unexplained
+ * `answer-query-evidence-focus` `why`. Fix: the pathless branch below applies
+ * the SAME relevance bar the pathless counterexample already uses — the
+ * window must reference an explicit query identifier or a symbol of the
+ * PRIMARY evidence (the required surface, or `surfaces[0]` when none is
+ * marked required — the same "primary" `runInternalReadinessFalsification`
+ * uses), and a markup/CSS window never qualifies regardless. A kept extra's
+ * `why` states which identifier it references
+ * (`"answer-query-evidence-focus: references <name>"`); an unrelated one is
+ * dropped outright, same as the named-path branch.
+ */
+function gateAnswerQueryEvidenceFocusOnNamedPathRelation(
+  surfaces: TaskPackSurface[],
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): void {
+  const namedPaths = queryNamedWorkspaceFiles(query, workspace, trustworthySurfaceAnchorPaths(surfaces));
+  // Precomputed once, used only by the pathless branch below — cheap even
+  // when unused (the named-path branch never reads either).
+  const explicitIdentifiers = namedPaths.length === 0 ? explicitCodeIdentifiers(query) : [];
+  const primarySymbol = namedPaths.length === 0
+    ? surfaces.find((s) => s.required === true)?.symbol ?? surfaces[0]?.symbol
+    : undefined;
+  // 2026-09-14 (v0.14.2 eval fix wave, GATE-B, fxR3bEngagementMarking's D7
+  // regression): the pathless branch below used to accept ONLY an explicit
+  // query identifier or the primary surface's own symbol — unlike its
+  // named-path sibling a few lines down, it never fell back to
+  // `statedRelationToNamedPath`'s import/calls/is-called-by/config/test
+  // check. That asymmetry starves a pathless "retain the supporting
+  // context" query of any lexically-related-but-not-identifier-mentioning
+  // surface (measured: FX-R3b D7's own engagement fixture — a file that
+  // calls a function the primary declares, but never repeats the traced
+  // identifier itself, is dropped here even though it is exactly the kind
+  // of stated relation TL142-05 elsewhere treats as sufficient). Resolving
+  // the primary surface's own PATH (parallel to `primarySymbol` above) lets
+  // the loop below try the same relation check the named-path branch
+  // already runs, as a fallback — never a replacement — for the identifier
+  // match.
+  const primaryPath = namedPaths.length === 0
+    ? surfaces.find((s) => s.required === true)?.path ?? surfaces[0]?.path
+    : undefined;
+  for (let i = surfaces.length - 1; i >= 0; i--) {
+    const surf = surfaces[i]!;
+    if (surf.why !== "answer-query-evidence-focus") continue;
+    if (namedPaths.length > 0) {
+      if (namedPaths.includes(surf.path)) continue; // it IS a named path — a stated requirement, not extra evidence
+      // BLOCKER 12 (review round 3, 2026-09-13): mirror the pathless
+      // branch's own "never drop the last surviving surface" floor. This
+      // branch's usual invariant — augmentQueryNamedFileSurfaces has
+      // ALREADY guaranteed at least one required named-file surface before
+      // this function ever runs — does NOT hold when the named path
+      // resolves but cannot be READ (readCached returns undefined, e.g. a
+      // mode-000 file): augmentQueryNamedFileSurfaces' own `if (content ===
+      // undefined) continue;` leaves namedPaths.length > 0 with no named
+      // surface at all, so a weak `answer-query-evidence-focus` surface can
+      // be the pack's ONLY surface. Splicing it away unconditionally
+      // emptied `surfaces`, and buildAnswerTaskPack's own
+      // `surfaces[0]!.range` a few lines below this function's call site
+      // then threw on `undefined` — a bare JSON-RPC error, no `v:1`
+      // envelope at all (E2E: scratchpad/r2-ws-weak2 — src/theme.css plus a
+      // chmod-000 src/locked.ts the query names by path).
+      // buildAnswerTaskPack ALSO now guards an empty `surfaces[]` directly
+      // at its own sink (defense in depth for any OTHER path that might
+      // empty the array); this floor keeps that guard from ever needing to
+      // fire here.
+      //
+      // BLOCKER 25 (2026-09-14, review round 4): the floor above was a bare
+      // `continue`, so it skipped the markup/CSS veto AND the `why`
+      // restatement the sibling pathless branch applies — the sole survivor
+      // shipped under the bare, unexplained `answer-query-evidence-focus`
+      // tag, and `buildAnswerTaskPack` then certified `act.answer` over it
+      // because `surface-content` was the only obligation left. The two
+      // branches of one gate had different honesty rules. They now share one:
+      // a markup/CSS sole survivor is DROPPED (the pack degrades to a
+      // structured decision through BLOCKER 12's empty-surfaces sink), and a
+      // real-code sole survivor is KEPT with its `why` restated. Reaching
+      // this floor at all means NO named surface exists (a named path is
+      // `continue`d above, and `augmentQueryNamedFileSurfaces` otherwise
+      // guarantees one) — i.e. exactly the unreadable/undecodable named-path
+      // case `unreadable_named_paths` discloses, so dropping here never
+      // starves a pack that had a named file to serve.
+      if (surfaces.length <= 1) {
+        const soleContent = surf.code ?? readCached(workspace, surf.path, cache);
+        if (soleContent !== undefined && looksLikeMarkupOrCssWindow(soleContent)) {
+          surfaces.splice(i, 1);
+          continue;
+        }
+        if (surf.why === "answer-query-evidence-focus") {
+          surf.why = "answer-query-evidence-focus: only candidate";
+        }
+        continue;
+      }
+      const content = surf.code ?? readCached(workspace, surf.path, cache);
+      const relation = content === undefined
+        ? undefined
+        : statedRelationToNamedPath(surf.path, content, namedPaths, workspace, cache);
+      if (relation !== undefined) {
+        surf.why = `${relation} (answer-query-evidence-focus)`;
+        continue;
+      }
+      surfaces.splice(i, 1);
+      continue;
+    }
+    // SHOULD-FIX 8: pathless variant — same bar as the pathless
+    // counterexample (runInternalReadinessFalsification): fails CLOSED
+    // (drop) unless the window references a real identifier, and a
+    // markup/CSS window is vetoed outright regardless of what it mentions.
+    //
+    // SHOULD-FIX 17 (review round 3, 2026-09-13): this used to floor at
+    // `if (surfaces.length <= 1) continue;` BEFORE the markup/CSS veto
+    // below, so the one shape this whole gate exists to exclude — a
+    // markup/CSS window with no real identifier reference — could be the
+    // SOLE surviving surface, kept with the bare, unexplained
+    // `answer-query-evidence-focus` tag (E2E: scratchpad/r2-ws-weak2's
+    // pathless case, src/theme.css alone). Now that buildAnswerTaskPack's
+    // own sink guards an empty `surfaces[]` (BLOCKER 12) instead of
+    // crashing on it, dropping a markup/CSS sole survivor is safe: the
+    // caller degrades to a structured discover/await_input outcome instead
+    // of serving a window this gate itself judged irrelevant.
+    //
+    // The identifier-match test further below is deliberately NOT applied
+    // to a sole survivor: replayCorpus's own ds8_answer_profile_entry (a
+    // pathless query naming a nonexistent class against a fixture with no
+    // such class) requires a body-bearing answer surface even when nothing
+    // in the workspace grounds the query's own identifier — dropping the
+    // pack's only REAL-CODE evidence would starve a genuinely weak-but-real
+    // answer of everything, trading one honesty problem for a worse one (no
+    // evidence at all where some exists). A sole survivor's `why` is still
+    // restated here (never left bare) either way, so the unexplained tag
+    // can never reach the caller through this function.
+    if (surfaces.length <= 1) {
+      const soleContent = surf.code ?? readCached(workspace, surf.path, cache);
+      if (soleContent !== undefined && looksLikeMarkupOrCssWindow(soleContent)) {
+        surfaces.splice(i, 1);
+        continue;
+      }
+      if (surf.why === "answer-query-evidence-focus") {
+        surf.why = "answer-query-evidence-focus: only candidate";
+      }
+      continue;
+    }
+    const content = surf.code ?? readCached(workspace, surf.path, cache);
+    if (content === undefined || looksLikeMarkupOrCssWindow(content)) {
+      surfaces.splice(i, 1);
+      continue;
+    }
+    const matchedIdentifier = explicitIdentifiers.find((identifier) => hasIdentifierSegment(content, identifier));
+    const referencesPrimarySymbol = matchedIdentifier === undefined
+      && primarySymbol !== undefined
+      && hasIdentifierSegment(content, primarySymbol);
+    // Fallback (2026-09-14, GATE-B — see the `primaryPath` comment above):
+    // no identifier/symbol mention, but the candidate still states one of
+    // TL142-05's own relation kinds to the primary surface — the same bar
+    // the named-path branch above already accepts. Only tried once neither
+    // mention matched, so a real identifier hit is never shadowed by a
+    // weaker relation string.
+    const relation = matchedIdentifier === undefined && !referencesPrimarySymbol && primaryPath !== undefined
+      ? statedRelationToNamedPath(surf.path, content, [primaryPath], workspace, cache)
+      : undefined;
+    if (matchedIdentifier === undefined && !referencesPrimarySymbol && relation === undefined) {
+      surfaces.splice(i, 1);
+      continue;
+    }
+    surf.why = relation !== undefined
+      ? `${relation} (answer-query-evidence-focus)`
+      : `answer-query-evidence-focus: references ${matchedIdentifier ?? primarySymbol}`;
+  }
+}
+
+/**
+ * TL142-05 (2026-09-13): size cap, documented constant. When the request
+ * names explicit path(s), the report's own acceptance bound is "total
+ * `content[0].text` ≤ 1.25 × the two named files' byte sizes" — this is the
+ * server-side proxy for that bound (the response's OWN serialization
+ * overhead is outside this function's reach; capping surface CODE bytes,
+ * which dominate response size, against the SAME 1.25x multiplier is the
+ * enforceable half of it). Runs LAST, after every other extra-evidence gate
+ * (the relation gate above, the counterexample relation gate in
+ * runInternalReadinessFalsification, and the post-trim import/anchor
+ * augmenters) — a defensive numeric backstop, not a substitute for the
+ * qualitative relation checks: a RELATION-VERIFIED extra can still be capped
+ * here if the named files alone are small and the extra is large. Fails
+ * toward dropping the extra evidence: never removes a named-path surface,
+ * and never removes a `required` surface (a different mechanism already
+ * decided that one is essential — e.g. this same wave's own named-path
+ * `required:true` stamp, or augmentExplicitAnswerImportSurfaces' own). A
+ * no-op when the query names no explicit path, matching every other
+ * TL142-05 gate's scope. Answer-profile only (called from
+ * buildAnswerTaskPack): an edit-shaped query names its target file just as
+ * routinely, and that profile's import-neighbour/sibling augmentation serves
+ * a real, separately-tested safety purpose this report never asked to
+ * constrain.
+ *
+ * C26 (chip wave, 2026-09-14): the drop order is WEAKEST-RELATION FIRST
+ * (see RELATION_VERIFIED_EXTRA_WHY_RE below), not merely last-in-`surfaces[]`
+ * first — a relation-VERIFIED extra (an import/call/config/test relation
+ * `statedRelationToNamedPath` already proved, stamped onto `why` by the
+ * relation gate above or by `runInternalReadinessFalsification`'s
+ * counterexample gate) must survive over a bare/lexical extra purely because
+ * of where it happened to land in the array. Exported so this drop order can
+ * be pinned directly — see readCodeTaskPack.spec.ts's
+ * "capExtraEvidenceRelativeToNamedPaths: drop order" describe.
+ */
+const EXTRA_EVIDENCE_NAMED_PATH_CAP_MULTIPLIER = 1.25;
+
+/**
+ * Matches the exact relation-verb prefixes `statedRelationToNamedPath` can
+ * return ("imports "/"is imported by "/"calls "/"is called by "/"config
+ * declares "/"test references "), which both its call sites stamp onto
+ * `surf.why` verbatim (only the trailing "(...)" tag differs between the two
+ * call sites) — C26's relevance signal for the drop order below.
+ */
+const RELATION_VERIFIED_EXTRA_WHY_RE = /^(?:imports |is imported by |calls |is called by |config declares |test references )/;
+
+export function capExtraEvidenceRelativeToNamedPaths(
+  surfaces: TaskPackSurface[],
+  query: string,
+  workspace: string,
+): void {
+  const namedPaths = queryNamedWorkspaceFiles(query, workspace, trustworthySurfaceAnchorPaths(surfaces));
+  if (namedPaths.length === 0) return;
+  let namedBytesTotal = 0;
+  for (const namedPath of namedPaths) {
+    const content = probeFileText(workspace, namedPath);
+    if (content !== undefined) namedBytesTotal += Buffer.byteLength(content, "utf8");
+  }
+  if (namedBytesTotal === 0) return; // could not size any named file — nothing to cap against
+  const cap = Math.ceil(EXTRA_EVIDENCE_NAMED_PATH_CAP_MULTIPLIER * namedBytesTotal);
+  let total = 0;
+  for (const surf of surfaces) {
+    if (typeof surf.code === "string") total += Buffer.byteLength(surf.code, "utf8");
+  }
+  if (total <= cap) return;
+  // C26: two passes, each still last-to-first WITHIN its own tier (preserves
+  // the prior tie-break when two candidates carry the same relation
+  // strength) — first every candidate whose `why` does NOT state a
+  // verified import/call/config/test relation, then, only if still over cap,
+  // the relation-verified ones.
+  for (const requireRelationVerified of [false, true]) {
+    for (let i = surfaces.length - 1; i >= 0 && total > cap; i--) {
+      const surf = surfaces[i]!;
+      if (namedPaths.includes(surf.path)) continue;
+      if (surf.required === true) continue;
+      // 2026-09-14 (v0.14.2 eval fix wave, GATE-B —
+      // semanticFrontierAnswerGraphE2E's "keeps explicit TS providers on the
+      // first pack" regression). `namedPaths` only ever holds FILE-shaped
+      // query tokens (`queryNamedWorkspaceFiles`) — a query that instead
+      // names several IDENTIFIERS, each resolving to a DIFFERENT file (e.g.
+      // "Trace INVOICE_TEMPLATE invoice_template.ts renderInvoice relation":
+      // "renderInvoice" names no path token, but is every bit as explicit a
+      // request as the literal "invoice_template.ts"), had every one of
+      // those OTHER explicit matches capped away as if they were incidental
+      // extra context — measured: a 3-file exact answer collapsed to 1 file,
+      // silently AFTER the earlier `coverage_reason:"candidate-list"` verdict
+      // had already been decided assuming all three still stood, so the wire
+      // ended up naming a stale "multiple candidates" reason over a single
+      // surviving surface.
+      // `answer-explicit-symbol-focus`/`answer-explicit-identifier-recovery`
+      // are the two `why` values this file mints ONLY for an EXACT match of a
+      // query's own explicitly-named identifier (`rankAnswerEvidenceCandidates`,
+      // `recoverExplicitIdentifierAnswerCandidates`) — never a weaker semantic
+      // or vocabulary-only hit — so exempting them here is the identical bar
+      // `namedPaths.includes`/`required===true` already apply to a
+      // literally-named file, extended to a literally-named IDENTIFIER.
+      if (surf.why === "answer-explicit-symbol-focus" || surf.why === "answer-explicit-identifier-recovery") continue;
+      if (typeof surf.code !== "string") continue;
+      const relationVerified = RELATION_VERIFIED_EXTRA_WHY_RE.test(surf.why ?? "");
+      if (relationVerified !== requireRelationVerified) continue;
+      total -= Buffer.byteLength(surf.code, "utf8");
+      surfaces.splice(i, 1);
+    }
   }
 }
 
@@ -18128,7 +22793,7 @@ export function semanticConstructionHubExcerpt(
     ]);
     const code = merged.map((range, index) => {
       const prefix = index === 0
-        ? "// TL hub excerpt; omitted ranges listed in remaining_ranges (zoom: ONE read_file mode=full of this handle beats repeated re-slices when you need most of the file)\n"
+        ? "// TL hub excerpt; omitted ranges listed in remaining_ranges (zoom: ONE read_file {targets:[{handle}], content:\"full\"} beats repeated re-slices when you need most of the file)\n"
         : `// TL omitted lines before L${range.start}\n`;
       // A2: only the LANDING-REGION sub-span of a window is served verbatim —
       // the rest of that window keeps the elided representation it always had.
@@ -18952,6 +23617,171 @@ export function deriveTaskChangeContractVerifyObligations(
   }
 }
 
+/**
+ * BLOCKER 61 / BLOCKER 62 (AC1, 2026-09-14, review round 12) — ONE
+ * WRITE-AUTHORITY PREDICATE.
+ *
+ * Rounds 8, 9, 10 and 11 each filed one half of the same question, and round 11
+ * finally measured an ON-DISK WRITE to a file the query never names. Both
+ * blockers are the same sentence — *a frontier entry was marked writable by a
+ * construction that never consulted the authority evidence* — so they get ONE
+ * predicate, consulted by BOTH producers (`buildTaskChangeContract`'s
+ * `editRequired`, and `actionFrontierForCertificate`'s final structural union),
+ * instead of a second veto per producer.
+ *
+ * Three independent reasons a path may not be written:
+ *
+ *  1. `read` LEAD (pre-existing, BLOCKER 34): the request's own wording asks to
+ *     explain/review this file. `readOnlyLeadPaths`, unchanged.
+ *  2. TOKEN-MATCH-ONLY EVIDENCE, UNNAMED BY THE REQUEST (BLOCKER 61): the
+ *     surface was admitted because a query TOKEN happened to match an identifier
+ *     in it (`why:"symbol hit for …"` / `"variant token match"` — the locator's
+ *     weakest admission), and the request names no edit lead for that path.
+ *     Round 11: `Explain how MAX_RETRIES works in src/retry.ts, and then set it
+ *     to 5.` marked `src/http.ts` writable because the edit VERB `set` matched
+ *     `SET_COOKIE` there, and `edit_file` then applied a replacement to it. The
+ *     locator half of that leak is closed in `requestItems.ts::
+ *     stripValueOnlyLeadClauses`; this is the independent second half, so a
+ *     token collision arriving by ANY other route (a genuinely named identifier
+ *     that also occurs in an unrelated file) can never carry write authority
+ *     either. Such a surface stays SERVED — it is discovery evidence, which is
+ *     what the locator admitted it as; it is only not an authorized target.
+ *  3. A NUL-STRIPPED SERVE (BLOCKER 62): `util/textDecode.ts::readServedText`
+ *     serves a file whose NUL-free ratio is >= 0.99 with the NULs removed, while
+ *     `detectWriteEncodingRisk` refuses to write ANY file with a NUL in its
+ *     first 4096 bytes. Round 11 measured the two disagreeing about the same
+ *     bytes: `act.edit`, frontier `[{path:"src/retry.ts", writable:true}]`, and
+ *     an `edit_file` refusal with `retry:"call"` that NO `edits[]` shape can
+ *     satisfy. Refusing the write is right (writing the stripped text back would
+ *     silently delete the NUL); the defect is certifying an edit the only
+ *     sanctioned transition always refuses. One verdict per file: the pack
+ *     already knows (the surface's own `why` carries `nul-stripped`), so it
+ *     declines the authority instead.
+ *
+ * Gate 2 is scoped to a request that NAMES AT LEAST ONE FILE of its own, under
+ * any lead. A path-less change request ("increase the premium multiplier in the
+ * rating engine") has no lead rows at all, and there the locator's evidence IS
+ * the only available target statement — so the gate stays off for it, exactly as
+ * before.
+ *
+ * FIXALL-A (2026-09-14) — that scope used to require an EDIT lead specifically
+ * (round 12's residual R1), which left the commonest BLOCKER-61 shape open:
+ * `Explain how MAX_RETRIES works in src/retry.ts, and then update the
+ * changelog.` has exactly one lead row, a READ on `src/retry.ts`, so
+ * `editLeadPaths` was empty, the gate never ran, and `src/audit.ts` — admitted
+ * solely because the edit verb `update` matched `UPDATE_MODE` in it — was
+ * WRITABLE. The distinction that actually matters is not which LEAD the named
+ * file carries but whether the request names a file AT ALL: once it does, a
+ * file it never mentions cannot be the one it means, whatever a token collision
+ * suggests. "The changelog" is a noun phrase, not a filename, and resolving it
+ * by lexical proximity to whichever file happens to contain a matching token is
+ * a guess — the pack still SERVES that surface as discovery evidence and the
+ * caller can still name the file explicitly, which is what makes it writable.
+ */
+const TOKEN_MATCH_ONLY_WHY_QUALIFIERS: ReadonlySet<string> = new Set([
+  "nul-stripped", "caller-supplied",
+]);
+
+/**
+ * True when every informative part of `why` says only "a query token matched an
+ * identifier here". `why` is a `;`-joined qualifier list (see
+ * `candidateToSurface`), so a stronger reason anywhere in it clears the surface.
+ */
+function surfaceAdmittedByTokenMatchOnly(why: string | undefined): boolean {
+  if (why === undefined || why === "") return false;
+  const parts = why.split(";").map((part) => part.trim()).filter((part) => part.length > 0);
+  const informative = parts.filter((part) => !TOKEN_MATCH_ONLY_WHY_QUALIFIERS.has(part));
+  if (informative.length === 0) return false;
+  return informative.every((part) => (
+    part.startsWith("symbol hit for")
+    || part === "variant token match"
+    // FIXALL-A (2026-09-14): a raw `exact-text` hit (`whySummary`'s default
+    // passthrough) is a literal match of a NON-distinctive query token against
+    // this file's bytes — the weakest lexical admission the locator has, weaker
+    // than the two above. Measured: `Implement a MIN_RETRIES constant to
+    // src/cache.ts, and change "src/retry.ts".` made the re-export barrel
+    // `src/index.ts` a required EDIT obligation because it contains the strings
+    // "retry" and "cache", alongside the two files the request actually names.
+    // `exact-text:distinctive` (`"matched distinctive identifier"`) is
+    // deliberately NOT here: it is how an identifier-only request
+    // (`Bump MAX_RETRIES to 5.`) legitimately finds its one file.
+    || part === "exact-text"
+  ));
+}
+
+/** True when this surface was served with its NUL characters stripped (BLOCKER 62). */
+function surfaceServedNulStripped(why: string | undefined): boolean {
+  return why !== undefined && surfaceWhyHasMarker(why, "nul-stripped");
+}
+
+interface WriteAuthorityVeto {
+  /** Paths the request's own wording marks read-only (BLOCKER 34). */
+  readonly readOnlyLeadPaths: ReadonlySet<string>;
+  /** Is `path` barred from the writable frontier, and why? */
+  readonly reasonFor: (path: string, why: string | undefined) => WriteAuthorityVetoReason | undefined;
+}
+/**
+ * FIXALL-A group F (2026-09-14): a FOURTH reason — the request offers this path
+ * as one of several ALTERNATIVES (`Update src/retry.ts or src/cache.ts …`) and
+ * has not said which. `read-lead` would be the wrong sentence for it (the
+ * request's wording does ask to edit it), so the veto names the ambiguity
+ * instead of mislabelling it.
+ */
+type WriteAuthorityVetoReason = "read-lead" | "token-match-only" | "nul-stripped" | "unresolved-alternative";
+
+function writeAuthorityVeto(query: string, editObserved = false): WriteAuthorityVeto {
+  const leads = requestItemLeads(query);
+  const readOnlyLeadPaths = new Set(
+    leads.filter((entry) => entry.lead === "read").map((entry) => entry.path),
+  );
+  // FIXALL-A (2026-09-14): gate 2's scope — every path the request names, under
+  // any lead, not only the ones it names as edit targets. See the doc above.
+  // (The old `editLeadPaths` set this replaced is gone; `readOnlyLeadPaths`
+  // above still carries gate 1's own, separate question.)
+  const namedPaths = new Set(leads.map((entry) => entry.path));
+  // FIXALL-A group F (2026-09-14): the SAME structural test `requestItemLeads`
+  // uses to hold an alternative down to `read`, imported rather than restated,
+  // so the two can never disagree about which paths are alternatives.
+  const alternatives = alternativeCoordinatedPaths(query);
+  return {
+    readOnlyLeadPaths,
+    reasonFor: (path, why) => {
+      // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2) — GATE-A, 2026-09-14: an
+      // `edit_file` call that already passed `guardExecutionEdit` THIS task
+      // epoch is a stronger statement of intent than anything the request TEXT
+      // says, and the three gates below are ALL request-text-derived (what the
+      // wording asks for, which files it names, which of several alternatives
+      // it left open). §4.2's whole premise is that a genuinely observed edit
+      // overrides the wording — `sfIntentEditObservedE2E.spec.ts` pins exactly
+      // that: `explain how computeTotal … in src/order.ts` is a read LEAD, yet
+      // the caller has already edited that very file this task. Gate 3
+      // (`nul-stripped`) is NOT suspended: it is a physical property of the
+      // bytes (`detectWriteEncodingRisk` refuses that write however the
+      // authority was earned), so certifying it would still promise an edit the
+      // only sanctioned transition always refuses (BLOCKER 62).
+      if (editObserved) return surfaceServedNulStripped(why) ? "nul-stripped" : undefined;
+      if (alternatives.has(path)) return "unresolved-alternative";
+      if (readOnlyLeadPaths.has(path)) return "read-lead";
+      if (surfaceServedNulStripped(why)) return "nul-stripped";
+      if (namedPaths.size > 0 && !namedPaths.has(path) && surfaceAdmittedByTokenMatchOnly(why)) {
+        return "token-match-only";
+      }
+      return undefined;
+    },
+  };
+}
+
+/** The caller-facing sentence for each veto reason (obligation `reason`, <=180 chars). */
+const WRITE_AUTHORITY_VETO_REASON: Readonly<Record<WriteAuthorityVetoReason, string>> = {
+  "read-lead": "the request's own wording asks to explain/review this file, not edit it",
+  "unresolved-alternative":
+    "the request offers this file as one of several alternatives and has not said which; name the one you mean before editing either",
+  "token-match-only":
+    "a query token matched an identifier here; this request never names this file as a change target, so it is discovery evidence, not a write target",
+  "nul-stripped":
+    "served with NUL characters stripped, so it cannot be written back without losing them: re-save this file as UTF-8 before editing it",
+};
+
 function buildTaskChangeContract(
   query: string,
   result: TaskPackResult,
@@ -18979,6 +23809,32 @@ function buildTaskChangeContract(
       .filter((handle): handle is string => handle !== undefined) ?? []),
   ]);
   const normalizedQuery = normIdent(query);
+  // r4-should-fix-26-propagation-route residual (2026-09-14): a path the
+  // query names under its OWN explicit read/explain lead
+  // (`requestItems.ts`'s `requestItemLeads` — the same per-item machinery
+  // `explicitMultiEditRequestPaths` uses) must never earn edit authority
+  // through the softer, name-only signals below (`explicitlyNamed`, the
+  // `primaryHandle` positional fallback) merely because ANOTHER clause of
+  // the same query edits a DIFFERENT file. Every query-derived builder's
+  // writable frontier funnels through here:
+  // `actionFrontierForCertificate` derives the certificate's writable
+  // `action_frontier` from `change_contract.obligations` whose
+  // `action === "edit"`, so gating `editRequired` here (rather than in each
+  // builder that seeds `result.surfaces`) closes the propagation/
+  // literal-first route's own independent seeding
+  // (`buildPropagationTaskPack` / `buildSeededTaskPack`) along with every
+  // other non-wiring builder that lands here, without re-deriving the
+  // edit/read verb rule a second time. Scoped to `connection === undefined`
+  // (a wiring pack's `wiringDestination` signal is a different, already
+  // call-graph-proved mechanism this finding does not touch).
+  // BLOCKER 61/62 (AC1, round 12): the read-lead veto is now one of THREE, all
+  // asked of the one shared predicate — see `writeAuthorityVeto`'s doc.
+  // GATE-A (2026-09-14): the observed-edit exemption is passed HERE too, not
+  // only at `actionFrontierForCertificate`, so the two producers cannot
+  // disagree about who may write (the exact failure the shared predicate
+  // exists to prevent): a §4.2 task would otherwise certify a writable
+  // `action_frontier` while its own `change_contract` said `action:"review"`.
+  const veto = writeAuthorityVeto(query, getIntentEditObserved(workspace));
 
   const obligations: TaskChangeObligation[] = surfaces.map((surface, index) => {
     const basename = path.basename(surface.path).replace(/\.[^.]+$/, "");
@@ -18986,24 +23842,30 @@ function buildTaskChangeContract(
     const explicitlyNamed = namedToken.length >= 3 && normalizedQuery.includes(normIdent(namedToken));
     const wiringSource = surface.handle === sourceHandle;
     const wiringDestination = surface.handle === destinationHandle;
-    const editRequired = connection !== undefined
-      ? wiringDestination
-      : concernHandles.has(surface.handle)
-        || surface.required === true
-        || requiredRoles.has(surface.role)
-        // Issue #4 (2026-08-21): a "doc" surface (CHANGELOG/README/contract
-        // prose) must not inherit required-edit status purely from landing
-        // at array position 0 — that is exactly what happens when an
-        // EARLIER, stronger candidate is removed (e.g. by
-        // suppressFragmentOnlyFilenameMatches above) and a documentation
-        // surface that merely discusses the same topic is promoted into the
-        // "primary" slot by accident. A doc surface still becomes required
-        // through any of the OTHER, EXPLICIT signals above/below
-        // (concernHandles, surface.required, requiredRoles, or the query
-        // literally naming it) — this only removes the position-only
-        // fallback for that one role.
-        || (surface.handle === primaryHandle && !wiringSource && surface.role !== "doc")
-        || explicitlyNamed;
+    // BLOCKER 61/62 (AC1, round 12). Scoped to `connection === undefined` for
+    // exactly the reason `readLedExplicitly` already is: a wiring pack's
+    // `edit_frontier` is a separate, call-graph-proved mechanism.
+    const vetoReason = connection === undefined ? veto.reasonFor(surface.path, surface.why) : undefined;
+    const editRequired = vetoReason === undefined && (
+      connection !== undefined
+        ? wiringDestination
+        : concernHandles.has(surface.handle)
+          || surface.required === true
+          || requiredRoles.has(surface.role)
+          // Issue #4 (2026-08-21): a "doc" surface (CHANGELOG/README/contract
+          // prose) must not inherit required-edit status purely from landing
+          // at array position 0 — that is exactly what happens when an
+          // EARLIER, stronger candidate is removed (e.g. by
+          // suppressFragmentOnlyFilenameMatches above) and a documentation
+          // surface that merely discusses the same topic is promoted into the
+          // "primary" slot by accident. A doc surface still becomes required
+          // through any of the OTHER, EXPLICIT signals above/below
+          // (concernHandles, surface.required, requiredRoles, or the query
+          // literally naming it) — this only removes the position-only
+          // fallback for that one role.
+          || (surface.handle === primaryHandle && !wiringSource && surface.role !== "doc")
+          || explicitlyNamed
+    );
     const action: "edit" | "review" = wiringSource ? "review" : editRequired ? "edit" : "review";
     const required = editRequired || wiringSource || (connection !== undefined && surface.required === true);
     // Wiring graph roles are semantic and survive project/file/symbol
@@ -19026,7 +23888,10 @@ function buildTaskChangeContract(
       path: surface.path,
       range: surface.range,
       role: asImpactSurface(surface.role),
-      reason: taskChangeContractReason(surface, kind, action).slice(0, 180),
+      reason: (vetoReason !== undefined
+        ? WRITE_AUTHORITY_VETO_REASON[vetoReason]
+        : taskChangeContractReason(surface, kind, action)
+      ).slice(0, 180),
       confidence: Math.round(((confidence && confidence > 0) ? confidence : required ? 0.85 : 0.65) * 100) / 100,
       depends_on: [],
     };
@@ -19301,6 +24166,91 @@ export function namedAuthorityFacetProofs(
   return proofs;
 }
 
+/**
+ * SHOULD-FIX 29 (2026-09-14, review round 4) — A MENTION IS NOT A DECLARATION.
+ *
+ * This is the ROOT of a weakness rounds 1, 2 and 3 each closed one carrier at a
+ * time (markdown, then HTML/SQL/ini/unknown, then the absence-staleness chain):
+ * the test was a bare word-boundary scan of `servedSurfaceText`, so
+ * `identifier:<term>` was PROVED by
+ *
+ *     // TODO: quantumTeleportationMode is intentionally not implemented here.
+ *     const note = "plasmaConduitMode";
+ *
+ * — a comment and a string literal — and the response certified `act.answer`
+ * with no gap, having disclosed an honest "absent, scope complete" for the same
+ * two identifiers one call earlier. Every previous fix was at a PROMOTION
+ * boundary, so a caller who read a doc or markup file DIRECTLY still discharged
+ * the obligation from prose.
+ *
+ * Closed here instead, at the obligation boundary, with the same rule the
+ * promotion gate uses (`termOccursOutsideComments` over the served text, with
+ * the surface's own language):
+ *  - a prose/markdown/markup/stylesheet surface never discharges
+ *    (`pathClassCanCarryCode`, extension-driven — BLOCKER 30, 2026-09-14
+ *    review round 5: no longer also refuses on `classifySurface`'s `ui`/
+ *    `style` DIRECTORY heuristics, which refused an ordinary
+ *    `src/components/settings.ts` declaration for living under
+ *    `components/`, not for what its bytes were);
+ *  - an unknown language never discharges (that is also what keeps
+ *    SHOULD-FIX 28's newly-SERVED `"located"` surfaces from certifying);
+ *  - a KNOWN language discharges only on an occurrence outside comments.
+ *
+ * THE `symbol` ARM IS KEPT AND IS THE AST ESCAPE HATCH. A surface's `symbol` is
+ * the skeleton/tree-sitter engine's own anchor, i.e. a real declaration
+ * identified by a parser rather than by this lexical pass — strictly stronger
+ * evidence than the text test, and the one way a file whose comment syntax is
+ * unclassified can still legitimately prove an identifier.
+ *
+ * FAIL-CLOSED DIRECTION. A surface this rejects leaves the obligation UNCOVERED,
+ * which keeps discovery open and makes `uncoveredIdentifierFindCall` re-propose
+ * the search — a bounded extra call, never a false certificate.
+ */
+/**
+ * SHOULD-FIX 29 / SHOULD-FIX 28 (2026-09-14, review round 4): does this
+ * request-item proof cite a CODE-BEARING occurrence of `identifier`?
+ *
+ * `buildRequestItemReadiness` may reconcile a proved `decision` item onto the
+ * matching `identifier:<term>` obligation (see the "reconciled from
+ * request-item" site). That reconciliation exists to fix a real staleness — the
+ * item proved the identifier from CARRIED-FORWARD evidence this turn's surfaces
+ * no longer contain — but it wrote a verdict from a DIFFERENT proof engine onto
+ * the one obligation `exactIdentifierEvidence` is the authority for, so it was
+ * also the second door into the class findings 28/29 close: an extensionless
+ * `bin/tool` whose comment syntax this server cannot classify still certified
+ * `identifier:plasmaConduitMode`, and any comment/prose mention could arrive the
+ * same way.
+ *
+ * So the reconciliation now has to meet the SAME bar: the cited file's class can
+ * carry code, and the term occurs outside its comments — or the cited evidence
+ * carries a `symbol` that NAMES the identifier, which is the parser's own
+ * declaration anchor and strictly stronger than this lexical test.
+ *
+ * Reads the cited file whole rather than its cited range: the range belongs to an
+ * EARLIER turn's surface, so slicing it against today's bytes would be wrong,
+ * and erring wider errs toward KEEPING the pre-existing reconciliation (whose own
+ * staleness fix must not be undone) — the language/class axes are what actually
+ * close the leak. Fails closed on an unreadable/undecodable/oversize file.
+ */
+function proofCitesCodeBearingOccurrence(
+  workspace: string | undefined,
+  evidence: readonly TaskReadinessEvidence[] | undefined,
+  identifier: string,
+): boolean {
+  if (workspace === undefined) return false;
+  const seen = new Set<string>();
+  for (const item of evidence ?? []) {
+    if (item.symbol !== undefined && identifierNamesSymbol(item.symbol, identifier)) return true;
+    const rel = item.path;
+    if (typeof rel !== "string" || rel === "" || seen.has(rel)) continue;
+    seen.add(rel);
+    if (!pathClassCanCarryCode(rel)) continue;
+    const text = boundedWorkspaceText(workspace, rel);
+    if (text !== undefined && termOccursOutsideComments(text, rel, identifier)) return true;
+  }
+  return false;
+}
+
 function exactIdentifierEvidence(
   surfaces: readonly TaskPackSurface[],
   identifier: string,
@@ -19309,7 +24259,19 @@ function exactIdentifierEvidence(
     .filter((surface) =>
       // E3: a qualified `symbol` (`EKF::isHealthy`) is named by the bare token.
       (surface.symbol !== undefined && identifierNamesSymbol(surface.symbol, identifier))
-      || new RegExp(`\\b${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(servedSurfaceText(surface))
+      // SHOULD-FIX 29 (2026-09-14): THE FILE ITSELF IS NAMED BY THE IDENTIFIER.
+      // The same arm `surfaceDeclaresNamedAuthority` has always trusted, and it
+      // is not a "mention": the identifier is the served file's own basename, so
+      // serving that file IS serving the thing the query named. Required because
+      // `explicitCodeIdentifiers` harvests a DOCUMENT name out of a query too —
+      // `replayCorpus`'s `mc2` asks about `aeroctl/CONTRACT.md` and its
+      // `identifier:CONTRACT` is discharged by serving that very file, which the
+      // code-bearing arm below (correctly) refuses to do for a markdown body.
+      || normIdent(path.basename(surface.path, path.extname(surface.path))) === normIdent(identifier)
+      || (
+        pathClassCanCarryCode(surface.path)
+        && termOccursOutsideComments(servedSurfaceText(surface), surface.path, identifier)
+      )
     )
     .map(readinessEvidence);
 }
@@ -19584,9 +24546,23 @@ function probeFileText(workspace: string, filePath: string): string | undefined 
     if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return undefined;
     const stat = fs.statSync(real);
     if (!stat.isFile() || stat.size > READINESS_PROBE_MAX_BYTES) return undefined;
-    // P3 (2026-08-27): decodeTextBuffer, not a raw utf8 read — undecodable
-    // content probes as unavailable, same as any other probe failure here.
-    return decodeTextBuffer(fs.readFileSync(real)) ?? undefined;
+    // P3 (2026-08-27): not a raw utf8 read — undecodable content probes as
+    // unavailable, same as any other probe failure here.
+    //
+    // AA1 (2026-09-14, review round 10): this is the FIFTH door, and finding 49
+    // is its bill. `probeFileText` feeds the readiness-falsification-
+    // counterexample admission (`why:"readiness-falsification-counterexample"`)
+    // and `statedRelationToNamedPath`; the counterexample's windows are
+    // embedded as `code` in a CERTIFIED pack, for a file the request never even
+    // named. It used to read via `decodeTextBuffer`, whose NUL probe stops at
+    // `UNDECODABLE_PROBE_BYTES`, so a workspace file whose NULs begin at byte
+    // 4260 probed as perfectly good text and put 300 escaped NULs inside an
+    // `act.answer`. One policy (`servedTextOrUndefined` -> `readServedText`):
+    // `"stripped"` probes on its NUL-free text, `"undecodable"` probes as
+    // unavailable — a candidate this server cannot read is not a competing
+    // implementation it can testify about either.
+    // served-bytes: readServedText
+    return servedTextOrUndefined(real);
   } catch {
     return undefined;
   }
@@ -19716,6 +24692,167 @@ function stripCommentOnlyLines(content: string): string {
     .join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// TL142-05 (2026-09-13, v0.14.2 hands-on report): relation gating for extra
+// evidence admitted alongside a request's own EXPLICITLY named path(s).
+//
+// Root cause this closes: neither the `answer-query-evidence-focus` fallback
+// admission (rankAnswerEvidenceCandidates) nor the readiness-falsification
+// counterexample admission (below) ever asked "is this related to what the
+// caller actually named?" — a match was admitted purely because SOME line in
+// it scored as lexically relevant (the former) or looked like a competing
+// implementation (the latter), full stop. Reused, not reinvented: `imports`/
+// `is imported by` go through `directImportNeighbors`, the SAME bounded
+// import-specifier scan (no new tree-sitter parse) `augmentExplicitAnswer-
+// ImportSurfaces` already uses — "apiGraph or import parse" per the report.
+// `calls`/`is called by`/`config`/`test` are bounded lexical proxies in the
+// same spirit (a shared top-level declared name used in a call position;
+// `isTestConcernPath`/`classifySurface` already exist and are reused
+// verbatim) — deliberately NOT a new path-detection regex.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whole top-level `export function|class|const|let|var|interface|type|enum
+ * <Name>` identifiers, in `content`. A bounded regex scan (no new parse),
+ * the same discipline `directImportNeighbors` already uses for import
+ * specifiers — used below as the "shared declared name" proxy for a
+ * calls/is-called-by/config/test relation.
+ */
+function topLevelDeclaredNames(content: string): string[] {
+  const names = new Set<string>();
+  for (
+    const m of content.matchAll(
+      /^export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm,
+    )
+  ) {
+    if (m[1]) names.add(m[1]);
+  }
+  return [...names];
+}
+
+/** True when `name` appears in `content` immediately followed by `(` (whitespace-tolerant), at an identifier boundary — a bounded "is this name CALLED here" proxy, no new parse. */
+function isCalledIn(content: string, name: string): boolean {
+  let from = 0;
+  while (from < content.length) {
+    const index = content.indexOf(name, from);
+    if (index < 0) return false;
+    const before = content[index - 1];
+    let after = index + name.length;
+    while (content[after] === " " || content[after] === "\t") after++;
+    if (content[after] === "(" && (before === undefined || !/[A-Za-z0-9_$]/.test(before))) return true;
+    from = index + 1;
+  }
+  return false;
+}
+
+/**
+ * TL142-05: the report's own four relation kinds — "import / is imported by
+ * (apiGraph or import parse), calls / is called by, config declaring a
+ * symbol used there, or a test referencing it". Returns a `why`-suffix
+ * phrase naming the ONE named path `candidatePath` relates to (the FIRST
+ * relation found, in that same order), or undefined when none of the four
+ * hold — the caller drops the candidate in that case, never admits it
+ * unconditionally.
+ *
+ * BLOCKER 3 (2026-09-13, review round): `calls`/`is-called-by`/`config`/
+ * `test` are bounded LEXICAL proxies (a shared top-level declared name in a
+ * call-shaped position, per topLevelDeclaredNames/isCalledIn's own doc
+ * comments) — real signal for two genuinely different files, but a
+ * dist/build MIRROR of `candidatePath`'s own source satisfies them
+ * SYSTEMATICALLY, because the mirror simply re-declares the same names, and
+ * a declaration site ("name(...) {") looks identical to a call to this
+ * naive scanner. Live regression: a `dist/cache.ts` compiled copy of
+ * `src/cache.ts` minted a false `is called by dist/cache.ts` purely from
+ * shared declared names. Two guards, both required, applied to every one of
+ * these four lexical checks (never to `imports`/`is imported by` just above,
+ * which are exact import-specifier matches via directImportNeighbors and do
+ * not share this weakness): (a) `named` must not be a file the DEFAULT walk
+ * would exclude as build/generated output (isSourceOnlyExcludedPath) — a
+ * compiled copy is never a meaningful caller or callee of its own source;
+ * (b) only a name declared on ONE side counts as evidence of a real call —
+ * a name BOTH files declare at top level is exactly the duplicate-
+ * declaration signature, not "actually references the named file's exported
+ * symbol".
+ *
+ * Exported (C17, chip wave, 2026-09-14) so guard (b) can be pinned with a
+ * direct unit test — see readCodeTaskPack.spec.ts's "statedRelationToNamedPath
+ * guard (b)" describe — without routing through the fuller answer-pack
+ * pipeline both call sites below sit behind.
+ */
+export function statedRelationToNamedPath(
+  candidatePath: string,
+  candidateContent: string,
+  namedPaths: readonly string[],
+  workspace: string,
+  cache: FileReadCache,
+): string | undefined {
+  const others = namedPaths.filter((p) => p !== candidatePath);
+  if (others.length === 0) return undefined;
+  const candidateImports = new Set(
+    directImportNeighbors(workspace, [{ path: candidatePath, code: candidateContent } as TaskPackSurface], new Set()),
+  );
+  for (const named of others) {
+    if (candidateImports.has(named)) return `imports ${named}`;
+  }
+  const candidateNames = topLevelDeclaredNames(candidateContent);
+  const candidateIsTest = isTestConcernPath(candidatePath);
+  const candidateIsConfig = classifySurface(candidatePath) === "config";
+  for (const named of others) {
+    const namedContent = readCached(workspace, named, cache);
+    if (namedContent === undefined) continue;
+    const namedImports = directImportNeighbors(
+      workspace, [{ path: named, code: namedContent } as TaskPackSurface], new Set(),
+    );
+    if (namedImports.includes(candidatePath)) return `is imported by ${named}`;
+    // BLOCKER 3, guard (a): everything below this line is a lexical proxy —
+    // never credit one to a compiled/generated mirror of the candidate.
+    if (isSourceOnlyExcludedPath(named)) continue;
+    const namedNames = topLevelDeclaredNames(namedContent);
+    // BLOCKER 3, guard (b): exclude names BOTH files declare at top level —
+    // that overlap is the duplicate-declaration signature the naive
+    // "name(" scan cannot otherwise tell apart from a real call.
+    if (namedNames.some((name) => !candidateNames.includes(name) && isCalledIn(candidateContent, name))) {
+      return `calls ${named}`;
+    }
+    if (candidateNames.some((name) => !namedNames.includes(name) && isCalledIn(namedContent, name))) {
+      return `is called by ${named}`;
+    }
+    if (
+      candidateIsConfig
+      && namedNames.some((name) => !candidateNames.includes(name) && hasIdentifierSegment(candidateContent, name))
+    ) {
+      return `config declares a symbol ${named} uses`;
+    }
+    if (
+      candidateIsTest
+      && (
+        hasIdentifierSegment(candidateContent, path.basename(named, path.extname(named)))
+        || namedNames.some((name) => !candidateNames.includes(name) && hasIdentifierSegment(candidateContent, name))
+      )
+    ) {
+      return `test references ${named}`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * TL142-05 pathless-variant relevance: a counterexample WINDOW that is
+ * markup/CSS template content, not implementation code, never counts as
+ * competing-implementation evidence — the report's own diagnosticsPanel.ts
+ * CSS-block false positive ("反証チェックだから常に必要とは考えにくい"). A
+ * bounded tag/rule-shape density heuristic, no new parse: `text` here is
+ * already the SERVED, byte-capped window, not the whole file, so this stays
+ * cheap regardless of file size.
+ */
+function looksLikeMarkupOrCssWindow(text: string): boolean {
+  if (/<\s*(?:html|body|head|div|span|style|script|button|table|tr|td|h[1-6])\b/i.test(text)) return true;
+  const cssShapedLines = text.split(/\r?\n/).filter((line) =>
+    /^\s*[a-zA-Z.#][\w.#-]*\s*\{?\s*$/.test(line) || /^\s*[a-z-]+\s*:\s*[^;{}]+;\s*$/.test(line)
+  ).length;
+  return cssShapedLines >= 3;
+}
+
 /**
  * Negative retrieval pass. It searches outside the already-served ranges for
  * evidence that would falsify a provisional ready decision and inlines at
@@ -19756,6 +24893,13 @@ function runInternalReadinessFalsification(
   const endpointTokens = [connection?.source?.token, connection?.destination?.token]
     .filter((token): token is string => typeof token === "string" && token.length > 0);
   const preferredPaths = existing.map((surface) => surface.path);
+  // TL142-05 (2026-09-13): the request's own explicitly-named path(s), if
+  // any — computed once, reused by the relation gate at admission time
+  // below. Query-text detection only (queryNamedWorkspaceFiles), matching
+  // decision #1's own "explicit query-text path mentions" framing; empty for
+  // a pathless query, which routes admission through the (unchanged) weaker
+  // relevance condition instead — see the push loop below.
+  const namedPaths = queryNamedWorkspaceFiles(query, workspace, trustworthySurfaceAnchorPaths(existing));
   const walked = walkCodeFiles(workspace, {}).map((file) => file.relPath);
   const normalizedScopes = (scopePaths ?? [])
     .map((scope) => path.posix.normalize(scope.replace(/\\/g, "/")).replace(/^\.\//, ""))
@@ -19928,6 +25072,65 @@ function runInternalReadinessFalsification(
       READINESS_PROBE_COUNTEREXAMPLE_MAX_BYTES,
     );
     if (capped === undefined) continue;
+    // TL142-05 (2026-09-13): relation gating. When the request names
+    // explicit path(s), an additional (non-named) counterexample survives
+    // only with a stated relation to one of them (report's own acceptance:
+    // "追加evidenceには質問との関係を説明できる理由を持たせる") — recorded
+    // INTO `why` so the caller can see why it was kept, per the report's own
+    // worked example. Otherwise (the pathless variant), decision #2's own
+    // relevance condition is narrower than the general admission bar just
+    // above: a `strong` match (identifierHit/endpointHit) or a window naming
+    // the PRIMARY evidence's own resolved symbol qualifies; a candidate
+    // admitted ONLY via the weak `queryTokenHits>=2` fallback (two ordinary
+    // words shared with the query, e.g. "cached"+"server", nothing to do
+    // with the query's actual subject) does not — that fallback's own reason
+    // for existing (an admittedly weak, "borderline case" signal, see its own
+    // comment above) is exactly what turned an unrelated UI-refresh routine
+    // into a false-positive competing implementation live. A markup/CSS
+    // template window (diagnosticsPanel.ts's own embedded <style> block)
+    // never qualifies either way. Fails CLOSED in every branch: skip this
+    // candidate outright, never fall back to admitting it unconditionally.
+    //
+    // RIC (2026-09-13, requestItemCompletion regression): a query naming a
+    // path for ONE facet (e.g. "the setting definition in package.json")
+    // must not veto a counterexample that tests a DIFFERENT facet of the
+    // same composite query — most concretely, the query's own PRIMARY
+    // identifier/symbol (e.g. a same-named decoy `getDisplayLanguage`
+    // unrelated to package.json). A relation to a named path is still
+    // preferred and recorded first; only when it is absent does this fall
+    // back to the identical strength bar the pathless branch already
+    // enforces below (never looser: still `strong`/primary-symbol-grounded,
+    // still never a markup/CSS window). Without this fallback, the
+    // consumer-does-not-reference/decision-at-function-tail language-setting
+    // fixtures silently dropped the sidebar.ts decoy counterexample once the
+    // query also happened to name package.json — which (via a downstream
+    // route/obligation interaction) let an unproven producer/consumer
+    // relation reach `act.answer` with no honest disclosure, and separately
+    // dead-ended a resolvable composite query on a bare next-less
+    // `search.references`. Bisected empirically: reverting only this
+    // relation-gate block (leaving TL142-05's named-path slot, size cap, and
+    // BLOCKER-3/SHOULD-FIX-8/11 changes untouched) restored both the honest
+    // gap and the composite-query closure; see ric-notes.md.
+    let counterexampleWhy: string = "readiness-falsification-counterexample";
+    const primarySymbol = existing.find((s) => s.required === true)?.symbol ?? existing[0]?.symbol;
+    const referencesPrimarySymbol = primarySymbol !== undefined
+      && hasIdentifierSegment(candidate.content, primarySymbol);
+    const identifierGrounded = candidate.strong || referencesPrimarySymbol;
+    if (namedPaths.length > 0) {
+      const fullContent = probeFileText(workspace, candidate.path);
+      const relation = fullContent === undefined
+        ? undefined
+        : statedRelationToNamedPath(candidate.path, fullContent, namedPaths, workspace, counterexampleCache);
+      if (relation !== undefined) {
+        counterexampleWhy = `${relation} (readiness-falsification-counterexample)`;
+      } else {
+        if (!identifierGrounded) continue;
+        if (looksLikeMarkupOrCssWindow(capped.code)) continue;
+      }
+    } else {
+      if (!identifierGrounded) continue;
+      if (looksLikeMarkupOrCssWindow(capped.code)) continue;
+    }
     const handle = handleTable.upsert({
       kind: "range",
       path: candidate.path,
@@ -19948,7 +25151,7 @@ function runInternalReadinessFalsification(
       // provisionally ready pack into a blocked one. See the `strong` field
       // built above.
       required: candidate.strong,
-      why: "readiness-falsification-counterexample",
+      why: counterexampleWhy,
       code: capped.code,
       ...(capped.remaining_ranges.length > 0
         ? { content_completeness: "partial" as const, remaining_ranges: capped.remaining_ranges }
@@ -21845,6 +27048,37 @@ function surfaceEvidencesSalientWord(surface: TaskPackSurface, word: string): bo
 }
 
 /**
+ * TL_IDENTIFIER_GROUNDING (2026-09-20): true when `word` occurs in the SOURCE
+ * lines `surface` serves -- its `range` minus every window it admits it did
+ * not serve -- including the doc comments the embedded body elides. Same
+ * plural-tolerant substring test `surfaceEvidencesSalientWord` opens with;
+ * the lexical-variant widening stays exclusive to the visible text. Anything
+ * unreadable or unparseable is "no": this only ever WIDENS what counts as
+ * already served, and the safe failure is today's behaviour.
+ */
+function servedRangeSourceHasSalientWord(surface: TaskPackSurface, word: string, workspace: string): boolean {
+  const stem = stemForAbsenceCheck(word);
+  if (stem.length === 0) return false;
+  const span = parsePackLineRange(surface.range);
+  if (span === undefined) return false;
+  const holes: Array<[number, number]> = [];
+  for (const window of surface.remaining_ranges ?? []) {
+    const hole = parsePackLineRange(window);
+    if (hole === undefined) return false;
+    holes.push(hole);
+  }
+  const source = readCached(workspace, surface.path);
+  if (source === undefined) return false;
+  const lines = source.split(/\r?\n/);
+  const last = Math.min(span[1], lines.length);
+  for (let line = span[0]; line <= last; line++) {
+    if (holes.some(([start, end]) => line >= start && line <= end)) continue;
+    if ((lines[line - 1] ?? "").toLowerCase().includes(stem)) return true;
+  }
+  return false;
+}
+
+/**
  * Proof for an unbindable item (a `topic` point, or any other kind whose own
  * structural resolution found no candidate at all): design §4.2's absence
  * path. Reuses the shared walk (`enumerateFindTextUniverse`/`scanLiteral`)
@@ -21865,22 +27099,103 @@ function proveUnbindableRequestItem(
   workspace: string,
   universe: FindTextUniverse,
   contentCache?: ScanContentCache,
+  // H-2 (2026-09-19): OPT-IN tightening for the new independent-question
+  // obligation path only — every existing caller omits this and keeps
+  // today's behavior byte-identical (the `requireDistinctConcentration ===
+  // true` branch below is unreachable from any pre-existing call site).
+  options?: { requireDistinctConcentration?: boolean },
 ): RequestItemProof {
   const words = salientWords(item.text);
   if (words.length === 0) {
     return { proved: true, evidence: [], reason: "residual point has no salient searchable wording", candidatePaths: [] };
   }
-  const alreadyServed = priorEvidence.filter(
-    (surface) => hasServedCode(surface) && words.some((word) => surfaceEvidencesSalientWord(surface, word)),
-  );
+  const requireDistinctConcentration = options?.requireDistinctConcentration === true;
+  // H-2 tightening: when requested, "already served" requires a REAL
+  // concentration of this item's own wording in ONE surface — min(2, n)
+  // DISTINCT salient words, variant-aware (`textHasWordVariant`) — rather
+  // than any single stem-matched word (today's default path, unchanged
+  // below). Fixes the "served but still certified absent" half of D1: one
+  // incidental word match no longer silently closes a genuine question.
+  const concentrationFloor = Math.min(2, words.length);
+  const alreadyServed = requireDistinctConcentration
+    ? priorEvidence.filter((surface) => {
+        if (!hasServedCode(surface)) return false;
+        const haystack = `${surface.path}\n${servedSurfaceText(surface)}`;
+        const distinct = new Set(words.filter((word) => textHasWordVariant(haystack, word)));
+        return distinct.size >= concentrationFloor;
+      })
+    : priorEvidence.filter(
+        (surface) => hasServedCode(surface) && words.some((word) =>
+          surfaceEvidencesSalientWord(surface, word)
+          // TL_IDENTIFIER_GROUNDING: the body on the wire has its doc comments
+          // elided, so a point whose wording lives in the Javadoc of the very
+          // member this pack serves read as "not served", fell through to the
+          // literal scan, matched too many files to batch, and held the pack
+          // in `discover` behind a `next` that could never resolve it
+          // (replayed 2026-09-20: "…API endpoint" vs `cancel`'s own comment,
+          // lines the served range 27-420 covers). The served RANGE is what
+          // was delivered; its comments are one zoom away and marked with
+          // their true line numbers.
+          || (identifierGroundingEnabled() && servedRangeSourceHasSalientWord(surface, word, workspace))
+        ),
+      );
   if (alreadyServed.length > 0) {
     return { proved: true, evidence: alreadyServed.map(readinessEvidence), reason: "a served surface already contains this point's salient wording", candidatePaths: [] };
   }
   const matchedPaths = new Set<string>();
+  // WP-S5 (B): a hit inside TokenLighten's OWN managed guide block is not a
+  // candidate — see `managedGuideBlockSpan`'s section comment. Counted, never
+  // silently dropped: the absence branch below must not read "no occurrence in
+  // scanned workspace files" when the word demonstrably occurs, so a
+  // guide-only match falls through to its own non-absence outcome.
+  const guideExcluded = identifierGroundingEnabled();
+  let guideOnlyMatch = false;
+  const addMatch = (matchPath: string, line: number | undefined): void => {
+    if (guideExcluded && matchIsManagedGuideText(workspace, matchPath, line)) {
+      guideOnlyMatch = true;
+      return;
+    }
+    matchedPaths.add(matchPath);
+  };
   for (const word of words.slice(0, 4)) {
     for (const match of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
-      matchedPaths.add(match.path);
+      addMatch(match.path, match.line);
     }
+  }
+  if (matchedPaths.size === 0) {
+    // H-1(ii) veto (2026-09-19, D1): an exact-literal miss across every
+    // sampled word is not yet a verified absence when a common English
+    // inflection of one of them occurs as a WHOLE WORD (never a raw
+    // substring — salientWordMatch.ts's own const/constant guard) somewhere
+    // in scope (validated/validateCouponCode, retried/
+    // retryFailedNotifications). Widen matchedPaths with confirmed variant
+    // hits before concluding absence; the normal matched/missing logic just
+    // below this block then proves or requests them exactly as it would an
+    // exact match — never a forked absence algorithm.
+    for (const word of words.slice(0, 4)) {
+      for (const variant of inflectionVariants(word)) {
+        if (variant === word.toLowerCase()) continue;
+        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
+          if (match.text !== undefined && textHasWordVariant(match.text, word)) {
+            addMatch(match.path, match.line);
+          }
+        }
+      }
+    }
+  }
+  if (matchedPaths.size === 0 && guideOnlyMatch) {
+    // WP-S5 (B): every occurrence was TokenLighten's own injected instructions.
+    // NOT an absence (the word does occur, so no `absentTerm` and no
+    // verified-absent wording ships) and NOT a discoverable gap either: the
+    // host already handed that exact text to the model, so no bounded call can
+    // turn it into repository evidence. Closing the point here is what stops
+    // the pack prescribing a re-pack of its own guide files.
+    return {
+      proved: true,
+      evidence: [],
+      reason: `the only workspace occurrences of ${words.join("/")} are inside TokenLighten's own managed guide block, which is not repository evidence`,
+      candidatePaths: [],
+    };
   }
   if (matchedPaths.size === 0) {
     const scopeComplete = !anyWalkOmission(universe.omissions);
@@ -22385,6 +27700,33 @@ function distinctiveSalientAbsence(
 
   for (const word of [...tierA, ...tierB, ...tierC]) {
     if (priorEvidence.some((surface) => hasServedCode(surface) && surfaceEvidencesSalientWord(surface, word))) continue;
+    // H-1(i) veto (2026-09-19, D1): scoped to Tier C (lowercase-EN) only —
+    // tierA/tierB are non-empty only when tierC is forced empty (see the
+    // tier computation above), so this membership check exactly identifies
+    // a Tier C iteration. A common English inflection of the candidate
+    // occurring as a WHOLE WORD (never a raw substring — the const/constant
+    // regression salientWordMatch.ts's own guard exists for) anywhere in
+    // absenceUniverse or in this pack's own served evidence means the word
+    // is not absent; move on to the next candidate exactly as this
+    // function does today when a word is not absent.
+    if (tierC.includes(word)) {
+      const servedVariant = priorEvidence.some(
+        (surface) => hasServedCode(surface) && textHasWordVariant(`${surface.path}\n${servedSurfaceText(surface)}`, word),
+      );
+      if (servedVariant) continue;
+      let variantFound = false;
+      for (const variant of inflectionVariants(word)) {
+        if (variantFound) break;
+        if (variant === word.toLowerCase()) continue;
+        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
+          if (match.text !== undefined && textHasWordVariant(match.text, word)) {
+            variantFound = true;
+            break;
+          }
+        }
+      }
+      if (variantFound) continue;
+    }
     let hasMatch = false;
     for (const _ of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
       hasMatch = true;
@@ -22627,7 +27969,12 @@ function buildRequestItemReadiness(
   // constructed), so this exactly predicts the post-walk gate below and lets
   // every single-target query (the overwhelming majority) skip
   // `enumerateFindTextUniverse` entirely.
-  if (extractRequestItems(query).length < 2) return none;
+  // TL142-04 Decision 6 (2026-09-13): a single-item query naming an
+  // explicitly QUOTED literal still deserves this machinery's absence-
+  // disclosure/search-target treatment (report's own acceptance: a quoted
+  // identical string must stay a target even though the item count alone
+  // would otherwise route it away as "just one point").
+  if (extractRequestItems(query).length < 2 && !queryHasQuotedLiteral(query)) return none;
 
   const pass = cachedRequestItemPass(workspace, result);
   if (pass === undefined) return none;
@@ -22642,8 +27989,11 @@ function buildRequestItemReadiness(
   const items = extractRequestItems(query, index);
   // Contract §3.4: a single-item query already proved by `surface-content`
   // must stay byte-identical — only a genuinely composite request (2+
-  // explicit points) engages this mechanism at all.
-  if (items.length < 2) return none;
+  // explicit points) engages this mechanism at all. TL142-04 Decision 6
+  // exemption (2026-09-13): mirrors the index-free pre-gate above — an
+  // explicitly quoted literal still earns this mechanism's treatment even
+  // as this query's only point.
+  if (items.length < 2 && !queryHasQuotedLiteral(query)) return none;
   // A structured signal (a named setting/config DEFINITION, a named
   // identifier's DECISION, or a producer->consumer RELATION) is required
   // before this mechanism engages at all — every item being an unstructured
@@ -22673,9 +28023,28 @@ function buildRequestItemReadiness(
     // is left alone exactly as before this fix: no readiness obligation, no
     // re-scan demanded for it.
     const epochTokens = tokenizeForEpoch(query);
-    const priorEvidence = epochServedEvidence(workspace, result, epochTokens);
+    const priorEvidence = epochServedEvidence(workspace, result, epochTokens, profile);
     const absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }> = [];
+
+    // H-2 (2026-09-19): an all-topic composite request made of >=2
+    // INDEPENDENT QUESTION clauses (each its own interrogative head, or JA
+    // 疑問詞+か/？ — see requestItems.ts's `isIndependentQuestionClause` for
+    // the exact boundary and its negative-case table: an imperative
+    // fragment, a parenthetical list inside ONE question, a bracket tag, a
+    // header line never qualify) is a genuine multi-point request (D2),
+    // never the d12a/"observed directory task_pack"-style prose the gate
+    // above protects. Scoped to `profile:"answer"` only (H-2 spec) — a
+    // `generic` (edit) task keeps the unconditional absence-only treatment
+    // below for every all-topic query, exactly as before this fix.
+    const independentQuestions = profile === "answer"
+      ? items.filter((item) => isIndependentQuestionClause(item.text))
+      : [];
+    const questionIds = independentQuestions.length >= 2
+      ? new Set(independentQuestions.map((item) => item.id))
+      : undefined;
+
     for (const item of items) {
+      if (questionIds?.has(item.id)) continue;
       // A distinctive, non-diluted term takes priority: `cache`/
       // `implementation` co-occurring in the same clause as a genuinely
       // absent `Redis`/`redis`/`実装` otherwise satisfies the whole-item
@@ -22708,11 +28077,85 @@ function buildRequestItemReadiness(
         });
       }
     }
-    return { obligations: [], absences };
+
+    if (questionIds === undefined) {
+      return { obligations: [], absences };
+    }
+
+    // >=2 independent questions: mint the SAME blocking obligations and
+    // bounded `request_item_gap` next the mixed-kind path below already
+    // mints, through the EXISTING `proveUnbindableRequestItem` proof engine
+    // — reuse, never fork. `proveRequestItem` (the dispatcher) is not
+    // called here: every item in this branch is `kind:"topic"` by this
+    // gate's own invariant (`!items.some((item) => item.kind !== "topic")`
+    // above), so it would always fall through to this same call anyway —
+    // this inlines that fallthrough plus its own `ownedFacets`
+    // short-circuit (copied verbatim) instead of widening
+    // `proveRequestItem`'s own signature, which is out of this fix's scope.
+    const ownedFacets = new Set(enumeratedQueryItemsForEpoch(query, workspace).map((facetItem) => facetItem.facet));
+    const obligations: TaskReadinessObligation[] = [];
+    const missingTargets = new Set<string>();
+    const missingRangeTargets: Array<{ path: string; range: string }> = [];
+    const gapIds: string[] = [];
+    for (const item of independentQuestions) {
+      let proof: RequestItemProof;
+      if (ownedFacets.size > 0 && salientWords(item.text).some((word) => ownedFacets.has(word.toLowerCase()))) {
+        proof = {
+          proved: true,
+          evidence: [],
+          reason: "this point's salient wording is already tracked by the query's own enumerated-item obligation (F-V13-6/F-V14); not duplicated as a separate request-item obligation",
+          candidatePaths: [],
+        };
+      } else {
+        proof = proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache, { requireDistinctConcentration: true });
+      }
+      obligations.push({
+        id: `${REQUEST_ITEM_OBLIGATION_PREFIX}${item.id}`,
+        kind: "concern",
+        status: proof.proved ? "proved" : "uncovered",
+        required: true,
+        evidence: proof.evidence,
+        reason: proof.reason,
+        origin: "query",
+      });
+      if (!proof.proved) {
+        gapIds.push(item.id);
+        for (const p of proof.candidatePaths) missingTargets.add(p);
+        for (const rt of proof.rangeCandidates ?? []) missingRangeTargets.push(rt);
+      } else if (proof.absentTerm !== undefined) {
+        absences.push({
+          id: item.id,
+          term: proof.absentTerm,
+          scope_complete: proof.absentScopeComplete ?? false,
+          omitted_count: proof.absentOmittedCount ?? 0,
+        });
+      }
+    }
+    if (missingTargets.size === 0 && missingRangeTargets.length === 0) {
+      return { obligations, absences };
+    }
+    const rangeTargetPaths = new Set(missingRangeTargets.map((t) => t.path));
+    const pathTargets = [...missingTargets].filter((p) => !rangeTargetPaths.has(p)).map((p) => ({ path: p }));
+    const rangeTargets = missingRangeTargets.map((t) => ({ path: t.path, range: t.range }));
+    return {
+      obligations,
+      absences,
+      gap: {
+        next_call: {
+          tool: "read_file",
+          arguments: {
+            query,
+            targets: [...pathTargets, ...rangeTargets].slice(0, MAX_REQUEST_ITEM_BATCH),
+            content: "auto",
+          },
+        },
+        ids: gapIds,
+      },
+    };
   }
 
   const epochTokens = tokenizeForEpoch(query);
-  const priorEvidence = epochServedEvidence(workspace, result, epochTokens);
+  const priorEvidence = epochServedEvidence(workspace, result, epochTokens, profile);
 
   // OWNERSHIP RULE: the query's own enumerated-item facets (F-V13-6/F-V14),
   // computed the identical way `buildReadinessObligations` mints them —
@@ -22739,6 +28182,12 @@ function buildRequestItemReadiness(
   const absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }> = [];
 
   for (const item of items) {
+    // WP-S5 (A): a clause that only constrains the answer's FORM or the
+    // agent's BEHAVIOUR is not an evidence point — it asks nothing about the
+    // repository, so it can neither be proved nor discovered. Skipped whole
+    // (no obligation, no candidate paths), never minted as "proved", so it
+    // also never joins the certificate as a claim this pack did not make.
+    if (identifierGroundingEnabled() && isFormatOrBehaviourClause(item.text)) continue;
     const proof = proveRequestItem(item, items, priorEvidence, workspace, universe, absenceUniverse, contentCache, ownedFacets);
     obligations.push({
       id: `${REQUEST_ITEM_OBLIGATION_PREFIX}${item.id}`,
@@ -22790,7 +28239,17 @@ function buildRequestItemReadiness(
       const stale = otherObligations.find(
         (obligation) => obligation.status !== "proved" && obligation.id === `identifier:${identifier}`,
       );
-      if (stale !== undefined) {
+      // SHOULD-FIX 29 / SHOULD-FIX 28 (2026-09-14, review round 4): two
+      // obligations about the identical fact must not disagree — and the one this
+      // writes into has a STANDARD (`exactIdentifierEvidence`: a code-bearing
+      // occurrence, or a parser-anchored `symbol`). Reconciling across the two
+      // engines is only honest when the incoming proof meets that standard too;
+      // otherwise this was a second door around it, and an extensionless
+      // `bin/tool` certified `identifier:plasmaConduitMode` through it while the
+      // direct route correctly refused. The staleness fix this guard sits on is
+      // untouched for the case it was written for (a real declaration in a
+      // classified language, served an earlier turn).
+      if (stale !== undefined && proofCitesCodeBearingOccurrence(workspace, proof.evidence, identifier)) {
         stale.status = "proved";
         stale.evidence = proof.evidence;
         stale.reason = `reconciled from request-item:${item.id}, which independently proved identifier ${identifier} from carried-forward evidence`;
@@ -22934,15 +28393,52 @@ function buildReadinessObligations(
           : "analysis has only unscoped token matches; locate the requested evidence before answering",
       });
     }
+    // WP-S11 (2026-09-20) — RE-PACK MONOTONICITY FOR A DECLARED ANSWER TASK.
+    //
+    // `served` is this pack's OWN surfaces, so a second pack of the same task
+    // re-tests every identifier against bytes it may deliberately not be
+    // re-sending. For an inferred answer task that is harmless: it is in the
+    // cumulative served-surface log and the coverage flip / `served_earlier` /
+    // `stampEpochServedPaths` channels carry pack 1 forward. A task whose
+    // caller DECLARED `task.profile:"answer"` is excluded from that log by
+    // design (`cumulativeEligible` — edit closure must not re-open for a
+    // read-only declared task), so it had NO such channel: every re-pack
+    // re-minted `identifier:X` obligations pack 1 had discharged and proposed
+    // a `find` for a body the caller already held — a relay loop, measured.
+    //
+    // The read-only serve view is that missing channel, and this is its ONE
+    // readiness-obligation reader outside `epochServedEvidence`. Scoped to
+    // `explicit-identifier` obligations, which is the single obligation kind
+    // `actionFrontierForCertificate` structurally excludes from
+    // `provedImplementation` — so carried-forward evidence can never become
+    // write authority, whatever a later `editObserved` does. Empty for every
+    // task that is NOT a declared answer task, so nothing else moves.
+    const identifierServed = workspace === undefined
+      ? served
+      : [...served, ...readOnlyViewCarriedEvidence(workspace, result, tokenizeForEpoch(query))];
     for (const identifier of explicitCodeIdentifiers(query).slice(0, 6)) {
-      const exactEvidence = exactIdentifierEvidence(served, identifier);
+      const exactEvidence = exactIdentifierEvidence(identifierServed, identifier);
       const semanticEvidence = result.answer_resolution
         && normIdent(result.answer_resolution.requested_identifier) === normIdent(identifier)
-        ? served
+        ? identifierServed
             .filter((surface) => surface.handle === result.answer_resolution!.resolved_handle)
             .map(readinessEvidence)
         : [];
       const evidence = exactEvidence.length > 0 ? exactEvidence : semanticEvidence;
+      // WP-S5 (TL_IDENTIFIER_GROUNDING, default OFF): an UNPROVED obligation
+      // for a bare camelCase/PascalCase word the workspace defines nowhere is
+      // dropped rather than minted — its only recovery would be a `find` this
+      // server can already predict closes nothing (see the "identifier
+      // grounding" doc block near `workspaceDefinesIdentifier`). Read after
+      // `evidence`/verified-absence precisely so it can never remove a PROVED
+      // claim from the certificate: what is proved stays on the record, and
+      // only the blocking, self-defeating case is withheld.
+      if (
+        evidence.length === 0
+        && !verifiedAbsentIdentifiersFor(result).includes(identifier)
+        && identifierGroundingEnabled()
+        && identifierIsUngrounded(result, workspace, query, identifier)
+      ) continue;
       obligations.push({
         id: `identifier:${identifier}`,
         kind: "explicit-identifier",
@@ -23015,6 +28511,9 @@ function buildReadinessObligations(
       // exactly those entries without touching the loop that mints them.
       const enumeratedObligationsStart = obligations.length;
       for (const item of enumeratedItems) {
+        // WP-S5 (A): a plain natural-language list item is a ranking hint, not
+        // a blocking obligation — nothing this server can call would close it.
+        if (identifierGroundingEnabled() && !enumeratedItemCarriesCodeShape(query, item)) continue;
         const facet = item.facet;
         const evidenceSurfaces = literalSurfaceDuty
           ? literalSurfaceDutyEvidence(served, facet)
@@ -23427,6 +28926,140 @@ function buildReadinessObligations(
  */
 const pendingOwnServedSurfaces = new WeakMap<TaskPackResult, TaskPackSurface[]>();
 
+/**
+ * WP-S11 (2026-09-20) — THE SAME-TASK READ-ONLY SERVE VIEW.
+ *
+ * `finalizePackServeState`'s `cumulativeEligible` deliberately keeps a pack
+ * whose caller DECLARED `task.profile:"answer"` out of the cumulative
+ * served-surface log, so a read-only task never acquires the edit-closure
+ * semantics that log carries (`priorEpochActionFrontier`, the cumulative
+ * coverage flip, the certificate's action frontier). That exclusion is the
+ * reviewed constraint stated at the `cumulativeEligible` line, and it stays.
+ *
+ * Its measured side effect did not belong to it. Because a declared-answer
+ * pack recorded NOTHING, a second pack OF THE SAME TASK — a `qref` replay or
+ * the same task handle — consulted an empty log and re-minted identifier and
+ * request-item obligations that the FIRST pack of that same task had already
+ * discharged, with bodies the caller still holds and nothing changed on disk.
+ * The certificate contradicted this server's own earlier evidence, and every
+ * further re-pack kept the task open (measured: a three-call relay loop whose
+ * third call proposed `find ["OrderService"]` for a body call one had served).
+ *
+ * This view closes that gap and nothing else. It is a SEPARATE store, never
+ * the pack serve log, and exactly ONE reader opts into it —
+ * `epochServedEvidence`, the readiness-obligation evidence reader. The edit
+ * fence, `priorEpochActionFrontier`, `applyCumulativeCoverage`,
+ * `attachFrontierIndex` and every other `queryServedSurfaces` consumer read
+ * the real log and therefore see nothing new.
+ *
+ * TASK BINDING is the pack serve log's own contract: entries live under the
+ * recording query's epoch tokens, a non-overlapping task resets the view
+ * before recording, and a read whose tokens do not overlap returns nothing —
+ * so a different task, epoch or lane can never discharge this task's
+ * obligation. Unlike the log this view fails CLOSED on an empty token list on
+ * both sides: an unbound entry is precisely what must not count.
+ *
+ * RESIDENCY is the reader's own, stricter rule. These entries carry no bytes:
+ * `epochServedEvidence` reconstructs a path only from the session's
+ * served-range ledger, and only while that ledger's sha still matches the file
+ * on disk right now, so a file edited since it was served yields no evidence.
+ * Any future opt-in reader owes the same content check.
+ */
+interface ReadOnlyServedView {
+  epochTokens: string[];
+  entries: Map<string, ServedSurfaceEntry>;
+  seq: number;
+}
+
+/** Bounded exactly like the pack serve log's FIFO, for the same reason. */
+const MAX_READ_ONLY_VIEW_PATHS = 512;
+
+const readOnlyServedViews = new Map<string, ReadOnlyServedView>();
+
+function readOnlyServedViewKey(workspace: string): string {
+  return laneScopedKey(path.resolve(workspace));
+}
+
+function epochTokensOverlap(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  const set = new Set(a);
+  return b.some((token) => set.has(token));
+}
+
+function recordReadOnlyServedSurfaces(
+  workspace: string,
+  surfaces: readonly TaskPackSurface[],
+  epochTokens: readonly string[],
+): void {
+  if (epochTokens.length === 0) return;
+  const key = readOnlyServedViewKey(workspace);
+  let view = readOnlyServedViews.get(key);
+  if (view === undefined) {
+    view = { epochTokens: [], entries: new Map(), seq: 0 };
+    readOnlyServedViews.set(key, view);
+  } else if (view.epochTokens.length > 0 && !epochTokensOverlap(epochTokens, view.epochTokens)) {
+    // A different task in the same lane — the same boundary
+    // `recordServedSurfaces` applies to the real log.
+    view.epochTokens = [];
+    view.entries.clear();
+  }
+  const seen = new Set(view.epochTokens);
+  for (const token of epochTokens) {
+    if (seen.has(token)) continue;
+    seen.add(token);
+    view.epochTokens.push(token);
+  }
+  for (const surface of surfaces) {
+    if (typeof surface.path !== "string" || surface.path.length === 0) continue;
+    // Last occurrence wins AND moves to the end, matching the log's ordering.
+    view.entries.delete(surface.path);
+    view.entries.set(surface.path, {
+      path: surface.path,
+      role: surface.role,
+      ...(surface.handle ? { handle: surface.handle } : {}),
+      // No stat identity of its own: the one reader revalidates by content sha
+      // against the served-range ledger, which is strictly stronger.
+      fingerprint: "",
+      servedAt: ++view.seq,
+    });
+  }
+  while (view.entries.size > MAX_READ_ONLY_VIEW_PATHS) {
+    const oldest = view.entries.keys().next();
+    if (oldest.done === true) break;
+    view.entries.delete(oldest.value);
+  }
+}
+
+function readOnlyServedEntries(
+  workspace: string,
+  epochTokens: readonly string[],
+): ServedSurfaceEntry[] {
+  const view = readOnlyServedViews.get(readOnlyServedViewKey(workspace));
+  if (view === undefined || view.entries.size === 0) return [];
+  if (!epochTokensOverlap(epochTokens, view.epochTokens)) return [];
+  return [...view.entries.values()].sort((a, b) => a.servedAt - b.servedAt);
+}
+
+/**
+ * Test-only inspector for the same-task read-only serve view, in the same
+ * spirit as `resetPackDedupeCache` above: the view is module state with no
+ * wire projection of its own, so its task/lane binding and its residency gate
+ * can only be pinned from here. `paths` is what the view holds for this epoch
+ * AFTER its task/lane gate; `carried` is what a readiness obligation actually
+ * receives — i.e. after the served-range ledger's sha check, which is where a
+ * file edited since it was served drops out.
+ */
+export function readOnlyServedViewForTest(
+  workspace: string,
+  epochTokens: readonly string[],
+): { paths: string[]; carried: Array<{ path: string; range: string }> } {
+  const entries = readOnlyServedEntries(workspace, epochTokens);
+  return {
+    paths: entries.map((entry) => entry.path),
+    carried: reconstructServedEntryEvidence(workspace, entries)
+      .map((surface) => ({ path: surface.path, range: surface.range ?? "" })),
+  };
+}
 
 function epochServedSurfaceEntries(
   workspace: string,
@@ -23459,6 +29092,32 @@ function epochServedSurfaceEntries(
 }
 
 /**
+ * WP-S11 — `epochServedSurfaceEntries` plus, for an ANSWER pack only, the
+ * same-task read-only serve view.
+ *
+ * A wrapper rather than a fourth parameter on purpose: FX-K's refresh/
+ * revalidation contract for this pack's own pending paths lives inside
+ * `epochServedSurfaceEntries` and `sfEpochServedEntries.spec.ts` pins its
+ * source shape, so the merge belongs strictly outside it. A logged entry
+ * always wins over a view entry for the same path — it went through
+ * `queryServedSurfaces`'s revalidation and may carry the range-aware
+ * `fullyServed` verdict this view has no opinion about.
+ */
+function epochServedSurfaceEntriesWithView(
+  workspace: string,
+  epochTokens: readonly string[],
+  result: TaskPackResult | undefined,
+  includeReadOnlyServedView: boolean,
+): ServedSurfaceEntry[] {
+  const base = epochServedSurfaceEntries(workspace, epochTokens, result);
+  if (!includeReadOnlyServedView) return base;
+  const readOnly = readOnlyServedEntries(workspace, epochTokens);
+  if (readOnly.length === 0) return base;
+  const known = new Set(base.map((entry) => entry.path));
+  return [...base, ...readOnly.filter((entry) => !known.has(entry.path))];
+}
+
+/**
  * P0 defect 3: same-epoch evidence the caller ALREADY holds, as certificate
  * frontier entries — served-surface handles plus the still-open edit
  * obligations an earlier pack of this task recorded.
@@ -23481,14 +29140,34 @@ function priorEpochActionFrontier(
   workspace: string,
   query: string,
   result?: TaskPackResult,
+  // GATE-A (2026-09-14): DESIGN-v0.15 §4.2 (IL-W2) — once an `edit_file` has
+  // landed this task epoch the request's own wording is no longer the
+  // authority about what the task may write; see `writeAuthorityVeto`.
+  editObserved = false,
 ): string[] {
   const epochTokens = tokenizeForEpoch(query);
   if (epochTokens.length === 0) return [];
+  // r4-should-fix-26-propagation-route residual (2026-09-14): this ledger's
+  // own contract is "every content-bearing serve is admissible for the rest
+  // of the epoch" (see this function's own doc comment) — deliberately
+  // broad for the ordinary "read it, then decide to edit it" workflow, but
+  // it must not re-open write authority THIS SAME query's own wording just
+  // closed for a path served ONLY as read/explain evidence (the reviewer's
+  // repro: `buildTaskChangeContract` already marks src/cache.ts
+  // `action:"review"`, yet its served handle re-entered here on the very
+  // next internal pass of the same call). Same veto, same shared source of
+  // truth as `buildTaskChangeContract`/`actionFrontierForCertificate`.
+  const readOnlyLeadPaths: ReadonlySet<string> = editObserved
+    ? new Set<string>()
+    : new Set(
+      requestItemLeads(query).filter((entry) => entry.lead === "read").map((entry) => entry.path),
+    );
   const handles = epochServedSurfaceEntries(workspace, epochTokens, result)
+    .filter((entry) => !readOnlyLeadPaths.has(entry.path))
     .map((entry) => entry.handle)
     .filter((handle): handle is string => typeof handle === "string" && handle.length > 0);
   const obligationPaths = queryPriorPackObligations(workspace, epochTokens)
-    .filter((obligation) => obligation.open && obligation.action === "edit")
+    .filter((obligation) => obligation.open && obligation.action === "edit" && !readOnlyLeadPaths.has(obligation.path))
     .map((obligation) => obligation.path);
   return [...new Set([...handles, ...obligationPaths])].slice(0, PRIOR_EPOCH_FRONTIER_CAP);
 }
@@ -23497,6 +29176,7 @@ function actionFrontierForCertificate(
   result: TaskPackResult,
   profile: TaskProfile,
   obligations: readonly TaskReadinessObligation[],
+  query: string,
   priorEpoch: readonly string[] = [],
   // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): an edit_file call that
   // already passed `guardExecutionEdit` this task epoch opens the write
@@ -23518,9 +29198,29 @@ function actionFrontierForCertificate(
   const fromChange = result.change_contract?.obligations
     .filter((obligation) => obligation.action === "edit" && obligation.status === "ready" && obligation.handle)
     .map((obligation) => obligation.handle!) ?? [];
+  // r4-should-fix-26-propagation-route residual (2026-09-14): `obligations`'
+  // generic "surface-content"/"behavior-body"/etc. proofs carry EVERY served
+  // surface as evidence once "proved" — including a surface the query names
+  // under its own explicit read/explain lead — so this fallback used to
+  // re-open write authority `buildTaskChangeContract`'s `change_contract`
+  // (above) had already correctly closed for that path. Same veto, same
+  // shared source of truth (`requestItems.ts::requestItemLeads`); see that
+  // function's own doc and `buildTaskChangeContract`'s call site.
+  // BLOCKER 61/62 (AC1, round 12): the read-lead veto is now one of three, all
+  // asked of `writeAuthorityVeto` — the SAME predicate
+  // `buildTaskChangeContract` consults, so the two producers cannot disagree
+  // about who may write.
+  const veto = writeAuthorityVeto(query, editObserved);
+  const whyOfPath = new Map(
+    codeTaskPackSurfaces(result.surfaces).map((surface) => [surface.path, surface.why] as const),
+  );
+  const vetoedPath = (path: string): boolean =>
+    veto.reasonFor(path, whyOfPath.get(path)) !== undefined;
   const provedImplementation = obligations
     .filter((obligation) => obligation.status === "proved" && obligation.kind !== "explicit-identifier")
-    .flatMap((obligation) => (obligation.evidence ?? []).map((evidence) => evidence.handle));
+    .flatMap((obligation) => (obligation.evidence ?? [])
+      .filter((evidence) => !vetoedPath(evidence.path))
+      .map((evidence) => evidence.handle));
   const createTarget = result.create_target?.path ? [result.create_target.path] : [];
   // Create-only context surfaces are read-only imitation evidence, not edit targets.
   // Mixed create+edit requests retain independent wiring/change obligations.
@@ -23549,11 +29249,44 @@ function actionFrontierForCertificate(
   // was NOT this: the lane's fence held a PEER lane's certificate. That is
   // fixed in the five lane-scoped stores, not here.
   if (createTarget.length > 0 && fromWiring.length === 0 && fromChange.length === 0) return [];
-  return [...new Set([
+  const merged = [...new Set([
     ...createTarget, ...fromWiring, ...fromChange, ...provedImplementation,
     // Last, so the cap can only ever evict prior-epoch entries.
     ...priorEpoch,
-  ])].slice(0, 12);
+  ])];
+  // BLOCKER 34 fail-closed guard (2026-09-14, review round 5): every channel
+  // above (`provedImplementation`, `priorEpochActionFrontier`'s own two
+  // sub-sources) already filters itself by `readOnlyLeadPaths` individually
+  // — this is the SAME check applied ONCE MORE, structurally, at the final
+  // union, so a future channel added here without remembering to consult
+  // `readOnlyLeadPaths` (the exact shape of the bug SHOULD-FIX 31's own new
+  // continuation-donation mechanism reopened) can never arm the certificate
+  // with a path this query's own wording explicitly marked read-only.
+  // `fromWiring` is exempt (mirrors `buildTaskChangeContract`'s own
+  // `connection === undefined` scoping): a wiring pack's `edit_frontier` is a
+  // different, already call-graph-proved mechanism this invariant does not
+  // second-guess.
+  // BLOCKER 61/62 (AC1, round 12): the structural final-union guard now asks the
+  // SHARED predicate, so it also catches a token-match-only surface the request
+  // never names and a NUL-stripped serve no `edits[]` shape can write. It is no
+  // longer short-circuited on `readOnlyLeadPaths.size === 0`: the round-11 leak
+  // reached `src/http.ts` through a query that HAD a read-lead row, but the
+  // nul-stripped half (BLOCKER 62) fires on a query with no lead rows at all
+  // (`In src/retry.ts, set MAX_RETRIES to 5.` produces one `edit` row and no
+  // `read` row), and skipping the guard for that shape is exactly how round 11's
+  // false certificate got out.
+  const wiringExempt = new Set(fromWiring);
+  const surfacesForGuard = codeTaskPackSurfaces(result.surfaces);
+  const pathOfHandle = new Map(surfacesForGuard.map((surface) => [surface.handle, surface.path] as const));
+  const whyOfHandle = new Map(surfacesForGuard.map((surface) => [surface.handle, surface.why] as const));
+  const whyOfSurfacePath = new Map(surfacesForGuard.map((surface) => [surface.path, surface.why] as const));
+  const guarded = merged.filter((entry) => {
+    if (wiringExempt.has(entry)) return true;
+    const surfacePath = pathOfHandle.get(entry) ?? entry;
+    const why = whyOfHandle.get(entry) ?? whyOfSurfacePath.get(surfacePath);
+    return veto.reasonFor(surfacePath, why) === undefined;
+  });
+  return guarded.slice(0, 12);
 }
 
 const MAX_WORKSPACE_STATE_INVENTORY_FILES = 10_000;
@@ -23626,6 +29359,7 @@ function evidenceFileState(workspace: string, relPath: string): string | undefin
     if (stat.size > MAX_WORKSPACE_STATE_HASH_BYTES) {
       return `large:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
     }
+    // served-bytes: not-served (content sha only)
     return shaOfBytes(fs.readFileSync(real));
   } catch {
     return undefined;
@@ -23787,6 +29521,23 @@ function buildCapabilityGaps(
       reason: "one or more caller-supplied paths entries are malformed",
     });
   }
+  // BLOCKER 25 (2026-09-14, review round 4): a file the REQUEST NAMED that this
+  // response could not read. Pushed BEFORE the three mutually-exclusive arms
+  // below so the `.slice(0, 3)` at the end can never drop it, and `refs` carry
+  // the path itself — `projectGaps` projects `obligation_ids` onto
+  // `decision.gaps[].refs`, which is how a `discover` names what is hidden.
+  // `recoverable: false` and no `next_call`: `readCached` failed, so there is no
+  // bounded call this server can vouch for that would produce those bytes
+  // (permissions and text-decodability are not fixed by asking again). The
+  // caller learns WHICH file and WHY, which is what it can act on.
+  for (const entry of result.unreadable_named_paths ?? []) {
+    gaps.push({
+      kind: "missing-evidence",
+      recoverable: false,
+      reason: `this request names ${entry.path}, which could not be served (${entry.reason})`,
+      obligation_ids: [`${UNREADABLE_NAMED_PATH_PREFIX}${entry.path}`],
+    });
+  }
   if (result.route?.action === "fallback_native") {
     gaps.push({
       kind: "unsupported-operation",
@@ -23864,7 +29615,12 @@ function buildFalsificationReport(
   if (profile === "artifact_build") checked.push("artifact-to-implementation-target");
   if (profile === "multi_concern") checked.push("independent-concern-frontiers");
   const counterexamples = codeTaskPackSurfaces(result.surfaces)
-    .filter((surface) => surface.why === "readiness-falsification-counterexample")
+    // TL142-05: a relation-gated counterexample's `why` is now
+    // "<relation> (readiness-falsification-counterexample)", not the bare
+    // literal — `.includes` keeps both shapes in this report; the ONLY
+    // producer of this suffix is the relation gate above, so no OTHER `why`
+    // tag can accidentally match here.
+    .filter((surface) => (surface.why ?? "").includes("readiness-falsification-counterexample"))
     .map((surface) => `${surface.path}:${surface.range}`)
     .slice(0, READINESS_PROBE_MAX_SURFACES);
   return {
@@ -23985,6 +29741,15 @@ function admitReadOnlyNextCall(call: ContinuationCall, originalQuery: string): C
       || (Array.isArray(args["handles"]) && args["handles"].length > 0)
       || (typeof args["path"] === "string" && args["path"].length > 0)
       || (Array.isArray(args["paths"]) && args["paths"].length > 0)
+      // TL142-01A: `targets` was missing from this list while being a shape
+      // this very file's own producers already emit (`nextCallForUnresolved`'s
+      // wiring-source branch: `{targets:[{path,symbol}]}`). Those reach the
+      // wire directly, so the omission was invisible until an ALTERNATIVE-AXIS
+      // candidate used the same carrier — Rule 1b's read of what an executed
+      // search located — and this admission gate silently rejected the single
+      // most specific call the pack could make, falling back to a re-read of an
+      // already-served window.
+      || (Array.isArray(args["targets"]) && args["targets"].length > 0)
       || (typeof args["symbol"] === "string" && args["symbol"].length > 0);
     if (hasBoundedTarget) return { ...call, arguments: args };
     const readQuery = typeof args["query"] === "string" ? args["query"] : "";
@@ -24369,6 +30134,12 @@ function openEpochContractRequirements(
       entry.startsWith("unresolved-ledger:")
       || entry.startsWith(UNSERVED_EPOCH_ROLE_PREFIX)
       || entry.startsWith(UNCOVERED_EPOCH_CONCERN_PREFIX)
+      // BLOCKER 25 (2026-09-14, review round 4): a file the REQUEST ITSELF
+      // named and this response could not read is the plainest possible
+      // "a required thing is still open" — the served-terminal grant must not
+      // certify beside it either (`deriveCanonicalTaskDecisionRaw` closes the
+      // ORDINARY certificate route; this closes P2-4's).
+      || entry.startsWith(UNREADABLE_NAMED_PATH_PREFIX)
     ) open.push(entry);
   }
   for (const role of result.missing_required_surfaces ?? []) {
@@ -24401,6 +30172,16 @@ export function buildTaskExecutionContract(
   /** Exact literal cohort evidence, admitted only after its bound continuation and ledger proof. */
   literalSourceUniverse = false,
 ): TaskExecutionContract {
+  // FIXALL-A group D (2026-09-14): stamp `request_names_no_target` here, the ONE
+  // choke point every decision path passes through with the query text in hand
+  // (`applyCanonicalTaskDecision` is called from four sites in this module and
+  // only ever sees the result). Idempotent and monotone: it is only ever set,
+  // never cleared, so a later rebuild of the same pack cannot lose it. See the
+  // field's own doc on `TaskPackResult` and its single consumer,
+  // `deriveCanonicalTaskDecisionRaw`.
+  if (stripValueOnlyLeadClauses(query).trim() === "" && query.trim() !== "") {
+    result.request_names_no_target = true;
+  }
   const proofCompletion = proofCompletionEnabled();
   // P2(b) (2026-08-28 review-fix wave): this builder runs at least twice per
   // pack (this doc comment's own next line: "before and after final
@@ -24509,7 +30290,17 @@ export function buildTaskExecutionContract(
   // comment for the wire path this feeds (`buildCapabilityGaps`, gated to a
   // `discover` decision by D-4).
   if (requestItemReadiness.absences.length > 0) {
-    result.request_item_absences = requestItemReadiness.absences;
+    // TL142-01B: MERGE, never overwrite. `promoteExecutedSearchAbsences` may
+    // already have recorded an absence an EXTERNAL executed search proved, and
+    // this builder runs several times per pack — a plain assignment silently
+    // discarded that disclosure on any pack whose own request-item pass also
+    // found something.
+    const existing = result.request_item_absences ?? [];
+    const merged = [...existing];
+    for (const absence of requestItemReadiness.absences) {
+      if (!merged.some((entry) => entry.term === absence.term)) merged.push(absence);
+    }
+    result.request_item_absences = merged;
   }
   const completion = projectCompletion(result, obligations);
   result.coverage = completion.coverage;
@@ -24858,7 +30649,23 @@ export function buildTaskExecutionContract(
     : [artifactFallback, continuationCall, proofNext, parsedNextAfterProof, gapFallback, partialFallback, missingAffordance]
         .filter((call): call is ContinuationCall => call !== undefined)
         .map((call) => admitReadOnlyNextCall(call, query))
-        .find((call): call is ContinuationCall => call !== undefined);
+        .filter((call): call is ContinuationCall => call !== undefined)
+        // SHOULD-FIX 59: applied to the WHOLE chain, not just `parsedNext`. Any
+        // candidate that merely re-reads a window this response already served
+        // is dropped here, so a `discover` can never prescribe a call whose only
+        // possible answer is a bodyless `code-unchanged` receipt with no `next`.
+        // SHOULD-FIX 59: applied to the WHOLE chain, not just `parsedNext`. Any
+        // candidate that merely re-reads a window this response already served
+        // is dropped here, so a `discover` can never prescribe a call whose only
+        // possible answer is a bodyless `code-unchanged` receipt with no `next`.
+        // Both forms of "already served" are covered: a RANGED re-read
+        // (`nextCallCoveredBySpans`, which round 10 applied to `parsedNext`
+        // alone — `proofNext` and the fallbacks walked straight past it) and a
+        // BODYLESS whole-handle re-read (`nextCallReReadsServedWindow`, the form
+        // that regex could never judge because it requires a `range`).
+        .find((call) => !nextCallCoveredBySpans(result, call, currentPackSpans)
+          && !nextCallReReadsServedWindow(result, call, currentPackSpans)
+          && !nextCallTargetsUnreadablePath(result, call));
   const callBudget = valueCallBudget(
     terminalAction,
     baseReady,
@@ -24936,7 +30743,8 @@ export function buildTaskExecutionContract(
     result,
     profile,
     obligations,
-    workspace !== undefined ? priorEpochActionFrontier(workspace, query, result) : [],
+    query,
+    workspace !== undefined ? priorEpochActionFrontier(workspace, query, result, editObserved) : [],
     editObserved,
   );
   const certificate = accepted
@@ -26026,6 +31834,7 @@ function findNearestNpmScripts(workspace: string, rel: string): { dir: string; p
       // P3 (2026-08-27): decodeTextBuffer, not a raw utf8 read; an
       // undecodable package.json is treated the same as an absent/unparsable
       // one — keep walking upward, never crash and never JSON.parse garbage.
+      // served-bytes: not-served (package.json scripts: JSON.parse, never served)
       const decoded = decodeTextBuffer(fs.readFileSync(pkgPath));
       if (decoded === null) continue;
       const pkg = JSON.parse(decoded) as { scripts?: Record<string, string> };
@@ -26272,9 +32081,42 @@ export async function candidateToSurface(
   requiredRoles: string[],
   query: string,
   cache?: FileReadCache,
-  options?: { answerProfile?: boolean; causalMultiMethod?: boolean },
+  options?: {
+    answerProfile?: boolean;
+    causalMultiMethod?: boolean;
+    /**
+     * WP-S2 rule 2 (TL_SEEDED_GENEROUS): per-surface embedded-code allowance
+     * for THIS candidate, overriding MAX_SURFACE_CODE_BYTES. Set only by
+     * `buildSeededTaskPack`'s caller-NAMED whole-file seeds on an `answer`
+     * profile, and only after that builder's water-filling pass proved the
+     * pack budget can carry the body — every other call site omits it and
+     * keeps the shared cap exactly.
+     */
+    surfaceCodeBytes?: number;
+  },
 ): Promise<TaskPackSurface> {
   const callerScoped = surfaceWhyHasMarker(candidate.why, "caller-supplied");
+  // SHOULD-FIX 58 (AB1, 2026-09-14, review round 11): DISCLOSE, wherever the
+  // candidate came from. `augmentQueryNamedFileSurfaces` is the only caller of
+  // `noteUnreadableNamedPath` on door 1 and it skips a path something else
+  // surfaced first (`if (already.has(rel)) continue;`), so whether a caller was
+  // told the reason depended on the WORKSPACE SHAPE: AA1's own door log shows
+  // `latin1.ts` / `short73.ts` / `nulpast4k.ts` / `sjis.ts` surfaced as
+  // `{why:"filename-match", len:0}` with no disclosure at all, and `latin1.ts`'s
+  // prescribed `next` refusing. This is the one place EVERY surface is built, so
+  // it is where the fact belongs: a path the serve-side policy will not read is
+  // named in `missing`/`unresolved` (the store is per-`buildTaskPack` ALS and
+  // de-dupes), and `coverage` can no longer be `complete` over it.
+  //
+  // Cheap: `readCached` is the same memo every later step in this function uses
+  // (`clampRangeToFile`, `tinyFileWholeRange`, `sliceCode`), so this adds no
+  // read — it only observes the one that was going to happen anyway.
+  if (readCached(workspace, candidate.path, cache) === undefined) {
+    // SHOULD-FIX 65 (AC1, round 12): a LOCATOR candidate. The request may never
+    // have mentioned it, so the disclosure must not claim it did — `"request"`
+    // still wins if the query-named site notes the same path.
+    noteUnreadableNamedPath(workspace, candidate.path, "resolution");
+  }
   candidate = refocusCandidateForQuery(candidate, workspace, query, cache);
   const role = candidate.surface as string;
   const rawRange = candidate.range ?? `${candidate.line}-${candidate.line}`;
@@ -26356,9 +32198,28 @@ export async function candidateToSurface(
   const summarizedWhy = candidate.why
     ? whySummary(candidate.why, candidate.symbol, role)
     : undefined;
-  const why = callerScoped && summarizedWhy
-    ? `${summarizedWhy}; caller-supplied`
-    : summarizedWhy;
+  // AA1 (2026-09-14, review round 10): the ONE place a NUL strip is STATED for
+  // ANY surface. `readServedText`'s `"stripped"` verdict is only honest if the
+  // response says so, and rounds 5-8 stated it at exactly the two doors that
+  // happened to notice: `augmentQueryNamedFileSurfaces` (its own
+  // "query-named-file; nul-stripped") and the seeded loop (`nulStrippedSeedPaths`).
+  // Now that `FileReadCache.read` applies the policy, an ORDINARY LOCATOR
+  // candidate for the same file is also served NUL-free -- and used to be served
+  // with no annotation at all, because the augmentation skips a path the locator
+  // already surfaced (`already.has(rel)`). Every surface built from a path THIS
+  // cache read and stripped now carries the marker, wherever the candidate came
+  // from. Inserted BEFORE a trailing "caller-supplied" for the same reason the
+  // seeded loop does (see its comment): `surfaceWhyHasMarker` re-appends that
+  // token, so the qualifier list must read "...; nul-stripped; caller-supplied".
+  // The exact-segment guard keeps a route that already stated it from doubling.
+  const nulStrippedByCache = cache?.verdictFor(candidate.path)?.kind === "stripped"
+    && !(summarizedWhy !== undefined && surfaceWhyHasMarker(summarizedWhy, "nul-stripped"));
+  const strippedWhy = summarizedWhy === undefined
+    ? (nulStrippedByCache ? "nul-stripped" : undefined)
+    : nulStrippedByCache ? `${summarizedWhy}; nul-stripped` : summarizedWhy;
+  const why = callerScoped && strippedWhy
+    ? `${strippedWhy}; caller-supplied`
+    : strippedWhy;
 
   // Build likely_edits: a single generic hint based on role (or the
   // candidate's raw `why`, when it carries more specific guidance — see
@@ -26393,7 +32254,10 @@ export async function candidateToSurface(
   // body + remaining_ranges instead of the old code-less cliff. Center on the
   // candidate's own matched line when known (finer than the range midpoint).
   const centeredEmbed = isHighConfidence
-    ? centeredSliceForCap(workspace, candidate.path, range, cache, candidate.line)
+    ? centeredSliceForCap(workspace, candidate.path, range, cache, candidate.line, options?.surfaceCodeBytes, {
+        fullRemainder: candidate.callerRange === true,
+        ...(options?.surfaceCodeBytes !== undefined ? { wholeFileParity: true } : {}),
+      })
     : undefined;
   const fullAfterElision = centeredEmbed?.remaining_ranges.length
     ? sliceCodeAfterCommentElision(
@@ -26621,6 +32485,43 @@ function isModuleClosureSurface(s: TaskPackSurface): boolean {
   return s.why !== undefined && MODULE_CLOSURE_WHY_MARKERS.has(s.why);
 }
 
+/**
+ * WP-S2 rule 2 (TL_SEEDED_GENEROUS): packs whose caller NAMED >= 2 files that
+ * an answer-profile seeded build decided to serve whole. Carried as a
+ * Symbol-keyed own property plus a WeakSet — the same carrier
+ * sfWithholdingMarks.ts uses for exactly this class of problem — so it is
+ * invisible on the wire (`JSON.stringify` never walks symbol keys) and cannot
+ * become a protocol field. `trimToCap` mutates and returns the SAME object, so
+ * its own `fitsInCap` -> `capForResult` chain reads the mark back.
+ */
+const SEEDED_GENEROUS_PACK_KEY: unique symbol = Symbol("tokenlighten.seededGenerousPack");
+const seededGenerousPacks = new WeakSet<object>();
+const seededGenerousPackTiers = new WeakMap<object, number>();
+
+function markSeededGenerousPack(result: TaskPackResult, tierBytes: number): void {
+  seededGenerousPacks.add(result);
+  seededGenerousPackTiers.set(result, tierBytes);
+  try {
+    Object.defineProperty(result, SEEDED_GENEROUS_PACK_KEY, {
+      value: tierBytes, enumerable: true, configurable: true, writable: true,
+    });
+  } catch {
+    // Non-extensible result: the WeakSet/WeakMap above still answer for this object.
+  }
+}
+
+function isSeededGenerousPack(result: TaskPackResult): boolean {
+  const marked = (result as unknown as Record<symbol, unknown>)[SEEDED_GENEROUS_PACK_KEY];
+  return marked === true || typeof marked === "number" || seededGenerousPacks.has(result);
+}
+/** The pack-budget tier `buildSeededTaskPack` claimed for this result (0 = unmarked). */
+function seededGenerousPackTier(result: TaskPackResult): number {
+  if (!isSeededGenerousPack(result)) return 0;
+  const marked = (result as unknown as Record<symbol, unknown>)[SEEDED_GENEROUS_PACK_KEY];
+  if (typeof marked === "number") return marked;
+  return seededGenerousPackTiers.get(result) ?? MAX_TASK_PACK_BYTES_MULTI_CONCERN;
+}
+
 function rawCapForResult(result: TaskPackResult): number {
   if (result.wiring?.strategy === "semantic-multihop") {
     if ((result.wiring.connections[0]?.completion_proof?.structural_checks.length ?? 0) > 0) {
@@ -26675,11 +32576,21 @@ function rawCapForResult(result: TaskPackResult): number {
     (s) => s.code !== undefined && (s.required || isModuleClosureSurface(s)),
   );
   const hasAnyCode = result.surfaces.some((s) => s.code !== undefined);
-  const base = hasHighConfCode
-    ? MAX_TASK_PACK_BYTES_HIGH_CONFIDENCE
-    : hasAnyCode
-      ? Math.round((MAX_TASK_PACK_BYTES + MAX_TASK_PACK_BYTES_HIGH_CONFIDENCE) / 2)
-      : MAX_TASK_PACK_BYTES;
+  // WP-S2 rule 2 (TL_SEEDED_GENEROUS): several files the CALLER NAMED have the
+  // same additive evidence floor the multi_concern tier above exists for — a
+  // four-file answer pack cannot prove four things inside the base tier. Taken
+  // as a FLOOR on the tier this result would otherwise get, never a narrowing,
+  // and only for a pack `buildSeededTaskPack` itself marked (>= 2 named files
+  // it decided to serve whole). Unmarked packs — every pack with the flag off
+  // — keep their exact tier.
+  const base = Math.max(
+    seededGenerousPackTier(result),
+    hasHighConfCode
+      ? MAX_TASK_PACK_BYTES_HIGH_CONFIDENCE
+      : hasAnyCode
+        ? Math.round((MAX_TASK_PACK_BYTES + MAX_TASK_PACK_BYTES_HIGH_CONFIDENCE) / 2)
+        : MAX_TASK_PACK_BYTES,
+  );
   // DESIGN-v0.9 §4.8: content the server internally executed (§4.6b codeless
   // surface bodies — signalled by a non-empty `inlined[]`) may expand the
   // budget to the must-fetch tier, and ONLY behind TL_MUSTFETCH_EXPAND.
@@ -26729,6 +32640,17 @@ interface PackedBlockFingerprint {
   hash: string;
   /** True when carried over from the PRIOR call's pack; false when added by the surface currently being processed in THIS pack. Decides the pointer wording at match time (a within-pack match must not claim "prior pack"). */
   fromPriorPack: boolean;
+  /**
+   * TL142-03: the server-resolved task identity (`TaskPackArgs.taskBinding`)
+   * in force when THIS entry was recorded, so a later call can prove "this is
+   * an unchanged repeat of the SAME task" rather than "a different request
+   * happens to reuse this handle". `undefined` when the recording call itself
+   * had no resolvable binding (e.g. a first, epoch:"new" call before any
+   * qref/task.handle exists) — an undefined value never matches anything
+   * (see applyPackDedupe), so identity that cannot be proven fails toward
+   * resending, never toward a false "same task".
+   */
+  taskBinding: string | undefined;
 }
 
 /**
@@ -26766,6 +32688,9 @@ const dedupedSurfaceBody = new WeakMap<TaskPackSurface, string>();
 export function resetPackDedupeCache(): void {
   lastPackBlocksByWorkspace.clear();
   servedPacksByWorkspace.clear();
+  // WP-S11: the same-task read-only serve view is per-workspace serve state of
+  // exactly this kind (see its own doc block), so it goes at the same boundary.
+  readOnlyServedViews.clear();
   // C2: the retained certificate is per-workspace serve state of exactly the
   // same kind, so every suite that resets the dedupe cache gets isolation here.
   certifiedWorkingSets.clear();
@@ -26807,6 +32732,10 @@ export function clearPackDedupeForWorkspace(workspace: string, lane?: string): v
   lastPackBlocksByWorkspace.delete(laneScopedKey(key));
   servedPacksByWorkspace.delete(laneScopedKey(key));
   certifiedWorkingSets.delete(laneScopedKey(key));
+  // WP-S11: `task.epoch:"new"` is the declared task boundary, so the same-task
+  // read-only serve view goes with the rest of this lane's task-scoped state —
+  // its own token-overlap reset is the heuristic backstop, not a substitute.
+  readOnlyServedViews.delete(laneScopedKey(key));
   // P0 defect 2 (2026-08-27): the epoch requirement contract is the same class
   // of workspace-keyed, task-scoped state, and `taskEpoch:"new"` is exactly
   // the boundary at which it must go. Doing it HERE rather than in server.ts's
@@ -26944,6 +32873,55 @@ interface ServedPackRecord {
   coverageBasis: TaskPackResult["coverage_basis"] | undefined;
   /** iter-2 W1/W2: the served route, echoed on the compact receipt so "working set complete — stop" survives the re-serve. */
   route: TaskPackResult["route"] | undefined;
+  /**
+   * TL142-01C (2026-09-13, v0.14.2 hands-on report §4 TL142-01 "C"): the
+   * `create_target` this pack certified, so the compact re-serve can RESTATE
+   * it instead of silently dropping the whole create route.
+   *
+   * Without this field the record had no slot to even ask the question:
+   * `compactReceiptFromRecord` rebuilt the receipt from
+   * coverage/route/missing/surfaces/executionContract, every one of which the
+   * create pack still had, and `create_target` — the one member
+   * `canonicalDecision`'s `act.edit` floor needs and `readFamily`'s
+   * `KEPT_ON_TASK_PACK` still ships — was the single fact that could not
+   * survive. Every same-epoch repeat of an `act.edit`+`create_target` pack
+   * (bare `{qref}`, bare `task:{handle}`, or a plain query resend with no
+   * `task` field at all — `tryServeCachedPack` answers all three) therefore
+   * degraded to `discover`/`await_input` with the original 4-file discovery
+   * `next` re-proposed, on a workspace where nothing had changed.
+   *
+   * Restated ONLY while the target still does not exist on disk (see
+   * `restatableCreateTarget`): once the caller has actually created the file,
+   * re-asserting the create would be a false claim, and the ordinary
+   * staleness gates already force a full rebuild for that case anyway (the
+   * new file moves the workspace-state fingerprint).
+   */
+  createTarget: TaskPackResult["create_target"] | undefined;
+  /**
+   * TL142-01B: the verified-absent request items this pack disclosed.
+   *
+   * The THIRD carrier a compact re-serve silently dropped (create_target was
+   * the first two doors — see `createTarget`). `decisionWire.ts`'s
+   * `projectCertificate` builds `certificate.gaps` from this array, so a
+   * receipt that restated the certificate but not the absences shipped a
+   * certificate whose disclosed gaps had vanished — on a workspace this very
+   * path has already proven byte-identical, which is precisely the condition
+   * under which an absence proof still holds.
+   */
+  requestItemAbsences: TaskPackResult["request_item_absences"] | undefined;
+  /**
+   * TL142-01A/01B: the executed-search RESULT ledger's sequence at capture
+   * time (`util/packServeLog.ts`'s `executedSearchResultSequence`).
+   *
+   * The receipt door's own staleness clock. Every other gate on this path
+   * proves the WORKSPACE has not changed; none of them can see that the CALLER
+   * has, in between, run the search this pack itself prescribed and learned
+   * where the symbol lives or that the token does not exist. Re-serving the
+   * record as `pack-unchanged` then denies a proof the task already holds —
+   * which is how a resume after a confirmed absence returned
+   * `await_input:"no-grounded-call-remains"` instead of citing the absence.
+   */
+  executedSearchSequence: number;
   /** iter-2 W1: epoch tokens this pack was served under — restricts subset re-serves to the SAME task. */
   epochTokens: string[];
   /** iter-3 F2: the request's surfaceRoles[] (sorted) at serve time — a differing role set is a DIFFERENT working set (adds required roles), so it must not be treated as a semantic duplicate. */
@@ -27112,6 +33090,7 @@ function surfaceFileIdentity(workspace: string, relPath: string): { sha: string;
     const real = fs.realpathSync(abs);
     if (!isWithin(real, resolveReal(workspace))) return undefined;
     if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
+    // served-bytes: not-served (surface fingerprint: sha + line count only)
     const text = fs.readFileSync(real, "utf8");
     const lines = text.split("\n");
     // A trailing newline yields a final empty element that is not a line.
@@ -27130,6 +33109,7 @@ function surfaceFileSha(workspace: string, relPath: string): string | undefined 
     if (!isWithin(real, resolveReal(workspace))) return undefined;
     const size = fs.statSync(real).size;
     if (size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
+    // served-bytes: not-served (surface fingerprint: sha only)
     return shaOfText(fs.readFileSync(real, "utf8"));
   } catch {
     return undefined;
@@ -27182,6 +33162,7 @@ function surfaceFileLineCount(workspace: string, relPath: string): number | unde
     const real = fs.realpathSync(abs);
     if (!isWithin(real, resolveReal(workspace))) return undefined;
     if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) return undefined;
+    // served-bytes: not-served (surface fingerprint: line count only)
     return countLines(fs.readFileSync(real, "utf8"));
   } catch {
     return undefined;
@@ -27251,6 +33232,123 @@ export function packServedSpans(result: TaskPackResult): Map<string, Array<[numb
     if (existing.length > 0) spans.set(surface.path, existing);
   }
   return spans;
+}
+
+/**
+ * SHOULD-FIX 59 (AB1, 2026-09-14, review round 11) — A HANDLE THIS RESPONSE
+ * ALREADY SERVED WHOLE IS NOT A `next`.
+ *
+ * `nextCallCoveredBySpans` below can only judge a call that names a RANGE
+ * (`parsePackLineRange(args.range)` returns `undefined` otherwise), so the
+ * commonest dead end walked straight past it: a bare `read_file
+ * targets:[{handle}] content:"auto"` over a handle whose body is in the SAME
+ * response. Measured (round 10, the mandate's own pinned input `In src/retry.ts,
+ * explain what it does and set it to 5.`): `decision.kind:"discover"` +
+ * `gaps:[missing-evidence surface-content]` + a `next` re-reading handle
+ * `h9uw6idmtjd`, whose 2-2 body the same pack served — and the receipt that
+ * `next` produces correctly answers "you already have this" and carries NO
+ * `next`, so `discover`'s own contract ("run its `next`") terminates with
+ * nothing certified and no continuation. That is the dead-end-receipt class the
+ * TL142-01 wave closed for the qref and `task.handle` doors, reappearing on the
+ * `discover` door.
+ *
+ * The rule is narrow on purpose:
+ *   - a call naming a range, `ranges` or a symbol is a ZOOM, judged by
+ *     `nextCallCoveredBySpans` (a sub-window may genuinely be unserved);
+ *   - a handle whose surface has NO served code is a real affordance (that is
+ *     exactly what `gapFallback` exists for) and is never filtered;
+ *   - only a bodyless RE-READ of a fully-served window is dropped, which lets
+ *     the contract fall through to the next candidate, and — when nothing
+ *     remains — to `requiredServed`'s "act on the served evidence" verdict
+ *     (`await_input` naming the open concerns) instead of a dead end.
+ */
+/**
+ * SHOULD-FIX 58 (AB1, 2026-09-14, review round 11) — A PATH THIS RESPONSE
+ * DISCLOSED AS UNREADABLE IS NOT A `next`.
+ *
+ * Measured (round 10 + this wave's own door matrix): for 4 of the 5 undecodable
+ * fixtures, door 1 answered `discover` with a bodyless `{why:"filename-match",
+ * len:0}` surface and a prescribed `next` that returns
+ * `refusal read-error` — the pack naming, as the caller's one sanctioned
+ * transition, the exact read its own `missing[]` row says cannot succeed. The
+ * disclosure is now reliable (see `candidateToSurface`), which makes the dead
+ * end the remaining half: the same fact that produced the row must also
+ * disqualify the call.
+ *
+ * Reads the DISCLOSURE off `result`, not the ALS store, so it holds on a re-pack
+ * too (`discloseUnreadableNamedPaths` restores the rows from `missing[]`).
+ */
+function nextCallTargetsUnreadablePath(result: TaskPackResult, call: ContinuationLike): boolean {
+  const disclosed = new Set<string>([
+    ...(result.unreadable_named_paths ?? []).map((row) => row.path),
+    ...result.missing
+      .map(parseUnreadableNamedPathRow)
+      .filter((row): row is NonNullable<ReturnType<typeof parseUnreadableNamedPathRow>> => row !== undefined)
+      .map((row) => row.path),
+  ]);
+  if (disclosed.size === 0) return false;
+  if (call.tool !== "read_file") return false;
+  const args = call.arguments as Record<string, unknown>;
+  const paths: string[] = [];
+  if (typeof args["path"] === "string") paths.push(args["path"]);
+  if (Array.isArray(args["paths"])) {
+    for (const entry of args["paths"]) {
+      if (typeof entry === "string") paths.push(entry);
+      else if (entry !== null && typeof entry === "object" && typeof (entry as Record<string, unknown>)["path"] === "string") {
+        paths.push((entry as Record<string, unknown>)["path"] as string);
+      }
+    }
+  }
+  if (Array.isArray(args["targets"])) {
+    for (const entry of args["targets"]) {
+      if (entry === null || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      if (typeof record["path"] === "string") paths.push(record["path"]);
+      if (typeof record["handle"] === "string") {
+        const owner = codeTaskPackSurfaces(result.surfaces).find((surface) => surface.handle === record["handle"]);
+        if (owner !== undefined) paths.push(owner.path);
+      }
+    }
+  }
+  if (typeof args["handle"] === "string") {
+    const owner = codeTaskPackSurfaces(result.surfaces).find((surface) => surface.handle === args["handle"]);
+    if (owner !== undefined) paths.push(owner.path);
+  }
+  // Only a call whose ENTIRE target set is disclosed-unreadable is a dead end;
+  // a batch that also names a readable path still advances.
+  return paths.length > 0 && paths.every((candidate) => disclosed.has(candidate));
+}
+
+function nextCallReReadsServedWindow(
+  result: TaskPackResult,
+  call: ContinuationLike,
+  spans: ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>,
+): boolean {
+  if (call.tool !== "read_file") return false;
+  const args = call.arguments as Record<string, unknown>;
+  // A zoom/symbol request is a different question — see the doc comment.
+  if (args["range"] !== undefined || args["ranges"] !== undefined || args["symbol"] !== undefined) return false;
+  const firstTarget = Array.isArray(args["targets"]) && args["targets"].length === 1
+    ? args["targets"][0]
+    : undefined;
+  const targetRecord = firstTarget !== null && typeof firstTarget === "object"
+    ? firstTarget as Record<string, unknown>
+    : undefined;
+  if (targetRecord !== undefined
+    && (targetRecord["range"] !== undefined || targetRecord["ranges"] !== undefined || targetRecord["symbol"] !== undefined)) {
+    return false;
+  }
+  const handle = typeof args["handle"] === "string"
+    ? args["handle"]
+    : typeof targetRecord?.["handle"] === "string"
+      ? targetRecord["handle"] as string
+      : undefined;
+  if (handle === undefined) return false;
+  const surface = codeTaskPackSurfaces(result.surfaces).find((candidate) => candidate.handle === handle);
+  if (surface === undefined || !hasServedCode(surface)) return false;
+  const range = parsePackLineRange(surface.range);
+  if (range === undefined) return false;
+  return spans.get(surface.path)?.some(([start, end]) => start <= range[0] && end >= range[1]) === true;
 }
 
 function nextCallCoveredBySpans(
@@ -27499,6 +33597,7 @@ function recordPackServedRanges(
       const real = fs.realpathSync(abs);
       if (!isWithin(real, resolveReal(workspace))) continue;
       if (fs.statSync(real).size > MAX_FINGERPRINT_FILE_BYTES) continue;
+      // served-bytes: not-served (served-range ledger capture: sha + span accounting only)
       text = fs.readFileSync(real, "utf8");
     } catch {
       continue;
@@ -27639,6 +33738,13 @@ function captureServedPack(
     coverageReason: result.coverage_reason,
     coverageBasis: result.coverage_basis,
     route: result.route ? { ...result.route } : undefined,
+    // TL142-01C: see ServedPackRecord.createTarget. Captured from the DEDUP
+    // BASELINE (`result`), the same object every other certified member on
+    // this record comes from — `served` can be a compact subset receipt whose
+    // own create route was never re-derived.
+    createTarget: result.create_target ? { ...result.create_target } : undefined,
+    requestItemAbsences: result.request_item_absences ? result.request_item_absences.map((a) => ({ ...a })) : undefined,
+    executedSearchSequence: executedSearchResultSequence(workspace, currentSessionLane(), args.taskBinding),
     epochTokens: tokenizeForEpoch(args.query ?? args.symbol ?? args.path ?? ""),
     requestRoles: (args.surfaceRoles ?? []).slice().sort(),
     requestPaths: requestedPathSet(args),
@@ -27921,6 +34027,43 @@ const RECEIPT_UNREPAIRABLE_STALE_ACTIONS: ReadonlySet<string> = new Set(
  * never run. Both arms stay inside RECEIPT_UNREPAIRABLE_STALE_ACTIONS, so a
  * read/zoom next is never touched.
  */
+/**
+ * F-V13-5 (GATE-A, 2026-09-14) — THE THIRD DOOR, opened by SHOULD-FIX 36 of
+ * this same wave.
+ *
+ * `decisionWire.ts::gapNamedNext` mints `decision.next` from the FIRST
+ * `capability_gaps[].next_call` whenever the contract itself names no call —
+ * which is precisely the state the next_call repair below leaves a suppressed
+ * receipt in. Until this wave that door could not open on a receipt at all:
+ * `compactReceiptFromRecord` never restated `capability_gaps`, so every receipt
+ * carried `undefined` there. SHOULD-FIX 36 (round 5) restates them — rightly,
+ * a receipt that drops its own disclosure is worse — and the consumed
+ * `search_files references …` rode back out through the gap's copy of it,
+ * re-serving the exact call F-V13-5 ratified as un-replayable (measured:
+ * `{action:"references",query:"alphaTotal"}` handed back after the caller ran
+ * it as `scope.symbol`).
+ *
+ * ONLY THE CALL IS DROPPED, never the gap. The disclosure is what SHOULD-FIX 36
+ * exists to preserve and what sequenceCorpus's I5 invariant requires; what a
+ * receipt may not do is point at work already done. Identity-preserving when
+ * nothing is stale, so an unaffected receipt is byte-for-byte unchanged.
+ */
+function receiptContractWithoutConsumedGapCall(
+  workspace: string,
+  contract: TaskExecutionContract | undefined,
+): TaskExecutionContract | undefined {
+  const gaps = contract?.capability_gaps;
+  if (contract === undefined || gaps === undefined || gaps.length === 0) return contract;
+  let changed = false;
+  const scrubbed = gaps.map((gap) => {
+    if (gap.next_call === undefined || !consumedReceiptSearchCall(workspace, gap.next_call)) return gap;
+    changed = true;
+    const { next_call: _consumed, ...rest } = gap;
+    return rest;
+  });
+  return changed ? { ...contract, capability_gaps: scrubbed } : contract;
+}
+
 function receiptContractWithoutConsumedSearch(
   workspace: string,
   contract: TaskExecutionContract | undefined,
@@ -27946,12 +34089,20 @@ function receiptContractWithoutConsumedSearch(
    */
   taskBinding?: string,
 ): TaskExecutionContract | undefined {
-  const nextCall = contract?.next_call;
-  if (contract === undefined || nextCall === undefined) return contract;
-  if (nextCall.tool !== "search_files") return contract;
+  // GATE-A (2026-09-14): the gap-carried copy of a consumed search is scrubbed
+  // FIRST and unconditionally — it is a separate carrier, reachable whether or
+  // not this contract's own `next_call` is stale (and reachable precisely
+  // BECAUSE the repair below may have already removed that one). Every
+  // identity-preserving return below hands back `scrubbed`, which IS `contract`
+  // by identity when no gap was stale — so `receiptRecordWithoutConsumedSearch`'s
+  // `===` comparison still tells the two cases apart correctly.
+  const scrubbed = receiptContractWithoutConsumedGapCall(workspace, contract);
+  const nextCall = scrubbed?.next_call;
+  if (scrubbed === undefined || nextCall === undefined) return scrubbed;
+  if (nextCall.tool !== "search_files") return scrubbed;
   const ncArgs = (nextCall.arguments ?? {}) as Record<string, unknown>;
   const action = typeof ncArgs["action"] === "string" ? ncArgs["action"] : "";
-  if (!RECEIPT_UNREPAIRABLE_STALE_ACTIONS.has(action)) return contract;
+  if (!RECEIPT_UNREPAIRABLE_STALE_ACTIONS.has(action)) return scrubbed;
   // THE WIRE ALREADY OWNS HALF OF THIS, AND MUST KEEP IT. `projectTaskDecision`
   // filters a consumed candidate out of its own precedence chain
   // (`firstUnconsumed`), so a receipt whose next this lane executed VERBATIM
@@ -27971,10 +34122,10 @@ function receiptContractWithoutConsumedSearch(
   // primary check — a handleless re-pack that recovered this task's binding
   // from its qref must not miss an execution this session recorded under
   // that binding.
-  if (hasExecutedNextBoundOrUnbound(workspace, currentSessionLane(), nextCall.tool, ncArgs, taskBinding)) return contract;
-  const repaired: TaskExecutionContract = { ...contract, next_call: structuredClone(nextCall) };
+  if (hasExecutedNextBoundOrUnbound(workspace, currentSessionLane(), nextCall.tool, ncArgs, taskBinding)) return scrubbed;
+  const repaired: TaskExecutionContract = { ...scrubbed, next_call: structuredClone(nextCall) };
   const outcome = advanceExecutedLocateNextCall(workspace, repaired, RECEIPT_UNREPAIRABLE_STALE_ACTIONS);
-  if (outcome === "kept") return contract;
+  if (outcome === "kept") return scrubbed;
   // I-7: the contract was ACTUALLY repaired — the one place shared by all
   // three receipt call sites (tryServeSubsetReceipt's own no-record call,
   // tryServeCachedPack, tryServeSemanticDuplicatePack via
@@ -28011,7 +34162,83 @@ function receiptRecordWithoutConsumedSearch(
   taskBinding?: string,
 ): ServedPackRecord {
   const repaired = receiptContractWithoutConsumedSearch(workspace, record.executionContract, record.lane, taskBinding);
-  return repaired === record.executionContract ? record : { ...record, executionContract: repaired };
+  // F-V13-5 (GATE-A, 2026-09-14): THE OTHER DOOR. `compactReceiptFromRecord`
+  // republishes the record's OWN top-level `next` exactly when the contract
+  // carries no `next_call` — which is what the repair above has just made true
+  // for a suppressed search. Repairing only the contract therefore moved the
+  // consumed call one field sideways and the receipt handed it straight back
+  // (measured: `references alphaTotal` re-served after the caller had run it
+  // under `scope.symbol`, F-V13-5's own reproduction). The fresh-build path has
+  // always dropped BOTH — `repairSuppressedNextCall`'s suppression arm deletes
+  // `result.next` alongside the contract's call — so this is that same rule
+  // reaching the receipt doors, not a new one.
+  const staleTopLevelNext = repaired?.next_call === undefined
+    && record.next !== undefined
+    && consumedReceiptSearchCall(workspace, record.next);
+  if (repaired === record.executionContract && !staleTopLevelNext) return record;
+  return {
+    ...record,
+    executionContract: repaired,
+    ...(staleTopLevelNext ? { next: undefined } : {}),
+  };
+}
+
+/**
+ * The action+term ledger's verdict for ONE proposed `search_files` call: the
+ * recorded candidate handles when EVERY term the call names has already been
+ * searched this session, `undefined` when any of them is still owed.
+ *
+ * F-V13-5 (GATE-A, 2026-09-14) — ONE SEARCH, EVERY SPELLING. The key used to be
+ * `args["query"]` alone. A proposed call written in the CANONICAL PLURAL
+ * (`queries:["X"]`) therefore keyed on `""` and matched nothing this session
+ * had ever recorded, so the brake read the ledger for a search nobody ran and
+ * kept re-proposing the consumed one — the exact F-V13-5 loop, re-opened by a
+ * producer (`selectCanonicalNext`) that mints the plural form directly.
+ * `blockedSearchTerms` is the collapse-to-the-TERM helper TL142-01A already
+ * built for `alternativeProgressAxis`'s Rule 1b (`queries[]` + `query` +
+ * `scope.symbol`), reused rather than restated — the two must not disagree
+ * about which spellings name the same search.
+ *
+ * EVERY named term must be recorded, not merely one: a two-term call whose
+ * second term has never been searched still has real work owed, and suppressing
+ * it would withdraw progress rather than prevent a repeat.
+ */
+function executedSearchForProposedCall(
+  workspace: string,
+  action: string,
+  args: Record<string, unknown>,
+): string[] | undefined {
+  const namedTerms = blockedSearchTerms(args);
+  // I-6 fix (unchanged): a pathless tree keys on the workspace root, the SAME
+  // fallback server.ts's `recordExecutedSearch` call records it under.
+  const searchKeys = action === "tree"
+    ? [String(args["path"] ?? workspace)]
+    : namedTerms.length > 0 ? namedTerms : [String(args["query"] ?? "")];
+  const consulted = searchKeys.map((key) => consultExecutedSearch(workspace, action, key));
+  if (consulted.some((entry) => entry === undefined)) return undefined;
+  return consulted.flatMap((entry) => entry ?? []);
+}
+
+/**
+ * F-V13-5 (GATE-A, 2026-09-14): does this proposed call name a
+ * find/references/tree whose every term this session already ran? The receipt
+ * paths' question about a call that is NOT the contract's `next_call` — see
+ * `receiptRecordWithoutConsumedSearch`.
+ */
+function consumedReceiptSearchCall(
+  workspace: string,
+  // Structural, not `ContinuationCall`: the two carriers this asks about are
+  // typed by DIFFERENT declarations of that name (`types`' own task-pack
+  // `ContinuationCall` on `capability_gaps[].next_call`, the protocol
+  // `ToolCall` alias on a record's `next`), and only `tool` + `arguments` are
+  // read here.
+  call: { readonly tool: string; readonly arguments?: unknown },
+): boolean {
+  if (call.tool !== "search_files") return false;
+  const args = (call.arguments ?? {}) as Record<string, unknown>;
+  const action = typeof args["action"] === "string" ? args["action"] : "";
+  if (!RECEIPT_UNREPAIRABLE_STALE_ACTIONS.has(action)) return false;
+  return executedSearchForProposedCall(workspace, action, args) !== undefined;
 }
 
 export function advanceExecutedLocateNextCall(
@@ -28035,8 +34262,7 @@ export function advanceExecutedLocateNextCall(
   // `""` here, which never matched anything server.ts recorded (that call
   // used to skip a pathless tree entirely) and left a bare-tree next_call
   // permanently unrepairable by this function.
-  const searchKey = action === "tree" ? String(ncArgs["path"] ?? workspace) : String(ncArgs["query"] ?? "");
-  const executed = consultExecutedSearch(workspace, action, searchKey);
+  const executed = executedSearchForProposedCall(workspace, action, ncArgs);
   if (executed === undefined) return "kept";
   // Only `locate` mints handles its candidates can be batch-read from
   // (candidateDetails[].handle). find/references/tree responses are
@@ -28054,6 +34280,31 @@ export function advanceExecutedLocateNextCall(
   delete contract.next_call;
   contract.reason = `${contract.reason}; next_call suppressed: that ${action} already ran this session and returned no usable candidates — widen scope (paths/cwd) or act on held evidence`;
   return "suppressed";
+}
+
+/**
+ * TL142-01A: every term a blocked `search_files` call is about, in all the
+ * spellings a producer or a caller may use for the same question —
+ * `queries:[...]` (the canonical form a pack proposes), the singular `query`
+ * (what Rule 5 re-derives), and `scope.symbol` (the `references`/symbol form).
+ *
+ * The whole 01A defect is that these spellings were treated as different
+ * searches: the executed `{queries:["validateToken"],scope:{kind:"symbol"}}`
+ * and the re-derived `{query:"validateToken"}` fingerprint differently, so the
+ * no-repeat ledger saw two unrelated calls. Collapsing them to the TERM here is
+ * what lets one recorded result answer for any of them.
+ */
+function blockedSearchTerms(blockedArgs: Record<string, unknown>): string[] {
+  const terms: string[] = [];
+  const push = (value: unknown): void => {
+    if (typeof value === "string" && value.length > 0 && !terms.includes(value)) terms.push(value);
+  };
+  const queries = blockedArgs["queries"];
+  if (Array.isArray(queries)) for (const entry of queries) push(entry);
+  push(blockedArgs["query"]);
+  const scope = blockedArgs["scope"];
+  if (scope !== null && typeof scope === "object") push((scope as { symbol?: unknown }).symbol);
+  return terms;
 }
 
 /**
@@ -28112,6 +34363,60 @@ function alternativeProgressAxis(
   // Tolerates a loosely-typed producer-exit payload whose surfaces may already
   // have been projected away; the search axes above and below still apply.
   const surfaces = codeTaskPackSurfaces(Array.isArray(result.surfaces) ? result.surfaces : []);
+  // Rule 1b (TL142-01A, 2026-09-13) — Rule 1 FOR THE ACTION A PACK ACTUALLY
+  // PROPOSES.
+  //
+  // Rule 1 above reads `consultExecutedLocate`, which is hard-wired to
+  // `action:"locate"` (util/packServeLog.ts). But for an open `identifier:*`
+  // obligation `nextCallForUnresolved` proposes `find`/`symbols`, never
+  // `locate` — so the one rule that could turn "the caller ran your search and
+  // it found src/auth.ts" into "read src/auth.ts" was structurally unreachable
+  // for every pack that hit this path. The blocked call then fell through to
+  // Rule 4 (re-read an already-disclosed partial window of an UNRELATED served
+  // file) and Rule 5 (re-derive a bare `{action:"find",query:t}` whose
+  // fingerprint differs from the executed `{queries:[t],scope:{kind:"symbol"}}`
+  // call, so the ledger filter below could not recognise it as a repeat) —
+  // exactly the retry.ts-receipt / redundant-search rotation the report
+  // observed.
+  //
+  // Reads the RESULT ledger, so it is action-agnostic by construction, and
+  // proposes `targets` (paths, with the located range when the hit carried a
+  // symbol line) rather than `handles`: a find/symbols response mints no
+  // handles of its own, so a handle-shaped next would name something its own
+  // recorded candidates cannot back — the reason Rule 1's `locate` arm is
+  // restricted to locate in the first place.
+  if (blocked.tool === "search_files") {
+    for (const term of blockedSearchTerms(blockedArgs)) {
+      const recorded = consultExecutedSearchResult(workspace, lane, term, taskBinding);
+      if (recorded === undefined) continue;
+      // R1-B2 (2026-09-13 review round): the SAME code-bearing gate the seed
+      // promotion applies, so the two mechanisms this wave built to agree on
+      // "what did that search find" cannot disagree about whether a markdown
+      // sentence counts. A prose-only hit is not the identifier's surface, and
+      // proposing it as the read that discharges the obligation would reach the
+      // same false certificate one call later.
+      //
+      // SHOULD-FIX 28 (2026-09-14, review round 4): `"located"` counts here too,
+      // for the same reason it counts as a seed — proposing the read of a
+      // located `.swift` declaration is progress the caller can act on, and the
+      // read cannot mint a certificate on its own (the obligation gate applies
+      // the identical code-bearing test to whatever gets served). Only
+      // `"refused"` (prose/markup/doc class, or a KNOWN language whose
+      // occurrences are all inside comments) stays out.
+      const unservedHits = recorded.hits.filter((hit) =>
+        !surfaces.some((surface) => surface.path === hit.path && hasServedCode(surface))
+        && classifyExecutedSearchHit(workspace, hit.path, term) !== "refused");
+      if (unservedHits.length === 0) continue;
+      candidates.push({
+        tool: "read_file",
+        arguments: {
+          targets: unservedHits
+            .slice(0, MAX_BATCH_NEXT_HANDLES)
+            .map((hit) => ({ path: hit.path, ...(hit.symbol !== undefined ? { symbol: hit.symbol } : {}) })),
+        },
+      });
+    }
+  }
   // Rule 3 — a required surface with no served code re-serves its own handle
   // (the contract builder's `gapFallback`, reachable after suppression).
   for (const surface of surfaces) {
@@ -28135,7 +34440,55 @@ function alternativeProgressAxis(
   // Rule 5 — a concern token the served bodies still do not match gets its own
   // find. Absence-proved tokens are already excluded by unmatchedConcernTokens,
   // and the ledger filter below catches anything it misses.
+  //
+  // TL142-01A: a token whose search THIS TASK ALREADY RAN is excluded here,
+  // whatever the recorded result was. The ledger filter at the bottom of this
+  // function compares FINGERPRINTS, so it could not catch this: the executed
+  // call was `{queries:[t],scope:{kind:"symbol"}}` and the call re-derived
+  // immediately above is `{query:t}` — semantically the same search, two
+  // different fingerprints, so an already-answered search kept winning ahead of
+  // Rule 1b's read of what that very search found. `executedSearchResults` is
+  // consulted (not just the blocked call's own terms) because Rule 5 mints
+  // calls for tokens the blocked call never named — which is also why the
+  // blocked call's own recorded terms need no separate set: every one of them
+  // is an entry of this same ledger.
+  //
+  // R1-S10b (2026-09-13 review round): TWO GUARDS, both of which this set
+  // originally lacked. The ledger merges the LANE's unbound partition, which
+  // every task in the lane that did not pass `task.epoch:"new"` shares, and the
+  // set was unconditional — so any token any task had ever searched was excluded
+  // from Rule 5 forever, including a token whose search was `scope.path`-narrowed
+  // and settled nothing. A suppression is only honest when the search it rests on
+  // actually answered the question:
+  //  - the term must be named VERBATIM by this query (the same gate
+  //    `executedSearchHitSeeds`/`promoteExecutedSearchAbsences` apply, and for
+  //    the same reason: another task's search must not silence this one's), and
+  //  - the recorded result must be a HIT or a PROVEN (caveat-free, un-narrowed,
+  //    literal) absence. A record that settled nothing leaves Rule 5 free to
+  //    propose the workspace-wide find, which IS the progress in that case.
+  //
+  // SHOULD-FIX 27 (2026-09-14, review round 4): A STALE RECORD NEITHER CERTIFIES
+  // NOR SUPPRESSES. `promoteExecutedSearchAbsences` already refuses to project
+  // an absence `recordedAbsenceIsStale` rejects; this set did not ask, so the
+  // one rebuild that WITHDREW the proof also silenced the find that would
+  // restore it — the chain reached `await_input:"no-grounded-call-remains"`
+  // with no `next`, and re-running the search by hand did certify again. The
+  // suppression and the projection now read the same predicate, so they cannot
+  // disagree about whether a recorded absence is still worth anything.
+  const alreadySearchedTerms = new Set(
+    executedSearchResults(workspace, lane, taskBinding)
+      .filter((entry) => query.includes(entry.term))
+      // Scoped to ABSENCE records: `recordedAbsenceIsStale` answers "does this
+      // recorded absence still describe the workspace", which is not a question
+      // about a HIT record — and its test (a) would fire on exactly the hit whose
+      // file this pack now serves, re-proposing a search that is already answered.
+      .filter((entry) =>
+        entry.hits.length > 0
+        || (entry.absence?.scopeComplete === true && !recordedAbsenceIsStale(workspace, result, entry)))
+      .map((entry) => entry.term),
+  );
   for (const token of unmatchedConcernTokens(query, surfaces)) {
+    if (alreadySearchedTerms.has(token)) continue;
     candidates.push({ tool: "search_files", arguments: { action: "find", query: token } });
   }
   // Rule 6 (R1, 2026-08-28) — THE DISCOVERY BUNDLE IS AN AXIS, NOT A SEPARATE
@@ -28503,6 +34856,149 @@ function receiptContinuationDisposition(
   return progress === undefined ? { state: "spent" } : { state: "advance", progress };
 }
 
+/**
+ * TL142-01C: the `create_target` a compact re-serve may restate, or undefined.
+ *
+ * Two conditions, both necessary and both cheap:
+ *  - the record actually certified one (`ServedPackRecord.createTarget`), and
+ *  - the named path STILL does not exist in the workspace.
+ *
+ * The second is the honesty gate: a create that already happened must never be
+ * re-asserted (the caller would be told to create a file it just wrote). It is
+ * an UNCACHED `fs.existsSync`, deliberately — the exact check
+ * `resolveCreateTargetFromQuery` itself makes ("exists → edit, not create") —
+ * because `statKindCached`'s memo has no invalidation hook for a file created
+ * mid-session, and a stale "missing" is precisely the answer this gate must
+ * never accept. One stat on a sub-1KB receipt path.
+ *
+ * Defence in depth, not the only line: creating the file also moves the
+ * inventory fingerprint `revalidateRecordToReceipt` compares, which declines
+ * the whole compact receipt and forces the full rebuild.
+ */
+function restatableCreateTarget(
+  workspace: string,
+  prev: ServedPackRecord,
+): TaskPackResult["create_target"] | undefined {
+  const target = prev.createTarget;
+  if (target === undefined || typeof target.path !== "string" || target.path.length === 0) return undefined;
+  const absolute = safeResolve(target.path, workspace);
+  if (absolute === undefined || fs.existsSync(absolute)) return undefined;
+  return target;
+}
+
+/**
+ * TL142-01C: did THIS record's own contract certify a terminal action?
+ *
+ * The same four conjuncts `canonicalDecision.ts`'s (module-private)
+ * `hasCertificateForTerminal` reads, restated here rather than exported,
+ * because this call site asks about a STORED `ServedPackRecord`'s contract, not
+ * about a freshly-built pack's. Kept adjacent to its single caller so the two
+ * cannot drift silently: a change to the terminal floor that forgets this
+ * predicate makes the receipt MORE conservative (declines, rebuilds), never
+ * less — the safe direction.
+ */
+function recordCertifiedTerminal(contract: TaskExecutionContract | undefined): boolean {
+  return contract !== undefined
+    && contract.state === "ready"
+    && contract.discovery_complete === true
+    && (contract.next_action === "answer" || contract.next_action === "edit")
+    && hasCertificateBinding(contract);
+}
+
+/**
+ * TL142-01C: a record with a STILL-PENDING create whose own contract never
+ * certified must not be replayed as "nothing changed" once this task has served
+ * evidence the record never saw.
+ *
+ * THE OBSERVED REGRESSION. The report's create query ("src/new-config.ts を新規
+ * 作成してください…") opens with a `discover` pack that already resolves
+ * `create_target` but whose contract is `needs-followup`; running that pack's
+ * own prescribed `next` (a batched read of the sibling files) reaches
+ * `act.edit` + `create_target`. A bare `{qref}` / `task:{handle}` resume — and a
+ * plain query resend with no `task` field — all re-enter `tryServeCachedPack`,
+ * whose fingerprint is over the TASK's pathless request, so all three match the
+ * PRE-advance seed record and replay its `discover` + its already-executed
+ * 4-file `next`. `create_target` and `act.edit` both vanish on an unchanged
+ * workspace, and the caller is sent back around a loop it already completed.
+ *
+ * NARROW BY CONSTRUCTION, and each conjunct is load-bearing:
+ *  1. the record carries a create target that is STILL absent
+ *     (`restatableCreateTarget`) — the only class where replaying "nothing
+ *     changed" withholds the single action the request asked for;
+ *  2. the record's own contract is NOT certified (`recordCertifiedTerminal`) —
+ *     a certified record is replayed normally, with its create target restated
+ *     (see the `create_target` member of the receipt), so the receipt economy
+ *     for the report's own "first call is already act.edit" shape is untouched;
+ *  3. this task's cumulative served-surface ledger now holds a path the record
+ *     never captured — proof that the rebuild has strictly more to certify
+ *     from than the capture did. Without it, a genuine no-op repeat (nothing
+ *     executed in between) would rebuild for nothing.
+ *
+ * TERMINATES IN ONE REBUILD: the rebuild re-captures this signature's record,
+ * and a rebuild that now certifies makes conjunct 2 false for every later
+ * repeat. A rebuild that still does not certify leaves conjunct 3 false (it
+ * captures the paths it just saw), so the decline cannot repeat either.
+ */
+function createPendingRecordIsStale(workspace: string, prev: ServedPackRecord): boolean {
+  if (restatableCreateTarget(workspace, prev) === undefined) return false;
+  if (recordCertifiedTerminal(prev.executionContract)) return false;
+  const capturedPaths = new Set(prev.surfaces.map((s) => s.path));
+  return queryServedSurfaces(workspace, workspace, { epochTokens: prev.epochTokens })
+    .some((entry) => !capturedPaths.has(entry.path));
+}
+
+/**
+ * TL142-01B: an UNCERTIFIED ANSWER record captured before this task proved a
+ * request term absent must not be replayed as "nothing changed".
+ *
+ * THE OBSERVED DEAD END. `Explain validateToken and quantumTeleportationMode.`
+ * serves `validateToken` and prescribes `find quantumTeleportationMode`. The
+ * caller runs it; the reply is an exhaustive, literal, un-narrowed absence
+ * certificate. The resume exact-fingerprint-matches the PRE-search record, and
+ * a receipt can only RESTATE a readiness verdict, never re-derive one — so it
+ * restated "needs-followup" over a search that had already been spent, and the
+ * producer exit turned that into `await_input:"no-grounded-call-remains"`. The
+ * one thing that could close the task (the absence is the answer for that term)
+ * had no way in. The rebuild this decline forces DOES re-derive it, via
+ * `promoteExecutedSearchAbsences`.
+ *
+ * DELIBERATELY NARROWER THAN "any newer search result". `receiptContinuation-
+ * Disposition`'s own doc comment records an earlier ruling (F-V13-5): a
+ * consumed SEARCH continuation is repaired IN-RECEIPT and never declined,
+ * because a fall-through recomputes the receipt's top-level `missing[]` from a
+ * different premise and an absence-discharged CONCERN token reappears as an
+ * `unresolved-ledger:` row the receipt had correctly dropped — sequenceCorpus's
+ * I1/I3, which fails on the broader gate (measured). That ruling is about an
+ * EDIT-intent pack's concern-token ledger. This gate therefore fires only on
+ * the ANSWER side, where a proven absence is not a discharged requirement but
+ * part of the answer itself, and only when:
+ *  - the record is an answer receipt (`taskProfile`/`route`, the same predicate
+ *    `compactReceiptFromRecord` already computes as `isAnswerReceipt`);
+ *  - its contract never certified (a certified record is restated as-is —
+ *    TL142-01C's `create_target` and the absences below ride along);
+ *  - a scope-complete absence was recorded AFTER this record was captured
+ *    (`ExecutedSearchResult.sequence` vs `executedSearchSequence`);
+ *  - and that term is one of this task's own epoch tokens, so an unrelated
+ *    search in the same lane cannot invalidate this record.
+ *
+ * Self-limiting exactly like the other decline on this path: the rebuild
+ * captures the current sequence, so the next identical repeat receipts again.
+ */
+function answerRecordPredatesProvenAbsence(
+  workspace: string,
+  prev: ServedPackRecord,
+  taskBinding?: string,
+): boolean {
+  if (prev.taskProfile !== "answer" && prev.route?.action !== "answer_from_handles") return false;
+  if (recordCertifiedTerminal(prev.executionContract)) return false;
+  const epochTokens = new Set(prev.epochTokens);
+  return executedSearchResults(workspace, prev.lane, taskBinding).some((entry) =>
+    entry.absence !== undefined
+    && entry.hits.length === 0
+    && entry.sequence > prev.executedSearchSequence
+    && tokenizeForEpoch(entry.term).some((token) => epochTokens.has(token)));
+}
+
 function compactReceiptFromRecord(
   workspace: string,
   prev: ServedPackRecord,
@@ -28523,6 +35019,19 @@ function compactReceiptFromRecord(
         discovery_complete: prev.executionContract.discovery_complete,
         next_action: prev.executionContract.next_action,
         max_additional_discovery_calls: prev.executionContract.max_additional_discovery_calls,
+        // SHOULD-FIX 36 (2026-09-14, review round 5): without this, EVERY
+        // compact receipt's `capability_gaps` was silently `undefined` —
+        // `decisionWire.ts::projectGaps`/`projectUnresolved` (steps 2+) both
+        // read `contract.capability_gaps` directly, so a `discover`-shaped
+        // re-pack lost `decision.gaps` ENTIRELY (not just the
+        // unreadable-named-path disclosure this finding names — the SAME
+        // pack's unrelated "surface-content"/identifier gaps vanished too,
+        // exactly as review-findings-5.md's own root-cause note observed).
+        // Safe to restate verbatim: `compactReceiptFromRecord` only ever runs
+        // once `revalidateRecordToReceipt`'s own staleness gates (unchanged
+        // file SHAs, unchanged inventory-complete workspace fingerprint) have
+        // already proven nothing this contract was built over has moved.
+        capability_gaps: prev.executionContract.capability_gaps,
         // Clause-boundary cap (same discipline as applyEnvelopeWeightTrim):
         // the hard slice shipped fragments like "… are served — act on the",
         // an instruction cut mid-directive.
@@ -28666,6 +35175,25 @@ function compactReceiptFromRecord(
   const isAnswerReceipt = prev.taskProfile === "answer"
     || prev.route?.action === "answer_from_handles";
   const receiptRoute = applyCompleteStopRoute(prev.route, prev.coverage, isAnswerReceipt);
+  const restatedCreateTarget = restatableCreateTarget(workspace, prev);
+  // SHOULD-FIX 36 (2026-09-14, review round 5): the SAME re-derivation
+  // `discloseUnreadableNamedPaths`'s own "restored" branch does over
+  // `result.missing` on a FRESH pack (the layer that function's own doc
+  // comment says re-populates `result.unreadable_named_paths` when this
+  // call's per-request ALS is empty) — done HERE too, because
+  // `compactReceiptFromRecord` never calls `discloseUnreadableNamedPaths` at
+  // all (it is not part of `dedupeTrimAndPersist`'s pipeline). Without this,
+  // `decisionWire.ts::projectUnresolved`'s own path-preserving "step 0b" never
+  // fires on ANY of the three receipt doors, and the disclosure that DOES
+  // survive (via the generic `missingRows`/`parseLedgerMissingRow` fallback
+  // further down that same projector) drops `path` and restates a different,
+  // prose-only reason string — the exact "not the same row" finding 36 names.
+  // `prev.missing` (not `receipt.missing`, not yet assembled at this point)
+  // is the identical source array — see the `missing: [...prev.missing]`
+  // field below.
+  const restoredUnreadableNamedPaths = prev.missing
+    .map(parseUnreadableNamedPathRow)
+    .filter((entry): entry is NonNullable<ReturnType<typeof parseUnreadableNamedPathRow>> => entry !== undefined);
   const receipt: TaskPackResult = {
     mode: "task_pack",
     coverage: prev.coverage,
@@ -28712,6 +35240,28 @@ function compactReceiptFromRecord(
       && prev.executionContract?.next_call === undefined
       && receiptDisposition.state === "fresh"
       ? { next: prev.next }
+      : {}),
+    // TL142-01C: restate the create route this record certified. Without it
+    // `applyCanonicalTaskDecision` below has no `create_target` to read and
+    // every same-epoch repeat of an act.edit+create pack degraded to
+    // discover/await_input over an unchanged workspace. Gated on the target
+    // still being absent — see `restatableCreateTarget`.
+    ...(restatedCreateTarget !== undefined ? { create_target: restatedCreateTarget } : {}),
+    // TL142-01B: restate the verified-absent disclosure, so a re-served
+    // certificate keeps the `gaps` it was minted with. Safe on this path by
+    // construction: every gate above has already proven the whole
+    // inventory-complete workspace byte-identical to the one the absence was
+    // proved against.
+    ...(prev.requestItemAbsences !== undefined && prev.requestItemAbsences.length > 0
+      ? { request_item_absences: prev.requestItemAbsences.map((absence) => ({ ...absence })) }
+      : {}),
+    // SHOULD-FIX 36: restate the first-class field the two wire projectors
+    // (`buildCapabilityGaps`-driven `decision.gaps`, and `projectUnresolved`'s
+    // own path-preserving "step 0b") both key their disclosure off — see
+    // `restoredUnreadableNamedPaths`'s own doc comment above for why this
+    // cannot instead happen inside `discloseUnreadableNamedPaths`.
+    ...(restoredUnreadableNamedPaths.length > 0
+      ? { unreadable_named_paths: restoredUnreadableNamedPaths }
       : {}),
   };
   // P0a §6.1: a receipt is an alternate WIRE shape, not alternate decision
@@ -28879,6 +35429,10 @@ function revalidateRecordToReceipt(
       prev.executionContract?.next_call ?? prev.next,
     ).state === "spent"
   ) return undefined;
+  // TL142-01C: see `createPendingRecordIsStale`.
+  if (createPendingRecordIsStale(workspace, prev)) return undefined;
+  // TL142-01B: see `answerRecordPredatesProvenAbsence`.
+  if (answerRecordPredatesProvenAbsence(workspace, prev, consumption.taskBinding)) return undefined;
   return compactReceiptFromRecord(workspace, prev, currentWorkspaceState, consumption);
 }
 
@@ -29099,6 +35653,15 @@ function tryServeSubsetReceipt(
     coverageReason: result.coverage_reason,
     coverageBasis: result.coverage_basis,
     route: result.route ? { ...result.route } : undefined,
+    // TL142-01C: the THIRD receipt door, and it dropped the create route the
+    // same way the stored-record door did. This path compacts a FRESHLY BUILT,
+    // already-certified pack, so omitting `create_target` here turned a
+    // just-earned `act.edit` into `await_input:"no-grounded-call-remains"` —
+    // the certificate survived, the frontier the create IS did not, and
+    // `projectTaskDecision`'s act.edit floor needs both.
+    createTarget: result.create_target ? { ...result.create_target } : undefined,
+    requestItemAbsences: result.request_item_absences ? result.request_item_absences.map((a) => ({ ...a })) : undefined,
+    executedSearchSequence: executedSearchResultSequence(workspace, currentSessionLane(), taskBinding),
     epochTokens: [...epochTokens],
     requestRoles: [], // synthetic subset-receipt record — never stored, so never F2-matched
     requestPaths: [],
@@ -29254,42 +35817,92 @@ function epochServedEvidence(
   workspace: string,
   result: TaskPackResult,
   epochTokens: readonly string[],
+  /**
+   * WP-S11: the CONSULTING pack's profile. Only an `answer` pack may read the
+   * same-task read-only serve view, so a change pack that re-packs the same
+   * wording can never inherit a declared-answer task's evidence — the
+   * "declared answer tasks remain excluded from edit closure" constraint at
+   * `cumulativeEligible` holds from the read side too. Omitted (the readiness
+   * specs' synthetic callers) reads the cumulative log alone, as before.
+   */
+  profile?: TaskProfile,
 ): TaskPackSurface[] {
   return [
     ...codeTaskPackSurfaces(result.surfaces),
-    ...epochServedSurfaceEntries(workspace, epochTokens, result).flatMap((entry) => {
-      // DESIGN-v0.15 R1 / validation appendix §1 row 2 fix (2026-09-07): the
-      // serve log only proves a path was served at SOME earlier revision —
-      // it carries no range/sha. Reconstructing "evidence" by re-reading the
-      // whole CURRENT file (the prior behaviour here) let a same-epoch
-      // challenge certify a concern from bytes that may have diverged from
-      // what this caller actually received (a file edited between two packs
-      // of the epoch, by the user, a native tool, or this task's own
-      // `edit_file`). The session's OWN served-range ledger
-      // (`state/session.ts`) is the one structure that records BOTH a sha
-      // and the exact merged line spans served under it — use ONLY that,
-      // sliced, and only when its `fileSha` still matches the file on disk
-      // right now. A stale sha, or no ledger entry at all (served only
-      // through some other path this ledger never saw), yields NO evidence
-      // for this path rather than a whole-file guess.
-      const ledger = getSession(workspace).servedRangeLedger.get(entry.path);
-      if (ledger === undefined || ledger.ranges.length === 0) return [];
-      const current = readCached(workspace, entry.path);
-      if (current === undefined) return [];
-      if (shaOfText(current) !== ledger.fileSha) return [];
-      const code = ledger.ranges
-        .map(([start, end]) => sliceLinesToText(current, start, end))
-        .join("\n");
-      if (code.length === 0) return [];
-      return [{
-        role: entry.role,
-        handle: entry.handle ?? "",
-        path: entry.path,
-        range: ledger.ranges.map(([start, end]) => `${start}-${end}`).join(","),
-        code,
-      }];
-    }),
+    ...reconstructServedEntryEvidence(
+      workspace,
+      epochServedSurfaceEntriesWithView(workspace, epochTokens, result, profile === "answer"),
+    ),
   ];
+}
+
+/**
+ * Turn served-surface LOG ENTRIES into evidence the caller genuinely still
+ * holds.
+ *
+ * DESIGN-v0.15 R1 / validation appendix §1 row 2 fix (2026-09-07): the serve
+ * log only proves a path was served at SOME earlier revision — it carries no
+ * range/sha. Reconstructing "evidence" by re-reading the whole CURRENT file
+ * (the prior behaviour here) let a same-epoch challenge certify a concern from
+ * bytes that may have diverged from what this caller actually received (a file
+ * edited between two packs of the epoch, by the user, a native tool, or this
+ * task's own `edit_file`). The session's OWN served-range ledger
+ * (`state/session.ts`) is the one structure that records BOTH a sha and the
+ * exact merged line spans served under it — use ONLY that, sliced, and only
+ * when its `fileSha` still matches the file on disk right now. A stale sha, or
+ * no ledger entry at all (served only through some other path this ledger
+ * never saw), yields NO evidence for this path rather than a whole-file guess.
+ *
+ * WP-S11 extracted this from `epochServedEvidence` unchanged, so the
+ * read-only serve view's entries are subject to the identical sha gate — that
+ * gate, not the view, is what makes carried-forward evidence honest.
+ */
+function reconstructServedEntryEvidence(
+  workspace: string,
+  entries: readonly ServedSurfaceEntry[],
+): TaskPackSurface[] {
+  return entries.flatMap((entry) => {
+    const ledger = getSession(workspace).servedRangeLedger.get(entry.path);
+    if (ledger === undefined || ledger.ranges.length === 0) return [];
+    const current = readCached(workspace, entry.path);
+    if (current === undefined) return [];
+    if (shaOfText(current) !== ledger.fileSha) return [];
+    const code = ledger.ranges
+      .map(([start, end]) => sliceLinesToText(current, start, end))
+      .join("\n");
+    if (code.length === 0) return [];
+    return [{
+      role: entry.role,
+      handle: entry.handle ?? "",
+      path: entry.path,
+      range: ledger.ranges.map(([start, end]) => `${start}-${end}`).join(","),
+      code,
+    }];
+  });
+}
+
+/**
+ * WP-S11 — the SAME-TASK carried-forward evidence of a DECLARED-answer task,
+ * and nothing else: the read-only serve view alone, never the cumulative log,
+ * minus the paths this pack is serving itself.
+ *
+ * Separate from `epochServedEvidence` on purpose. A task excluded from the
+ * cumulative log is also excluded from every channel that log feeds — the
+ * coverage flip, `served_earlier`, `stampEpochServedPaths` — so a re-pack of
+ * such a task has NO way to see its own pack 1. An undeclared/inferred answer
+ * task does have those channels and keeps exactly the behaviour it has today:
+ * widening them is a policy change, not this defect.
+ */
+function readOnlyViewCarriedEvidence(
+  workspace: string,
+  result: TaskPackResult,
+  epochTokens: readonly string[],
+): TaskPackSurface[] {
+  const ownPaths = new Set(codeTaskPackSurfaces(result.surfaces).map((surface) => surface.path));
+  return reconstructServedEntryEvidence(
+    workspace,
+    readOnlyServedEntries(workspace, epochTokens).filter((entry) => !ownPaths.has(entry.path)),
+  );
 }
 
 /**
@@ -29301,11 +35914,13 @@ function reconcileEpochTaskContract(
   workspace: string,
   result: TaskPackResult,
   query: string,
+  /** WP-S11: see `epochServedEvidence`'s own `profile` doc — the read-only serve view is answer-only. */
+  profile?: TaskProfile,
 ): void {
   const epochTokens = tokenizeForEpoch(query);
   const stored = queryTaskContract(workspace, epochTokens);
   if (stored === undefined) return;
-  const evidence = epochServedEvidence(workspace, result, epochTokens);
+  const evidence = epochServedEvidence(workspace, result, epochTokens, profile);
   const covered = new Set([...stored.servedRoles, ...evidence.map((surface) => surface.role)]);
   recordServedRoleEvidence(workspace, [...covered]);
   // A BACKSTOP, not a second narrator. When this pack already names the gap in
@@ -29381,6 +35996,12 @@ function reconcileEpochTaskContract(
   result.missing = [...new Set([
     ...result.missing,
     ...unservedRoles.map((role) =>
+      // WP-S11 (Part B) deliberately leaves BOTH spellings below alone: these
+      // are not prose either. `canonicalDecision.ts`'s UNSERVED_EPOCH_ROLE_RE
+      // / UNCOVERED_EPOCH_CONCERN_RE parse them back into `decision.next_call`
+      // — the canonical, projected field the caller actually executes — so a
+      // canonicalized spelling here would DELETE the recovery rather than
+      // improve it (same ruling as `continuationQuery`'s own doc block).
       `${UNSERVED_EPOCH_ROLE_PREFIX}${role} (required by an earlier pack in this task;`
       + ` re-request via read_file mode=task_pack query="${sourceQuery}" surfaceRoles=["${role}"])`),
     ...uncoveredConcerns.map((token) =>
@@ -29658,7 +36279,7 @@ const MAX_FALLBACK_MISSING_ENTRIES = 4;
  * EXECUTABLE.
  *
  * buildRoute tells such a pack's caller "if required sites are missing from the
- * candidates, ONE task_pack with paths=[chosen + missing] is sanctioned" — as
+ * candidates, ONE read_file {query, targets:[chosen + missing]} is sanctioned" — as
  * PROSE inside route.reason, which the caller has to parse and transcribe into
  * a call. Live forensics (run 2026-07-31-semantic-signal5-2, T05c rep0): the
  * caller never did; it re-issued the same query-only pack and got another
@@ -30374,8 +36995,10 @@ function reclaimForDocSliver(result: TaskPackResult, cap: number, want: number):
  *   3  the sanctioned zoom (next_call)
  *   4  the route honesty clause — only once no affordance level remains, since
  *      restoring it resurrects "working set complete — stop discovery"
- *   5  advisory pack prose (create_note / verify / checks), because past rung 4
- *      the overage is demonstrably not this pass's doing
+ *   5  advisory pack prose (the verification verdict's fixed no-install
+ *      `suggestion`, then create_note / verify / checks, then the verdict
+ *      itself), because past rung 4 the overage is demonstrably not this
+ *      pass's doing
  *   6  the doc surface itself — forbidden while the floor fits, reachable only
  *      when the pack cannot transport even the pre-L1 sliver + handle
  */
@@ -30436,6 +37059,33 @@ function shrinkDocSliverAffordanceToFit(
   // from the uncapped route/verify/runtime prose added after the last
   // fitsInCap gate. Shed that prose in trimToCap's own priority order (advisory
   // speculation first) rather than charging it to the doc surface.
+  //
+  // 2026-09-15 (Windows wave, T05c multi_concern): measured, this ladder had
+  // NOTHING to give on the exact pack it exists for. With no doc-sliver
+  // affordance attached (the 2026-09-05 markdown anchor-focus re-pin) rungs
+  // 1-4 are no-ops, `create_note`/`verify`/`checks` were all absent, the floor
+  // restore was empty and rung 6's handle set was empty — so a 38B overage
+  // shipped at 32806B, past the 32768B transport ceiling the bench smoke gate
+  // refuses on. The bytes that made the difference were `verification`:
+  // `attachVerificationVerdict` lands BEFORE trimToCap, but ~1.8KB of
+  // un-size-checked prose lands AFTER it, so the verdict's SIZE is what
+  // decides the final fit. On a host WITH the probed toolchain the verdict is
+  // 93B (`available:true` + `command`); on a host WITHOUT one it is 202B —
+  // `available:false` + `reason` + a 127B FIXED `suggestion` string. Every
+  // Windows box in this wave, and any CI image without a C/C++ toolchain,
+  // therefore breached the ceiling on a pack that fits everywhere a compiler
+  // happens to be installed. This is not a Windows bug: it reproduces exactly
+  // on macOS through `setToolchainPathLookupForTest`.
+  //
+  // The `suggestion` is a CONSTANT (VERIFY_NO_INSTALL_SUGGESTION) carrying no
+  // pack-specific information, so it goes first — ahead even of the computed
+  // prose below. `available`/`reason` are pack-specific honesty and are only
+  // given up once every other advisory string is gone, and still ahead of
+  // rung 6's floor flags and rung 7's authority-document drop.
+  if (result.verification !== undefined && "suggestion" in result.verification) {
+    delete (result.verification as { suggestion?: string }).suggestion;
+    if (fitsInCap(result)) return;
+  }
   if (result.create_note !== undefined) {
     result.create_note = undefined;
     if (fitsInCap(result)) return;
@@ -30446,6 +37096,14 @@ function shrinkDocSliverAffordanceToFit(
   }
   if (result.checks !== undefined) {
     result.checks = undefined;
+    if (fitsInCap(result)) return;
+  }
+  // The verdict itself is advisory runnability metadata, not evidence: no
+  // handle, no coverage claim and no `missing` row depends on it, and an agent
+  // that needs it can probe its own host. Given up before the floor flags
+  // below, which are honesty ABOUT served evidence.
+  if (result.verification !== undefined) {
+    result.verification = undefined;
     if (fitsInCap(result)) return;
   }
 
@@ -30722,7 +37380,7 @@ function annotateEditZoomAffordance(result: TaskPackResult): void {
   if (partialDisclosed === 0) return;
   result.route = {
     ...route,
-    reason: `${route.reason}; ${partialDisclosed} surface(s) have remaining_ranges (re-slice to zoom, or ONE read_file mode=full of that handle when most of the file is needed)`,
+    reason: `${route.reason}; ${partialDisclosed} surface(s) have remaining_ranges (re-slice to zoom, or ONE read_file {targets:[{handle}], content:"full"} when most of the file is needed)`,
   };
 }
 
@@ -30756,7 +37414,15 @@ export function applyEnvelopeWeightTrim(
     for (const surf of codeTaskPackSurfaces(result.surfaces)) {
       const carriesFullCode = surf.code !== undefined && surf.content_completeness !== "partial";
       if (carriesFullCode) {
-        delete surf.why;
+        // SHOULD-FIX 28 (2026-09-14, review round 4): one `why` is NOT
+        // orientation the caller already holds — it is a CAVEAT ABOUT THIS
+        // BODY. A surface promoted out of the executed-search ledger in a
+        // language this server cannot classify says so in its `why`
+        // (`EXECUTED_SEARCH_UNCLASSIFIED_WHY`: the declaration is unverified),
+        // and stripping that leaves a full-bodied surface that reads exactly
+        // like a verified one. Every other `why` is a provenance label the
+        // caller has seen before, and keeps being dropped.
+        if (surf.why !== EXECUTED_SEARCH_UNCLASSIFIED_WHY) delete surf.why;
         delete surf.outline;
       }
     }
@@ -31126,8 +37792,18 @@ function applyLedgerServedSurfaces(workspace: string, result: TaskPackResult): v
  * that trimToCap then stripped (Phase 5 drops `surf.code`; Phase 1 drops whole
  * surfaces), so the NEXT pack would emit `code_unchanged: "<handle> — see
  * prior pack"` pointing at code the prior pack never actually delivered.
+ *
+ * TL142-03 (2026-09-13): `taskBinding` narrows the `required===true` skip
+ * below to the ONE case its own comment describes — a genuinely DIFFERENT
+ * request reusing this handle while making the body action-bearing — instead
+ * of every required surface, unconditionally, forever. An unchanged repeat of
+ * the SAME task (proven by a matching `TaskPackArgs.taskBinding`, the
+ * server-resolved identity behind qref/task.handle) dedupes a required
+ * surface exactly like any other; when identity cannot be proven (either side
+ * `undefined`, or a genuinely different task), the skip still fires and the
+ * body is resent — fail toward resending, never toward a false "same task".
  */
-export function applyPackDedupe(workspace: string, result: TaskPackResult): void {
+export function applyPackDedupe(workspace: string, result: TaskPackResult, taskBinding?: string): void {
   const prior = lastPackBlocksByWorkspace.get(laneScopedKey(workspace)) ?? [];
   const running: PackedBlockFingerprint[] = prior.map((f) => ({ ...f, fromPriorPack: true }));
 
@@ -31139,8 +37815,13 @@ export function applyPackDedupe(workspace: string, result: TaskPackResult): void
       // A different request can reuse the same handle while making that body
       // action-bearing (artifact target, edit frontier, etc.). Exact request
       // re-calls are already intercepted by pack_unchanged; never replace a
-      // newly required body with a pointer to unrelated prior-pack context.
-      if (match.fromPriorPack && surf.required === true) continue;
+      // newly required body with a pointer to unrelated prior-pack context —
+      // UNLESS this fingerprint was recorded under the SAME proven task
+      // identity, in which case it is not "a different request" at all.
+      const provenSameTask = match.taskBinding !== undefined
+        && taskBinding !== undefined
+        && match.taskBinding === taskBinding;
+      if (match.fromPriorPack && surf.required === true && !provenSameTask) continue;
       // W4: preserve the real body server-side (identity-keyed) so proof passes
       // stay deterministic across identical re-calls; the response still ships
       // only the compact pointer below.
@@ -31151,34 +37832,64 @@ export function applyPackDedupe(workspace: string, result: TaskPackResult): void
       surf.code = undefined;
       continue;
     }
-    running.push({ handle: surf.handle, range: surf.range, hash, fromPriorPack: false });
+    running.push({ handle: surf.handle, range: surf.range, hash, fromPriorPack: false, taskBinding });
   }
 }
 
 /**
  * P1 fix: persist the FINAL response's code-bearing surfaces as this
- * workspace's "last pack" fingerprints, replacing the cache wholesale (true
- * last-pack semantics — the cache is what the immediately-next pack dedupes
- * against, so it must describe exactly what THIS pack actually delivered).
+ * workspace's "last pack" fingerprints — the cache is what the
+ * immediately-next pack dedupes against, so it must describe exactly what
+ * THIS pack actually delivered.
  *
- * Runs AFTER trimToCap. Records ONLY surfaces that still carry embedded `code`
+ * Runs AFTER trimToCap. Records surfaces that still carry embedded `code`
  * in the final result: a surface whose code trimToCap stripped (Phase 5), or
  * a surface trimToCap dropped entirely (Phase 1), delivered no code, so it
- * must not seed a `code_unchanged` pointer on the next pack. Surfaces already
- * carrying `code_unchanged` (suppressed by applyPackDedupe above) delivered no
- * fresh code either and are likewise not re-recorded — the prior entry they
- * point at is already in the (previous) cache, but since we replace wholesale,
- * only surfaces that shipped code THIS pack are what the next pack can match.
+ * must not seed a `code_unchanged` pointer on the next pack — such a surface
+ * is simply absent from `result.surfaces` with a `code` value, so the loop
+ * below never records it.
+ *
+ * TL142-03 (2026-09-13): MERGE, don't replace. The pre-fix version rebuilt
+ * the cache from scratch every call, recording ONLY surfaces that shipped
+ * FRESH code THIS pack — so a surface applyPackDedupe (or the residency
+ * passes) successfully demoted to `code_unchanged` THIS call dropped OUT of
+ * the cache going into the NEXT call, even though nothing about it changed.
+ * For a non-required surface that is a stable period-2 oscillation (dedupes,
+ * forgets, re-sends in full, re-populates, dedupes again — forever); for a
+ * required one it compounded with the `applyPackDedupe` guard to make the
+ * body unconditionally fresh every call. The fix: a surface demoted to
+ * `code_unchanged` THIS call is STILL VALID (its content provably did not
+ * change — that is what "demoted" means), so its fingerprint is carried
+ * forward exactly like a freshly-delivered one. The real body a demotion
+ * needs to re-hash is recovered from the `dedupedSurfaceBody` side channel
+ * (set by both applyPackDedupe and applyResidentFileDedup on every match) —
+ * a surface demoted by applyLedgerServedSurfaces never had `code` to begin
+ * with (it only processes codeless surfaces), so there is nothing to carry
+ * for it here; that mechanism re-derives residency from the session ledger on
+ * every call regardless of this cache.
  */
-export function persistPackFingerprints(workspace: string, result: TaskPackResult): void {
+export function persistPackFingerprints(workspace: string, result: TaskPackResult, taskBinding?: string): void {
   const fingerprints: PackedBlockFingerprint[] = [];
   for (const surf of result.surfaces) {
-    if (surf.code === undefined) continue;
+    if (surf.code !== undefined) {
+      fingerprints.push({
+        handle: surf.handle,
+        range: surf.range,
+        hash: shaOfText(surf.code),
+        fromPriorPack: true,
+        taskBinding,
+      });
+      continue;
+    }
+    if (surf.code_unchanged === undefined) continue;
+    const unchangedBody = dedupedSurfaceBody.get(surf);
+    if (unchangedBody === undefined) continue; // codeless-origin demotion — nothing to carry
     fingerprints.push({
       handle: surf.handle,
       range: surf.range,
-      hash: shaOfText(surf.code),
+      hash: shaOfText(unchangedBody),
       fromPriorPack: true,
+      taskBinding,
     });
   }
   lastPackBlocksByWorkspace.set(laneScopedKey(workspace), fingerprints);
@@ -32043,6 +38754,15 @@ function bookShippedPackServeState(
       })),
       bookings.epochTokens,
     );
+  } else if (shipped.length > 0) {
+    // WP-S11: the declared-answer complement. The comment above says why these
+    // surfaces must not enter the cumulative log — an answer pack has no edit
+    // closure to complete a later change pack from. It does not follow that
+    // this task should forget its own bodies: record them in the same-task
+    // READ-ONLY view instead, which only `epochServedEvidence` consults, so a
+    // re-pack of THIS task stops re-minting obligations pack 1 discharged.
+    // Same projection (`shipped`), same epoch binding, no write authority.
+    recordReadOnlyServedSurfaces(workspace, shipped, bookings.epochTokens);
   }
 
   // Cache only after the final returned projection. An awaiting-input or
@@ -32454,6 +39174,580 @@ function attachVerificationVerdict(workspace: string, result: TaskPackResult): v
   result.verification = verdict;
 }
 
+/**
+ * SHOULD-FIX 32 (2026-09-14, review round 4/5): the exact inverse of the
+ * `missing[]` row template `discloseUnreadableNamedPaths` builds below
+ * (`${UNREADABLE_NAMED_PATH_PREFIX}<path> (named by this request; not
+ * served: <reason>)`) — kept beside its builder, one formula, so they can
+ * never drift silently out of sync (`readCodeTaskPack.spec.ts` also pins a
+ * literal build-then-parse round trip).
+ *
+ * Exists because `result.missing` is a plain, persisted string array
+ * (`ServedPackRecord.missing`) that survives a `qref`/`task.handle` re-pack
+ * that carries an earlier pack's `missing[]` forward, while
+ * `result.unreadable_named_paths` — the FIRST-CLASS field `buildCapabilityGaps`
+ * and `decisionWire.ts`'s `projectUnresolved` both key their own disclosure
+ * off — is populated only from `unreadableNamedPathRows()`, an ALS scoped to
+ * the ONE `buildTaskPack` call that actually re-ran
+ * `augmentQueryNamedFileSurfaces`. A re-pack that instead reuses carried-
+ * forward surfaces never re-populates that ALS, so without this the `missing`
+ * row alone survived while the gap and the `unresolved[]` row it drives both
+ * silently vanished.
+ *
+ * Exported (alongside `UNREADABLE_NAMED_PATH_PREFIX`) only so
+ * `readCodeTaskPack.spec.ts` can pin the literal build-then-parse round trip
+ * directly — the same "exported for one pin" precedent `FileReadCache` above
+ * documents for the FX-OH F1 case.
+ */
+export function parseUnreadableNamedPathRow(
+  row: string,
+): { path: string; reason: "unreadable" | "undecodable"; provenance: "request" | "resolution" } | undefined {
+  if (!row.startsWith(UNREADABLE_NAMED_PATH_PREFIX)) return undefined;
+  const rest = row.slice(UNREADABLE_NAMED_PATH_PREFIX.length);
+  // SHOULD-FIX 65 (AC1, 2026-09-14, review round 12): the row now spells its own
+  // PROVENANCE, and both spellings round-trip — the pre-round-12 wording ("named
+  // by this request") is exactly the `"request"` case, so a `missing[]` row
+  // carried forward from an earlier pack parses back to the same meaning it had.
+  const match = /^(.+) \((named by this request|reached while resolving this request); not served: (unreadable|undecodable)\)$/
+    .exec(rest);
+  if (match === null) return undefined;
+  return {
+    path: match[1]!,
+    reason: match[3] as "unreadable" | "undecodable",
+    provenance: match[2] === "named by this request" ? "request" : "resolution",
+  };
+}
+
+/**
+ * SHOULD-FIX 65 (AC1, 2026-09-14, review round 12): the ONE `missing[]` spelling,
+ * so the producer and `parseUnreadableNamedPathRow` above cannot drift.
+ */
+function unreadableNamedPathMissingRow(row: {
+  path: string;
+  reason: "unreadable" | "undecodable";
+  provenance?: "request" | "resolution";
+}): string {
+  const provenance = (row.provenance ?? "request") === "request"
+    ? "named by this request"
+    : "reached while resolving this request";
+  return `${UNREADABLE_NAMED_PATH_PREFIX}${row.path} (${provenance}; not served: ${row.reason})`;
+}
+
+/**
+ * BLOCKER 25 (2026-09-14, review round 4): PUBLISH what this call could not
+ * read, on the pack that is actually shipping.
+ *
+ * A file the REQUEST NAMED BY PATH is a stated requirement (TL142-05 stamps
+ * such a surface `required: true`). When it resolves but cannot be served,
+ * three things must be true of the response and none of them was:
+ *
+ *  1. the path is DISCLOSED. `unreadable_named_paths` is the field the two wire
+ *     projectors read — `buildCapabilityGaps` (a blocking `missing-evidence`
+ *     gap whose `refs` name the path, which is how a `discover` says it) and
+ *     `decisionWire.ts`'s `projectUnresolved` (an `await_input` row naming the
+ *     path AND the cause). Plus a `missing` row in the epoch vocabulary, which
+ *     is what `openEpochContractRequirements` reads: the served-terminal grant
+ *     (P2-4) must not mint a certificate beside this disclosure either.
+ *  2. `coverage` does not claim `complete`. The reported undecodable variant
+ *     shipped `task.coverage:"complete"` while hiding a file the query named.
+ *     `missing-roles` is the existing telemetry value for "a required surface
+ *     is absent"; `??=` so a more specific reason already set is never
+ *     overwritten.
+ *  3. the terminal is refused (`canonicalDecision.ts`).
+ *
+ * Called from `dedupeTrimAndPersist`, the choke point EVERY builder funnels
+ * through, and BEFORE the first `buildTaskExecutionContract` in it — so the
+ * contract, its gaps and the canonical decision are all computed over the
+ * disclosure rather than beside it. Idempotent: the rows are set, not appended,
+ * and the `missing` row is de-duplicated, because this runs once per builder
+ * and a pack can pass through more than one.
+ *
+ * SHOULD-FIX 32 (2026-09-14, review round 4/5): when THIS call's own ALS is
+ * empty — a re-pack that carried surfaces forward instead of re-running
+ * `augmentQueryNamedFileSurfaces` — re-derive `unreadable_named_paths` from
+ * any `unreadable-named-path:` row `result.missing` already carries forward
+ * (see `parseUnreadableNamedPathRow` above), so the gap/`unresolved[]` stay in
+ * step with the `missing[]` row that already survives the re-pack, instead of
+ * one persisting and the other silently vanishing.
+ */
+/**
+ * SHOULD-FIX 65 (AC1, 2026-09-14, review round 12): does the REQUEST TEXT name
+ * this path?
+ *
+ * The ALS provenance alone is not enough, and the reason is measured: the
+ * query-named augmentation SKIPS a path the locator already surfaced
+ * (`already.has(rel)`), so for the round-11 repro the only site that ran for the
+ * file the query DOES name was `candidateToSurface` — i.e. the `"resolution"`
+ * one. Provenance is a property of the request, so it is answered from the
+ * request: verbatim mention of the workspace-relative path, or of its basename
+ * (the two spellings `queryNamedWorkspaceFiles` itself resolves). The ALS hint
+ * still wins for a caller-supplied `targets[]` entry, which IS named by the
+ * request even when the prose never spells it.
+ */
+function requestTextNamesPath(query: string, relPath: string): boolean {
+  if (query === "") return false;
+  const haystack = query.toLowerCase();
+  if (haystack.includes(relPath.toLowerCase())) return true;
+  const base = relPath.slice(relPath.lastIndexOf("/") + 1).toLowerCase();
+  if (base === "" || !base.includes(".")) return false;
+  // Word-bounded on the left so `notes.txt` does not match `my-notes.txt`.
+  const index = haystack.indexOf(base);
+  if (index < 0) return false;
+  const before = index === 0 ? "" : haystack[index - 1]!;
+  return !/[A-Za-z0-9_.-]/.test(before);
+}
+
+function discloseUnreadableNamedPaths(result: TaskPackResult, query: string = ""): void {
+  const rows = unreadableNamedPathRows().map((row) => (
+    row.provenance === "request" || requestTextNamesPath(query, row.path)
+      ? { ...row, provenance: "request" as const }
+      : { ...row, provenance: "resolution" as const }
+  ));
+  if (rows.length > 0) {
+    result.unreadable_named_paths = rows;
+    const disclosures = rows.map(unreadableNamedPathMissingRow);
+    result.missing = [...new Set([...result.missing, ...disclosures])];
+    if (result.coverage === "complete") result.coverage = "partial";
+    result.coverage_reason ??= "missing-roles";
+    return;
+  }
+  if (result.unreadable_named_paths !== undefined && result.unreadable_named_paths.length > 0) return;
+  const restored = result.missing
+    .map(parseUnreadableNamedPathRow)
+    .filter((entry): entry is NonNullable<ReturnType<typeof parseUnreadableNamedPathRow>> => entry !== undefined);
+  if (restored.length === 0) return;
+  result.unreadable_named_paths = restored;
+  if (result.coverage === "complete") result.coverage = "partial";
+  result.coverage_reason ??= "missing-roles";
+}
+
+/**
+ * BLOCKER 62 (AC1, 2026-09-14, review round 12) — STATE the encoding risk that
+ * cost this request its write authority.
+ *
+ * `writeAuthorityVeto` keeps a NUL-stripped file out of every writable frontier,
+ * which is the safety half. Without this, the caller gets an `await_input` whose
+ * `unresolved[]` never mentions the one fact that decided it, and the only place
+ * the risk is stated is a `why` qualifier the caller has no reason to read as a
+ * write verdict. Emitted ONLY when the request's own wording asks to CHANGE that
+ * path (`requestItemLeads`), because a read of a stripped file is perfectly fine
+ * and is already disclosed by the served note — it is the promise of an edit
+ * that was false.
+ *
+ * Deliberately does NOT move `coverage`: nothing about discovery is incomplete,
+ * and the empty frontier is already what degrades the decision.
+ */
+function discloseUnwritableStrippedPaths(result: TaskPackResult, query: string): void {
+  if (query === "") return;
+  const strippedPaths = codeTaskPackSurfaces(result.surfaces)
+    .filter((surface) => surfaceServedNulStripped(surface.why))
+    .map((surface) => surface.path);
+  if (strippedPaths.length === 0) return;
+  const editLeadPaths = new Set(
+    requestItemLeads(query)
+      .filter((entry) => entry.lead === "edit" || entry.lead === "inherited-edit")
+      .map((entry) => entry.path),
+  );
+  const disclosures = [...new Set(strippedPaths)]
+    .filter((relPath) => editLeadPaths.has(relPath))
+    .sort((left, right) => left.localeCompare(right))
+    .map((relPath) => `${UNWRITABLE_ENCODING_RISK_PREFIX}${relPath} was served with its NUL `
+      + `characters stripped, so TokenLighten will not write it back (the edit would silently delete `
+      + `them); re-save it as UTF-8 before asking for a change`);
+  if (disclosures.length === 0) return;
+  result.missing = [...new Set([...result.missing, ...disclosures])];
+}
+
+// ---------------------------------------------------------------------------
+// P2 fix (2026-09-19) — DESIGN-v0.15-exploration-continuation-reliability.md
+// §3.2 ("本文をさらに削った場合も、被覆を再計算する") / §5.1 (D=Q-(C∪S)) /
+// §5.3 ("単独の小範囲nextで残りtargetsを失わせない").
+//
+// ROOT CAUSE, PINNED (2026-09-19, live-repo repro against the real
+// DESIGN-*.md docs, call shape verbatim from the orchestrator's report):
+// trimToCap's Phase E "legacy halving" loop (>=2 caller-supplied ranged
+// bodies) can shrink a surface's `code` a SECOND time, after an earlier,
+// more generous construction pass already set `remaining_ranges` for a
+// FIRST cut. Phase E's own bookkeeping only ever unions in the surface's
+// WHOLE `range` (`[...new Set([...(remaining ?? []), surf.range])]`) — it
+// never learns the specific window its OWN halving just cut away. Measured:
+// a 274-line file served through line ~51 with
+// `remaining_ranges:["104-274","1-274"]` — "104-274" is the pre-halving
+// remainder, "1-274" is Phase E's whole-range fallback; lines 52-103 were
+// neither delivered nor named by either entry.
+//
+// `dedupeTrimAndPersist` is the single choke point every pack builder funnels
+// through (see its own doc comment), so this reconciles ONCE, right after
+// its `trimToCap` call — the LAST stage in this function that can shrink a
+// surface's body — rather than patching every individual trimming pass
+// (Phase E's loop, Phase F's whole-body strip, `shedSurface`'s whole-surface
+// drop) that could independently go stale. Scoped to a `markCallerRangeSurface`
+// mark (set from `why` containing "caller-supplied" AND no `.symbol`, before
+// trimToCap can clear `why`) — so a query/search-located document's
+// single-answer zoom, and a symbol-anchored surface (a DIFFERENT remaining/
+// pointer contract; "anchor-focus: … caller-supplied" also contains the
+// substring, which is why `.symbol === undefined` is required too — see
+// `markCallerRangeSurface`'s own call site) are both untouched.
+//
+// P3 CORRECTION (2026-09-19, orchestrator-caught regression): the P2 version
+// above computed `firstUndelivered` from the RAW line count of `surf.code`,
+// silently assuming one display line == one source line. A served body's
+// comment-elision marker (`/* doc elided L<a>-<b> */` / `# doc elided L<a>-<b>`,
+// util/formatCompress.ts) collapses MANY source lines into ONE display line,
+// so a complete, whole-range body that happens to contain a marker was
+// undercounted and stamped with a false `remaining` — a wasted hop on the
+// single most common shape there is (a ranged read of commented code).
+// Fixed by NEVER re-parsing the rendered text for marker-shaped strings
+// (unsound: fxq2RangeGranularForeignHandle.spec.ts exists precisely because a
+// file can contain a LITERAL string byte-identical to a genuine marker) and
+// instead re-deriving the elision windows from the ACTUAL SOURCE via the
+// same sanctioned renderer function every honest booking site uses,
+// `elideDocCommentsWithWindows` (see `fxoServeCoordinateSettlement.spec.ts`'s
+// "THE FIX" note and `spansExcludingWindows`'s doc comment, both
+// util/formatCompress.ts) — never `servedSpansOfDisplayedText`, which is
+// TEST-ONLY (fxnBookingSettlementFence.spec.ts pins that no new production
+// caller reappears).
+// ---------------------------------------------------------------------------
+
+/** One marked surface's `code`/`remaining_ranges`/`content_completeness`, captured immediately before `trimToCap` runs. */
+interface CallerRangePreTrimSnapshot {
+  readonly code: string | undefined;
+  readonly remainingRanges: readonly string[] | undefined;
+  readonly contentCompleteness: "partial" | undefined;
+}
+
+/** Every `result.surfaces` entry `markCallerRangeSurface` marked, snapshotted before trimToCap can touch it. Call BEFORE `trimToCap`. */
+function snapshotCallerRangeSurfaces(result: TaskPackResult): Map<TaskPackSurface, CallerRangePreTrimSnapshot> {
+  const snapshot = new Map<TaskPackSurface, CallerRangePreTrimSnapshot>();
+  for (const surf of result.surfaces) {
+    if (!isCallerRangeSurface(surf)) continue;
+    snapshot.set(surf, {
+      code: surf.code,
+      remainingRanges: surf.remaining_ranges,
+      contentCompleteness: surf.content_completeness,
+    });
+  }
+  return snapshot;
+}
+
+/** Real (non-trailing-newline) line count of a served body — `""` (`code === ""`, never produced today) counts as zero lines. */
+function displayLineCount(text: string): number {
+  if (text === "") return 0;
+  const lines = text.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.length;
+}
+
+/**
+ * The 1-based SOURCE line the first `keptDisplayLines` display lines of a
+ * body starting at `startLine` reach, given that body's own elision windows
+ * (ascending, non-overlapping, FILE-absolute — `elideDocCommentsWithWindows`'s
+ * `elided`). A marker line consumes ONE display line but represents its
+ * WHOLE source span (`windowEnd - windowStart + 1` source lines), matching
+ * the renderer's own accounting exactly (this is the same walk
+ * `elideCBlockComments`/`elidePythonDocstrings` performs to PRODUCE the
+ * marker, run forward instead of being re-derived from output text).
+ * `ceiling` bounds the result the way `spansExcludingWindows`' own `rangeEnd`
+ * bounds a window: a body can never be credited with source lines past it.
+ */
+function sourceLineAfterDisplayLines(
+  startLine: number,
+  elided: ReadonlyArray<readonly [number, number]>,
+  keptDisplayLines: number,
+  ceiling: number,
+): number {
+  if (keptDisplayLines <= 0) return startLine - 1;
+  let sourceCursor = startLine;
+  let displayLinesUsed = 0;
+  for (const [winStart, winEnd] of elided) {
+    if (winStart < sourceCursor) continue; // window behind the cursor already (defensive; elided is ascending)
+    const normalCount = winStart - sourceCursor;
+    if (displayLinesUsed + normalCount >= keptDisplayLines) {
+      const consumed = keptDisplayLines - displayLinesUsed;
+      return Math.min(ceiling, sourceCursor + consumed - 1);
+    }
+    displayLinesUsed += normalCount;
+    sourceCursor = winStart;
+    displayLinesUsed += 1; // the marker line itself
+    if (displayLinesUsed >= keptDisplayLines) return Math.min(ceiling, winEnd);
+    sourceCursor = winEnd + 1;
+  }
+  const remaining = keptDisplayLines - displayLinesUsed;
+  return Math.min(ceiling, sourceCursor + remaining - 1);
+}
+
+/** Elision windows (FILE-absolute) for the real source underlying `[requestedStart, ceiling]` of `relPath` — `[]` for a non-elidable language or an unreadable file, matching `elideDocCommentsWithWindows`'s own no-op shape. */
+function callerRangeElisionWindows(
+  workspace: string,
+  relPath: string,
+  requestedStart: number,
+  ceiling: number,
+  cache?: FileReadCache,
+): Array<[number, number]> {
+  const sourceText = readCached(workspace, relPath, cache);
+  if (sourceText === undefined) return [];
+  const sourceLines = sourceText.split(/\r?\n/);
+  const clampedCeiling = Math.min(ceiling, sourceLines.length);
+  if (clampedCeiling < requestedStart) return [];
+  const slice = sourceLines.slice(requestedStart - 1, clampedCeiling).join("\n");
+  const lang = languageForPath(relPath);
+  return elideDocCommentsWithWindows(slice, lang, requestedStart).elided;
+}
+
+/** Merge "a-b" windows: parse, sort by start, merge overlapping/contiguous runs, re-render ordered and deduplicated. */
+function mergeRangeStrings(ranges: readonly string[]): string[] {
+  const parsed: Array<[number, number]> = [];
+  for (const range of ranges) {
+    const m = /^(\d+)-(\d+)$/.exec(range);
+    if (m === null) continue;
+    const start = Number(m[1]);
+    const end = Number(m[2]);
+    if (end >= start) parsed.push([start, end]);
+  }
+  parsed.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of parsed) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && start <= last[1] + 1) {
+      last[1] = Math.max(last[1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  return merged.map(([start, end]) => `${start}-${end}`);
+}
+
+function reconcileCallerRangeRemaining(
+  result: TaskPackResult,
+  workspace: string,
+  preTrim: ReadonlyMap<TaskPackSurface, CallerRangePreTrimSnapshot>,
+  cache?: FileReadCache,
+): void {
+  for (const surf of codeTaskPackSurfaces(result.surfaces)) {
+    const snapshot = preTrim.get(surf);
+    if (snapshot === undefined) continue; // not a marked caller-range surface
+    // Requirement 1: trimToCap did not touch this surface's body at all —
+    // leave it byte-identical to whatever trimToCap already returned.
+    if (surf.code === snapshot.code) continue;
+
+    const requested = /^(\d+)-(\d+)$/.exec(surf.range);
+    if (requested === null) continue;
+    const requestedStart = Number(requested[1]);
+    const requestedEnd = Number(requested[2]);
+
+    if (snapshot.code === undefined) continue; // nothing to map a cut FROM
+
+    // The pre-trim body's OWN true source coverage — requirement 3 is
+    // explicit that this is NOT necessarily requestedEnd (an earlier,
+    // more generous construction pass may already have windowed it short).
+    const elided = callerRangeElisionWindows(workspace, surf.path, requestedStart, requestedEnd, cache);
+    const preTrimEnd = sourceLineAfterDisplayLines(
+      requestedStart, elided, displayLineCount(snapshot.code), requestedEnd,
+    );
+
+    if (surf.code === undefined) {
+      // trimToCap's Phase F stripped the body entirely: the pre-trim body's
+      // WHOLE span is undelivered, not just some stale tail of it.
+      surf.content_completeness = "partial";
+      surf.remaining_ranges = mergeRangeStrings([
+        `${requestedStart}-${preTrimEnd}`,
+        ...(snapshot.remainingRanges ?? []),
+      ]);
+      continue;
+    }
+
+    // trimToCap's Phase E halving always keeps a PREFIX of the pre-trim
+    // DISPLAY text (`lines.slice(0, kept)`), so the kept body's display-line
+    // count against the SAME elision windows gives the true source line it
+    // now reaches.
+    const deliveredEnd = sourceLineAfterDisplayLines(
+      requestedStart, elided, displayLineCount(surf.code), preTrimEnd,
+    );
+
+    if (deliveredEnd >= preTrimEnd) {
+      // The kept body still reaches as far (in source terms) as the
+      // pre-trim body did — e.g. a marker absorbed the cut lines — so
+      // nothing new is undelivered. Restate the pre-trim value exactly
+      // rather than reusing whatever `surf.remaining_ranges` trimToCap
+      // itself already wrote (which may be the false superset this fix
+      // exists to remove).
+      surf.content_completeness = snapshot.contentCompleteness;
+      surf.remaining_ranges = snapshot.remainingRanges === undefined
+        ? undefined : [...snapshot.remainingRanges];
+      continue;
+    }
+
+    surf.content_completeness = "partial";
+    surf.remaining_ranges = mergeRangeStrings([
+      `${deliveredEnd + 1}-${preTrimEnd}`,
+      ...(snapshot.remainingRanges ?? []),
+    ]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WP-S7 (2026-09-20, TL_FOLD_SMALL_REMAINDER) -- do not leave a remainder
+// that is cheaper to serve than to ask for. See util/flags.ts's
+// `foldSmallRemainderEnabled` doc block for the full motivation and contract;
+// this block is its one implementation.
+// ---------------------------------------------------------------------------
+
+/** WP-S7: a remainder of at most this many lines is eligible to fold into the whole file. */
+const FOLD_SMALL_REMAINDER_MAX_LINES = 40;
+/** WP-S7: ...and whose own elided embed costs at most this many bytes. */
+const FOLD_SMALL_REMAINDER_MAX_BYTES = 2048;
+
+/**
+ * WP-S7: every `remaining_ranges` entry of a surface, parsed as [start,end]
+ * pairs. `undefined` on any entry that is not a plain "N-M" span (never
+ * expected today, but a malformed entry must abstain, not guess).
+ */
+function parseRemainingSpans(ranges: readonly string[]): Array<[number, number]> | undefined {
+  const spans: Array<[number, number]> = [];
+  for (const entry of ranges) {
+    const span = parseSurfaceSpan(entry);
+    if (span === undefined) return undefined;
+    spans.push([span.start, span.end]);
+  }
+  return spans;
+}
+
+/**
+ * WP-S7: the lines and post-elision bytes `spans` of `relPath` would cost if
+ * served on their own — the same measure `sliceCode` (this file's shared
+ * embed helper) applies to any other slice, so a remainder that "fits" here is
+ * held to the identical bar as the body it would join. A generous `maxBytes`
+ * (never the per-surface cap) is passed through so the byte figure returned is
+ * the remainder's true elided size, never an early cap rejection. `undefined`
+ * when any span cannot be read/sliced (a malformed span, or the file vanished
+ * under us) — the caller's job then is to abstain, never to guess.
+ */
+function foldableRemainderSize(
+  workspace: string,
+  relPath: string,
+  spans: ReadonlyArray<readonly [number, number]>,
+  cache?: FileReadCache,
+): { lines: number; bytes: number } | undefined {
+  let lines = 0;
+  let bytes = 0;
+  for (const [start, end] of spans) {
+    lines += end - start + 1;
+    const slice = sliceCode(workspace, relPath, `${start}-${end}`, cache, Number.MAX_SAFE_INTEGER);
+    if (slice === undefined) return undefined;
+    bytes += Buffer.byteLength(slice, "utf8");
+  }
+  return { lines, bytes };
+}
+
+/**
+ * WP-S7: widen a surface whose only unserved lines are a small file-boundary
+ * remainder to the whole file, so a caller never spends a whole extra model
+ * turn fetching a `remaining` span that was cheaper to have shipped up front.
+ * Mutates `result.surfaces` in place; a no-op with the flag off. See
+ * `foldSmallRemainderEnabled`'s doc block (util/flags.ts) for the full
+ * contract.
+ *
+ * Must run BEFORE `trimToCap` (a fold that does not survive the pack budget
+ * is undone right here, never discovered later as a stale `remaining_ranges`
+ * after an unrelated trim) and AFTER this function's own caller-range marking
+ * loop just above (so `isCallerRangeSurface` is authoritative for every
+ * surface below, exactly as `snapshotCallerRangeSurfaces` relies on next).
+ *
+ * Exported (not otherwise part of the public task-pack API) purely for direct
+ * unit testing against constructed TaskPackResult values, the same rationale
+ * `applyAgentGuideElision`/`trimToCap`/`dedupeAgentGuideSurfaces` are already
+ * exported under -- the real entry point remains
+ * dedupeTrimAndPersist/buildTaskPack.
+ */
+export function applyFoldSmallRemainder(
+  workspace: string,
+  result: TaskPackResult,
+  cache?: FileReadCache,
+): void {
+  if (!foldSmallRemainderEnabled()) return;
+  const surfaces = codeTaskPackSurfaces(result.surfaces);
+  const surfacesForPath = new Map<string, number>();
+  for (const surface of surfaces) {
+    surfacesForPath.set(surface.path, (surfacesForPath.get(surface.path) ?? 0) + 1);
+  }
+
+  for (const surf of surfaces) {
+    if (surf.code === undefined) continue; // body-less (prior/handle-only): nothing to widen
+    if (isMarkdownPath(surf.path)) continue; // Markdown already has its own unconditional whole-file promotion
+    if ((surfacesForPath.get(surf.path) ?? 0) > 1) continue; // multi-window file: each window owns its own remainder
+    if (isCallerRangeSurface(surf)) continue; // the caller chose this exact range — a hard window
+    if (wasSemanticFrontierBodyWithheld(surf)) continue; // the semantic frontier already decided this surface's body
+    const remaining = surf.remaining_ranges;
+    if (remaining === undefined || remaining.length === 0) continue; // nothing left to fold
+
+    const spans = parseRemainingSpans(remaining);
+    if (spans === undefined) continue;
+    const size = foldableRemainderSize(workspace, surf.path, spans, cache);
+    if (size === undefined) continue;
+    if (size.lines > FOLD_SMALL_REMAINDER_MAX_LINES || size.bytes > FOLD_SMALL_REMAINDER_MAX_BYTES) continue;
+
+    const content = readCached(workspace, surf.path, cache);
+    if (content === undefined) continue;
+    const totalLines = countLines(content);
+    if (totalLines <= 0) continue;
+    const wholeRange = `1-${totalLines}`;
+    if (wholeRange === surf.range) continue; // already whole — nothing to widen
+
+    // The exact whole-file path a fits-the-cap serve already uses: at the
+    // shared per-surface allowance, this returns a complete (empty
+    // remaining_ranges) embed only when the WHOLE file actually fits — the
+    // "per-surface allowance" fit check this widen must pass before landing.
+    const widened = centeredSliceForCap(workspace, surf.path, wholeRange, cache, undefined, MAX_SURFACE_CODE_BYTES);
+    if (widened === undefined || widened.remaining_ranges.length > 0) continue;
+
+    const before = {
+      range: surf.range,
+      code: surf.code,
+      remaining_ranges: surf.remaining_ranges,
+      content_completeness: surf.content_completeness,
+      handle: surf.handle,
+      symbol: surf.symbol,
+    };
+    const oldHandle = surf.handle;
+    // A fresh handle for the WIDENED range, exactly like the sibling
+    // whole-file promotion above (wholeFileRangeIfDominant/candidateToSurface)
+    // — the handle table's own registration must match what this surface now
+    // claims, or a later bare-handle re-read would resolve the stale, narrower
+    // span.
+    const newHandle = handleTable.upsert({
+      kind: "range",
+      path: surf.path,
+      range: wholeRange,
+      workspaceRoot: workspace,
+    }).id;
+
+    surf.range = wholeRange;
+    surf.code = widened.code;
+    delete surf.remaining_ranges;
+    delete surf.content_completeness;
+    surf.handle = newHandle;
+    delete surf.symbol; // the surface now names the whole file, not one symbol's span
+    for (const edit of surf.likely_edits ?? []) {
+      if (edit.handle === oldHandle) edit.handle = newHandle;
+    }
+
+    if (fitsInCap(result)) continue; // widen accepted — fits the pack's own byte budget
+
+    // Does not fit the pack budget: leave the surface exactly as it was.
+    surf.range = before.range;
+    surf.code = before.code;
+    if (before.remaining_ranges !== undefined) surf.remaining_ranges = before.remaining_ranges;
+    else delete surf.remaining_ranges;
+    if (before.content_completeness !== undefined) surf.content_completeness = before.content_completeness;
+    else delete surf.content_completeness;
+    surf.handle = before.handle;
+    if (before.symbol !== undefined) surf.symbol = before.symbol;
+    for (const edit of surf.likely_edits ?? []) {
+      if (edit.handle === newHandle) edit.handle = oldHandle;
+    }
+  }
+}
+
 function dedupeTrimAndPersist(
   workspace: string,
   result: TaskPackResult,
@@ -32491,8 +39785,18 @@ function dedupeTrimAndPersist(
     ?? opts?.args?.path
     ?? "";
   const servedZoomScope = servedZoomScopeForArgs(opts?.args, effectiveQuery);
+  // BLOCKER 25 (2026-09-14, review round 4): FIRST, before any contract,
+  // gap or decision is computed over this pack — see the function's own
+  // doc comment for why the disclosure has to precede all three.
+  discloseUnreadableNamedPaths(result, effectiveQuery);
+  // BLOCKER 62 (AC1, round 12): the same "before any contract, gap or decision"
+  // position, for the same reason.
+  discloseUnwritableStrippedPaths(result, effectiveQuery);
   let semanticCheckRecords: PackCheckRecord[] = [];
-  let binding = bindTaskProfile(opts?.args?.taskProfile, effectiveQuery, opts?.args?.writeAllowed);
+  let binding = noteInheritedTaskProfile(
+    bindTaskProfile(opts?.args?.taskProfile, effectiveQuery, opts?.args?.writeAllowed),
+    opts?.args,
+  );
   let profile = binding.selected;
   result.profile_binding = binding;
   if (profile !== "generic") result.task_profile = profile;
@@ -32558,7 +39862,7 @@ function dedupeTrimAndPersist(
   // when the caller cannot be assumed to have read the first copy.
   const forceServePack = opts?.args?.forceServe === true;
   if (!forceServePack) {
-    applyPackDedupe(workspace, result);
+    applyPackDedupe(workspace, result, opts?.args?.taskBinding);
     // iter-3 F3: after the prior-pack (handle-keyed) dedup, strip any NON-required
     // body whose exact (path,range) was already served this epoch and is
     // byte-unchanged — the cross-pack, content-addressed case applyPackDedupe's
@@ -32923,6 +40227,12 @@ function dedupeTrimAndPersist(
     }
   }
   noteDeclaredProfileCreateConflict(result);
+  // TL142-01B: fold every absence the CALLER's own executed searches proved
+  // into this pack's absence vocabulary, before the contract builder reads
+  // either carrier. See `promoteExecutedSearchAbsences`.
+  if (effectiveQuery.length > 0) {
+    promoteExecutedSearchAbsences(workspace, effectiveQuery, result, opts?.args?.taskBinding);
+  }
   // IMPROVEMENT A: consult/record the session-stateful served-surface log,
   // flip coverage to cumulative-complete when the union of this call's surfaces
   // and still-valid prior surfaces closes every required role, and attach the
@@ -32996,11 +40306,62 @@ function dedupeTrimAndPersist(
     // already closed.
     if (semanticCheckRecords.length === 0) delete result.checks;
   }
+  // FX-M Change A (TL_PACK_GUIDE_ELIDE, 2026-09-19): elide the redundant
+  // TokenLighten-managed guide block BEFORE trimToCap ever runs -- every host
+  // that serves one of these files already injects the identical block into
+  // the model's own instructions, so shipping it again is pure duplication
+  // that starves genuinely novel bytes out of the fixed cap, whether or not
+  // this pack is currently over budget. Flag-gated: OFF (the default) never
+  // calls this, so a served guide file's body is byte-identical to
+  // pre-FX-M output.
+  if (packGuideElideEnabled()) {
+    applyAgentGuideElision(result);
+  }
+  // P2 fix (2026-09-19): mark the caller-range surfaces BEFORE trimToCap
+  // runs — its own Phase B unconditionally clears `why` from every surface
+  // ("drop why from all surfaces") once the pack needs enough trimming to
+  // reach Phase E, so re-deriving this predicate from `why` AFTER trimToCap
+  // returns (as trimToCap's OWN internal `callerRangeBodySurfaces` filter
+  // does, safely, before its own Phase B) would silently match nothing. The
+  // mark is a Symbol-keyed own property (sfWithholdingMarks.ts's established
+  // carrier for exactly this class of problem), so it survives Phase B.
+  // NARROWER than trimToCap's own `callerRangeBodySurfaces` filter on purpose
+  // (measured, replayCorpus.spec.ts): "caller-supplied" is appended onto
+  // several UNRELATED `why` shapes this reconciliation/bundling must not
+  // touch — e.g. "anchor-focus: query-matched symbol X; caller-supplied"
+  // (a symbol-anchored surface, which already carries its OWN, intentional
+  // remaining/pointer semantics tied to the symbol span, not the plain
+  // line-range semantics this fix assumes) and other query-driven joins.
+  // `symbol === undefined` isolates the plain path+range shape this defect
+  // was pinned against (server.ts's `targets[]`/`paths[]` entries with a
+  // `range` and no `symbol`) without narrowing trimToCap's OWN halving
+  // population, which is untouched and stays byte-identical.
+  for (const surface of result.surfaces) {
+    if (surface.why?.includes("caller-supplied") === true && surface.symbol === undefined) {
+      markCallerRangeSurface(surface);
+    }
+  }
+  // WP-S7 (2026-09-20, TL_FOLD_SMALL_REMAINDER): widen a surface whose only
+  // unserved lines are a small file-boundary remainder to the whole file.
+  // Runs here — after the caller-range marks above (so isCallerRangeSurface
+  // is authoritative) and before trimToCap/the caller-range snapshot below
+  // (so a rejected or accepted widen is what both of them see; the flag-off
+  // path returns immediately and this call is inert).
+  applyFoldSmallRemainder(workspace, result, opts?.cache);
+  // Requirement 1 (P3 correction): snapshot every marked surface's body
+  // BEFORE trimToCap can touch it, so reconciliation can tell "trimToCap
+  // changed this body" from "trimToCap left it exactly as constructed" and
+  // touch only the former.
+  const callerRangePreTrim = snapshotCallerRangeSurfaces(result);
   const trimmed = trimToCap(
     result,
     opts?.protectedSurfaces,
     prefetchedCallerNamedArtifacts(workspace),
   );
+  // Settle caller-ranged remaining/coverage against what trimToCap actually
+  // shipped — see reconcileCallerRangeRemaining's own doc comment above for
+  // the pinned defect this closes.
+  reconcileCallerRangeRemaining(trimmed, workspace, callerRangePreTrim, opts?.cache);
   // DESIGN-v0.9 §4.3 post-trim recompute: a whole-surface drop that FLIPS
   // coverage invalidates the next/route computed against the fuller pre-trim
   // pack (the classic stale "you're done" next on a now-partial pack).
@@ -33127,7 +40488,7 @@ function dedupeTrimAndPersist(
   // Persist same-epoch role/concern evidence before the final certificate is
   // evaluated. A continuation may legitimately serve a different frontier;
   // the ledger must see the union it already served, not only this body.
-  reconcileEpochTaskContract(workspace, trimmed, effectiveQuery);
+  reconcileEpochTaskContract(workspace, trimmed, effectiveQuery, profile);
   // A resolved create target is the terminal frontier. Post-trim route
   // recomputation sees zero editable surfaces for a not-yet-existing file and
   // can restore `locate_missing_surfaces`; reassert the create route BEFORE
@@ -33190,29 +40551,120 @@ function dedupeTrimAndPersist(
       trimmed.wiring?.connections[0]?.source?.handle,
       trimmed.wiring?.connections[0]?.destination?.handle,
     ].filter((handle): handle is string => handle !== undefined));
-    const optional = codeTaskPackSurfaces(trimmed.surfaces)
-      .filter((surface) => surface.required !== true && !protectedHandles.has(surface.handle))
-      .sort((a, b) =>
-        Buffer.byteLength(b.code ?? b.code_unchanged ?? "", "utf8")
-        - Buffer.byteLength(a.code ?? a.code_unchanged ?? "", "utf8")
-      );
-    for (const surface of optional) {
+    const codeBytesOf = (surface: TaskPackSurface): number =>
+      Buffer.byteLength(surface.code ?? surface.code_unchanged ?? "", "utf8");
+    /** The three markers that make a surface's presence the CALLER's own doing. */
+    const explicitlyProvenanced = (why: string | undefined): boolean =>
+      why !== undefined
+      && (why.includes("caller-supplied")
+        || why.includes("query-named-file")
+        || why.includes("header-source-pair"));
+    /**
+     * Drop ONE surface and re-derive everything that named it. `discloseAlways`
+     * is the required tier below: a surface the pack itself marked `required`
+     * is never dropped silently, whatever its provenance.
+     */
+    /**
+     * WP-P2 B (2026-09-20) -- DEFECT, unconditional. True when one of `why`'s
+     * own `;`-separated segments says the CALLER spelled THIS path.
+     * Deliberately segment-EXACT where `explicitlyProvenanced` above is a
+     * substring test: `caller-supplied-dir` (a locator pick from inside a
+     * directory the caller named) and `header-source-pair` (a derived sibling)
+     * both contain a marker, but they are this server's choices, not paths the
+     * caller asked for, and they stay droppable exactly as before.
+     */
+    const callerNamedSurface = (why: string | undefined): boolean =>
+      why !== undefined
+      && why.split(";").some((segment) => {
+        const marker = segment.trim();
+        return marker === "caller-supplied" || marker === "query-named-file";
+      });
+    /**
+     * WP-P2 B -- reduce a caller-named surface's BODY by at least `needed`
+     * bytes, keeping its leading lines (and an honest `remaining_ranges`)
+     * whenever any of them survive. Same shape as `trimToCap`'s own Phase E
+     * ladder, whose whole point is that the surface, its role and its HANDLE
+     * outlive their embedded code. Returns false only when there is no body
+     * left to take, which is the one case the caller may still remove.
+     */
+    const reduceCallerNamedBody = (surface: TaskPackSurface, needed: number): boolean => {
+      const code = surface.code;
+      if (code === undefined) return false;
+      const lines = code.split("\n");
+      let kept = lines.length;
+      let freed = 0;
+      while (kept > 0 && freed < needed) {
+        kept -= 1;
+        freed += Buffer.byteLength(lines[kept]!, "utf8") + 1;
+      }
+      surface.code = kept > 0 ? `${lines.slice(0, kept).join("\n")}\n` : undefined;
+      surface.content_completeness = "partial";
+      // State the remainder PRECISELY. `trimToCap`'s own Phase E stamps the
+      // whole range and relies on `reconcileCallerRangeRemaining` to narrow it
+      // afterwards -- but that pass has already run by the time this tier
+      // does, so a whole-range claim written here would reach the wire as is
+      // (measured: a 374-line file served to line ~234 advertised
+      // `remaining:["1-374"]`, i.e. "re-read all of it"). The kept body is a
+      // whole-line PREFIX of the display text, so the same display-line
+      // accounting the reconciler uses gives the source line it now reaches.
+      const requested = parsePackLineRange(surface.range);
+      if (requested !== undefined) {
+        const [requestedStart, requestedEnd] = requested;
+        const deliveredEnd = surface.code === undefined
+          ? requestedStart - 1
+          : sourceLineAfterDisplayLines(
+              requestedStart,
+              callerRangeElisionWindows(workspace, surface.path, requestedStart, requestedEnd),
+              displayLineCount(surface.code),
+              requestedEnd,
+            );
+        if (deliveredEnd < requestedEnd) {
+          surface.remaining_ranges = mergeRangeStrings([
+            `${deliveredEnd + 1}-${requestedEnd}`,
+            ...(surface.remaining_ranges ?? []),
+          ]);
+        }
+      }
+      return true;
+    };
+    const shedSurface = (surface: TaskPackSurface, discloseAlways: boolean): void => {
       const index = trimmed.surfaces.findIndex((candidate) => candidate.handle === surface.handle);
-      if (index < 0) continue;
+      if (index < 0) return;
+      // WP-P2 B -- THE DEFECT THIS CLOSES. `trimToCap` above honours
+      // `protectedSurfaces`: a caller-named seed may lose its code there, never
+      // its row (`MAX_SEEDED_CODE_SURFACES`'s own doc: "never dropping one,
+      // whatever the byte budget does to its embedded code"). This tier runs
+      // AFTER it, re-derives its own protection from the wiring endpoints
+      // alone, and so removed a caller-named path outright -- measured on a
+      // live GitHub Copilot shape naming nine files: the pack FIT at
+      // `trimToCap`, the contract/readiness passes between then and here
+      // inflated it 1,224 bytes past the cap, and this loop paid for that by
+      // deleting the single LARGEST caller-named body (9,387 bytes). The v1
+      // wire carries no `missing`, so the file vanished with no row, no
+      // `remaining` and no disclosure, and the caller re-read it natively.
+      //
+      // Take only the bytes the overflow actually needs, from the body, and
+      // leave the addressable row behind. A caller-named path with nothing
+      // left to give falls through to the removal below, exactly as before.
+      if (callerNamedSurface(surface.why)) {
+        const overflow = packWireBytes(trimmed) - capForResult(trimmed);
+        if (overflow > 0 && reduceCallerNamedBody(surface, overflow + SHED_REDUCTION_SLACK_BYTES)) return;
+      }
       trimmed.surfaces.splice(index, 1);
-      const shedWhy = surface.why ?? "";
-      if (
-        shedWhy.includes("caller-supplied")
-        || shedWhy.includes("query-named-file")
-        || shedWhy.includes("header-source-pair")
-      ) {
+      if (discloseAlways || explicitlyProvenanced(surface.why)) {
         // Never silently drop an explicitly requested file (or a query-named /
         // pair-contract enrichment surface): the caller cannot tell "trimmed
         // for byte budget" apart from "does not exist", and the observed
         // fallback is a native read of exactly that path.
         trimmed.missing = [...new Set([
           ...trimmed.missing,
-          `dropped-by-byte-budget:${surface.path} (re-request via read_file handle=${surface.handle} or paths=[…])`,
+          // Canonical vocabulary only (2026-09-19 P2/F5 fix): the legacy
+          // `paths=[…]` alternative this used to advertise needs
+          // TL_LEGACY_INPUT=accept and must never be minted (AGENTS.md).
+          // `targets=[{handle:...}]` matches canonicalDecision.ts's
+          // `unservedCallerRangedTargetsNext`, which parses this exact shape
+          // to re-bundle a wholly-dropped caller-named surface.
+          `dropped-by-byte-budget:${surface.path} (re-request via read_file targets=[{handle:"${surface.handle}"}])`,
         ])];
       }
       const servedHandles = new Set(trimmed.surfaces.map((candidate) => candidate.handle));
@@ -33227,7 +40679,53 @@ function dedupeTrimAndPersist(
         trimmed.change_contract = buildTaskChangeContract(effectiveQuery, trimmed, workspace);
         reconcileTaskChangeContract(trimmed);
       }
+    };
+    const optional = codeTaskPackSurfaces(trimmed.surfaces)
+      .filter((surface) => surface.required !== true && !protectedHandles.has(surface.handle))
+      .sort((a, b) => codeBytesOf(b) - codeBytesOf(a));
+    for (const surface of optional) {
+      shedSurface(surface, false);
       if (fitsInCap(trimmed)) break;
+    }
+    // GATE-A (2026-09-14) — THE LAST DISCLOSED TIER: one required surface is
+    // shed before the WHOLE PACK is.
+    //
+    // MEASURED, not reasoned (cumulativeReissueReceipt's F-B2 fixture, this
+    // wave): a pack of SEVEN required surfaces came in 533 bytes over a 32,768
+    // cap. Nothing was optional, so the pass above dropped nothing, and the
+    // emergency envelope below — whose whole job is to keep the response under
+    // the cap — threw away six of the seven surfaces and demoted a `prepared`
+    // certificate to `discovery`. A 1.6% overflow costing 86% of the evidence
+    // is not a budget decision, it is a cliff.
+    //
+    // The condition became reachable when TL142-05 stamped a QUERY-NAMED file
+    // `required: true` (rightly — an explicitly named path must survive), which
+    // also made the pass above's own `query-named-file` disclosure arm dead
+    // code for that class. This tier restores it: the surface still goes, but
+    // as ONE disclosed drop instead of six silent ones.
+    //
+    // THE ORDER IS WEAKEST-FIRST, TWICE OVER, so the pack gives up as little as
+    // it can: surfaces the CALLER did not name go before ones it did (TL142-05's
+    // "explicit paths first", the same tie-break `capExtraEvidenceRelativeTo
+    // NamedPaths` states), and within each tier the SMALLEST body goes first —
+    // the opposite of the optional pass above, and deliberately: there the goal
+    // is to free the most bytes from evidence nothing required, here it is to
+    // surrender the least evidence that still gets under the cap.
+    //
+    // FLOOR: two surfaces. Below that the emergency envelope is the right
+    // shape (it rebuilds the route, the contract and the bounded continuation
+    // around a single retained handle), so this tier never races it to one.
+    if (!fitsInCap(trimmed)) {
+      const requiredTier = [false, true].flatMap((explicit) =>
+        codeTaskPackSurfaces(trimmed.surfaces)
+          .filter((surface) =>
+            !protectedHandles.has(surface.handle)
+            && explicitlyProvenanced(surface.why) === explicit)
+          .sort((a, b) => codeBytesOf(a) - codeBytesOf(b)));
+      for (const surface of requiredTier) {
+        if (fitsInCap(trimmed) || trimmed.surfaces.length <= 2) break;
+        shedSurface(surface, true);
+      }
     }
   }
   if (!fitsInCap(trimmed)) {
@@ -33348,7 +40846,7 @@ function dedupeTrimAndPersist(
     assertCreateRoute(fallback, profile, workspace);
     // W2: bound the guidance-metadata inventory at ANY pack size.
     capGuidanceMetadata(fallback);
-    persistPackFingerprints(workspace, fallback);
+    persistPackFingerprints(workspace, fallback, opts?.args?.taskBinding);
     // FX-J/FX-K: this EARLY exit ships `fallback` and never reaches the seam,
     // so nothing was withheld — but the bookings must still land, or a surface
     // this response really served would be missing from the epoch's admissible
@@ -33574,7 +41072,7 @@ function dedupeTrimAndPersist(
     && opts.args.paths.length > 0
     && opts.args.autoDiscoveredLocation !== true;
   attachSingleSiteUniqueMatchFastPath(trimmed, workspace, effectiveQuery, profile, opts?.cache, hasCallerSuppliedLocation);
-  persistPackFingerprints(workspace, trimmed);
+  persistPackFingerprints(workspace, trimmed, opts?.args?.taskBinding);
   // Session-state registration is skipped too for an answer pack — a later
   // `read_file mode=closure` call must have nothing open to report for a
   // pack that never registered a closure/wiring check in the first place
@@ -33647,7 +41145,7 @@ function dedupeTrimAndPersist(
       trimmed.missing = [...new Set([
         ...trimmed.missing,
         ...unservedPriorEdits.map((o) =>
-          `unserved-obligation:${o.path} (edit obligation from an earlier pack this task; re-request via read_file paths=["${o.path}"])`
+          `unserved-obligation:${o.path} (edit obligation from an earlier pack this task; re-request via read_file {targets:[{path:"${o.path}"}]})`
         ),
       ])];
     }
@@ -33887,7 +41385,7 @@ function annotateSpannedRoots(result: TaskPackResult): void {
           ...result.route,
           reason:
             result.route.reason +
-            `; surfaces span ${spanned.length} project roots (${spanned.join(", ")}) — if the task targets one, re-scope with paths=["<root>"] or name it in the query`,
+            `; surfaces span ${spanned.length} project roots (${spanned.join(", ")}) — if the task targets one, re-scope with scope:{path:"<root>"} or name it in the query`,
         }
       : result.route;
 
@@ -34045,6 +41543,220 @@ function dropArtifactSections(
     else delete result.inlined;
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// FX-M Change B (TL_PACK_FAIR_TRIM, 2026-09-19): water-filling truncation for
+// trimToCap's Phase E caller-supplied-body ladder. See applyFairTrimWaterFilling
+// below, called from Phase E itself.
+// ---------------------------------------------------------------------------
+
+/** Search floor for the shared per-body byte ceiling: below this, a body carries too little signal to keep separate from the legacy ladder's eventual full-body strip. */
+const FAIR_TRIM_FLOOR_BYTES = 512;
+
+/**
+ * Geometric backoff factor used when the binary search's chosen ceiling does
+ * not actually fit once verified. capForResult() is a STEP function of pack
+ * content (Phase E's own long-standing note below: "capForResult() SHRINKS as
+ * code is removed"), not a smooth one, so the search's assumption that a
+ * larger ceiling never fits worse than a smaller one can be wrong by a step;
+ * walking the ceiling down by this factor re-tests against the live
+ * measurement until it agrees (or the floor is reached).
+ */
+const FAIR_TRIM_BACKOFF_FACTOR = 0.85;
+
+/**
+ * Slack (in body bytes, summed over the truncated bodies) the water-filling
+ * pass leaves under the cap for the fields dedupeTrimAndPersist re-attaches
+ * AFTER trimToCap returns -- see the HEADROOM note in
+ * applyFairTrimWaterFilling. 3 KiB covers the compact execution contract
+ * (~1-2 KB) plus the small rollup/roots annotations with margin.
+ */
+const FAIR_TRIM_RESERVE_BYTES = 3072;
+
+/** Snapshot of one surface's pre-fair-trim body state, so every probe restores from the TRUE original rather than compounding a previous probe's truncation. */
+interface FairTrimSnapshot {
+  code: string;
+  contentCompleteness: TaskPackSurface["content_completeness"];
+  remainingRanges: string[] | undefined;
+}
+
+/** `lines[i]`'s cumulative UTF-8 byte cost when rejoined as `lines.slice(0, i + 1).join("\n") + "\n"` — precomputed once per surface so each probe's truncation point is a binary search over this array instead of a re-join + re-measure. */
+interface LineByteTable {
+  lines: string[];
+  cumulativeBytes: number[];
+}
+
+function buildLineByteTable(code: string): LineByteTable {
+  const lines = code.split("\n");
+  const cumulativeBytes: number[] = [];
+  let acc = 0;
+  for (const line of lines) {
+    acc += Buffer.byteLength(line, "utf8") + 1; // +1 for the "\n" the rejoin adds after every line
+    cumulativeBytes.push(acc);
+  }
+  return { lines, cumulativeBytes };
+}
+
+/**
+ * The longest whole-line prefix of `table` whose rejoined UTF-8 byte length
+ * is <= limitBytes, keeping at least one line even when that single line
+ * alone exceeds limitBytes (the caller-supplied-body contract: degrade, never
+ * silently vanish).
+ */
+function lineByteTablePrefix(table: LineByteTable, limitBytes: number): string {
+  const { lines, cumulativeBytes } = table;
+  let lo = 0;
+  let hi = cumulativeBytes.length - 1;
+  let bestIdx = -1; // 0-based index of the last line INCLUDED, or -1 if none fit
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (cumulativeBytes[mid]! <= limitBytes) {
+      bestIdx = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  const keep = bestIdx >= 0 ? bestIdx + 1 : 1;
+  return lines.slice(0, keep).join("\n") + "\n";
+}
+
+/**
+ * TL_PACK_FAIR_TRIM: water-filling truncation across the caller-supplied
+ * bodies in `targets`. Finds the largest shared per-body byte ceiling L
+ * (binary search in [FAIR_TRIM_FLOOR_BYTES, the largest original body's own
+ * byte length], probed on each surface's ORIGINAL bytes every time -- never
+ * on a previous probe's output) such that truncating every body longer than L
+ * to its longest whole-line prefix <= L bytes, and leaving every body already
+ * <= L untouched, makes `result` fit its cap (measured ONLY via the existing
+ * `fitsInCap`, never a new response-level byte-measurement site). Small
+ * bodies therefore stay whole; only large bodies shrink, and every one that
+ * shrinks lands on the same ceiling (within one line's worth of bytes, since
+ * the kept prefix is the LONGEST one at or under L).
+ *
+ * On success, mutates every target surface's `code`/`content_completeness`/
+ * `remaining_ranges` to its final (fitting) state and returns true. On
+ * failure -- no L at or above FAIR_TRIM_FLOOR_BYTES makes the pack fit --
+ * restores every target surface to its ORIGINAL code/completeness/
+ * remaining_ranges and returns false, so the caller can fall through to the
+ * legacy halving ladder exactly as if this pass had never run.
+ */
+function applyFairTrimWaterFilling(
+  result: TaskPackResult,
+  targets: ReadonlySet<TaskPackSurface>,
+): boolean {
+  const originals = new Map<TaskPackSurface, FairTrimSnapshot>();
+  const lineTables = new Map<TaskPackSurface, LineByteTable>();
+  let maxBodyBytes = 0;
+
+  for (const surf of targets) {
+    if (surf.code === undefined) continue;
+    originals.set(surf, {
+      code: surf.code,
+      contentCompleteness: surf.content_completeness,
+      remainingRanges: surf.remaining_ranges,
+    });
+    lineTables.set(surf, buildLineByteTable(surf.code));
+    const bytes = Buffer.byteLength(surf.code, "utf8");
+    if (bytes > maxBodyBytes) maxBodyBytes = bytes;
+  }
+  // Nothing to balance, or every body is already at/under the floor -- the
+  // legacy ladder handles a single body fine and gains nothing from a search.
+  if (originals.size === 0 || maxBodyBytes <= FAIR_TRIM_FLOOR_BYTES) return false;
+
+  const restore = (): void => {
+    for (const [surf, snap] of originals) {
+      surf.code = snap.code;
+      surf.content_completeness = snap.contentCompleteness;
+      surf.remaining_ranges = snap.remainingRanges;
+    }
+  };
+
+  const apply = (limitBytes: number): void => {
+    for (const [surf, snap] of originals) {
+      const originalBytes = Buffer.byteLength(snap.code, "utf8");
+      if (originalBytes <= limitBytes) {
+        surf.code = snap.code;
+        surf.content_completeness = snap.contentCompleteness;
+        surf.remaining_ranges = snap.remainingRanges;
+        continue;
+      }
+      surf.code = lineByteTablePrefix(lineTables.get(surf)!, limitBytes);
+      surf.content_completeness = "partial";
+      surf.remaining_ranges = surf.range === undefined
+        ? snap.remainingRanges
+        : [...new Set([...(snap.remainingRanges ?? []), surf.range])];
+    }
+  };
+
+  // The floor itself must fit before a search is worthwhile at all.
+  apply(FAIR_TRIM_FLOOR_BYTES);
+  if (!fitsInCap(result)) {
+    restore();
+    return false;
+  }
+
+  // Binary search the largest L in [FLOOR, maxBodyBytes] for which apply(L)
+  // fits, assuming (not yet verified) rough monotonicity.
+  let lo = FAIR_TRIM_FLOOR_BYTES;
+  let hi = maxBodyBytes;
+  while (lo < hi) {
+    const mid = lo + Math.ceil((hi - lo) / 2);
+    apply(mid);
+    if (fitsInCap(result)) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  // Verify + geometric backoff: capForResult is a step function of pack
+  // content (see this function's own doc comment), so the search above may
+  // have picked an L that does not actually fit. FAIR_TRIM_FLOOR_BYTES is
+  // already PROVEN to fit (checked above), so this loop is guaranteed to
+  // reach a fitting ceiling at or before it gets there.
+  let ceiling = lo;
+  apply(ceiling);
+  while (!fitsInCap(result) && ceiling > FAIR_TRIM_FLOOR_BYTES) {
+    const stepped = Math.floor(ceiling * FAIR_TRIM_BACKOFF_FACTOR);
+    ceiling = Math.max(FAIR_TRIM_FLOOR_BYTES, Math.min(stepped, ceiling - 1));
+    apply(ceiling);
+  }
+  if (fitsInCap(result)) {
+    // HEADROOM. The ceiling found above is the LARGEST one that fits, i.e. the
+    // pack now sits within a line's worth of bytes of its cap -- and
+    // dedupeTrimAndPersist still re-attaches fields after trimToCap returns
+    // (the compact execution contract, rollups, roots). With no slack left,
+    // that pushes the pack back over the cap and the post-trim safety net
+    // sheds a WHOLE caller-named surface (measured: 1 of 9 named sources lost
+    // its handle, 87 B over a 22 KB cap). The legacy halving ladder never hit
+    // this because it overshoots by up to half a body. Give the same slack
+    // back deliberately: lower the shared ceiling until the truncated bodies
+    // have released FAIR_TRIM_RESERVE_BYTES more than the fit required.
+    // Sized from each body's own byte length only -- no new response-level
+    // measurement site.
+    let truncatedCount = 0;
+    for (const snap of originals.values()) {
+      if (Buffer.byteLength(snap.code, "utf8") > ceiling) truncatedCount++;
+    }
+    if (truncatedCount > 0 && ceiling > FAIR_TRIM_FLOOR_BYTES) {
+      const lowered = Math.max(
+        FAIR_TRIM_FLOOR_BYTES,
+        ceiling - Math.ceil(FAIR_TRIM_RESERVE_BYTES / truncatedCount),
+      );
+      if (lowered < ceiling) {
+        apply(lowered);
+        // A lower ceiling can only shrink the pack, but capForResult steps down
+        // as code is removed; if that ever makes the lowered state not fit,
+        // return to the proven ceiling rather than ship an over-cap pack.
+        if (!fitsInCap(result)) apply(ceiling);
+      }
+    }
+    return true;
+  }
+  restore();
+  return false;
 }
 
 export function trimToCap(
@@ -34227,6 +41939,16 @@ export function trimToCap(
   // budget for any body at all. Only once equal rounds cannot make the result
   // fit does the ordinary body-removal ladder take over.
   if (callerRangeBodySurfaces.size >= 2) {
+    // FX-M Change B (TL_PACK_FAIR_TRIM): try the water-filling pass BEFORE the
+    // legacy halving loop. On success it already left `result` in its final,
+    // fitting state (same early-return shape the legacy loop itself uses at
+    // the top of every round). On failure it has already restored every
+    // target surface's original bytes, so the legacy loop below runs exactly
+    // as it would with the flag off. Flag OFF: this call is never made, so
+    // the legacy loop is the only code that ever executes here.
+    if (packFairTrimEnabled() && applyFairTrimWaterFilling(result, callerRangeBodySurfaces)) {
+      return result;
+    }
     for (;;) {
       if (fitsInCap(result)) return result;
       let changed = false;

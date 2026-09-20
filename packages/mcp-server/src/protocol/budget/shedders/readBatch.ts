@@ -29,6 +29,7 @@ import {
   dropTrailingEntry,
   isRecord,
   str,
+  carriesStripDisclosure,
   withKey,
   withoutKeys,
   type ShedOutcome,
@@ -62,6 +63,10 @@ function shedEntryProse(payload: ShedPayload): ShedOutcome | undefined {
     let cut = 0;
     const next = entries.map((entry) => {
       if (!isRecord(entry)) return entry;
+      // SHOULD-FIX 63 (AC1, round 12): an ENTRY whose own `note` carries the
+      // NUL-strip statement keeps it; its siblings still shed. See
+      // `registry.ts::carriesStripDisclosure`.
+      if (carriesStripDisclosure(entry[key])) return entry;
       const stripped = withoutKeys(entry, [key]);
       if (stripped === undefined) return entry;
       cut += 1;

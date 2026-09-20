@@ -6,9 +6,10 @@ TokenLighten (TL) helps coding agents use fewer input tokens by giving them prec
 
 The TokenLighten Workspace view is for developers using GitHub Copilot, the VS Code Codex extension, or Claude Code in VS Code. It provides only workspace-scoped controls and data:
 
-- One-click setup for VS Code, GitHub Copilot, Codex, and Claude Code in the current workspace.
+- One-click setup for VS Code, GitHub Copilot, Codex, and Claude Code in the current workspace — this installs TokenLighten as a machine-scoped MCP server that other detected hosts on the machine pick up too, not only VS Code.
 - A workspace switch for enabling or temporarily disabling TokenLighten.
 - Automatic re-enabling when workspace setup is run again.
+- An uninstall command that removes the machine install and managed host registrations without leaving VS Code.
 - Current TL status and the version reported by the bundled TL CLI.
 - Local estimates of this workspace's token and billing reduction rates.
 - Export of privacy-safe usage logs for this workspace.
@@ -18,6 +19,8 @@ The TokenLighten Workspace view is for developers using GitHub Copilot, the VS C
 For normal installation or recovery, use **Set up this workspace**. It installs or repairs the TokenLighten MCP configuration and managed AI instructions in one operation, then enables TL for the workspace. Existing project instructions outside TokenLighten-managed sections are preserved.
 
 If TokenLighten causes a problem, clear **Enable TL in this workspace** and save the setting. Check it again, or rerun workspace setup, to restore TL.
+
+To remove TokenLighten from the machine entirely — not just this workspace — run **TokenLighten: Uninstall TokenLighten from This Machine** from the Command Palette. It removes the staged runtime and host identity, and TokenLighten-managed registrations for Claude Code and Codex. For every workspace this machine install set up, it also removes TokenLighten's managed guide blocks and managed MCP entries (keeping a `.tl-backup` copy next to each edited MCP file); your own content, other servers' entries, and workspaces it never set up are left untouched.
 
 ## How token reduction works
 

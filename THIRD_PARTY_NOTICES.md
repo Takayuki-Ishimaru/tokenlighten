@@ -16,18 +16,18 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 |---|---|---|---|
 | @fast-csv/format@4.3.5 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
 | @fast-csv/parse@4.3.6 | MIT | doug-martin | https://github.com/C2FO/fast-csv |
-| @hono/node-server@2.1.1 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
+| @hono/node-server@1.19.17 | MIT | Yusuke Wada | https://github.com/honojs/node-server |
 | @libpdf/core@0.3.6 | MIT | Lucas Smith | https://github.com/LibPDF-js/core |
 | @modelcontextprotocol/core@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @modelcontextprotocol/sdk@1.30.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/sdk@1.29.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
 | @modelcontextprotocol/server@2.0.0 | MIT | Anthropic, PBC | https://github.com/modelcontextprotocol/typescript-sdk |
-| @noble/ciphers@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
+| @noble/ciphers@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-ciphers |
 | @noble/hashes@1.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
 | @noble/hashes@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/noble-hashes |
-| @scure/base@2.4.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
+| @scure/base@2.2.0 | MIT | Paul Miller | https://github.com/paulmillr/scure-base |
 | @types/node@14.18.63 | MIT |  | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @xmldom/xmldom@0.8.15 | MIT |  | https://github.com/xmldom/xmldom |
-| @zip.js/zip.js@2.11.2 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
+| @zip.js/zip.js@2.8.34 | BSD-3-Clause | Gildas Lormeau | https://github.com/gildas-lormeau/zip.js |
 | accepts@2.0.0 | MIT |  | https://github.com/jshttp/accepts |
 | adler-32@1.3.1 | Apache-2.0 | sheetjs | https://github.com/SheetJS/js-adler32 |
 | ajv-formats@3.0.1 | MIT | Evgeny Poberezkin | https://github.com/ajv-validator/ajv-formats |
@@ -71,7 +71,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | crc32-stream@4.0.3 | MIT | Chris Talkington | https://github.com/archiverjs/node-crc32-stream |
 | cross-spawn@7.0.6 | MIT | André Cruz | https://github.com/moxystudio/node-cross-spawn |
 | crypto-js@4.2.0 | MIT | Evan Vosberg | https://github.com/brix/crypto-js |
-| dayjs@1.11.23 | MIT | iamkun | https://github.com/iamkun/dayjs |
+| dayjs@1.11.21 | MIT | iamkun | https://github.com/iamkun/dayjs |
 | debug@4.4.3 | MIT | Josh Junon | https://github.com/debug-js/debug |
 | depd@2.0.0 | MIT | Douglas Christopher Wilson | https://github.com/dougwilson/nodejs-depd |
 | dingbat-to-unicode@1.0.1 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/dingbat-to-unicode |
@@ -86,10 +86,10 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | es-object-atoms@1.1.2 | MIT | Jordan Harband | https://github.com/ljharb/es-object-atoms |
 | escape-html@1.0.3 | MIT |  | https://github.com/component/escape-html |
 | etag@1.8.1 | MIT |  | https://github.com/jshttp/etag |
-| eventsource-parser@3.1.1 | MIT | Espen Hovlandsdal | https://github.com/rexxars/eventsource-parser |
+| eventsource-parser@3.1.0 | MIT | Espen Hovlandsdal | https://github.com/rexxars/eventsource-parser |
 | eventsource@3.0.7 | MIT | Espen Hovlandsdal | git://git@github.com/EventSource/eventsource |
 | exceljs@4.4.0 | MIT | Guyon Roche | https://github.com/exceljs/exceljs |
-| express-rate-limit@8.7.0 | MIT | Nathan Friedly | https://github.com/express-rate-limit/express-rate-limit |
+| express-rate-limit@8.5.2 | MIT | Nathan Friedly | https://github.com/express-rate-limit/express-rate-limit |
 | express@5.2.1 | MIT | TJ Holowaychuk | https://github.com/expressjs/express |
 | fast-csv@4.3.6 | MIT | Doug Martin | https://github.com/C2FO/fast-csv |
 | fast-deep-equal@3.1.3 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/fast-deep-equal |
@@ -108,7 +108,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | graceful-fs@4.2.11 | ISC |  | https://github.com/isaacs/node-graceful-fs |
 | has-symbols@1.1.0 | MIT | Jordan Harband | https://github.com/inspect-js/has-symbols |
 | hasown@2.0.4 | MIT | Jordan Harband | https://github.com/inspect-js/hasOwn |
-| hono@4.13.7 | MIT | Yusuke Wada | https://github.com/honojs/hono |
+| hono@4.13.8 | MIT | Yusuke Wada | https://github.com/honojs/hono |
 | http-errors@2.0.1 | MIT | Jonathan Ong | https://github.com/jshttp/http-errors |
 | iconv-lite@0.7.3 | MIT | Alexander Shtuchkin | https://github.com/pillarjs/iconv-lite |
 | ieee754@1.2.1 | BSD-3-Clause | Feross Aboukhadijeh | https://github.com/feross/ieee754 |
@@ -116,12 +116,12 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | immediate@3.0.6 | MIT |  | https://github.com/calvinmetcalf/immediate |
 | inflight@1.0.6 | ISC | Isaac Z. Schlueter | https://github.com/npm/inflight |
 | inherits@2.0.4 | ISC |  | https://github.com/isaacs/inherits |
-| ip-address@10.7.0 | MIT | Beau Gunderson | https://github.com/beaugunderson/ip-address |
+| ip-address@10.5.0 | MIT | Beau Gunderson | https://github.com/beaugunderson/ip-address |
 | ipaddr.js@1.9.1 | MIT | whitequark | https://github.com/whitequark/ipaddr.js |
 | is-promise@4.0.0 | MIT | ForbesLindesay | https://github.com/then/is-promise |
 | isarray@1.0.0 | MIT | Julian Gruber | https://github.com/juliangruber/isarray |
 | isexe@2.0.0 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/isexe |
-| jose@6.2.12 | MIT | Filip Skokan | https://github.com/panva/jose |
+| jose@6.2.3 | MIT | Filip Skokan | https://github.com/panva/jose |
 | json-schema-traverse@1.0.0 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/json-schema-traverse |
 | json-schema-typed@8.0.2 | BSD-2-Clause | Remy Rylan | https://github.com/RemyRylan/json-schema-typed |
 | jszip@3.10.1 | (MIT OR GPL-3.0-or-later) | Stuart Knightley | https://github.com/Stuk/jszip |
@@ -144,9 +144,9 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | lodash.uniq@4.5.0 | MIT | John-David Dalton | https://github.com/lodash/lodash |
 | lop@0.4.2 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/lop |
 | lru-cache@11.5.2 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/node-lru-cache |
-| mammoth@1.12.2 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/mammoth.js |
+| mammoth@1.12.0 | BSD-2-Clause | Michael Williamson | https://github.com/mwilliamson/mammoth.js |
 | math-intrinsics@1.1.0 | MIT | Jordan Harband | https://github.com/es-shims/math-intrinsics |
-| media-typer@1.1.1 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/media-typer |
+| media-typer@1.1.0 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/media-typer |
 | merge-descriptors@2.0.0 | MIT |  | https://github.com/sindresorhus/merge-descriptors |
 | mime-db@1.54.0 | MIT |  | https://github.com/jshttp/mime-db |
 | mime-types@3.0.2 | MIT |  | https://github.com/jshttp/mime-types |
@@ -155,7 +155,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | minimist@1.2.8 | MIT | James Halliday | https://github.com/minimistjs/minimist |
 | mkdirp@0.5.6 | MIT | James Halliday | https://github.com/substack/node-mkdirp |
 | ms@2.1.3 | MIT |  | https://github.com/vercel/ms |
-| negotiator@1.1.0 | MIT |  | https://github.com/jshttp/negotiator |
+| negotiator@1.0.0 | MIT |  | https://github.com/jshttp/negotiator |
 | normalize-path@3.0.0 | MIT | Jon Schlinkert | https://github.com/jonschlinkert/normalize-path |
 | object-assign@4.1.1 | MIT | Sindre Sorhus | https://github.com/sindresorhus/object-assign |
 | object-inspect@1.13.4 | MIT | James Halliday | https://github.com/inspect-js/object-inspect |
@@ -175,9 +175,9 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | process-nextick-args@2.0.1 | MIT |  | https://github.com/calvinmetcalf/process-nextick-args |
 | proxy-addr@2.0.7 | MIT | Douglas Christopher Wilson | https://github.com/jshttp/proxy-addr |
 | pvtsutils@1.3.6 | MIT | PeculiarVentures | https://github.com/PeculiarVentures/pvtsutils |
-| pvutils@1.2.0 | MIT | Yury Strozhevsky | https://github.com/PeculiarVentures/pvutils |
+| pvutils@1.1.5 | MIT | Yury Strozhevsky | https://github.com/PeculiarVentures/pvutils |
 | qs@6.16.0 | BSD-3-Clause |  | https://github.com/ljharb/qs |
-| range-parser@1.3.0 | MIT | TJ Holowaychuk | https://github.com/jshttp/range-parser |
+| range-parser@1.2.1 | MIT | TJ Holowaychuk | https://github.com/jshttp/range-parser |
 | raw-body@3.0.2 | MIT | Jonathan Ong | https://github.com/stream-utils/raw-body |
 | readable-stream@2.3.8 | MIT |  | https://github.com/nodejs/readable-stream |
 | readable-stream@3.6.2 | MIT |  | https://github.com/nodejs/readable-stream |
@@ -186,9 +186,8 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | rimraf@2.7.1 | ISC | Isaac Z. Schlueter | https://github.com/isaacs/rimraf |
 | router@2.2.0 | MIT | Douglas Christopher Wilson | https://github.com/pillarjs/router |
 | safe-buffer@5.1.2 | MIT | Feross Aboukhadijeh | https://github.com/feross/safe-buffer |
-| safe-buffer@5.2.1 | MIT | Feross Aboukhadijeh | https://github.com/feross/safe-buffer |
 | safer-buffer@2.1.2 | MIT | Nikita Skovoroda | https://github.com/ChALkeR/safer-buffer |
-| sax@1.6.1 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/sax-js |
+| sax@1.6.0 | BlueOak-1.0.0 | Isaac Z. Schlueter | https://github.com/isaacs/sax-js |
 | saxes@5.0.1 | ISC | Louis-Dominique Dubeau | https://github.com/lddubeau/saxes |
 | send@1.2.1 | MIT | TJ Holowaychuk | https://github.com/pillarjs/send |
 | serve-static@2.2.1 | MIT | Douglas Christopher Wilson | https://github.com/expressjs/serve-static |
@@ -204,7 +203,6 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | sprintf-js@1.0.3 | BSD-3-Clause | Alexandru Marasteanu | https://github.com/alexei/sprintf.js |
 | statuses@2.0.2 | MIT |  | https://github.com/jshttp/statuses |
 | string_decoder@1.1.1 | MIT |  | https://github.com/nodejs/string_decoder |
-| string_decoder@1.3.0 | MIT |  | https://github.com/nodejs/string_decoder |
 | tar-stream@2.2.0 | MIT | Mathias Buus | https://github.com/mafintosh/tar-stream |
 | tmp@0.2.7 | MIT | KARASZI István | https://github.com/raszi/node-tmp |
 | toidentifier@1.0.1 | MIT | Douglas Christopher Wilson | https://github.com/component/toidentifier |
@@ -213,7 +211,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | tslib@2.8.1 | 0BSD | Microsoft Corp. | https://github.com/Microsoft/tslib |
 | type-is@2.1.0 | MIT |  | https://github.com/jshttp/type-is |
 | underscore@1.13.8 | MIT | Jeremy Ashkenas | https://github.com/jashkenas/underscore |
-| unpdf@1.8.1 | MIT | Johann Schopplich | https://github.com/unjs/unpdf |
+| unpdf@1.6.2 | MIT | Johann Schopplich | https://github.com/unjs/unpdf |
 | unpipe@1.0.0 | MIT | Douglas Christopher Wilson | https://github.com/stream-utils/unpipe |
 | unzipper@0.10.11 | MIT | Evan Oxfeld | https://github.com/ZJONSSON/node-unzipper |
 | util-deprecate@1.0.2 | MIT | Nathan Rajlich | https://github.com/TooTallNate/util-deprecate |
@@ -229,7 +227,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | xmlchars@2.2.0 | MIT | Louis-Dominique Dubeau | https://github.com/lddubeau/xmlchars |
 | zip-stream@4.1.1 | MIT | Chris Talkington | https://github.com/archiverjs/node-zip-stream |
 | zod-to-json-schema@3.25.2 | ISC | Stefan Terdell | https://github.com/StefanTerdell/zod-to-json-schema |
-| zod@4.5.4 | MIT | Colin McDonnell | https://github.com/colinhacks/zod |
+| zod@4.4.3 | MIT | Colin McDonnell | https://github.com/colinhacks/zod |
 
 ## License texts
 
@@ -622,7 +620,7 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEAL
 
 ### MIT — SHA-256 15c88630f1e778db64a446cb31b67362cc9eb7a048fdf5ac7ab51905b74464cd
 
-Applies to: `pvutils@1.2.0`
+Applies to: `pvutils@1.1.5`
 
 ```text
 MIT License
@@ -785,7 +783,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 1b7ebc8d7889ed25491484ab2b102370742ca6c0b26650a0c62cc2269b579b84
 
-Applies to: `@zip.js/zip.js@2.11.2`
+Applies to: `@zip.js/zip.js@2.8.34`
 
 ```text
 BSD 3-Clause License
@@ -932,7 +930,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 24d0608c3320a3e27ac35e1b36ee222b096e372ccd981351f4db7ff4c2b0bfd0
 
-Applies to: `@noble/ciphers@2.4.0`
+Applies to: `@noble/ciphers@2.2.0`
 
 ```text
 The MIT License (MIT)
@@ -1351,7 +1349,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 3239e134eb6e6d64538ca76498c7fcb08a395249dd9d4af9927bf6d0169ee429
 
-Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.4.0`, `@scure/base@2.4.0`
+Applies to: `@noble/hashes@1.4.0`, `@noble/hashes@2.4.0`, `@scure/base@2.2.0`
 
 ```text
 The MIT License (MIT)
@@ -1727,7 +1725,7 @@ MIT License
 
 ### MIT — SHA-256 3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8
 
-Applies to: `zod@4.5.4`
+Applies to: `zod@4.4.3`
 
 ```text
 MIT License
@@ -1916,7 +1914,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### MIT — SHA-256 4a57080b8ecdb3a53ec678828121849ce5df877a99b1ad8d50e165d8a2aded1b
 
-Applies to: `unpdf@1.8.1`
+Applies to: `unpdf@1.6.2`
 
 ```text
 MIT License
@@ -2094,7 +2092,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 553d4d20029a24e315b428a1a54a9e109eaa340f2e958a4f50a92362c2c4070b
 
-Applies to: `negotiator@1.1.0`
+Applies to: `negotiator@1.0.0`
 
 ```text
 (The MIT License)
@@ -2856,7 +2854,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 ### MIT — SHA-256 5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d
 
-Applies to: `@modelcontextprotocol/sdk@1.30.0`
+Applies to: `@modelcontextprotocol/sdk@1.29.0`
 
 ```text
 MIT License
@@ -2966,7 +2964,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 5faab7526d055651be3aab769d58897be6bd91f3d39d137f25f12dba1b31d5dc
 
-Applies to: `dayjs@1.11.23`
+Applies to: `dayjs@1.11.21`
 
 ```text
 MIT License
@@ -3080,7 +3078,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD* — SHA-256 6663bbd049205d38a496ccacb412a151980b444627d38de218b3b809aef330f1
 
-Applies to: `duck@0.1.12`, `lop@0.4.2`, `mammoth@1.12.2`, `option@0.2.4`
+Applies to: `duck@0.1.12`, `lop@0.4.2`, `mammoth@1.12.0`, `option@0.2.4`
 
 ```text
 Copyright (c) 2013, Michael Williamson
@@ -3109,7 +3107,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 6895190430d809c4c57a7582ecc2f99acbc2ea39a5dfad20262a41d5b3e91733
 
-Applies to: `@hono/node-server@2.1.1`
+Applies to: `@hono/node-server@1.19.17`
 
 ```text
 MIT License
@@ -4074,7 +4072,7 @@ MIT
 
 ### MIT — SHA-256 8078b0829d6c3e9ecde2f003e1966e4cad3efc6e7a640efbab0313cc166b1af1
 
-Applies to: `jose@6.2.12`
+Applies to: `jose@6.2.3`
 
 ```text
 The MIT License (MIT)
@@ -4245,7 +4243,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### MIT — SHA-256 835eb611a23301b27115ca1be9f754c876e643ceb7fe63049c6b50609a1cafeb
 
-Applies to: `eventsource-parser@3.1.1`
+Applies to: `eventsource-parser@3.1.0`
 
 ```text
 MIT License
@@ -4354,7 +4352,7 @@ For more information, please refer to <http://unlicense.org>
 
 ### BlueOak-1.0.0 — SHA-256 8a1af140fdfbf5afd3df27f7e662f989c5b963a300020dfafce42033cae9e004
 
-Applies to: `lru-cache@11.5.2`, `sax@1.6.1`
+Applies to: `lru-cache@11.5.2`, `sax@1.6.0`
 
 ```text
 # Blue Oak Model License
@@ -5386,7 +5384,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
 
-Applies to: `hono@4.13.7`
+Applies to: `hono@4.13.8`
 
 ```text
 MIT License
@@ -5399,34 +5397,6 @@ in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-### MIT — SHA-256 a752c164b45840ef677e68c738aefabfd665ee9f112ada4538761301a97118b0
-
-Applies to: `express-rate-limit@8.7.0`
-
-```text
-MIT License
-
-Copyright 2023 Nathan Friedly, Vedant K
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
@@ -5914,7 +5884,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 bd47ce7b88c7759630d1e2b9fcfa170a0f1fde522be09e13fb1581a79d090400
 
-Applies to: `content-disposition@1.1.0`, `forwarded@0.2.0`, `media-typer@1.1.1`, `vary@1.1.2`
+Applies to: `content-disposition@1.1.0`, `forwarded@0.2.0`, `media-typer@1.1.0`, `vary@1.1.2`
 
 ```text
 (The MIT License)
@@ -6152,7 +6122,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 c7cc929b57080f4b9d0c6cf57669f0463fc5b39906344dfc8d3bc43426b30eac
 
-Applies to: `safe-buffer@5.1.2`, `safe-buffer@5.2.1`
+Applies to: `safe-buffer@5.1.2`
 
 ```text
 The MIT License (MIT)
@@ -6435,6 +6405,33 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+### MIT — SHA-256 df66e8e76a2438780588c57d91c552ead3f7ed81730acaafc3a45dd3e8618843
+
+Applies to: `express-rate-limit@8.5.2`
+
+```text
+# MIT License
+
+Copyright 2023 Nathan Friedly, Vedant K
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### BSD-3-Clause — SHA-256 df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
 
 Applies to: `fast-uri@3.1.7`
@@ -6688,7 +6685,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 ec62dc96da0099b87f4511736c87309335527fb7031639493e06c95728dc8c54
 
-Applies to: `readable-stream@2.3.8`, `readable-stream@3.6.2`, `string_decoder@1.1.1`, `string_decoder@1.3.0`
+Applies to: `readable-stream@2.3.8`, `readable-stream@3.6.2`, `string_decoder@1.1.1`
 
 ```text
 Node.js is licensed for use as follows:
@@ -6832,7 +6829,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### MIT — SHA-256 f655e6291356ec0de7a8f0e69f294961a2cea86678ec94588be1e6a492e278ab
 
-Applies to: `range-parser@1.3.0`
+Applies to: `range-parser@1.2.1`
 
 ```text
 (The MIT License)
@@ -6944,7 +6941,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 f8d791359a50cbcac82c29cb7b0b1b889b28be76fdd35b8ee33f0f7c8704702a
 
-Applies to: `ip-address@10.7.0`
+Applies to: `ip-address@10.5.0`
 
 ```text
 Copyright (C) 2011 by Beau Gunderson

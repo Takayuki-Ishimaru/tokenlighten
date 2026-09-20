@@ -4,6 +4,7 @@
   "command.setup": "TokenLighten: このワークスペースをセットアップ",
   "command.usage.show": "TokenLighten: このワークスペースの使用状況と削減率を表示",
   "command.logs.export": "TokenLighten: このワークスペースの使用ログを出力",
+  "command.uninstallMachine": "TokenLighten: このマシンからTokenLightenをアンインストール",
   "view.controlCenter": "ワークスペース",
   "config.enabled": "このワークスペースでTokenLightenを有効にします。",
   "config.language": "TokenLighten拡張機能全体の表示言語です。",

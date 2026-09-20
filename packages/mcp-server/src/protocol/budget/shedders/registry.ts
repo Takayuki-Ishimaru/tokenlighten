@@ -181,6 +181,35 @@ export function str(value: unknown): string | undefined {
 }
 
 /**
+ * SHOULD-FIX 63 (AC1, 2026-09-14, review round 12) — THE ONE STATEMENT E-7's
+ * ARGUMENT DOES NOT COVER.
+ *
+ * E-7 sheds prose because "absence never means 'this did not happen' — only
+ * 'this was not worth the bytes'". For ONE sentence that is false: when
+ * `util/textDecode.ts::readServedText` returns a `"stripped"` verdict, the
+ * policy's own words are that the server MUST say it stripped the file's NUL
+ * characters, because the `sha`, `range` and byte counts on that response
+ * describe the SERVED text and not the bytes on disk. Round 11 measured the
+ * consequence: under `budget:{bytes:3000}` the statement — carried in `note`,
+ * the FIRST entry of every rung-1 prose list — was shed at `read.text`,
+ * `read.batch` and `read.map` while the stripped body and its `sha` were still
+ * served, and on the batch path rung 1 is not in `LIMIT_BEARING_RUNGS`, so the
+ * drop was not even disclosed as `metadata`.
+ *
+ * So a `note` that CARRIES the strip statement is unsheddable, exactly as
+ * `headings`/`sections_hint`/`style` already are in `readText.ts`'s
+ * "DELIBERATELY NOT ON THIS LIST" block — and by the same test those use: the
+ * value, not the key. A `note` with no strip statement stays rung-1 prose and
+ * sheds first, so no clean serve moves a byte. The ladder simply moves on to
+ * the next key, which is why this needs no new rung and no wire field.
+ */
+const NUL_STRIPPED_DISCLOSURE_TOKEN = "nul-stripped";
+
+export function carriesStripDisclosure(value: unknown): boolean {
+  return typeof value === "string" && value.includes(NUL_STRIPPED_DISCLOSURE_TOKEN);
+}
+
+/**
  * A copy of `source` without `keys`, plus the keys that were actually there.
  *
  * KEY ORDER IS PRESERVED for everything that survives, because a rebuilt object

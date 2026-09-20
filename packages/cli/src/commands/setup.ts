@@ -25,6 +25,7 @@
 
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
+import { resolveSpawnTarget } from "../spawnCompat.js";
 import {
   detectPrereqs,
   buildPrereqContext,
@@ -122,9 +123,17 @@ async function runInstall(
   }
 
   const code = await new Promise<number>((resolve) => {
-    const child = spawn(ic.manager, ic.args, {
+    // Same defense-in-depth rationale as prereqs.ts's ensurePrereqs: only
+    // `winget` is reachable here on win32 today and it is a native
+    // executable (not a batch file), so this is a no-op passthrough — but
+    // it shares the "spawn a resolved-at-runtime command name" shape with
+    // the sites that ARE affected by Windows' `spawn EINVAL` batch-file
+    // issue, so it goes through the same helper for consistency.
+    const target = resolveSpawnTarget(ic.manager, ic.args);
+    const child = spawn(target.file, target.args, {
       shell: false,
       stdio: "inherit",
+      ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true as const } : {}),
     });
     child.on("exit", (c) => resolve(c ?? 1));
     child.on("error", (e) => {

@@ -1200,7 +1200,12 @@ export async function resolveSlice(
     const cutSymbol = await findBoundaryCutAsync(content, filePath, startLine, endLine);
     if (cutSymbol) {
       const cutRangeStr = String(cutSymbol.startLine) + "-" + String(cutSymbol.endLine);
-      note = `boundary cuts symbol ${cutSymbol.name} (${cutRangeStr}); use symbol=${cutSymbol.name}`;
+      // Trim B (2026-09-13, §5 lightweight-path record): shortest form that
+      // still names the symbol and its covering range -- handle/range/sha
+      // already carry the rest of the addressing, so the caller can
+      // self-correct with symbol=<name> without the longer
+      // "boundary cuts ...; use symbol=..." sentence this replaces.
+      note = `symbol ${cutSymbol.name} spans ${cutRangeStr}`;
     }
 
     // T1b (v0.13, UTF-16 3-way read-parity wave): sliceLinesToText restores

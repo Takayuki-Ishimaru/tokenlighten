@@ -32,7 +32,15 @@
           "handle": "$TH"
         }
       }
-    }
+    },
+    "gaps": [
+      {
+        "code": "missing-evidence",
+        "refs": [
+          "surface-content"
+        ]
+      }
+    ]
   },
   "qref": "$QREF"
 }

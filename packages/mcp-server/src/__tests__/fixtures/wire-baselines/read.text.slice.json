@@ -11,7 +11,7 @@
   ],
   "sha": "$SHA1",
   "total_lines": 1290,
-  "note": "boundary cuts symbol isHealthy (7-1191); use symbol=isHealthy",
+  "note": "symbol isHealthy spans 7-1191",
   "headings": [
     {
       "level": 1,

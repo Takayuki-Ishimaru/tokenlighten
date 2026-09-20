@@ -53,8 +53,18 @@ describe("compact GuideProfile round-trip via injectAll (all targets, both local
       // CLAUDE.md stays the @AGENTS.md import stub regardless of profile.
       expect(readFile(repo, "CLAUDE.md")).toContain("@AGENTS.md");
 
+      // copilot-instructions.md stays the short Copilot pointer stub
+      // regardless of profile too (same reasoning as CLAUDE.md above) — see
+      // render.ts's COPILOT_IMPORT_TEMPLATE / loadTemplateForProfile.
+      const copilotContent = readFile(repo, ".github/copilot-instructions.md");
+      expect(copilotContent).toContain("`AGENTS.md`");
+      expect(copilotContent).toContain(INSTRUCTIONS_VERSION);
+      expect(copilotContent).not.toContain("## TokenLighten MCP (compact)");
+
       // Every other stub gets the compact body, not the full one.
-      const fullBodyTargets = ALL_STUB_FILES.filter((f) => f !== "CLAUDE.md");
+      const fullBodyTargets = ALL_STUB_FILES.filter(
+        (f) => f !== "CLAUDE.md" && f !== ".github/copilot-instructions.md",
+      );
       for (const target of fullBodyTargets) {
         const content = readFile(repo, target);
         expect(content, target).toContain("## TokenLighten MCP (compact)");

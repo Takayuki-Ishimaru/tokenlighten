@@ -320,7 +320,7 @@ const REFUSAL_CODES: ReadonlySet<string> = new Set<RefusalCode>([
   // TypestateCode
   "execution-typestate", "prepared-discovery-closed", "discovery-loop-brake",
   "prescribed-step-executed-target-still-inadmissible", "create-target-not-servable",
-  "create-target-exists", "repeated-all-served-find",
+  "create-target-exists", "frontier-read-only", "repeated-all-served-find",
   // WriteCode
   "write-not-enabled", "hash-mismatch", "scope-violation", "out-of-scope",
   "blast-radius-precondition-required", "range-out-of-bounds", "range-invalid",

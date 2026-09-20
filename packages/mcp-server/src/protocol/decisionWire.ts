@@ -39,7 +39,7 @@ import type { TaskExecutionContract, TaskCapabilityGap } from "@tokenlighten/typ
 import type { TaskPackResult } from "../features/task-pack/model.js";
 
 import { emittableToolCall } from "./refusal.js";
-import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow } from "../features/task-pack/canonicalDecision.js";
+import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow } from "../features/task-pack/canonicalDecision.js";
 import { semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
 import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
 import { noteSemanticFrontierDecisionSuppression, noteSemanticFrontierEvidenceSuppression, noteSemanticFrontierWithholding, semanticFrontierEvidenceWitnessId } from "./semanticFrontierTraceContext.js";
@@ -613,9 +613,19 @@ function projectFrontier(
     }
   }
   const frontier: FrontierEntry[] = [];
+  // C24 (chip wave, 2026-09-14): two DIFFERENT handles can both resolve to the
+  // SAME path (e.g. one handle from `evidence[]`, another from
+  // `frontier_index`, for the same file) — dedupe by path so the wire never
+  // lists one file twice under two handles. The FIRST handle in
+  // `action_frontier` order that resolves to a given path wins; a later
+  // handle for that same path is dropped, not merged, since the caller
+  // already has an addressable frontier entry for that file.
+  const seenPaths = new Set<string>();
   for (const handle of handles) {
     const path = paths.get(handle);
     if (path === undefined) continue;
+    if (seenPaths.has(path)) continue;
+    seenPaths.add(path);
     // §2.1.1: an edit frontier is the bounded effect area, so every entry is a
     // write target by construction. `writable` is the type's readback of that,
     // not a filesystem probe.
@@ -756,10 +766,54 @@ function discoverNext(
  * requested: there is then nothing to zoom, and a `discover` naming a call that
  * fetches nothing new would be a round trip charged for no bytes.
  */
+/**
+ * SHOULD-FIX 59 (AB1, 2026-09-14, review round 11) — `remaining` IS PER-HANDLE,
+ * "ALREADY SERVED" IS PER-PATH.
+ *
+ * `Evidence.remaining` is documented as "unserved windows of THIS handle", and
+ * that is exactly what it is — but a pack routinely serves ONE path through TWO
+ * surfaces (a narrow symbol window and a wider file window), so a window this
+ * response DID serve on one handle is still listed as `remaining` on the other.
+ * Zooming into it prescribes a call whose only possible answer is
+ * `read.receipt {receipt:"code-unchanged"}` with NO `next` — the dead end
+ * measured at `What does MAX_RETRIES do in src/retry.ts? Update the changelog.`
+ * (round 11): `next: read_file targets:[{handle:<1-1 surface>, range:"2-2"}]`,
+ * answered `served_by:"task_pack 1-2 (call #1)"`.
+ *
+ * So the candidate window is checked against what THIS RESPONSE actually put in
+ * the caller's hands, per path: any entry carrying a `body` (served here) or a
+ * `prior` (served earlier in this session, so the caller already holds it).
+ * Falls through to the next candidate window, and to `undefined` when every
+ * window is already held — which is the honest input to the `await_input` arms
+ * below, all of which name what is unresolved.
+ */
 function servedEvidenceZoom(evidence: readonly Evidence[]): ToolCall | undefined {
+  const parseSpan = (value: string | undefined): [number, number] | undefined => {
+    const match = /^(\d+)-(\d+)$/.exec(value ?? "");
+    if (match === null) return undefined;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return Number.isInteger(start) && Number.isInteger(end) && start >= 1 && end >= start ? [start, end] : undefined;
+  };
+  const held = new Map<string, Array<[number, number]>>();
   for (const entry of evidence) {
-    const range = entry.remaining?.[0];
-    if (typeof range === "string" && range !== "") {
+    if (entry.path === undefined) continue;
+    if (entry.body === undefined && entry.prior === undefined) continue;
+    const span = parseSpan(entry.range);
+    if (span === undefined) continue;
+    const list = held.get(entry.path) ?? [];
+    list.push(span);
+    held.set(entry.path, list);
+  }
+  const alreadyHeld = (path: string | undefined, span: [number, number]): boolean => {
+    if (path === undefined) return false;
+    return (held.get(path) ?? []).some(([start, end]) => start <= span[0] && end >= span[1]);
+  };
+  for (const entry of evidence) {
+    for (const range of entry.remaining ?? []) {
+      if (typeof range !== "string" || range === "") continue;
+      const span = parseSpan(range);
+      if (span !== undefined && alreadyHeld(entry.path, span)) continue;
       return { tool: "read_file", arguments: { handle: entry.handle, range } };
     }
   }
@@ -1120,6 +1174,21 @@ function projectUnresolved(
     out.push(toPush);
   };
 
+  // 0a. FIXALL-A group D (2026-09-14): the request named NOTHING to act on.
+  // `await_input` means "`unresolved[]` names the blocker", and for this shape
+  // the blocker is not a file that could not be read or a role that was not
+  // served — it is that the request itself never stated an object. Sited FIRST,
+  // ahead of the profile conflict, because `MAX_UNRESOLVED` is a hard cap and
+  // every other row below describes the PACK, which is a true but useless thing
+  // to tell a caller whose request was `Increase it to 5.`. See
+  // `TaskPackResult.request_names_no_target`.
+  if ((result as Record<string, unknown>)["request_names_no_target"] === true) {
+    push({
+      kind: "ambiguous-target",
+      reason: "this request names no file, symbol or identifier to act on — only a verb and a value; name the target so it can be resolved to a surface",
+    });
+  }
+
   // 0. The declared-profile conflict (reviewer note 5), narrowed to the two
   // codes where it is genuinely this terminal's own question (finding 8).
   const conflict = profileConflictAppliesTo(awaitCode) ? declaredProfileCreateConflict(result) : undefined;
@@ -1128,6 +1197,42 @@ function projectUnresolved(
       kind: "profile-conflict",
       reason: `explicit create of ${conflict.path} needs task.profile generic (declared: answer)`,
       path: conflict.path,
+    });
+  }
+
+  // 0b. BLOCKER 25 (2026-09-14, review round 4): a file THIS REQUEST NAMED BY
+  // PATH that the server resolved but could not read. Sited here, second only
+  // to the profile conflict, because `MAX_UNRESOLVED` is a hard cap and this
+  // row is the one the caller cannot reconstruct from anything else in the
+  // response: without it the named path appears nowhere at all, which is the
+  // finding. Read from the pack's own first-class field
+  // (`TaskPackResult.unreadable_named_paths`) rather than from the `missing`
+  // row the same producer writes, so the row can carry `path` addressing —
+  // `parseLedgerMissingRow` returns prose only. The `missing` row remains the
+  // epoch-vocabulary spelling `openEpochContractRequirements` reads, and its
+  // duplicate is collapsed by `push`'s own kind+reason dedupe below.
+  for (const entry of Array.isArray(result["unreadable_named_paths"]) ? result["unreadable_named_paths"] : []) {
+    const row = recordAt(entry);
+    const namedPath = typeof row?.["path"] === "string" ? row["path"] as string : undefined;
+    const reason = typeof row?.["reason"] === "string" ? row["reason"] as string : undefined;
+    if (namedPath === undefined || namedPath === "" || reason === undefined) continue;
+    // SHOULD-FIX 65 (AC1, 2026-09-14, review round 12): say "this request names
+    // X" only when it does. Round 11 measured a query naming ONE file producing
+    // THREE rows with this wording, two of them false — the disclosure is now a
+    // property of the VERDICT (any candidate path the serve policy will not
+    // read), so it reaches paths the request never mentions. `await_input` means
+    // "`unresolved[]` names the blocker", and a caller acting on a false row asks
+    // the user to re-save files it never mentioned. The producer
+    // (`readCodeTaskPack.ts::noteUnreadableNamedPath`) records which it is;
+    // absence reads as `"request"`, because a row restored from the pre-round-12
+    // `missing[]` spelling could only have come from that case.
+    const provenance = row?.["provenance"] === "resolution" ? "resolution" : "request";
+    push({
+      kind: "unreadable-named-path",
+      reason: provenance === "request"
+        ? `this request names ${namedPath}, which this response could not serve (${reason})`
+        : `a file this task needed (${namedPath}) could not be read/decoded (${reason})`,
+      path: namedPath,
     });
   }
 
@@ -1227,11 +1332,23 @@ function projectUnresolved(
     const coverage = result["coverage"];
     const reason = result["coverage_reason"];
     if (coverage === "partial" || coverage === "focused") {
+      // SHOULD-FIX 64 (AC1, 2026-09-14, review round 12): this is the LAST-RESORT
+      // arm (`out.length === 0` — the pack could name nothing at all), and round
+      // 11 measured it as the terminal for an unambiguous edit request whose
+      // whole `unresolved[]` was one row describing the PACK. The pack fact is
+      // the honest cause and stays; what is added is the half a caller can act
+      // on, because `await_input` means "`unresolved[]` names the blocker" and a
+      // row naming only the server's own coverage names no blocker the caller or
+      // the user could lift. Nothing here invents a target: it states what the
+      // response is missing (a target it could resolve) and what supplying it
+      // looks like.
+      const pack = typeof reason === "string" && reason !== ""
+        ? `pack coverage is "${String(coverage)}" (${reason})`
+        : `pack coverage is "${String(coverage)}"`;
       push({
         kind: "incomplete-coverage",
-        reason: typeof reason === "string" && reason !== ""
-          ? `pack coverage is "${String(coverage)}" (${reason}); no served surface closes the remainder`
-          : `pack coverage is "${String(coverage)}"; no served surface closes the remainder`,
+        reason: `${pack}; no served surface closes the remainder — name the file or`
+          + ` identifier this request is about, so it can be resolved to a surface`,
       });
     }
   }
@@ -1432,6 +1549,19 @@ function projectSemanticFrontierNext(
   consumed: ((call: ToolCall) => boolean) | undefined,
 ): ToolCall | undefined {
   const taskResult = result as unknown as TaskPackResult;
+  /**
+   * FIXALL-A group D (2026-09-14) — NOTHING TO SEARCH FOR IS NOT A REASON TO
+   * SEARCH. The wire ranks its own discovery candidates here rather than taking
+   * `deriveCanonicalTaskDecisionRaw`'s, so the same suppression has to be stated
+   * at both seats (that function carries the full argument; this is its wire
+   * half). `request_names_no_target` says the ENTIRE request was a verb, an
+   * optional pronoun and an optional bare value — `Increase it to 5.`,
+   * 「それを 5 に削除してください。」 — so every candidate below can only propose a
+   * repository-wide find for the verb the caller used to ask for the change.
+   * With no `next`, the decision falls through to `await_input`, whose
+   * `unresolved[]` names what the caller can supply.
+   */
+  if (taskResult.request_names_no_target === true) return undefined;
   const guardEnabled = semanticFrontierGuardEnabled();
   const allowed = semanticFrontierNextAllowed({
     surfaces: Array.isArray(result["surfaces"]) ? result["surfaces"] as TaskPackResult["surfaces"] : [],
@@ -1442,6 +1572,7 @@ function projectSemanticFrontierNext(
   const rawBundle = discoveryBundleNext(taskResult, false);
   const rawContract = sanitizeSemanticFrontierNext(taskResult, discoverNext(contract, result), false);
   const rawGap = sanitizeSemanticFrontierNext(taskResult, gapNamedNext(contract), false);
+  const rawUnserved = sanitizeSemanticFrontierNext(taskResult, unservedAddressableRepack(taskResult), false);
   // D8 (FX-R3c, DC2) NOTE: §10.0 names `selectCanonicalNext` the single arbiter
   // of `decision.next`, but `rawBundle` still outranks `rawContract` here, so
   // on a CANDIDATE-LIST pack the wire keeps offering the discovery bundle even
@@ -1460,6 +1591,11 @@ function projectSemanticFrontierNext(
     },
     { raw: rawContract, guarded: guarded(rawContract), suppressionReason: "continuation-target" },
     { raw: rawGap, guarded: guarded(rawGap), suppressionReason: "continuation-target" },
+    // FIXALL-A (2026-09-14), LAST: the rows this pack addressed and did not
+    // serve. Ranked below every producer above so it can only replace the
+    // ABSENCE of a call — see `unservedAddressableRepack`, which carries the
+    // loop-freedom argument round 12's residual R2 was waiting on.
+    { raw: rawUnserved, guarded: guarded(rawUnserved), suppressionReason: "continuation-target" },
   ];
   const rawWinner = firstProgressingIndex(candidates, consumed, "raw");
   const guardedWinner = firstProgressingIndex(candidates, consumed, "guarded");

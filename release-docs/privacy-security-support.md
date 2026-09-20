@@ -22,7 +22,7 @@ The VS Code extension and CLI can produce local usage and cost-savings estimates
 
 ## Dependency updates
 
-v0.14.0 included dependency updates that address security issues, and v0.14.2 declares no dependency changes. Use the latest released version. Source users can run `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation. Advisory information can change after release.
+v0.14.0 and v0.14.3 included dependency updates that address published advisories; v0.14.3 moves three transitive runtime dependencies to patched versions within their existing ranges and adds no new runtime dependency. Each install archive also bundles an official Node.js 24 LTS runtime; a Node.js security release on that line is treated as a re-release obligation. Use the latest released version. Source users can run `npm audit --omit=dev` for runtime dependencies and `npm audit` for the complete development installation. Advisory information can change after release.
 
 ## Support and service level
 

@@ -268,7 +268,7 @@ describe("A1 — caller-named artifact surfaces carry content", () => {
 
     expect(artifactSurfaces(result).length).toBeGreaterThan(0);
     for (const surface of artifactSurfaces(result)) {
-      expect(surface.extract).toBe(`read_file mode=artifact path=${surface.path}`);
+      expect(surface.extract).toBe(`read_file {targets:[{path:${JSON.stringify(surface.path)}}]}`);
     }
     expect(result.artifact_sections).toBeUndefined();
     expect(result.inlined?.some((stamp) => stamp.startsWith("artifact-section:")) ?? false).toBe(false);

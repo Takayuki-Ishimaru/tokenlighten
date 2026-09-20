@@ -10,10 +10,11 @@
 
 import { describe, it, expect } from "vitest";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildSkeleton } from "../index.js";
 import { renderSkeleton } from "../render.js";
 
-const FIXTURE_ROOT = join(new URL(".", import.meta.url).pathname, "../../test-fixtures/mini-repo");
+const FIXTURE_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../../test-fixtures/mini-repo");
 
 const defaultConfig = {
   topN: 10,

@@ -60,8 +60,16 @@ describe("tl-agents CLI argument parsing", () => {
     expect(parsed.profile).toBe("compact");
   });
 
-  it("still advertises the pre-existing targets and locales unchanged", () => {
-    expect(VALID_TARGETS).toEqual(["claude", "copilot", "cursor", "cline", "continue"]);
+  it("advertises the pre-existing 5 targets plus copilot-agent, and the locales unchanged", () => {
+    expect(VALID_TARGETS).toEqual(["claude", "copilot", "cursor", "cline", "continue", "copilot-agent"]);
     expect(VALID_LOCALES).toEqual(["en", "jp"]);
+  });
+
+  it("parses --targets copilot-agent (v96 addition) alongside the pre-existing ids", () => {
+    const parsed = parseArgs([
+      "node", "cli.js", "update",
+      "--targets", "copilot,copilot-agent",
+    ]);
+    expect(parsed.targets).toEqual(["copilot", "copilot-agent"]);
   });
 });

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
@@ -588,5 +588,218 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
       });
       expect(result["kind"], JSON.stringify(result)).toBe("read.batch");
     });
+  });
+});
+
+describe("libarchive Node worker path (Windows worker-path fix)", () => {
+  it("resolves worker-bundle-node.mjs to a real, existing file with no drive-letter duplication", async () => {
+    const { resolveLibarchiveWorkerPath } = await import("../tools/archive.js");
+    const workerPath = resolveLibarchiveWorkerPath();
+    expect(workerPath).toBeDefined();
+    expect(fs.existsSync(workerPath!)).toBe(true);
+    expect(workerPath!.endsWith("worker-bundle-node.mjs")).toBe(true);
+    // The reported Windows bug produces `C:\C:\...` — i.e. a drive letter
+    // appearing twice in the same path. A correctly resolved native path
+    // has at most one (zero on POSIX, exactly one on win32).
+    const driveLetterOccurrences = workerPath!.match(/[A-Za-z]:[\\/]/g) ?? [];
+    expect(driveLetterOccurrences.length).toBeLessThanOrEqual(1);
+    expect(workerPath).not.toMatch(/[\\/][A-Za-z]:[\\/]/);
+  });
+
+  it("patchLibarchiveWorkerPath replaces getWorker but preserves the library's own createClient, and runs at most once per process", async () => {
+    // Earlier tests in this file (the real archive-reading ones) already
+    // drove `openArchive()` → `patchLibarchiveWorkerPath(Archive)` against
+    // the real library, which sets the module-level "already patched"
+    // guard for THAT module instance. Reset modules so this test observes
+    // a fresh instance with the guard unset — otherwise it would find the
+    // guard already tripped and (correctly, per the idempotency contract)
+    // do nothing, which is what the "runs at most once" half of this test
+    // asserts about `fakeArchiveB` on purpose, but must not be an accident
+    // for `fakeArchiveA` too.
+    vi.resetModules();
+    const { patchLibarchiveWorkerPath } = await import("../tools/archive.js");
+    const originalCreateClient = (): string => "original-create-client";
+    const originalGetWorker = (): string => "original-get-worker";
+
+    const fakeArchiveA = {
+      init(options: Record<string, unknown>) {
+        fakeArchiveA._options = options;
+      },
+      _options: { getWorker: originalGetWorker, createClient: originalCreateClient } as Record<string, unknown>,
+    };
+    patchLibarchiveWorkerPath(fakeArchiveA);
+
+    // getWorker was replaced with a fixed, platform-neutral resolver...
+    expect(fakeArchiveA._options["getWorker"]).not.toBe(originalGetWorker);
+    // ...but createClient (the Node-worker-to-comlink adapter) must survive
+    // untouched — dropping it would break every platform, not just Windows.
+    expect(fakeArchiveA._options["createClient"]).toBe(originalCreateClient);
+
+    // A second, independent Archive-shaped object is left untouched: the
+    // patch is idempotent (init once per process), not "once per Archive".
+    const fakeArchiveB = {
+      init(options: Record<string, unknown>) {
+        fakeArchiveB._options = options;
+      },
+      _options: { getWorker: originalGetWorker, createClient: originalCreateClient } as Record<string, unknown>,
+    };
+    patchLibarchiveWorkerPath(fakeArchiveB);
+    expect(fakeArchiveB._options["getWorker"]).toBe(originalGetWorker);
+    expect(fakeArchiveB._options["createClient"]).toBe(originalCreateClient);
+  });
+
+  it("resolveLibarchiveWorkerPath falls through to a sibling file next to the running module when require.resolve fails (shipped VSIX / install-archive bundle layout)", async () => {
+    const { resolveLibarchiveWorkerPath } = await import("../tools/archive.js");
+    const checkedPaths: string[] = [];
+    const result = resolveLibarchiveWorkerPath({
+      resolveFromRequire: () => {
+        throw new Error("Cannot find module 'libarchive.js/dist/worker-bundle-node.mjs'");
+      },
+      moduleUrl: "file:///Users/ishim/app/0.14.2/node_modules/@tokenlighten/mcp-server/dist/bin.js",
+      exists: (p: string) => {
+        checkedPaths.push(p);
+        return p.endsWith("worker-bundle-node.mjs");
+      },
+    });
+    expect(result).toBeDefined();
+    expect(result!.endsWith("worker-bundle-node.mjs")).toBe(true);
+    expect(checkedPaths.length).toBeGreaterThan(0);
+    const driveLetterOccurrences = result!.match(/[A-Za-z]:[\\/]/g) ?? [];
+    expect(driveLetterOccurrences.length).toBeLessThanOrEqual(1);
+    expect(result).not.toMatch(/[\\/][A-Za-z]:[\\/]/);
+  });
+
+  it("resolveLibarchiveWorkerPath resolves a win32-shaped bundle module URL without ever doubling the drive letter", async () => {
+    const { resolveLibarchiveWorkerPath } = await import("../tools/archive.js");
+    const result = resolveLibarchiveWorkerPath({
+      resolveFromRequire: () => {
+        throw new Error("Cannot find module 'libarchive.js/dist/worker-bundle-node.mjs'");
+      },
+      // The exact shape of the B1 crash report: the shipped bundle's own
+      // dist/bin.js, on Windows.
+      moduleUrl:
+        "file:///C:/Users/ishim/AppData/Local/tokenlighten/app/0.14.2/node_modules/@tokenlighten/mcp-server/dist/bin.js",
+      exists: () => true,
+    });
+    expect(result).toBeDefined();
+    expect(result!.endsWith("worker-bundle-node.mjs")).toBe(true);
+    // The reported bug is a DOUBLED drive letter (`C:\C:\...`) produced by
+    // libarchive's own `new URL(".", import.meta.url).pathname` idiom; this
+    // function instead uses fileURLToPath + dirname + join (never
+    // `.pathname`), so "C:" must appear at most once no matter how many
+    // times join()/dirname() touch the string. (A bare leading "/C:/" is
+    // NOT itself the bug being guarded here and is not asserted against:
+    // on a non-win32 host — this suite always runs on macOS/Linux — Node's
+    // OWN fileURLToPath necessarily keeps a POSIX-style leading "/" for a
+    // win32-shaped URL, since only the real win32 branch of fileURLToPath
+    // strips it; that is confirmed cross-platform-testing behavior, not a
+    // reproduction of the reported crash.)
+    const driveLetterOccurrences = result!.match(/[A-Za-z]:[\\/]/g) ?? [];
+    expect(driveLetterOccurrences.length).toBeLessThanOrEqual(1);
+  });
+
+  it("resolveLibarchiveWorkerPath returns undefined when neither require.resolve nor the sibling file yields a path", async () => {
+    const { resolveLibarchiveWorkerPath } = await import("../tools/archive.js");
+    const result = resolveLibarchiveWorkerPath({
+      resolveFromRequire: () => {
+        throw new Error("Cannot find module 'libarchive.js/dist/worker-bundle-node.mjs'");
+      },
+      moduleUrl:
+        "file:///C:/Users/ishim/AppData/Local/tokenlighten/app/0.14.2/node_modules/@tokenlighten/mcp-server/dist/bin.js",
+      exists: () => false,
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("resolveLibarchiveWorkerPath prefers require.resolve and never consults the sibling-file fallback when it succeeds", async () => {
+    const { resolveLibarchiveWorkerPath } = await import("../tools/archive.js");
+    let existsCalled = false;
+    const result = resolveLibarchiveWorkerPath({
+      resolveFromRequire: () => "/real/node_modules/libarchive.js/dist/worker-bundle-node.mjs",
+      exists: () => {
+        existsCalled = true;
+        return true;
+      },
+    });
+    expect(result).toBe("/real/node_modules/libarchive.js/dist/worker-bundle-node.mjs");
+    expect(existsCalled).toBe(false);
+  });
+
+  it("patchLibarchiveWorkerPath returns the resolved worker path on every call, including after the first (idempotent) call", async () => {
+    vi.resetModules();
+    const { patchLibarchiveWorkerPath } = await import("../tools/archive.js");
+    const makeFakeArchive = () => {
+      const archive: { init: (options: Record<string, unknown>) => void; _options: Record<string, unknown> } = {
+        init(options) {
+          archive._options = options;
+        },
+        _options: {},
+      };
+      return archive;
+    };
+    const first = patchLibarchiveWorkerPath(makeFakeArchive());
+    expect(first).toBeDefined();
+    expect(first!.endsWith("worker-bundle-node.mjs")).toBe(true);
+    // Second call: the "already patched" guard skips re-patching (asserted by
+    // the "runs at most once" test above), but the CACHED worker path must
+    // still come back — openArchive needs it on every read to decide whether
+    // it may safely fall through to libarchive's own (win32-broken) default
+    // resolution.
+    const second = patchLibarchiveWorkerPath(makeFakeArchive());
+    expect(second).toBe(first);
+  });
+
+  it("shouldRefuseMissingWorkerPath refuses only on win32 with no resolved worker path", async () => {
+    const { shouldRefuseMissingWorkerPath } = await import("../tools/archive.js");
+    expect(shouldRefuseMissingWorkerPath(undefined, "win32")).toBe(true);
+    expect(shouldRefuseMissingWorkerPath(undefined, "darwin")).toBe(false);
+    expect(shouldRefuseMissingWorkerPath(undefined, "linux")).toBe(false);
+    expect(shouldRefuseMissingWorkerPath("/real/worker-bundle-node.mjs", "win32")).toBe(false);
+  });
+
+  it("createLibarchiveWorker attaches an error listener so a worker that fails to bootstrap emits 'error' instead of crashing the process", async () => {
+    const { createLibarchiveWorker } = await import("../tools/archive.js");
+    // Deliberately missing — mirrors the shipped-bundle resolution gap
+    // (MODULE_NOT_FOUND) from the B1 2026-09-17 Windows crash report.
+    // Manually verified (outside this suite, via a standalone repro script)
+    // that a bare `new Worker(...)` with NO listener attached crashes the
+    // whole Node process for this exact scenario, with the identical
+    // `MessagePort.<anonymous> (node:internal/main/worker_thread:223:26)`
+    // stack frame as the field report.
+    const brokenPath = path.join(__dirname, `definitely-missing-worker-${Date.now()}.mjs`);
+    const worker = createLibarchiveWorker(brokenPath);
+    try {
+      expect(worker.listenerCount("error")).toBeGreaterThan(0);
+      const outcome = await new Promise<string>((resolve) => {
+        worker.once("error", () => resolve("error"));
+        worker.once("exit", () => resolve("exit"));
+        setTimeout(() => resolve("timeout"), 5000);
+      });
+      expect(["error", "exit"]).toContain(outcome);
+    } finally {
+      await worker.terminate().catch(() => {});
+    }
+  });
+
+  it("withLibarchiveWorkerTimeout returns a bounded failure when the opener never settles (dead worker never answers)", async () => {
+    const { withLibarchiveWorkerTimeout } = await import("../tools/archive.js");
+    const neverResolving = () => new Promise<never>(() => {});
+    const result = await withLibarchiveWorkerTimeout(neverResolving, 50);
+    expect(result).toEqual({ ok: false });
+  });
+
+  it("withLibarchiveWorkerTimeout returns the opener's value when it settles well before the bound", async () => {
+    const { withLibarchiveWorkerTimeout } = await import("../tools/archive.js");
+    const result = await withLibarchiveWorkerTimeout(async () => "reader" as const, 5_000);
+    expect(result).toEqual({ ok: true, value: "reader" });
+  });
+
+  it("withLibarchiveWorkerTimeout propagates a genuine rejection instead of masking it as a timeout", async () => {
+    const { withLibarchiveWorkerTimeout } = await import("../tools/archive.js");
+    await expect(
+      withLibarchiveWorkerTimeout(async () => {
+        throw new Error("boom");
+      }, 5_000),
+    ).rejects.toThrow("boom");
   });
 });

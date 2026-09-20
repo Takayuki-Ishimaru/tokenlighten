@@ -12,6 +12,7 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import { resolveSpawnTarget } from "./spawnCompat.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -290,7 +291,18 @@ export function resolvePythonCommand(): PythonCommand | null {
       : [["python3.12", ["-V"]], ["python3.11", ["-V"]], ["python3", ["-V"]], ["python", ["-V"]]];
 
   for (const [bin, args] of candidates) {
-    const r = spawnSync(bin, args, { shell: false, encoding: "utf-8" });
+    // `bin` is a bare candidate name (python3/python/py) — on Windows this
+    // can resolve to a version-manager's `.bat` shim (e.g. pyenv-win),
+    // which Node refuses to exec directly without `shell:true`
+    // (`spawn EINVAL`). `resolveSpawnTarget` reroutes through cmd.exe only
+    // when that is actually the case; every other platform/command is
+    // unaffected.
+    const target = resolveSpawnTarget(bin, args);
+    const r = spawnSync(target.file, target.args, {
+      shell: false,
+      encoding: "utf-8",
+      ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true as const } : {}),
+    });
     if (r.error || r.status !== 0) continue;
     // Python prints to both stdout (newer) and stderr (older)
     const raw = ((r.stdout ?? "") + (r.stderr ?? "")).trim();
@@ -499,9 +511,18 @@ export async function ensurePrereqs(
 
     process.stderr.write(`Running: ${prereqIc.manager} ${prereqIc.args.join(" ")}\n`);
     const code = await new Promise<number>((resolve) => {
-      const child = spawn(prereqIc.manager, prereqIc.args, {
+      // Only `winget` is ever reachable here on win32 (see
+      // platformPmPriority) and it is a native executable, not a batch
+      // file — this call is not currently known-affected by the Windows
+      // `spawn EINVAL` batch-file issue, but it shares the "spawn a
+      // resolved-at-runtime command name" shape with the sites that are,
+      // so it is routed through the same helper for consistency and
+      // defense-in-depth; it is a no-op passthrough today.
+      const target = resolveSpawnTarget(prereqIc.manager, prereqIc.args);
+      const child = spawn(target.file, target.args, {
         shell: false,
         stdio: "inherit",
+        ...(target.windowsVerbatimArguments ? { windowsVerbatimArguments: true as const } : {}),
       });
       child.on("exit", (c) => resolve(c ?? 1));
       child.on("error", () => resolve(1));

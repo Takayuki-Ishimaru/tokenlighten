@@ -1123,6 +1123,38 @@ function textEvidence(body: Body): Evidence[] {
       // the range is a bare `0-0` sentinel — never a valid 1-based line and
       // never confusable with one.
       push({ handle, ...pathOf(), range: "0-0", body: "" });
+    } else if (
+      handle !== ""
+      && remaining.length > 0
+      && typeof body["total_lines"] === "number"
+      && body["total_lines"] > 0
+    ) {
+      // GATE-A (2026-09-14, R2 property case 24): A GOVERNED DOWNGRADE THAT
+      // SHIPPED NEITHER BYTES NOR AN OUTLINE.
+      //
+      // `buildFullDowngradePayload`'s per-task-cap arm (server.ts) replaces a
+      // content head with `{mode:"skeleton", skeleton, remaining_ranges, next,
+      // note}`. `envelope.ts::isSkeletonOnlyBody` routes that to `read.map` —
+      // but only when the outline is NON-EMPTY, and `extractSymbolsFromFile`
+      // returns `[]` for a file whose declarations it cannot name (measured: a
+      // 237-line file of `const 行N = "…";` rows). Such a body then arrived
+      // here with no `content`, no `range` and no segments, so nothing was
+      // pushed and the response shipped `evidence: []` — A.5.2's required set
+      // (>=1 `FreshEvidence`) violated, which FIXALL-B's
+      // `emitRequiredSetViolationRefusal` now converts into a visible
+      // `invalid-input` refusal instead of a silent malformed payload. The
+      // caller asked a real question about a real file and got neither an
+      // answer nor a recovery.
+      //
+      // The honest entry is BODYLESS AND ADDRESSED: the window is what the
+      // caller addressed (the whole file — this arm is only ever reached by a
+      // governed whole-file read), no `body` because nothing shipped, and the
+      // per-handle `remaining` the loop below attaches carries the unserved
+      // spans. That is A.2.7's sanctioned bodyless shape and satisfies E-8
+      // (`!body` implies `prior` or `remaining`) by construction, so the
+      // pre-filled `limit.next` zoom stays reachable instead of being replaced
+      // by a dead-end refusal.
+      push({ handle, ...pathOf(), range: `1-${body["total_lines"]}` });
     }
   }
 
@@ -1209,7 +1241,10 @@ function structuralOutline(body: Body): Body | undefined {
 
   if (isRecord(body["digest"])) {
     const outline: Body = { form: "digest" };
-    keep(outline, body, ["handle", "path", "sha", "digest"]);
+    // `note`: SHOULD-FIX 57 — a digest computed over STRIPPED text must be able
+    // to say so; the counts it reports describe that text, not the bytes on
+    // disk. E-1, so an ordinary digest pays nothing.
+    keep(outline, body, ["handle", "path", "sha", "digest", "note"]);
     return outline;
   }
 
@@ -1222,7 +1257,9 @@ function structuralOutline(body: Body): Body | undefined {
   // for this family and the one place a private vocabulary cannot collide.
   if (str(body["kind"]) === "markdown" && Array.isArray(body["sections"])) {
     const outline: Body = { form: "markdown" };
-    keep(outline, body, ["handle", "path", "sha", "title", "summary"]);
+    // `note`: SHOULD-FIX 57 — same reason as the `signatures` form above; the
+    // markdown overview route reads through the served-bytes policy too.
+    keep(outline, body, ["handle", "path", "sha", "title", "summary", "note"]);
     outline["sections"] = body["sections"];
     // A.8.2: emitted iff the section list was capped. `limit` states THAT rows
     // were shed; only this states the pre-cap total, and without it a capped
@@ -1257,7 +1294,11 @@ function structuralOutline(body: Body): Body | undefined {
   const signatureText = str(body["signatures"]) ?? str(body["skeleton"]);
   if (signatureText !== undefined || signatureRows !== undefined) {
     const outline: Body = { form: "signatures" };
-    keep(outline, body, ["handle", "path"]);
+    // `note`: SHOULD-FIX 57 (AB1, round 11) — the SINGLE-target
+    // `content:"outline"` serve lands here, and a skeleton projected from
+    // STRIPPED text must be able to say so (the batch arm already could, via
+    // its per-entry `note`). E-1, so an ordinary skeleton pays nothing.
+    keep(outline, body, ["handle", "path", "note"]);
     outline["language"] = str(body["language"]) ?? "text";
     outline["signatures"] = signatureText ?? signatureRows ?? "";
     // A.8.2: emitted iff the skeleton was truncated.
@@ -1355,7 +1396,13 @@ function batchEntry(raw: Body): Body | undefined {
 
   if (path !== undefined) {
     const entry: Body = { form: "file", path, truncated: raw["truncated"] === true };
-    keep(entry, raw, ["handle", "content", "sha", "fullFileExpansion"]);
+    // `note`: SHOULD-FIX 57 (AB1, round 11). `projectBatch` keeps NO top-level
+    // prose, so a batch can only state a per-entry fact per entry — and the
+    // `content:"outline"` batch (BLOCKER 52's route) serves a skeleton PROJECTED
+    // FROM STRIPPED TEXT. Same E-1 addition, and the same reasoning, as the
+    // `form:"handle"` arm above, whose own comment records that this allowlist
+    // had already dropped `note` once.
+    keep(entry, raw, ["handle", "content", "sha", "fullFileExpansion", "note"]);
     // DESIGN-v0.15 §5.1 (R2): a GENUINELY EMPTY (0-byte) batch item. `keep()`
     // is E-1's shared "absent iff empty" rule and drops `content: ""` like
     // every other empty string, which for every OTHER item is correct (an
@@ -1378,17 +1425,69 @@ function batchEntry(raw: Body): Body | undefined {
   return undefined;
 }
 
+/**
+ * AB1 residual R4 / MX-B group (2026-09-14). Rule T (this file's own header)
+ * deletes the per-item `omitted[] {path|handle, reason}` ledger from the
+ * wire in favor of the coarse `limit.omitted` class rollup — correctly, for a
+ * member that was simply never reached (cap-exceeded, not-found, handle-* —
+ * no `entries[]` shape could honestly represent "not even attempted"). An
+ * UNDECODABLE member is different: the server definitively resolved it and
+ * knows exactly why no bytes shipped, which is precisely the fact
+ * `file-downgraded` (A.5.4's own frozen `BatchEntry` form) already exists to
+ * state — the SAME form `read.batch`'s over-budget/governed-full downgrade
+ * already uses for "this source exists; here is why you got none". Two
+ * spellings reach here (server.ts's two undecodable-batch producers): the
+ * handles batch's short, machine-stable tag, and the skeleton/outline
+ * batch's full prose from `undecodableTextMessage` (server.ts) — recognized
+ * by its fixed, always-present "not decodable as UTF-8" clause (the
+ * template literal's only invariant substring; `relPath`/the inner reason
+ * both vary) rather than re-derived.
+ */
+function isUndecodableOmission(reason: string): boolean {
+  // `includes`, not `startsWith`: `undecodableTextMessage` (server.ts) is the
+  // fixed template `Cannot read ${relPath} as text: not decodable as UTF-8
+  // (${reason}) — re-save...` — the "not decodable as UTF-8" clause is its
+  // only invariant substring (relPath and the inner reason both vary), and
+  // it never sits at position 0 because relPath comes first.
+  return reason === "not-decodable-text" || reason.includes("not decodable as UTF-8");
+}
+
 function projectBatch(body: Body): Body {
   const items = Array.isArray(body["items"]) ? body["items"] : [];
   const entries = items
     .filter(isRecord)
     .map(batchEntry)
     .filter((entry): entry is Body => entry !== undefined);
+  // See `isUndecodableOmission`'s doc comment. `path` is REQUIRED to
+  // synthesize a `file-downgraded` entry (A.5.4's own required set); an
+  // omitted item with no path attached (should not occur for this reason,
+  // but the producer's own array type keeps it optional) is left as a
+  // coarse `limit.omitted` class only, exactly as before this fix — never a
+  // partial or dishonest entry.
+  const rawOmitted = Array.isArray(body["omitted"]) ? body["omitted"] : [];
+  for (const raw of rawOmitted) {
+    if (!isRecord(raw)) continue;
+    const reason = str(raw["reason"]);
+    if (reason === undefined || !isUndecodableOmission(reason)) continue;
+    const path = str(raw["path"]);
+    if (path === undefined) continue;
+    const entry: Body = { form: "file-downgraded", path, reason: "not-decodable-text" };
+    keep(entry, raw, ["handle"]);
+    // The closed `FullDowngradeReason` enum cannot carry the full "why" (nul
+    // ratio, offending byte position, decode failure mode, ...); `note`
+    // already can (A.8 rule E-7) and is where every other per-entry prose
+    // fact in this projector lives (`batchEntry`'s own `note` comment
+    // above). The short-tag producer states the same fact generically so
+    // every disclosed entry's `note` names the SAME family regardless of
+    // which producer built it.
+    entry["note"] = reason === "not-decodable-text" ? "not decodable as UTF-8 text" : reason;
+    entries.push(entry);
+  }
   const projected: Body = { entries };
   // A.8.2: `locate` iff this was a query-driven pack.
   keep(projected, body, ["locate"]);
   // Rule T: the `completeness` rollup is DELETED; `omitted[]`'s per-item ledger
-  // becomes `limit.omitted`.
+  // becomes `limit.omitted` (still true for every OTHER reason; see above).
   const limit = limitFrom(body, withheldSomething(body));
   if (limit !== undefined) projected["limit"] = limit;
   return projected;

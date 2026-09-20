@@ -113,6 +113,12 @@ function setSpawnResult(cmd: string, firstArg: string, result: SpawnSyncResult) 
   spawnSyncResultMap.set(`${cmd} ${firstArg}`.trim(), result);
 }
 
+// isPmAvailable (prereqs.ts) branches on process.platform between `where`
+// (win32) and `which` (POSIX) — an un-injectable real value, so a mock that
+// only ever registers a "which ..." key misses on a real Windows box. Mocks
+// below must branch the same way the product does.
+const PM_LOOKUP_CMD = process.platform === "win32" ? "where" : "which";
+
 // ---------------------------------------------------------------------------
 // detectPrereqs — Node
 // ---------------------------------------------------------------------------
@@ -408,7 +414,7 @@ describe("pickInstallCommand", () => {
 
 describe("buildPrereqContext", () => {
   it("detects brew when which brew returns 0", async () => {
-    setSpawnResult("which", "brew", { status: 0, stdout: "/opt/homebrew/bin/brew\n", stderr: "" });
+    setSpawnResult(PM_LOOKUP_CMD, "brew", { status: 0, stdout: "/opt/homebrew/bin/brew\n", stderr: "" });
 
     vi.resetModules();
     const { buildPrereqContext } = await import("../prereqs.js");
@@ -426,7 +432,7 @@ describe("buildPrereqContext", () => {
   });
 
   it("detects apt when which apt returns 0", async () => {
-    setSpawnResult("which", "apt", { status: 0, stdout: "/usr/bin/apt\n", stderr: "" });
+    setSpawnResult(PM_LOOKUP_CMD, "apt", { status: 0, stdout: "/usr/bin/apt\n", stderr: "" });
 
     vi.resetModules();
     const { buildPrereqContext } = await import("../prereqs.js");
@@ -653,8 +659,13 @@ describe("ensurePrereqs", () => {
         ? { status: 0, stdout: "v22.0.0\n", stderr: "" }
         : { status: 1, stdout: "", stderr: "", error: new Error("ENOENT") }
     );
-    // Ensure apt is available for buildPrereqContext
-    spawnSyncResultMap.set("which apt", { status: 0, stdout: "/usr/bin/apt\n", stderr: "" });
+    // Ensure a package manager is available for buildPrereqContext (winget
+    // is the one PM actually reachable on win32; apt elsewhere — see
+    // isPmAvailable's own where/which platform branch in prereqs.ts).
+    spawnSyncResultMap.set(
+      `${PM_LOOKUP_CMD} ${process.platform === "win32" ? "winget" : "apt"}`,
+      { status: 0, stdout: "/usr/bin/apt\n", stderr: "" },
+    );
 
     // Second detectPrereqs call (re-check after install): queue a different result
     // The queue-aware mock consumes from queue first, then falls back to map.

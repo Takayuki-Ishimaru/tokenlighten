@@ -51,8 +51,12 @@ Commands:
                            Runtime health checks (node version, config dir, parser, exceljs,
                            MCP dist, client registration); --development adds license-checker,
                            python, and dist-freshness strictness
+  install [<workspace>...] [--yes] [--dry-run] [--json] [--uninstall]
+                           Install TokenLighten itself as a machine-scoped MCP server (no
+                           editor extension needed); re-run to upgrade in place
   install-hooks [--uninstall]
-                           Add/remove 'tl skeleton check' pre-commit hook (opt-in)
+                           Add/remove 'tl skeleton check' pre-commit hook (opt-in) — unrelated
+                           to 'install' above (that installs TokenLighten; this installs a git hook)
   version                  Print CLI version
   help                     Print this help
 

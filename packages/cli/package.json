@@ -1,6 +1,6 @@
 {
   "name": "@tokenlighten/cli",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/index.js",
@@ -13,6 +13,10 @@
     "./launcher": {
       "import": "./dist/launcher.js",
       "types": "./dist/launcher.d.ts"
+    },
+    "./mcpHandshake": {
+      "import": "./dist/mcpHandshake.js",
+      "types": "./dist/mcpHandshake.d.ts"
     },
     "./package.json": "./package.json"
   },
@@ -41,7 +45,7 @@
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^20",
     "typescript": "^5.6.3",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.11"
   },
   "files": [
     "dist"

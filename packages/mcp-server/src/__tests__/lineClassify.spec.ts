@@ -4,7 +4,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { classifyCommentLines, matchesAreCommentOnly } from "../util/lineClassify.js";
+import {
+  classifyCommentLines,
+  commentSyntaxIsKnown,
+  commentSyntaxLanguageForPath,
+  matchesAreCommentOnly,
+} from "../util/lineClassify.js";
+import { languageForPath } from "../util/languages.js";
 
 describe("classifyCommentLines", () => {
   it("flags line-comment lines and leaves code lines unflagged (C-style)", () => {
@@ -107,5 +113,66 @@ describe("matchesAreCommentOnly", () => {
   });
   it("out-of-range lines are treated as non-comment (defensive)", () => {
     expect(matchesAreCommentOnly([999], flags)).toBe(false);
+  });
+});
+
+/**
+ * SHOULD-FIX 28 (2026-09-14, review round 4) — the module's OWN extension map.
+ *
+ * Review round 3 NOTE 30 measured that 14 of the `LINE_COMMENT_PREFIXES` rows
+ * were unreachable: every honesty consumer resolved its language through
+ * `util/languages.ts`'s grammar map, which does not map `.swift`, `.sql`, `.ini`
+ * and friends — so those rows could neither be produced nor tested through a
+ * caller, and a located Swift declaration read as "unknown language".
+ * `commentSyntaxLanguageForPath` is the supplement; these cases pin exactly what
+ * it does and does not claim to know.
+ */
+describe("commentSyntaxLanguageForPath (SHOULD-FIX 28)", () => {
+  it.each([
+    ["src/feature.swift", "swift"],
+    ["src/Feature.scala", "scala"],
+    ["src/schema.sql", "sql"],
+    ["src/mod.lua", "lua"],
+    ["src/Mod.hs", "haskell"],
+    ["src/pkg.adb", "ada"],
+    ["src/settings.ini", "ini"],
+    ["src/boot.asm", "asm"],
+    ["src/core.lisp", "lisp"],
+    ["src/mod.clj", "clojure"],
+    ["src/mod.scm", "scheme"],
+    ["src/init.el", "elisp"],
+    ["src/conf.json5", "json5"],
+    ["src/theme.scss", "scss"],
+    ["src/theme.less", "less"],
+    ["src/feed.xml", "xml"],
+    ["src/icon.svg", "svg"],
+    ["src/App.vue", "vue"],
+  ])("resolves %s to %s, and the comment table knows it", (relPath, expected) => {
+    const resolved = commentSyntaxLanguageForPath(relPath, languageForPath(relPath));
+    expect(resolved).toBe(expected);
+    expect(commentSyntaxIsKnown(resolved)).toBe(true);
+  });
+
+  it.each([
+    ["bin/tool"],
+    ["Makefile"],
+    ["Dockerfile"],
+    ["src/plugin.zzz"],
+    ["src/app.dart"],
+    ["src/deploy.tf"],
+    ["src/query.graphql"],
+  ])("leaves %s unknown — an unclassified file is served, never certified", (relPath) => {
+    const resolved = commentSyntaxLanguageForPath(relPath, languageForPath(relPath));
+    expect(resolved).toBeUndefined();
+    expect(commentSyntaxIsKnown(resolved)).toBe(false);
+  });
+
+  it("never overrides the caller's own resolver (the `.h` C++ content sniff keeps its authority)", () => {
+    expect(commentSyntaxLanguageForPath("src/ekf.h", "cpp")).toBe("cpp");
+    expect(commentSyntaxLanguageForPath("src/feature.swift", "typescript")).toBe("typescript");
+  });
+
+  it("a dotfile has no extension to read (leading dot is not a separator)", () => {
+    expect(commentSyntaxLanguageForPath(".swift", undefined)).toBeUndefined();
   });
 });

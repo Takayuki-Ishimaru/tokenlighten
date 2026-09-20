@@ -862,7 +862,9 @@ describe("relationGraphPort is not wired into any response this wave", () => {
       if (isTestFile(absolute)) continue;
       const specifiers = importSpecifiers(fs.readFileSync(absolute, "utf8"));
       if (specifiers.some((s) => s.includes("graph-evidence/relationGraphPort"))) {
-        offenders.push(path.relative(SRC_DIR, absolute));
+        // Windows: path.relative returns native backslashes; SANCTIONED_PRODUCTION_IMPORTER
+        // is a forward-slash literal, so compare like-for-like.
+        offenders.push(path.relative(SRC_DIR, absolute).split(path.sep).join("/"));
       }
     }
     expect(

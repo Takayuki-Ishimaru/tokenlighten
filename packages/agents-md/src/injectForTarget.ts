@@ -77,7 +77,18 @@ const LEGACY_CLAUDE_PROLOGUE =
 /** Tool-native files to write (relative to repoRoot). */
 const TARGET_FILES: readonly { target?: StubTargetId; file: string }[] = [
   { file: "AGENTS.md" },
-  ...STUB_TARGETS.map((target) => ({ target: target.id, file: target.file })),
+  // "copilot-agent" is deliberately excluded: it renders a VS Code Copilot
+  // Chat custom-agent file whose whole point is to point a live MCP server
+  // registration's tools (`tokenlighten/read_file` etc., tied to this
+  // repo's own `.vscode/mcp.json`) at a runSubagent child. `injectForTarget`
+  // only drops generic guide TEXT into a foreign repo (no MCP config, no
+  // notion of "this repo uses VS Code") via one shared body for every
+  // non-Claude target — using that body here would give the custom agent
+  // file the wrong content (the whole AGENTS.md-style guide instead of the
+  // short subagent instructions render.ts's COPILOT_AGENT_IMPORT_TEMPLATE
+  // renders through injectAll). See StubTargetId's own doc comment.
+  ...STUB_TARGETS.filter((target) => target.id !== "copilot-agent")
+    .map((target) => ({ target: target.id, file: target.file })),
 ];
 
 export interface InjectForTargetOptions {

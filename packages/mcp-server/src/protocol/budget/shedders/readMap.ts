@@ -24,6 +24,7 @@ import {
   dropTrailingEntry,
   isRecord,
   recordAt,
+  carriesStripDisclosure,
   str,
   withKey,
   type ShedOutcome,
@@ -48,7 +49,10 @@ import {
 const MAP_PROSE: readonly string[] = ["note", "summary", "hint"];
 
 function shedOutlineProse(payload: ShedPayload): ShedOutcome | undefined {
+  const outline = recordAt(payload, "outline");
   for (const key of MAP_PROSE) {
+    // SHOULD-FIX 63 (AC1, round 12): see `registry.ts::carriesStripDisclosure`.
+    if (carriesStripDisclosure(outline?.[key])) continue;
     const outcome = dropInBlock(payload, "outline", [key], 1);
     if (outcome !== undefined) return outcome;
   }

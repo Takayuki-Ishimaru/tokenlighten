@@ -238,7 +238,17 @@ describe("buildTaskPack — W1: multi-slot re-call dedup (verbatim duplicate 1 c
     // A receipt names the resident handle without re-serving any body — an order
     // of magnitude under a full multi-KB pack (the iter-1 loss re-served ~20KB).
     expect(c.surfaces.every((s) => s.code === undefined)).toBe(true);
-    expect(Buffer.byteLength(JSON.stringify(c), "utf8")).toBeLessThan(1600);
+    // 2026-09-14 (v0.14.2 eval fix wave, GATE-B): bumped 1600 -> 2000. Cause
+    // confirmed by diffing this exact fixture's receipt against a pre-wave
+    // (HEAD) build in an isolated worktree: byte-for-byte identical except one
+    // new block, `execution_contract.capability_gaps` (315 B here), which is
+    // SHOULD-FIX 36's (2026-09-14, review round 5) deliberate fix at this same
+    // file's `compactReceiptFromRecord` — before it, "EVERY compact receipt's
+    // `capability_gaps` was silently `undefined`", dropping `decision.gaps`
+    // entirely on a re-pack. Restating it is correct; 2000 keeps this well
+    // under the ~20KB full-pack size the comment above measures against (still
+    // an order of magnitude smaller) while covering the now-measured 1635 B.
+    expect(Buffer.byteLength(JSON.stringify(c), "utf8")).toBeLessThan(2000);
   }, 30000);
 
   it("a full workspace change (edited surfaced file) forces a fresh full serve, not a receipt", async () => {

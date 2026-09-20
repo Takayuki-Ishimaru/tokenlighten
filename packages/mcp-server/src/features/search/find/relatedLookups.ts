@@ -52,13 +52,15 @@
 // follow-up calls risks a false miss more than it saves bytes.
 //
 // Byte budget: computed and checked AFTER buildFindResponse's own
-// MAX_RESPONSE_BYTES-fitting trial has already run, then dropped (never
-// re-triggering that trial) if attaching it would cross the SAME cap —
-// mirrors maybeAttachMemberSweepToFindResponse exactly, and for the same
-// reason: this feature must never be why a diet response bursts its budget.
+// findResponseCapBytes()-fitting trial has already run (F5, 2026-09-19:
+// formerly the bare MAX_RESPONSE_BYTES constant — same cap, now read through
+// the TL_FIND_WIDE_PAGE-aware accessor), then dropped (never re-triggering
+// that trial) if attaching it would cross the SAME cap — mirrors
+// maybeAttachMemberSweepToFindResponse exactly, and for the same reason:
+// this feature must never be why a diet response bursts its budget.
 
 import { isIdentifierToken } from "./memberSweep.js";
-import { MAX_RESPONSE_BYTES as FIND_MAX_RESPONSE_BYTES, MAX_INVENTORY_RESPONSE_BYTES } from "./findText.js";
+import { findResponseCapBytes, findInventoryCapBytes } from "./findText.js";
 import type { FindResponse } from "./findText.js";
 
 /** One ready-to-run search_files call: pass `.arguments` to the tool named `.tool` verbatim (cwd/lane etc. deferred to caller context, same convention as findReferences.ts's own continuationNextCall). */
@@ -116,6 +118,6 @@ export function maybeAttachRelatedLookups(response: FindResponse, opts: FindRela
   if (!isIdentifierToken(opts.query)) return response;
 
   const withLookups: FindResponse = { ...response, related_lookups: buildRelatedLookups(opts.query) };
-  const cap = response.inventory ? MAX_INVENTORY_RESPONSE_BYTES : FIND_MAX_RESPONSE_BYTES;
+  const cap = response.inventory ? findInventoryCapBytes() : findResponseCapBytes();
   return Buffer.byteLength(JSON.stringify(withLookups), "utf8") <= cap ? withLookups : response;
 }

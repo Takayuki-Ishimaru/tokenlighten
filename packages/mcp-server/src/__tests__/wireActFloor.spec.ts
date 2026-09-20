@@ -546,3 +546,58 @@ describe("[R5-30] branch 3 (`act-on-served-evidence`) is re-sited, gated on the 
     }
   });
 });
+
+describe("[C24] projectFrontier dedupes by path (chip wave, 2026-09-14)", () => {
+  // review-findings-3.md NOTE 34: a single-file JA `にして` edit response's
+  // `frontier[]` listed the SAME path twice under two different handles
+  // (`r3-nishite.json`: two entries for src/retry.ts, handles hcs2p990t86 and
+  // hd3w8m8vhod) — an agent batching edits[] straight from the frontier could
+  // then address one file twice. `projectFrontier` pushed one entry per
+  // HANDLE with no path dedup; the fix keeps the first handle that resolves
+  // to a given path and drops any later handle for that same path.
+  const certifiedEditContract = (frontierHandles: string[]): TaskExecutionContract => ({
+    version: 1,
+    state: "ready",
+    readiness: "edit-ready",
+    discovery_complete: true,
+    next_action: "edit",
+    max_additional_discovery_calls: 0,
+    reason: "proof-carrying edit frontier passed falsification and risk gates",
+    workspace_state: WORKSPACE,
+    readiness_certificate: { id: "ready-c24", obligations: [{ id: "surface-content" }], action_frontier: frontierHandles },
+    typestate: { phase: "prepared", certificate_id: "ready-c24", allowed_actions: ["edit"], challenge_required_for: [] },
+  } as unknown as TaskExecutionContract);
+
+  it("two handles addressing the SAME path emit only ONE frontier entry, keeping the first handle", () => {
+    const decision = projectTaskDecision({
+      result: {},
+      contract: certifiedEditContract(["hcs2p990t86", "hd3w8m8vhod"]),
+      canonicalKind: "act-edit",
+      evidence: [
+        { handle: "hcs2p990t86", path: "src/retry.ts", range: "1-10", body: "export const x = 1;" },
+        { handle: "hd3w8m8vhod", path: "src/retry.ts", range: "11-20", body: "export const y = 2;" },
+      ],
+    });
+    expect(decision?.kind).toBe("act.edit");
+    expect((decision as { frontier?: unknown }).frontier).toEqual([
+      { handle: "hcs2p990t86", path: "src/retry.ts", writable: true },
+    ]);
+  });
+
+  it("two handles for two DIFFERENT paths both survive, in action_frontier order — the dedupe is by path only", () => {
+    const decision = projectTaskDecision({
+      result: {},
+      contract: certifiedEditContract(["h1", "h2"]),
+      canonicalKind: "act-edit",
+      evidence: [
+        { handle: "h1", path: "src/a.ts", range: "1-10", body: "export const a = 1;" },
+        { handle: "h2", path: "src/b.ts", range: "1-10", body: "export const b = 2;" },
+      ],
+    });
+    expect(decision?.kind).toBe("act.edit");
+    expect((decision as { frontier?: unknown }).frontier).toEqual([
+      { handle: "h1", path: "src/a.ts", writable: true },
+      { handle: "h2", path: "src/b.ts", writable: true },
+    ]);
+  });
+});

@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 
 import { runHelp } from "./commands/help.js";
 import { runConfig } from "./commands/config.js";
+import { runInstall } from "./commands/install.js";
 import { runInstallHooks } from "./commands/install-hooks.js";
 import { runSkeleton } from "./commands/skeleton.js";
 import { runAgents } from "./commands/agents.js";
@@ -95,6 +96,14 @@ async function main(): Promise<void> {
 
     case "doctor":
       await runDoctor(filteredRest);
+      break;
+
+    case "install":
+      // DESIGN-v0.14-mcp-only-install.md §4.2: `tl install` = TokenLighten
+      // itself (machine-scoped MCP server, host identity, workspaces).
+      // `install-hooks` (git hooks) and `setup` (system prerequisites) are
+      // unrelated commands that happen to share the `tl install*` prefix.
+      await runInstall(filteredRest);
       break;
 
     case "install-hooks":

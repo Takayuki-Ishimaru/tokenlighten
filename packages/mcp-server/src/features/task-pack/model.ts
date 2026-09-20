@@ -371,6 +371,67 @@ export interface TaskPackResult {
    * unconditionally).
    */
   request_item_absences?: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }>;
+  /**
+   * FIXALL-A group D (2026-09-14) — THIS REQUEST NAMES NOTHING ADDRESSABLE.
+   *
+   * INTERNAL ONLY, same convention as `request_item_absences` above: set by
+   * `buildTaskPack` when the caller supplied no path/symbol/paths AND the WHOLE
+   * query is a value-only lead clause by `requestItems.ts`'s own
+   * `stripValueOnlyLeadClauses` — a verb, an optional pronoun and an optional
+   * bare value (`Increase it to 5.`, `Insert it to 5?`,
+   * 「それを 5 に削除してください。」). Blanking such a clause leaves the empty
+   * string, which is POSITIVE PROOF that there is nothing to look for — not a
+   * reason to fall back to searching for the verb the caller used to ask.
+   *
+   * `canonicalDecision.ts` reads it to suppress every discovery `next`, so the
+   * pack reaches `await_input` with `unresolved[]` naming the missing target
+   * instead of `discover` + `search_files{queries:["increase"]}`.
+   */
+  request_names_no_target?: true;
+  /**
+   * BLOCKER 25 (2026-09-14, review round 4): workspace files THIS REQUEST
+   * NAMED BY PATH that the server resolved but could NOT SERVE, because
+   * reading them failed (`readCached` -> `undefined`).
+   *
+   * Two distinguishable causes, both reachable from the wire:
+   *  - `"unreadable"`   — the read itself threw (permission denied / vanished
+   *                       between the walk and the read);
+   *  - `"undecodable"`  — the bytes were read but are not text
+   *                       (`decodeTextBuffer` -> null: a NUL byte, a binary
+   *                       payload, an encoding this server will not guess).
+   *
+   * WHY IT IS A FIRST-CLASS FIELD. `augmentQueryNamedFileSurfaces` used to
+   * `continue` past such a file silently, so `queryNamedWorkspaceFiles`
+   * returned a path, no surface carried it, and nothing downstream could tell
+   * the difference between "the request named no file" and "the request named
+   * a file this response is hiding". The observed consequence was a CERTIFIED
+   * `act.answer` whose only evidence was an unrelated CSS window, with the
+   * named path mentioned nowhere in the response and `coverage:"complete"` in
+   * the undecodable variant.
+   *
+   * INTERNAL ONLY, same convention as `request_item_absences` above. Three
+   * readers: `buildCapabilityGaps` (a blocking `missing-evidence` gap whose
+   * `refs` name the path, so a `discover` discloses it),
+   * `deriveCanonicalTaskDecisionRaw` (`canonicalDecision.ts` — the terminal is
+   * refused while a named path is unserved) and `decisionWire.ts`'s
+   * `projectUnresolved` (an `await_input` names the path AND the reason).
+   * Absent when every named path was served, i.e. on essentially every pack.
+   */
+  /**
+   * SHOULD-FIX 65 (AC1, 2026-09-14, review round 12): `provenance` says whether
+   * the REQUEST named this path (`"request"`) or the server reached it while
+   * RESOLVING the request (`"resolution"` — a locator candidate). Round 11
+   * measured three rows all claiming "this request names <file>" for a query that
+   * named ONE of them. Optional so a restored row from an older `missing[]`
+   * spelling (which carried no provenance) stays representable; the wire
+   * projectors read `"request"` as the default for exactly that case, because
+   * that is the only spelling those rows could have come from.
+   */
+  unreadable_named_paths?: Array<{
+    path: string;
+    reason: "unreadable" | "undecodable";
+    provenance?: "request" | "resolution";
+  }>;
   /** Sparse receipt for safe read/search operations completed before returning. */
   internalized?: Array<{
     op: "find" | "read";
@@ -566,6 +627,13 @@ export interface TaskPackArgs {
    */
   taskQueryRefReplay?: true;
   /**
+   * The dispatcher carried `taskProfile` over from the task this call
+   * continues (server.ts's `inheritDeclaredTaskProfile`) — the caller did not
+   * restate it. Read only by `noteInheritedTaskProfile`, so `profile_binding`
+   * says where the declaration came from.
+   */
+  taskProfileInherited?: true;
+  /**
    * PI-09 close-out: the caller sent `force_serve:true` — "my context was
    * compacted, send the bodies again". Suppresses every BODY-WITHHOLDING pack
    * receipt (exact-fingerprint dedup, semantic-duplicate dedup, subset
@@ -611,6 +679,36 @@ export interface TaskPackArgs {
    * Server-derived; internal only, never serialized or fingerprinted.
    */
   autoDiscoveredLocation?: boolean;
+  /**
+   * R1-B2 (2026-09-13 review round): of the `paths` entries above, the ones an
+   * EXECUTED SEARCH located for a term this query names (readCodeTaskPack.ts's
+   * `executedSearchHitSeeds`).
+   *
+   * `buildSeededTaskPack` reads it for one reason: provenance honesty. Every
+   * internal seeding site routes through `paths`, and that builder's default
+   * `why` for a path entry is `"caller-supplied"` — true for a wire call, false
+   * for a server-derived promotion, and the wire showed
+   * `why:"caller-supplied; caller-supplied"` on a file the caller had never
+   * named. Paths listed here are stamped `executed-search-located` instead.
+   * Server-derived; internal only, never serialized or fingerprinted.
+   */
+  executedSearchLocated?: readonly string[];
+  /**
+   * SHOULD-FIX 28 (2026-09-14, review round 4): of the `paths` entries above,
+   * the ones an executed search located in a file whose COMMENT SYNTAX this
+   * server cannot classify (`.swift`, an extensionless script) — so the pack
+   * cannot prove the occurrence is a declaration rather than a comment.
+   *
+   * They are seeded and SERVED exactly like `executedSearchLocated`, and differ
+   * in one way: `buildSeededTaskPack` stamps a `why` that SAYS the declaration
+   * is unverified, and nothing may discharge an `identifier:<term>` obligation
+   * from them (`exactIdentifierEvidence` re-applies the same code-bearing test
+   * to the served surface, and an unclassified language fails it). Before this,
+   * such a hit was discarded outright and the chain dead-ended one call after
+   * the search had found the file. Server-derived; internal only, never
+   * serialized or fingerprinted.
+   */
+  executedSearchLocatedUnclassified?: readonly string[];
   /**
    * Canonical, server-resolved task identity for result-consumption state.
    *

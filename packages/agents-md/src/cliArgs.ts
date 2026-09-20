@@ -14,7 +14,7 @@
 import type { StubTargetId } from "@tokenlighten/types";
 import type { GuideProfile, Locale } from "./render.js";
 
-export const VALID_TARGETS: StubTargetId[] = ["claude", "copilot", "cursor", "cline", "continue"];
+export const VALID_TARGETS: StubTargetId[] = ["claude", "copilot", "cursor", "cline", "continue", "copilot-agent"];
 export const VALID_LOCALES: Locale[] = ["en", "jp"];
 export const VALID_PROFILES: GuideProfile[] = ["full", "medium", "compact"];
 

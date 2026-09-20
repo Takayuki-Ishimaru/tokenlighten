@@ -28,7 +28,9 @@
  *      only hard-fails in --development, see checkMcpDistFresh)
  *   7. Public MCP artifact excludes Core 2 entry surfaces (an unresolvable
  *      artifact warns instead of failing outside --development)
- *   8. Per-client MCP registration status (evaluateDoctorAsync/runDoctor only)
+ *   8. No raw NUL byte in any tracked text source file under packages/<name>/
+ *      src (see checkNoNulBytes) — always hard-fails in either mode
+ *   9. Per-client MCP registration status (evaluateDoctorAsync/runDoctor only)
  *   + node/python/git prereq detection (evaluateDoctorAsync/runDoctor
  *     only): python never gates `ok` outside --development; git never
  *     gates `ok` in either mode (see isGatingPrereq)
@@ -57,13 +59,22 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { spawnSync } from "child_process";
+import { homedir } from "os";
+import { dirname, join, resolve } from "path";
 import { createRequire } from "module";
 import { resolvePath } from "../paths.js";
+import {
+  installCliJsPath,
+  installNodePath,
+  readInstallRecord,
+  resolveInstallHome,
+} from "../installHome.js";
+import { findExecutableOnPath, legacyLauncherPath, managedLauncherPath } from "../launcher.js";
 import { detectPrereqs, PREREQ_DOCTOR_MODE, type PrereqStatus, type PrereqId } from "../prereqs.js";
 import { resolveRepoRoot } from "../repoRoot.js";
 import { currentCliVersion, getClientStatuses } from "./clients.js";
-import type { TokenLightenClientRegistrationStatus } from "@tokenlighten/types";
+import type { InstallRecord, TokenLightenClientRegistrationStatus } from "@tokenlighten/types";
 
 export interface DoctorCheck {
   name: string;
@@ -100,6 +111,14 @@ export interface DoctorOptions {
    * install with no adjacent repo checkout and no dev tooling.
    */
   development?: boolean;
+  /** Override the machine-install home for `install_consistency` (tests). */
+  installHome?: string;
+  /** Override the home directory `install_consistency` probes (tests). */
+  homeDir?: string;
+  /** Override the PATH `install_consistency`'s `tl` lookup searches (tests). */
+  pathEnv?: string;
+  /** Override the `packages/` root `source_no_nul_bytes` scans under (tests). Falls back to the TL_PACKAGES_ROOT env var. */
+  packagesRoot?: string;
 }
 
 /** Prereqs whose absence is surfaced but never fails doctor, in either mode. */
@@ -124,13 +143,34 @@ function envOverride(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
-function checkNodeVersion(): DoctorCheck {
+// DESIGN-v0.14-mcp-only-install.md §4.6 C12: once a machine install exists,
+// report the BUNDLED runtime's own version too — not just the version of
+// Node this `tl doctor` process happens to be running under (which, for the
+// archive's bundled runtime, is the same binary; for a source checkout it
+// is system Node).
+function bundledNodeVersion(record: InstallRecord): string | undefined {
+  if (record.runtime.source !== "bundled-node") return undefined;
+  try {
+    const result = spawnSync(record.identity.command, ["--version"], { encoding: "utf8", timeout: 5_000 });
+    if (result.status === 0 && result.stdout) return result.stdout.trim();
+  } catch {
+    // best effort
+  }
+  return undefined;
+}
+
+function checkNodeVersion(opts: DoctorOptions = {}): DoctorCheck {
   const [major] = process.versions.node.split(".").map(Number);
   const ok = typeof major === "number" && major >= 20;
+  const installHome = opts.installHome ?? resolveInstallHome();
+  const record = readInstallRecord(installHome);
+  const bundled = record ? bundledNodeVersion(record) : undefined;
   return {
     name: "node_version",
     ok,
-    detail: `${process.versions.node} (need >=20)`,
+    detail: bundled
+      ? `${process.versions.node} (need >=20); bundled runtime ${bundled}`
+      : `${process.versions.node} (need >=20)`,
   };
 }
 
@@ -425,6 +465,222 @@ export function checkMcpCore2Excluded(opts: DoctorOptions = {}): DoctorCheck {
   };
 }
 
+/** Extensions the NUL-byte scan opens — tracked, genuinely-text source
+ *  formats only (see checkNoNulBytes). A binary asset never has one of
+ *  these extensions, so filtering by extension already excludes it; this
+ *  check never opens a file outside this list, `fixtures/` directories
+ *  included. */
+const NUL_SCAN_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs", ".json", ".md", ".tmpl"]);
+
+/** Directory names the NUL-byte scan never descends into, wherever they
+ *  appear under a package's `src/` tree — vendored/build output, never
+ *  contributor-authored source. */
+const NUL_SCAN_SKIP_DIRS = new Set(["node_modules", "dist"]);
+
+function collectNulScanFiles(root: string): string[] {
+  const files: string[] = [];
+  try {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const absolute = join(root, entry.name);
+      if (entry.isDirectory()) {
+        if (NUL_SCAN_SKIP_DIRS.has(entry.name)) continue;
+        files.push(...collectNulScanFiles(absolute));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const dot = entry.name.lastIndexOf(".");
+      if (dot < 0) continue;
+      if (!NUL_SCAN_EXTENSIONS.has(entry.name.slice(dot))) continue;
+      files.push(absolute);
+    }
+  } catch {
+    // best effort — an unreadable directory contributes nothing
+  }
+  return files;
+}
+
+/**
+ * C15 (chip wave, 2026-09-14) — no CI/doctor mechanism previously caught a
+ * raw NUL byte accidentally landing in a tracked source file; three-plus
+ * agents introduced and hand-fixed one independently within a single
+ * review wave. Scans every tracked, genuinely-text source extension under
+ * each `packages/<name>/src` tree for an embedded 0x00 byte and fails,
+ * naming every offending path. `node_modules`/`dist` are skipped wherever
+ * they appear (vendored/build output, never contributor-authored); a
+ * `fixtures` directory is still scanned for its own text files — a NUL byte
+ * in a real fixture is exactly as much of a landmine as one in ordinary
+ * source — but the extension allowlist above already keeps this from ever
+ * opening anything actually binary there.
+ *
+ * A raw byte scan (Buffer, not a decoded string), so this can never itself
+ * throw on a file that fails UTF-8 decoding.
+ */
+export function checkNoNulBytes(opts: DoctorOptions = {}): DoctorCheck {
+  let packagesRoot = opts.packagesRoot ?? envOverride("TL_PACKAGES_ROOT");
+  if (packagesRoot === undefined) {
+    try {
+      packagesRoot = join(resolveRepoRoot(), "packages");
+    } catch {
+      const cwdPackages = join(process.cwd(), "packages");
+      if (!existsSync(cwdPackages)) {
+        return { name: "source_no_nul_bytes", ok: true, detail: "packages/ not present (packaged install)" };
+      }
+      packagesRoot = cwdPackages;
+    }
+  }
+  if (!existsSync(packagesRoot)) {
+    return { name: "source_no_nul_bytes", ok: true, detail: `${packagesRoot} not present` };
+  }
+
+  const offending: string[] = [];
+  try {
+    for (const pkg of readdirSync(packagesRoot, { withFileTypes: true })) {
+      if (!pkg.isDirectory()) continue;
+      const srcDir = join(packagesRoot, pkg.name, "src");
+      if (!existsSync(srcDir)) continue;
+      for (const file of collectNulScanFiles(srcDir)) {
+        if (readFileSync(file).includes(0)) offending.push(file);
+      }
+    }
+  } catch (err) {
+    return {
+      name: "source_no_nul_bytes",
+      ok: false,
+      detail: `could not scan ${packagesRoot}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  return {
+    name: "source_no_nul_bytes",
+    ok: offending.length === 0,
+    detail: offending.length === 0
+      ? `${packagesRoot}/*/src: no raw NUL byte in any tracked text source file`
+      : `raw NUL byte found in: ${offending.join(", ")}`,
+  };
+}
+
+// Reverses the §4.6 C9 portability substitutions well enough to check
+// whether an identity written on ANOTHER machine/user resolves HERE.
+function resolveWorkspaceIdentityPath(value: string, homeDirOverride?: string): string {
+  const home = homeDirOverride ?? homedir();
+  if (value.startsWith("${userHome}")) return home + value.slice("${userHome}".length);
+  if (value.startsWith("${HOME}")) return (process.env["HOME"] ?? home) + value.slice("${HOME}".length);
+  if (value.startsWith("${env:LOCALAPPDATA}")) {
+    return (process.env["LOCALAPPDATA"] ?? "") + value.slice("${env:LOCALAPPDATA}".length);
+  }
+  if (value.startsWith("${LOCALAPPDATA}")) {
+    return (process.env["LOCALAPPDATA"] ?? "") + value.slice("${LOCALAPPDATA}".length);
+  }
+  return value;
+}
+
+function vsCodeExtensionVersion(homeDirOverride?: string): { version: string; dir: string } | undefined {
+  const home = homeDirOverride ?? homedir();
+  const extRoot = join(home, ".vscode", "extensions");
+  if (!existsSync(extRoot)) return undefined;
+  try {
+    for (const entry of readdirSync(extRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.toLowerCase().includes("tokenlighten")) continue;
+      const pkgPath = join(extRoot, entry.name, "package.json");
+      if (!existsSync(pkgPath)) continue;
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+      if (typeof pkg.version === "string") return { version: pkg.version, dir: entry.name };
+    }
+  } catch {
+    // best effort
+  }
+  return undefined;
+}
+
+// DESIGN-v0.14-mcp-only-install.md §4.6 C12. Runtime-mode check; warns
+// rather than fails except for a dangling runtime (`bin/node` missing or
+// not executable) — everything else here is informational drift a user can
+// fix by re-running `tl-setup`.
+export function checkInstallConsistency(opts: DoctorOptions = {}): DoctorCheck {
+  const installHome = opts.installHome ?? resolveInstallHome();
+  const record = readInstallRecord(installHome);
+  if (!record) {
+    // Not a warning: the entire pre-v0.14.3 VSIX/source-checkout population
+    // has no machine install and never will unless they opt into `tl
+    // install` — surfacing this as a warning would put a brand-new WARN
+    // line on every one of those users' `tl doctor` with nothing to act on.
+    return { name: "install_consistency", ok: true, detail: "no machine install; VSIX/source setup" };
+  }
+
+  const details: string[] = [`install.json version ${record.version} (${record.installed_by})`];
+  let warning = false;
+
+  const nodePath = installNodePath(installHome);
+  const nodeExists = existsSync(nodePath);
+  const nodeExecutable = nodeExists
+    && (process.platform === "win32" || (statSync(nodePath).mode & 0o111) !== 0);
+  if (!nodeExecutable) details.push(`bin/node not executable at ${nodePath}`);
+  const ok = record.installed_by !== "archive" || nodeExecutable;
+
+  const cliJsPath = installCliJsPath(installHome);
+  try {
+    const shim = readFileSync(cliJsPath, "utf8");
+    const target = shim.match(/process\.argv\[1\]\s*=\s*"([^"]+)"/)?.[1];
+    if (!target || !existsSync(target)) {
+      warning = true;
+      details.push(`bin/tl.js target missing: ${target ?? cliJsPath}`);
+    }
+  } catch {
+    warning = true;
+    details.push(`bin/tl.js missing at ${cliJsPath}`);
+  }
+
+  const legacyPath = legacyLauncherPath({ homeDir: opts.homeDir });
+  let legacyState: "absent" | "forwarder" | "stale-standalone" = "absent";
+  if (existsSync(legacyPath)) {
+    try {
+      const content = readFileSync(legacyPath, "utf8");
+      const looksLikeForwarder = content.includes("TL_RECORDED") === false
+        && /exec\s+"|call\s+"/.test(content);
+      legacyState = looksLikeForwarder ? "forwarder" : "stale-standalone";
+    } catch {
+      legacyState = "stale-standalone";
+    }
+  }
+  details.push(`legacy shim: ${legacyState}`);
+  if (legacyState === "stale-standalone") warning = true;
+
+  const pathTl = findExecutableOnPath("tl", { pathEnv: opts.pathEnv ?? process.env["PATH"] });
+  if (pathTl) {
+    const managed = managedLauncherPath({ installHome });
+    const matchesManaged = resolve(pathTl) === resolve(managed);
+    details.push(matchesManaged ? "PATH tl resolves to the managed shim" : `PATH tl resolves to a foreign path: ${pathTl}`);
+    if (!matchesManaged) warning = true;
+  }
+
+  const extension = vsCodeExtensionVersion(opts.homeDir);
+  if (extension && extension.version !== record.version) {
+    warning = true;
+    details.push(`VS Code extension ${extension.dir} bundles v${extension.version}, machine install is v${record.version}`);
+  }
+
+  for (const workspace of record.workspaces) {
+    const mcpJsonPath = join(workspace.root, ".vscode", "mcp.json");
+    if (!existsSync(mcpJsonPath)) continue;
+    try {
+      const doc = JSON.parse(readFileSync(mcpJsonPath, "utf8")) as {
+        servers?: Record<string, { command?: unknown }>;
+      };
+      const command = doc.servers?.["tokenlighten"]?.command;
+      if (typeof command !== "string") continue;
+      const resolved = resolveWorkspaceIdentityPath(command, opts.homeDir);
+      if (!existsSync(resolved)) {
+        warning = true;
+        details.push(`workspace ${workspace.root}: identity does not resolve on this machine (${command})`);
+      }
+    } catch {
+      // malformed workspace file — not this check's concern
+    }
+  }
+
+  return { name: "install_consistency", ok, ...(warning ? { warning: true } : {}), detail: details.join("; ") };
+}
+
 export function checkClientRegistration(
   registration: TokenLightenClientRegistrationStatus,
   localTokenLightenVersion: string,
@@ -433,7 +689,10 @@ export function checkClientRegistration(
     && localTokenLightenVersion !== "unknown"
     && !registration.tokenLightenVersion.includes(localTokenLightenVersion);
   const warning = registration.state === "not-registered"
-    || registration.state === "registered-foreign";
+    || registration.state === "registered-foreign"
+    // Ours, but stale (§4.6 C7) — worth a nudge to re-run `tl install` /
+    // `tl clients register`, but never a doctor failure.
+    || registration.state === "registered-legacy";
   const ok = registration.state === "client-absent"
     || warning
     || (
@@ -462,13 +721,15 @@ export function checkClientRegistration(
 export async function evaluateDoctor(opts: DoctorOptions = {}): Promise<DoctorResult> {
   const development = opts.development === true;
   const checks: DoctorCheck[] = [
-    checkNodeVersion(),
+    checkNodeVersion(opts),
     ...(opts.skipFsChecks ? [] : [checkConfigDirWrite()]),
     checkTreeSitter(),
     await checkExcelJs(),
     checkLicenseChecker(development),
     checkMcpDistFresh(opts),
     checkMcpCore2Excluded(opts),
+    checkNoNulBytes(opts),
+    ...(development ? [] : [checkInstallConsistency(opts)]),
   ];
 
   const ok = checks.every((c) => c.ok);
@@ -491,13 +752,15 @@ export async function evaluateDoctor(opts: DoctorOptions = {}): Promise<DoctorRe
 export async function evaluateDoctorAsync(opts: DoctorOptions = {}): Promise<DoctorResult> {
   const development = opts.development === true;
   const checks: DoctorCheck[] = [
-    checkNodeVersion(),
+    checkNodeVersion(opts),
     ...(opts.skipFsChecks ? [] : [checkConfigDirWrite()]),
     checkTreeSitter(),
     await checkExcelJs(),
     checkLicenseChecker(development),
     checkMcpDistFresh(opts),
     checkMcpCore2Excluded(opts),
+    checkNoNulBytes(opts),
+    ...(development ? [] : [checkInstallConsistency(opts)]),
   ];
 
   const prereqs = await detectPrereqs(["node", "python", "git"]);

@@ -1,10 +1,28 @@
 import * as vscode from "vscode";
-import { getMcpLaunchConfig } from "./cli.js";
 import {
+  COPILOT_LARGE_RESULTS_SECTION,
+  isCopilotInlineResultsSufficient,
+} from "./diagnostics.js";
+import {
+  machineInstallCached,
   onWorkspaceSetupStateChanged,
+  vscodeMcpJsonManaged,
   workspaceMcpSettingsCached,
+  type WorkspaceMcpSettings,
 } from "./workspaceState.js";
 import { TOKENLIGHTEN_SCHEMA_STAMP } from "./generated/schemaStamp.js";
+
+/**
+ * Safe defaults for a "never-set-up" workspace's fallback definition
+ * (DESIGN-v0.14-mcp-only-install.md §4.6 C5): no explicit consent for
+ * writes or usage logging has been recorded for this workspace (that only
+ * happens via "Set up this workspace"), so the fallback stays read-only
+ * and does not record local usage until the user opts in.
+ */
+const FALLBACK_WORKSPACE_SETTINGS: WorkspaceMcpSettings = {
+  writeEnabled: false,
+  usageLoggingEnabled: false,
+};
 
 /**
  * globalState key recording the last schema stamp this install has
@@ -22,7 +40,8 @@ export type HostMcpActivationState =
   | "active"
   | "native-bypass"
   | "not-configured"
-  | "host-unsupported";
+  | "host-unsupported"
+  | "file-managed";
 
 let nativeSessionBypass = false;
 let definitionsChanged: vscode.EventEmitter<void> | undefined;
@@ -94,6 +113,10 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
       if (
         event.affectsConfiguration("tokenlighten.enabled")
         || event.affectsConfiguration("tokenlighten.toolSurface")
+        // The never-set-up fallback below also folds this setting into its
+        // own env/version (TOKENLIGHTEN_TASK_PACK_MAX_BYTES / `+inline`) —
+        // a change here needs the same re-registration as toolSurface.
+        || event.affectsConfiguration(COPILOT_LARGE_RESULTS_SECTION)
       ) changed.fire();
     }),
   );
@@ -111,8 +134,36 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
           return [];
         }
         const root = vscode.workspace.workspaceFolders?.[0];
-        const settings = workspaceMcpSettingsCached();
-        if (!root || !settings) {
+        if (!root) {
+          observeActivation("not-configured");
+          return [];
+        }
+        // DESIGN-v0.14-mcp-only-install.md §4.6 C5: VS Code identifies a
+        // server by (collectionId, definitionId) and treats the label as a
+        // case-insensitive COLLISION key — a set-up workspace's
+        // `.vscode/mcp.json` (sort order 0) always outranks this provider
+        // (order 300), so registering a definition here too just gets it
+        // silently auto-disabled (vscode#334069) while looking "inert" to
+        // the user. Suppress entirely once the file carries a managed
+        // entry; only a workspace that was NEVER set up gets a provider
+        // fallback definition below.
+        if (vscodeMcpJsonManaged(root.uri.fsPath)) {
+          observeActivation("file-managed");
+          return [];
+        }
+        // DESIGN-v0.14-mcp-only-install.md §4.6 C5, hands-on report
+        // (2026-09-08): a never-set-up workspace only gets a fallback
+        // definition when this MACHINE already has a `tl-setup`/`tl install`
+        // machine install (checked via the cached record, never a fresh
+        // spawn from provideMcpServerDefinitions()). Without one, the VSIX
+        // alone has nothing durable to launch here — falling back to VS
+        // Code's own bundled CLI under Electron (getMcpLaunchConfig) would
+        // start a TokenLighten MCP server, and pay its tool-definition
+        // tokens, in EVERY folder the user opens, merely from installing the
+        // extension, with no guide block and no recorded consent. Report
+        // "not-configured" exactly as the no-workspace-folder case above.
+        const machineInstall = machineInstallCached();
+        if (!machineInstall) {
           observeActivation("not-configured");
           return [];
         }
@@ -127,7 +178,35 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
         const toolSurface = vscode.workspace
           .getConfiguration("tokenlighten", root.uri)
           .get<string>("toolSurface", "full");
-        const launch = getMcpLaunchConfig([
+        // A never-set-up workspace has no recorded consent to WRITE any
+        // setting (that only happens via "Set up this workspace"/`tl
+        // workspace setup`), so this only ever READS Copilot's current
+        // effective large-tool-result setting, never raises it itself.
+        // "Sufficient" mirrors ensureCopilotSettings()'s alreadySufficient
+        // check in packages/cli/src/commands/workspace.ts — see
+        // diagnostics.ts's isCopilotInlineResultsSufficient doc comment.
+        // vscode.workspace.getConfiguration can be absent/throw on an odd
+        // host, or in a test double that only stubs the sections it
+        // exercises — either way, treat that as "not sufficient" and keep
+        // today's (un-linked) launch env/version untouched.
+        let copilotInlineResultsSufficient: boolean;
+        try {
+          const copilotConfig = vscode.workspace.getConfiguration(COPILOT_LARGE_RESULTS_SECTION, root.uri);
+          copilotInlineResultsSufficient = isCopilotInlineResultsSufficient({
+            enabled: copilotConfig.get<boolean>("enabled", true),
+            thresholdBytes: copilotConfig.get<number>("thresholdBytes", 8192),
+          });
+        } catch {
+          copilotInlineResultsSufficient = false;
+        }
+        // A never-set-up workspace has no recorded write/usage-log
+        // consent (workspaceMcpSettingsCached() only populates once "Set
+        // up this workspace" has run) — fall back to safe, read-only,
+        // no-logging defaults. If the workspace DOES happen to be
+        // configured (e.g. the managed file was removed by hand after
+        // setup), reuse its recorded settings instead of resetting them.
+        const settings = workspaceMcpSettingsCached() ?? FALLBACK_WORKSPACE_SETTINGS;
+        const mcpArgs = [
           "mcp",
           "start",
           "--stdio",
@@ -135,7 +214,16 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
           // Omitted (not merely "full") for the common case — matches every
           // other optional flag here (--allow-write above).
           ...(toolSurface === "code" ? ["--tool-surface", "code"] : []),
-        ]);
+        ];
+        // DESIGN-v0.14-mcp-only-install.md §4.6 C5: a never-set-up
+        // workspace on a machine that already ran `tl-setup`/`tl install`
+        // gets that machine-scoped, version-independent identity — the
+        // `machineInstall` presence check above guarantees this is defined.
+        const launch = {
+          command: machineInstall.identity.command,
+          args: [...machineInstall.identity.argsPrefix, ...mcpArgs],
+          env: machineInstall.identity.env,
+        };
         const definition = new vscode.McpStdioServerDefinition(
           "TokenLighten",
           launch.command,
@@ -143,8 +231,25 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
           {
             ...launch.env,
             TOKENLIGHTEN_CLIENT: "vscode",
+            // GitHub Copilot Chat fixed-overhead reduction (WP-C1): pins the
+            // VS Code advertisement profile (protocol/clientAdvertisement.ts)
+            // even on a transport leg that never threads a real
+            // clientInfo.name through to resolvedClientId(), and turns on
+            // the server's default-OFF turn-economy serving policies
+            // (util/flags.ts's turnEconomyEnabled()) for this host only.
+            // Unconditional, like TOKENLIGHTEN_CLIENT above — never gated on
+            // copilotInlineResultsSufficient.
+            TOKENLIGHTEN_CLIENT_ID: "vscode",
+            TL_TURN_ECONOMY: "1",
             TOKENLIGHTEN_USAGE_LOG: settings.usageLoggingEnabled ? "on" : "off",
             TOKENLIGHTEN_ACTIVATION: "host-auto",
+            // Lifts TL's own client-profile response ceiling (14,336 bytes)
+            // to match Copilot's now-sufficient inline threshold — the same
+            // pairing `tl workspace setup` writes, see
+            // packages/cli/src/commands/workspace.ts. Present only when
+            // copilotInlineResultsSufficient; this read-only fallback path
+            // never writes any setting itself.
+            ...(copilotInlineResultsSufficient ? { TOKENLIGHTEN_TASK_PACK_MAX_BYTES: "0" } : {}),
           },
           // VS Code MCP definition-cache mitigation (v0.13.0): `version` is
           // an official VS Code contract — "If this changes, the editor
@@ -162,8 +267,11 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
           // would not change when a user only toggles this per-workspace
           // setting; appending the setting's own value guarantees the
           // `version` string changes on every surface toggle too, the exact
-          // property this cache-invalidation contract requires.
-          `${packageVersion}+${TOKENLIGHTEN_SCHEMA_STAMP}+${toolSurface}`,
+          // property this cache-invalidation contract requires. The
+          // trailing `+inline` marker (same mechanism) changes whenever the
+          // Copilot link state above flips, so VS Code restarts the server
+          // with the (un)linked env in step with it.
+          `${packageVersion}+${TOKENLIGHTEN_SCHEMA_STAMP}+${toolSurface}${copilotInlineResultsSufficient ? "+inline" : ""}`,
         );
         definition.cwd = root.uri;
         return [definition];

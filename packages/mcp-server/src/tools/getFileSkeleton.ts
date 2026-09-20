@@ -373,7 +373,7 @@ export async function getFileSkeleton(
     // buildFullDowngradePayload's skeletonUsable check (signatures.trim())
     // still reads it as no-signal and falls back to its bounded `head`.
     const marker = kept.trim().length > 0
-      ? "\n[truncated: unrecognized extension served verbatim up to the byte budget; use mode=slice (range) or search_files action=find for the rest]"
+      ? '\n[truncated: unrecognized extension served verbatim up to the byte budget; use read_file {targets:[{path:"…", range:"a-b"}]} or search_files {action:"find", queries:["…"]} for the rest]'
       : "";
     return {
       ok: true,
@@ -382,7 +382,7 @@ export async function getFileSkeleton(
         language: "unknown",
         truncated: true,
         byte_budget: MAX_RESPONSE_BYTES,
-        hint: "unrecognized extension; use mode=slice with a range or search_files action=find for targeted reads",
+        hint: 'unrecognized extension; use read_file {targets:[{path:"…", range:"a-b"}]} or search_files {action:"find", queries:["…"]} for targeted reads',
       },
     };
   }

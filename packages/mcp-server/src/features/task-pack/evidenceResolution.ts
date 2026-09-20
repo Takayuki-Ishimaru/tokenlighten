@@ -49,6 +49,7 @@ import {
   type MarkdownHeading,
 } from "../../util/markdownSections.js";
 import { assertionRefs } from "../../util/verificationPack.js";
+import { servedTextOrUndefined } from "../../util/textDecode.js";
 
 // ---------------------------------------------------------------------------
 // Contract
@@ -192,7 +193,15 @@ function readBounded(abs: string): string | undefined {
   try {
     const stat = fs.statSync(abs);
     if (!stat.isFile() || stat.size > MAX_EVIDENCE_FILE_BYTES) return undefined;
-    return fs.readFileSync(abs, "utf8");
+    // served-bytes: readServedText
+    // AB1 (2026-09-14, review round 11): a normative evidence item carries a
+    // `text` field (`buildNormativeEvidence`'s `out.push({... text})`), so this
+    // bounded read IS a served-body door — it was the last reader in the
+    // task-pack feature still doing a raw `fs.readFileSync(abs, "utf8")`. Same
+    // policy as every other door: `undefined` means "no evidence from this
+    // file", which is precisely how all four call sites already read it.
+    // served-bytes: readServedText
+    return servedTextOrUndefined(abs);
   } catch {
     return undefined;
   }

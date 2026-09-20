@@ -10,7 +10,7 @@
 // return 'write-not-enabled' unless --allow-write is passed at startup.
 // kill-switch: TL_KILL_SWITCH=1 causes tools/list to return empty.
 
-import { existsSync, statSync, lstatSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, statSync, lstatSync, readdirSync } from "node:fs";
 import * as path from "path";
 import { createHash, randomBytes } from "crypto";
 import { deriveServerBuildId, deriveServerPackageVersion } from "./util/serverBuild.js";
@@ -64,7 +64,7 @@ import {
   splitArchiveVirtualPath,
   virtualArchivePath,
 } from "./tools/archive.js";
-import { admitTaskPackBudget, buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, repairSuppressedNextCall } from "./features/task-pack/readCodeTaskPack.js";
+import { admitTaskPackBudget, autoBoundTaskProfile, buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, repairSuppressedNextCall } from "./features/task-pack/readCodeTaskPack.js";
 import { rescueStringifiedCanonicalFields as rescueCanonicalDialectFields } from "./mcp/transport/canonicalDialectRescue.js";
 function taskPackAdmission(
   args: Record<string, unknown>,
@@ -80,6 +80,7 @@ function taskPackAdmission(
 import {
   bindTaskContractHandle,
   consumeExecutableNextScope,
+  hasPendingExecutableNext,
   recoverHandlelessTaskScope,
   resolveExecutableNextScope,
   recordAuthoritativeAbsentConcerns,
@@ -105,7 +106,7 @@ import {
 // D1 (2026-09-05): the per-(workspace, lane) registry of task handles THIS
 // process minted — the only authority for "is the lane's working set still
 // alive?", which the durable, fingerprint-keyed store cannot answer.
-import { laneTaskHandleNearMiss, recordLaneTaskHandle } from "./state/laneTaskHandles.js";
+import { laneTaskHandleMidSpliceMatch, laneTaskHandleNearMiss, laneTaskHandles, laneTaskHandleTailExtensionMatch, recordLaneTaskHandle } from "./state/laneTaskHandles.js";
 // PI-09 close-out: the `operation_id` dedup table the store already keeps
 // (`rememberOperation` / `lookupOperation`). Imported here rather than behind
 // a stateHandles re-export because the idempotency wrapper is a DISPATCH
@@ -130,7 +131,7 @@ import { csvTable, decodeCsvBytes, type CsvTableResult } from "./office/csv.js";
 import { prepareOfficeDocument } from "./office/decrypt.js";
 import { resolveCredentialRef } from "./security/credentials.js";
 import { editArtifact } from "./write/artifactEdit.js";
-import { assertSemanticFrontierV2FlagConsistency, batchHintsEnabled, cwdNearMissEnabled, decisionInvariantStrictEnabled, deltaContextEnabled, reasoningIrV2Enabled, receiptCoverageEnabled } from "./util/flags.js";
+import { assertSemanticFrontierV2FlagConsistency, batchHintsEnabled, cwdNearMissEnabled, decisionInvariantStrictEnabled, deltaContextEnabled, leanCallsEnabled, reasoningIrV2Enabled, receiptCoverageEnabled, reserveSmallWindowsEnabled, taskHandleRecoveryEnabled } from "./util/flags.js";
 // W-WIRE-2A (DESIGN-v0.15-sf-turn-economy.md §2 / W-LEDGER): the pure
 // per-path-ledger coverage decision, bridged into the production read paths
 // below. See coverageReceipt.ts's own header for the honesty contract this
@@ -145,10 +146,10 @@ import { deriveIrTaskRef, recordReasoningIrV2ClosureFromEdit, recordReasoningIrV
 import { deriveCanonicalTaskDecision, discoveryBundleNext, enforceCanonicalTaskDecisionAtExit } from "./features/task-pack/canonicalDecision.js";
 import type { TaskPackResult } from "./features/task-pack/model.js";
 import { projectLeanExecutionContract } from "./util/leanExecutionContract.js";
-import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, resolveTaskQueryRefBinding, resolveTaskQueryRefHandle, attachTaskQueryRefBinding, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, type ServedRangeLedgerReceipt } from "./state/session.js";
+import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCertifiedDecision, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, resolveTaskQueryRefBinding, resolveTaskQueryRefHandle, attachTaskQueryRefBinding, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, type ServedRangeLedgerReceipt } from "./state/session.js";
 import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, type BodyMarker } from "./util/verificationPack.js";
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
-import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNextBoundOrUnbound, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordServedBytes } from "./util/packServeLog.js";
+import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNextBoundOrUnbound, hasPrescribedSearchTerm, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordExecutedSearchResult, recordPrescribedSearchTerms, recordServedBytes, type ExecutedSearchAbsence, type ExecutedSearchHit } from "./util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "./util/laneKey.js";
 // DESIGN-v0.15 §5 (R2): the read-request continuation store. Q/D live here, not
 // in a handle payload and not in a second store (§10 item 3).
@@ -199,8 +200,17 @@ import { decideFullRead, TINY_BYTES, TINY_LINES, LARGE_BYTES, GOVERNED_FULL_SERV
 import { buildSmallFile, type SmallFileContentMode } from "./tools/readCodeSmallFile.js";
 import { buildOverview } from "./tools/readCodeOverview.js";
 import { applyIntent } from "./intents/index.js";
-import { resolveReal, readFileSafe, readBytesSafe, safeResolve } from "./util/safePath.js";
-import { countLines } from "./util/countLines.js";
+import { resolveReal, readFileSafe, readBytesSafe, readServedTextSafe, safeResolve } from "./util/safePath.js";
+import { noteNulStrippedServe } from "./protocol/envelope.js";
+import {
+  describeServedTextRefusal,
+  NUL_STRIPPED_SERVE_NOTE,
+  readServedText,
+  servedTextOrUndefined,
+  type ServedTextUndecodableReason,
+  type ServedTextVerdict,
+} from "./util/textDecode.js";
+import { countLines, sliceLinesToText } from "./util/countLines.js";
 import {
   isMarkdownPath,
   parseMarkdownHeadings,
@@ -283,6 +293,15 @@ import { taskContractLedgerSnapshot } from "./features/task-pack/taskContractSto
 // Re-exported so the hand-rolled leg's own tests can import it from here.
 import { SERVER_INSTRUCTIONS } from "./protocol/serverInstructions.js";
 export { SERVER_INSTRUCTIONS } from "./protocol/serverInstructions.js";
+// VS Code / GitHub Copilot Chat advertisement variants (see this module's
+// own header for the full rationale) — used below by `advertisedTools()` and
+// `buildInitializeInstructionsForClient()` to make the hand-rolled leg's
+// `tools/list`/`initialize` responses client-aware without changing any
+// other client's output.
+import {
+  baseServerInstructionsForClient,
+  toolDescriptionForClient,
+} from "./protocol/clientAdvertisement.js";
 import {
   packUnchangedPriorLabel,
   projectEvidence,
@@ -400,8 +419,89 @@ setHandlePersistence({ record: recordHandleEntry, rehydrate: rehydrateHandleEntr
 // main checkout. See write/resolveWorkspace.ts.
 //
 // enforcePreconditions expects a callback with an optional root arg; bind activeRoot.
+// served-bytes: not-served (wrapper: binds the active root; every caller is annotated at its own site)
 function readFileSafeOpt(rel: string, root?: string): Promise<string | null> {
+  // served-bytes: not-served (the wrapper's own forwarding call; see the tag above this function)
   return readFileSafe(rel, root ?? activeRoot);
+}
+
+/**
+ * AA1 (2026-09-14, review round 10): the ONE message every server route uses
+ * when a file was READ successfully but its bytes are not servable text under
+ * `util/textDecode.ts::readServedText` (invalid UTF-8, a BOM-less UTF-16 save,
+ * or NULs too dense to be incidental). Paired with `readServedTextSafe` at every
+ * route below that puts file text on the wire, so the whole server agrees with
+ * the task-pack doors about which bytes are text -- rounds 6-9 measured raw NULs
+ * and mojibake arriving through `readFileSafe`-based serve routes for files the
+ * task pack had already disclosed as unreadable.
+ *
+ * `read-error` is the existing A.7.1 code for "this read could not produce
+ * content" (already this file's code for a failed `small_file` read). A more
+ * precise `not-decodable-text` code would be better and is filed as a chip:
+ * minting a wire code is a protocol change, not a fix-wave edit.
+ */
+/**
+ * SHOULD-FIX 60 (AB1, 2026-09-14, review round 11): takes the VERDICT, not a
+ * bare tag, so the wire message names the rule that fired and the numbers it
+ * measured. Round 10 measured "not decodable as UTF-8 (nul-dense)" on a 42-byte
+ * file holding ONE NUL — the sparsest corruption possible — and the caller was
+ * told its file was NUL-dense when the rule that actually fired was "any NUL is
+ * refused below 100 characters". A bare reason string is still accepted for the
+ * callers that have nothing else to give.
+ */
+function undecodableTextMessage(
+  relPath: string,
+  verdict: Extract<ServedTextVerdict, { kind: "undecodable" }> | ServedTextUndecodableReason,
+): string {
+  const reason = typeof verdict === "string"
+    ? describeServedTextRefusal(verdict)
+    : describeServedTextRefusal(verdict.reason, { nulCount: verdict.nulCount, totalLength: verdict.totalLength });
+  return `Cannot read ${relPath} as text: not decodable as UTF-8 (${reason}) — re-save the file as UTF-8, or read it with search_files / an artifact mode`;
+}
+
+/**
+ * SHOULD-FIX 57: the one place a server route turns a `"stripped"` verdict into
+ * the annotation the policy requires. Spread into any response body that
+ * already carries a prose `note` (`read.text`, `read.map`, the `form:"handle"`
+ * and `form:"file"` batch entries) — E-1, so a `clean` serve pays nothing.
+ */
+/**
+ * SERVED-BYTES COMPLETENESS (AB1, 2026-09-14, review round 11) — the ONE way a
+ * `read_file` route in this file obtains file text it intends to put on the
+ * wire. `readServedTextSafe` is the policy; this is the policy plus the two
+ * things every door also has to do and two doors forgot:
+ *
+ *   1. `readServedText`'s verdict decides whether the bytes may be served at
+ *      all (BLOCKERs 52 and 53 were routes that still called `readFileSafe`,
+ *      the LENIENT reader, and therefore served exactly the bytes the
+ *      single-target form of the same request refused);
+ *   2. a `"stripped"` serve publishes itself into the protocol call context, so
+ *      `projectSuccessBody` states it once for the whole read family
+ *      (SHOULD-FIX 57: five routes served a stripped body silently, each under
+ *      a `sha` computed over the stripped text).
+ *
+ * `__tests__/servedBytesDoors.spec.ts` greps this file (and the other
+ * wire-serving modules) for every byte-read primitive and fails unless each hit
+ * is annotated `// served-bytes: readServedText` or
+ * `// served-bytes: not-served (<why>)`, so a seventh door cannot be added
+ * silently. That guard is why this helper exists as a named funnel rather than
+ * as nine copies of the same three lines.
+ */
+async function servedTextForRoute(rel: string, workspace: string): Promise<ServedTextVerdict | null> {
+  // served-bytes: readServedText
+  const verdict = await readServedTextSafe(rel, workspace);
+  if (verdict !== null && verdict.kind === "stripped") noteNulStrippedServe();
+  return verdict;
+}
+
+function nulStrippedNoteText(verdict: ServedTextVerdict | null | undefined): string | undefined {
+  return verdict?.kind === "stripped" ? NUL_STRIPPED_SERVE_NOTE : undefined;
+}
+
+/** The spreadable form of {@link nulStrippedNoteText} — E-1: absent when clean. */
+function nulStrippedNote(verdict: ServedTextVerdict | null | undefined): { note?: string } {
+  const note = nulStrippedNoteText(verdict);
+  return note === undefined ? {} : { note };
 }
 
 function textForLineRange(text: string, range: { start: number; end: number }): string {
@@ -1337,6 +1437,144 @@ function filterToolDefinitionForSurface<
     delete definition.inputSchema.anyOf;
     definition.inputSchema.required = ["edits"];
   }
+  return definition;
+}
+
+// WP-V1 (2026-09-20): the ADDITIONAL nested paths a "vscode" client's
+// advertised schema sheds under `leanCallsEnabled()`, on top of whatever
+// `FULL_ONLY_PROPERTY_PATHS` above already removed for the active tool
+// surface. `targets[].purpose` STAYS advertised (orchestrator ruling,
+// 2026-09-20, reversing this wave's first cut): it is the one argument that
+// tells the server what a caller-named DIRECTORY is for, and the
+// directory-confined clause recovery in `buildSeededTaskPack` locates with
+// it first -- on the recorded GitHub Copilot sessions the purposes cost
+// about 10 mAIU of output per call, while a first pack that misses the
+// directory's concern costs two to four whole model requests. Its
+// description is rewritten below to steer it onto directory targets, where
+// it pays. `task.dependentRequired` is dropped on every tool because
+// Copilot's own schema validator rejects the `dependentRequired` keyword
+// outright (same reason the top-level `oneOf`/`anyOf` deletion below
+// exists) — `dispatchTool` still enforces the expected_state_version-needs-
+// handle rule regardless of what gets advertised. `budget.bytes`/
+// `budget.tokens` are dropped from read_file ONLY (replay forensics,
+// 2026-09-20 P2 sessions): the model set `budget:{bytes:24000-42000}` on
+// large batch reads, the server honoured it as a cap, and each capped batch
+// then cost 2-3 follow-up reads — a whole model turn each. The Copilot
+// notes already say "omit `budget` unless you want LESS than TL's
+// default"; not advertising the byte/token knobs is the reliable way to
+// get there. `budget.items` is left advertised on search_files (its own,
+// untouched `LEAN_SCHEMA_PROPERTY_PATHS` entry below) — `references`
+// paging needs it, so it is NOT part of this read_file-only cut.
+// `dispatchTool` still accepts `budget.bytes`/`budget.tokens` exactly as
+// today; see `leanSchemaBudgetBytesStillServed`-style coverage in
+// leanVsCodeCalls.rc.spec.ts.
+const LEAN_SCHEMA_PROPERTY_PATHS: Record<string, readonly string[]> = {
+  read_file: [
+    "task.dependentRequired",
+    "budget.properties.bytes",
+    "budget.properties.tokens",
+  ],
+  edit_file: ["task.dependentRequired"],
+  search_files: ["task.dependentRequired"],
+};
+
+// WP-V1: top-level advertised properties that, once
+// `LEAN_SCHEMA_PROPERTY_PATHS` has emptied out their OWN nested
+// `properties`, must be dropped ENTIRELY rather than advertised as a bare,
+// property-less `{additionalProperties:false, properties:{}}` shape — an
+// empty container teaches a model nothing and is pure overhead. Not reached
+// today (read_file's `budget` above still keeps `items`/`rows`/`cells`/
+// `allowFull` after losing `bytes`/`tokens`), but a later wave narrowing
+// this same tool's budget further must not have to remember this rule.
+const LEAN_SCHEMA_DROP_IF_EMPTY: Record<string, readonly string[]> = {
+  read_file: ["budget"],
+};
+
+/** Deletes `description` from `node` and, recursively, from everything nested inside it (its own `properties`/`items`, and theirs, …). Never touches a property NAME. */
+function deleteDescriptionsDeep(node: unknown): void {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return;
+  const record = node as Record<string, unknown>;
+  delete record["description"];
+  const properties = record["properties"];
+  if (properties !== null && typeof properties === "object" && !Array.isArray(properties)) {
+    for (const child of Object.values(properties as Record<string, unknown>)) deleteDescriptionsDeep(child);
+  }
+  const items = record["items"];
+  if (items !== null && typeof items === "object") deleteDescriptionsDeep(items);
+}
+
+/**
+ * WP-V1: keeps the `description` on each TOP-level advertised property
+ * (`topLevelProperties`'s own immediate entries — `query`, `targets`,
+ * `task`, `edits`, `artifact`, …) and deletes it everywhere nested below
+ * that — an array's `items`, an object's own nested `properties`, and
+ * everything inside those, recursively. No property NAME is touched
+ * anywhere by this function; only nested description TEXT is shed, which
+ * is where most of the schemas' description bytes live (an edit item's
+ * `intent`, an artifact's per-format sub-object, a target's individual
+ * field list, a budget dimension, …) for fields comparatively rare next to
+ * the ones VSCODE_TOOL_DESCRIPTIONS already covers in prose at the tool
+ * level.
+ */
+function stripNestedSchemaDescriptions(topLevelProperties: Record<string, unknown>): void {
+  for (const node of Object.values(topLevelProperties)) {
+    if (node === null || typeof node !== "object" || Array.isArray(node)) continue;
+    const record = node as Record<string, unknown>;
+    const properties = record["properties"];
+    if (properties !== null && typeof properties === "object" && !Array.isArray(properties)) {
+      for (const child of Object.values(properties as Record<string, unknown>)) deleteDescriptionsDeep(child);
+    }
+    const items = record["items"];
+    if (items !== null && typeof items === "object") deleteDescriptionsDeep(items);
+  }
+}
+
+/**
+ * WP-V1 (2026-09-20): the additional VS-Code-only, `leanCallsEnabled()`-only
+ * schema diet layered on top of `filterToolDefinitionForSurface` above —
+ * see util/flags.ts's `leanCallsEnabled` doc block for the full rationale.
+ * `clientId` not resolving to "vscode", or the flag off: returns
+ * `definition` unchanged, so every other client/flag combination stays
+ * byte-for-byte identical to pre-WP-V1 output. `dispatchTool`'s own
+ * validation is untouched by any of this — a caller that still sends a
+ * leaned-away property (`purpose`, an `anyOf`-only shape,
+ * `expected_state_version` without a sibling `handle`) is served/refused
+ * exactly as it is today.
+ */
+function leanToolDefinitionForClient<
+  T extends {
+    name: string;
+    inputSchema: { properties: Record<string, SchemaNode>; oneOf?: unknown[]; anyOf?: unknown[]; required?: string[] };
+  },
+>(definition: T, clientId: string | undefined): T {
+  if (!leanCallsEnabled() || resolveClientProfile(clientId).id !== "vscode") return definition;
+  definition.inputSchema.properties = withoutSchemaPaths(
+    definition.inputSchema.properties,
+    LEAN_SCHEMA_PROPERTY_PATHS[definition.name] ?? [],
+  );
+  // A container property (e.g. `budget`) that LEAN_SCHEMA_PROPERTY_PATHS
+  // just emptied out is dropped entirely — see LEAN_SCHEMA_DROP_IF_EMPTY's
+  // own doc comment for why this stays a live rule even though nothing
+  // reaches it today.
+  for (const name of LEAN_SCHEMA_DROP_IF_EMPTY[definition.name] ?? []) {
+    const container = definition.inputSchema.properties[name] as { properties?: Record<string, unknown> } | undefined;
+    if (container?.properties !== undefined && Object.keys(container.properties).length === 0) {
+      delete definition.inputSchema.properties[name];
+    }
+  }
+  delete definition.inputSchema.oneOf;
+  delete definition.inputSchema.anyOf;
+  stripNestedSchemaDescriptions(definition.inputSchema.properties);
+  const cwd = definition.inputSchema.properties["cwd"] as { description?: string } | undefined;
+  if (cwd !== undefined) cwd.description = "edit_file only; omit on read/search in a single-root workspace.";
+  // `stripNestedSchemaDescriptions` just removed every nested description,
+  // `purpose`'s included; give it back the one sentence that says where it
+  // pays (see LEAN_SCHEMA_PROPERTY_PATHS's doc comment).
+  const targets = definition.inputSchema.properties["targets"] as
+    | { items?: { properties?: Record<string, { description?: string }> } }
+    | undefined;
+  const purpose = targets?.items?.properties?.["purpose"];
+  if (purpose !== undefined) purpose.description = "For a directory target: what to find in it.";
   return definition;
 }
 
@@ -2298,7 +2536,20 @@ function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<s
   return shape.keys !== undefined && withinRefusalBudget(withKeys) ? withKeys : refusal;
 }
 
-export function advertisedTools() {
+/**
+ * `clientId` defaults to `resolvedClientId()` (the id captured by this same
+ * process's `handleRequest` "initialize" case, or the TOKENLIGHTEN_CLIENT_ID
+ * override — see resolvedClientId's doc comment) so every EXISTING bare
+ * `advertisedTools()` call site (all three transport legs, every test in
+ * this package) keeps its exact prior behavior with no change at the call
+ * site: `resolvedClientId()` is `undefined` unless something upstream of
+ * this call already captured a real client, which resolves to the
+ * "unknown" profile and therefore the pre-existing default descriptions
+ * (see clientAdvertisement.ts's "DEFAULT BEHAVIOR IS BYTE-IDENTICAL" note).
+ * Callers that already know which client they are advertising to (tests;
+ * a future transport leg) may pass it explicitly instead.
+ */
+export function advertisedTools(clientId: string | undefined = resolvedClientId()) {
   if (KILL_SWITCH) return [];
   // Deep-copy each definition. ALL_TOOLS holds the single source-of-truth
   // schema objects; handing out the live references let any caller (a test
@@ -2317,13 +2568,25 @@ export function advertisedTools() {
   return ALL_TOOLS.filter((t) => t.enabled).map((t) => {
     const cloned = structuredClone(t.definition) as {
       name: string;
+      description: string;
       inputSchema: { properties: Record<string, SchemaNode>; anyOf?: unknown[]; required?: string[] };
     };
-    return filterToolDefinitionForSurface(
+    // VS Code / GitHub Copilot Chat only (see clientAdvertisement.ts):
+    // swap in the richer description for this tool. Every other/unknown
+    // client gets `undefined` here, so `cloned.description` is left exactly
+    // as ALL_TOOLS defined it — the input SCHEMA (inputSchema below) is
+    // never touched by this override, on any client.
+    const descriptionOverride = toolDescriptionForClient(clientId, t.name);
+    if (descriptionOverride !== undefined) cloned.description = descriptionOverride;
+    const surfaced = filterToolDefinitionForSurface(
       cloned,
       ACTIVE_TOOL_SURFACE,
       FULL_ONLY_PROPERTY_PATHS[t.name] ?? [],
-    ) as unknown as Record<string, unknown>;
+    );
+    // WP-V1 (2026-09-20): a second, independent diet — see
+    // `leanToolDefinitionForClient`'s own doc comment. A no-op for every
+    // client but "vscode" and for "vscode" without `leanCallsEnabled()`.
+    return leanToolDefinitionForClient(surfaced, clientId) as unknown as Record<string, unknown>;
   });
 }
 
@@ -2697,6 +2960,7 @@ async function applyElidedEditAnchor(
   const replace = typeof entry["replace"] === "string" ? entry["replace"] : undefined;
   let content: string | null;
   try {
+    // served-bytes: not-served (edit anchor resolution: the text is MATCHED, never emitted)
     content = await readFileSafeOpt(relPath, workspace);
   } catch {
     return false;
@@ -3049,6 +3313,7 @@ async function createTargetExistsRefusal(
   requestedContent: string,
   workspace: string,
 ): Promise<Record<string, unknown>> {
+  // served-bytes: not-served (create-collision report: emits handle/bytes/sha and content_identical, never the bytes)
   const existing = await readFileSafe(relPath, workspace);
   const cwd = { cwd: workspace };
   const identical = existing !== null && existing === requestedContent;
@@ -3068,6 +3333,15 @@ async function createTargetExistsRefusal(
         content_identical: identical,
       }
     : {};
+  // INTERNAL DIALECT, NOT CALLER-FACING PROSE (2026-09-20 legacy-spelling sweep).
+  // The `key=value` strings in `accepted_transitions` never reach the wire as
+  // text: `protocol/refusal.ts`'s `routeUnlockAlternatives` parses each one with
+  // `parseProseToolCall` and the envelope's `canonicalizeEmittedToolCalls`
+  // emits the result as a STRUCTURED, canonical call (`targets:[{handle}]`,
+  // `content:"full"`, `task:{pull:"closure"}`…) — pinned by the
+  // `refusal.edit_create_target_exists` wire baseline. Rewriting them in the
+  // canonical `{…}` spelling makes them unparseable, and the wire then carries
+  // a raw string instead of an executable call (measured while trying it).
   const unlock = entry === undefined
     ? {
         accepted_transitions: [`read_file path=${relPath}`],
@@ -3162,12 +3436,14 @@ async function resolveCreateSourceContent(
       effectiveWorkspace = res.kind === "adopt" ? res.workspace : entry.workspaceRoot;
     }
     if (!entry.path) return { ok: false, reason: "no-source" };
+    // served-bytes: not-served (create-by-copy source: these bytes become the NEW FILE, not a response body)
     const content = await readFileSafe(entry.path, effectiveWorkspace);
     if (content === null) return { ok: false, reason: "no-source" };
     const resolved = entry.range ? extractRangeText(content, entry.range) : content;
     if (resolved === null) return { ok: false, reason: "no-source" };
     return { ok: true, content: resolved, workspace: effectiveWorkspace };
   }
+  // served-bytes: not-served (create-by-copy source: these bytes become the NEW FILE, not a response body)
   const plain = await readFileSafe(source, workspace);
   if (plain === null) return { ok: false, reason: "no-source" };
   return { ok: true, content: plain, workspace };
@@ -4069,6 +4345,39 @@ export function isSeparatorClassSubstitution(a: string, b: string): boolean {
   return diffs > 0;
 }
 
+/**
+ * The spelling two cwd paths must be compared IN. On POSIX this returns its
+ * input unchanged, so every comparison in this module stays byte-for-byte
+ * what it was.
+ *
+ * Win32 needs a normalization the other platforms do not, because the two
+ * sides of these comparisons come from different producers: `requested` is a
+ * raw wire string a client may spell with forward slashes and either
+ * drive-letter case (`c:/w/wt_a` is a perfectly legal Windows path), while a
+ * candidate arrives from `realpathSync`, which returns native backslashes and
+ * PRESERVES whatever drive-letter case it was handed. Two spellings of ONE
+ * directory then failed every identity / `path.dirname` / `startsWith` test
+ * below, and the matcher answered `no-candidate` for a cwd it should have
+ * corrected — while `isSegmentDuplicationOf`, which splits on `path.sep`,
+ * saw a forward-slash path as a single unsplittable segment.
+ *
+ * ONLY the separator class and the drive letter are canonicalized. Name case
+ * is deliberately left alone: `deps.caseInsensitiveFs` is this module's one
+ * authority on how NAMES compare, and folding case here would silently turn a
+ * case-only difference into distance 0 behind that flag's back.
+ */
+function cwdComparablePath(p: string): string {
+  if (process.platform !== "win32") return p;
+  const native = path.resolve(p.replace(/\//g, path.sep));
+  const root = path.parse(native).root;
+  // `c:\` and `C:\` are never two different volumes. A UNC root
+  // (`\\server\share\`) has no drive letter to fold, and charAt(0) is its
+  // leading separator, so it passes through unchanged.
+  return root.length > 0
+    ? root.charAt(0).toUpperCase() + root.slice(1) + native.slice(root.length)
+    : native;
+}
+
 /** Path segments below the root (`path.parse().root` is preserved verbatim). */
 function cwdPathSegments(p: string): { root: string; segments: string[] } {
   const root = path.parse(p).root;
@@ -4085,7 +4394,9 @@ function cwdPathSegments(p: string): { root: string; segments: string[] } {
  * Both are exact string identities after the fold, so neither widens the
  * false-positive surface the way another distance rule would.
  */
-export function isSegmentDuplicationOf(requested: string, candidate: string): boolean {
+export function isSegmentDuplicationOf(rawRequested: string, rawCandidate: string): boolean {
+  const requested = cwdComparablePath(rawRequested);
+  const candidate = cwdComparablePath(rawCandidate);
   const { root, segments } = cwdPathSegments(requested);
   const collapsed: string[] = [];
   for (const segment of segments) {
@@ -4108,10 +4419,14 @@ export function isSegmentDuplicationOf(requested: string, candidate: string): bo
  * Pure: every filesystem fact it needs arrives through `deps`.
  */
 export function cwdNearMissRelationFor(
-  requestedResolved: string,
-  candidateReal: string,
+  rawRequestedResolved: string,
+  rawCandidateReal: string,
   deps: CwdNearMissDeps = DEFAULT_CWD_NEAR_MISS_DEPS,
 ): { relation: CwdNearMissRelation; editDistance?: number } | undefined {
+  // Both sides are compared in ONE spelling — see `cwdComparablePath`. The
+  // identity of this function is unchanged on POSIX.
+  const requestedResolved = cwdComparablePath(rawRequestedResolved);
+  const candidateReal = cwdComparablePath(rawCandidateReal);
   if (requestedResolved === candidateReal) return undefined;
   if (isSegmentDuplicationOf(requestedResolved, candidateReal)) {
     return { relation: "segment-duplication" };
@@ -4128,7 +4443,7 @@ export function cwdNearMissRelationFor(
   // Everything below is SIBLING-ONLY: identical parent directory, compared
   // after realpath. This is what structurally excludes an unrelated same-named
   // directory living under some other worktree group.
-  const requestedParent = deps.realpath(path.dirname(requestedResolved));
+  const requestedParent = cwdComparablePath(deps.realpath(path.dirname(requestedResolved)));
   if (requestedParent !== path.dirname(candidateReal)) return undefined;
 
   const from = path.basename(requestedResolved);
@@ -4142,7 +4457,7 @@ export function cwdNearMissRelationFor(
     deps.caseInsensitiveFs
     && from !== to
     && from.toLowerCase() === to.toLowerCase()
-    && deps.realpath(requestedResolved) !== candidateReal
+    && cwdComparablePath(deps.realpath(requestedResolved)) !== candidateReal
   ) {
     return undefined;
   }
@@ -4189,14 +4504,17 @@ export function cwdNearMissMatch(
   // hard safety ceiling remains; past it we refuse outright rather than
   // sample.
   if (candidates.length > CWD_NEAR_MISS_POOL_SAFETY_BOUND) return { refused: "pool-too-large" };
-  const requestedResolved = path.resolve(requested);
+  const requestedResolved = cwdComparablePath(path.resolve(requested));
   const seen = new Set<string>();
   const hits: CwdNearMissMatch[] = [];
   for (const candidate of candidates) {
     if (deps.isSymlink(candidate.cwd)) continue; // never resolve THROUGH a symlink
     const real = deps.realpath(candidate.cwd);
-    if (seen.has(real)) continue; // one directory reached twice is not a tie
-    seen.add(real);
+    // Dedupe on the COMPARABLE spelling: on win32 `c:/w/a` and `C:\w\a` name
+    // one directory, and counting them twice would manufacture a tie.
+    const realKey = cwdComparablePath(real);
+    if (seen.has(realKey)) continue; // one directory reached twice is not a tie
+    seen.add(realKey);
     const relation = cwdNearMissRelationFor(requestedResolved, real, deps);
     if (relation === undefined) continue;
     hits.push({
@@ -4766,7 +5084,16 @@ function workspaceRoutingRefusal(
             arguments: {
               ...args,
               cwd: foreign,
-              path: path.relative(foreign, path.resolve(workspace, crossings[0]!.path)),
+              // `path.relative` emits NATIVE separators, so on win32 this
+              // rerouted continuation handed back `packages\cli\src\...`.
+              // Every workspace-relative path on this wire is POSIX-spelled
+              // (same `split(path.sep).join("/")` fold `createDirectoryEvidence`
+              // applies), and this one is meant to be re-issued verbatim — a
+              // backslash spelling is a different string to every handle,
+              // ignore-pattern and dedupe key downstream. `cwd` stays native:
+              // it is an absolute host path, not a wire-relative one.
+              path: path.relative(foreign, path.resolve(workspace, crossings[0]!.path))
+                .split(path.sep).join("/"),
             },
           },
         }
@@ -5900,6 +6227,7 @@ async function resolveFullReadForPath(
 
     // mode=full on office files: redirect unless allowFull is explicitly true.
     if (!allowFullRequested) {
+      // served-bytes: not-served (office/PDF container bytes: extractOfficeText owns its own decode)
       const offBytes = await readBytesSafe(filePath, workspace);
       if (offBytes === null) return { ok: false, error: `File not found or outside workspace: ${filePath}`, code: "not-found" };
       // B5.2: full-content hash, not a first-48-bytes truncation.
@@ -5930,6 +6258,7 @@ async function resolveFullReadForPath(
     }
 
     // mode=full with allowFull:true on an office file: extract text directly.
+    // served-bytes: not-served (office/PDF container bytes: extractOfficeText owns its own decode)
     const bytes = await readBytesSafe(filePath, workspace);
     if (bytes === null) return { ok: false, error: `File not found or outside workspace: ${filePath}`, code: "not-found" };
     const result = await extractOfficeText(
@@ -5955,8 +6284,30 @@ async function resolveFullReadForPath(
     return { ok: true, data: result.data as unknown as Record<string, unknown> };
   }
 
-  const content = await readFileSafe(filePath, workspace);
+  // AA1 (round 10): serve-side verdict, not the lenient reader — see
+  // `undecodableTextMessage`. This resolution feeds BOTH `content:"full"` and
+  // the `paths[]` full batch, and round 9 measured it serving a rare-NUL file's
+  // raw NUL (`content:"full"` on the same file the task pack served stripped).
+  // served-bytes: readServedText
+  const fullVerdict = await servedTextForRoute(filePath, workspace);
+  if (fullVerdict !== null && fullVerdict.kind === "undecodable") {
+    return { ok: false, error: undecodableTextMessage(filePath, fullVerdict), code: "read-error" };
+  }
+  const content = fullVerdict === null ? null : fullVerdict.text;
   if (content === null) return { ok: false, error: `File not found or outside workspace: ${filePath}`, code: "not-found" };
+  // SHOULD-FIX 57 (AB1, round 11): EVERY success arm of this resolution — the
+  // plain serve, the tiny exception, the auto-allow, and all four downgrade
+  // payloads — goes through `servedFull`, so a `stripped` serve cannot be
+  // silent at `content:"full"` or in the `paths[]` full batch. Round 10
+  // measured a 2352-character stripped body here under
+  // `sha:"sha256:0c1a4c0685ce"` with no note at all. The builders own the rest
+  // of the payload; the annotation is composed with any `note` they set.
+  const servedFull = (data: Record<string, unknown>): FullReadResolution => {
+    const strip = nulStrippedNoteText(fullVerdict);
+    if (strip === undefined) return { ok: true, data };
+    const existing = typeof data["note"] === "string" && data["note"] !== "" ? `${data["note"] as string}; ` : "";
+    return { ok: true, data: { ...data, note: `${existing}${strip}` } };
+  };
 
   const fullBytes = Buffer.byteLength(content, "utf8");
   // BUG FIX: was content.split(/\r?\n/).length — feeds decideFullRead's
@@ -5983,37 +6334,31 @@ async function resolveFullReadForPath(
     // skeleton. Returning the full body here keeps the trim marker honest: no
     // discovery was actually trimmed when the tiny exception applies.
     if (fullBytes <= TINY_BYTES && fullLineCount <= TINY_LINES) {
-      return {
-        ok: true,
-        data: buildFullServePayload({
-          workspace,
-          filePath,
-          content,
-          handleId: govHEntry.id,
-          sha: fullSha,
-          keepComments,
-          allowFull: allowFullRequested,
-        }),
-      };
-    }
-    noteServedBytesSource("post-ready-trim");
-    return {
-      ok: true,
-      data: await buildFullDowngradePayload({
+      return servedFull(buildFullServePayload({
         workspace,
         filePath,
         content,
         handleId: govHEntry.id,
         sha: fullSha,
-        bytes: fullBytes,
-        maxBytes: effectiveCapBytes,
-        reason: "full-downgraded",
-        allowFullWouldHelp: false,
         keepComments,
-        skeletonOnly: true,
-        hint: "Post-ready discovery is trimmed; zoom this honest skeleton by range.",
-      }),
-    };
+        allowFull: allowFullRequested,
+      }));
+    }
+    noteServedBytesSource("post-ready-trim");
+    return servedFull(await buildFullDowngradePayload({
+      workspace,
+      filePath,
+      content,
+      handleId: govHEntry.id,
+      sha: fullSha,
+      bytes: fullBytes,
+      maxBytes: effectiveCapBytes,
+      reason: "full-downgraded",
+      allowFullWouldHelp: false,
+      keepComments,
+      skeletonOnly: true,
+      hint: "Post-ready discovery is trimmed; zoom this honest skeleton by range.",
+    }));
   }
   if (fullBytes > effectiveCapBytes) {
     const allowFullWouldHelp = !allowFullRequested && fullBytes <= READ_FULL_CAP_BYTES_ALLOW_FULL;
@@ -6037,38 +6382,32 @@ async function resolveFullReadForPath(
       if (autoDecision.decision === "allow" && autoDecision.autoAllowed) {
         // Feature 1 (2026-07-12b2): successful mode=full content serve.
         // B2e: routed through the shared chunk-capped builder.
-        return {
-          ok: true,
-          data: buildFullServePayload({
-            workspace,
-            filePath,
-            content,
-            handleId: govHEntry.id,
-            sha: fullSha,
-            keepComments,
-            allowFull: allowFullRequested,
-            extra: { auto_allowed: autoDecision.autoAllowed },
-          }),
-        };
+        return servedFull(buildFullServePayload({
+          workspace,
+          filePath,
+          content,
+          handleId: govHEntry.id,
+          sha: fullSha,
+          keepComments,
+          allowFull: allowFullRequested,
+          extra: { auto_allowed: autoDecision.autoAllowed },
+        }));
       }
       if (autoDecision.decision === "downgrade" && autoDecision.reason === "per-task-cap-reached") {
-        return {
-          ok: true,
-          data: await buildFullDowngradePayload({
-            workspace,
-            filePath,
-            content,
-            handleId: govHEntry.id,
-            sha: fullSha,
-            bytes: fullBytes,
-            maxBytes: effectiveCapBytes,
-            reason: "per-task-cap-reached",
-            allowFullWouldHelp: true,
-        keepComments,
-            alternatives: autoDecision.alternatives,
-            hint: "This task has hit its full-read budget for other files.",
-          }),
-        };
+        return servedFull(await buildFullDowngradePayload({
+          workspace,
+          filePath,
+          content,
+          handleId: govHEntry.id,
+          sha: fullSha,
+          bytes: fullBytes,
+          maxBytes: effectiveCapBytes,
+          reason: "per-task-cap-reached",
+          allowFullWouldHelp: true,
+          keepComments,
+          alternatives: autoDecision.alternatives,
+          hint: "This task has hit its full-read budget for other files.",
+        }));
       }
       // Otherwise (a REPEAT read → per-path-cap-reached downgrade): fall
       // through to the byte cap-exceeded payload below.
@@ -6079,22 +6418,19 @@ async function resolveFullReadForPath(
       : allowFullWouldHelp
         ? `File is ${fullBytes} bytes, over the default cap of ${READ_FULL_CAP_BYTES}.`
         : `File is ${fullBytes} bytes, over both the default cap (${READ_FULL_CAP_BYTES}) and the allowFull ceiling (${READ_FULL_CAP_BYTES_ALLOW_FULL}); allowFull cannot help here.`;
-    return {
-      ok: true,
-      data: await buildFullDowngradePayload({
-        workspace,
-        filePath,
-        content,
-        handleId: govHEntry.id,
-        sha: fullSha,
-        bytes: fullBytes,
-        maxBytes: effectiveCapBytes,
-        reason: "cap-exceeded",
-        allowFullWouldHelp,
-        keepComments,
-        hint,
-      }),
-    };
+    return servedFull(await buildFullDowngradePayload({
+      workspace,
+      filePath,
+      content,
+      handleId: govHEntry.id,
+      sha: fullSha,
+      bytes: fullBytes,
+      maxBytes: effectiveCapBytes,
+      reason: "cap-exceeded",
+      allowFullWouldHelp,
+      keepComments,
+      hint,
+    }));
   }
 
   // Governor check: consult decideFullRead before expanding. Preserves
@@ -6137,23 +6473,20 @@ async function resolveFullReadForPath(
             || govDecision.reason === "candidate-pack-full-repeat")
           ? govDecision.reason
           : "full-downgraded";
-    return {
-      ok: true,
-      data: await buildFullDowngradePayload({
-        workspace,
-        filePath,
-        content,
-        handleId: govHEntry.id,
-        sha: fullSha,
-        bytes: fullBytes,
-        maxBytes: effectiveCapBytes,
-        reason: govReason,
-        allowFullWouldHelp,
-        keepComments,
-        alternatives: govDecision.alternatives,
-        hint,
-      }),
-    };
+    return servedFull(await buildFullDowngradePayload({
+      workspace,
+      filePath,
+      content,
+      handleId: govHEntry.id,
+      sha: fullSha,
+      bytes: fullBytes,
+      maxBytes: effectiveCapBytes,
+      reason: govReason,
+      allowFullWouldHelp,
+      keepComments,
+      alternatives: govDecision.alternatives,
+      hint,
+    }));
   }
 
   // mode=full augmentation: handle + sha + fullFileExpansion:true (C.5).
@@ -6161,18 +6494,15 @@ async function resolveFullReadForPath(
   // B2e: the payload is built by buildFullServePayload, which caps ONE serve at
   // FULL_SERVE_CHUNK_BYTES (unless allowFull) and records only what it sent.
   // Feature 1 (2026-07-12b2): successful mode=full content serve.
-  return {
-    ok: true,
-    data: buildFullServePayload({
-      workspace,
-      filePath,
-      content,
-      handleId: govHEntry.id,
-      sha: fullSha,
-      keepComments,
-      allowFull: allowFullRequested,
-    }),
-  };
+  return servedFull(buildFullServePayload({
+    workspace,
+    filePath,
+    content,
+    handleId: govHEntry.id,
+    sha: fullSha,
+    keepComments,
+    allowFull: allowFullRequested,
+  }));
 }
 
 /**
@@ -6530,6 +6860,7 @@ async function buildUnreadSiblingNote(
     if (size > UNREAD_SCAN_MAX_FILE_BYTES) continue;
     scanned++;
 
+    // served-bytes: not-served (concern scoring: token containment only, no body derived from it)
     const text = await readFileSafe(file.relPath, workspace);
     if (text === null) continue;
     const lower = text.toLowerCase();
@@ -7028,6 +7359,28 @@ export function recordTaskPackExecution(
   result["task"] = task;
   result["profile"] = profile;
   if (decision !== undefined) result["decision"] = decision;
+  // FX-L SOFT FRONTIER MARKER (user ruling 2026-09-14, review-findings-6
+  // SHOULD-FIX 38): record the CERTIFIED decision this lane was just handed,
+  // exactly as the caller receives it one line above. This is the only site
+  // that both emits the single decision and installs the fence, so a record
+  // written here can never describe a verdict the caller was not given.
+  //
+  // Only `act.edit` / `act.answer` are certified decisions; a `discover` /
+  // `await_input` / `done` pack certifies nothing and therefore does NOT
+  // retire an earlier record (see `recordCertifiedDecision`'s own doc).
+  // `qref`/`task.id` are captured for the binding check and degrade to "" when
+  // this pack minted neither, which is the ruling's epoch-only fallback.
+  if (decision !== undefined && (decision.kind === "act.edit" || decision.kind === "act.answer")) {
+    recordCertifiedDecision(workspace, {
+      certificateId: decision.certificate?.id ?? "",
+      kind: decision.kind,
+      frontier: (decision.kind === "act.edit" ? decision.frontier ?? [] : [])
+        .map((entry) => ({ path: entry.path, writable: entry.writable })),
+      createTargetPath: decision.kind === "act.edit" ? decision.create_target?.path ?? "" : "",
+      taskId: typeof task.id === "string" ? task.id : "",
+      qref: typeof qrefForBinding === "string" ? qrefForBinding : "",
+    });
+  }
   // P2(d) (2026-08-28 review-fix wave): was `decision?.kind === "discover" ?
   // decision.next : undefined` — registration only ever fired for a
   // `discover`-kind wire decision. `TaskDecision`'s own D-1 invariant
@@ -7055,6 +7408,29 @@ export function recordTaskPackExecution(
       tool: next.tool,
       arguments: next.arguments as Record<string, unknown>,
     });
+  }
+  // R1-S10a (2026-09-13 review round): record WHICH TERMS this pack asked the
+  // caller to search for, so the result ledger can refuse to learn from a search
+  // no pack ever requested (`termSearchWasPrescribed`).
+  //
+  // Read from BOTH carriers. `registerExecutableNextScope` above is fed only by
+  // the internal `next_call`, and the answer-pack `discover` shape that prescribes
+  // an identifier find leaves that unset while carrying the call on the wire
+  // decision — which is precisely why the pending-next fences never fire on those
+  // chains. A fence must be able to say YES when the pack really did ask, so this
+  // reads the prescription wherever the pack actually put it.
+  //
+  // Lane, not task: `contractScope?.lane` is the authenticated lane of the call
+  // being served (`currentSessionLane()` is the same value for an ALS-scoped
+  // dispatch and the fallback when no contract scope exists), and the record is
+  // deliberately UNBOUND — the caller's later search has no binding of its own to
+  // match against. See `recordPrescribedSearchTerms`' doc comment for why that is
+  // a necessary-not-sufficient condition.
+  for (const carrier of [next, (decision as { next?: unknown } | undefined)?.next]) {
+    const terms = prescribedSearchTermsOf(carrier);
+    if (terms.length > 0) {
+      recordPrescribedSearchTerms(workspace, contractScope?.lane ?? currentSessionLane(), terms);
+    }
   }
   if ((decision?.kind === "act.answer" || decision?.kind === "act.edit")
     && effectiveContract?.readiness_certificate !== undefined) {
@@ -7882,11 +8258,20 @@ async function attachAppliedReadback(
       const end = m[2] !== undefined ? parseInt(m[2], 10) : start;
       let lines = contentCache.get(f.path);
       if (lines === undefined) {
-        try {
-          lines = readFileSync(path.join(workspace, f.path), "utf8").split("\n");
-        } catch {
-          lines = null;
-        }
+        // served-bytes: readServedText
+        // AB1 (2026-09-14, review round 11): `applied[].code` IS a served body —
+        // the post-edit disk slice this response puts on the wire, with a
+        // `slice_sha` over it. A raw `readFileSync(..., "utf8")` here served
+        // whatever bytes were on disk, so an edit to a file carrying an
+        // incidental NUL (or an editor's BOM-less UTF-16 re-save between the
+        // write and this read-back) shipped them verbatim inside a success
+        // response. `servedTextOrUndefined` is the same policy every read door
+        // is gated on; an undecodable file simply carries no read-back (the
+        // entry is skipped), which is exactly what this optional evidence
+        // already does for an unreadable one.
+        // served-bytes: readServedText
+        const servedBack = servedTextOrUndefined(path.join(workspace, f.path));
+        lines = servedBack === undefined ? null : servedBack.split("\n");
         contentCache.set(f.path, lines);
       }
       if (lines === null) continue;
@@ -8424,6 +8809,7 @@ async function serveSearchCursorPage(
   const distinctPaths = [...new Set(staged.state.matches.map((m) => m.path))];
   const lineCache = new Map<string, string[]>();
   for (const relPath of distinctPaths) {
+    // served-bytes: not-served (find-cursor source-revision check: sha comparison, page bytes come from the ledgered matches)
     const text = await readFileSafe(relPath, workspace);
     const expected = staged.state.matches.find((m) => m.path === relPath)?.sha;
     if (text === null || (expected !== undefined && shaOfText(text) !== expected)) {
@@ -8664,6 +9050,78 @@ function applyRecoveredTaskHandleFromQref(args: Record<string, unknown>, workspa
   // `taskHandleRefusal` will immediately reject as `handle-unknown`.
   if (!resolveTaskHandle(handle, workspace).ok) return;
   args["task_handle"] = handle;
+}
+
+/**
+ * TL_TASK_HANDLE_RECOVERY (default ON; see util/flags.ts's own doc comment
+ * for the full policy). `read_file`/`search_files` dispatch only — never
+ * called from the edit_file arm, which keeps strict authentication.
+ *
+ * Runs only when the presented `task_handle` already FAILED
+ * `resolveTaskHandle` (identity/TTL/workspace/MAC are already proven false —
+ * this never lowers that bar). Two routes, tried in order, both restricted
+ * to THIS process's own (workspace, lane) lineage (`laneTaskHandles` is
+ * in-memory and never persisted, so recovery can never reach another
+ * process or installation — and a cross-installation token would fail its
+ * OWN candidate liveness check regardless, via `resolveTaskHandle`'s
+ * `wrong-subject` outcome):
+ *
+ *   (a) the SAME call's own `qref` is bound to a handle this lane minted
+ *       that is still live;
+ *   (b) exactly one live lane handle is a same-length, bounded mid-splice of
+ *       the presented string (`laneTaskHandleMidSpliceMatch`) — two or more
+ *       qualifying candidates is ambiguous and recovers nothing.
+ *
+ * `wrong-workspace` is never attempted — a cryptographically valid handle
+ * for ANOTHER workspace is not a splice to repair, same precedent as the
+ * near-miss hint `taskHandleRefusal` builds below (it short-circuits on
+ * `wrong-workspace` before ever reaching that hint too).
+ *
+ * On a match, `args["task_handle"]` is overwritten with the recovered,
+ * already-authenticated handle BEFORE `taskHandleRefusal` runs, so the rest
+ * of dispatch (contract-scope binding, pack building, `withTaskHandle`'s own
+ * mint-reuse fast path) proceeds exactly as if the caller had presented that
+ * handle — the response's `task.id` is therefore the recovered handle
+ * itself, which is how the caller self-corrects without a wasted turn.
+ */
+function recoverAuthFailedTaskHandle(
+  args: Record<string, unknown>,
+  workspace: string,
+  tool: "read_file" | "search_files",
+): void {
+  if (!taskHandleRecoveryEnabled()) return;
+  const token = args["task_handle"];
+  if (typeof token !== "string" || token === "") return;
+  const resolved = resolveTaskHandle(token, workspace);
+  if (resolved.ok || resolved.outcome === "wrong-workspace") return;
+  const lane = sessionLaneOf(args);
+  const mine = laneTaskHandles(workspace, lane);
+  const isLiveInLane = (candidate: string): boolean =>
+    candidate !== token && mine.includes(candidate) && resolveTaskHandle(candidate, workspace).ok;
+
+  // Route (0): the presented string is a live handle of this lane plus a few
+  // trailing characters — the authentic token is all there, so this is tried
+  // first (laneTaskHandles.ts's isTailExtendedHandle).
+  const extended = laneTaskHandleTailExtensionMatch(workspace, lane, token, isLiveInLane);
+  if (extended !== undefined) {
+    args["task_handle"] = extended;
+    trace("task_handle_recovered", { tool, route: "tail-extension" }, workspace);
+    return;
+  }
+
+  const ref = typeof args["qref"] === "string" ? args["qref"].trim() : "";
+  const bound = ref === "" ? undefined : resolveTaskQueryRefHandle(workspace, ref);
+  if (bound !== undefined && isLiveInLane(bound)) {
+    args["task_handle"] = bound;
+    trace("task_handle_recovered", { tool, route: "qref" }, workspace);
+    return;
+  }
+
+  const recovered = laneTaskHandleMidSpliceMatch(workspace, lane, token, isLiveInLane);
+  if (recovered !== undefined) {
+    args["task_handle"] = recovered;
+    trace("task_handle_recovered", { tool, route: "mid-splice" }, workspace);
+  }
 }
 
 /**
@@ -9953,9 +10411,34 @@ export function normalizeCanonicalRequest(canonical: string, input: Record<strin
   if (canonical === "read_file") {
     const rawTargets = Array.isArray(args["targets"]) ? args["targets"] : [];
     delete args["targets"];
-    const targets = rawTargets
+    let targets = rawTargets
       .map(asCanonicalObject)
       .filter((target): target is Record<string, unknown> => target !== undefined);
+    // S1-A2 (2026-09-20 dispatcher dead-turn fix): `search_files` documents
+    // `scope.path` as "root path to search under", and read_file advertises
+    // the same shared `scope` object — a caller reasonably scopes a
+    // task-pack `query`/`qref` to a subtree with `scope:{path:<dir>}}`
+    // instead of `targets:[{path:<dir>}]`. `mapCanonicalScope` above already
+    // copied `scope.path` onto the top-level `args["path"]` unconditionally
+    // (every canonical tool shares that field), but with no `targets` this
+    // call used to skip the `targets.length > 0` branch below entirely and
+    // reach dispatch as an ordinary single-FILE path read — `is-a-directory`
+    // for a directory scope, and for a file scope a silent drop of the
+    // query/qref in favor of a raw single-file read. Only promote scope.path
+    // into a target when there is no explicit target already, a query or
+    // qref is actually present (this is a task-pack request, not a bare
+    // direct read a `scope.symbol` lookup would also use), and the scope
+    // does not ALSO select an archive member (`scope.archive` is its own,
+    // unrelated addressing and must not be reinterpreted as a plain path).
+    if (
+      targets.length === 0
+      && (args["query"] !== undefined || args["qref"] !== undefined)
+      && typeof scopeValue?.["path"] === "string" && scopeValue["path"] !== ""
+      && scopeValue["archive"] === undefined
+    ) {
+      targets = [{ path: scopeValue["path"] }];
+      delete args["path"];
+    }
     const selectsArtifact = mapCanonicalSelect(select, args);
 
     // I-5 fix: fail closed, before ANY legacy projection below, on a
@@ -10323,6 +10806,312 @@ function discoveryScopeClass(args: Record<string, unknown>): "handle" | "path" |
   return "none";
 }
 
+/**
+ * S1-A1: does at least one window this call's ORIGINAL canonical `targets`
+ * addresses fall outside the served-range ledger for that target's live
+ * content?
+ *
+ * Used ONLY to decide whether a `qref` re-pack that also names explicit
+ * `targets` should be re-projected as though `qref` were absent — see the
+ * `dispatchTool` read_file call site's own doc comment for why.
+ *
+ * A target with NO served history at all (no ledger entry for this exact
+ * (path, sha)) counts as unserved by definition -- the MOST unserved a
+ * target can be, not a reason to abstain. This function used to `return
+ * false` (abstain the WHOLE call) for exactly that case, reasoning that
+ * only "zoom into a window of material this task already disclosed" should
+ * reproject, and that the OTHER `{qref,targets}` shape AGENTS.md documents
+ * ("a re-pack ONCE with `read_file {qref:…,targets:[<candidate paths>]}`"
+ * to WIDEN a task's scope with a brand-new path) must stay `task_pack` --
+ * confirmed live by taskHandleRecovery.spec.ts's "declared task.profile
+ * persists across re-packs" suite. That reasoning cut too wide: it also
+ * abstained for a caller re-packing a qref to fetch evidence the SAME
+ * pack's own `remaining` had just pointed at -- never served at all, and
+ * exactly the "still served (cheap)" case AGENTS.md promises (recorded
+ * live, second Copilot session, 2026-09-20: a `decision-unchanged` receipt
+ * for three files that had never been served one byte of). The
+ * taskHandleRecovery.spec.ts suite this gate was protecting sends
+ * `task.force_serve:true` on every one of its brand-new-path re-packs --
+ * checked separately at the `dispatchTool` call site below, which now
+ * skips this whole reprojection for a forced re-pack regardless of what
+ * this function returns. That leaves this function free to answer the
+ * question its name asks, literally: is there an unserved window, full
+ * stop.
+ *
+ * Still deliberately CONSERVATIVE for a target this function cannot
+ * resolve or measure: an unknown handle, a cross-workspace handle, an
+ * archive member, or an unreadable path abstains the WHOLE call (returns
+ * false) rather than guessing — a false negative here just keeps today's
+ * behavior for that shape (no regression, just not fixed); this function
+ * never has the power to cause a wrong reroute beyond what the real
+ * served-range ledger already proves, because it reads the SAME ledger the
+ * real serve path consults, over the SAME live content.
+ */
+async function qrefRepackTargetsHaveUnservedWindow(
+  workspace: string,
+  targets: readonly unknown[],
+): Promise<boolean> {
+  let sawUnservedWindow = false;
+  for (const raw of targets) {
+    if (typeof raw !== "object" || raw === null) return false;
+    const target = raw as Record<string, unknown>;
+    // Archive members have their own credential/selector plumbing this probe
+    // does not replicate; leaving them out of this fix's scope is strictly
+    // conservative (never triggers a reroute this function cannot vouch for).
+    if (target["archive"] !== undefined) return false;
+    const handle = typeof target["handle"] === "string" ? target["handle"] : undefined;
+    const hEntry = handle !== undefined ? handleTable.get(handle) : undefined;
+    if (handle !== undefined && (hEntry === undefined || hEntry.workspaceRoot !== workspace)) return false;
+    const path = typeof target["path"] === "string" ? target["path"] : hEntry?.path;
+    if (path === undefined || path === "") return false;
+    // served-bytes: not-served (ledger probe only: sha + line count decide whether a window is unserved; no byte of `content` reaches the wire)
+    const content = await readFileSafe(path, workspace);
+    // A path that does not exist (a caller's wrong guess among otherwise good
+    // targets — recorded live: 4 real files + 1 mistyped path) says nothing
+    // about whether the OTHER targets are unserved. Skip it instead of
+    // abstaining for the whole call: the qref-less projection then reports
+    // that one entry as not-found exactly as a plain multi-target read does,
+    // and the real files are served instead of a body-less receipt. A call
+    // whose EVERY target is unreadable still returns false below (nothing
+    // proved unserved), so it keeps today's receipt.
+    if (content === null) continue;
+    const sha = shaOfText(content);
+    const totalLines = countLines(content);
+    const coverage = servedRangeCoverage(workspace, path, sha, totalLines);
+    // S1-A1 addendum (2026-09-20, second Copilot session): no ledger entry
+    // at all for this exact (path, sha) means this session never served one
+    // byte of it -- the MOST unserved a target can be, not a reason to
+    // abstain. This used to `return false` here, aborting the WHOLE probe
+    // (so the caller's re-pack answered from the body-less task_pack
+    // receipt instead of serving the brand-new evidence it named) -- see
+    // this function's own doc comment above for why that scope cut existed
+    // and why it was wrong. `task.force_serve:true` is the one shape that
+    // must still take the OLD (task_pack) path unchanged -- checked at the
+    // call site, not here (taskHandleRecovery.spec.ts).
+    if (coverage === undefined) {
+      sawUnservedWindow = true;
+      continue;
+    }
+    const rangesField = target["ranges"];
+    const rangeField = target["range"];
+    const windows: Array<[number, number]> = [];
+    if (Array.isArray(rangesField)) {
+      for (const spec of rangesField) {
+        const parsed = typeof spec === "string" ? parseLedgerRangeSpec(spec) : undefined;
+        if (parsed !== undefined) windows.push(parsed);
+      }
+    } else if (typeof rangeField === "string") {
+      const parsed = parseLedgerRangeSpec(rangeField);
+      if (parsed !== undefined) windows.push(parsed);
+    } else if (typeof target["symbol"] === "string") {
+      // A named selector denotes lines this probe cannot name directly; the
+      // claim is well-formed only when this file's OWN coverage is COMPLETE
+      // at this sha (mirrors state/session.ts's heldSelfMaterialReceipt for
+      // the same named-selector shape).
+      if (!coverage.complete) sawUnservedWindow = true;
+      continue;
+    } else {
+      // A bare path/handle target with no window selector addresses the
+      // whole file.
+      windows.push([1, totalLines]);
+    }
+    for (const [start, end] of windows) {
+      if (unservedLineCount(workspace, path, sha, start, end, totalLines) > 0) sawUnservedWindow = true;
+    }
+  }
+  return sawUnservedWindow;
+}
+
+/**
+ * WP-S10 (2026-09-20), turn-economy: one target this call addresses, either
+ * as one or more explicit line windows or as a symbol name to resolve. Built
+ * by `collectSmallWindowTargets` below -- see its own doc comment.
+ */
+interface SmallWindowTarget {
+  path: string;
+  windows?: Array<[number, number]>;
+  symbol?: string;
+}
+
+/**
+ * WP-S10 (2026-09-20), turn-economy: pulls the explicit range/ranges/symbol
+ * off ONE target's own fields, falling back to a resolved handle's OWN
+ * stored range/symbol when the fields carry none of their own -- a bare
+ * `handles:[...]` continuation with no per-item override still addresses the
+ * exact window the handle was minted with. Returns `undefined` when NEITHER
+ * the fields nor the handle name any window at all -- a whole-file/whole-
+ * target reference, which `collectSmallWindowTargets` treats as "this call
+ * is not eligible".
+ */
+function smallWindowFromFields(
+  fields: Record<string, unknown>,
+  fallbackEntry: HandleEntry | undefined,
+): { windows?: Array<[number, number]>; symbol?: string } | undefined {
+  const rangesField = fields["ranges"];
+  if (Array.isArray(rangesField) && rangesField.length > 0) {
+    const windows: Array<[number, number]> = [];
+    for (const spec of rangesField) {
+      const parsed = typeof spec === "string" ? parseLedgerRangeSpec(spec) : undefined;
+      if (parsed === undefined) return undefined;
+      windows.push(parsed);
+    }
+    return { windows };
+  }
+  const rangeField = fields["range"];
+  if (typeof rangeField === "string") {
+    const parsed = parseLedgerRangeSpec(rangeField);
+    return parsed === undefined ? undefined : { windows: [parsed] };
+  }
+  const symbolField = fields["symbol"];
+  if (typeof symbolField === "string" && symbolField !== "") return { symbol: symbolField };
+  if (fallbackEntry?.range !== undefined) {
+    const parsed = parseLedgerRangeSpec(fallbackEntry.range);
+    if (parsed !== undefined) return { windows: [parsed] };
+  }
+  if (fallbackEntry?.symbol !== undefined && fallbackEntry.symbol !== "") return { symbol: fallbackEntry.symbol };
+  return undefined;
+}
+
+/**
+ * WP-S10 (2026-09-20), turn-economy (`reserveSmallWindowsEnabled`, util/
+ * flags.ts): reads every explicit line window THIS `read_file` call
+ * addresses off whichever post-normalization shape survived -- `handles:[...]`
+ * (+ this call's own `HANDLE_OVERRIDES_INPUT`, the A7 batch's own per-item
+ * carrier), `paths:[...]` (the `targets` -> legacy-paths projection every
+ * qref/query re-pack and multi-path batch shares), or a single top-level
+ * `path`/`handle` with its own `range`/`ranges`/`symbol`.
+ *
+ * Returns `undefined` -- "this call is not eligible" -- for anything that is
+ * not, in full, an explicit-window request: a bare path/handle continuation
+ * with no window of its own AND no stored handle window either (a whole-file
+ * reference), a `paths[]` entry that is a bare string (the caller-named-file
+ * task-pack seed shape, `legacyPathTarget`'s own whole-file encoding), an
+ * archive-member entry, or an unparsable range. Conservative BY TARGET, not
+ * only by call: any single target this function cannot resolve into a window
+ * aborts the WHOLE call (returns `undefined`) rather than sizing a partial
+ * view of it -- mirroring `qrefRepackTargetsHaveUnservedWindow`'s own posture
+ * a few lines above, a false negative here just keeps today's behaviour (no
+ * regression, only a missed optimization), never a wrong reroute.
+ */
+function collectSmallWindowTargets(
+  args: Record<string, unknown>,
+  workspace: string,
+): SmallWindowTarget[] | undefined {
+  const handleOverrides = (args as Record<PropertyKey, unknown>)[HANDLE_OVERRIDES_INPUT] as
+    | Array<Record<string, unknown>>
+    | undefined;
+
+  if (Array.isArray(args["handles"]) && (args["handles"] as unknown[]).length > 0) {
+    const ids = (args["handles"] as unknown[]).map(String);
+    const out: SmallWindowTarget[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const entry = handleTable.get(ids[i]!);
+      if (entry === undefined || entry.workspaceRoot !== workspace || entry.path === undefined || entry.path === "") {
+        return undefined;
+      }
+      const win = smallWindowFromFields(handleOverrides?.[i] ?? {}, entry);
+      if (win === undefined) return undefined;
+      out.push({ path: entry.path, ...win });
+    }
+    return out;
+  }
+
+  if (Array.isArray(args["paths"]) && (args["paths"] as unknown[]).length > 0) {
+    const raw = args["paths"] as unknown[];
+    const out: SmallWindowTarget[] = [];
+    for (const item of raw) {
+      if (typeof item !== "object" || item === null) return undefined;
+      const obj = item as Record<string, unknown>;
+      if (obj["archive"] !== undefined) return undefined;
+      const handleId = typeof obj["handle"] === "string" ? obj["handle"] : undefined;
+      const handleEntry = handleId !== undefined ? handleTable.get(handleId) : undefined;
+      if (handleId !== undefined && (handleEntry === undefined || handleEntry.workspaceRoot !== workspace)) {
+        return undefined;
+      }
+      const path = typeof obj["path"] === "string" ? obj["path"] : handleEntry?.path;
+      if (path === undefined || path === "") return undefined;
+      const win = smallWindowFromFields(obj, handleEntry);
+      if (win === undefined) return undefined;
+      out.push({ path, ...win });
+    }
+    return out;
+  }
+
+  const handleId = typeof args["handle"] === "string" ? args["handle"] : undefined;
+  const handleEntry = handleId !== undefined ? handleTable.get(handleId) : undefined;
+  if (handleId !== undefined && (handleEntry === undefined || handleEntry.workspaceRoot !== workspace)) return undefined;
+  const path = typeof args["path"] === "string" ? args["path"] : handleEntry?.path;
+  if (path === undefined || path === "") return undefined;
+  const win = smallWindowFromFields(args, handleEntry);
+  if (win === undefined) return undefined;
+  return [{ path, ...win }];
+}
+
+/** WP-S10 (2026-09-20): the size gate `reserveSmallWindowsEnabled` applies. */
+const RESERVE_SMALL_WINDOWS_MAX_LINES = 120;
+const RESERVE_SMALL_WINDOWS_MAX_BYTES = 4096;
+
+/**
+ * WP-S10 (2026-09-20), turn-economy: sums the LIVE size (lines + raw UTF-8
+ * bytes) of every window `collectSmallWindowTargets` found, short-circuiting
+ * the moment either cap is exceeded (the exact final tally does not matter
+ * once the call is already disqualified). A `symbol` target is resolved
+ * through the SAME `getSymbolWithContext` the single-target `mode=symbol`
+ * path uses (tools/readCodeModes.ts's `resolveSlice`); an unresolvable
+ * symbol or an unreadable path aborts the whole measurement (`undefined`),
+ * and a range that starts past end-of-file measures as zero -- the same
+ * "served nothing" leniency `resolveSlice` itself applies, never a refusal.
+ */
+async function measureSmallWindowTotal(
+  workspace: string,
+  targets: readonly SmallWindowTarget[],
+): Promise<{ lines: number; bytes: number } | undefined> {
+  let totalLines = 0;
+  let totalBytes = 0;
+  const contentByPath = new Map<string, string | null>();
+  for (const target of targets) {
+    let content = contentByPath.get(target.path);
+    if (content === undefined) {
+      // served-bytes: not-served (sizing probe only, to decide force_serve eligibility; the real serve re-reads through its own annotated door)
+      content = await readFileSafe(target.path, workspace);
+      contentByPath.set(target.path, content);
+    }
+    if (content === null) return undefined;
+    if (target.symbol !== undefined) {
+      const symResult = await getSymbolWithContext(content, { path: target.path, symbol: target.symbol });
+      if (!symResult.ok) return undefined;
+      totalLines += symResult.data.range.end - symResult.data.range.start + 1;
+      totalBytes += Buffer.byteLength(symResult.data.code, "utf8");
+    } else if (target.windows !== undefined) {
+      const fileLines = countLines(content);
+      for (const [start, end] of target.windows) {
+        if (start > fileLines) continue;
+        const clampedEnd = Math.min(end, fileLines);
+        totalLines += clampedEnd - start + 1;
+        totalBytes += Buffer.byteLength(sliceLinesToText(content, start, clampedEnd), "utf8");
+      }
+    } else {
+      return undefined;
+    }
+    if (totalLines > RESERVE_SMALL_WINDOWS_MAX_LINES || totalBytes > RESERVE_SMALL_WINDOWS_MAX_BYTES) {
+      return { lines: totalLines, bytes: totalBytes };
+    }
+  }
+  return { lines: totalLines, bytes: totalBytes };
+}
+
+/**
+ * S1-A1: every `args` field `normalizeCanonicalRequest`'s read_file
+ * `targets`-with-no-`select` handling can set for a single- or multi-target
+ * call, so the reprojection at the `dispatchTool` call site can sync exactly
+ * these and nothing else (leaving whatever `select` already produced on the
+ * live call untouched).
+ */
+const TARGET_PROJECTION_SYNC_KEYS = [
+  "mode", "path", "handle", "handles", "paths", "archive", "credentialRef",
+  "range", "ranges", "symbol", "profile", "lang", "includeClosure", "surfaceRoles",
+] as const;
+
 async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>): Promise<ToolCallResult> {
   const normalized = normalizeWireArgs(canonical, rawArgs);
   if ("refusal" in normalized) return toolStructuredError(normalized.refusal);
@@ -10413,6 +11202,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // comment. A no-op for every call shape that is not exactly this one
       // (explicit task_handle, no qref, taskEpoch:"new", ...).
       applyRecoveredTaskHandleFromQref(args, workspace);
+      // TL_TASK_HANDLE_RECOVERY: a task_handle that fails authentication may
+      // still be recoverable (qref binding or a lane lineage mid-splice) —
+      // see recoverAuthFailedTaskHandle's own doc comment. A no-op when the
+      // flag is off, when no task_handle was presented, or when it already
+      // resolves.
+      recoverAuthFailedTaskHandle(args, workspace, "read_file");
       // PI-09: a presented task_handle is validated against THIS workspace
       // before any read runs, so a wrong-purpose/stale/foreign handle can never
       // ride along as a silent no-op.
@@ -10542,7 +11337,19 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // original input, never a narrowed slice of it.
         const cursorContents = new Map<string, string>();
         for (const target of staged.state.targets) {
-          const text = await readFileSafe(target.path, workspace);
+          // served-bytes: readServedText
+          // AB1 (round 11): every later page of this request is SERVED from
+          // `cursorContents`. The sha equality below binds those bytes to the
+          // ones the minting call served, so a mismatch already fails closed —
+          // but the minting call served through `readServedText` (a `stripped`
+          // file's sha is over the STRIPPED text), so reading the lenient text
+          // here made a perfectly continuable stripped file report
+          // `cursor-stale` on page 2, and made this route the one place a
+          // future decode change could reintroduce raw bytes behind a matching
+          // sha. One policy at both ends.
+          // served-bytes: readServedText
+          const cursorVerdict = await servedTextForRoute(target.path, workspace);
+          const text = cursorVerdict === null || cursorVerdict.kind === "undecodable" ? null : cursorVerdict.text;
           if (text === null || shaOfText(text) !== target.sha) {
             return toolStructuredError({
               ok: false,
@@ -10745,6 +11552,119 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         staged.page = cursorPage;
         const cursorContext = protocolCallContext();
         if (cursorContext !== undefined) cursorContext.readRequest = staged;
+      }
+
+      // -----------------------------------------------------------------------
+      // WP-S10 (2026-09-20), turn-economy (`reserveSmallWindowsEnabled`,
+      // util/flags.ts, carries the full rationale): compute an EFFECTIVE
+      // force-serve for this whole call, ONCE, here -- before S1-A1 (just
+      // below), the prepared-fence `executionGuard`/`guardExecutionDiscovery`
+      // short-circuit, the A7 handles=[] batch loop, and the ordinary
+      // mode=slice/symbol served-range ledger, so every one of those doors
+      // sees the SAME flat `args["force_serve"]` a genuine
+      // `task.force_serve:true` call would have set (`mapCanonicalTask` maps
+      // the canonical field onto this exact key). Only ever turns an unset/
+      // false value on, never the reverse -- a caller's own explicit
+      // `force_serve` (true or false) is left untouched.
+      // -----------------------------------------------------------------------
+      if (
+        reserveSmallWindowsEnabled()
+        && args["force_serve"] !== true
+        && mode !== "full" && mode !== "archive" && mode !== "artifact" && mode !== "closure"
+      ) {
+        const smallWindowTargets = collectSmallWindowTargets(args, workspace);
+        if (smallWindowTargets !== undefined && smallWindowTargets.length > 0) {
+          const smallWindowTotal = await measureSmallWindowTotal(workspace, smallWindowTargets);
+          if (
+            smallWindowTotal !== undefined
+            && smallWindowTotal.lines <= RESERVE_SMALL_WINDOWS_MAX_LINES
+            && smallWindowTotal.bytes <= RESERVE_SMALL_WINDOWS_MAX_BYTES
+          ) {
+            args["force_serve"] = true;
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // S1-A1 (2026-09-20 dispatcher dead-turn fix): a `qref` re-pack (no NEW
+      // `query`) that also carries its own explicit `targets` is forced into
+      // `mode:"task_pack"` by normalizeCanonicalRequest's read_file branch,
+      // regardless of whether those targets are a fresh discovery query or a
+      // single handle zooming into specific windows (that function's
+      // `targets.length > 0 && (query !== undefined || qref !== undefined)`
+      // check does not distinguish the two). Under a PREPARED execution
+      // fence, task_pack mode either answers from the cached-pack-fingerprint
+      // shortcut (`exactPreparedTaskPackReceipt` below) or, once that fails,
+      // from `preparedDiscoveryReceipt` — both compact, body-less receipts —
+      // because guardExecutionDiscovery's fence-independent "any OTHER mode
+      // serves real bytes" exception (added for the 2026-08-22 fence-serves-
+      // unserved-scope wave) is explicitly scoped OFF for `mode==="task_pack"`.
+      // Neither receipt asks "were THIS call's specific windows ever served" —
+      // only "did the files/fingerprint change". A caller that re-issues the
+      // qref naming windows the server's own prior response listed as
+      // `remaining` therefore got a body-less reply for bytes it had never
+      // received (recorded in a live Copilot session).
+      //
+      // The identical call WITHOUT `qref` never enters task_pack mode at all
+      // (the same function's `else` branch) — it resolves directly to
+      // mode=slice/symbol/full/handles-batch and serves real bytes through
+      // the ordinary, fence-independent path below. So: when the fence is
+      // prepared and this shape's addressed windows are not all covered by
+      // the served-range ledger, redo the SAME canonical-to-legacy projection
+      // with `qref` removed and adopt its target/mode fields — producing a
+      // response byte-identical to the qref-less call. A server-authored
+      // `discover` continuation of this same `{qref,targets}` shape while the
+      // fence is NOT prepared is untouched (the `getExecutionFence` check
+      // below is false). When every addressed window is already served,
+      // `args` is left exactly as today, so the existing dedup-honest receipt
+      // still fires. `qrefRepackTargetsHaveUnservedWindow` now counts a
+      // target with NO served history at all as unserved too (see its own
+      // doc comment for the 2026-09-20 second-session fix), so a qref-repack
+      // naming brand-new evidence is reprojected and served exactly like a
+      // zoom into partially-served evidence is. The one shape that keeps
+      // TODAY's task_pack behavior unconditionally is `task.force_serve:true`
+      // (read here as the already-normalized flat `args["force_serve"]`, the
+      // same field `executionGuard` below reads) — taskHandleRecovery.spec.ts's
+      // "declared task.profile persists across re-packs" suite re-packs onto
+      // a brand-new path on every case, but sends force_serve on every one of
+      // them, so skipping this whole reprojection for a forced call keeps
+      // that suite green without needing this file to special-case "brand new
+      // path" at all.
+      // -----------------------------------------------------------------------
+      const s1a1Fence = getExecutionFence(workspace);
+      if (mode === "task_pack" && s1a1Fence?.phase === "prepared" && args["force_serve"] !== true) {
+        const original = (args as Record<PropertyKey, unknown>)[CANONICAL_ORIGINAL_INPUT] as
+          | Record<string, unknown>
+          | undefined;
+        const originalTargets = original !== undefined && Array.isArray(original["targets"])
+          ? original["targets"]
+          : undefined;
+        if (
+          originalTargets !== undefined
+          && originalTargets.length > 0
+          && typeof original!["qref"] === "string" && original!["qref"] !== ""
+          && original!["query"] === undefined
+          && (await qrefRepackTargetsHaveUnservedWindow(workspace, originalTargets))
+        ) {
+          const qreflessProjection = normalizeCanonicalRequest("read_file", {
+            targets: originalTargets,
+            ...(original!["content"] !== undefined ? { content: original!["content"] } : {}),
+            ...(original!["scope"] !== undefined ? { scope: original!["scope"] } : {}),
+          }) as Record<PropertyKey, unknown>;
+          for (const key of TARGET_PROJECTION_SYNC_KEYS) {
+            if (qreflessProjection[key] !== undefined) args[key] = qreflessProjection[key];
+            else delete args[key];
+          }
+          if (qreflessProjection[HANDLE_OVERRIDES_INPUT] !== undefined) {
+            Object.defineProperty(args, HANDLE_OVERRIDES_INPUT, {
+              value: qreflessProjection[HANDLE_OVERRIDES_INPUT], enumerable: true, configurable: true,
+            });
+          } else {
+            delete (args as Record<PropertyKey, unknown>)[HANDLE_OVERRIDES_INPUT];
+          }
+          delete args["qref"];
+          mode = String(args["mode"] ?? "auto");
+        }
       }
 
       // -----------------------------------------------------------------------
@@ -10974,6 +11894,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       let taskPackQueryResolution: TaskPackQueryResolution | undefined;
       const resolveTaskPackQueryOnce = (): TaskPackQueryResolution =>
         (taskPackQueryResolution ??= resolveTaskPackQueryArg(args, workspace));
+      // A continuation that omits `task.profile` keeps the profile its task
+      // was declared under — see inheritDeclaredTaskProfile. Runs before the
+      // receipt preflight and every builder below so they all see one profile;
+      // it never resolves the query on a `taskEpoch:"new"` call, so the
+      // resolver's epoch side effects stay where they were.
+      inheritDeclaredTaskProfile(args, workspace, resolveTaskPackQueryOnce);
       // F-C1: the guaranteed-receipt preflight now consumes the RESOLVED query.
       // It used to read RAW pre-resolution args, so `args.query` was `undefined`
       // for every wire `{mode:"task_pack", qref}` replay — the re-pack mechanism
@@ -11231,7 +12157,20 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // are untouched.
         const omitted: Array<{
           handle: string;
-          reason: "handle-unknown" | "handle-workspace-mismatch" | "not-found" | "cap-exceeded";
+          // `not-decodable-text` (BLOCKER 53, AB1 round 11): the file exists and
+          // reads, and `readServedText` refuses to put its bytes on the wire.
+          // `not-found` would be a lie about the caller's own file. This enum is
+          // otherwise INTERNAL — `readFamily.ts::omittedClasses` collapses every
+          // `omitted[]` entry to `limit.omitted:["evidence"]`, so widening it
+          // moves no wire byte and adds no protocol vocabulary EXCEPT for
+          // `not-decodable-text` itself: AB1 residual R4 / MX-B (2026-09-14)
+          // closes the "caller learns THAT, never WHY" gap for exactly this
+          // reason, via `path` below — `projectBatch` reads it (when present)
+          // to disclose the member as a `file-downgraded` batch entry.
+          reason: "handle-unknown" | "handle-workspace-mismatch" | "not-found" | "cap-exceeded" | "not-decodable-text";
+          // Populated only for `not-decodable-text` (see above); every other
+          // reason is unaffected and still carries no `path`.
+          path?: string;
           code?: "not-found" | "range-invalid";
           candidates?: string[];
           skeleton?: string;
@@ -11283,7 +12222,19 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           }
           const virtual = splitArchiveVirtualPath(hPath);
           let hContent: string | null;
+          // served-bytes: readServedText
+          // BLOCKER 53 (AB1, 2026-09-14, review round 11): `hVerdict` is the ONE
+          // verdict for this batch arm. Round 10 measured the ordinary Windows
+          // accident this module's own doc comment says it exists to prevent:
+          // mint two ranged handles, let an editor re-save one file as BOM-less
+          // UTF-16, and `targets:[{handle},{handle}]` served 62 raw NULs —
+          // `truncated:false`, a `sha` and a handle asserting those bytes are
+          // pinned — while `targets:[{handle}]` alone refused `read-error` in the
+          // SAME run. A consumer that trusts that `sha` builds an
+          // `expected-hash` precondition over bytes that are not on disk.
+          let hVerdict: ServedTextVerdict | null = null;
           if (virtual) {
+            // served-bytes: not-served (archive CONTAINER bytes: readArchiveMember gates the member; the decoded member is classified below)
             const archiveBytes = await readBytesSafe(virtual.outerPath, workspace);
             if (archiveBytes === null) {
               hContent = null;
@@ -11295,10 +12246,28 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 workspace,
                 credentialPassword,
               );
+              // An archive member is already gated by `readArchiveMember`
+              // (`archive-entry-binary`, verified fail-closed independently of
+              // this policy); its `content` is a decoded string, not bytes, so
+              // it is classified rather than re-read.
               hContent = memberResult.ok ? memberResult.data.content : null;
+              if (hContent !== null) {
+                // served-bytes: readServedText
+                hVerdict = readServedText(Buffer.from(hContent, "utf8"));
+              }
             }
           } else {
-            hContent = await readFileSafe(hPath, workspace);
+            // served-bytes: readServedText
+            hVerdict = await servedTextForRoute(hPath, workspace);
+            hContent = hVerdict === null ? null : hVerdict.kind === "undecodable" ? null : hVerdict.text;
+          }
+          if (hVerdict !== null && hVerdict.kind === "undecodable") {
+            // AB1 residual R4 / MX-B (2026-09-14): `path` rides alongside the
+            // handle so `readFamily.ts::projectBatch` can disclose this member
+            // as a `file-downgraded` batch entry (A.5.4's frozen shape
+            // requires `path`) instead of only a coarse `limit.omitted` class.
+            omitted.push({ handle: hId, path: hPath, reason: "not-decodable-text" });
+            continue;
           }
           if (hContent === null) {
             omitted.push({ handle: hId, reason: "not-found" });
@@ -11392,7 +12361,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 false,
                 sliceResult.data.assembled ? 1 : rangeStartLine(sliceResult.data.range),
               );
-          const itemNote = [sliceResult.data.note, itemDisplay.note].filter(Boolean).join("; ") || undefined;
+          // SHOULD-FIX 57: a `stripped` serve is STATED here too — this item
+          // carries a `sha`, and that sha is over the stripped text.
+          const itemNote = [sliceResult.data.note, itemDisplay.note, nulStrippedNoteText(hVerdict)]
+            .filter(Boolean).join("; ") || undefined;
           // S1 (2026-08-07): BOOK WHAT THIS BATCH ACTUALLY SERVES. This path
           // put bodies on the wire and recorded nothing, so every later
           // consumer of the served-range ledger — code_unchanged receipts, the
@@ -11472,6 +12444,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // -----------------------------------------------------------------------
       const virtualResolved = resolvedPath ? splitArchiveVirtualPath(resolvedPath) : undefined;
       if (virtualResolved) {
+        // served-bytes: not-served (archive CONTAINER bytes: readArchiveMember gates the member)
         const archiveBytes = await readBytesSafe(virtualResolved.outerPath, workspace);
         if (archiveBytes === null) {
           return toolStructuredError({
@@ -11610,6 +12583,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         if (archiveTaskSurfaceRefusal !== undefined) {
           return toolStructuredError({ ok: false, code: archiveTaskSurfaceRefusal.code, error: archiveTaskSurfaceRefusal.error });
         }
+        // served-bytes: not-served (archive CONTAINER bytes: readArchiveMember gates the member)
         const archiveBytes = await readBytesSafe(taskArchivePath, workspace);
         if (archiveBytes === null) {
           return toolStructuredError({
@@ -11670,6 +12644,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         isSupportedArchivePath(outerArchivePath) &&
         (mode === "archive" || mode === "auto")
       ) {
+        // served-bytes: not-served (archive CONTAINER bytes: readArchiveMember gates the member)
         const archiveBytes = await readBytesSafe(outerArchivePath, workspace);
         if (archiveBytes === null) {
           return toolStructuredError({
@@ -11713,6 +12688,198 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           error: `mode=${mode} cannot read raw archive bytes`,
           next: canonicalToolCall("read_file", { mode: "archive", path: outerArchivePath }),
         });
+      }
+
+      // -----------------------------------------------------------------------
+      // S6 (2026-09-20, Copilot dead-turn forensics): query-less multi-target
+      // paths[]/handles batch with a per-entry symbol window --
+      // `targets:[{path,symbol},{path,symbol},{path}]` (a documented,
+      // advertised shape: targets[].symbol, "partial=>targets[].range/
+      // .ranges/.symbol") must not fall into the mode-unspecified task_pack
+      // promotion just below (`pathlessExploratoryPaths` ->
+      // buildSeededTaskPack). That builder treats every path as a ranking
+      // CANDIDATE for a query and has no per-entry "this symbol does not
+      // exist" signal to give back -- confirmed live: an unresolvable symbol
+      // silently served a truncated, mislabeled first line instead of the
+      // candidates/skeleton/next a single-target mode=symbol miss gives. A
+      // range-only batch is deliberately NOT rerouted here: it already
+      // resolves its exact windows correctly through that same promotion
+      // (F-V13-1 Fix A / rangedBatchNextPreservation.spec.ts) and must keep
+      // doing so unchanged -- only a target carrying `symbol` trips this
+      // branch.
+      //
+      // Recorded live (2026-09-20 GitHub Copilot session, new build): two
+      // {path,symbol} targets plus a bare {path}, under an already-prepared
+      // answer-profile task, hard-refused "path is required" -- the FIRST
+      // entry's symbol forces the whole call to mode="symbol"
+      // (normalizeCanonicalRequest above), which only ever resolves a
+      // single top-level path/symbol and never promotes one for
+      // targets.length > 1. Resolved here instead, independent of what
+      // `mode` ended up as, using the SAME resolveSlice/servedTextForRoute
+      // machinery and the SAME omitted[] not-found shape the A7 handles=[]
+      // batch above already uses -- in request order, one response, no
+      // whole-call refusal for one bad symbol.
+      // -----------------------------------------------------------------------
+      if (
+        mode !== "task_pack" && mode !== "closure"
+        && (args["mode"] === undefined || mode === "auto" || mode === "symbol")
+        && Array.isArray(args["paths"]) && (args["paths"] as unknown[]).length > 1
+        && (args["paths"] as unknown[]).some(
+          (entry) => typeof entry === "object" && entry !== null && (entry as Record<string, unknown>)["symbol"] !== undefined,
+        )
+      ) {
+        const rawEntries = args["paths"] as unknown[];
+        // `ranges[]` (plural, multi-window) on one target has no per-item
+        // carrier in this batch's one-range-per-item shape -- the same scope
+        // note the A7 handles=[] batch's own HANDLE_OVERRIDES_INPUT gate
+        // documents. Refuse the WHOLE batch with a concrete task_pack
+        // recovery instead of silently falling back to a default window.
+        const rangesEntry = rawEntries.find(
+          (entry) => typeof entry === "object" && entry !== null
+            && Array.isArray((entry as Record<string, unknown>)["ranges"])
+            && ((entry as Record<string, unknown>)["ranges"] as unknown[]).length > 0,
+        );
+        if (rangesEntry !== undefined) {
+          return toolStructuredError({
+            ok: false,
+            code: "invalid-input",
+            field: "targets",
+            error: "ranges[] on one target of a mixed symbol/range batch is not supported; request one range per target, or re-read via task_pack",
+            next: canonicalToolCall("read_file", { mode: "task_pack", paths: rawEntries }),
+          });
+        }
+
+        // A.5.4: a multi-target serve reporting per-item completeness is
+        // `read.batch` whatever `mode` says -- same declaration point (and
+        // the same reason) as the A7 handles=[] batch above: a refusal
+        // returned AFTER declareKind would be misclassified as a
+        // successful, empty read.batch.
+        declareKind("read.batch");
+        recordReadMode(workspace, "paths");
+
+        const items: Record<string, unknown>[] = [];
+        const omitted: Record<string, unknown>[] = [];
+        const pathsBatchCeiling = resolveCallerByteCeiling(
+          typeof args["maxBytes"] === "number" ? args["maxBytes"] : undefined,
+          typeof args["maxTokens"] === "number" ? args["maxTokens"] : undefined,
+          defaultResponseByteCeiling,
+        );
+        let pathsBatchBytesSoFar = 0;
+        let pathsBatchCapHit = false;
+
+        for (const raw of rawEntries) {
+          const resolvedEntry = resolvePathsBatchEntry(raw, workspace);
+          if (pathsBatchCapHit) {
+            omitted.push({ path: resolvedEntry.path, ...(resolvedEntry.handle ? { handle: resolvedEntry.handle } : {}), reason: "cap-exceeded" });
+            continue;
+          }
+          if (!resolvedEntry.path) {
+            omitted.push(resolvedEntry.handleReason !== undefined
+              ? { path: resolvedEntry.path, handle: resolvedEntry.handle, reason: resolvedEntry.handleReason }
+              : { path: resolvedEntry.path, reason: "path is required" });
+            continue;
+          }
+          const rawObject = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : undefined;
+          const entrySymbol = typeof rawObject?.["symbol"] === "string" ? rawObject["symbol"] : undefined;
+          const entryRange = typeof rawObject?.["range"] === "string" ? rawObject["range"] : undefined;
+          // A handle-addressed entry with NEITHER an explicit symbol nor range
+          // of its own falls back to the handle's OWN stored symbol/range --
+          // the same override precedence the A7 handles=[] batch gives an
+          // explicit per-target override over a handle's stored tag.
+          const hEntryForOverride = resolvedEntry.handle !== undefined ? handleTable.get(resolvedEntry.handle) : undefined;
+          const effectiveSymbol = entrySymbol ?? (entryRange === undefined ? hEntryForOverride?.symbol : undefined);
+          const effectiveRange = entryRange ?? (entrySymbol === undefined ? hEntryForOverride?.range : undefined);
+
+          // served-bytes: readServedText
+          const verdict = await servedTextForRoute(resolvedEntry.path, workspace);
+          if (verdict !== null && verdict.kind === "undecodable") {
+            omitted.push({ path: resolvedEntry.path, ...(resolvedEntry.handle ? { handle: resolvedEntry.handle } : {}), reason: "not-decodable-text" });
+            continue;
+          }
+          const content = verdict === null ? null : verdict.text;
+          if (content === null) {
+            omitted.push({ path: resolvedEntry.path, ...(resolvedEntry.handle ? { handle: resolvedEntry.handle } : {}), reason: "not-found" });
+            continue;
+          }
+
+          // A bare entry (no symbol, no range anywhere) addresses the whole
+          // file -- the same synthesized "1-N" whole-file window the A7
+          // handles=[] batch gives a bare, override-less handle (2026-07-31
+          // verify-kit-gap), so the third target in the recorded shape above
+          // serves the file it named instead of an unservable bare entry.
+          const isSynthesizedFileRange = effectiveRange === undefined && effectiveSymbol === undefined;
+          const rangeForSlice = effectiveRange
+            ?? (effectiveSymbol === undefined ? `1-${Math.max(1, countLines(content))}` : undefined);
+          const sliceResult = await resolveSlice(workspace, resolvedEntry.path, content, effectiveSymbol, rangeForSlice);
+          if (!sliceResult.ok) {
+            // D1: an unknown-symbol miss carries the SAME candidates/skeleton/
+            // next a single-target mode=symbol call gives -- resolveSlice is
+            // the one shared primitive both routes call, so this entry's
+            // not-found information is not a lesser copy of the single-target
+            // shape, it is that shape.
+            omitted.push({
+              path: resolvedEntry.path,
+              ...(resolvedEntry.handle ? { handle: resolvedEntry.handle } : {}),
+              reason: sliceResult.capExceeded ? "cap-exceeded" : "not-found",
+              ...(sliceResult.code ? { code: sliceResult.code } : {}),
+              ...(sliceResult.candidates ? { candidates: sliceResult.candidates } : {}),
+              ...(sliceResult.skeleton ? { skeleton: sliceResult.skeleton } : {}),
+              ...(sliceResult.next ? { next: sliceResult.next } : {}),
+              ...(sliceResult.total_lines !== undefined ? { total_lines: sliceResult.total_lines } : {}),
+            });
+            continue;
+          }
+
+          const itemDisplay = keepComments
+            ? { content: sliceResult.data.content, note: undefined as string | undefined, elided: [] as Array<[number, number]> }
+            : elideDocCommentsForDisplay(
+                sliceResult.data.content,
+                languageForPath(resolvedEntry.path),
+                false,
+                sliceResult.data.assembled ? 1 : rangeStartLine(sliceResult.data.range),
+              );
+          const itemNote = [sliceResult.data.note, itemDisplay.note, nulStrippedNoteText(verdict)]
+            .filter(Boolean).join("; ") || undefined;
+
+          if (!sliceResult.data.assembled) {
+            const itemStart = rangeStartLine(sliceResult.data.range);
+            const itemTotalLines = countLines(content);
+            const itemEnd = Math.min(itemTotalLines, itemStart + countLines(sliceResult.data.content) - 1);
+            const itemCall = beginServeCall(workspace);
+            for (const [spanStart, spanEnd] of spansExcludingWindows(itemStart, itemEnd, itemDisplay.elided)) {
+              recordServedRange(
+                workspace, resolvedEntry.path, shaOfText(content), spanStart, spanEnd, itemTotalLines,
+                { mode: "paths", range: sliceResult.data.range, call: itemCall },
+              );
+            }
+          }
+
+          items.push({
+            // A handle-addressed entry keeps ITS OWN handle identity (the A7
+            // convention); a path-addressed entry uses the handle
+            // resolveSlice just minted for this exact slice.
+            handle: resolvedEntry.handle ?? sliceResult.data.handle,
+            path: sliceResult.data.path,
+            range: sliceResult.data.range,
+            content: itemDisplay.content,
+            truncated: sliceResult.data.truncated,
+            sha: shortSha(sliceResult.data.sha),
+            ...(itemNote ? { note: itemNote } : {}),
+            ...(sliceResult.data.concern_note ? { concern_note: sliceResult.data.concern_note } : {}),
+            ...(sliceResult.data.downgraded_from ? { downgraded_from: sliceResult.data.downgraded_from } : {}),
+            ...(sliceResult.data.remaining_ranges ? { remaining_ranges: sliceResult.data.remaining_ranges } : {}),
+            ...(sliceResult.data.next ? { next: sliceResult.data.next } : {}),
+            ...(isSynthesizedFileRange ? { synthesized_range: true } : {}),
+          });
+          if (pathsBatchCeiling !== undefined) {
+            pathsBatchBytesSoFar += Buffer.byteLength(itemDisplay.content, "utf8");
+            if (pathsBatchBytesSoFar > pathsBatchCeiling) pathsBatchCapHit = true;
+          }
+          recordReadPath(workspace, resolvedEntry.path);
+        }
+
+        const completeness = omitted.length === 0 ? "complete" : items.length === 0 ? "empty" : "partial";
+        return toolOk({ mode: "paths", items, omitted, completeness });
       }
 
       // -----------------------------------------------------------------------
@@ -11804,7 +12971,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               // C2: a qref replay is a call over a working set the caller still
               // holds, so a context-only addition must not re-derive coverage.
               ...(taskPackQuery.fromRef === true ? { taskQueryRefReplay: true as const } : {}),
-              ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]) } : {}),
+              ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]), ...(inheritedTaskProfileArgs.has(args) ? { taskProfileInherited: true as const } : {}) } : {}),
               ...(promoteLang ? { lang: promoteLang } : {}),
               ...(typeof args["limit"] === "number" ? { limit: args["limit"] } : {}),
               ...(Array.isArray(args["surfaceRoles"]) ? { surfaceRoles: (args["surfaceRoles"] as unknown[]).map(String) } : {}),
@@ -11890,7 +13057,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             query: taskPackQuery.query.length > 0 ? taskPackQuery.query : undefined,
             // C2: see the sibling promotion branch above.
             ...(taskPackQuery.fromRef === true ? { taskQueryRefReplay: true as const } : {}),
-            ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]) } : {}),
+            ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]), ...(inheritedTaskProfileArgs.has(args) ? { taskProfileInherited: true as const } : {}) } : {}),
             ...(resolvedPath && tpZoomPaths === undefined ? { path: resolvedPath } : {}),
             ...(resolvedSymbol ? { symbol: resolvedSymbol } : {}),
             ...(tpLang ? { lang: tpLang } : {}),
@@ -12002,14 +13169,23 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           for (const p of mapPaths) {
             if (!p) { mapOmitted.push({ path: p, reason: "path is required" }); continue; }
             if (mapCapReached) { mapOmitted.push({ path: p, reason: "map-byte-cap" }); continue; }
-            const mapContent = await readFileSafe(p, workspace);
+            // served-bytes: readServedText
+            const mapVerdict = await servedTextForRoute(p, workspace);
+            if (mapVerdict !== null && mapVerdict.kind === "undecodable") {
+              // A batch entry is omitted with its reason, never a whole-call
+              // refusal (the established batch precedent), but it is never
+              // served either.
+              mapOmitted.push({ path: p, reason: undecodableTextMessage(p, mapVerdict) });
+              continue;
+            }
+            const mapContent = mapVerdict === null ? null : mapVerdict.text;
             if (mapContent === null) {
               const mapAbs = safeResolve(p, workspace);
               const mapIsDir = mapAbs !== undefined && existsSync(mapAbs) && statSync(mapAbs).isDirectory();
               mapOmitted.push({
                 path: p,
                 reason: mapIsDir
-                  ? "is a directory — pass file paths; for inventory use search_files action=tree"
+                  ? 'is a directory — pass file paths; for inventory use search_files {action:"tree", scope:{path:"<dir>"}}'
                   : `File not found or outside workspace: ${p}`,
               });
               continue;
@@ -12022,6 +13198,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               handle: handleTable.upsert({ kind: "file", path: p, workspaceRoot: workspace }).id,
               signatures: blockResult.data.signatures,
               truncated: blockResult.data.truncated,
+              // SHOULD-FIX 57: the strip statement for this door rides the
+              // RESPONSE, not the entry — `read.map`'s `files` form keeps only
+              // path/handle/language/signatures per entry and keeps `note` at
+              // the outline level, which `servedTextForRoute` + the
+              // `projectSuccessBody` funnel already fill.
             };
             // Serialized-entry accounting (+1 for the array separator): the
             // budget covers path/handle overhead, not just signature text, so
@@ -12079,7 +13260,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       if (mode === "overview") {
         recordReadMode(workspace, "map");
         if (resolvedPath && isMarkdownPath(resolvedPath)) {
-          const markdown = await readFileSafe(resolvedPath, workspace);
+          // served-bytes: readServedText
+          const mdOverviewVerdict = await servedTextForRoute(resolvedPath, workspace);
+          if (mdOverviewVerdict !== null && mdOverviewVerdict.kind === "undecodable") {
+            return toolError(undecodableTextMessage(resolvedPath, mdOverviewVerdict), { code: "read-error" });
+          }
+          const markdown = mdOverviewVerdict === null ? null : mdOverviewVerdict.text;
           if (markdown === null) return toolError(`File not found or outside workspace: ${resolvedPath}`, { code: "not-found" });
           const headings = parseMarkdownHeadings(markdown);
           const fullSha = shaOfText(markdown);
@@ -12169,7 +13355,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const markdownSectionCap = 8;
         const cappedMarkdownSections = requestedMarkdownSections.slice(0, markdownSectionCap);
         const remainingMarkdownSections = requestedMarkdownSections.slice(markdownSectionCap);
-        const markdown = await readFileSafe(resolvedPath, workspace);
+        // served-bytes: readServedText
+        const mdSectionVerdict = await servedTextForRoute(resolvedPath, workspace);
+        if (mdSectionVerdict !== null && mdSectionVerdict.kind === "undecodable") {
+          return toolError(undecodableTextMessage(resolvedPath, mdSectionVerdict), { code: "read-error" });
+        }
+        const markdown = mdSectionVerdict === null ? null : mdSectionVerdict.text;
         if (markdown === null) return toolError(`File not found or outside workspace: ${resolvedPath}`, { code: "not-found" });
         const headings = parseMarkdownHeadings(markdown);
         const sectionQueries = markdownSymbolSection !== undefined
@@ -12609,13 +13800,20 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       if (mode === "digest") {
         const digestPath = resolvedPath ?? "";
         if (!digestPath) return toolError("path (or handle) is required for mode=digest", { code: "invalid-input" });
-        const content = await readFileSafe(digestPath, workspace);
+        // served-bytes: readServedText
+        const digestVerdict = await servedTextForRoute(digestPath, workspace);
+        if (digestVerdict !== null && digestVerdict.kind === "undecodable") {
+          return toolError(undecodableTextMessage(digestPath, digestVerdict), { code: "read-error" });
+        }
+        const content = digestVerdict === null ? null : digestVerdict.text;
         if (content === null) return toolError(`File not found or outside workspace: ${digestPath}`, { code: "not-found" });
         const digestResult = await resolveDigest(workspace, digestPath, content, resolvedSymbol);
         // dead at HEAD (see C2-6 audit): resolveDigest has no ok:false
         // return path; coded honestly for the day it does.
         if (!digestResult.ok) return toolError(digestResult.error, { code: "invalid-input" });
-        return toolOk(digestResult.data);
+        // SHOULD-FIX 57: state a strip here too — the digest is derived from the
+        // stripped text, and its counts describe that text.
+        return toolOk({ ...digestResult.data, ...nulStrippedNote(digestVerdict) });
       }
 
       // -----------------------------------------------------------------------
@@ -12680,7 +13878,17 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           }
           return toolError("path (or handle) is required for mode=slice", { code: "invalid-input" });
         }
-        const content = await readFileSafe(slicePath, workspace);
+        // AA1 (round 10): the DIRECT SLICE route. Round 9's residuals W1-3/X1-1
+        // were measured here: `targets:[{path, range}]` served a BOM-less UTF-16
+        // file's 63 raw NULs and a 73-byte file's lone NUL while every task-pack
+        // door disclosed the same files. One verdict now (see
+        // `undecodableTextMessage`).
+        // served-bytes: readServedText
+        const sliceVerdict = await servedTextForRoute(slicePath, workspace);
+        if (sliceVerdict !== null && sliceVerdict.kind === "undecodable") {
+          return toolError(undecodableTextMessage(slicePath, sliceVerdict), { code: "read-error" });
+        }
+        const content = sliceVerdict === null ? null : sliceVerdict.text;
         if (content === null) return toolError(`File not found or outside workspace: ${slicePath}`, { code: "not-found" });
 
         // DESIGN-v0.15 §5.1 (R2): an explicit window request has a Q too — the
@@ -13471,6 +14679,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           sliceData.note,
           sliceDisplay.note,
           elisionMarkerNote(sliceDisplay.content),
+          // SHOULD-FIX 57 (AB1, round 11): round 10 measured this exact route
+          // serving a 299-character stripped body under `sha:"sha256:e0bd92dab9a3"`
+          // with NO note at all. The strip is now stated wherever it happens.
+          nulStrippedNoteText(sliceVerdict),
         ].filter(Boolean).join("; ") || undefined;
         const sliceOut: Record<string, unknown> = {
           ...sliceData,
@@ -13601,7 +14813,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               // PI-09 close-out: the explicit "I lost my context" switch.
               ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
               query: String(args["query"]),
-              ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]) } : {}),
+              ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]), ...(inheritedTaskProfileArgs.has(args) ? { taskProfileInherited: true as const } : {}) } : {}),
               ...(resolvedPath ? { path: resolvedPath } : {}),
               ...(resolvedSymbol ? { symbol: resolvedSymbol } : {}),
               ...(promoteLang ? { lang: promoteLang } : {}),
@@ -13662,7 +14874,20 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           ...(lang ? { lang } : {}),
           ...(args["maxTokens"] !== undefined ? { maxTokens: Number(args["maxTokens"]) } : {}),
         };
-        const result = await readCodePack(packInput, workspace, (rel) => readFileSafe(rel, workspace));
+        // served-bytes: readServedText
+        // Residual R79 (AA1) / AB1 round 11: `readCodePack` slices the text this
+        // callback hands it and SERVES the slice, at four sites its own module
+        // never gated. Rather than convert four internal sites, the reader
+        // itself is the served-bytes policy: `readCodePack` reads `null` as
+        // "unreadable" and already turns that into an `omitted` entry. Reachable
+        // only through the legacy `mode:"pack"` dialect today (the canonical
+        // `content:*` spellings never resolve to it), which is exactly why it
+        // went unmeasured for five rounds.
+        const result = await readCodePack(packInput, workspace, async (rel) => {
+          // served-bytes: readServedText
+          const verdict = await servedTextForRoute(rel, workspace);
+          return verdict === null || verdict.kind === "undecodable" ? null : verdict.text;
+        });
         return toolOk(result);
       }
 
@@ -13703,6 +14928,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const ext = (artifactPath.toLowerCase().match(/\.([^.\\/]+)$/)?.[1]) ?? "";
         const kind = (typeof args["kind"] === "string" ? args["kind"] : ext);
 
+        // served-bytes: not-served (artifact CONTAINER bytes: extractOfficeText / the archive reader owns the decode)
         const bytes = await readBytesSafe(artifactPath, workspace);
         if (bytes === null) return toolError(`File not found or outside workspace: ${artifactPath}`, { code: "not-found" });
 
@@ -14038,7 +15264,25 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               : { path: requestedPath, reason: "path is required" });
             continue;
           }
-          const content = await readFileSafe(requestedPath, workspace);
+          // served-bytes: readServedText
+          // BLOCKER 52 (AB1, 2026-09-14, review round 11): this is the route a
+          // CANONICAL `content:"outline"` batch actually takes — normalizeWireArgs
+          // rewrites `content:"outline"` to `mode:"skeleton"` internally, DOWNSTREAM
+          // of the legacy-input gate that refuses the explicit `mode:"skeleton"`
+          // spelling, which is why rounds 6-10 never probed it. It read through
+          // `readFileSafe`, the LENIENT decoder, and therefore served exactly the
+          // bytes the single-target form of the SAME request refuses: a BOM-less
+          // UTF-16 save shipped 63 escaped NULs and a Shift-JIS file an 80-U+FFFD
+          // mojibake skeleton, each under a freshly minted handle. One policy, the
+          // same shape `mode:"map"`'s batch already uses: an `undecodable` file
+          // becomes an `omitted` row carrying the reason, never a served entry.
+          // served-bytes: readServedText
+          const skelVerdict = await servedTextForRoute(requestedPath, workspace);
+          if (skelVerdict !== null && skelVerdict.kind === "undecodable") {
+            omitted.push({ path: requestedPath, reason: undecodableTextMessage(requestedPath, skelVerdict) });
+            continue;
+          }
+          const content = skelVerdict === null ? null : skelVerdict.text;
           if (content === null) { omitted.push({ path: requestedPath, reason: "File not found or outside workspace" }); continue; }
           const skeleton = await getFileSkeleton(content, { path: requestedPath });
           if (!skeleton.ok) { omitted.push({ path: requestedPath, reason: skeleton.error }); continue; }
@@ -14046,6 +15290,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             path: requestedPath,
             language: skeleton.data.language,
             handle: handleTable.upsert({ kind: "file", path: requestedPath, workspaceRoot: workspace }).id,
+            // SHOULD-FIX 57: a `stripped` serve is never silent. The skeleton is
+            // a projection OF THE STRIPPED TEXT, so the entry says so.
+            ...nulStrippedNote(skelVerdict),
             // `read.batch`'s established file-entry vocabulary is content,
             // not a second skeleton-only union arm. Preserve the exact
             // signature projection there so the common batch projector and
@@ -14202,6 +15449,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             // and sha — `fr.data.content` is already the compressed display
             // text and would book spans that do not map to file lines.
             if (fr.data["fullFileExpansion"] === true) {
+              // served-bytes: not-served (served-range ledger bookkeeping: the body was produced by resolveFullReadForPath)
               const bookable = await readFileSafe(p, workspace);
               if (bookable !== null) bookFullFileExpansionServe(workspace, p, bookable, keepComments);
             }
@@ -14222,7 +15470,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             omitted.push({
               path: p,
               reason: isDir
-                ? "is a directory — pass file paths; for discovery use search_files action=tree or read_file query=..."
+                ? 'is a directory — pass file paths; for discovery use search_files {action:"tree", scope:{path:"<dir>"}} or read_file {query:"...", targets:[{path:"<dir>"}]}'
                 : fr.error,
             });
           }
@@ -14314,6 +15562,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // function of the payload (D4), so it is declared where the payload is
           // decided — the same fix the archive-manifest branch above carries.
           declareKind("read.artifact");
+          // served-bytes: not-served (office container bytes: extractOfficeText owns the decode)
           const offBytes = await readBytesSafe(filePath, workspace);
           if (offBytes === null) return toolError(`File not found or outside workspace: ${filePath}`, { code: "not-found" });
           const prepared = await prepareOfficeDocument(offBytes, credentialPassword);
@@ -14399,6 +15648,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // reached through `auto` extract to `sections`/`slides`/`pages`, which
         // `projectArtifact` reads and `projectText` cannot see at all.
         declareKind("read.artifact");
+        // served-bytes: not-served (office container bytes: extractOfficeText owns the decode)
         const bytes = await readBytesSafe(filePath, workspace);
         if (bytes === null) return toolError(`File not found or outside workspace: ${filePath}`, { code: "not-found" });
         const result = await extractOfficeText(
@@ -14432,6 +15682,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // dispatched far above and never reaches here.
       // -----------------------------------------------------------------------
       if ((ext === "csv" || ext === "tsv") && (mode === "auto" || mode === "skeleton" || mode === "symbol")) {
+        // served-bytes: not-served (csv/tsv container bytes: decodeCsvBytes / serveBoundedCsvArtifact owns the decode)
         const csvBytes = await readBytesSafe(filePath, workspace);
         if (csvBytes === null) return toolError(`File not found or outside workspace: ${filePath}`, { code: "not-found" });
         if (csvBytes.length > TINY_BYTES) {
@@ -14463,7 +15714,33 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // small csv/tsv (<= TINY_BYTES): fall through to today's text behavior.
       }
 
-      const content = await readFileSafe(filePath, workspace);
+      // AA1 (2026-09-14, review round 10): the direct slice/symbol/full/skeleton
+      // route -- the one a caller reaches as `targets:[{path}]` /
+      // `targets:[{path, range}]`, and the destination of several task-pack
+      // `next`s -- read through `readFileSafe`, whose decode is deliberately
+      // LENIENT (its ~40-80 call sites include scans and edit preconditions
+      // whose mandate is explicitly not a new failure mode). That made this the
+      // door that SERVED, raw, the very bytes the task-pack doors disclosed:
+      // review rounds 6-9 measured 63 raw NULs from a BOM-less UTF-16 file and a
+      // lone NUL from a 73-byte file arriving here after the pack had refused
+      // them (residuals W1-3 / X1-1). `readServedTextSafe` keeps every guard
+      // `readFileSafe` applies and adds the ONE serve-side verdict, so the whole
+      // server now agrees about which bytes are servable text.
+      // served-bytes: readServedText
+      const servedVerdict = await servedTextForRoute(filePath, workspace);
+      const content = servedVerdict === null || servedVerdict.kind === "undecodable"
+        ? null
+        : servedVerdict.text;
+      if (servedVerdict !== null && servedVerdict.kind === "undecodable") {
+        // The read SUCCEEDED and the bytes are not text in this encoding: say so,
+        // never serve mojibake and never a misleading `not-found`. `read-error`
+        // is the existing RefusalCode for "this read could not produce content"
+        // (already this route's own code for a failed `small_file` read); the
+        // message names the actual verdict so the caller can act on it. A NEW
+        // `not-decodable-text` code would be more precise and is filed as a chip
+        // — minting a wire code is a protocol change, not a fix-wave edit.
+        return toolError(undecodableTextMessage(filePath, servedVerdict), { code: "read-error" });
+      }
       if (content === null) {
         // FIX (2026-07-10a dispatch-gap forensics): readFileSafe's
         // fs.readFile throws EISDIR for a directory target, caught the same
@@ -14486,7 +15763,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // is gone: a caller can now branch on the code instead of parsing
           // the message.
           return toolError(
-            `"${filePath}" is a directory — use read_file query="..." paths=["${filePath}"] (task pack) or search_files action=tree path="${filePath}"`,
+            `"${filePath}" is a directory — use read_file {query:"...", targets:[{path:"${filePath}"}]} (task pack) or search_files {action:"tree", scope:{path:"${filePath}"}}`,
             { code: "is-a-directory" },
           );
         }
@@ -14784,13 +16061,22 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const symRecorded = symSpans.length > 0
             ? symSpans
             : [[symStart, symStart] as [number, number]];
-          // FX-O1 (ruling (t), 2026-09-03): this response is
-          // `{...symbolDataWithoutScopeHeader, code, handle, sha}` — it carries
-          // the assembled scope view as a BODY and names no `path` anywhere, so
+          // FX-O1 (ruling (t), 2026-09-03; retired 2026-09-13, review round
+          // BLOCKER 5): this response used to be
+          // `{...symbolDataWithoutScopeHeader, code, handle, sha}` — it carried
+          // the assembled scope view as a BODY and named no `path` anywhere, so
           // `servedWindowsOf` had nothing to attribute those bytes to and the
           // whole response projected `unattributed`, which the settlement used
-          // to fail OPEN on (round-17 finding 2). Name the file the spans above
-          // are staged for; the wire is untouched.
+          // to fail OPEN on (round-17 finding 2). This internal attribution call
+          // stays (still the cheapest way to feed `servedWindowsOf`), but it is
+          // no longer the ONLY place the file is named: the wire response below
+          // now also carries a structured `path` unconditionally (Trim A's
+          // small-file header omission, §5 lightweight-path wave, removed the
+          // injected `// tokenlighten:scope path=...` body line that used to be
+          // the sole substitute for it on a <=2 KiB file; `FreshEvidence`,
+          // packages/types/src/mcp/protocol.ts, already declares `path` as
+          // §3.3's addressing triple, so this is additive on an already-optional
+          // field, not a new one).
           noteServeAttribution(filePath);
           const symCall = beginServeCall(workspace);
           for (const [spanStart, spanEnd] of symRecorded) {
@@ -14805,7 +16091,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             );
           }
         }
-        return toolOk(attachSupply({ ...symbolDataWithoutScopeHeader, code: symbolCode, handle: hEntry.id, sha: shortSha(sha) }, workspace));
+        return toolOk(attachSupply({ ...symbolDataWithoutScopeHeader, code: symbolCode, handle: hEntry.id, sha: shortSha(sha), path: filePath }, workspace));
       }
 
       // Explicit mode=full, OR auto-mode under the small-file threshold → full content
@@ -15215,7 +16501,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               // cannot name the remainder — the old unconditional next
               // emitted an inverted, unusable range (2-1 on a one-line 32KB
               // file). Keep truncated:true + handle and point at mode=full.
-              docResult["hint"] = `remainder is inside line ${lastCoveredLine} (no later line to slice); use read_file mode=full path=${filePath} for the whole file`;
+              docResult["hint"] = `remainder is inside line ${lastCoveredLine} (no later line to slice); use read_file {targets:[{path:"${filePath}"}], content:"full"} for the whole file`;
             }
           }
           // OPTIONAL: markdown heading outline — extracted from the full
@@ -15530,6 +16816,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       );
       if (!executionGuard.allowed) return toolStructuredError(executionGuard.refusal);
       const pendingReclassification = executionGuard.reclassified;
+      // FX-L soft frontier marker (user ruling 2026-09-14). Carried beside
+      // `pendingReclassification`, never inside it: `recordExecutionEditResult`
+      // treats a reclassification as a fence RE-TYPING (terminalAction ->
+      // "edit", phase -> "verifying"), and an advisory landing-site disclosure
+      // must not trigger that.
+      const pendingFrontierMarker = executionGuard.frontierMarker;
       const pendingCreateAuthorization = executionGuard.createAuthorization;
       const wantReview = args["review"] === true;
       // One-shot edits[] batching hint (see recordSingleEditCompletion doc in
@@ -15891,7 +17183,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const nestedEdit = (result as { edit?: { path?: string } }).edit;
         const postPath = nestedEdit?.path ?? (result as { path?: string }).path ?? effectivePath;
         const binaryPostPath = /\.(docx|xlsx|pptx|pdf|zip)$/i.test(postPath);
+        // served-bytes: not-served (post-edit sha refresh: shaOfText/shaOfBytes only, no body)
         const postContent = binaryPostPath ? null : await readFileSafe(postPath, workspace);
+        // served-bytes: not-served (post-edit sha refresh: shaOfBytes only, no body)
         const postBytes = binaryPostPath ? await readBytesSafe(postPath, workspace) : null;
         const postSha = postBytes !== null
           ? shaOfBytes(postBytes)
@@ -16149,9 +17443,17 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const withReclassification = editOk && pendingReclassification !== undefined
           ? { ...resolved, reclassified: pendingReclassification }
           : resolved;
-        const withUnreadNote = unreadNote !== undefined
-          ? { ...withReclassification, unread_note: unreadNote }
+        // FX-L soft frontier marker (user ruling 2026-09-14): an internal
+        // carrier only — `protocol/editFamily.ts`'s `projectApplied` folds it
+        // into `reclassification.frontier_status` (once, top level) and
+        // `applied[].frontier_status` (per marked file) and DELETES this key,
+        // so it never reaches the wire under this spelling.
+        const withFrontierMarker = editOk && pendingFrontierMarker !== undefined
+          ? { ...withReclassification, frontier_marker: pendingFrontierMarker }
           : withReclassification;
+        const withUnreadNote = unreadNote !== undefined
+          ? { ...withFrontierMarker, unread_note: unreadNote }
+          : withFrontierMarker;
         const withApplied = editOk ? await attachAppliedReadback(withUnreadNote, args, workspace) : withUnreadNote;
         // L1: a create admitted by its own workspace pin says so, in the same
         // `create_target` shape the read side already uses for a pack-resolved
@@ -16987,6 +18289,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const blastAcknowledged =
             entryPrecondition === "expected-hash" && (edits as unknown[]).length === 1;
           if (entry["content"] !== undefined && entry["search"] === undefined) {
+            // served-bytes: not-served (edit precondition: existence probe for the refusal message)
             const existingCheckForBatchContentMsg = await readFileSafeOpt(bareEntryPath, workspace);
             if (existingCheckForBatchContentMsg !== null) {
               // IL-W5 (DESIGN-v0.15-sf-intent-layers.md §11.2(1)): a bare
@@ -17294,6 +18597,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // by the replace either way — reading pre- or post-edit content
         // would report the identical tail text, but pre-edit lets this run
         // in parallel with the write below rather than after it).
+        // served-bytes: not-served (edit precondition: pre-edit text for the tail/range computation, never emitted)
         const preEditContentForTail = await readFileSafeOpt(filePath, workspace);
         // 2026-08-01 blast-radius precondition (write/blastRadius.ts): a
         // full-range content replacement at whole-file scale must be
@@ -17363,6 +18667,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // replaceRangeContent's OWN resolveExistingFile check runs BEFORE
         // its bounds check, so it reports the real not-found error itself
         // rather than this call site inventing a second one.
+        // served-bytes: not-served (edit precondition: pre-edit text for the whole-file replace, never emitted)
         const preEditContentForFile = await readFileSafeOpt(filePath, workspace);
         const wholeFileRange = preEditContentForFile !== null
           ? `1-${countLines(preEditContentForFile)}`
@@ -17412,6 +18717,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // create:true to create new files.") — only the EXISTING-file message
       // changes here, to point at the two forms that actually apply.
       if (!handleId && filePath.trim() !== "" && args["content"] !== undefined && args["search"] === undefined && args["create"] !== true) {
+        // served-bytes: not-served (edit precondition: existence probe for the refusal message)
         const existingCheckForContentMsg = await readFileSafeOpt(filePath, workspace);
         if (existingCheckForContentMsg !== null) {
           // IL-W5 (DESIGN-v0.15-sf-intent-layers.md §11.2(1)): same
@@ -17674,6 +18980,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // D.3: unique-match check — when precondition=unique-match, verify the
       // search string occurs exactly once in the file before writing.
       if (args["precondition"] === "unique-match" && filePath && search) {
+        // served-bytes: not-served (unique-match precondition: occurrence COUNTING, never emitted)
         const fileContent = await readFileSafe(filePath, workspace);
         if (fileContent !== null) {
           // Normalize line endings for matching (same as applySingleEdit).
@@ -17717,6 +19024,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       // This makes handle-backed writes the easy path without requiring a prior read.
       let autoMintedHandleId: string | null = null;
       if (!handleId && !args["expectedSha"] && filePath && search) {
+        // served-bytes: not-served (auto-mint precondition: occurrence COUNTING, never emitted)
         const fileContent = await readFileSafe(filePath, workspace);
         if (fileContent !== null) {
           const normalized = fileContent.replace(/\r\n/g, "\n").replace(/\r/g, "\n").normalize("NFC");
@@ -17873,6 +19181,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // mint. This auto-mint path only ever mints a whole-file (no
           // range) handle, so there is no range to shift — sha only, same
           // as withHandleAugment's non-range case.
+          // served-bytes: not-served (post-edit sha refresh only)
           const autoPostContent = await readFileSafe(filePath, workspace);
           const autoPostSha = autoPostContent !== null ? shaOfText(autoPostContent) : undefined;
           if (autoPostSha !== undefined) {
@@ -17910,6 +19219,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       }
       if (resultRec.ok === false && (resultRec.code === "not-found" || resultRec.code === "ambiguous")) {
         if (!resultRec.candidates && filePath) {
+          // served-bytes: not-served (edit-failure candidates: skeleton -> top-level symbol NAMES, no file text)
           const candidateContent = await readFileSafe(filePath, workspace);
           if (candidateContent !== null) {
             const skelForCandidates = await getFileSkeleton(candidateContent, { path: filePath });
@@ -17991,6 +19301,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       const cwdGuardExplore = guardCwd(args, activeRoot);
       if (!cwdGuardExplore.ok) return toolStructuredError(cwdGuardExplore.refusal);
       const workspace = resolveWorkspaceRoot(args["cwd"] as string | undefined, activeRoot);
+      // TL_TASK_HANDLE_RECOVERY — see the read_file arm /
+      // recoverAuthFailedTaskHandle's own doc comment.
+      recoverAuthFailedTaskHandle(args, workspace, "search_files");
       // PI-09 — see the read_file arm.
       const taskHandleRefusalSearch = taskHandleRefusal(args, workspace, "search_files");
       if (taskHandleRefusalSearch !== null) return toolStructuredError(taskHandleRefusalSearch);
@@ -18042,6 +19355,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         if (archiveSearchSurfaceRefusal !== undefined) {
           return toolStructuredError({ ok: false, code: archiveSearchSurfaceRefusal.code, error: archiveSearchSurfaceRefusal.error });
         }
+        // served-bytes: not-served (archive search container bytes: the member gate lives in readArchiveMember)
         const archiveBytes = await readBytesSafe(archiveSearchPath, workspace);
         if (archiveBytes === null) {
           return toolStructuredError({
@@ -18191,8 +19505,18 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ? batchBody.matched_terms.filter((value): value is string => typeof value === "string")
               : [],
           );
+          // C12 (chip wave, 2026-09-14): a caveated or scope-narrowed whole-set
+          // `absence` must not become an AUTHORITATIVE per-concern-token
+          // absence any more than it may back the wire
+          // `request_item_absences` certificate below — gate on the same
+          // caveat-free/scope-complete proof `provenFindAbsence` already
+          // computes for the executed-search result ledger, instead of
+          // trusting `batchBody.absence !== undefined` alone. Hoisted here
+          // (rather than duplicated) so both consumers share one proof; the
+          // second declaration further down is removed.
+          const batchAbsence = provenFindAbsence(args, outcome.body as Record<string, unknown>);
           const absent = new Set<string>();
-          if (batchBody.absence !== undefined) {
+          if (batchAbsence !== undefined) {
             for (const query of queries) absent.add(query);
           }
           if (Array.isArray(batchBody.term_results)) {
@@ -18213,6 +19537,24 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           }
           const served = queries.filter((query) => matched.has(query));
           const certifiedAbsent = queries.filter((query) => absent.has(query));
+          // R1-S10a: asked BEFORE the consume below spends the capability, and
+          // read-only so an unprescribed probe cannot poison the shape for a
+          // pack that prescribes it later — see `termSearchWasPrescribed`.
+          //
+          // The WHOLE-CALL shape counts first: a pack with two uncovered
+          // identifiers prescribes exactly `{action:"find", queries:[a,b]}`, so
+          // running that call is running what was asked for, for both terms. A
+          // batch the caller ASSEMBLED itself (the reviewer's input A: the pack
+          // asked for one term, the caller added a second) resolves only
+          // per-term, which is the fail-closed half — the extra term writes
+          // nothing.
+          const batchShapePrescribed = hasPendingExecutableNext(workspace, sessionLaneOf(args), {
+            tool: "search_files",
+            arguments: { action: "find", queries },
+          });
+          const prescribedTerms = new Set(
+            queries.filter((query) => batchShapePrescribed || termSearchWasPrescribed(workspace, args, query)),
+          );
           if (served.length > 0 || certifiedAbsent.length > 0) {
             const batchScope = consumeExecutableNextScope(workspace, sessionLaneOf(args), {
               tool: "search_files",
@@ -18224,6 +19566,67 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               }
               if (served.length > 0) recordServedConcernEvidence(workspace, served, batchScope);
             }
+          }
+          // TL142-01A/01B: the canonical `queries[]` form is the shape a pack
+          // ACTUALLY proposes for an identifier obligation, and it recorded
+          // nothing at all before this wave — not even the no-repeat entry the
+          // single-query form below has had since P1-b. Both halves now:
+          //  - HITS are attributed only for a SINGLE-term call. A multi-term
+          //    `find` reports `files[]` for the whole OR-match with no per-term
+          //    attribution, so claiming those paths for one term would be a
+          //    guess; multi-term calls therefore record the per-term ABSENCE
+          //    verdict (which `term_results[]` does attribute) and an empty hit
+          //    list, which still stops a rebuild re-proposing a spent search.
+          //  - ABSENCE rides `term_results[].scope.completeness === "complete"`
+          //    (the same gate `certifiedAbsent` above already trusts) or, for a
+          //    whole-set absence, `provenFindAbsence` (hoisted above the
+          //    `absent` fill near the top of this branch — C12, chip wave).
+          const batchHits = queries.length === 1
+            ? findResponseHits(outcome.body as Record<string, unknown>)
+            : [];
+          // NOTE: no `recordExecutedSearch` here. That store is the SESSION
+          // no-repeat ledger `advanceExecutedLocateNextCall`/
+          // `suppressNonProgressingNextCall` consult to suppress a proposed
+          // call, and the `queries[]` branch has deliberately never written to
+          // it (only the single-query branch below does). Adding it changes
+          // which continuations are suppressed, which is a separate contract
+          // from "what did this search find" — `sequenceCorpus`'s I1/I3
+          // absence-consumption cases fail on it. The RESULT ledger below is
+          // read only by TL142-01A/01B's own promotion paths.
+          // R1-B1 (2026-09-13 review round): AN ABSENCE MAY ONLY BE RECORDED FROM
+          // THE WHOLE RESPONSE'S OWN CERTIFICATE.
+          //
+          // This branch used to record a term absence off
+          // `term_results[].scope.completeness === "complete"`, and `findText.ts`
+          // stamps that for ANY per-term absence its shared `buildAbsenceExtra`
+          // issues — including one whose certificate carried a `caveat` naming
+          // the paths excluded from the scan. A two-term find over a workspace
+          // with a `.tokenlightenignore`d (or unreadable) file holding the term
+          // therefore recorded a "scope complete" proof in the same body that
+          // disclosed `omitted:{tokenlighten_ignored:1}`, and the resume
+          // certified `act.answer` with `explicit-gap:request-item-absent:<term>
+          // (… scope complete)` — a false certificate over a file the term IS in.
+          //
+          // `provenFindAbsence` is the one gate the single-query branch below has
+          // always used (workspace-wide, literal, un-narrowed, caveat-free, and
+          // now omission-free). Because `findText.ts` issues a whole-set
+          // `absence` only on a total miss, requiring it here means exactly this:
+          // an all-absent, caveat-free batch records the proof it really made,
+          // and a MIXED batch (one term matched, another reported absent) records
+          // none — the pack keeps proposing the single-term search, which already
+          // handles that case correctly. Hits are unaffected.
+          for (const query of queries) {
+            recordTermSearchResult(
+              workspace,
+              args,
+              "find",
+              query,
+              matched.has(query) ? batchHits : [],
+              batchAbsence !== undefined && absent.has(query) && !matched.has(query)
+                ? batchAbsence
+                : undefined,
+              prescribedTerms.has(query),
+            );
           }
           // DESIGN-v0.15 §6.1 (R3): a truncated queries[] find is staged and
           // its own files[]/total_files/total_matches rebuilt from the full
@@ -18300,6 +19703,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // L2: see the queries[] branch above — an escalation carries no files[]
         // snippets for hop-1 to describe.
         if (outcome.escalated) return toolOk(outcome.body);
+        // R1-S10a: the fence for the RESULT ledger below, asked BEFORE either
+        // consume spends this call's capability (`consumeExecutableNextScope`
+        // deletes the pending-next, so asking afterwards would report "not
+        // prescribed" for every prescribed find) — see
+        // `termSearchWasPrescribed`.
+        const singleFindPrescribed = termSearchWasPrescribed(workspace, args, queryStr);
         // `absence` is the authoritative scope certificate object (not a
         // boolean) on the find payload. Its presence is the server's completed
         // zero-result proof; `=== true` silently discarded that proof.
@@ -18338,6 +19747,20 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // (readCodeTaskPack.ts) consults it to SUPPRESS, never advance, a
         // repeat of this exact (action,query).
         recordExecutedSearch(workspace, "find", queryStr, []);
+        // TL142-01A/01B: the RESULT half of the same recording site. This is
+        // what a later rebuild of the task that PRESCRIBED this find reads, so
+        // it can serve what the search located (or cite what it proved absent)
+        // instead of re-deriving both from scratch — see
+        // `recordTermSearchResult`/`provenFindAbsence`.
+        recordTermSearchResult(
+          workspace,
+          args,
+          "find",
+          queryStr,
+          findResponseHits(outcome.body as Record<string, unknown>),
+          provenFindAbsence(args, outcome.body as Record<string, unknown>),
+          singleFindPrescribed,
+        );
         // DESIGN-v0.15 §6.1 (R3): see the queries[] branch above for the full
         // doc comment — a truncated single-query find is staged and rebuilt
         // from the full snapshot's stable order the same way.
@@ -18492,6 +19915,34 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           },
           workspace,
         );
+        // TL142-01A: a `symbols` search answers the same "where is this term"
+        // question a `find` does — and it is the shape `nextCallForUnresolved`
+        // proposes for an `identifier:*` obligation — so its located
+        // path/line/symbol rows go into the SAME term-keyed result ledger. No
+        // absence is ever recorded here: a symbols miss proves nothing about
+        // workspace CONTENT (the term may exist as a non-symbol occurrence),
+        // and only `find`'s own scope certificate can carry that claim.
+        const symbolsBody = symbolsResult as unknown as Record<string, unknown>;
+        const symbolLocations = Array.isArray(symbolsBody["locations"]) ? symbolsBody["locations"] : [];
+        const symbolHits: ExecutedSearchHit[] = [];
+        for (const raw of symbolLocations) {
+          if (raw === null || typeof raw !== "object") continue;
+          const entry = raw as { path?: unknown; line?: unknown; symbol?: unknown };
+          if (typeof entry.path !== "string" || entry.path.length === 0) continue;
+          symbolHits.push({
+            path: entry.path,
+            ...(typeof entry.line === "number" ? { line: entry.line } : {}),
+            ...(typeof entry.symbol === "string" ? { symbol: entry.symbol } : {}),
+          });
+        }
+        if (hasSymbolQuery && symbolHits.length > 0) {
+          recordTermSearchResult(
+            workspace, args, "symbols", rawQuery, symbolHits, undefined,
+            // R1-S10a: same fence as the find branches — nothing consumes this
+            // call's capability before here, so the read-only ask is exact.
+            termSearchWasPrescribed(workspace, args, rawQuery),
+          );
+        }
         // Fix A: query empty/omitted + path provided is a LISTING, not a
         // ranked search — say so, since the caller may expect name matches.
         if (!hasSymbolQuery && hasSymbolPath) {
@@ -18522,7 +19973,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               // PI-09 close-out: the explicit "I lost my context" switch.
               ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
               query: args["query"] ? String(args["query"]) : undefined,
-              ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]) } : {}),
+              ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]), ...(inheritedTaskProfileArgs.has(args) ? { taskProfileInherited: true as const } : {}) } : {}),
               ...(args["symbol"] !== undefined ? { symbol: String(args["symbol"]) } : {}),
               ...(args["path"] !== undefined ? { path: String(args["path"]) } : {}),
               ...(lang ? { lang } : {}),
@@ -18570,6 +20021,27 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               .filter((handle): handle is string => typeof handle === "string")
           : [];
         recordExecutedLocate(workspace, String(args["query"] ?? ""), locateCandidateHandles);
+        // TL142-01A: `locate` already had the ONLY result-carrying store in
+        // this file (its candidate HANDLES). Its candidate PATHS join the
+        // term-keyed ledger too, so a rebuild asking "what did the search for
+        // this term find" gets one answer regardless of which of the three term
+        // actions the caller happened to run.
+        const locateHits: ExecutedSearchHit[] = ("candidateDetails" in locateResult && Array.isArray(locateResult.candidateDetails)
+          ? locateResult.candidateDetails
+          : [])
+          .map((detail) => (detail as { path?: unknown; line?: unknown }))
+          .filter((detail): detail is { path: string; line?: number } => typeof detail.path === "string" && detail.path.length > 0)
+          .map((detail) => ({ path: detail.path, ...(typeof detail.line === "number" ? { line: detail.line } : {}) }));
+        if (locateHits.length > 0) {
+          const locateTerm = String(args["query"] ?? "");
+          recordTermSearchResult(
+            workspace, args, "locate", locateTerm, locateHits, undefined,
+            // R1-S10a: see the find branch. `recordExecutedLocate` above is the
+            // session no-repeat ledger and stays unfenced (it only ever
+            // SUPPRESSES a repeat); this one is certificate-grade.
+            termSearchWasPrescribed(workspace, args, locateTerm),
+          );
+        }
         return toolOk(locateResult);
       }
       if (action === "tree") {
@@ -18653,6 +20125,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         if (DOC_DISABLED) return toolError("Document extraction is disabled.", { code: "not-a-document" });
         const officePath = String(args["path"] ?? "");
         if (!officePath) return toolError("path is required", { code: "invalid-input" });
+        // served-bytes: not-served (office container bytes: extractOfficeText owns the decode)
         const officeBytes = await readBytesSafe(officePath, workspace);
         if (officeBytes === null) return toolError(`File not found or outside workspace: ${officePath}`, { code: "not-found" });
         const officeResult = await extractOfficeText(
@@ -19205,6 +20678,75 @@ function canonicalTaskBindingOf(args: Record<string, unknown>, workspace: string
 }
 
 /**
+ * The stored task identity, `task-<sha16(profile NUL query)>` — the same
+ * derivation `projectTaskPackWire` and readCodeTaskPack.ts's
+ * `deterministicCertificate` spell inline. The separator is built from its
+ * code point because a NUL escape cannot ride an edit payload.
+ */
+const TASK_FINGERPRINT_SEPARATOR = String.fromCharCode(0);
+function taskFingerprintFor(profile: string, query: string): string {
+  return `task-${shaOfText(`${profile}${TASK_FINGERPRINT_SEPARATOR}${query}`).replace(/^sha256:/, "").slice(0, 16)}`;
+}
+
+/** Calls whose `taskProfile` was carried over by `inheritDeclaredTaskProfile`, not sent by the caller. */
+const inheritedTaskProfileArgs = new WeakSet<Record<string, unknown>>();
+
+/**
+ * A DECLARED PROFILE BELONGS TO THE TASK, NOT TO THE CALL THAT DECLARED IT
+ * (2026-09-19, live GitHub Copilot session). Call 1 declared
+ * `task.profile:"answer"`; every re-pack of that task (`{qref, targets,
+ * task:{handle}}`) omitted it, so `bindTaskProfile` re-INFERRED the profile,
+ * the §14 misfire guardrail turned the inferred "answer" into "generic", and
+ * the same read-only task was served as a change pack. Because task identity
+ * hashes the profile, that also minted a SECOND task handle for what the
+ * caller experiences as one task — two 115-character strings that differ in
+ * 12 characters, which the model then spliced into a handle that
+ * authenticates as neither (`handle-unknown`, two wasted turns).
+ *
+ * The guide tells callers to omit `task.profile` when they have nothing to
+ * declare and that same-epoch requirements persist, so an omitted profile on
+ * a continuation means "unchanged", not "guess again". The identity the
+ * presented handle (or this call's own qref) resolves to already records
+ * which profile the task was packed under: when it equals the fingerprint of
+ * THIS call's resolved query under "answer", AND binding the query afresh
+ * would select something else, "answer" is carried onto this call. Anything
+ * else — a declared profile, a new epoch, a different query, no binding, a
+ * task whose profile re-inference reproduces anyway — is left to
+ * `bindTaskProfile` exactly as before.
+ *
+ * ONE DIRECTION ONLY. "answer" is a restriction the user declared (read-only
+ * work); dropping it silently is the harmful case. "generic" is the
+ * permissive default, and a question-shaped continuation of a generic task
+ * narrowing to "answer" is existing, relied-upon behaviour
+ * (requestItemCompletion.spec.ts: a request declared generic still closes as
+ * `act.answer`) — an edit that actually arrives re-opens the write frontier.
+ */
+function inheritDeclaredTaskProfile(
+  args: Record<string, unknown>,
+  workspace: string,
+  resolveQuery: () => TaskPackQueryResolution,
+): void {
+  if (args["taskProfile"] !== undefined || args["taskEpoch"] === "new") return;
+  if (args["mode"] !== undefined && args["mode"] !== "task_pack" && args["mode"] !== "auto") return;
+  const hasQuery = typeof args["query"] === "string" && args["query"].trim() !== "";
+  const hasRef = typeof args["qref"] === "string" && args["qref"].trim() !== "";
+  if (!hasQuery && !hasRef) return;
+  const resolution = resolveQuery();
+  if (resolution.error !== undefined || resolution.query === "") return;
+  const binding = canonicalTaskBindingOf(args, workspace) ?? resolution.taskBinding;
+  if (binding === undefined) return;
+  if (binding !== taskFingerprintFor("answer", resolution.query)) return;
+  // Omission only matters when re-inference would bind something else. When
+  // it binds "answer" again the call is left exactly as sent: an injected
+  // declaration changes the pack-dedupe fingerprint of a task that never
+  // declared anything, and its re-packs would re-send bodies the caller
+  // already holds (replay v0142c1).
+  if (autoBoundTaskProfile(resolution.query) === "answer") return;
+  args["taskProfile"] = "answer";
+  inheritedTaskProfileArgs.add(args);
+}
+
+/**
  * A prescribed search next deliberately need not expose a task handle. Bind
  * its result only when pending-next provenance resolves to exactly one task
  * in this lane; unregistered or colliding searches remain unbound.
@@ -19244,6 +20786,216 @@ function canonicalTaskBindingForExecutedCall(
     if (binding !== undefined) return binding;
   }
   return undefined;
+}
+
+/**
+ * R1-S10a: the TERMS a pack's own `search_files` next asks the caller to look up.
+ *
+ * Only the three term actions (`find` in both spellings, `symbols`, `locate`) —
+ * `references` and `tree` answer different questions and the result ledger
+ * deliberately does not record them. Tolerates the wire spelling of the call,
+ * whose `arguments` also carry `cwd`/`lane`/`task`; only the query fields are read.
+ */
+function prescribedSearchTermsOf(next: unknown): string[] {
+  if (next === null || typeof next !== "object") return [];
+  const call = next as { tool?: unknown; arguments?: unknown };
+  if (call.tool !== "search_files") return [];
+  const callArgs = call.arguments;
+  if (callArgs === null || typeof callArgs !== "object" || Array.isArray(callArgs)) return [];
+  const record = callArgs as { action?: unknown; query?: unknown; queries?: unknown };
+  if (record.action !== "find" && record.action !== "symbols" && record.action !== "locate") return [];
+  const terms: string[] = [];
+  if (Array.isArray(record.queries)) {
+    for (const entry of record.queries) {
+      if (typeof entry === "string" && entry.length > 0 && !terms.includes(entry)) terms.push(entry);
+    }
+  }
+  if (typeof record.query === "string" && record.query.length > 0 && !terms.includes(record.query)) {
+    terms.push(record.query);
+  }
+  return terms;
+}
+
+/**
+ * R1-S10a (2026-09-13 review round): did a pack in this lane prescribe a search
+ * for THIS TERM — in any of the three spellings of the one question the result
+ * ledger answers?
+ *
+ * `find`/`symbols`/`locate` are interchangeable on the way IN (the ledger keys
+ * on the term, never the action, precisely so a pack's `find` next can be
+ * answered by the caller's `symbols` run), so they are interchangeable here too:
+ * a pack that asked "where is `t`" authorizes learning from whichever of the
+ * three the caller reached for. What is NOT authorized is a term no pack asked
+ * about at all.
+ *
+ * Read-only (`hasPendingExecutableNext`, never `resolve`/`consume`): the callers
+ * below must ask this BEFORE the sibling absence/hit concern recorders spend the
+ * same capability, and a probe must not memoize a miss — see that function's own
+ * doc comment for both traps.
+ */
+function termSearchWasPrescribed(
+  workspace: string,
+  args: Record<string, unknown>,
+  term: string,
+): boolean {
+  if (term.length === 0) return false;
+  const lane = sessionLaneOf(args);
+  // The prescription ledger: what a pack in this lane actually asked for, by
+  // term, recorded at the pack exit from whichever carrier held the next.
+  if (hasPrescribedSearchTerm(workspace, lane, term, canonicalTaskBindingForExecutedCall("search_files", args, workspace))) {
+    return true;
+  }
+  // The executable-next registry, as the stricter second door: when a pack DID
+  // register a pending next (the `next_call` carrier), executing it is
+  // prescription with per-task provenance. Read-only, never consuming — the
+  // sibling concern recorders in this dispatch spend that capability themselves.
+  const shapes: Array<Record<string, unknown>> = [
+    { action: "find", query: term },
+    { action: "find", queries: [term] },
+    { action: "symbols", query: term },
+    { action: "locate", query: term },
+  ];
+  return shapes.some((shape) => hasPendingExecutableNext(workspace, lane, {
+    tool: "search_files",
+    arguments: shape,
+  }));
+}
+
+/**
+ * TL142-01A/01B (2026-09-13): record WHAT an executed term search found, beside
+ * the existing `recordExecutedSearch` calls that record only THAT it ran.
+ *
+ * One helper for all three term actions (`find` in both its `query` and
+ * `queries[]` spellings, `symbols`, `locate`) so the ledger can never learn a
+ * result under one action's spelling and be unable to answer for another's —
+ * the exact defect `consultExecutedLocate`'s hard-wired `"locate"` key had.
+ * Lane is normalized inside `executedNextLedgerKey`, so passing the session
+ * spelling here keys identically to the contract spelling `recordExecutedNext`
+ * passes.
+ */
+function recordTermSearchResult(
+  workspace: string,
+  args: Record<string, unknown>,
+  action: string,
+  term: string,
+  hits: readonly ExecutedSearchHit[],
+  provenAbsence: ExecutedSearchAbsence | undefined,
+  prescribed: boolean,
+): void {
+  if (term.length === 0) return;
+  // R1-S10a (2026-09-13 review round): THE PRESCRIBED-CALL FENCE.
+  //
+  // This ledger is read by `executedSearchHitSeeds` (which makes a located path
+  // a surface of the next rebuild) and `promoteExecutedSearchAbsences` (which
+  // mints a `request-item-absent` gap on a CERTIFIED decision). That is
+  // certificate-grade state, and it was being written by EVERY find/symbols/
+  // locate — the sibling recorder `recordAuthoritativeAbsentConcerns` beside it
+  // has always required a server-prescribed call. So a search no pack ever asked
+  // for could move an unrelated task's decision. The caller decides what to
+  // search; only the pack that PRESCRIBED a search may learn from its result.
+  //
+  // Fail-closed: an unprescribed search records nothing at all, which leaves the
+  // pack proposing its own search — the same direction every other honesty gate
+  // in this file takes.
+  if (!prescribed) return;
+  try {
+    recordExecutedSearchResult(
+      workspace,
+      sessionLaneOf(args),
+      {
+        term,
+        action,
+        hits,
+        ...(provenAbsence !== undefined ? { absence: provenAbsence } : {}),
+      },
+      canonicalTaskBindingForExecutedCall("search_files", args, workspace),
+    );
+  } catch {
+    // A ledger write is never worth failing a served search over.
+  }
+}
+
+/**
+ * TL142-01B: the ONE place that decides whether a zero-result `find` is a
+ * workspace-wide PROOF this server may later act on.
+ *
+ * Four conjuncts, all fail-closed:
+ *  - the response issued its own `absence` certificate (findText.ts's
+ *    `buildAbsenceExtra` already refuses to issue one over an oversize or
+ *    undecodable remainder);
+ *  - that certificate carries NO `caveat` — a caveat names paths excluded from
+ *    the scan, so the claim is about a subset, not the workspace;
+ *  - the call narrowed nothing (`scope.path`, normalized to `args.path`): a
+ *    subtree absence is not a workspace absence;
+ *  - the call was literal, not a regex (a pattern's absence is not a term's).
+ *
+ * A partial-scope zero result returns undefined, which leaves the pack
+ * proposing the search — the safe direction, and what the brief's "absence must
+ * be scope-complete to count" requires.
+ */
+function provenFindAbsence(
+  args: Record<string, unknown>,
+  body: Record<string, unknown>,
+): ExecutedSearchAbsence | undefined {
+  if (args["path"] !== undefined) return undefined;
+  if (args["regex"] === true) return undefined;
+  const absence = body["absence"];
+  if (absence === null || typeof absence !== "object") return undefined;
+  const record = absence as { caveat?: unknown; scanned_files?: unknown };
+  if (record.caveat !== undefined) return undefined;
+  // R1-B1 (2026-09-13 review round): the response's own machine-readable
+  // exclusion disclosure, as a second, independent conjunct beside the caveat.
+  // `buildAbsenceExtra` derives its caveat prose from the same omission counts,
+  // so for today's `findText.ts` this is belt-and-braces — which is the point:
+  // the recorded absence carries `omittedCount` onto the wire gap
+  // (`promoteExecutedSearchAbsences`), so it must be READ off the body, never
+  // assumed, and a disclosure class that grows a caveat-free spelling later
+  // cannot silently back a "scope complete" claim.
+  const omittedCount = disclosedOmissionCount(body);
+  if (omittedCount > 0) return undefined;
+  const scanned = typeof record.scanned_files === "number" ? record.scanned_files : 0;
+  // R2-B14 (2026-09-13 review round 2): stamp WHEN this scan proved the absence.
+  // `promoteExecutedSearchAbsences` reads it to refuse a proof the workspace has
+  // since outgrown — see `ExecutedSearchAbsence.recordedAtMs`.
+  return scanned > 0
+    ? { scannedFiles: scanned, omittedCount, scopeComplete: true, recordedAtMs: Date.now() }
+    : undefined;
+}
+
+/**
+ * Paths a find response disclosed as EXCLUDED from its own scan (`omitted`).
+ *
+ * `outside_workspace` is deliberately not counted: it names paths outside the
+ * workspace root, which a workspace-wide absence claim never covered in the
+ * first place. Every other class (ignore rules, symlinks, non-text, secrets,
+ * oversize, unreadable directories, product-rule source-only exclusions,
+ * undecodable bytes) is content inside the workspace that this scan did not
+ * read, so it bounds what the absence may claim.
+ */
+function disclosedOmissionCount(body: Record<string, unknown>): number {
+  const omitted = body["omitted"];
+  if (omitted === null || typeof omitted !== "object") return 0;
+  let total = 0;
+  for (const [key, value] of Object.entries(omitted as Record<string, unknown>)) {
+    if (key === "outside_workspace") continue;
+    if (typeof value === "number" && value > 0) total += value;
+  }
+  return total;
+}
+
+/** Hit rows off a `find` response body (`files[].path` + its first matched line). */
+function findResponseHits(body: Record<string, unknown>): ExecutedSearchHit[] {
+  const files = body["files"];
+  if (!Array.isArray(files)) return [];
+  const hits: ExecutedSearchHit[] = [];
+  for (const raw of files) {
+    if (raw === null || typeof raw !== "object") continue;
+    const entry = raw as { path?: unknown; lines?: unknown };
+    if (typeof entry.path !== "string" || entry.path.length === 0) continue;
+    const line = Array.isArray(entry.lines) && typeof entry.lines[0] === "number" ? entry.lines[0] : undefined;
+    hits.push({ path: entry.path, ...(line !== undefined ? { line } : {}) });
+  }
+  return hits;
 }
 
 /** The authenticated scope available internally for task-pack construction. */
@@ -19724,6 +21476,22 @@ export function buildInitializeInstructions(degraded: readonly string[]): string
     : SERVER_INSTRUCTIONS;
 }
 
+/**
+ * Client-aware variant of {@link buildInitializeInstructions} (VS Code /
+ * GitHub Copilot Chat disambiguation — see protocol/clientAdvertisement.ts).
+ * VS Code's own `clientId` gets `VSCODE_SERVER_INSTRUCTIONS`; every other or
+ * unknown `clientId` gets exactly what `buildInitializeInstructions` has
+ * always returned (the two share the same degraded-append shape, so this is
+ * a strict superset, never a behavior change for a non-VS-Code caller).
+ */
+export function buildInitializeInstructionsForClient(
+  clientId: string | undefined,
+  degraded: readonly string[],
+): string {
+  const base = baseServerInstructionsForClient(clientId);
+  return degraded.length > 0 ? `${base}\nDegraded: ${degraded.join(", ")}` : base;
+}
+
 export async function handleRequest(req: RpcRequest): Promise<RpcResponse | null> {
   const id = req.id ?? null;
 
@@ -19770,7 +21538,14 @@ export async function handleRequest(req: RpcRequest): Promise<RpcResponse | null
           // set when degraded) so a host that surfaces it in the system
           // prompt (e.g. Claude Code's "MCP Server Instructions") routes
           // discovery-shaped tasks to TL from turn 0.
-          instructions: buildInitializeInstructions(degraded),
+          // VS Code / GitHub Copilot Chat disambiguation: `resolvedClientId()`
+          // reads back the `capturedClientId` just assigned above (or the
+          // TOKENLIGHTEN_CLIENT_ID override), so a VS Code connection gets
+          // VSCODE_SERVER_INSTRUCTIONS from its very first `initialize`
+          // response — every other/unknown client gets exactly the
+          // `buildInitializeInstructions(degraded)` output this line always
+          // produced (see buildInitializeInstructionsForClient's doc comment).
+          instructions: buildInitializeInstructionsForClient(resolvedClientId(), degraded),
         },
       };
     }

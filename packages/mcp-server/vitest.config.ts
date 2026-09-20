@@ -28,6 +28,9 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts", "src/**/*.spec.ts"],
     environment: "node",
+    // 2026-09-20: same HOME-child fixture cleanup as the ROOT vitest.config.ts
+    // (see helpers/homeTempJanitor.setup.ts). Keep the two in sync.
+    setupFiles: ["./src/__tests__/helpers/homeTempJanitor.setup.ts"],
     // 2026-08-01: same explicit HOME authority as the ROOT vitest.config.ts
     // (tests create isolated direct children of HOME; production has no
     // ambient HOME grant — this mirrors the server's --allowed-parent
@@ -46,12 +49,9 @@ export default defineConfig({
     },
     pool: "forks",
     isolate: true,
-    poolOptions: {
-      forks: {
-        maxForks: MAX_FORKS,
-        minForks: 1,
-      },
-    },
+    // vitest 4 (2026-09-18, advisory GHSA-82fw-gwwq-j7x9 fix): poolOptions.forks
+    // {maxForks, minForks} became the top-level maxWorkers; minWorkers was removed.
+    maxWorkers: MAX_FORKS,
     testTimeout: 30000,
     hookTimeout: 30000,
   },

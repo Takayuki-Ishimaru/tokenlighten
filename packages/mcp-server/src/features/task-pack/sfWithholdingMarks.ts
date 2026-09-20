@@ -38,9 +38,23 @@
 export const SF_WITHHELD_BODY_KEY: unique symbol = Symbol("tokenlighten.sfWithheldBody");
 /** Set by the D8 caller-named frontier join on every grounded named row it adds. */
 export const SF_NAMED_JOIN_KEY: unique symbol = Symbol("tokenlighten.sfNamedJoin");
+/**
+ * P2 fix (2026-09-19). Same carrier problem, unrelated to SF: `why` is the
+ * ordinary way to spot a caller-supplied ranged surface, but trimToCap's own
+ * Phase B unconditionally clears `why` from every surface ("drop why from
+ * all surfaces") once a pack needs enough trimming to reach Phase E — so a
+ * check made AFTER trimToCap returns (canonicalDecision.ts's
+ * `unservedCallerRangedTargetsNext`) cannot re-derive it from `why` any more
+ * than readCodeTaskPack.ts's own post-trim reconciliation can (see
+ * `reconcileCallerRangeRemaining`'s doc comment). Mark it here, before
+ * trimToCap ever runs, and read it back downstream instead of guessing from
+ * a field a sibling phase is free to erase.
+ */
+export const CALLER_RANGE_SURFACE_KEY: unique symbol = Symbol("tokenlighten.callerRangeSurface");
 
 const withheldBodies = new WeakSet<object>();
 const namedJoins = new WeakSet<object>();
+const callerRangeSurfaces = new WeakSet<object>();
 
 function mark(surface: object, key: symbol, set: WeakSet<object>): void {
   if (surface === null || typeof surface !== "object") return;
@@ -88,4 +102,14 @@ export function markSemanticFrontierNamedJoin(surface: object): void {
 /** True iff D8's caller-named frontier join minted this surface. */
 export function isSemanticFrontierNamedJoin(surface: object): boolean {
   return marked(surface, SF_NAMED_JOIN_KEY, namedJoins);
+}
+
+/** Record that `surface` was built directly from the caller's own named, ranged `targets[]`/`paths[]` request (captured before trimToCap can clear `why`). */
+export function markCallerRangeSurface(surface: object): void {
+  mark(surface, CALLER_RANGE_SURFACE_KEY, callerRangeSurfaces);
+}
+
+/** True iff `markCallerRangeSurface` marked this surface. */
+export function isCallerRangeSurface(surface: object): boolean {
+  return marked(surface, CALLER_RANGE_SURFACE_KEY, callerRangeSurfaces);
 }
