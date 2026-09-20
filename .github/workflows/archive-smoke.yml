@@ -12,7 +12,9 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # GitHub requires write access to read unpublished draft release assets.
+  # This workflow only downloads and verifies; it never publishes a release.
+  contents: write
 
 jobs:
   archive:
@@ -32,7 +34,6 @@ jobs:
           - os: macos-15-intel
             platform: darwin-x64
     env:
-      GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       ARCHIVE_PLATFORM: ${{ matrix.platform }}
     defaults:
@@ -40,12 +41,16 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci
       - name: Download the uploaded release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_TAG="${RELEASE_TAG#release/}"
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
