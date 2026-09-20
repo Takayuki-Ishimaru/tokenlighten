@@ -84,7 +84,17 @@ try {
   // Re-running setup must retain a usable version-independent launcher.
   run(setupCommand, installArgs, payload);
   assert(run(installedNode, [installedCli, "version"]).includes(version));
-  run(installedNode, [installedCli, "install", "--uninstall", "--yes", "--json"]);
+  const uninstalled = JSON.parse(run(installedNode, [installedCli, "install", "--uninstall", "--yes", "--json"]));
+  assert(!existsSync(join(installHome, "install.json")), "Uninstall must remove the installation record immediately");
+  // Windows cannot delete the runtime executing this command. Its detached
+  // cleanup retries after that process exits; verify the eventual result too.
+  if (process.platform === "win32" && uninstalled.pendingRemoval?.length) {
+    const deadline = Date.now() + 55_000;
+    while (existsSync(join(installHome, "bin")) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    assert(!existsSync(join(installHome, "bin")), JSON.stringify(uninstalled));
+  }
   assert(!existsSync(installedCli), "Uninstall must remove the managed launcher");
   console.log(`PASS ${platform}: checksum, setup, runtime, MCP tools, file/archive reads, re-run, uninstall`);
 } finally {
