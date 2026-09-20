@@ -449,7 +449,11 @@ function sha256File(pathname) {
 export function packArchive({ outRoot, dirName, platform, noZip = false, spawnFn = spawnSync }) {
   const tgzPath = join(outRoot, `${dirName}.tgz`);
   rmSync(tgzPath, { force: true });
-  const tarResult = spawnFn("tar", ["czf", tgzPath, "-C", outRoot, dirName], { encoding: "utf8" });
+  // macOS copyfile metadata becomes visible AppleDouble files on Linux/Windows.
+  // Ship only the payload; code signatures embedded in the runtime stay intact.
+  const tarResult = spawnFn("tar", ["czf", tgzPath, "-C", outRoot, dirName], {
+    encoding: "utf8", env: { ...process.env, COPYFILE_DISABLE: "1" },
+  });
   if (tarResult.error || tarResult.status !== 0) {
     fail(`tar packing failed for ${dirName}: ${tarResult.error?.message ?? tarResult.stderr ?? tarResult.stdout ?? "unknown error"}`);
   }

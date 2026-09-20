@@ -13,6 +13,8 @@ const archive = resolve(process.argv[2] ?? "");
 const match = /^tokenlighten-(\d+\.\d+\.\d+)-(win-x64|darwin-arm64|darwin-x64|linux-x64)\.tgz$/.exec(basename(archive));
 assert(match, "Usage: node scripts/smoke-install-archive.mjs <release.tgz> [SHA256SUMS]");
 const [, version, platform] = match;
+// Git Bash's GNU tar treats drive letters as remote hosts. Use Windows bsdtar.
+const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
 assert.equal(platform, `${process.platform === "win32" ? "win" : process.platform}-${process.arch}`);
 const sums = readFileSync(resolve(process.argv[3] ?? join(dirname(archive), "SHA256SUMS")), "utf8");
 const checksum = sums.split(/\r?\n/).map((line) => line.trim().split(/\s+/)).find((entry) => entry[1] === basename(archive));
@@ -44,7 +46,7 @@ function run(command, args, cwd = workspace) {
 }
 let client;
 try {
-  run("tar", ["xzf", archive, "-C", extracted]);
+  run(tar, ["xzf", archive, "-C", extracted]);
   const entries = readdirSync(extracted);
   assert.equal(entries.length, 1);
   const payload = join(extracted, entries[0]);
@@ -66,7 +68,7 @@ try {
   assert(run(installedNode, [installedCli, "version"]).includes(version));
   const sentence = "TokenLighten release archive read is working.";
   writeFileSync(join(workspace, "hello.txt"), sentence + "\n");
-  run("tar", ["czf", join(workspace, "sample.tar.gz"), "-C", workspace, "hello.txt"]);
+  run(tar, ["czf", join(workspace, "sample.tar.gz"), "-C", workspace, "hello.txt"]);
   client = new Client({ name: "tokenlighten-archive-smoke", version: "1.0.0" });
   await client.connect(new StdioClientTransport({ command: installedNode, args: [installedCli, "mcp", "start", "--stdio", "--no-prereq-check", "--workspace", workspace], cwd: workspace, env, stderr: "inherit" }));
   assert.equal(client.getServerVersion()?.version, version);
