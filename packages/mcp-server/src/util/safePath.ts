@@ -23,7 +23,10 @@ function normalizeWindowsDriveLetter(value: string): string {
 }
 
 export function resolveReal(p: string): string {
-  try { return normalizeWindowsDriveLetter(realpathSync(p)); }
+  // fs.promises.realpath uses the native resolver. On Windows its long-name
+  // result must be compared with a native root too: realpathSync's JS resolver
+  // can retain an 8.3 alias such as RUNNER~1 and reject an in-root file.
+  try { return normalizeWindowsDriveLetter(process.platform === "win32" ? realpathSync.native(p) : realpathSync(p)); }
   catch { return normalizeWindowsDriveLetter(path.resolve(p)); }
 }
 

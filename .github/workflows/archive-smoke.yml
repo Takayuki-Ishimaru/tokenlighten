@@ -48,6 +48,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Verify Windows short-path reads
+        if: runner.os == 'Windows'
+        run: |
+          npm run build
+          npx vitest run packages/mcp-server/src/__tests__/windowsShortPathRead.spec.ts
       - name: Download the uploaded release archive
         env:
           GH_TOKEN: ${{ github.token }}
