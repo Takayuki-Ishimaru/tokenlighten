@@ -30,13 +30,14 @@
 // the corpus harness replays fixed recorded request/response pairs and
 // has no way to mint that handle dynamically.
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { killServerGroup } from "../helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -87,9 +88,9 @@ const tmpDirs: string[] = [];
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(ws: string): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, BIN_TS, ws], {
+  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, ws], {
     cwd: ws,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env },
   });
   let stdoutBuf = "";
@@ -136,7 +137,7 @@ function startServer(ws: string): ServerHandle {
   const handle: ServerHandle = {
     initialize,
     rpc,
-    kill: () => { try { child.kill("SIGKILL"); } catch { /* ok */ } },
+    kill: () => { try { killServerGroup(child); } catch { /* ok */ } },
   };
   spawnedServers.push(handle);
   return handle;
@@ -152,6 +153,12 @@ let nextCallId = 100;
 async function callTool(server: ServerHandle, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   return bodyOf(await server.rpc(nextCallId++, "tools/call", { name, arguments: args }));
 }
+
+// Every server here is started inside one test, never reused across
+// `it`s; stop it now rather than letting it ride the file-level afterAll.
+afterEach(() => {
+  for (const s of spawnedServers.splice(0)) s.kill();
+});
 
 afterAll(() => {
   for (const s of spawnedServers.splice(0)) s.kill();

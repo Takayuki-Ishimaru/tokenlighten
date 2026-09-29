@@ -61,6 +61,18 @@ describe("buildTaskPack — IMPROVEMENT D: verification runnability verdict", ()
     expect(res.verification!.command).toBe("npm test");
   }, 30000);
 
+  // External v0.14.3 evaluation 2026-09-27 §6.2: the pack-time verdict must agree with the edit-time kit —
+  // a zero-dependency `node --test` script needs no install.
+  it("zero-dependency node --test project WITHOUT node_modules => available:true", async () => {
+    const ws = mkWs("node-builtin");
+    write(ws, "package.json", JSON.stringify({ name: "app", type: "module", scripts: { test: "node --test tests/a.test.mjs" } }));
+    write(ws, "src/a.mjs", "export const a = 1;\n");
+    const res = await buildTaskPack({ paths: [{ path: "src/a.mjs" }] }, ws);
+    expect(res.verification).toBeDefined();
+    expect(res.verification!.available).toBe(true);
+    expect(res.verification!.command).toBe("npm test");
+  }, 30000);
+
   it("python project WITHOUT an installed runner => available:false", async () => {
     const ws = mkWs("py-noinstall");
     write(ws, "pyproject.toml", "[tool.pytest.ini_options]\n");

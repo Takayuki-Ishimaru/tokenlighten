@@ -79,8 +79,16 @@ export const JA_GLOSSARY: ReadonlyArray<readonly [string, readonly string[]]> = 
   ["経路", ["route"]],
   ["賞味期限", ["expiry", "expire"]],
   ["消費期限", ["expiry", "expire"]],
-  ["有効期限", ["expiry", "expire", "validity"]],
-  ["期限", ["expiry", "expire", "deadline"]],
+  // R-B3 (2026-09-21, orchestrator ruling 3; plan §6.1 names TTL itself):
+  // code spells an expiry as a time-to-live as often as as "expire", so "ttl"
+  // joins the expansions of 有効期限 / 期限 (期限切れ reaches 期限 through the
+  // longest-match scan). Retrieval help only: a glossary expansion never
+  // proves presence, and its miss never proves absence. "time to live" is
+  // spelled here by its one single-word vocabulary form: the camelCase split
+  // of `timeToLive` yields only generic words (time / live) that would match
+  // almost any workspace.
+  ["有効期限", ["expiry", "expire", "validity", "ttl"]],
+  ["期限", ["expiry", "expire", "deadline", "ttl"]],
   ["税金", ["tax"]],
   ["消費税", ["tax"]],
   ["手数料", ["fee"]],
@@ -467,6 +475,16 @@ export const JA_GLOSSARY: ReadonlyArray<readonly [string, readonly string[]]> = 
   ["機能", ["feature", "function"]],
   ["初期値", ["initial", "default"]],
   ["既定値", ["default", "preset"]],
+  // FIX-FAB item 9 (eval-0927 review #12, jaKanjiOnly): 既定 bare ("default",
+  // predetermined/standard — 既定のフォルダ, 既定の設定 — common software/business
+  // vocabulary independent of 既定値's "default value" phrasing) and 待ち時間
+  // ("wait time" — the ordinary Japanese business/software term for a
+  // timeout or waiting duration) were both entirely absent; a kanji-only
+  // question using either bare word had nowhere to normalize to. Additive
+  // only, same standing rule as this file's own header: general vocabulary,
+  // not reverse-engineered from any fixture.
+  ["既定", ["default"]],
+  ["待ち時間", ["timeout", "wait"]],
   ["カスタマイズ", ["customize"]],
 
   // Errors / exceptions / logging / monitoring / tracking / tracing / metrics / analytics / reports
@@ -525,4 +543,29 @@ export const JA_GLOSSARY: ReadonlyArray<readonly [string, readonly string[]]> = 
   ["借方", ["debit"]],
   ["貸方", ["credit"]],
   ["決算", ["closing", "settlement"]],
+
+  // ---------------------------------------------------------------------
+  // FIX-C1 (2026-09-27, eval-0927 P0-2 / arch-map Q5): the map's own reading
+  // of this file found NO entry for 呼び出し元/呼び出し箇所/使用箇所 ("callers"),
+  // NO entry for a bare 処理経路/処理の流れ/呼び出し経路 ("path"/"flow"), and NO
+  // entry at all for ステータスコード ("status code") or 条件 ("condition") — so
+  // even with the JA bridge fully engaged, those words had nowhere to
+  // normalize to. Additive only, same standing rule as the module doc above:
+  // general software vocabulary, written from the words themselves, not
+  // reverse-engineered from any fixture. リクエスト/タイムアウト/インポート are a
+  // second, independent gap noticed while writing requestFacets.ts's own
+  // held-out spec (common HTTP/import vocabulary absent from every existing
+  // section above).
+  // ---------------------------------------------------------------------
+  ["呼び出し元", ["caller"]],
+  ["呼び出し箇所", ["caller", "callsite"]],
+  ["使用箇所", ["usage"]],
+  ["処理経路", ["path", "flow"]],
+  ["処理の流れ", ["flow"]],
+  ["呼び出し経路", ["flow", "chain"]],
+  ["ステータスコード", ["status", "code"]],
+  ["条件", ["condition"]],
+  ["リクエスト", ["request"]],
+  ["タイムアウト", ["timeout"]],
+  ["インポート", ["import"]],
 ] as const;

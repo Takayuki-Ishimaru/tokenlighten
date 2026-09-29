@@ -17,22 +17,19 @@
 
 It exposes exactly three tools: `read_file`, `search_files`, and `edit_file`.
 
-## v0.14.3 release
+## v0.14.4 release
 
-**Public Beta.** TokenLighten v0.14.3 adds an install path that needs no editor extension and no separate Node.js: one archive per OS, one command. It also improves GitHub Copilot integration, task continuation, Japanese requests, and Windows support. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.14.4 improves ranged file reads, task continuation, and the evidence returned for compound questions in English and Japanese. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main changes in v0.14.3 are:
+The main changes in v0.14.4 are:
 
-- `tl-setup <workspace>` installs TokenLighten from a platform archive that bundles its own Node.js runtime, registers every detected AI-agent host (Claude Code, Codex, Gemini CLI, Copilot CLI, and GitHub Copilot Chat in VS Code), and sets up the workspace; re-running it upgrades in place, `--use` rolls back, and `--uninstall` removes the machine install together with the entries and guide blocks it wrote;
-- the VS Code extension's **Set up this workspace** performs the same machine install and no longer adds a second server definition on top of the workspace file, and a new command uninstalls the machine install;
-- `tl doctor` reports the consistency of the machine install, the extension and any `tl` on `PATH`, and `tl clients snippet` prints a pasteable entry for hosts it cannot write directly;
-- continuing a task no longer repeats a search it already ran, loses a pending file creation, or resends a body it already returned, and requests naming several files or edits — in English or Japanese — are read more precisely;
-- a read-only question that asks several things at once finds evidence for each point in its first response more often, and a Japanese question against an English codebase is retried with English search terms derived from it (both on by default; `TL_CONCERN_RECOVERY=0` and `TL_JA_QUERY_BRIDGE=0` turn them off);
-- a read-only task stays read-only when a continuation omits `task.profile`, and a task handle the model garbled continues the caller's own live task on `read_file`/`search_files` instead of ending it (`TL_TASK_HANDLE_RECOVERY=0` restores the strict refusal);
-- GitHub Copilot in VS Code receives more of the relevant context in one response, with shorter host-specific tool definitions and updated workspace instructions; setup also offers a compact guide for Copilot-only workspaces;
-- a `read_file` call naming several files with a line range each no longer loses lines when its response is shortened, and multi-question requests stay open until every question is covered;
-- every file body goes through one decoding policy, so undecodable or NUL-heavy files are disclosed instead of served; and
-- archive reads, client registration and the bundled runtime now work on Windows, including from a folder extracted by Explorer.
+- ranged reads across several files retain all requested lines through the returned continuations, and preserve the caller's response budget;
+- compound read-only questions retain each requirement until it is supported by returned evidence or explicitly disclosed as unresolved or absent within the searched scope;
+- questions about values, conditions, callers, and processing paths receive the relevant code before the task is marked ready to answer;
+- Japanese and identifier matching are more reliable, and evidence already returned is not reported absent in the same response;
+- evidence bodies match their stated source ranges, and continuations detect files that change during a read;
+- dependency and virtual-environment folders are skipped by default, while explicitly named files remain readable; and
+- large-workspace discovery avoids repeated scans and the standard MCP launcher reduces WebAssembly memory use where supported.
 
 The public release includes:
 
@@ -40,7 +37,7 @@ The public release includes:
 - the TokenLighten CLI and MCP server as source code with public package tests for developers; and
 - a self-contained VS Code extension distributed as a VSIX.
 
-**Compatibility:** the three tools and canonical request fields remain available. After upgrading, re-run `tl workspace setup` or the extension's **Set up this workspace** to refresh the managed instructions and enable the updated Copilot configuration. The first run of any v0.14.3 entry point migrates the earlier `~/.tokenlighten/bin/tl` launcher into a forwarder and re-points the host entries it manages. Legacy v0.12/v0.13 request fields remain refused by default, with `TL_LEGACY_INPUT=accept` available as a temporary server-side migration bridge. See the [v0.14.3 release notes](release-docs/github-release-v0.14.3.md) for compatibility details and known limitations.
+**Compatibility:** upgrade the runtime or VSIX to use v0.14.4. Managed agent instructions are unchanged from v0.14.3, so existing workspaces do not need a separate guide refresh. These fixes are enabled by default, and responses include additional entries describing evidence requirements and unresolved points. Legacy v0.12/v0.13 request fields remain refused by default, with `TL_LEGACY_INPUT=accept` available as a temporary server-side migration bridge. See the [v0.14.4 release notes](release-docs/github-release-v0.14.4.md) for upgrade steps and known limitations.
 
 ## Why TokenLighten
 
@@ -71,7 +68,7 @@ In a v0.14.0 comparison, total task cost was **36.7% lower with TokenLighten** t
 
 **These percentages describe cost savings, not token-count reductions.** Input, output, and cached tokens have different prices, so a cost reduction cannot be converted directly into the same token reduction. The amount of context avoided depends on how much source material the agent would otherwise read and reread.
 
-Use these results as a guide, not a guaranteed saving. These figures describe v0.14.0; they are not performance claims for v0.14.3 or for any particular host, including GitHub Copilot. Results vary by repository, task, client, model behavior, and pricing. For your own workspace, the CLI and VS Code usage views show locally measured usage and estimates; these are not provider billing records.
+Use these results as a guide, not a guaranteed saving. These figures describe v0.14.0; they are not performance claims for v0.14.4 or for any particular host, including GitHub Copilot. Results vary by repository, task, client, model behavior, and pricing. For your own workspace, the CLI and VS Code usage views show locally measured usage and estimates; these are not provider billing records.
 
 ### Tasks that may benefit less
 
@@ -99,7 +96,7 @@ Prefer VS Code's own extension instead? See the next section.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.14.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.3/tokenlighten-vscode-extension-0.14.3.vsix)** from the v0.14.3 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.14.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.4/tokenlighten-vscode-extension-0.14.4.vsix)** from the v0.14.4 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -110,7 +107,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.14.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.4.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required. This performs the same machine install as the archive above (`tl install --from-extension`) and sets up the current workspace, but leaves other hosts on the machine — Claude Code, Codex — unregistered (`--clients none`); register them separately with `tl clients activate`, or with an archive's `tl-setup`.

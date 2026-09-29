@@ -1,5 +1,7 @@
 import * as path from "path";
 
+import { countLines } from "../util/countLines.js";
+
 export type QueryEvidenceKind = "test-block" | "json-key" | "text-window";
 
 export interface QueryEvidence {
@@ -130,9 +132,23 @@ function scoreWindow(
   radius: number,
   preferTestBlocks: boolean,
   jsonPath: boolean,
+  // FIX-ORIG (2026-09-27, eval-0927 P1 §6.1): the REAL logical line count
+  // (util/countLines.ts), not `lines.length` -- `lines` comes from a bare
+  // `content.split("\n")` in `selectQueryEvidence` below, which counts a
+  // phantom trailing empty element for content ending in "\n" (nearly every
+  // file). Clamping the window end to that inflated count is exactly how a
+  // 16-line file's `readiness-falsification-counterexample` evidence (this
+  // function's own `range` return value, several lines down) shipped
+  // "1-17" -- reproduced live via evaluation0927Scenarios.ts's V01/V03 on
+  // the dev tree (httpClient.ts). Only the END clamp changes; the
+  // document-frequency "rarity" heuristic a few lines below intentionally
+  // keeps using `lines.length` -- it is a scoring perturbation, not a
+  // served-range producer, and changing it would perturb ranking for no
+  // honesty benefit.
+  totalLines: number,
 ): ScoredWindow {
   const startIndex = Math.max(0, centerIndex - radius);
-  const endIndex = Math.min(lines.length - 1, centerIndex + radius);
+  const endIndex = Math.min(totalLines - 1, centerIndex + radius);
   const lowerWindow = lowerLines.slice(startIndex, endIndex + 1).join("\n");
   const rawWindow = lines.slice(startIndex, endIndex + 1).join("\n");
   const matchedTerms: string[] = [];
@@ -189,6 +205,9 @@ export function selectQueryEvidence(
 
   const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const lowerLines = lines.map((line) => line.toLowerCase());
+  // FIX-ORIG (2026-09-27, eval-0927 P1 §6.1): the trailing-newline-aware total
+  // (see scoreWindow's own comment on its `totalLines` parameter below).
+  const totalLines = countLines(content);
   const documentFrequency = new Map<string, number>();
   for (const term of terms) {
     let count = 0;
@@ -215,6 +234,7 @@ export function selectQueryEvidence(
       radius,
       preferTestBlocks,
       jsonPath,
+      totalLines,
     ))
     .filter((candidate) => candidate.matchedTerms.length > 0)
     .sort((a, b) => b.score - a.score || a.line - b.line);

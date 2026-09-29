@@ -20,7 +20,7 @@
  * See docs/00-postmortem.md §2.2 for rationale.
  */
 
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { randomBytes } from "node:crypto";
@@ -57,6 +57,30 @@ Usage: tl mcp <start|stop|status>
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * V8 flags the MCP server process runs with. `--liftoff-only` keeps
+ * WebAssembly — the tree-sitter grammars — on V8's baseline compiler.
+ * Measured 2026-09-28: the optimizing compiler's per-grammar compilation left
+ * 2.0-2.4 GB resident on a polyglot workspace against 0.4 GB with the flag,
+ * for +0.4-2 s per task_pack. A runtime that does not know a V8 flag refuses
+ * to start at all ("bad option", exit 9), so the flag is probed with the
+ * very binary that will run the server (Node, or Electron as Node) and
+ * simply dropped when refused; the probe costs one ~40 ms `--version` run.
+ * The timeout is 3 s, not 10 s (round-2 evaluation finding P2-17(c)): a
+ * runtime that hangs on `--liftoff-only --version` — rather than exiting
+ * non-zero — otherwise delays `tl mcp start` by the full timeout before
+ * falling back to no flag; 3 s is still generously above the ~40 ms measured
+ * cost for a well-behaved runtime.
+ */
+export function serverNodeFlags(execPath: string = process.execPath): string[] {
+  const probe = spawnSync(execPath, ["--liftoff-only", "--version"], {
+    shell: false,
+    stdio: "ignore",
+    timeout: 3_000,
+  });
+  return probe.status === 0 ? ["--liftoff-only"] : [];
+}
 
 function mcpPidPath(): string {
   return resolvePath("runtime", "mcp.pid", { ensureDir: true });
@@ -185,8 +209,8 @@ async function runMcpStart(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  // Build argv — shell:false, array form
-  const argv: string[] = [mcpBin];
+  // Build argv — shell:false, array form; node/V8 flags before the entry.
+  const argv: string[] = [...serverNodeFlags(), mcpBin];
   if (opts.allowWrite) argv.push("--allow-write");
   if (opts.workspace) argv.push("--workspace", opts.workspace);
   for (const parent of opts.allowedParents) argv.push("--allowed-parent", parent);

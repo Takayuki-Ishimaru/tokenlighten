@@ -184,6 +184,54 @@ export interface WriteGraphIfStaleOptions {
   forceRebuild?: boolean;
   /** Test-only — see atomicJson.ts's AtomicJsonWriteHooks.beforeRename. */
   beforeRename?: AtomicJsonWriteHooks["beforeRename"];
+  /**
+   * Perf (2026-09-27, large-workspace task_pack cost, item D): "auto"
+   * (default when omitted) and "off" apply `graphIndexMaxBytes` as a
+   * publish gate — skip the stringify+write for a graph that large,
+   * because the READER (mcp-server/src/graph/index.ts's own
+   * GRAPH_INDEX_MAX_BYTES check) never reads a graph above that same cap
+   * back in either of those modes anyway, so publishing it changes nothing
+   * any caller can observe. "on" bypasses the gate — exactly mirroring the
+   * reader's own "on" bypass — so a graph the caller explicitly opted into
+   * publishing at any size still is, unchanged from before this option
+   * existed. skeleton-engine reads no environment itself: the caller
+   * (mcp-server) resolves its own TL_GRAPH_INDEX env into this value.
+   */
+  graphIndexMode?: "auto" | "on" | "off";
+  /**
+   * The reader's own size cap (mcp-server/src/graph/index.ts's
+   * GRAPH_INDEX_MAX_BYTES), threaded in rather than duplicated as an
+   * independent literal so the write-side gate and the read-side cap can
+   * never silently drift apart. Defaults to 64 MiB (today's mcp-server
+   * value) when the caller does not pass one.
+   */
+  graphIndexMaxBytes?: number;
+}
+
+/** Default for `WriteGraphIfStaleOptions.graphIndexMaxBytes` — mirrors mcp-server/src/graph/index.ts's GRAPH_INDEX_MAX_BYTES at the time of this writing; a caller SHOULD pass the real value explicitly. */
+export const DEFAULT_GRAPH_INDEX_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Cheap, GUARANTEED lower bound on `JSON.stringify(graph)`'s eventual byte
+ * length — same technique and same safety property as
+ * `estimateManifestMinBytes` in indexStore.ts (sum of raw string-field
+ * lengths, no JSON syntax/escaping counted, so the real size is always >=
+ * this sum). Computed from the ALREADY-BUILT graph object (buildTlGraphFromManifest
+ * has no I/O and does not itself stringify anything, so building it is not
+ * the expensive part this item targets — see writeGraphIfStale below).
+ */
+function estimateGraphMinBytes(graph: TlGraph): number {
+  let total = graph.rootHash.length;
+  for (const symbol of graph.symbols) {
+    total += symbol.name.length + symbol.definition.path.length;
+    for (const ref of symbol.references) total += ref.path.length;
+  }
+  for (const file of graph.files) {
+    total += file.path.length;
+    for (const imported of file.imports) total += imported.length;
+    for (const exported of file.exports) total += exported.length;
+  }
+  return total;
 }
 
 export async function writeGraphIfStale(
@@ -236,6 +284,21 @@ export async function writeGraphIfStale(
   }
 
   const graph = buildTlGraphFromManifest(manifest);
+
+  // Perf (item D): skip the expensive stringify+write for a graph the
+  // READER would never read back anyway in this mode — see
+  // WriteGraphIfStaleOptions.graphIndexMode's doc comment. A plain early
+  // return before writeJsonAtomic ever runs: any EXISTING on-disk graph
+  // file (from an earlier, smaller build, or one published under mode
+  // "on") is left exactly as it is, the same as every "missing or
+  // corrupt — rebuild" path above already leaves whatever was there
+  // untouched on any OTHER failure to publish a new one.
+  if ((opts?.graphIndexMode ?? "auto") !== "on") {
+    const maxBytes = opts?.graphIndexMaxBytes ?? DEFAULT_GRAPH_INDEX_MAX_BYTES;
+    if (estimateGraphMinBytes(graph) > maxBytes) {
+      return { written: false, symbolCount: graph.symbols.length, fileCount: graph.files.length };
+    }
+  }
 
   // Compact JSON — same reasoning as the manifest: readers only JSON.parse,
   // and pretty-printing a repo-scale graph roughly doubles serialize time and

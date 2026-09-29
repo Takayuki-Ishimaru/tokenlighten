@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -14,9 +15,9 @@ const children: ChildProcess[] = [];
 const roots: string[] = [];
 
 function start(cwd: string, mode: "on" | "off", tracePath: string): { initialize(): Promise<void>; call(id: number, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>>; close(): void } {
-  const child = spawn(process.execPath, [TSX_CLI, BIN_TS], {
+  const child = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS], {
     cwd,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: {
       ...process.env,
       TOKENLIGHTEN_ALLOWED_PARENTS: os.tmpdir(),
@@ -57,13 +58,13 @@ function start(cwd: string, mode: "on" | "off", tracePath: string): { initialize
       const result = response.result as { content?: Array<{ text?: string }> } | undefined;
       return JSON.parse(result?.content?.[0]?.text ?? "{}") as Record<string, unknown>;
     },
-    close() { try { child.kill("SIGKILL"); } catch { /* already exited */ } },
+    close() { try { killServerGroup(child); } catch { /* already exited */ } },
   };
 }
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
-    try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    try { killServerGroup(child); } catch { /* already exited */ }
     await waitForExit(child);
   }
   for (const root of roots.splice(0)) await rmDirWithRetry(root);

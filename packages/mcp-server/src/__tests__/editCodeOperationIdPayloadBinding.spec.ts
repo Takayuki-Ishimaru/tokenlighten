@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 type Body = Record<string, unknown>;
 
@@ -54,6 +55,10 @@ afterEach(() => {
   for (const workspace of workspaces.splice(0)) {
     try { fs.rmSync(workspace, { recursive: true, force: true }); } catch { /* best effort */ }
   }
+  // Every server is started inside one test (`startWriteServer`, never
+  // reused across the file's 4 tests); stop it now rather than letting it
+  // ride the file-level afterAll.
+  for (const s of spawnedServers.splice(0)) s.kill();
 });
 
 afterAll(() => {
@@ -69,8 +74,8 @@ interface ServerHandle {
 function startWriteServer(cwd: string): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, cwd, "--allow-write"],
-    { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } },
+    [TSX_CLI, "--liftoff-only", BIN_TS, cwd, "--allow-write"],
+    { cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env } },
   );
 
   let stdoutBuf = "";
@@ -125,7 +130,7 @@ function startWriteServer(cwd: string): ServerHandle {
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
   }
 
-  function kill(): void { try { child.kill("SIGKILL"); } catch { /* ok */ } }
+  function kill(): void { try { killServerGroup(child); } catch { /* ok */ } }
 
   return { initialize, call: callFn, kill };
 }

@@ -7,7 +7,7 @@
  */
 
 import { promises as fs, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createRequire } from "node:module";
@@ -387,6 +387,82 @@ export async function loadManifest(root: string): Promise<SourceIndexManifestV1 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Perf (2026-09-27, large-workspace task_pack cost, item D) — skip the
+// doomed full-manifest stringify. Measured ~1s in
+// `JSON.stringify(sortKeys(manifest))` on an 11.6k-file workspace (~0.5 GB
+// serialized), whose result is then immediately discarded by the
+// MAX_CACHE_MANIFEST_BYTES check right after it, on EVERY writeManifest call
+// (once per loadOrBuildSourceIndex, i.e. once per edit-triggered rebuild).
+// ---------------------------------------------------------------------------
+
+/**
+ * Cheap, GUARANTEED lower bound on `JSON.stringify(sortKeys(manifest))`'s
+ * eventual byte length: the sum of the raw character length of the
+ * dominant string fields JSON.stringify would have to emit (per-file
+ * symbols/chunks/identifiers — the actual bulk of a repo-scale manifest),
+ * with NO JSON syntax (quotes, colons, commas, braces, key names) or
+ * escaping counted. The real serialized size can only be >= this sum —
+ * syntax and escaping are strictly additive, never subtractive — so when
+ * this sum ALONE already exceeds MAX_CACHE_MANIFEST_BYTES, the real
+ * serialization is guaranteed to exceed it too, and the real stringify can
+ * be skipped entirely. When the sum does NOT exceed the cap, this proves
+ * nothing either way (the real size may still be over once overhead and
+ * the fields this omits are added), so the caller must fall back to the
+ * real stringify+check — see writeManifest below.
+ *
+ * Deliberately covers the dominant contributors only, not every field:
+ * omitting a field can only make the returned sum SMALLER (a looser, but
+ * still entirely valid, lower bound), never larger, so this stays safe —
+ * never a false "too large" — as these interfaces gain fields over time.
+ */
+function estimateManifestMinBytes(manifest: SourceIndexManifestV1): number {
+  let total = 0;
+  for (const path in manifest.files) {
+    const file = manifest.files[path]!;
+    total += file.path.length + file.language.length + file.contentSha256.length;
+    for (const symbol of file.symbols) {
+      total += symbol.name.length + symbol.signature.length;
+    }
+    for (const chunk of file.chunks) {
+      total += chunk.id.length + chunk.path.length + chunk.signature.length
+        + (chunk.symbolName?.length ?? 0) + (chunk.parentSymbolName?.length ?? 0);
+      for (const identifier of chunk.identifiers) total += identifier.length;
+    }
+  }
+  return total;
+}
+
+/**
+ * Per-root memo of "the manifest was too large to cache", so a rebuild
+ * triggered by the NEXT edit (or the next unrelated read) does not retry a
+ * doomed serialization at all — not even `estimateManifestMinBytes`'s cheap
+ * walk. Re-checked (both the estimate and, if needed, the real stringify)
+ * only once the file count has shrunk MATERIALLY relative to the count seen
+ * when the verdict was recorded (see MANIFEST_TOO_LARGE_RECHECK_RATIO) —
+ * never assumed stale by a small edit or two. Small and FIFO-capped like
+ * this module's other per-root memos (e.g. loadOrBuildSourceIndex's own
+ * manifestMemo epoch map): a process indexes a handful of distinct roots at
+ * most in practice.
+ */
+const manifestTooLargeMemo = new Map<string, { fileCount: number }>();
+const MANIFEST_TOO_LARGE_MEMO_MAX_ROOTS = 8;
+/** Re-check once the file count drops below this fraction of the count last seen as "too large". */
+const MANIFEST_TOO_LARGE_RECHECK_RATIO = 0.5;
+
+/** Test hook: forget every remembered "too large" verdict (fixtures mutate a workspace's file count across cases). */
+export function resetManifestTooLargeMemo(): void {
+  manifestTooLargeMemo.clear();
+}
+
+function rememberManifestTooLarge(rootKey: string, fileCount: number): void {
+  if (!manifestTooLargeMemo.has(rootKey) && manifestTooLargeMemo.size >= MANIFEST_TOO_LARGE_MEMO_MAX_ROOTS) {
+    const oldest = manifestTooLargeMemo.keys().next().value;
+    if (oldest !== undefined) manifestTooLargeMemo.delete(oldest);
+  }
+  manifestTooLargeMemo.set(rootKey, { fileCount });
+}
+
 /**
  * Write the manifest to the cache file atomically.
  * Creates parent directories as needed.
@@ -397,14 +473,39 @@ export async function writeManifest(
   hooks?: AtomicJsonWriteHooks,
 ): Promise<void> {
   const cachePath = getCachePath(root);
+  const rootKey = resolve(root);
+  const fileCount = Object.keys(manifest.files).length;
+  const tooLargeError = () => new Error("source index manifest exceeds the 32 MiB cache limit");
+
+  // Fastest path: an earlier call for this SAME root already proved it too
+  // large, and the file count has not shrunk materially since — skip every
+  // remaining check, including the cheap estimate below.
+  const remembered = manifestTooLargeMemo.get(rootKey);
+  if (remembered !== undefined && fileCount >= remembered.fileCount * MANIFEST_TOO_LARGE_RECHECK_RATIO) {
+    throw tooLargeError();
+  }
+
+  // Cheap guaranteed-lower-bound pre-check: skip the real (expensive)
+  // stringify when it is ALREADY certain to be futile.
+  if (estimateManifestMinBytes(manifest) > MAX_CACHE_MANIFEST_BYTES) {
+    rememberManifestTooLarge(rootKey, fileCount);
+    throw tooLargeError();
+  }
+
   // Compact (non-pretty) canonical JSON: readers only ever JSON.parse this
   // file, and pretty-printing a repo-scale manifest roughly doubles both the
   // serialize time and the on-disk bytes counted against
   // MAX_CACHE_MANIFEST_BYTES.
   const serialized = JSON.stringify(sortKeys(manifest));
   if (Buffer.byteLength(serialized, "utf8") > MAX_CACHE_MANIFEST_BYTES) {
-    throw new Error("source index manifest exceeds the 32 MiB cache limit");
+    rememberManifestTooLarge(rootKey, fileCount);
+    throw tooLargeError();
   }
+  // A successful write proves this root currently fits — forget any stale
+  // "too large" verdict so a FUTURE regrowth is judged on its own, not
+  // compared against a now-irrelevant old file count.
+  manifestTooLargeMemo.delete(rootKey);
+
   // writeJsonAtomic (atomicJson.ts) owns the safety checks and the
   // write-tmp-then-rename sequence — see its doc comment for why this is
   // the one seam every skeleton-engine on-disk artifact publishes through.
@@ -703,6 +804,10 @@ export async function loadOrBuildSourceIndex(
     ignoreHash: string;
     extraIgnorePatterns?: string[];
     __testHooks?: IndexFaultHooksForTest;
+    /** Perf (item D) — threaded straight through to writeGraphIfStale's WriteGraphIfStaleOptions.graphIndexMode; see that option's own doc comment. */
+    graphIndexMode?: "auto" | "on" | "off";
+    /** Perf (item D) — threaded straight through to writeGraphIfStale's WriteGraphIfStaleOptions.graphIndexMaxBytes; see that option's own doc comment. */
+    graphIndexMaxBytes?: number;
   },
 ): Promise<{
   manifest: SourceIndexManifestV1;
@@ -1137,6 +1242,8 @@ export async function loadOrBuildSourceIndex(
       await writeGraphIfStale(root, manifest, {
         forceRebuild: journalStatus.pending,
         beforeRename: opts.__testHooks?.beforeGraphRename,
+        graphIndexMode: opts.graphIndexMode,
+        graphIndexMaxBytes: opts.graphIndexMaxBytes,
       });
       // Graph now confirmed at (at least) this generation — clear any
       // pending record, including one this same call just wrote above.

@@ -19,6 +19,8 @@
  * existing behaviour never changes (wave1-contract.md §3.4).
  */
 
+import { isNegatedInstructionClause } from "./requestFacets.js";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -161,11 +163,28 @@ function glossarySeeds(text: string): string[] {
 // salient words, >=4 chars, not stopwords, EN/JA)
 // ---------------------------------------------------------------------------
 
+// N7(a) (r-b2, 2026-09-21, review finding N7) — "also"/"plus"/"then" added: a
+// coordinator/discourse-filler word carries no lexical content of its own,
+// exactly like "and"/"which"/"about" already on this list (the same
+// generalized test STOPWORDS already applies: "would this word's absence
+// ever tell a reader something distinguishing about a workspace?"). Root
+// cause: `; also how database migrations are executed.` never reads as its
+// own independent question under any pre-r-b2 predicate revision (`also` is
+// not stripped by `isIndependentQuestionClause`'s narrower coordinator
+// strip), so it fell through to the generic Tier-based absence scan, whose
+// candidate pool is exactly this file's `salientWords()` — and without this
+// entry, "also" (>=4 chars) was a live candidate, observed reported verbatim
+// as part of a gap's wording ("also/database/migrations/executed"). "plus"
+// and "then" are the SAME class (two more members of this file's own
+// `BARE_AND_RE` coordinator alternation) and were never real search targets
+// either, so they are excluded for the identical reason regardless of which
+// joiner surfaced them.
 const STOPWORDS = new Set([
   "this", "that", "these", "those", "with", "from", "into", "onto", "your",
   "their", "there", "where", "which", "about", "explain", "describe",
   "please", "what", "does", "how", "when", "and", "the", "for", "are", "was",
   "were", "have", "has", "had", "not", "you", "our", "its",
+  "also", "plus", "then",
 ]);
 
 /**
@@ -196,6 +215,30 @@ const JA_BARE_PARTICLE_RE = new RegExp(`^(?:${JA_BARE_PARTICLES_LONGEST_FIRST.jo
 /** Same alternatives, unanchored and global — every occurrence, not only a
  *  leading one, so `lastBareParticleOccurrence` can find the RIGHTMOST one. */
 const JA_BARE_PARTICLE_ANYWHERE_RE = new RegExp(`(?:${JA_BARE_PARTICLES_LONGEST_FIRST.join("|")})`, "gu");
+/**
+ * N7(b) (r-b2, 2026-09-21, review finding N7) — same alternatives as
+ * `JA_BARE_PARTICLE_RE`, anchored at the END instead of the start. A run's
+ * own TRAILING particle (most commonly the list conjunction "と"/"や" a
+ * clause splitter had no structural boundary to cut at — `splitEnumerated`'s
+ * own comment records why a bare "と" is deliberately never split there)
+ * carries no lexical content of its own and must never survive verbatim into
+ * a returned salient word: `stripTrailingInstructionClauses` below already
+ * peels the mirror-image LEADING case one call up (`salientWords`'
+ * `JA_BARE_PARTICLE_RE` strip, before this function ever runs), and
+ * `isGenericJapaneseAbsenceRun`'s own genericity TEST already strips a
+ * trailing hiragana edge to decide "is this a generic word" — but never
+ * exposed that trimmed form as the CANDIDATE ITSELF, so a run whose trimmed
+ * core is not a short generic word (a long, real, specific phrase) survived
+ * WITH its particle still attached. See `stripTrailingInstructionClauses`'s
+ * own doc comment for the full repro
+ * ("キャッシュが期限切れの場合の処理と" reported verbatim, と included).
+ */
+const JA_TRAILING_BARE_PARTICLE_RE = new RegExp(`(?:${JA_BARE_PARTICLES_LONGEST_FIRST.join("|")})+$`, "u");
+
+/** Strips a trailing run of bare particles (`JA_TRAILING_BARE_PARTICLE_RE`) — a no-op when `run` has none. */
+function stripTrailingBareParticle(run: string): string {
+  return run.replace(JA_TRAILING_BARE_PARTICLE_RE, "");
+}
 /** Suffix form (matches at the END) — used both to test "does this run end
  *  in an instruction" and (via `.replace`) to peel that suffix off once a
  *  peel has isolated a run with no particle left to split on. */
@@ -277,7 +320,17 @@ function trailingInstructionPattern(run: string): RegExp | undefined {
 function stripTrailingInstructionClauses(run: string): string[] {
   const inflection = trailingInstructionPattern(run);
   if (inflection === undefined) {
-    return isGenericJapaneseAbsenceRun(run) ? [] : [run];
+    // N7(b): a run that is not itself an instruction may still carry a
+    // trailing BARE PARTICLE with no lexical content of its own — peeled
+    // the SAME way the leading edge already is (`JA_TRAILING_BARE_PARTICLE_RE`,
+    // mirroring `salientWords`' own `JA_BARE_PARTICLE_RE`), so
+    // "…の処理と" is reported (and searched for) as "…の処理", never with
+    // its trailing "と" attached. A run left with nothing lexical after the
+    // peel (<= 1 char, i.e. the run WAS only a particle) falls back to the
+    // untrimmed original rather than emitting an empty/near-empty candidate.
+    const trimmed = stripTrailingBareParticle(run);
+    const candidate = trimmed.length > 1 ? trimmed : run;
+    return isGenericJapaneseAbsenceRun(candidate) ? [] : [candidate];
   }
   const particle = lastBareParticleOccurrence(run);
   if (particle === undefined) {
@@ -293,8 +346,23 @@ function stripTrailingInstructionClauses(run: string): string[] {
   return survivors;
 }
 
-/** Words >= 4 chars, not stopwords — the candidate pool this scans over. */
-const SALIENT_WORD_RE = /[A-Za-z0-9_]{4,}|[぀-ヿ一-鿿]{2,}/gu;
+/**
+ * Words >= 4 chars, not stopwords — the candidate pool this scans over.
+ *
+ * P1-9 (eval-0927 review-r2 #9, perfEdge): a word outside BOTH ASCII and the
+ * Hiragana/Katakana/Han block above — Latin-with-diacritics (`größe`),
+ * Cyrillic, Greek, ... — matched neither alternative, so a request item
+ * naming one produced NO salient word for it at all (`bindable:false`, the
+ * same shape as the JA kanji-only gap this file's own P0-2 fix already
+ * closed for concept TERMS, here for the topic-item literal-find pool
+ * instead). The added `\p{L}{4,}` alternative is tried LAST, so it only
+ * ever activates where NEITHER existing alternative already matched —
+ * zero behavior change for ASCII or CJK input, coverage added only for
+ * scripts neither covers. `isCjkRun` below still classifies whatever text
+ * any alternative captures by its own content, so this never double-routes
+ * a CJK run through the wrong branch.
+ */
+const SALIENT_WORD_RE = /[A-Za-z0-9_]{4,}|[぀-ヿ一-鿿]{2,}|\p{L}{4,}/gu;
 
 /**
  * C32 fix (chip wave, 2026-09-14, review-findings-2.md) — global span-only
@@ -317,6 +385,45 @@ function quotedSpans(text: string): Array<{ start: number; end: number }> {
     spans.push({ start, end: start + m[0].length });
   }
   return spans;
+}
+
+/**
+ * P1-8 (eval-0927 review r2 finding 8, classFlowLifecycle/classFlowHandle):
+ * a small, closed set of ENGLISH SEQUENCING IDIOMS a flow/order question
+ * commonly wraps its real subject in — "step by step", "end-to-end", "in
+ * its lifecycle", "in what order", and the question's own "how ... handle(s)"
+ * verb construction. None of these names workspace content of its own: they
+ * are the QUESTION'S OWN GRAMMAR, never something a served file could
+ * mention verbatim, so shipping one as a `salientWords` candidate produces a
+ * false `request-item-absent:step`/`:lifecycle` disclosure — measured on
+ * "How does OrderFlow handle payment and shipping, step by step?" against a
+ * class that (correctly) never spells "step" or "lifecycle" anywhere. A bare
+ * per-word stoplist cannot fix this without ALSO suppressing the same words
+ * used as real domain terms elsewhere ("the payment queue's processing
+ * order", "the request handler") — brief's own constraint — so this masks
+ * the fixed multi-word SHAPES only, length-preserving (space-fill) exactly
+ * like `maskReadLeadSpan`/`stripValueOnlyLeadClauses` below, so `quotedSpans`
+ * (computed on the ORIGINAL text) keeps valid offsets. The "how ... handle(s)"
+ * case blanks ONLY the verb itself, keeping "how" and whatever sits between
+ * them (the real subject, e.g. "OrderFlow") untouched — masking the whole
+ * span would risk eating a genuine identifier the clause needs elsewhere;
+ * bounded to the same clause (`[^.?!]*?`, non-greedy, never crosses a
+ * sentence end) so an unrelated later "handle" in a different question is
+ * never touched.
+ */
+const STEP_BY_STEP_IDIOM_RE = /\bsteps?[\s-]+by[\s-]+step\b/giu;
+const END_TO_END_IDIOM_RE = /\bend[\s-]+to[\s-]+end\b/giu;
+const IN_ITS_LIFECYCLE_IDIOM_RE = /\bin\s+(?:its|their|his|her|the)\s+lifecycle\b/giu;
+const IN_WHAT_ORDER_IDIOM_RE = /\bin\s+what\s+order\b/giu;
+const HOW_X_HANDLES_IDIOM_RE = /\b(how)\b([^.?!]*?)\b(handles?)\b/giu;
+
+function maskPhrasingIdiomSpans(text: string): string {
+  let out = text;
+  for (const re of [STEP_BY_STEP_IDIOM_RE, END_TO_END_IDIOM_RE, IN_ITS_LIFECYCLE_IDIOM_RE, IN_WHAT_ORDER_IDIOM_RE]) {
+    out = out.replace(re, (m) => " ".repeat(m.length));
+  }
+  out = out.replace(HOW_X_HANDLES_IDIOM_RE, (_m, howWord: string, mid: string, verb: string) => `${howWord}${mid}${" ".repeat(verb.length)}`);
+  return out;
 }
 
 /** Words >= 4 chars, not stopwords — the pool a topic item's literal find scans for. */
@@ -344,7 +451,11 @@ export function salientWords(text: string): string[] {
    * — is not object-free and is untouched, so ordinary nouns that happen to
    * spell a mutation verb stay searchable.
    */
-  const scanned = stripValueOnlyLeadClauses(text);
+  // R-B3 (ruling 6): the lead span of a generalised read lead is masked (same
+  // length, so `isQuoted`'s offsets stay valid) — see `maskReadLeadSpan`.
+  // P1-8: phrasing-idiom spans are masked FIRST (same length-preserving
+  // contract), before the read-lead/value-only masks run over what remains.
+  const scanned = stripValueOnlyLeadClauses(maskReadLeadSpan(maskPhrasingIdiomSpans(text)));
   const out: string[] = [];
   const seen = new Set<string>();
   const pushCandidate = (candidate: string): void => {
@@ -1049,7 +1160,21 @@ function clauseNamesOwnValueIdentifier(text: string): boolean {
  * u→ん sound change to "読んで", never "読みて" — carried as a second whole
  * alternative rather than a suffix on "読み").
  */
-const READ_VERB_LEAD_EN_RE = /^[\s\-*•]*(?:explain|describe|tell me(?:\s+about)?|clarify)\b/iu;
+/**
+ * B1 (fix-b, 2026-09-21): widened to also recognize "show me" and
+ * "summarize"/"summarise" — both were ALREADY reviewed as read-only leads by
+ * `COLON_INTRODUCES_READ_LEAD` above (explain/describe/clarify/summar/tell
+ * me/show me), just never added to this sibling list. Orchestrator ruling:
+ * widening is sanctioned only to leads already reviewed elsewhere in this
+ * file — never to an arbitrary imperative. Verified against the five call
+ * sites of `itemReadsAsReadLead` (below): four gate on a MUTATION-verb-only
+ * regex downstream (`LEAD_VERB_TOKEN_RE`) that this widening cannot affect
+ * (neither "show" nor "summarize" is in `MUTATION_VERBS_EN`), and the fifth
+ * (`stripValueOnlyLeadClauses`) only blanks a clause that ALSO independently
+ * satisfies BLOCKER 34's object-free whitelist — the same treatment
+ * "explain"/"describe" already receive.
+ */
+const READ_VERB_LEAD_EN_RE = /^[\s\-*•]*(?:explain|describe|tell me(?:\s+about)?|show me(?:\s+about)?|clarify|summari[sz]e)\b/iu;
 /**
  * FIXALL-A group C (2026-09-14) — the READ half of the ONE JA vocabulary,
  * declared once for the same reason `EDIT_VERB_JA_ROOTS` is (above):
@@ -2259,7 +2384,67 @@ function splitNounList(text: string): string[] {
 // context, not one of the four enumerated points).
 // ---------------------------------------------------------------------------
 
+/**
+ * D3 (fix-c, 2026-09-21, TL-02 class) — a numbered ("1.", "1)") or bulleted
+ * ("-", "*", "•") list item's own leading marker, anchored at the very start
+ * of the (trimmed) query. Requires whitespace right after the marker
+ * character so an ordinary decimal ("3.5") or a leading minus sign on a
+ * number ("-1 apples...") never false-positives — see `splitLeadAndBody`'s
+ * own doc comment for why this matters.
+ */
+const LIST_ITEM_MARKER_RE = /^\s*(?:\d+[.)]|[-*•])\s+/u;
+
+/**
+ * r-b2 (2026-09-21) — found via the expanded MATRIX-A joiner set's own
+ * "newline (no marker)" cell: D3's list-marker gate below covers a MARKED
+ * list's own item 1, but an UNMARKED multi-line query of two (or more)
+ * PARALLEL "?"/"!"-ending lines hits the IDENTICAL loss — "Can you explain
+ * how credentials are validated?\nCan you explain how database migrations
+ * are executed?" (no marker at all) lost line 1 entirely, for exactly the
+ * reason D3's own comment describes for the marked-list case: the regex
+ * below finds the FIRST "?" anywhere (line 1's own) and discards everything
+ * up to it. The genuine target shape this function exists for ("Why is X
+ * slow?\nExplain the TTL logic.", also single-line: "Why is X slow? Explain
+ * the TTL logic.") is structurally DIFFERENT: its second line is an
+ * IMPERATIVE STATEMENT, never itself question-shaped. So the general,
+ * structural signal — mirroring D3's own "recognized structurally, so this
+ * only ever protects an ACTUAL list" — is not "is the query multi-line"
+ * (the genuine lead+body shape is often ALSO written across two lines) but
+ * "does the line immediately after the candidate lead ALSO end in
+ * ?/!/？/！": two parallel question-shaped lines are peers, never one
+ * disposable rhetorical lead followed by the real request. Only ever WIDENS
+ * what counts as "keep the whole query as body" — a query whose second line
+ * is not itself question-shaped (the classic "Why is X slow?\nExplain …"
+ * case) is completely unaffected, verified directly below and in
+ * requestItems.spec.ts/requestItemCompletion.spec.ts's existing coverage of
+ * that exact shape.
+ */
+const LINE_ENDS_IN_QUESTION_OR_BANG_RE = /[?？!！]\s*$/u;
+
+function firstLineEndsAsQuestion(text: string): boolean {
+  const firstNewline = text.indexOf("\n");
+  const firstLine = firstNewline < 0 ? text : text.slice(0, firstNewline);
+  return LINE_ENDS_IN_QUESTION_OR_BANG_RE.test(firstLine.trim());
+}
+
 function splitLeadAndBody(query: string): { lead: string; body: string } {
+  const trimmed = query.trim();
+  // D3 (fix-c, 2026-09-21): a numbered/bulleted list's OWN first item must
+  // never be swallowed as throwaway "lead" context merely because it
+  // happens to end in "?"/"!" before the list's second item does — unlike
+  // this function's genuine target shape ("Why is X slow? Explain how it's
+  // optimized." — one disposable leading question, then the real request),
+  // a list's item 1 carries exactly as much of the request as item 2, 3,
+  // ... ("1. Can you explain how credentials are validated?\n2. ..." used
+  // to lose item 1 entirely: the FIRST "?" anywhere is inside line 1, so
+  // the regex below treated the whole first line as a discardable lead and
+  // only line 2 ever reached `extractRequestItems`). Recognized
+  // structurally — the query ITSELF starts with a list marker — so this
+  // only ever protects an ACTUAL list; an ordinary "Question? Statement."
+  // sentence pair never starts with "1."/"-"/"*" and is unaffected.
+  if (LIST_ITEM_MARKER_RE.test(trimmed)) {
+    return { lead: "", body: query };
+  }
   // Only ?/？/!/！ end a "lead" clause, exactly like the ASCII-only path:
   // a plain 。/． (JA/fullwidth periods) is EXCLUDED for the same reason ASCII
   // "." always was (too often just a statement terminator, not a question/
@@ -2267,8 +2452,13 @@ function splitLeadAndBody(query: string): { lead: string; body: string } {
   // it as a lead-ender discarded a whole substantive leading sentence as
   // "context" for any multi-sentence JA request -- see requestItemCompletion
   // "JA lead swallows first sentence" case).
-  const m = /^(.*?[?？!！])\s*([\s\S]*)$/u.exec(query.trim());
+  const m = /^(.*?[?？!！])\s*([\s\S]*)$/u.exec(trimmed);
   if (m && m[2] !== undefined && m[2].trim().length > 0) {
+    // r-b2: an UNMARKED multi-line query of parallel question-shaped lines
+    // — see `firstLineEndsAsQuestion`'s own doc comment just above.
+    if (trimmed.includes("\n") && firstLineEndsAsQuestion(m[2])) {
+      return { lead: "", body: query };
+    }
     return { lead: m[1]!, body: m[2]! };
   }
   return { lead: "", body: query };
@@ -2413,7 +2603,18 @@ const EN_TRAILING_COLON_NO_QUESTION_RE = /:\s*$/u;
 const BRACKET_TAG_ONLY_RE = /^[[(【].*[\])】]$/u;
 
 const JA_INTERROGATIVE_RE = /どこ|どの|どのよう|どう|何|なに|なぜ|いつ|誰|どれ|いくつ|どちら/u;
-const JA_QUESTION_END_RE = /(?:か|[?？])\s*$/u;
+// H-4 residual fix (fix-b, 2026-09-21): natural JA prose closes a question
+// with a trailing 。 after か ("...されますか。", not the bare "...されますか"
+// this regex originally required) — confirmed on the current tree: a genuine
+// two-question JA compound
+// ("認証情報はどこで検証されますか。また、データベースのマイグレーションはどのよ
+// うに実行されますか。") failed BOTH of its own clauses here purely because of
+// the trailing 。, which is standard JA sentence-final punctuation, not
+// content. One optional trailing "。"/"." after the か/?/？ (before the
+// existing optional whitespace) — never widens WHICH clauses can qualify
+// (still gated on `JA_INTERROGATIVE_RE` finding an actual interrogative word
+// first), only lets the ordinary written form of the same clause qualify.
+const JA_QUESTION_END_RE = /(?:か|[?？])[。.]?\s*$/u;
 
 /**
  * True when `text` reads as ONE self-contained question, not a fragment of
@@ -2445,6 +2646,157 @@ export function isIndependentQuestionClause(text: string): boolean {
   return false;
 }
 
+/**
+ * H-4 (fix-b, 2026-09-21, TL-02/TL-04(a); GENERALISED by r-b2, 2026-09-21,
+ * adversarial-review finding B4 — supersedes fix-b's own closed-vocabulary
+ * ruling, which is now a strict subset of the rule below) — "non-mutation
+ * lead + embedded wh-question".
+ *
+ * `isIndependentQuestionClause` deliberately requires the interrogative to be
+ * the clause's OWN head (its own doc comment explains why: an imperative
+ * fragment like "Trace how X builds Y" must never qualify AS AN INDEPENDENT
+ * QUESTION CLAUSE ON ITS OWN — that predicate's contract is UNCHANGED by this
+ * fix). That is exactly right for `isIndependentQuestionClause` itself, but
+ * fix-b's first cut at THIS predicate only special-cased a closed read-verb
+ * vocabulary (`explain|describe|tell me|show me|clarify|summarize`) ahead of
+ * the embedded question — so `Trace how credentials are validated and how
+ * database migrations are executed.` (and `Walk me through …`, `I want to
+ * understand …`, `Outline …`, `Document …`, `Give me an overview of …`) never
+ * split at its bare "and": the "before" side's head was still an imperative
+ * verb outside that closed list, `extractRequestItems` returned ONE item, and
+ * the whole request-item mechanism silently never engaged for the second
+ * point — a disclosure loss, not a crash, so nothing failed loudly.
+ *
+ * ORCHESTRATOR RULING (r-b2, review finding B4): generalise by RULE, not by
+ * growing the word list again. A clause qualifies when, after the SAME
+ * reviewed `stripLeadPrefixes` chain every other lead test in this file
+ * shares:
+ *   (a) a wh-word (`EN_INTERROGATIVE_HEAD_WORD`) occurs within the first 6
+ *       tokens (`findEmbeddedWhHeadIndex` below) — long enough to admit
+ *       "Give me an overview of how X" (5 lead words before its "how"),
+ *       short enough that a wh-word buried inside an unrelated later clause
+ *       of a long imperative sentence never qualifies;
+ *   (b) nothing between the clause's own start and that wh-word crosses a
+ *       comma, colon, semicolon, bracket or quote mark — a wh-word sitting
+ *       inside a parenthetical, past a colon-introduced list, or inside a
+ *       quoted phrase is not THIS clause's own embedded question (the same
+ *       spirit as B3's bracket/quote guard on the split boundary itself,
+ *       applied here to the LEAD side, ahead of the wh-word rather than
+ *       around the join point);
+ *   (c) the lead itself does not read as an edit/mutation lead — reuses the
+ *       existing, already-reviewed `MUTATION_VERB_LEAD_RE`
+ *       (built from `MUTATION_VERBS_EN`, a strict superset of
+ *       `EDIT_LEAD_VERBS_EN` by construction, asserted in
+ *       requestItems.spec.ts) rather than a new vocabulary, so
+ *       `Refactor how X … and how Y …` / `Fix how the parser handles input`
+ *       stay ONE edit request: change-task routing and
+ *       `matrix/intentLeadMatrix.spec.ts` cannot move, because a
+ *       mutation-led clause is rejected before the wh-search is even
+ *       consulted;
+ *   (d) `isIndependentQuestionClause` — UNCHANGED, never widened, never
+ *       called with a looser sibling test — accepts the remainder starting
+ *       AT that wh-word.
+ *
+ * Still never widens to a clause with NO wh-word anywhere in its first 6
+ * tokens ("Identify the implementation path" fails (a) exactly as before) or
+ * to any mutation-led clause (fails (c) regardless of how close its own
+ * wh-word sits) — replay `d12a`/`p12d`, the observed-directory case, and
+ * `matrix/intentLeadMatrix.spec.ts` all stay green because neither call site
+ * below changed, only what this ONE predicate itself decides.
+ *
+ * Used at EXACTLY two call sites (unchanged from fix-b's own B2 ruling): the
+ * BEFORE side of `splitBareAndAtQuestionBoundary` below, and the H-2 filter in
+ * readCodeTaskPack.ts's ALL-TOPIC branch of `buildRequestItemReadiness`. Name
+ * kept (not renamed) so neither call site's import needs to change — r-b2's
+ * own region is this file plus N7 wording only in readCodeTaskPack.ts, and
+ * the H-2 filter is neither.
+ */
+const EMBEDDED_WH_MAX_LEAD_TOKENS = 6;
+/** `EN_INTERROGATIVE_HEAD_WORD`, matched alone (no optional trailing aux — that belongs to `EN_INTERROGATIVE_HEAD_RE`'s AFTER-side test, not this BEFORE-side token scan). */
+const EN_INTERROGATIVE_HEAD_WORD_ONLY_RE = new RegExp(`^(?:${EN_INTERROGATIVE_HEAD_WORD})\\b`, "iu");
+/** Rule (b)'s boundary set: comma, colon, semicolon, any bracket (ASCII or JA fullwidth), or any quote mark. */
+const LEAD_WH_BOUNDARY_PUNCTUATION_RE = /[,:;()[\]{}「」『』【】"'`“”‘’]/u;
+
+/**
+ * Index in `text` where a qualifying embedded wh-word begins (rules (a)+(b)
+ * of `headIsWhAfterReadLead` above), or `undefined` when none exists.
+ * Token-scans (whitespace-delimited) rather than reusing `stripLeadPrefixes`
+ * a second time: the lead here is not one of that chain's three reviewed
+ * prefix registers (politeness/discourse/locative) — it is ANY non-mutation
+ * run of words, of unknown shape, so the only general boundary available is
+ * "how many words" (a) and "no structural punctuation crossed yet" (b). A
+ * token's own LEADING non-letter characters (an opening quote/bracket
+ * touching the word, e.g. `"how`) count toward the boundary check — the
+ * quote/bracket sits strictly before the wh-word's first letter — so a
+ * wh-word immediately inside an opening quote/bracket is correctly rejected,
+ * not accidentally admitted by trimming the quote away first.
+ */
+function findEmbeddedWhHeadIndex(text: string): number | undefined {
+  const tokenRe = /\S+/gu;
+  let match: RegExpExecArray | null;
+  let tokenIndex = 0;
+  while ((match = tokenRe.exec(text)) !== null) {
+    tokenIndex += 1;
+    if (tokenIndex > EMBEDDED_WH_MAX_LEAD_TOKENS) return undefined;
+    const token = match[0];
+    const leadingNonLetter = token.match(/^[^\p{L}]*/u)?.[0] ?? "";
+    const core = token.slice(leadingNonLetter.length);
+    if (EN_INTERROGATIVE_HEAD_WORD_ONLY_RE.test(core)) {
+      const whStart = (match.index ?? 0) + leadingNonLetter.length;
+      if (LEAD_WH_BOUNDARY_PUNCTUATION_RE.test(text.slice(0, whStart))) return undefined;
+      return whStart;
+    }
+  }
+  return undefined;
+}
+
+export function headIsWhAfterReadLead(text: string): boolean {
+  const trimmed = text.trim();
+  if (isIndependentQuestionClause(trimmed)) return true;
+  const stripped = stripLeadPrefixes(trimmed);
+  if (stripped.length === 0) return false;
+  // Rule (c): a mutation/edit lead never qualifies, however close its own
+  // wh-word sits — checked BEFORE the wh-search so an edit request can never
+  // be reclassified by this predicate.
+  if (MUTATION_VERB_LEAD_RE.test(stripped)) return false;
+  const whStart = findEmbeddedWhHeadIndex(stripped);
+  if (whStart === undefined) return false;
+  return isIndependentQuestionClause(stripped.slice(whStart));
+}
+
+/**
+ * R-B3 (2026-09-21, orchestrator ruling 6) — the LEAD SPAN of a generalised
+ * read lead is not part of what the clause asks about. "Walk me through how
+ * refunds are processed" asks about refunds; "Walk"/"through" (like "Trace",
+ * "I want to understand", "Give me an overview of") only say HOW to answer.
+ * Left in, they became salient words — a topic term that is never evidenced,
+ * a Tier C absence candidate, and (confirmed live, R-B1's matrix) the whole
+ * query of a `search_files find "walk"` when the first pack served nothing.
+ *
+ * The span is identified by `headIsWhAfterReadLead`'s OWN rule (a)-(c), never
+ * a word list: the words between the stripped lead prefixes and the embedded
+ * wh-head that makes the rest an independent question. Returned MASKED — the
+ * same length, the span blanked — so every character offset a caller computes
+ * against the original text (quoted spans, positions) stays valid. A clause
+ * that already opens with its own wh/aux head, a mutation lead, or a clause
+ * with no qualifying embedded wh-head is returned unchanged; the stripped
+ * politeness/discourse/locative prefixes themselves are never masked (a
+ * locative carries the file it names).
+ */
+export function maskReadLeadSpan(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || isIndependentQuestionClause(trimmed)) return text;
+  const stripped = stripLeadPrefixes(trimmed);
+  if (stripped.length === 0 || MUTATION_VERB_LEAD_RE.test(stripped)) return text;
+  const whStart = findEmbeddedWhHeadIndex(stripped);
+  if (whStart === undefined || whStart === 0) return text;
+  if (!isIndependentQuestionClause(stripped.slice(whStart))) return text;
+  // `stripLeadPrefixes` only ever removes a PREFIX, so `stripped` is a suffix
+  // of `trimmed`, which starts after `text`'s own leading whitespace.
+  const start = (text.length - text.trimStart().length) + (trimmed.length - stripped.length);
+  return `${text.slice(0, start)}${" ".repeat(whStart)}${text.slice(start + whStart)}`;
+}
+
 // H-3: a bare " and " with NO preceding comma is ordinarily kept fused (a
 // single verb/preposition's two objects — see the DriveMounter regression
 // note on `splitEnumerated`'s own comma-normalization rule below). But when
@@ -2455,17 +2807,96 @@ export function isIndependentQuestionClause(text: string): boolean {
 // invoices built?" — D3). Scoped narrowly to this two-sided shape so it
 // never fires on an ordinary compound object or a d12a-style parenthetical
 // list.
-const BARE_AND_RE = /\s+and\s+/giu;
+//
+// TL-02 residual fix (fix-b, 2026-09-21): "as well as" is the SAME bare
+// coordinator in this position — "Explain how X as well as how Y." reaches
+// this mechanism exactly like "Explain how X and how Y." does, and for the
+// identical reason must NOT split a compound object ("Explain how the
+// parser handles JSON as well as YAML." stays one clause: "YAML." carries
+// no fresh wh-head of its own, so the two-sided test below still refuses
+// it). Confirmed missing on the current tree: neither this splitter nor
+// `splitEnumerated`'s comma/semicolon rules recognize "as well as" at all,
+// so a query using only this joiner never reached 2 items in the first
+// place — the whole request-item mechanism silently never engaged, the
+// exact TL-02 shape this file exists to close.
+//
+// GENERALISED (r-b2, 2026-09-21, review finding B4): "and"/"as well as" are
+// two members of a COORDINATOR CLASS, not the whole class — the review
+// measured "plus" and "along with" silently certifying only half a compound
+// question the identical way "and" itself used to, and "together with" /
+// "and also" / "and then" are the same shape. All seven read the SAME
+// two-sided test below unchanged (the AFTER side must open with a fresh
+// wh-head; B3's bracket/quote guard applies at every occurrence identically,
+// regardless of which coordinator matched) — this is a bigger alternation,
+// never a new mechanism. `and(?:\s+(?:also|then))?` deliberately matches the
+// LONGER "and also"/"and then" form whenever it is present (`?` is greedy,
+// so the compound reading wins over the bare "and" prefix), so the AFTER
+// side never has to start with a stray "also"/"then" of its own. A bare
+// "; also" (semicolon, not "and") is intentionally NOT part of this
+// alternation — `splitOnSemicolons` already splits it structurally
+// (unconditional), and "also" alone is not a coordinator (see N7's own
+// gap-token fix: "also"/"plus"/"then" are filler words, never a search
+// target, but "; also" already produces 2 items via the semicolon, not via
+// this regex).
+const BARE_AND_RE = /\s+(?:and(?:\s+(?:also|then))?|as well as|plus|along with|together with)\s+/giu;
 
-/** Splits `segment` at every bare " and " boundary that satisfies the two-sided independent-question test above; returns `[segment]` unchanged when none does. Recurses into the tail so "A? and B? and C?" splits at every qualifying boundary, not just the first. */
+/**
+ * B3 (fix-b, 2026-09-21) — bracket/quote guard for the bare-"and" split.
+ *
+ * A parenthetical list inside ONE question (the d12a class: "...(exact
+ * command, workflow args like reps/tasks, and the post-run
+ * record/archive/aggregate steps)?") must never be torn in half by a split
+ * that lands strictly between an opening and closing bracket/quote —
+ * confirmed live on the CURRENT tree even before H-4 above: `How does the
+ * pipeline handle retries (and how backoff is tuned) and how are errors
+ * logged?` already mis-split into `"How does the pipeline handle retries
+ * (and how backoff is tuned)"` (dangling open paren) + `"how are errors
+ * logged?"`, because the "before" side of THAT bare "and" already read as an
+ * independent question (a bare "How does" head) with no bracket awareness at
+ * all. Depth-tracked per bracket TYPE (not a shared cross-type stack) so
+ * nested/mixed brackets resolve correctly; quotes reuse `quotedSpans` (the
+ * SAME span computation `salientWords` already trusts) rather than a second
+ * quote scanner. A bare "and" whose position is protected is simply SKIPPED
+ * (the loop below tries the next occurrence) — it is never counted as a
+ * split boundary, so `before` on a later, unprotected match still spans the
+ * WHOLE bracketed run unmodified, exactly as it already does today for the
+ * bracket-external case.
+ */
+const AND_GUARD_BRACKET_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ["(", ")"],
+  ["[", "]"],
+  ["（", "）"],
+  ["【", "】"],
+];
+
+function isInsideUnclosedBracket(text: string, index: number): boolean {
+  for (const [open, close] of AND_GUARD_BRACKET_PAIRS) {
+    let depth = 0;
+    for (let i = 0; i < index; i += 1) {
+      const ch = text[i];
+      if (ch === open) depth += 1;
+      else if (ch === close && depth > 0) depth -= 1;
+    }
+    if (depth > 0) return true;
+  }
+  return false;
+}
+
+function bareAndSitsInsideProtectedSpan(text: string, index: number): boolean {
+  if (quotedSpans(text).some((span) => index >= span.start && index < span.end)) return true;
+  return isInsideUnclosedBracket(text, index);
+}
+
+/** Splits `segment` at every bare " and "/" as well as " boundary (`BARE_AND_RE`) that satisfies the two-sided independent-question test above; returns `[segment]` unchanged when none does. Recurses into the tail so "A? and B? as well as C?" splits at every qualifying boundary, not just the first. */
 function splitBareAndAtQuestionBoundary(segment: string): string[] {
   BARE_AND_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = BARE_AND_RE.exec(segment)) !== null) {
+    if (bareAndSitsInsideProtectedSpan(segment, m.index)) continue;
     const before = segment.slice(0, m.index).trim();
     const after = segment.slice(m.index + m[0].length).trim();
     if (before.length === 0 || after.length === 0) continue;
-    if (EN_INTERROGATIVE_HEAD_RE.test(after) && isIndependentQuestionClause(before)) {
+    if (EN_INTERROGATIVE_HEAD_RE.test(after) && headIsWhAfterReadLead(before)) {
       return [before, ...splitBareAndAtQuestionBoundary(after)];
     }
   }
@@ -2638,6 +3069,11 @@ export function extractRequestItems(rawQuery: string, index?: RequestItemIndexVi
   // test that keeps this from over-splitting an ordinary compound object.
   for (const segment of splitEnumerated(masked).flatMap(splitBareAndAtQuestionBoundary)) {
     if (isGenericClosing(segment)) continue;
+    // A negated instruction ("please do not modify anything", 「変更しないで
+    // ください」) constrains a future edit; it asks for nothing, so it is no
+    // item — its verb used to become a topic searched for and certified
+    // absent (`request-item-absent:modify`, eval-0927 review-r4 P1-10).
+    if (isNegatedInstructionClause(segment)) continue;
     const terms = extractTerms(segment);
     // NOTE (2026-09-07): a definition keyword WITHOUT any term ("the setting
     // definition", no file/key named) deliberately stays a `definition` item —

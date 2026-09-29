@@ -12,7 +12,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import { TextDecoder } from "node:util";
-import { createIgnoreMatcherSync, createPatternMatcherSync, type IgnoreMatcher } from "@tokenlighten/skeleton-engine";
+import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  createIgnoreMatcherSync,
+  createPatternMatcherSync,
+  DEFAULT_IGNORE,
+  VIRTUALENV_NAME_PATTERNS,
+  type IgnoreMatcher,
+} from "@tokenlighten/skeleton-engine";
 import { loadWorkspaceGitignorePatterns } from "../util/gitignorePatterns.js";
 import { MCP_LANG_EXTS } from "@tokenlighten/types";
 import type { McpLang } from "@tokenlighten/types";
@@ -372,10 +379,30 @@ export interface WalkOmissions {
    * the doc comment above `SOURCE_ONLY_EXCLUDED_PREFIXES`).
    */
   source_only_excluded: number;
+  /**
+   * N7(c) (r-b2, 2026-09-21, review finding N7) — a SUBSET of `ignored`:
+   * every entry counted here was ALSO counted in `ignored` (this field never
+   * changes `ignored`'s own value, `search.tree`'s `excluded_by_reason`, or
+   * any other existing wire count — it is additive, internal bookkeeping
+   * only, never surfaced on the wire). Counts ONLY a top-level VCS metadata
+   * directory (currently: a `.git` entry, DEFAULT_IGNORE's own `.git/`
+   * pattern) skipped by `classifyIgnored` below. Root cause: EVERY
+   * git-tracked workspace has `.ignored >= 1` purely from skipping `.git/`
+   * plumbing no query could ever mean to search — readCodeTaskPack.ts's
+   * request-item absence scope note (`scopeCompletenessAfterScan`) used the
+   * raw `ignored` count directly, so an otherwise scope-complete scan of an
+   * ordinary git checkout ALWAYS reported "N path(s) excluded from the
+   * scan", even when the only exclusion was `.git` itself — never a real gap
+   * in what the scan covered. This field lets that ONE caller subtract the
+   * VCS-metadata slice back out; every OTHER DEFAULT_IGNORE entry sharing
+   * the `ignored` bucket (`node_modules/`, `dist/`, `vendor/`, …) is
+   * untouched and stays a real, disclosed omission there.
+   */
+  vcs_metadata: number;
 }
 
 export function createWalkOmissions(): WalkOmissions {
-  return { ignored: 0, gitignored: 0, tokenlighten_ignored: 0, oversize: 0, symlinks: 0, non_text: 0, secrets: 0, unreadable_dirs: 0, outside_workspace: 0, source_only_excluded: 0 };
+  return { ignored: 0, gitignored: 0, tokenlighten_ignored: 0, oversize: 0, symlinks: 0, non_text: 0, secrets: 0, unreadable_dirs: 0, outside_workspace: 0, source_only_excluded: 0, vcs_metadata: 0 };
 }
 
 export function anyWalkOmission(o: WalkOmissions): boolean {
@@ -552,12 +579,34 @@ interface LayerMatchers {
   combined: IgnoreMatcher;
   /** DEFAULT_IGNORE (with fullRecall re-inclusions) only — the heuristic layer. */
   defaultOnly: IgnoreMatcher;
+  /**
+   * Same as `defaultOnly` minus `VIRTUALENV_NAME_PATTERNS` (`.venv/`,
+   * `site-packages/`) — round-4 finding P1-9. Used ONLY for the scoped
+   * re-anchoring check inside a lift whose target is itself a virtualenv
+   * (`liftIsVirtualenv`): the explicit lift already means "show me this
+   * venv's contents", so its own nested `site-packages/` (or a decoy nested
+   * `.venv/`) must not re-fire, while unrelated DEFAULT_IGNORE entries
+   * nested in the same lift (a vendored `node_modules/`, say) still exclude
+   * normally — see `classifyIgnored`.
+   */
+  defaultOnlyNoVirtualenv: IgnoreMatcher;
   /** User-authored .tokenlightenignore only; null when absent/empty. */
   tlOnly: IgnoreMatcher | null;
   /** Workspace .gitignore only; null unless respectGitignore found patterns. */
   gitOnly: IgnoreMatcher | null;
   /** Explicit subPath whose default/gitignore exclusion is lifted ("" = none). */
   liftScope: string;
+  /**
+   * True when `liftScope` itself is a virtualenv — matched by
+   * `VIRTUALENV_NAME_PATTERNS` (by name, at any depth: the lift can target
+   * the venv root OR reach straight into its `site-packages/`) or by the
+   * `pyvenv.cfg` marker AND its sibling shape (`hasVirtualenvMarkerFile`).
+   * Gates which `defaultOnly` variant the lifted branch of `classifyIgnored`
+   * re-checks against, and also waives the marker+shape check itself for
+   * content already inside this lift (P1-9's "name- and marker-based
+   * alike"). Meaningless when `liftScope === ""`.
+   */
+  liftIsVirtualenv: boolean;
 }
 
 function buildLayerMatchers(
@@ -569,11 +618,17 @@ function buildLayerMatchers(
   const userPatterns = loadTokenlightenIgnorePatterns(workspace);
   const combined = ignoreMatcherFor(fullRecall, workspace);
   const defaultOnly = createIgnoreMatcherSync(fullRecall ? [...FULL_RECALL_REINCLUDE_PATTERNS] : undefined);
+  const defaultOnlyNoVirtualenv = createPatternMatcherSync([
+    ...DEFAULT_IGNORE.filter((p) => !VIRTUALENV_NAME_PATTERNS.includes(p)),
+    ...(fullRecall ? FULL_RECALL_REINCLUDE_PATTERNS : []),
+  ]);
+  const virtualenvNameOnly = createPatternMatcherSync(VIRTUALENV_NAME_PATTERNS);
   const tlOnly = userPatterns.length > 0 ? createPatternMatcherSync(userPatterns) : null;
   const gitPatterns = respectGitignore ? loadGitignorePatternsCached(workspace) : [];
   const gitOnly = gitPatterns.length > 0 ? createPatternMatcherSync(gitPatterns) : null;
 
   let liftScope = "";
+  let liftIsVirtualenv = false;
   if (subPath) {
     const normalizedScope = normalizeRelPath(subPath);
     let scopeEnd = normalizedScope.length;
@@ -584,14 +639,21 @@ function buildLayerMatchers(
     if (scope === "." || scope === ".." || scope.startsWith("../")) scope = "";
     const scopeIgnoredBy = (m: IgnoreMatcher | null): boolean =>
       m !== null && (m.ignores(scope) || m.ignores(scope + "/"));
+    // P1-9: the scope is also a virtualenv lift when it is itself named (at
+    // any depth) by a virtualenv pattern, or when it is itself a directory
+    // that passes the marker+shape check — never when scope === "" (the
+    // workspace root is never a virtualenv lift target).
+    const scopeIsVirtualenv =
+      scope !== "" && (scopeIgnoredBy(virtualenvNameOnly) || hasVirtualenvMarkerFile(path.join(workspace, scope)));
     // Pointing the walk AT an area the heuristic or borrowed layer hides is
     // explicit intent — ignored never means unimportant, so those two layers
     // are waived for the subtree. The user-authored layer is never waived.
-    if (scope && !scopeIgnoredBy(tlOnly) && (scopeIgnoredBy(defaultOnly) || scopeIgnoredBy(gitOnly))) {
+    if (scope && !scopeIgnoredBy(tlOnly) && (scopeIgnoredBy(defaultOnly) || scopeIgnoredBy(gitOnly) || scopeIsVirtualenv)) {
       liftScope = scope;
+      liftIsVirtualenv = scopeIsVirtualenv;
     }
   }
-  return { combined, defaultOnly, tlOnly, gitOnly, liftScope };
+  return { combined, defaultOnly, defaultOnlyNoVirtualenv, tlOnly, gitOnly, liftScope, liftIsVirtualenv };
 }
 
 function classifyIgnored(
@@ -604,8 +666,12 @@ function classifyIgnored(
     if (layers.tlOnly?.ignores(p)) return "tokenlighten_ignored";
     // The heuristic layer is re-anchored at the lifted scope: entering dist/
     // on purpose must not also drag in the node_modules/ nested inside it.
+    // A virtualenv lift re-anchors against the NO-virtualenv variant instead
+    // (P1-9): its own nested site-packages/ (or a decoy nested .venv/) must
+    // stay visible, while unrelated entries like node_modules/ still don't.
     const scoped = relPath.slice(layers.liftScope.length + 1);
-    if (scoped !== "" && layers.defaultOnly.ignores(isDir ? scoped + "/" : scoped)) return "ignored";
+    const reanchored = layers.liftIsVirtualenv ? layers.defaultOnlyNoVirtualenv : layers.defaultOnly;
+    if (scoped !== "" && reanchored.ignores(isDir ? scoped + "/" : scoped)) return "ignored";
     return null;
   }
   if (layers.combined.ignores(p)) {
@@ -616,6 +682,75 @@ function classifyIgnored(
   }
   if (layers.gitOnly?.ignores(p)) return "gitignored";
   return null;
+}
+
+/**
+ * Round-2 evaluation finding P2-15: a Python virtualenv, WHATEVER its name —
+ * `python -m venv <any-name>` (and `virtualenv`, `uv venv`, etc.) always
+ * writes `pyvenv.cfg` directly at the environment's own root, never inside
+ * its nested `lib/…/site-packages/`. `venv/` (bare, no dot) is a NAME
+ * pattern round-3 deliberately left out of DEFAULT_IGNORE — a NAME pattern
+ * with no leading/interior slash matches at any depth, which collided with
+ * a genuinely plausible source directory (`src/venv/manager.py`) — so a
+ * marker check recognizes it (and any other spelling) instead: it runs once
+ * per candidate directory during the walk itself, and a plain
+ * `src/venv/manager.py` with no `pyvenv.cfg` sibling at its directory root
+ * is never touched.
+ *
+ * Round-4 finding P1-9 added the SHAPE requirement below: a bare
+ * `pyvenv.cfg`, alone, is not enough — `markerInSrc` showed a stray marker
+ * file (dropped into an ordinary source directory, no real environment
+ * around it) hiding that entire directory. A real virtualenv's `pyvenv.cfg`
+ * always has a `site-packages/` sibling (POSIX: `lib/python<major>.<minor>/
+ * site-packages/`; Windows: `Lib/site-packages/`) and/or an `activate`
+ * script (`bin/activate` POSIX, `Scripts/activate` Windows) one level below
+ * it; a marker with NEITHER sibling is not treated as a virtualenv at all —
+ * the directory stays visible, exactly like it would with no marker.
+ * `site-packages/` itself is a separate, unconditional NAME pattern in
+ * DEFAULT_IGNORE now (unambiguous, no shape check needed — see `ignore.ts`);
+ * this function only decides whether the ENVIRONMENT ROOT (the directory
+ * `pyvenv.cfg` lives in) is hidden as a whole, whatever it is named.
+ *
+ * Failure (permission denied, a symlinked/broken entry, at either the
+ * marker or the shape check) reads as "not a virtualenv" — never throws.
+ */
+function hasVirtualenvMarkerFile(absDirPath: string): boolean {
+  try {
+    if (!fs.statSync(path.join(absDirPath, "pyvenv.cfg")).isFile()) return false;
+  } catch {
+    return false;
+  }
+  return hasVirtualenvSiblingShape(absDirPath);
+}
+
+/** See `hasVirtualenvMarkerFile`'s doc comment — the sibling-shape half of the check. */
+function hasVirtualenvSiblingShape(absDirPath: string): boolean {
+  const isDir = (rel: string): boolean => {
+    try {
+      return fs.statSync(path.join(absDirPath, ...rel.split("/"))).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const isFile = (rel: string): boolean => {
+    try {
+      return fs.statSync(path.join(absDirPath, ...rel.split("/"))).isFile();
+    } catch {
+      return false;
+    }
+  };
+  if (isDir("Lib/site-packages")) return true; // Windows layout (no python-version segment)
+  if (isFile("bin/activate")) return true; // POSIX activation script
+  if (isFile("Scripts/activate")) return true; // Windows activation script (POSIX-shell variant)
+  try {
+    const libDir = path.join(absDirPath, "lib");
+    for (const entry of fs.readdirSync(libDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && /^python\d/i.test(entry.name) && isDir(`lib/${entry.name}/site-packages`)) return true;
+    }
+  } catch {
+    // No lib/ (or unreadable) — fall through to false.
+  }
+  return false;
 }
 
 /**
@@ -648,7 +783,21 @@ function isTokenlightenNamespacePath(relPath: string): boolean {
   return relPath === ".tokenlighten" || relPath.startsWith(".tokenlighten/");
 }
 
-export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundFile[] {
+/**
+ * N7(c) (r-b2, 2026-09-21) — the VCS METADATA class `WalkOmissions.vcs_metadata`
+ * counts: currently just `.git`, DEFAULT_IGNORE's own recognized entry
+ * (matched by basename, at ANY depth, so a nested submodule's own `.git`
+ * counts too — the same "matches at any depth" semantics DEFAULT_IGNORE's
+ * bare `.git/` gitignore-style pattern already has). A worktree/submodule's
+ * `.git` is sometimes a FILE (a "gitdir: …" pointer), not a directory —
+ * checked by name alone here, independent of which `classifyIgnored` call
+ * site (file or directory) fires, so either shape is recognized alike.
+ */
+function isVcsMetadataName(name: string): boolean {
+  return name === ".git";
+}
+
+function walkCodeFilesCore(workspace: string, opts: WalkOptions): FoundFile[] {
   const allowedExts: Set<string> | null = opts.lang
     ? new Set(LANG_EXTS[opts.lang] ?? [])
     : null;
@@ -713,7 +862,10 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
       const relPath = path.relative(workspaceReal, resolvedAbs).replace(/\\/g, "/");
       const layer = classifyIgnored(layers, relPath, false);
       if (layer) {
-        if (om) om[layer] += 1;
+        if (om) {
+          om[layer] += 1;
+          if (layer === "ignored" && isVcsMetadataName(path.basename(relPath))) om.vcs_metadata += 1;
+        }
         return out;
       }
       if (isSourceOnlyExcludedPath(relPath, opts.subPath, fullRecall)) {
@@ -760,6 +912,122 @@ export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundF
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Perf (2026-09-27, large-workspace task_pack cost, item C) — per-REQUEST
+// walk memoization. Measured ~16 real walkCodeFilesCore calls for ONE
+// read_file task_pack on an 11.6k-file workspace (locateTaskContext.ts's own
+// per-call WalkCache already dedupes ITS OWN helpers, but findText.ts and
+// findReferences.ts each walk independently of it and of each other, and
+// several readCodeTaskPack.ts candidate-enumeration helpers do too), each
+// walk costing ~1s of classifyIgnored + the `ignore` package's own matching
+// over a 12k-entry tree.
+//
+// requestWalkScope holds one memo per REQUEST (never across requests — "no
+// cross-request walk cache in this round" per this wave's brief). It is
+// opened by server.ts around read_file/search_files dispatch ONLY, via
+// runWithWalkRequestScope — NEVER around edit_file: a write can change what
+// the very next walk in the SAME request would see, so a write-spanning
+// cache would go stale within its own request. walkCodeFiles below checks
+// the scope transparently; with no scope open (every existing caller that
+// invokes it directly, outside server.ts's dispatch — e.g. every spec in
+// this package) it is a pure passthrough to walkCodeFilesCore, byte-for-byte
+// identical to today.
+// ---------------------------------------------------------------------------
+
+interface WalkRequestCacheEntry {
+  files: FoundFile[];
+  /**
+   * This walk's OWN contribution only — never whatever the caller's own
+   * `opts.omissions` object already held before this call. Kept separate so
+   * a cache hit can be REPLAYED (added) into a second caller's omissions
+   * object without double-counting the first caller's own prior baggage —
+   * see walkCodeFiles' cache-hit branch below.
+   */
+  omissions: WalkOmissions;
+}
+
+const requestWalkScope = new AsyncLocalStorage<Map<string, WalkRequestCacheEntry>>();
+
+/**
+ * Open a per-request walkCodeFiles memo for the duration of `fn`. Call this
+ * around one read_file/search_files dispatch ONLY (see the doc comment
+ * above) — never spanning more than one dispatch, and never around
+ * edit_file.
+ */
+export function runWithWalkRequestScope<T>(fn: () => T): T {
+  return requestWalkScope.run(new Map(), fn);
+}
+
+/**
+ * Stable, order-independent cache key covering every WalkOptions field that
+ * affects walkCodeFilesCore's result (`omissions` is an out-parameter, not
+ * part of the result identity, so it is deliberately excluded).
+ */
+function requestWalkCacheKey(workspace: string, opts: WalkOptions): string {
+  return JSON.stringify({
+    workspace: path.resolve(workspace),
+    lang: opts.lang ?? null,
+    subPath: opts.subPath ?? null,
+    includeArtifacts: opts.includeArtifacts ?? false,
+    includeGenericText: opts.includeGenericText ?? false,
+    extraExts: opts.extraExts ? [...opts.extraExts].sort() : null,
+    extraBasenames: opts.extraBasenames ? [...opts.extraBasenames].sort() : null,
+    fullRecall: opts.fullRecall ?? false,
+    respectGitignore: opts.respectGitignore ?? false,
+    sizeCapBytes: opts.sizeCapBytes ?? null,
+  });
+}
+
+/** Additive replay: `target`'s pre-existing counts are preserved, `delta`'s are added on top — see WalkRequestCacheEntry's doc comment for why this must never be an overwrite. */
+function addOmissionsInto(target: WalkOmissions, delta: WalkOmissions): void {
+  target.ignored += delta.ignored;
+  target.gitignored += delta.gitignored;
+  target.tokenlighten_ignored += delta.tokenlighten_ignored;
+  target.oversize += delta.oversize;
+  target.symlinks += delta.symlinks;
+  target.non_text += delta.non_text;
+  target.secrets += delta.secrets;
+  target.unreadable_dirs += delta.unreadable_dirs;
+  target.outside_workspace += delta.outside_workspace;
+  target.source_only_excluded += delta.source_only_excluded;
+  target.vcs_metadata += delta.vcs_metadata;
+}
+
+/**
+ * Walk the workspace and return tracked code files, byte-stable sorted —
+ * see walkCodeFilesCore's own doc comment for the actual walk semantics
+ * (unchanged). This wrapper ONLY adds the per-request memo described above;
+ * with no request scope open, `result` is exactly `walkCodeFilesCore`'s own
+ * return value (a fresh array each call, as always). With a scope open,
+ * a REPEATED call with the identical option-set within the same request
+ * returns a fresh COPY of the first call's result instead of re-walking —
+ * `opts.omissions`, if the caller supplied one, still receives this walk's
+ * exact contribution either way (additive replay on a cache hit, direct
+ * accumulation on a miss), so a caller cannot tell the difference from the
+ * omissions it observes.
+ */
+export function walkCodeFiles(workspace: string, opts: WalkOptions = {}): FoundFile[] {
+  const store = requestWalkScope.getStore();
+  if (!store) return walkCodeFilesCore(workspace, opts);
+
+  const key = requestWalkCacheKey(workspace, opts);
+  const cached = store.get(key);
+  if (cached) {
+    if (opts.omissions) addOmissionsInto(opts.omissions, cached.omissions);
+    return cached.files.slice();
+  }
+
+  // Always walk with a FRESH delta accumulator, regardless of whether the
+  // caller passed its own `opts.omissions` — see WalkRequestCacheEntry's doc
+  // comment for why the cached snapshot must never include the caller's own
+  // pre-existing counts.
+  const delta = createWalkOmissions();
+  const files = walkCodeFilesCore(workspace, { ...opts, omissions: delta });
+  store.set(key, { files, omissions: delta });
+  if (opts.omissions) addOmissionsInto(opts.omissions, delta);
+  return files.slice();
+}
+
 function walkDir(
   workspace: string,
   dir: string,
@@ -804,7 +1072,27 @@ function walkDir(
       if (isTokenlightenNamespacePath(relPath)) continue;
       const layer = classifyIgnored(layers, relPath, true);
       if (layer) {
-        if (om) om[layer] += 1;
+        if (om) {
+          om[layer] += 1;
+          if (layer === "ignored" && isVcsMetadataName(name)) om.vcs_metadata += 1;
+        }
+        continue;
+      }
+      // P2-15/P1-9: a Python virtualenv marker+shape (`pyvenv.cfg` plus a
+      // site-packages/activate sibling — see `hasVirtualenvMarkerFile`),
+      // whatever this directory is named — not a name pattern, so an
+      // explicit `path=` lift straight into it (walkCodeFilesCore starts the
+      // walk AT the resolved subPath itself, never through this entries
+      // loop for that exact directory) is unaffected. Content already
+      // reached by lifting an ANCESTOR of it is unaffected too — UNLESS that
+      // ancestor lift is itself a virtualenv (`liftIsVirtualenv`): P1-9's
+      // "an explicitly lifted dependency directory lifts the dependency
+      // patterns nested inside it (name- and marker-based alike)" means a
+      // real nested venv inside an already-lifted venv must stay visible,
+      // the same as its nested site-packages/ does (classifyIgnored, above).
+      const insideVirtualenvLift = layers.liftIsVirtualenv && relPath.startsWith(layers.liftScope + "/");
+      if (!insideVirtualenvLift && hasVirtualenvMarkerFile(absPath)) {
+        if (om) om.ignored += 1;
         continue;
       }
       if (isSourceOnlyExcludedPath(relPath + "/", explicitSubPath, fullRecall)) {
@@ -816,7 +1104,10 @@ function walkDir(
       if (isTokenlightenNamespacePath(relPath)) continue;
       const layer = classifyIgnored(layers, relPath, false);
       if (layer) {
-        if (om) om[layer] += 1;
+        if (om) {
+          om[layer] += 1;
+          if (layer === "ignored" && isVcsMetadataName(name)) om.vcs_metadata += 1;
+        }
         continue;
       }
       if (isSourceOnlyExcludedPath(relPath, explicitSubPath, fullRecall)) {

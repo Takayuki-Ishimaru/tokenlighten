@@ -46,6 +46,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import Ajv from "ajv";
 import type { ValidateFunction } from "ajv";
+import { killServerGroup } from "../helpers/killServerGroup.js";
 
 import {
   buildServedBytesMatrixWorkspace,
@@ -136,9 +137,9 @@ function startServer(cwd: string, extraArgs: string[] = []): ServerHandle {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env["TL_LEGACY_INPUT"];
 
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, BIN_TS, cwd, ...extraArgs], {
+  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd, ...extraArgs], {
     cwd,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env,
   });
   let buffer = "";
@@ -212,7 +213,7 @@ function startServer(cwd: string, extraArgs: string[] = []): ServerHandle {
       return response;
     },
     kill(): void {
-      try { child.kill("SIGKILL"); } catch { /* already closed */ }
+      try { killServerGroup(child); } catch { /* already closed */ }
     },
   };
 }

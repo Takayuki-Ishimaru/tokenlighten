@@ -17,7 +17,8 @@ import {
   type CoverageProbeSurface,
 } from "../../util/surfaceServedCoverage.js";
 import { trace } from "../../util/trace.js";
-import { markSemanticFrontierWithheldBody, isCallerRangeSurface } from "./sfWithholdingMarks.js";
+import { handleTable } from "../../util/handles.js";
+import { markSemanticFrontierWithheldBody, isExplicitRangeSurface } from "./sfWithholdingMarks.js";
 
 type ContinuationCall = ToolCall;
 type SemanticSurfaceCarrier = { readonly surfaces?: unknown };
@@ -124,6 +125,81 @@ function surfaceExceedsRepackBudgetInThisPack(
   const probe = coverageProbeSurfaceFor(result, candidatePath);
   return probe !== undefined && surfaceExceedsRepackBudget(probe);
 }
+
+/**
+ * R-B3 (ruling 4), narrowed by GATE-C1 (2026-09-22): true when some surface of
+ * THIS pack for `candidatePath` delivers (or, `code_unchanged`, already
+ * delivered) the WHOLE file — a range from line 1 with nothing left in
+ * `remaining_ranges` and no cap-trim — so a re-pack of that path has no line
+ * left to serve.
+ *
+ * ONLY consulted for a MULTI-CONCERN candidate-list (see
+ * `hasMultiConcernRequestItems` at this function's one call site): a
+ * composite query ("X and Y") whose candidates are one-file-per-concern, not
+ * mutually-exclusive alternatives for ONE concern. Live evidence for that
+ * narrower case (VS Code config, `requestItemGateMatrix`'s
+ * `en|Explain|and|implemented|real`): re-invoking `mode:"task_pack"` over
+ * paths THIS response already embeds whole collapses to a bodyless
+ * `read.receipt` (`compactReceiptFromRecord`'s dedup match), discarding a
+ * certificate the SAME evidence would otherwise have earned — confirmed via a
+ * live trace, not merely reasoned. A SINGLE-concern choose-candidate pack
+ * (W9's read-only candidate-list arm, `discoveryBundleNext.spec.ts`) never
+ * reaches this predicate at all: "choose-candidate close"
+ * (readCodeTaskPack.ts's `candidateChoicePending`) only fires once every
+ * candidate already carries served code, so gating THAT case on "served
+ * whole" defeated the branch itself, regardless of receipt risk — the
+ * W9 branch's own value is resolving which read-only candidate is the
+ * answer, not fetching new bytes, so firing on an already-fully-served
+ * single-concern list is the intended behaviour, not the defect.
+ */
+function pathServedWholeInThisPack(result: SemanticSurfaceCarrier, candidatePath: string): boolean {
+  return semanticSurfaces(result).some((surface) => {
+    const record = surface as {
+      path?: unknown;
+      code?: unknown;
+      code_unchanged?: unknown;
+      range?: unknown;
+      content_completeness?: unknown;
+      remaining_ranges?: unknown;
+    };
+    if (record.path !== candidatePath) return false;
+    const holds = (typeof record.code === "string" && record.code !== "")
+      || (typeof record.code_unchanged === "string" && record.code_unchanged !== "");
+    if (!holds || record.content_completeness === "partial") return false;
+    if (Array.isArray(record.remaining_ranges) && record.remaining_ranges.length > 0) return false;
+    return parseLineSpan(record.range)?.[0] === 1;
+  });
+}
+
+/**
+ * GATE-C1 (2026-09-22): true when THIS pack carries two or more independent
+ * per-clause obligations (`readCodeTaskPack.ts`'s `REQUEST_ITEM_OBLIGATION_PREFIX`,
+ * "request-item:") on its evidence model — the marker of a COMPOSITE query
+ * ("explain X and Y") whose candidate-list is one-file-per-concern, not a
+ * single concern with several mutually-exclusive candidate SITES. Read off
+ * `execution_contract.evidence_model.claims`, which `buildDecisionEvidenceModel`
+ * populates unconditionally (accepted or not, certified or not) — so this is
+ * available even on an `awaiting-input` choose-candidate contract. A
+ * hand-built contract that omits `evidence_model` entirely (W9's unit
+ * fixtures; a legacy/compact receipt shape) reads as "not multi-concern",
+ * which is the safe default: it keeps firing exactly as the single-concern
+ * branch always has, never newly suppressing a shape this check cannot see.
+ */
+function hasMultiConcernRequestItems(result: SemanticSurfaceCarrier): boolean {
+  const contract = (result as unknown as { execution_contract?: { evidence_model?: { claims?: unknown } } }).execution_contract;
+  const claims = contract?.evidence_model?.claims;
+  if (!Array.isArray(claims)) return false;
+  let count = 0;
+  for (const claim of claims) {
+    const id = (claim as { id?: unknown } | null)?.id;
+    if (typeof id === "string" && id.startsWith(REQUEST_ITEM_CLAIM_PREFIX)) count += 1;
+    if (count >= 2) return true;
+  }
+  return false;
+}
+
+/** Mirrors `readCodeTaskPack.ts`'s `REQUEST_ITEM_OBLIGATION_PREFIX` (private to that module). */
+const REQUEST_ITEM_CLAIM_PREFIX = "request-item:";
 
 /** Only explicitly classified lexical surfaces are outside canonical continuation. */
 export function semanticFrontierNextAllowed(
@@ -522,6 +598,40 @@ function parseLineSpan(value: unknown): [number, number] | undefined {
   return [start, end];
 }
 
+/** R-B3 (ruling 4): `span` minus every hole — the lines of a served surface that are actually on the wire. */
+function subtractSpans(
+  span: [number, number] | undefined,
+  holes: ReadonlyArray<[number, number] | undefined>,
+): Array<[number, number]> {
+  if (span === undefined) return [];
+  let pieces: Array<[number, number]> = [span];
+  for (const hole of holes) {
+    if (hole === undefined) continue;
+    const next: Array<[number, number]> = [];
+    for (const [start, end] of pieces) {
+      if (hole[1] < start || hole[0] > end) {
+        next.push([start, end]);
+        continue;
+      }
+      if (hole[0] > start) next.push([start, hole[0] - 1]);
+      if (hole[1] < end) next.push([hole[1] + 1, end]);
+    }
+    pieces = next;
+  }
+  return pieces;
+}
+
+/** R-B3 (ruling 4): true when the union of `spans` covers every line of `target` (touching spans chain; a one-line gap does not). */
+function spansCoverSpan(spans: ReadonlyArray<[number, number]>, target: [number, number]): boolean {
+  let reached = target[0] - 1;
+  for (const [start, end] of [...spans].sort((a, b) => a[0] - b[0])) {
+    if (start > reached + 1) break;
+    if (end > reached) reached = end;
+    if (reached >= target[1]) return true;
+  }
+  return reached >= target[1];
+}
+
 /**
  * The union of `spans`, merged over touching/overlapping neighbours, as
  * `"<start>-<end>"` strings. A demoted row's `remaining` must cover the window
@@ -854,13 +964,50 @@ export function unservedAddressableRepack(result: TaskPackResult): ToolCall | un
   const surfaces = Array.isArray(result.surfaces) ? result.surfaces : [];
   const served = new Set<string>();
   let anyServed = false;
+  // R-B3 (2026-09-21, orchestrator ruling 4) — NO RECEIPT-ONLY `next`. A row is
+  // "unserved" only when its WINDOW is, never merely because its HANDLE differs
+  // from the served surface's. Confirmed live (VS Code config, 28 cells of
+  // R-B1's matrix): `TL_FOLD_SMALL_REMAINDER` widens a served surface to the
+  // whole file under a FRESH handle while `frontier_index` keeps the pre-fold
+  // handle of the same path, so this last resort re-offered a window the same
+  // response had just served in full — and its execution could only return a
+  // `read.receipt`, a dead end for a verbatim follower. The same holds for a
+  // row whose bytes the caller already holds from earlier in this epoch (a
+  // `code_unchanged` surface). Windows held here: every served surface's
+  // range minus its `remaining_ranges`, and every held surface's range, by path.
+  const held = new Map<string, Array<[number, number]>>();
+  const hold = (path: string, span: [number, number] | undefined): void => {
+    if (span === undefined) return;
+    const list = held.get(path) ?? [];
+    list.push(span);
+    held.set(path, list);
+  };
   for (const surface of surfaces) {
     const row = surface as unknown as Record<string, unknown>;
     const code = row["code"];
+    const path = typeof row["path"] === "string" ? row["path"] : undefined;
+    const range = typeof row["range"] === "string" ? row["range"] : undefined;
+    if (typeof code === "string" && code !== "") {
+      if (path !== undefined && range !== undefined) {
+        const holes = Array.isArray(row["remaining_ranges"])
+          ? (row["remaining_ranges"] as unknown[]).map((entry) => (typeof entry === "string" ? parseLineSpan(entry) : undefined))
+          : [];
+        for (const piece of subtractSpans(parseLineSpan(range), holes)) hold(path, piece);
+      }
+    } else if (typeof row["code_unchanged"] === "string" && path !== undefined && range !== undefined) {
+      hold(path, parseLineSpan(range));
+    }
     if (typeof code !== "string" || code === "") continue;
     anyServed = true;
     if (typeof row["handle"] === "string") served.add(row["handle"]);
   }
+  const windowHeld = (handle: string, path: string): boolean => {
+    const entry = handleTable.get(handle);
+    if (entry === undefined || entry.path !== path) return false;
+    const span = parseLineSpan(entry.range);
+    if (span === undefined) return false;
+    return spansCoverSpan(held.get(path) ?? [], span);
+  };
   if (!anyServed) return undefined;
   const index = (result as unknown as Record<string, unknown>)["frontier_index"];
   if (!Array.isArray(index)) return undefined;
@@ -887,6 +1034,7 @@ export function unservedAddressableRepack(result: TaskPackResult): ToolCall | un
     const path = row["path"];
     if (typeof handle !== "string" || handle === "" || served.has(handle)) continue;
     if (typeof path !== "string" || path === "" || seenPaths.has(path) || unreadable.has(path)) continue;
+    if (windowHeld(handle, path)) continue; // R-B3 ruling 4: would only return a receipt
     seenPaths.add(path);
     targets.push({ handle });
     if (targets.length >= UNSERVED_ADDRESSABLE_REPACK_CAP) break;
@@ -912,7 +1060,15 @@ export function discoveryBundleNext(
   // canonicalDecision.ts. Independent of `result.qref` (a caller-ranged
   // request rarely has one) and of `guardEnabled` (`unservedCallerRangedTargetsNext`
   // applies its own per-surface SF-guard check).
-  const callerRangedBundle = unservedCallerRangedTargetsNext(result);
+  //
+  // TL-01 (2026-09-21): at the SINGLE-target floor. This function is only ever
+  // consulted once a `discover` decision exists (the wire projector rebuilding
+  // that decision's `next`, the W9 read-only candidate-list arm, and the
+  // last-resort chain BELOW `servedDocumentZoom`), so unlike the F2 seat in
+  // `deriveCanonicalTaskDecisionRaw` it preempts no single-document zoom — and
+  // a `discover` whose wire `next` does not name the caller's own undelivered
+  // range is the defect, not the fix.
+  const callerRangedBundle = unservedCallerRangedTargetsNext(result, 1);
   if (callerRangedBundle !== undefined) return callerRangedBundle;
   if (!semanticFrontierNextAllowed(result, guardEnabled) || result.coverage === "complete" || typeof result.qref !== "string" || result.qref === "") return undefined;
   const surfaces = semanticSurfaces(result);
@@ -921,10 +1077,51 @@ export function discoveryBundleNext(
     if (typeof value === "string" && value !== "" && !paths.includes(value) && paths.length < DISCOVERY_BUNDLE_PATH_CAP) paths.push(value);
   };
   if (result.coverage_reason === "candidate-list") {
+    // R-B3 (2026-09-21, orchestrator ruling 4) — never a receipt-only `next`.
+    //
+    // GATE-C1 (2026-09-22): R-B3's first cut gated EVERY candidate-list firing
+    // on `pathServedWholeInThisPack`. That reopened the W9 regression
+    // (`discoveryBundleNext.spec.ts`'s read-only candidate-list suite, all 4
+    // cases): "choose-candidate close" (readCodeTaskPack.ts's
+    // `candidateChoicePending`) never reaches this branch until EVERY
+    // candidate surface already carries served code, so on a genuine
+    // choose-candidate-closed pack every candidate looks "served whole" by
+    // construction — the gate suppressed the bundle unconditionally,
+    // defeating the branch it was meant to narrow, not just the live
+    // over-fire it targeted.
+    //
+    // The two cases are genuinely different shapes, confirmed by a live
+    // trace of each: W9's branch exists for a SINGLE concern with several
+    // MUTUALLY EXCLUSIVE candidate sites ("which of these is the drive-mount
+    // bug" — the a4 m365-drive-mount repro) — re-invoking the pack there
+    // resolves which candidate is right, so it is worth firing regardless of
+    // whether the bytes are already known. R-B1's matrix cells (VS Code
+    // config, `requestItemGateMatrix`'s `en|Explain|and|implemented|real`)
+    // are a COMPOSITE query ("explain X and Y") whose two candidates each
+    // answer a DIFFERENT concern and are already fully embedded — there
+    // re-invoking `mode:"task_pack"` over the same paths hits
+    // `compactReceiptFromRecord`'s dedup match and collapses to a bodyless
+    // `read.receipt`, discarding a certificate the same evidence would
+    // otherwise earn (traced live: the identical rebuild inline, before the
+    // dedup match, reaches `act.answer`). `hasMultiConcernRequestItems`
+    // (this pack carries 2+ independent per-clause "request-item:" claims) is
+    // exactly that distinction, so the whole-file check is scoped to it:
+    // a single-concern list keeps firing unconditionally (W9); a
+    // multi-concern one still requires an uncovered candidate.
+    const multiConcern = hasMultiConcernRequestItems(result);
+    let hasUncoveredCandidate = false;
     for (const surface of surfaces) {
       if (guardEnabled && isSemanticFrontierContinuationOptional(surface)) continue;
-      add((surface as { path?: unknown }).path);
+      const candidatePath = (surface as { path?: unknown }).path;
+      if (
+        typeof candidatePath === "string" && candidatePath !== ""
+        && (!multiConcern || !pathServedWholeInThisPack(result, candidatePath))
+      ) {
+        hasUncoveredCandidate = true;
+      }
+      add(candidatePath);
     }
+    if (!hasUncoveredCandidate) return undefined;
   } else {
     const graph = result.wiring?.evidence_graph;
     if (graph === undefined || graph.relations.length === 0) return undefined;
@@ -1326,14 +1523,31 @@ export function decisionGradeLiteralAbsenceSubject(
  * answer case (kept untouched below; this function returns `undefined` and
  * lets that path run whenever fewer than 2 targets qualify).
  *
- * SCOPE GUARD: `isCallerRangeSurface` (sfWithholdingMarks.ts) must mark the
- * surface — set from `why` containing "caller-supplied" BEFORE trimToCap can
- * clear it (its own Phase B unconditionally drops `why`; see
- * `reconcileCallerRangeRemaining`'s doc comment for why a post-trim `why`
- * check silently matches nothing). A surface TL located FOR a query is never
- * marked, so a genuine query/answer-route pack's single-document zoom is
- * never redirected here — only a pack seeded directly from the caller's own
- * `targets[]`/`paths[]` request.
+ * SCOPE GUARD (refined 2026-09-21/B1): `isExplicitRangeSurface`
+ * (sfWithholdingMarks.ts) must mark the surface — set in `candidateToSurface`
+ * (readCodeTaskPack.ts) from `candidate.callerRange === true`, captured at
+ * surface-construction time, the only point with direct access to that bit (it
+ * never survives onto the returned TaskPackSurface as an ordinary field). A
+ * surface TL located FOR a query is never marked, so a genuine query/
+ * answer-route pack's single-document zoom is never redirected here — nor is a
+ * pack seeded directly from the caller's own `targets[]`/`paths[]` request
+ * UNLESS that request's own entry carried an explicit `range`/`ranges`: a bare
+ * `targets:[{path}]` entry — whether caller-typed or re-offered by a PREVIOUS
+ * server `next` (B1's repro: a re-offered candidate is a seed, not a request
+ * to read a specific window in full) — is never marked either, so it is never
+ * redirected here.
+ *
+ * NOT `isCallerRangeSurface` (the P2/2026-09-19 mark, still set from `why`
+ * containing "caller-supplied" with no `.symbol` — see its own call site in
+ * `dedupeTrimAndPersist`): that mark covers every NAMED target, ranged or not,
+ * and stays that way on purpose, because `settleCallerRangeDelivery` /
+ * `reconcileCallerRangeRemaining` / `applyFoldSmallRemainder` (disclosure/
+ * remaining_ranges-accuracy, never a withholding gate) still need it broad —
+ * `firstPackCompleteness.spec.ts`'s "B" suite (pre-existing, unrelated to this
+ * wave) proved that narrowing THAT mark left a range-less named target's
+ * stale `remaining_ranges` unreconciled. `isExplicitRangeSurface` is the new,
+ * narrower, WITHHOLDING-GATE-ONLY signal this function (and `discoveryBundleNext`'s
+ * own call below) uses instead.
  *
  * `remaining_ranges` is read AS RECONCILED by
  * `reconcileCallerRangeRemaining` (one precise window per affected surface
@@ -1347,14 +1561,28 @@ export function decisionGradeLiteralAbsenceSubject(
 const CALLER_RANGED_BUNDLE_CAP = 8;
 const DROPPED_BY_BYTE_BUDGET_RE = /^dropped-by-byte-budget:.*? \(re-request via read_file targets=\[\{handle:"([^"]+)"\}\]\)/;
 
-function unservedCallerRangedTargetsNext(result: TaskPackResult): ToolCall | undefined {
+/**
+ * TL-01 (2026-09-21): `minTargets` exists so the F2 seat above keeps its
+ * reviewed floor of 2 — it is checked AHEAD of `requiredAnswerDocumentZoom`
+ * precisely because a multi-target caller request must not be answered with
+ * one document's zoom, and that argument does not extend to a single target.
+ * The SINGLE-target floor is used only at seats where no single-document zoom
+ * is being preempted: the gate in front of `hasCertificateForTerminal` (a
+ * caller-ranged surface with undelivered lines is not closed discovery,
+ * whatever the certificate says), and `discoveryBundleNext`, which is only ever
+ * consulted once a `discover` decision already exists.
+ */
+function unservedCallerRangedTargetsNext(result: TaskPackResult, minTargets = 2): ToolCall | undefined {
   // `discoveryBundleNext` is reached from the WIRE projector
   // (decisionWire.ts projectSemanticFrontierNext), which is also driven with
   // minimal decision-shaped results that carry no `surfaces` at all. Nothing
   // caller-ranged can be pending there, and the projector must never throw.
   if (!Array.isArray(result.surfaces)) return undefined;
+  // B1 fix (2026-09-21): `isExplicitRangeSurface`, NOT `isCallerRangeSurface`
+  // — see this function's own doc comment's "SCOPE GUARD" for why the two
+  // marks differ and why this withholding gate needs the narrower one.
   const affected = codeTaskPackSurfaces(result.surfaces).filter((surface) =>
-    isCallerRangeSurface(surface)
+    isExplicitRangeSurface(surface)
     && Array.isArray((surface as { remaining_ranges?: unknown }).remaining_ranges)
     && ((surface as { remaining_ranges?: unknown[] }).remaining_ranges?.length ?? 0) > 0
     && typeof surface.handle === "string"
@@ -1369,14 +1597,14 @@ function unservedCallerRangedTargetsNext(result: TaskPackResult): ToolCall | und
     }
   }
 
-  if (affected.length + droppedHandles.length < 2) return undefined;
+  if (affected.length + droppedHandles.length < minTargets) return undefined;
 
-  const targets: Array<{ handle: string; range?: string }> = [];
+  const targets: Array<{ path?: string; handle?: string; range?: string }> = [];
   for (const surface of affected) {
     const ranges = (surface as { remaining_ranges?: string[] }).remaining_ranges ?? [];
     for (const range of ranges) {
       if (targets.length >= CALLER_RANGED_BUNDLE_CAP) break;
-      targets.push({ handle: surface.handle, range });
+      targets.push({ ...callerRangedAddress(surface), range });
     }
     if (targets.length >= CALLER_RANGED_BUNDLE_CAP) break;
   }
@@ -1384,7 +1612,49 @@ function unservedCallerRangedTargetsNext(result: TaskPackResult): ToolCall | und
     if (targets.length >= CALLER_RANGED_BUNDLE_CAP) break;
     targets.push({ handle });
   }
-  return targets.length < 2 ? undefined : { tool: "read_file", arguments: { targets } };
+  // FIX-G (2026-09-27, eval-0927 P0): the continuation of a QUERY-BEARING pack
+  // re-enters the SAME task (its `qref`), never a query-less read. A bare
+  // `{targets}` re-entry loses every obligation the query minted (request
+  // items, facets), so the follow-up certified a terminal decision over
+  // evidence the task still lacked (measured: a facet `next` under
+  // `budget.bytes:7000` → partial delivery → bare `{targets}` → `act.edit`
+  // with 4 of 6 required constants never served). A pack with no query has no
+  // `qref`, so a plain multi-target ranged read (eval §5 / R01) is unchanged.
+  const qref = typeof result.qref === "string" && result.qref !== "" ? result.qref : undefined;
+  return targets.length < minTargets
+    ? undefined
+    : { tool: "read_file", arguments: { ...(qref !== undefined ? { qref } : {}), targets } };
+}
+
+/**
+ * TL-01 (2026-09-21) — ADDRESS A STILL-UNDELIVERED CALLER RANGE BY ITS PATH.
+ *
+ * MEASURED, not reasoned (plan-0143 §4 payload, `budget.bytes:6500`, both
+ * configs). `{handle, range}` targets are NOT promoted to a task pack
+ * (`server.ts`'s `pathlessExploratoryPaths` promotes on a PATH list), so the
+ * bundle landed on `read.batch` — and `read.batch` cannot page a single ranged
+ * entry: its aggregate ceiling serves "the item that CROSSES the ceiling in
+ * full (never split)" by reviewed design, and its wire shed ladder floors at
+ * ONE WHOLE ENTRY. With the caller's own per-response budget now inherited onto
+ * this continuation (R4), one 65-line × ~121 B window therefore could not fit
+ * any response at all: `refusal{cap-exceeded}`, no `next`, 133 of the caller's
+ * 150 lines abandoned. Naming the same windows by PATH re-enters the task-pack
+ * producer — the one that paged hop 0 correctly in the first place — and the
+ * identical payload converges 150/150 in five hops, every response inside the
+ * declared 6,500 B.
+ *
+ * So this is not a preference for one spelling: it is the difference between a
+ * continuation the receiving path can answer under the caller's cap and one it
+ * cannot. `handle` remains the address whenever `path` cannot stand on its own
+ * — an archive member's `outer!/member` virtual path, which only the
+ * `targets[].archive` form can express, and the wholly-dropped rows below,
+ * whose surface (and therefore whose requested window) is already gone.
+ */
+function callerRangedAddress(surface: { handle: string; path?: unknown }): { path: string } | { handle: string } {
+  const path = surface.path;
+  return typeof path === "string" && path !== "" && !path.includes("!/")
+    ? { path }
+    : { handle: surface.handle };
 }
 
 function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDecision | undefined {
@@ -1545,6 +1815,41 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
     return {
       kind: "await-input",
       reason: `this request names ${unreadableNamed.map((entry) => `${entry.path} (${entry.reason})`).join(", ")}; no served evidence covers ${unreadableNamed.length === 1 ? "it" : "them"} and this server cannot read ${unreadableNamed.length === 1 ? "it" : "them"}`,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // TL-01 (2026-09-21) — A CALLER'S OWN RANGE THAT WAS NOT DELIVERED IS NOT
+  // CLOSED DISCOVERY, NOT EVEN WHEN THERE IS ONLY ONE OF THEM.
+  //
+  // Same seat and same reasoning as the three zooms above, one axis out. The F2
+  // bundle at the top of this chain abstains below two targets — rightly, since
+  // it is checked ahead of `requiredAnswerDocumentZoom` and must not preempt a
+  // genuine single-document zoom. But with exactly ONE partial caller-ranged
+  // surface nothing else caught it either: `hasCertificateForTerminal` has no
+  // "does any caller-ranged surface still carry remaining_ranges?" check, and
+  // `servedDocumentZoom` sits BELOW this gate and so was never reached.
+  // Measured (plan-0143 §4 payload at budget.bytes 20000, both configs): an
+  // `act.edit` with `evidence[alpha].remaining:["83-90"]` and no `next` at all
+  // — a terminal certificate handed out over eight of the caller's own lines
+  // this server had just admitted it did not send.
+  //
+  // Placed AFTER `requiredAnswerDocumentZoom`/the two obligation zooms so every
+  // shape they own is unchanged, and BEFORE the certificate gate so the
+  // terminal is withheld rather than published-then-contradicted. Scoped (via
+  // `unservedCallerRangedTargetsNext`) by `isExplicitRangeSurface` (refined
+  // 2026-09-21/B1; see that function's own "SCOPE GUARD"), so a surface TL
+  // located FOR a query can never land here — nor can a range-less named
+  // target, caller-typed or server-`next`-re-offered.
+  // -------------------------------------------------------------------------
+  const callerRangedSingle = canonicalNextAllowed
+    ? unservedCallerRangedTargetsNext(result, 1)
+    : undefined;
+  if (callerRangedSingle !== undefined) {
+    return {
+      kind: "discover",
+      next_call: callerRangedSingle,
+      reason: "caller-named ranged targets still have undelivered lines",
     };
   }
 

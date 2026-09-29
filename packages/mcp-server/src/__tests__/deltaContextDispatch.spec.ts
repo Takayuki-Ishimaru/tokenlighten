@@ -20,13 +20,14 @@
  *       body (delta>full -> full).
  *   (f) MULTI-HUNK edits[] batch -> one enclosing region, still reconstructing.
  */
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const require = createRequire(import.meta.url);
 const tsx = require.resolve("tsx/cli");
@@ -42,10 +43,10 @@ const spawned: RpcServer[] = [];
 const tmpDirs: string[] = [];
 
 function startServer(root: string, env: Record<string, string>): RpcServer {
-  const child: ChildProcess = spawn(process.execPath, [tsx, bin, "--workspace", root, "--allow-write"], {
+  const child: ChildProcess = spawn(process.execPath, [tsx, "--liftoff-only", bin, "--workspace", root, "--allow-write"], {
     cwd: root,
     env: { ...process.env, TOKENLIGHTEN_ALLOWED_PARENTS: os.homedir(), ...env },
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
   });
   let pending = "";
   let stderr = "";
@@ -77,7 +78,7 @@ function startServer(root: string, env: Record<string, string>): RpcServer {
       waiters.set(id, (value) => { clearTimeout(timer); resolve(value); });
       child.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     }),
-    kill: () => { try { child.kill("SIGKILL"); } catch { /* already stopped */ } },
+    kill: () => { try { killServerGroup(child); } catch { /* already stopped */ } },
   };
   spawned.push(server);
   return server;
@@ -209,6 +210,14 @@ function reconstruct(entries: EvidenceEntry[], diskText: string): string {
     .toBe(diskLines.length);
   return `${out.join("\n")}\n`;
 }
+
+// Every server is started inside one test (`startServer` self-pushes into
+// `spawned`, never reused across `it`s — test "(a)" already kills its own 2
+// inline); stop the rest now so this file's 6 tests never hold all their
+// servers alive at once.
+afterEach(() => {
+  for (const s of spawned.splice(0)) s.kill();
+});
 
 afterAll(() => {
   for (const s of spawned.splice(0)) s.kill();

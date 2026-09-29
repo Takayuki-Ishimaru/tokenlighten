@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -35,11 +36,11 @@ function write(root: string, rel: string, content: string): void {
 }
 
 function startServer(root: string, allowWrite = false): ServerHandle {
-  const args = [TSX_CLI, BIN_TS, root];
+  const args = [TSX_CLI, "--liftoff-only", BIN_TS, root];
   if (allowWrite) args.push("--allow-write");
   const child: ChildProcess = spawn(process.execPath, args, {
     cwd: root,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env },
   });
   let stdout = "";
@@ -102,7 +103,7 @@ function startServer(root: string, allowWrite = false): ServerHandle {
   const handle = {
     initialize,
     call,
-    kill: () => { try { child.kill("SIGKILL"); } catch { /* best effort */ } },
+    kill: () => { try { killServerGroup(child); } catch { /* best effort */ } },
   };
   servers.push(handle);
   return handle;

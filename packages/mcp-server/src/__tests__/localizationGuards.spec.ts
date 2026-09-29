@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 import {
   getSession,
   otherActiveRoots,
@@ -68,8 +69,8 @@ function writeFile(dir: string, rel: string, content: string): void {
 function startServer(opts: { cwd: string; args: string[]; env?: Record<string, string> }): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, ...opts.args],
-    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...(opts.env ?? {}) } },
+    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
+    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, ...(opts.env ?? {}) } },
   );
 
   let stdoutBuf = "";
@@ -119,7 +120,7 @@ function startServer(opts: { cwd: string; args: string[]; env?: Record<string, s
   }
 
   function kill(): void {
-    try { child.kill("SIGKILL"); } catch { /* ok */ }
+    try { killServerGroup(child); } catch { /* ok */ }
   }
 
   return { initialize, rpc, kill };

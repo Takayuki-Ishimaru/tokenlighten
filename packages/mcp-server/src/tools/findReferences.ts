@@ -382,7 +382,14 @@ export function looksLikeComment(line: string, language: string): boolean {
   return false;
 }
 
-const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
+// P1-9 (eval-0927 review-r2 #9, perfEdge): ASCII-only, so a genuinely
+// identifier-shaped name outside ASCII (`größe`) was refused as "neither an
+// identifier nor a fully qualified Class::method name" -- a real symbol
+// this tool could otherwise scan for just as well as any ASCII one.
+// ECMAScript ID_Start/ID_Continue shape (ID_Start covers `\p{L}`/`\p{Nl}`;
+// ID_Continue adds `\p{N}`/`\p{Mn}`/`\p{Mc}`/`\p{Pc}` — combining marks and
+// connector punctuation a Unicode identifier may continue with, e.g. Devanagari).
+const IDENT_RE = /^[\p{L}\p{Nl}_$][\p{L}\p{N}\p{Mn}\p{Mc}\p{Pc}_$]*$/u;
 
 // ---------------------------------------------------------------------------
 // FX-OH F7 (2026-09-04) — A QUALIFIED `Class::method` USED TO SCAN NOTHING.
@@ -947,7 +954,21 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   const cursorPos = resolvedCursor.pos;
   const cursorInvalid = resolvedCursor.cursorInvalidNote;
 
-  const needle = new RegExp(`\\b${escapeRegExp(symbol)}\\b`, "g");
+  // P1-9 (eval-0927 review-r2 #9, perfEdge): JS's `\b` is ASCII-only word-
+  // boundary, even under the `u` flag -- for a symbol starting or ending in
+  // a non-ASCII identifier character (`größe`, `étage`), the character
+  // right before/after it in real code (a space, a paren) is ALSO non-`\w`
+  // by that ASCII definition, so `\b` never fires there and the walk below
+  // silently found nothing, even once `IDENT_RE` (above) stopped refusing
+  // the input outright. A negative look-around against the SAME
+  // ID_Continue-shaped class `IDENT_RE` itself uses generalizes the
+  // boundary check the identical way; for a purely ASCII `symbol` this is
+  // the exact same test `\b` already ran (every ASCII identifier character
+  // is also in this class), so no existing match shifts.
+  const needle = new RegExp(
+    `(?<![\\p{L}\\p{N}\\p{Mn}\\p{Mc}\\p{Pc}_$])${escapeRegExp(symbol)}(?![\\p{L}\\p{N}\\p{Mn}\\p{Mc}\\p{Pc}_$])`,
+    "gu",
+  );
 
   // Full-recall: findReferences must see EVERY reference to be correct, so it
   // opts out of build-dir/generated noise filtering (a real `src/build/` or
@@ -1010,6 +1031,13 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
       continue;
     }
     scannedFiles++;
+    // `needle` is a case-sensitive `\b<symbol>\b`, so a file that does not
+    // contain `symbol` at all cannot match on any line: it needs neither the
+    // line split, nor the tree-sitter lexical parse, nor the resume sha
+    // (`fileShas` is only read back for the file holding the last served
+    // reference). Measured 2026-09-27 on an 11.6k-file workspace: parsing
+    // every scanned file was ~60% of a warm task_pack's wall time.
+    if (!raw.includes(symbol)) continue;
     fileShas.set(f.relPath, shaOfText(raw));
     const lines = raw.split(/\r?\n/);
     const lexicalSegments = await collectLexicalSegments(raw, f.language);

@@ -112,6 +112,15 @@ interface SessionMetaState {
   functionalValidation?: FunctionalValidationObligation;
   /** D3 (2026-08-01): locate calls this session already executed — query → candidate handles. */
   executedLocates?: Map<string, string[]>;
+  /**
+   * GATE-A (2026-09-21, v0.14.4 candidate item 2): a one-line disclosure an
+   * INDEPENDENT (unbound) caller-ranged read leaves for the in-flight call's
+   * own response to attach, naming a path this epoch's continuation ledger
+   * already served under a since-changed revision that the current request
+   * does not itself re-cover. Consumed (and cleared) once, immediately after
+   * the call that produced it returns — see `consumeIndependentRangeStalenessNote`.
+   */
+  independentRangeStalenessNote?: string;
 }
 
 interface WorkspacePackLog {
@@ -756,6 +765,33 @@ export function consultAwaitingInputLatch(
 export function clearAwaitingInputLatch(workspaceRoot: string): void {
   const log = _logs.get(_logKey(workspaceRoot));
   if (log?.meta.awaitingInput !== undefined) log.meta.awaitingInput = undefined;
+}
+
+// ---------------------------------------------------------------------------
+// GATE-A (2026-09-21, v0.14.4 candidate item 2): independent-read staleness
+// disclosure. Single-slot, workspace-scoped, exactly like the awaiting-input
+// latch above — write once from `admitCallerRangedContinuation` (server.ts),
+// read once immediately after the SAME call's dispatch returns, then cleared.
+// The narrow window in which a second, concurrent in-flight call for the SAME
+// workspace could read a note meant for a different call is the same
+// workspace-only (not lane-scoped) granularity `WorkspacePackLog` already
+// accepts for the awaiting-input latch; a misattributed note is a cosmetic
+// disclosure imprecision, never a correctness fault in the admission
+// decision itself (that decision is computed fresh, per call, from the
+// served-range ledger — this slot only carries prose).
+// ---------------------------------------------------------------------------
+
+/** GATE-A: stash the one-line disclosure this call's admission check produced. */
+export function stashIndependentRangeStalenessNote(workspaceRoot: string, note: string): void {
+  _getLog(workspaceRoot).meta.independentRangeStalenessNote = note;
+}
+
+/** GATE-A: consume (and clear) the disclosure stashed for `workspaceRoot`, if any. */
+export function consumeIndependentRangeStalenessNote(workspaceRoot: string): string | undefined {
+  const log = _logs.get(_logKey(workspaceRoot));
+  const note = log?.meta.independentRangeStalenessNote;
+  if (log !== undefined) log.meta.independentRangeStalenessNote = undefined;
+  return note;
 }
 
 // ---------------------------------------------------------------------------

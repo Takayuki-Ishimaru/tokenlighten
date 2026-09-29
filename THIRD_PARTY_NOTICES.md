@@ -116,7 +116,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | immediate@3.0.6 | MIT |  | https://github.com/calvinmetcalf/immediate |
 | inflight@1.0.6 | ISC | Isaac Z. Schlueter | https://github.com/npm/inflight |
 | inherits@2.0.4 | ISC |  | https://github.com/isaacs/inherits |
-| ip-address@10.5.0 | MIT | Beau Gunderson | https://github.com/beaugunderson/ip-address |
+| ip-address@10.7.2 | MIT | Beau Gunderson | https://github.com/beaugunderson/ip-address |
 | ipaddr.js@1.9.1 | MIT | whitequark | https://github.com/whitequark/ipaddr.js |
 | is-promise@4.0.0 | MIT | ForbesLindesay | https://github.com/then/is-promise |
 | isarray@1.0.0 | MIT | Julian Gruber | https://github.com/juliangruber/isarray |
@@ -6941,7 +6941,7 @@ THE SOFTWARE.
 
 ### MIT — SHA-256 f8d791359a50cbcac82c29cb7b0b1b889b28be76fdd35b8ee33f0f7c8704702a
 
-Applies to: `ip-address@10.5.0`
+Applies to: `ip-address@10.7.2`
 
 ```text
 Copyright (C) 2011 by Beau Gunderson

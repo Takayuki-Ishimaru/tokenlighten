@@ -54,6 +54,7 @@ import { callTool } from "../server.js";
 import { getSession, tokenizeForEpoch } from "../state/session.js";
 import { queryServedSurfaces } from "../util/packServeLog.js";
 import { resetAll as resetAllSessions } from "../util/session.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 // ---------------------------------------------------------------------------
 // Fixture and queries — the round-14 `r14_m` reproduction, verbatim in shape.
@@ -148,8 +149,8 @@ interface ServerHandle {
 function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, cwd, "--allow-write"],
-    { cwd, stdio: ["pipe", "pipe", "pipe"], env },
+    [TSX_CLI, "--liftoff-only", BIN_TS, cwd, "--allow-write"],
+    { cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env },
   );
   let stdout = "";
   let stderr = "";
@@ -218,7 +219,7 @@ function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
     },
     kill() {
       try {
-        child.kill("SIGKILL");
+        killServerGroup(child);
       } catch {
         /* already gone */
       }
@@ -562,11 +563,20 @@ describe("FX-K: a CAP-OVERFLOWING pack books only what it shipped, flag off", ()
     });
     const pack = JSON.parse(res.content[0]?.text ?? "{}") as { kind?: string; evidence?: WireRow[] };
     expect(pack.kind).toBe("read.task_pack");
-    const shipped = (pack.evidence ?? []).map((row) => row.path);
-    expect(shipped, "precondition: the byte budget really shed a whole surface")
-      .not.toContain("src/paymentApi.ts");
-    expect(shipped).toContain("src/payment.ts");
-    expect(shipped).toContain("src/checkout.ts");
+    const rows = pack.evidence ?? [];
+    // TL-01 (2026-09-21): the drop this case called "Phase F" was in fact
+    // `dedupeTrimAndPersist`'s post-contract shed tier, whose caller-named
+    // protection (WP-P2 B) was dead code because it re-read a `why` that
+    // `trimToCap` Phase B had already cleared. With that guard live a
+    // caller-named path keeps its addressable row and gives up BODY bytes
+    // instead — measured on this exact fixture across every admissible budget.
+    // So the set under test is "bytes this response did not send", which
+    // covers both shapes (no row, or a row with no body), and the
+    // complementary ⊇ direction below keeps the case from ever passing
+    // vacuously.
+    const shipped = rows.filter((row) => (row.body ?? "") !== "").map((row) => row.path);
+    const named = ["src/payment.ts", "src/checkout.ts", "src/paymentApi.ts"];
+    const withheld = named.filter((p) => !shipped.includes(p));
 
     const session = getSession(ws);
     const logged = queryServedSurfaces(ws, ws, { epochTokens: tokenizeForEpoch(query) })
@@ -577,11 +587,15 @@ describe("FX-K: a CAP-OVERFLOWING pack books only what it shipped, flag off", ()
       expect(session.admissibleEditPaths, `${p} shipped a body and must stay editable`).toContain(p);
       expect(logged, `${p} shipped a body and must stay in the cumulative log`).toContain(p);
     }
-    // The FX-K direction: the spliced surface sent no bytes, so it carries no
-    // write authority and makes no cumulative-coverage claim.
-    expect(session.admissibleEditPaths, "a Phase-F spliced surface must not be editable")
-      .not.toContain("src/paymentApi.ts");
-    expect(logged, "a Phase-F spliced surface must not be logged as served")
-      .not.toContain("src/paymentApi.ts");
+    // The FX-K direction: a surface whose bytes never shipped carries no write
+    // authority and makes no cumulative-coverage claim.
+    for (const p of withheld) {
+      expect(session.admissibleEditPaths, `a surface the response never sent must not be editable: ${p}`)
+        .not.toContain(p);
+      expect(logged, `a surface the response never sent must not be logged as served: ${p}`)
+        .not.toContain(p);
+    }
+    expect(shipped.length + withheld.length, "every named module is accounted for one way or the other")
+      .toBe(named.length);
   }, 90000);
 });

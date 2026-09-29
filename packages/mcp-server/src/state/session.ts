@@ -762,6 +762,74 @@ export interface WorkspaceSession {
   /** Content-hash-bound cumulative line ranges served for each path. */
   servedRangeLedger: Map<string, ServedRangeLedgerState>;
 
+  /**
+   * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): paths a CALLER-RANGED
+   * continuation has touched during the task epoch currently in progress —
+   * the gate `servedRangeStaleness` consults before trusting
+   * `servedRangeLedger`'s stored sha as "this epoch's own baseline" for that
+   * path. `servedRangeLedger` is deliberately NOT epoch-scoped (see
+   * `verificationSurfacesServed`'s doc comment for the sibling reasoning:
+   * "already served" is a session-lifetime fact) — but that is exactly what
+   * makes it unsafe, on its own, to answer "did THIS continuation chain's
+   * OWN earlier hop already serve different bytes of this path", since an
+   * unrelated PAST task in the same lane could have left a stale sha behind
+   * for a path this genuinely new task has never touched. Gating on
+   * membership here first, and clearing this set on `task.epoch:"new"`
+   * (`guardExecutionDiscovery`, alongside its sibling per-epoch resets),
+   * makes a fresh epoch's first touch of any path unconditionally safe: no
+   * entry survives from an epoch that already ended, so the very first
+   * caller-ranged read of THIS epoch always finds "not watched yet" and
+   * skips the sha comparison entirely, matching today's behaviour exactly.
+   * Bounded like `servedRangeLedger` (oldest-first eviction) so a very long
+   * multi-file task cannot grow this without limit.
+   */
+  epochRangeWatch: Set<string>;
+
+  /**
+   * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): path -> the sha a stale-
+   * continuation refusal already disclosed for it, this epoch. Prevents an
+   * infinite refusal loop: the pre-flight refusal
+   * (`admitCallerRangedContinuation`, server.ts) runs BEFORE the real serve,
+   * so it never itself advances `servedRangeLedger`'s stored sha — a
+   * follower that reissues the refusal's OWN `next` verbatim would otherwise
+   * be refused again forever, since nothing ever reaches the real serve that
+   * updates the ledger. Once a (path, sha) pair has been disclosed,
+   * `servedRangeStaleness` admits that exact sha through, letting the real
+   * read proceed and `recordServedRange` update the ledger normally — a
+   * DIFFERENT later sha for the same path is a new disclosure. Cleared with
+   * `epochRangeWatch` on `task.epoch:"new"` for the identical reason.
+   */
+  acknowledgedStaleSha: Map<string, string>;
+
+  /**
+   * GATE-A2 (plan-0143 §4/§8.1, R04, 2026-09-21): path -> the "start-end"
+   * windows THIS SERVER ITSELF has minted, this epoch + lane, as the
+   * undelivered remainder of a caller-ranged read — i.e. exactly what a
+   * `next`/`remaining_ranges` this process wrote for that path promised.
+   * Written from ONE seat, `protocol/envelope.ts`'s `canonicalToolCall` (see
+   * its own doc comment on why that is the single place every emitted
+   * continuation passes through); read by `admitCallerRangedContinuation`
+   * (server.ts) — see `mintRangedContinuationWindow`'s doc comment for the
+   * full reasoning.
+   *
+   * WHY A SEPARATE REGISTRY FROM `servedRangeLedger`/`epochRangeWatch`.
+   * Those answer "what has this path already DELIVERED, and under which
+   * sha" — a fact about the past. Telling a genuine continuation (the
+   * caller advancing a promise THIS SERVER made) from an independent read
+   * of a brand-new window needs a fact about the PROMISE itself: an
+   * independent read also asks for lines `servedRangeLedger` has never
+   * seen, but no `next` this process wrote ever named it.
+   *
+   * Cleared with `epochRangeWatch`/`acknowledgedStaleSha` on
+   * `task.epoch:"new"` (`guardExecutionDiscovery`) for the identical
+   * reason: a newly declared task has been handed no promise of its own
+   * yet. Bounded like `servedRangeLedger` (oldest-first path eviction via
+   * the shared `SERVED_RANGE_LEDGER_PATH_CAP`, capped spans per path) —
+   * fail-safe, since a dropped entry can only make a later request look
+   * MORE independent (served fresh) than it truly is, never the reverse.
+   */
+  mintedRangedWindows: Map<string, string[]>;
+
   /** Content-hash-bound sheet ranges served by artifact reads. */
   artifactServedRangeLedger: Map<string, ArtifactServedRangeState>;
 
@@ -1862,6 +1930,9 @@ function _emptySession(): WorkspaceSession {
     pathOrSearchEditsWithoutHandle: 0,
     repeatedReadsPerPathRange: new Map(),
     servedRangeLedger: new Map(),
+    epochRangeWatch: new Set(),
+    acknowledgedStaleSha: new Map(),
+    mintedRangedWindows: new Map(),
     artifactServedRangeLedger: new Map(),
     openReadRequests: new Map(),
     pendingServeSpans: [],
@@ -4996,6 +5067,19 @@ export function guardExecutionDiscovery(
     // that just ended must not carry forward and inflate the new task's own
     // count.
     session.serialSingleTargetReads = 0;
+    // TL-06 (plan-0143 §4/§8.1, R04): "which paths THIS continuation chain
+    // has already touched" is exactly as task-shaped as the ledgers above —
+    // a newly declared task has served nothing of its own yet, so a mid-chain
+    // staleness comparison must never reach across an epoch boundary into a
+    // predecessor task's leftovers. See `epochRangeWatch`'s own doc comment.
+    session.epochRangeWatch.clear();
+    session.acknowledgedStaleSha.clear();
+    // GATE-A2 (plan-0143 §4/§8.1, R04, 2026-09-21): same reasoning as the two
+    // clears above — a newly declared task has been promised nothing of its
+    // own yet, so a mid-chain minted-window check must never reach across an
+    // epoch boundary into a predecessor task's promises. See
+    // `mintedRangedWindows`'s own doc comment.
+    session.mintedRangedWindows.clear();
   }
   const fence = session.executionFence;
   if (args["taskEpoch"] === "new") {
@@ -6929,6 +7013,158 @@ export function servedRangeReceipt(
     complete: unserved.length === 0,
     ...(servedBy !== undefined ? { served_by: servedBy } : {}),
   };
+}
+
+/**
+ * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): marks `filePath` as touched by
+ * a caller-ranged continuation during the task epoch in progress — see
+ * `WorkspaceSession.epochRangeWatch`'s doc comment for why this gate exists
+ * alongside `servedRangeLedger` rather than reading that ledger alone.
+ *
+ * Called BEFORE the actual body is assembled (a pre-flight admission check,
+ * mirroring `admitTaskPackBudget`'s position ahead of the builder), so this
+ * is intentionally a separate, idempotent write, not folded into
+ * `recordServedRange` — the fenced booking function
+ * (`fxnBookingSettlementFence.spec.ts`) enumerates every one of ITS call
+ * sites exactly, and this is a different fact ("a chain touched this path
+ * this epoch") recorded at a different time (before the read, not after the
+ * wire is final).
+ */
+export function markRangeContinuationWatched(workspaceRoot: string, filePath: string): void {
+  if (filePath === "") return;
+  const session = getSession(workspaceRoot);
+  session.epochRangeWatch.add(filePath);
+  while (session.epochRangeWatch.size > SERVED_RANGE_LEDGER_PATH_CAP) {
+    const oldest = session.epochRangeWatch.values().next().value as string | undefined;
+    if (oldest === undefined) break;
+    session.epochRangeWatch.delete(oldest);
+  }
+}
+
+/**
+ * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): READ-ONLY probe — has THIS
+ * task epoch's own continuation already served lines of `filePath` under a
+ * DIFFERENT sha than `freshSha`? Returns the stale sha and the (merged)
+ * ranges served under it when so; `undefined` on every "no honest signal of
+ * staleness" branch, which is always the SAFE direction here (falling
+ * through serves normally, exactly like today):
+ *
+ *  - `filePath` was never marked via `markRangeContinuationWatched` THIS
+ *    epoch (first touch, including the first hop of a genuinely fresh
+ *    `task.epoch:"new"` chain that happens to reuse a path a PRIOR,
+ *    unretired epoch also touched — the false-alarm case plan-0143 §4's own
+ *    acceptance text rules out);
+ *  - no ledger entry exists for the path, or its sha already matches
+ *    `freshSha` (unchanged file, OR a change this session's OWN successful
+ *    `edit_file` made — `transformServedRangesAcrossServerEdit`,
+ *    `write/atomicWrite.ts`'s write seam, updates `state.fileSha` to the
+ *    POST-edit sha in place rather than resetting the entry, so a self-edit
+ *    reaches here with `state.fileSha === freshSha` and is never flagged);
+ *  - the ledger entry has no ranges recorded yet;
+ *  - this EXACT (path, freshSha) pair was already disclosed once this epoch
+ *    (`acknowledgeRangeStaleness`) — see that function's own doc comment for
+ *    why re-disclosing it forever would be a live lock, not a safety margin.
+ *
+ * Deliberately does NOT mutate `servedRangeLedger` — that ledger's own
+ * writers (`recordServedRange`, `transformServedRangesAcrossServerEdit`) are
+ * the fenced, exhaustively-enumerated set this file's static fence binds;
+ * this reads their state exactly like `servedRangeReceipt` already does for
+ * its own (different) purpose, and leaves the eventual real serve to reset
+ * or extend the entry exactly as it does today.
+ */
+export function servedRangeStaleness(
+  workspaceRoot: string,
+  filePath: string,
+  freshSha: string,
+): { priorSha: string; ranges: string[] } | undefined {
+  const session = getSession(workspaceRoot);
+  if (!session.epochRangeWatch.has(filePath)) return undefined;
+  if (session.acknowledgedStaleSha.get(filePath) === freshSha) return undefined;
+  const state = session.servedRangeLedger.get(filePath);
+  if (state === undefined || state.fileSha === freshSha || state.ranges.length === 0) return undefined;
+  return {
+    priorSha: state.fileSha,
+    ranges: state.ranges.map(([rangeStart, rangeEnd]) => `${rangeStart}-${rangeEnd}`),
+  };
+}
+
+/**
+ * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): records that a stale-
+ * continuation refusal has now told the caller about `filePath`'s new
+ * `sha` — call exactly once, when `admitCallerRangedContinuation` (server.ts)
+ * actually MINTS that refusal, never speculatively.
+ *
+ * WHY THIS MUST EXIST. The refusal is a PRE-FLIGHT check: it runs before the
+ * real read, specifically so a torn read is never assembled at all. That
+ * means the real serve — the ONLY thing that ever calls `recordServedRange`
+ * and moves `servedRangeLedger`'s stored sha forward — never runs on a
+ * refused hop either. Without this, a verbatim follower that reissues the
+ * refusal's OWN restart `next` would find the ledger in EXACTLY the same
+ * "stale" state and be refused again, forever, over a file that stopped
+ * changing after the first mutation — an honesty tightening turning into a
+ * dead end, which rule 10 (brief-common) forbids. Marking the disclosure
+ * lets the SAME sha through next time (`servedRangeStaleness` above), so the
+ * retry reaches the real serve, which then records the new content properly;
+ * a file that changes AGAIN afterward is a new `sha` and is disclosed again.
+ */
+export function acknowledgeRangeStaleness(workspaceRoot: string, filePath: string, sha: string): void {
+  if (filePath === "") return;
+  const session = getSession(workspaceRoot);
+  session.acknowledgedStaleSha.set(filePath, sha);
+  while (session.acknowledgedStaleSha.size > SERVED_RANGE_LEDGER_PATH_CAP) {
+    const oldest = session.acknowledgedStaleSha.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    session.acknowledgedStaleSha.delete(oldest);
+  }
+}
+
+/** Bound on spans recorded per path in `mintedRangedWindows` — same fail-safe
+ * eviction direction as every other cap in this file (a dropped span can only
+ * make a later request look more independent, never less). */
+const MINTED_RANGED_WINDOW_SPAN_CAP = 8;
+
+/**
+ * GATE-A2 (plan-0143 §4/§8.1, R04, 2026-09-21): record that `range`
+ * ("start-end") is a window THIS SERVER ITSELF just minted as the (possibly
+ * partial) undelivered remainder of a caller-ranged read of `filePath`.
+ * Called from `protocol/envelope.ts`'s `canonicalToolCall` — see that
+ * function's own doc comment for why that is the one correct seat: every
+ * executable continuation this server emits, from every ranged-continuation
+ * producer, reaches the wire through it.
+ *
+ * Idempotent (an exact-string repeat for the same path is not re-pushed) and
+ * bounded both per path (`MINTED_RANGED_WINDOW_SPAN_CAP`) and across paths
+ * (the shared `SERVED_RANGE_LEDGER_PATH_CAP`, oldest-first), matching
+ * `servedRangeLedger`'s own bounding idiom.
+ */
+export function mintRangedContinuationWindow(workspaceRoot: string, filePath: string, range: string): void {
+  if (filePath === "" || range === "") return;
+  const session = getSession(workspaceRoot);
+  let spans = session.mintedRangedWindows.get(filePath);
+  if (spans === undefined) {
+    spans = [];
+    session.mintedRangedWindows.set(filePath, spans);
+    while (session.mintedRangedWindows.size > SERVED_RANGE_LEDGER_PATH_CAP) {
+      const oldest = session.mintedRangedWindows.keys().next().value as string | undefined;
+      if (oldest === undefined || oldest === filePath) break;
+      session.mintedRangedWindows.delete(oldest);
+    }
+  }
+  if (!spans.includes(range)) {
+    spans.push(range);
+    if (spans.length > MINTED_RANGED_WINDOW_SPAN_CAP) spans.splice(0, spans.length - MINTED_RANGED_WINDOW_SPAN_CAP);
+  }
+}
+
+/**
+ * The windows `mintRangedContinuationWindow` has recorded for `filePath`
+ * this epoch + lane, oldest first — `undefined` when none were ever minted
+ * (the safe default: no recorded promise, so `admitCallerRangedContinuation`
+ * never treats anything for this path as a continuation).
+ */
+export function mintedRangedContinuationWindows(workspaceRoot: string, filePath: string): string[] | undefined {
+  if (filePath === "") return undefined;
+  return getSession(workspaceRoot).mintedRangedWindows.get(filePath);
 }
 
 /**

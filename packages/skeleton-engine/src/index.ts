@@ -17,7 +17,7 @@ export { buildSkeleton } from "./application/buildSkeleton.js";
 export type { BuildSkeletonOptions, BuildSkeletonResult } from "./application/buildSkeleton.js";
 export { renderSkeleton } from "./render.js";
 export { renderCompactSkeleton } from "./compact.js";
-export { DEFAULT_IGNORE, DEFAULT_IGNORE_PATTERNS, createIgnoreMatcherSync, createPatternMatcherSync } from "./ignore.js";
+export { DEFAULT_IGNORE, DEFAULT_IGNORE_PATTERNS, VIRTUALENV_NAME_PATTERNS, createIgnoreMatcherSync, createPatternMatcherSync } from "./ignore.js";
 export type { IgnoreMatcher } from "./ignore.js";
 export type { SymbolKind, ChunkKind, IndexedChunkV1 } from "./chunker.js";
 export type { SourceIndexManifestV1, IndexedFileV1, IndexedSymbolV1, DirectoryDigestV1 } from "./indexStore.js";

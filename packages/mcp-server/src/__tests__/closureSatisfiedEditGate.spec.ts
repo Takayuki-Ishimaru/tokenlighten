@@ -22,6 +22,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { execFileSync } from "child_process";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -60,10 +61,10 @@ function gitInit(dir: string): void {
 function startServer(opts: { cwd: string; args: string[] }): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, ...opts.args],
+    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
     {
       cwd: opts.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
       // D10 (2026-08-14): this used to pass TL_RECURSIVE_READ_CLOSURE=0 to keep
       // a sibling unread. That flag is permanent-on and deleted, so the
       // isolation is gone and the tests below assert the unconditional
@@ -119,7 +120,7 @@ function startServer(opts: { cwd: string; args: string[] }): ServerHandle {
   }
 
   function kill(): void {
-    try { child.kill("SIGKILL"); } catch { /* ok */ }
+    try { killServerGroup(child); } catch { /* ok */ }
   }
 
   return { initialize, rpc, kill };

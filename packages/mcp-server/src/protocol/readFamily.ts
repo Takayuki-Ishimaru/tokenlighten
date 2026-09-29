@@ -136,6 +136,28 @@ function servedBody(source: Body): string | undefined {
   return str(source["content"]) ?? str(source["code"]);
 }
 
+/**
+ * The served body of a ONE-LINE window whose line is blank: `""`, the line's
+ * whole verbatim text. `servedBody` (via `str()`) drops an empty string by
+ * E-1's "absent iff empty" rule, which for a blank line erases the only proof
+ * the window shipped — the entry went bare (the E-8 violation `servedBody`'s
+ * own note describes), and a budgeted read's continuation
+ * (`readRequestContinuation.ts`'s `shippedWindowsByPath`) counted the line as
+ * still owed and re-offered it through a cursor that served it bare again,
+ * without end (eval-0927 review: `targets:[{path, range:"2-2"}]` + any
+ * `budget.bytes` on a blank line 2 looped). Same exception, for the same
+ * reason, as the 0-byte file arm in `textEvidence`. Only a single-line window
+ * qualifies: N lines always carry N-1 newlines, so an empty body for a wider
+ * window is never verbatim.
+ */
+function blankLineBody(source: Body, range: string | undefined): string | undefined {
+  if (range === undefined) return undefined;
+  const window = /^(\d+)(?:-(\d+))?$/.exec(range);
+  if (window === null || Number(window[1]) < 1) return undefined;
+  if (window[2] !== undefined && window[2] !== window[1]) return undefined;
+  return (source["content"] ?? source["code"]) === "" ? "" : undefined;
+}
+
 function lineCount(text: string): number {
   if (text === "") return 0;
   let lines = 1;
@@ -204,7 +226,10 @@ function truncatedMember(body: Body): boolean {
  * Derivation order, most specific first:
  *   1. the body's own `next` (already a `ToolCall`, or parseable prose);
  *   2. a same-handle zoom over the windows this response left unserved;
- *   3. the paths a batch dropped.
+ *   3. what a batch dropped — BY ITS OWN WINDOW when the dropped entry had
+ *      one (`range`, held item 7, 2026-09-21), else the whole file (legacy
+ *      `mode:"full"`/`paths:[]`, unchanged for every entry that never had a
+ *      range to narrow with).
  *
  * THERE IS NO BARE-HANDLE RUNG. `{mode:"slice", handle}` with no range and no
  * `ranges` re-serves exactly the window this response already served, so it is
@@ -238,11 +263,73 @@ function deriveNext(body: Body): ToolCall | undefined {
   }
   const omitted = body["omitted"];
   if (Array.isArray(omitted)) {
-    const paths = omitted
-      .map((entry) => (isRecord(entry) ? str(entry["path"]) : undefined))
-      .filter((path): path is string => path !== undefined);
-    if (paths.length > 0) {
-      return { tool: "read_file", arguments: { mode: "full", paths: paths.slice(0, 8) } };
+    // held item 7 (2026-09-21, adversarial review of the v0.14.3
+    // improvement-plan fix wave). An omitted entry that carries its OWN
+    // `range` (TL-A6-2's construction-time cap drop of a RANGED handle,
+    // server.ts's `handles=[]` batch loop) is a dropped WINDOW, not a
+    // dropped FILE — recovering it must ask for that same window, never the
+    // whole file. Widening it to `mode:"full"` (the pre-fix rung below) can
+    // cost far more than the caller's own declared budget just to reach the
+    // one small slice it actually wanted back, and serves lines outside what
+    // was ever requested. Only entries with NO `range` (a genuinely
+    // whole-file-originated drop — `not-decodable-text`, an unresolvable
+    // handle recovered by path, etc.) fall through to the original
+    // whole-file bucket, so every OTHER caller of this rung (none of which
+    // ever populated `range` on an omitted entry) is byte-for-byte
+    // unaffected.
+    const rangedTargets: Array<{ handle?: string; path?: string; range: string }> = [];
+    const wholeFilePaths: string[] = [];
+    let contentFull = false;
+    for (const entry of omitted) {
+      if (!isRecord(entry)) continue;
+      if (entry["contentFull"] === true) contentFull = true;
+      const entryRange = str(entry["range"]);
+      const entryHandle = str(entry["handle"]);
+      const entryPath = str(entry["path"]);
+      if (entryRange !== undefined && (entryHandle !== undefined || entryPath !== undefined)) {
+        rangedTargets.push({
+          ...(entryHandle !== undefined ? { handle: entryHandle } : {}),
+          ...(entryPath !== undefined ? { path: entryPath } : {}),
+          range: entryRange,
+        });
+        continue;
+      }
+      if (entryPath !== undefined) wholeFilePaths.push(entryPath);
+    }
+    if (rangedTargets.length > 0) {
+      // Canonical `targets:[]` (not the legacy `mode:"full"`/`paths:[]` the
+      // whole-file-only rung below still uses) — the one shape that can
+      // express a per-target `range` alongside a per-target whole-file
+      // fallback in a SINGLE call, so a mixed batch (some drops ranged, some
+      // not) still recovers in one hop.
+      //
+      // R-A3 (v0.14.4 candidate, 2026-09-21): NO 8-target cap. This bundle
+      // used to `.slice(0, 8)` both arrays — a silent truncation that lost
+      // windows 9+ for a verbatim follower, with nothing else in the chain
+      // ever re-addressing them (the same class of loss this whole file's
+      // R-A3 banner elsewhere describes). The advertised `read_file` schema
+      // (`server.ts`'s `ALL_TOOLS` `targets` property) declares no
+      // `maxItems` on `targets`, so plan §4's rule applies directly: name
+      // EVERY undelivered window and let the response budget decide how
+      // much of THIS hop's own body fits — the wire-level shed ladder
+      // (`readBatch.ts`) still narrows/drops individual entries of
+      // whatever this `next` serves, exactly as it does for any other
+      // over-budget `read.batch` call. Proven with a 12-entry construction-
+      // time-drop case (`handlesBatchDropOwnWindow.spec.ts`).
+      const targets: Array<{ handle?: string; path?: string; range?: string }> = [
+        ...rangedTargets,
+        ...wholeFilePaths.map((path) => ({ path })),
+      ];
+      return {
+        tool: "read_file",
+        arguments: { targets, ...(contentFull ? { content: "full" } : {}) },
+      };
+    }
+    if (wholeFilePaths.length > 0) {
+      // R-A3: same no-cap rule as the `rangedTargets` bundle above — see its
+      // own comment. `mode:"full"` + `paths:[]` is the ONE shape this legacy
+      // rung uses, and the schema imposes no length limit on `paths` either.
+      return { tool: "read_file", arguments: { mode: "full", paths: wholeFilePaths } };
     }
   }
   return undefined;
@@ -1072,10 +1159,10 @@ function textEvidence(body: Body): Evidence[] {
       if (!isRecord(raw)) continue;
       const range = rangeOf(raw["range"]);
       if (range === undefined) continue;
-      const content = servedBody(raw);
       const priorBy = raw["code_unchanged"] === true
         ? str(raw["served_by"]) ?? "an earlier call this session"
         : undefined;
+      const content = servedBody(raw) ?? (priorBy === undefined ? blankLineBody(raw, range) : undefined);
       push({
         handle: str(raw["handle"]) ?? handle,
         ...pathOf(str(raw["path"])),
@@ -1101,11 +1188,12 @@ function textEvidence(body: Body): Evidence[] {
     const range = declared
       ?? (content !== undefined ? `1-${Math.max(1, lineCount(content))}` : undefined);
     if (range !== undefined) {
+      const shipped = content ?? blankLineBody(body, declared);
       push({
         handle,
         ...pathOf(),
         range,
-        ...(content !== undefined ? { body: content } : {}),
+        ...(shipped !== undefined ? { body: shipped } : {}),
       });
     } else if (body["total_lines"] === 0 && body["content"] === "") {
       // DESIGN-v0.15 §5.1 (R2): A GENUINELY EMPTY FILE. `servedBody` (via
@@ -1385,12 +1473,30 @@ function batchEntry(raw: Body): Body | undefined {
       "content", "sha", "note", "concern_note", "synthesized_range",
       "remaining_ranges", "next",
     ]);
+    // P1-10 (round-2 evaluation): `keep()` is E-1's "absent iff empty" rule,
+    // which drops `content: ""` — correct for every OTHER item, but for a
+    // single-line window whose line is blank that empty string is the item's
+    // entire truthful body (`blankLineBody`'s own doc comment). Without this,
+    // a multi-target `content:"full"` batch that happens to include a blank
+    // line ships a `form:"handle"` entry with no `content` key at all,
+    // failing `read.batch/entry-form-satisfied` (BATCH_ENTRY_KEYS.handle
+    // requires it) as a server-side response-construction defect.
+    if (entry["content"] === undefined) {
+      const blank = blankLineBody(raw, range);
+      if (blank !== undefined) entry["content"] = blank;
+    }
     return entry;
   }
 
   if (range !== undefined) {
     const entry: Body = { form: "range", path: path ?? "", range, truncated: raw["truncated"] === true };
     keep(entry, raw, ["purpose", "content"]);
+    // P1-10: same blank-line exception as the `handle` arm just above —
+    // BATCH_ENTRY_KEYS.range also requires `content`.
+    if (entry["content"] === undefined) {
+      const blank = blankLineBody(raw, range);
+      if (blank !== undefined) entry["content"] = blank;
+    }
     return entry;
   }
 
@@ -2169,6 +2275,14 @@ const PLAN_MEMBERS = [
  *                       `profile_binding`". `profile` carries the SELECTED
  *                       value; the binding carries requested-vs-selected,
  *                       source and confidence, which is the readback.
+ *                       SEND-ONCE / NO-ECHO (P2, 2026-09-27 evaluation §6.3):
+ *                       when the caller DECLARED the profile and the server
+ *                       simply honoured it (`source:"explicit"` and
+ *                       `selected === requested`), the binding tells the
+ *                       caller nothing it did not just say — `profile` alone
+ *                       already states the whole fact — so the field is
+ *                       omitted for exactly that case. See
+ *                       `profileBindingIsExplicitEcho` below.
  *  - `frontier_index`   the guide's "write only `edit_frontier`" rule reads it
  *                       when the decision is not an `act.edit`.
  *  - `checks` / `verify` the closure obligations a later `mode=closure` reports
@@ -2229,6 +2343,50 @@ function carriesCreateTargetInDecision(body: Body): boolean {
   return record["kind"] === "act.edit" && record["create_target"] !== undefined;
 }
 
+/**
+ * SEND-ONCE / NO-ECHO (P2, 2026-09-27 evaluation §6.3): true iff
+ * `profile_binding` would tell the caller only what it just declared.
+ *
+ * Read from the INTERNAL `profile_binding` (the producer's own
+ * `TaskProfileBinding`, not yet wire-shaped) — the same object
+ * `decisionWire.ts`'s `declaredProfileCreateConflict` and server.ts's
+ * `wireTaskProfile` (~6953) already read, both of which run BEFORE this
+ * projector on that same object. This predicate only decides whether the
+ * FIELD reaches the wire; it never mutates the internal result those two
+ * readers see, so neither is affected by the omission below.
+ *
+ * Narrow on purpose: `source !== "explicit"` (inferred/fallback/evidence) is
+ * new information the caller could not have supplied, and an explicit
+ * request the server OVERRODE (`selected !== requested`) is exactly the
+ * disagreement the binding exists to disclose. Only the exact-echo case —
+ * the caller said X, the server did X — is a pure repeat of `profile`.
+ *
+ * ONE FURTHER CARVE-OUT, found live (taskHandleRecovery.spec.ts):
+ * `readCodeTaskPack.ts`'s `noteInheritedTaskProfile` produces a binding that
+ * reads exactly like a fresh explicit declaration (`source:"explicit"`,
+ * `selected === requested`) when a task's profile was instead CARRIED OVER
+ * from an earlier call of the same task — its own doc comment: "the caller
+ * did not send it on THIS call, and `profile_binding` is the field the guide
+ * tells callers to observe". That call's `profile` is just as "answer"/
+ * "generic" as a fresh declaration would produce, so nothing else on the
+ * wire tells THIS call's caller the value came from an earlier call rather
+ * than anything in this one — dropping the field would silently turn an
+ * inherited binding into the one shape (an undeclared profile with no
+ * `profile_binding` to observe) the guide's own instruction cannot cover.
+ * Detected the same way the rest of this module reads a producer's internal
+ * signal off a string it controls (`capFired`, `surfaceWhyHasMarker`-style):
+ * the literal continuation phrase that function alone appends.
+ */
+const INHERITED_TASK_PROFILE_MARKER = "kept for this continuation";
+
+function profileBindingIsExplicitEcho(body: Body): boolean {
+  const binding = body["profile_binding"];
+  if (!isRecord(binding)) return false;
+  if (binding["source"] !== "explicit" || binding["selected"] !== binding["requested"]) return false;
+  const reason = str(binding["reason"]);
+  return reason === undefined || !reason.includes(INHERITED_TASK_PROFILE_MARKER);
+}
+
 function projectTaskPack(body: Body): Body {
   const projected: Body = {};
   keep(projected, body, ["task"]);
@@ -2250,13 +2408,14 @@ function projectTaskPack(body: Body): Body {
   const limit = limitFrom(body, withheldSomething(body));
   if (limit !== undefined) projected["limit"] = limit;
 
-  keep(
-    projected,
-    body,
-    carriesCreateTargetInDecision(projected)
-      ? KEPT_ON_TASK_PACK.filter((member) => member !== "create_target")
-      : KEPT_ON_TASK_PACK,
-  );
+  let keptOnTaskPack: readonly string[] = KEPT_ON_TASK_PACK;
+  if (carriesCreateTargetInDecision(projected)) {
+    keptOnTaskPack = keptOnTaskPack.filter((member) => member !== "create_target");
+  }
+  if (profileBindingIsExplicitEcho(body)) {
+    keptOnTaskPack = keptOnTaskPack.filter((member) => member !== "profile_binding");
+  }
+  keep(projected, body, keptOnTaskPack);
   return projected;
 }
 

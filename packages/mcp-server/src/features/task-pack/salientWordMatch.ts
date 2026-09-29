@@ -53,11 +53,23 @@ function needsDoubledConsonantBeforeSuffix(word: string): boolean {
   return true;
 }
 
-// Backward rules — plural/3rd-singular, past tense, gerund, nominalisation.
-// Each strips ONE suffix pattern and returns candidate root(s); chaining
-// happens via `inflectionVariants`'s own fixed-point loop over these alone
-// (never the forward direction — see that function's doc comment for why
-// keeping backward/forward separate is what keeps this noise-free).
+/**
+ * Minimum STEM length (after stripping "ion") the nominalisation rule trusts
+ * as a genuine derivational root rather than a coincidental "-ation"/"-ion"
+ * spelling — see that rule's own doc comment (below) for the station/nation
+ * collision this closes. Every pinned "-ate" family member in this file's
+ * own spec clears this by 2+ letters.
+ */
+const NOMINALISATION_MIN_STEM_LENGTH = 5;
+
+// Backward rules — plural/3rd-singular, past tense, gerund, nominalisation,
+// and (held item 5, r-b2, 2026-09-21) the derivational families below:
+// -ation/-ition (bare-"e" verbs), -olution/-olve, -al, -ment, -ance/-ence,
+// -er/-or agent nouns, -ity. Each strips ONE suffix pattern and returns
+// candidate root(s); chaining happens via `inflectionVariants`'s own
+// fixed-point loop over these alone (never the forward direction — see that
+// function's doc comment for why keeping backward/forward separate is what
+// keeps this noise-free).
 const BACKWARD_RULES: readonly BackwardRule[] = [
   // plural / 3rd-person singular: boxes->box, invoices->invoice, companies->company.
   (w) => {
@@ -91,11 +103,149 @@ const BACKWARD_RULES: readonly BackwardRule[] = [
   },
   // nominalisation -ion/-ation and -ication: validation->validate,
   // authentication->authenticate, notification->notify, verification->verify.
+  //
+  // r-b2 (2026-09-21, held item 5 collision control) — the two branches
+  // below USED to gate on the WHOLE WORD's length (`w.length > 6` for
+  // "-ation", `w.length > 5` for the generic "-ion" fallback) and otherwise
+  // ran the IDENTICAL transform (`slice(0,-3)` + optional "e"). That let a
+  // short, coincidental "-ation"/"-ion" word through: "station" (7 letters,
+  // clears the >6 gate) produced "stat"/"state", and "nation" (6 letters,
+  // misses the >6 "-ation" gate but clears the generic >5 "-ion" fallback)
+  // produced "nat"/"nate" — CONFIRMED live on the pre-fix tree, neither word
+  // is a nominalisation of a verb "state"/"nate" at all. Every genuine
+  // pinned pair (valid-ation, migrat-ion, authenticat-ion, invalidat-ion,
+  // calculat-ion) has a stem of 6+ letters once "ion" is stripped; unified
+  // into ONE check gated on the STEM's own length (not the whole word's),
+  // which is what the collision actually turns on.
   (w) => {
     const out: string[] = [];
     if (w.length > 8 && w.endsWith("ication")) out.push(`${w.slice(0, -7)}y`);
-    if (w.length > 6 && w.endsWith("ation")) out.push(w.slice(0, -3), `${w.slice(0, -3)}e`);
-    else if (w.length > 5 && w.endsWith("ion")) out.push(w.slice(0, -3), `${w.slice(0, -3)}e`);
+    if (w.endsWith("ion")) {
+      const stem = w.slice(0, -3);
+      if (stem.length >= NOMINALISATION_MIN_STEM_LENGTH) out.push(stem, `${stem}e`);
+    }
+    return out;
+  },
+  // held item 5 (r-b2, 2026-09-21) — "-ation"/"-ition" verbs that end in a
+  // bare "-e" rather than "-ate": expiration->expire, configuration->
+  // configure. The rule above already reaches "-ate" verbs (validation->
+  // validate) by stripping just "ion" (3 chars) and adding "e" onto the
+  // "-at" stem it leaves; a verb with NO "-ate" pattern needs the FULL
+  // 5-letter "-ation"/"-ition" suffix stripped instead, then "e" added onto
+  // what remains: "expir"+"e"="expire", "configur"+"e"="configure",
+  // "defin"+"e"="define". Over-generation (e.g. "valide" from "validation")
+  // is harmless noise per this file's own doctrine — the consumer only
+  // tests set membership against real text.
+  (w) => {
+    const out: string[] = [];
+    if (w.endsWith("ation") || w.endsWith("ition")) {
+      const stem = w.slice(0, -5);
+      if (stem.length >= NOMINALISATION_MIN_STEM_LENGTH - 2) out.push(`${stem}e`);
+    }
+    return out;
+  },
+  // held item 5 (r-b2, 2026-09-21) — the "-olve"/"-olution" family
+  // (resolve/resolution, revolve/revolution, evolve/evolution, solve/
+  // solution, dissolve/dissolution): an irregular-looking but fully general
+  // t/v alternation, safe as a narrow, anchored suffix rule (nothing in
+  // English ends in "-olution" that is not this family).
+  (w) => {
+    const out: string[] = [];
+    if (w.endsWith("olution")) out.push(`${w.slice(0, -7)}olve`);
+    return out;
+  },
+];
+
+/**
+ * held item 5 (r-b2, 2026-09-21) — TERMINAL derivation rules: "-al"
+ * (renewal->renew, removal->remove), "-ment" (deployment->deploy), "-ance"/
+ * "-ence" (acceptance->accept), "-er"/"-or" agent nouns (validator->
+ * validate, scheduler->schedule), "-ity" (validity->valid, activity->
+ * active).
+ *
+ * Deliberately NOT part of `BACKWARD_RULES`: those feed BOTH the frontier
+ * `inflectionVariants` re-chases for up to `MAX_ROOT_CHASE_ROUNDS` more
+ * rounds AND `forwardForms`'s own nominalisation step, and this file's own
+ * "+e" reattachment above (`"-al"`'s "remov"+"e"="remove", "-er/-or"'s
+ * "validat"+"e"="validate", …) produces plenty of "words" that ARE NOT real
+ * ("genere" from "general", "containe" from "container") — harmless as a
+ * SET-MEMBERSHIP candidate on its own, but CONFIRMED to compound into a
+ * coincidentally real, unrelated word once re-expanded: `forwardForms
+ * ("genere")` (an "e"-ending root, indistinguishable in shape from a
+ * genuine one) produced "generation" — exactly the "general" collision this
+ * wave's own recall control names, and NOT the same bug as the
+ * `NOMINALISATION_MIN_STEM_LENGTH` fix above (that one is about the
+ * BACKWARD nominalisation rule's own stem length; this one is about a
+ * MANUFACTURED root re-entering forward expansion a second time). Applied
+ * directly to the ORIGINAL word ONLY (see `inflectionVariants`'s own Phase
+ * 1.5) — never re-chased, never forward-expanded — so each reaches its own
+ * direct target with no risk of a second-order coincidence.
+ */
+const TERMINAL_DERIVATION_RULES: readonly BackwardRule[] = [
+  // "-al": stem gated at >= 4 letters — shorter than that is where this
+  // file's own collision controls live (a 2-3 letter stem is far more
+  // likely to be coincidental than a genuine "-al" nominalisation). "-ial"
+  // adjectives (official, potential, essential, …) are excluded outright —
+  // they are not "-al" nominalisations of a verb this file knows at all.
+  (w) => {
+    const out: string[] = [];
+    if (w.length > 5 && w.endsWith("al") && !w.endsWith("ial")) {
+      const stem = w.slice(0, -2);
+      if (stem.length >= 4) out.push(stem, `${stem}e`);
+    }
+    return out;
+  },
+  // "-ment": bare stem only — unlike "-al", the verb's own trailing "e" (if
+  // any) is already part of the stem this strip leaves ("require"+"ment"=
+  // "requirement", never dropped). Stem gated at >= 4 letters: "moment"/
+  // "element" (this file's own named collision controls) strip to "mo"/
+  // "ele" — both excluded.
+  (w) => {
+    const out: string[] = [];
+    if (w.length > 8 && w.endsWith("ment")) {
+      const stem = w.slice(0, -4);
+      if (stem.length >= 4) out.push(stem);
+    }
+    return out;
+  },
+  // "-ance"/"-ence": acceptance->accept. Bare stem only (the required pair
+  // needs no "+e" — "accept" does not end in "e" — and dropping it here
+  // halves this family's own contribution to the compounding risk
+  // `TERMINAL_DERIVATION_RULES`'s own doc comment describes). Stem gated at
+  // >= 5 letters: common short words like "instance"/"distance" strip to a
+  // 4-letter stem and are deliberately left alone.
+  (w) => {
+    const out: string[] = [];
+    if (w.length > 7 && (w.endsWith("ance") || w.endsWith("ence"))) {
+      const stem = w.slice(0, -4);
+      if (stem.length >= 5) out.push(stem);
+    }
+    return out;
+  },
+  // "-er"/"-or" AGENT NOUNS: validator->validate, scheduler->schedule. The
+  // riskiest family (most English "-er"/"-or" words are not agent nouns of
+  // a verb this file knows: "order", "user", "member", "author", …) so the
+  // stem is gated at >= 5 letters — every short common "-er"/"-or" noun
+  // this wave checked ("auth", "ord", "us", "memb", "buff", "mast", "filt",
+  // "vect", "edit") strips to <= 4 letters and is excluded; the two named
+  // pairs ("validat", "schedul") are both 7.
+  (w) => {
+    const out: string[] = [];
+    if (w.length > 6 && (w.endsWith("er") || w.endsWith("or"))) {
+      const stem = w.slice(0, -2);
+      if (stem.length >= 5) out.push(stem, `${stem}e`);
+    }
+    return out;
+  },
+  // "-ity": validity->valid. Bare stem only (no required pair needs "+e",
+  // and dropping it halves this family's own compounding contribution).
+  // Stem gated at >= 4 letters.
+  (w) => {
+    const out: string[] = [];
+    if (w.length > 6 && w.endsWith("ity")) {
+      const stem = w.slice(0, -3);
+      if (stem.length >= 4) out.push(stem);
+    }
     return out;
   },
 ];
@@ -129,7 +279,26 @@ function forwardForms(root: string): string[] {
   else out.push(`${root}ing`);
   // nominalisation -ion/-ication
   if (endsConsonantY) out.push(`${root.slice(0, -1)}ication`);
-  else if (root.endsWith("ate")) out.push(`${root.slice(0, -1)}ion`);
+  else if (root.endsWith("olve")) {
+    // held item 5 (r-b2, 2026-09-21) — forward partner of the "-olution"
+    // backward rule: resolve->resolution, revolve->revolution, so
+    // `inflectionVariants("resolve")` reaches "resolution" too, not only the
+    // other direction (this file's own doc comment: "the SAME family
+    // whichever inflected member you start from").
+    out.push(`${root.slice(0, -4)}olution`);
+  } else if (root.endsWith("ate")) {
+    out.push(`${root.slice(0, -1)}ion`);
+  } else if (root.endsWith("e") && root.length > 3) {
+    // held item 5 (r-b2, 2026-09-21) — forward partner of the "-ation"/
+    // "-ition" bare-verb backward rule: expire->expiration, configure->
+    // configuration, define->definition. Both suffix spellings are
+    // generated (English lexical convention picks one or the other per
+    // word, with no general rule to predict which) — the wrong one for a
+    // given root ("expirition") is harmless noise, per this file's own
+    // over-generation doctrine.
+    const stem = root.slice(0, -1);
+    out.push(`${stem}ation`, `${stem}ition`);
+  }
   return out;
 }
 
@@ -196,6 +365,20 @@ export function inflectionVariants(word: string): string[] {
   for (const w of [...all]) {
     if (w.length > 5 && w.endsWith("ion")) {
       all.add(/(?:s|x|z|ch|sh)$/u.test(w) ? `${w}es` : `${w}s`);
+    }
+  }
+
+  // Phase 1.5 (held item 5, r-b2, 2026-09-21): TERMINAL derivation rules,
+  // applied to `w0` ONLY — never re-chased (they never enter `roots`/
+  // `frontier` for another round) and never forward-expanded (they never
+  // enter Phase 2's loop) — see `TERMINAL_DERIVATION_RULES`'s own doc
+  // comment for the compounding collision ("general"->"genere"->
+  // "generation") this isolation exists to prevent. Run last so the
+  // MAX_VARIANTS trim below sees every other candidate first — these are
+  // the newest, most speculative family.
+  for (const rule of TERMINAL_DERIVATION_RULES) {
+    for (const candidate of rule(w0)) {
+      if (candidate.length >= MIN_DERIVED_VARIANT_LENGTH) all.add(candidate);
     }
   }
 

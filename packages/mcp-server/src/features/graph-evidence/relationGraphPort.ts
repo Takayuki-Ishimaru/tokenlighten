@@ -126,6 +126,7 @@ import { loadGraphIndex, type GraphIndex } from "../../graph/index.js";
 import { walkCodeFiles, type FoundFile } from "../../tools/walkRepo.js";
 import { languageForPath } from "../../util/languages.js";
 import { handleTable, shaOfText } from "../../util/handles.js";
+import { countLines } from "../../util/countLines.js";
 import { isTestPath as skeletonIsTestPath } from "@tokenlighten/skeleton-engine";
 
 import {
@@ -702,7 +703,15 @@ function mintOneHandle(
     }).id;
   }
 
-  const totalLines = Math.max(1, text.length === 0 ? 1 : text.split("\n").length);
+  // FIX-ORIG (2026-09-27, eval-0927 P1 §6.1): was
+  // `text.split("\n").length`, which counts a phantom trailing empty
+  // segment for content ending in "\n" (nearly every file) -- this handle's
+  // `range` reaches `plan.wiring.evidence_graph` (this module's own header),
+  // so an inflated bound here is the same wire-visible N+1 class fixed
+  // elsewhere this wave, just reached through the relation-packet path
+  // (TL_SF_RELATION_PACKETS) instead of a task-pack surface producer.
+  // countLines() matches edit_file's own bounds check.
+  const totalLines = Math.max(1, countLines(text));
   const [startRaw, endRaw] = range.split("-", 2);
   const start = Number(startRaw);
   if (!Number.isInteger(start) || start < 1 || start > totalLines) {

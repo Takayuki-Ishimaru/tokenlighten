@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.14.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.3/tokenlighten-vscode-extension-0.14.3.vsix)** from the v0.14.3 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.14.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.4/tokenlighten-vscode-extension-0.14.4.vsix)** from the v0.14.4 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,7 +14,7 @@ Download **[tokenlighten-vscode-extension-0.14.3.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.14.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.4.vsix
 ~~~
 
 To build from source:
@@ -75,4 +75,4 @@ Repository indexing and context selection run locally. The extension does not ad
 | `tokenlighten.toolSurface` | `full` | Advertised MCP tool surface: `full` (every capability) or `code` (code/plain-text/config only, a smaller tool schema). Changing this requires reconnecting. |
 | `tokenlighten.guideProfile` | `full` | Guide size written during setup: `full`, `medium`, or `compact`. Left unset, setup writes `compact` instead of `full` when `tokenlighten.toolSurface` is `code`; an explicit value here always wins over that default. |
 
-The desktop application is not included in the public v0.14.3 release.
+The desktop application is not included in the public v0.14.4 release.

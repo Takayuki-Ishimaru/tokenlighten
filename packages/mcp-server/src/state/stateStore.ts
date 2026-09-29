@@ -77,6 +77,7 @@ import {
   readSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -228,6 +229,23 @@ export class WorkspaceStateStore {
     const dir = join(workspaceRoot, ".tokenlighten", STATE_DIRNAME);
     const store = new WorkspaceStateStore(dir);
     try {
+      // FIX-FD (2026-09-28, external v0.14.3 evaluation §6.2): `mkdirSync`
+      // below with `recursive:true` creates EVERY missing ancestor, including
+      // `workspaceRoot` ITSELF when it does not exist — the exact mechanism
+      // that materialized `pack/.tokenlighten/state/meta.json` and
+      // `no-import/.tokenlighten/state/meta.json` at this repo's own root (a
+      // caller passed an unvalidated workspace root; see server.ts's
+      // `assertActiveRootExists` and `checkCwdWithCorrection` for the two
+      // upstream fixes). This store may create `.tokenlighten/` and
+      // everything under it; it must never create the workspace root that
+      // contains it — that decision belongs to whoever validated
+      // `workspaceRoot` in the first place, never to this store. Follows
+      // symlinks (unlike the `.tokenlighten/state` check just below, which
+      // deliberately does not): a workspace root reached through a symlinked
+      // worktree is ordinary and legitimate.
+      if (!statSync(workspaceRoot).isDirectory()) {
+        throw new Error("workspace root is not a directory");
+      }
       mkdirSync(dir, { recursive: true, mode: DIR_MODE });
       const stat = lstatSync(dir);
       if (stat.isSymbolicLink() || !stat.isDirectory()) {

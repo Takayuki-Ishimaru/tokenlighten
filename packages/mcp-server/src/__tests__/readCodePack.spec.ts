@@ -15,6 +15,7 @@ import { resetPackDedupeCache } from "../tools/readCodeTaskPack.js";
 import { handleTable } from "../util/handles.js";
 import { resetAll as resetAllSessions } from "../util/session.js";
 import { shortTmpDir } from "./helpers/shortTmpDir.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -47,8 +48,8 @@ function writeFile(dir: string, rel: string, content: string): void {
 function startServer(opts: { cwd: string; args: string[] }): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, ...opts.args],
-    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } },
+    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
+    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env } },
   );
 
   let stdoutBuf = "";
@@ -98,7 +99,7 @@ function startServer(opts: { cwd: string; args: string[] }): ServerHandle {
   }
 
   function kill(): void {
-    try { child.kill("SIGKILL"); } catch { /* ok */ }
+    try { killServerGroup(child); } catch { /* ok */ }
   }
 
   return { initialize, rpc, kill };
@@ -414,9 +415,38 @@ describe("read_code mode=pack (server-level)", () => {
   // fail this test (`wireBytes` far exceeding `declaredCeiling +
   // RECOVERY_TOLERANCE_BYTES`) while leaving every other test in this file
   // green. Restored after confirming the failure.
-  it("FX-U3: mode=pack wire bytes stay within the declared maxTokens ceiling plus the recovery block's documented tolerance", async () => {
+  //
+  // GATE-C1 (2026-09-22) RE-PIN: R-A5's uniform read.batch rule (ruling 1 —
+  // never trim a target out of a `next`; refuse honestly instead when the
+  // union of undelivered windows cannot fit) means 40 tiny files at
+  // maxTokens 50/100 no longer come back as a `read.batch` at all — the
+  // shape that used to ship silently dropped every window past the one its
+  // single `next` could still name. Both budgets now get the honest
+  // `budget-below-minimum` refusal. This is NOT a regression of FX-U3's own
+  // fix (the wire-byte admission loop this comment describes is untouched
+  // and still the reason the earlier, pre-FX-U3 5.8x-13.5x overshoot cannot
+  // recur) — it is a DIFFERENT, later rule superseding "ship a tiny
+  // read.batch" with "refuse below the accepted minimum" (plan §7.2:
+  // 「受付下限未満の予算は成功扱いせず」). FX-U3's actual intent — no
+  // runaway wire bytes, no silently dropped windows — is re-asserted as a
+  // disjunction: a `read.batch` still within the declared ceiling (kept live
+  // in case a future admission change makes these budgets sufficient again),
+  // OR a `budget-below-minimum` refusal that is itself small AND whose own
+  // `next`, run verbatim at `required_min_bytes`, succeeds on the FIRST
+  // retry within `required_min_bytes + RECOVERY_TOLERANCE_BYTES`. Measured
+  // live (this exact fixture, both budgets): refusal ~1.0-1.1 KB,
+  // `required_min_bytes:6144` (the task-pack construction floor a bare
+  // `targets[]+budget` continuation is promoted into and admitted against —
+  // see `protocol/emit.ts`'s `READ_BATCH_TASK_PACK_PROMOTION_FLOOR_BYTES`),
+  // first retry ~3.0-3.1 KB of a real `read.task_pack` body — comfortably
+  // inside both bounds and nowhere near a runaway.
+  it("FX-U3: mode=pack wire bytes stay within the declared maxTokens ceiling plus the recovery block's documented tolerance, or honestly refuses with a bounded, first-retry-solvable budget-below-minimum", async () => {
     const wsDir = mkDir("pack-wire-budget");
     const RECOVERY_TOLERANCE_BYTES = 300;
+    // The refusal itself must stay small — nowhere near the original bug's
+    // 900-2000+ B overshoot territory, and well under the ~3 KB a genuine
+    // (non-refusal) response to this same request costs.
+    const REFUSAL_SIZE_BOUND_BYTES = 1600;
     const NFILES = 40;
     const paths: Array<{ path: string }> = [];
     for (let i = 0; i < NFILES; i++) {
@@ -429,8 +459,9 @@ describe("read_code mode=pack (server-level)", () => {
     servers.push(srv);
     await srv.initialize();
 
+    let rpcId = 2;
     for (const maxTokens of [50, 100]) {
-      const res = await srv.rpc(2, "tools/call", {
+      const res = await srv.rpc(rpcId++, "tools/call", {
         name: "read_file",
         arguments: { mode: "pack", paths, maxTokens },
       });
@@ -438,12 +469,40 @@ describe("read_code mode=pack (server-level)", () => {
       expect(typeof text).toBe("string");
       const wireBytes = Buffer.byteLength(text, "utf8");
       const data = JSON.parse(text) as Record<string, unknown>;
-      expect(data["kind"]).toBe("read.batch");
       const declaredCeiling = maxTokens * 4;
+
+      if (data["kind"] === "read.batch") {
+        expect(
+          wireBytes,
+          `maxTokens=${maxTokens} wireBytes=${wireBytes} declaredCeiling=${declaredCeiling}`,
+        ).toBeLessThanOrEqual(declaredCeiling + RECOVERY_TOLERANCE_BYTES);
+        continue;
+      }
+
+      expect(data["kind"], JSON.stringify(data).slice(0, 400)).toBe("refusal");
+      expect(data["code"]).toBe("budget-below-minimum");
       expect(
         wireBytes,
-        `maxTokens=${maxTokens} wireBytes=${wireBytes} declaredCeiling=${declaredCeiling}`,
-      ).toBeLessThanOrEqual(declaredCeiling + RECOVERY_TOLERANCE_BYTES);
+        `refusal must itself stay bounded: maxTokens=${maxTokens} wireBytes=${wireBytes}`,
+      ).toBeLessThanOrEqual(REFUSAL_SIZE_BOUND_BYTES);
+      const requiredMinBytes = data["required_min_bytes"];
+      expect(typeof requiredMinBytes).toBe("number");
+      const next = data["next"] as { tool: string; arguments: Record<string, unknown> } | undefined;
+      expect(next, `budget-below-minimum refusal must carry an executable next: ${JSON.stringify(data).slice(0, 400)}`).toBeDefined();
+      expect(next!.arguments["budget"]).toEqual({ bytes: requiredMinBytes });
+
+      const retryRes = await srv.rpc(rpcId++, "tools/call", { name: "read_file", arguments: next!.arguments });
+      const retryText = retryRes?.result?.content?.[0]?.text as string;
+      const retryBytes = Buffer.byteLength(retryText, "utf8");
+      const retryData = JSON.parse(retryText) as Record<string, unknown>;
+      expect(
+        retryData["kind"],
+        `re-issuing next verbatim at required_min_bytes must make progress on the FIRST retry: ${JSON.stringify(retryData).slice(0, 400)}`,
+      ).not.toBe("refusal");
+      expect(
+        retryBytes,
+        `retry response must land within required_min_bytes + tolerance: retryBytes=${retryBytes} requiredMinBytes=${requiredMinBytes}`,
+      ).toBeLessThanOrEqual((requiredMinBytes as number) + RECOVERY_TOLERANCE_BYTES);
     }
   }, 30000);
 });

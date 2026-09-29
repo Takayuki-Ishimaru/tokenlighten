@@ -20,6 +20,7 @@ import { handleTable, shaOfText } from "./handles.js";
 import { laneScopedKey } from "./laneKey.js";
 import { countLines } from "./countLines.js";
 import { projectRootOf } from "../features/locator/locateTaskContext.js";
+import { classifyNodeTestRunnability, type NodePackageManifestLike } from "./nodeTestRunnability.js";
 import type { TaskVerificationRecipe } from "@tokenlighten/types";
 
 /**
@@ -187,15 +188,21 @@ export interface ToolchainInfo {
   test_entry?: string;
   /** node only: directory whose package.json declared `scripts.test` ("" = workspace root). */
   test_entry_dir?: string;
-  /** node: `<test_entry_dir>/node_modules` exists; python: a venv runner exists. */
+  /**
+   * node: install evidence is reachable from `test_entry_dir` (`node_modules`, Yarn PnP) or the script
+   * needs nothing installed; python: a venv runner exists. OMITTED (never `false`-by-default) — not
+   * `true` or `false` — when a node monorepo member's install may be hoisted one level above the
+   * workspace root, outside what this server can see: `verify_note` then says so instead of asserting
+   * either way (external v0.14.3 evaluation, 2026-09-27 §6.2, finding #18(c)).
+   */
   deps_installed?: boolean;
-  /** Present exactly when `deps_installed === false`. */
+  /** Present when `deps_installed === false`, or omitted because it could not be determined. */
   verify_note?: string;
 }
 
-/** One-line advisory for the only verification failure that blocks execution: missing dependencies. */
+/** One-line advisory for a verification gap that should change how the agent verifies: dependencies confirmed missing, or install status undetermined. */
 export function verificationDependencyNote(manifest: Pick<VerificationManifest, "toolchain">): string | undefined {
-  return manifest.toolchain?.deps_installed === false && typeof manifest.toolchain.verify_note === "string"
+  return manifest.toolchain?.deps_installed !== true && typeof manifest.toolchain?.verify_note === "string"
     ? manifest.toolchain.verify_note
     : undefined;
 }
@@ -1078,13 +1085,76 @@ interface TestEntryFact {
   /** node only: directory whose package.json declared scripts.test ("" = workspace root). */
   dir?: string;
   /**
-   * node: `<dir>/node_modules` is a directory; python: a venv runner exists at
-   * the matched root. Mirrors the pack-time runnability verdict
-   * (readCodeTaskPack.ts buildVerificationVerdict) rather than importing it, so
-   * the edit-time kit and the pack-time verdict cannot disagree about the same
-   * checkout while each stays inside its own module boundary.
+   * node: install evidence (`node_modules`, or a Yarn PnP loader/cache — see `hasInstallEvidence`) is
+   * reachable, or the script needs nothing installed; python: a venv runner exists at the matched root.
+   * `undefined` (node only): not determinable — see `installEvidenceJustAboveWorkspaceRoot`. Mirrors the
+   * pack-time runnability verdict (readCodeTaskPack.ts buildVerificationVerdict) rather than importing it,
+   * so the edit-time kit and the pack-time verdict cannot disagree about the same checkout while each
+   * stays inside its own module boundary; that verdict has no wire slot for "not determinable" and keeps
+   * its pre-existing (boolean-only) call shape, which this module's default parameter preserves exactly.
    */
-  deps_installed: boolean;
+  deps_installed: boolean | undefined;
+}
+
+/** Yarn PnP's generated loader — its presence is as definitive as a `node_modules` directory. */
+const YARN_PNP_LOADER_NAMES = ["pnp.cjs", "pnp.js"].map((name) => `.${name}`);
+
+/**
+ * `node_modules` is a directory at `<workspace>/<rel>`, OR the same location carries Yarn PnP install
+ * evidence (`.pnp.cjs`/`.pnp.js` — the generated loader a `yarn install` under `nodeLinker: pnp` writes,
+ * or a populated `.yarn/cache`) — PnP replaces node_modules entirely, so its absence must never read as
+ * "not installed" (external v0.14.3 evaluation, 2026-09-27 §6.2, finding #18(b)).
+ */
+function hasInstallEvidence(workspace: string, rel: string): boolean {
+  const dir = path.join(workspace, rel);
+  try {
+    if (fs.statSync(path.join(dir, "node_modules")).isDirectory()) return true;
+  } catch {
+    // absent — keep checking other markers
+  }
+  for (const name of YARN_PNP_LOADER_NAMES) {
+    try {
+      if (fs.statSync(path.join(dir, name)).isFile()) return true;
+    } catch {
+      // absent — keep checking
+    }
+  }
+  try {
+    if (fs.statSync(path.join(dir, ".yarn", "cache")).isDirectory()) return true;
+  } catch {
+    // absent
+  }
+  return false;
+}
+
+/**
+ * True when `<dir>` or any ancestor up to (and including) the workspace root carries install evidence
+ * (`hasInstallEvidence`) — Node's own resolution walks upward, so a hoisted monorepo install counts. Never
+ * looks outside the workspace; kept under its original name (readCodeTaskPack.ts imports it by this exact
+ * name and must not disagree with this module about what "reachable" means).
+ */
+export function nodeModulesReachableFrom(workspace: string, dir: string): boolean {
+  let rel = dir === "." ? "" : dir;
+  for (;;) {
+    if (hasInstallEvidence(workspace, rel)) return true;
+    if (rel === "") return false;
+    const parent = path.posix.dirname(rel);
+    rel = parent === "." || parent === "/" ? "" : parent;
+  }
+}
+
+/**
+ * One bounded, content-free existence peek exactly at the workspace root's OWN parent — never further,
+ * never workspace-internal content, and never used to grant "installed" — for the ONE ambiguity
+ * `nodeModulesReachableFrom` cannot resolve honestly by walking inside the workspace: a monorepo member
+ * opened directly as the workspace root, whose install is hoisted to the true monorepo root one level
+ * above (external v0.14.3 evaluation, 2026-09-27 §6.2, finding #18(c)). `false` whenever the workspace
+ * itself has no parent (already a filesystem/drive root), so there is nothing to be ambiguous about.
+ */
+export function installEvidenceJustAboveWorkspaceRoot(workspace: string): boolean {
+  const parent = path.dirname(workspace);
+  if (parent === workspace) return false;
+  return hasInstallEvidence(parent, "");
 }
 
 /** Installed-runner markers for a python root — same list the pack-time verdict stats. */
@@ -1125,15 +1195,17 @@ function detectTestEntry(
       try {
         const abs = path.join(workspace, rel);
         if (!fs.existsSync(abs)) continue;
-        const pkg = JSON.parse(fs.readFileSync(abs, "utf8")) as { scripts?: Record<string, unknown> };
-        const test = pkg.scripts?.test;
+        const pkg = JSON.parse(fs.readFileSync(abs, "utf8")) as NodePackageManifestLike;
+        const test = pkg.scripts?.["test"];
         if (typeof test !== "string" || test.length === 0) continue;
-        let installed = false;
-        try {
-          installed = fs.statSync(path.join(workspace, root, "node_modules")).isDirectory();
-        } catch {
-          installed = false;
-        }
+        // 2026-09-27 (external evaluation §6.2): "node_modules exists" is not the runnability test. A
+        // zero-dependency `node --test …` suite runs with no install at all, and a monorepo member resolves a
+        // hoisted install from an ancestor directory. Same classifier as the pack-time verdict
+        // (readCodeTaskPack.ts buildVerificationVerdict), so the two can never disagree — that call site
+        // passes only two arguments and keeps its pre-existing boolean-only verdict (the third parameter's
+        // default preserves its behavior exactly); only THIS kit's wire shape has a slot for "not determinable".
+        const verdict = classifyNodeTestRunnability(pkg, nodeModulesReachableFrom(workspace, root), installEvidenceJustAboveWorkspaceRoot(workspace));
+        const installed = verdict.reason === "not-determinable" ? undefined : verdict.runnable;
         return { command: "npm test", dir: root, deps_installed: installed };
       } catch {
         // malformed/unreadable package.json — keep scanning other roots
@@ -1442,6 +1514,10 @@ const HARNESS_CREATE_NOTE =
 /** toolchain.verify_note when the detected test entry cannot actually run yet. */
 const VERIFY_NO_DEPS_NOTE =
   "this test entry's dependencies are not installed — verify by diff review against the served evidence, not by installing them";
+
+/** node only: `deps_installed` omitted because a hoisted install above the workspace root cannot be ruled out. */
+const VERIFY_NOT_DETERMINABLE_NOTE =
+  "whether this test entry's dependencies are installed could not be determined from inside the workspace boundary (a hoisted install may exist above the workspace root) — try running it before falling back to diff review";
 
 /**
  * Build the manifest, or undefined when there is nothing verification-shaped
@@ -1825,8 +1901,9 @@ export function buildVerificationManifest(
       ...(buildEntryAbsent ? { build_entry_absent: true } : {}),
       ...(testEntry !== undefined ? { test_entry: testEntry.command } : {}),
       ...(testEntry?.dir !== undefined ? { test_entry_dir: testEntry.dir } : {}),
-      ...(testEntry !== undefined ? { deps_installed: testEntry.deps_installed } : {}),
+      ...(testEntry?.deps_installed !== undefined ? { deps_installed: testEntry.deps_installed } : {}),
       ...(testEntry?.deps_installed === false ? { verify_note: VERIFY_NO_DEPS_NOTE } : {}),
+      ...(testEntry !== undefined && testEntry.deps_installed === undefined ? { verify_note: VERIFY_NOT_DETERMINABLE_NOTE } : {}),
     };
     if (Object.keys(toolchainCandidate).length > 0) toolchain = toolchainCandidate;
   }

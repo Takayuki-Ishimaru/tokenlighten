@@ -811,7 +811,7 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
    * plain `spansExcludingWindows`-over-`elided` site, an allowlist reason)
    * fails the enumeration-completeness check below.
    */
-  const SITES: ReadonlyArray<{ id: string; category: "a1-elided" | "a2-markdown" | "a2-csv" | "a2-task-pack" | "a2-verification-kit" | "a2-comments-keep-head" | "allowlist"; reason?: string }> = [
+  const SITES: ReadonlyArray<{ id: string; category: "a1-elided" | "a2-markdown" | "a2-csv" | "a2-task-pack" | "a2-verification-kit" | "a2-comments-keep-head" | "a2-range-batch-unelided" | "allowlist"; reason?: string }> = [
     { id: "server.ts: bookCsvArtifactServe (mode=artifact)", category: "a2-csv" },
     { id: "server.ts: resolveFullReadForPath governed head chunk (mode=full-head)", category: "a1-elided" },
     { id: "server.ts: buildFullDowngradePayload's comments-keep head (mode=full-comments-keep)", category: "a2-comments-keep-head" },
@@ -820,6 +820,8 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
     { id: "server.ts: dropServedBody (mode=verification-kit)", category: "a2-verification-kit" },
     { id: "server.ts: handles-batch item (mode=handles)", category: "a1-elided" },
     { id: "server.ts: multi-target paths-batch item (mode=paths)", category: "a1-elided" },
+    { id: "server.ts: resolveRangedPathsBatchEntry, ranges[] segment (mode=full, ranged)", category: "a2-range-batch-unelided" },
+    { id: "server.ts: resolveRangedPathsBatchEntry, single range/symbol (mode=full, ranged)", category: "a2-range-batch-unelided" },
     { id: "server.ts: markdown section (mode=markdown-section)", category: "a2-markdown" },
     {
       id: "server.ts: ranges-batch segment, already-held sub-branch (mode=slice)",
@@ -849,7 +851,7 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
       serverSites.length,
       "server.ts's recordServedRange call-site count must match this file's enumeration "
       + "exactly — a new site (or a deleted one) must update SITES above, not pass silently",
-    ).toBe(14);
+    ).toBe(16);
     expect(smallFileSites.length, "readCodeSmallFile.ts's one known site").toBe(1);
     expect(taskPackSites.length, "readCodeTaskPack.ts's one known site").toBe(1);
     expect(
@@ -930,8 +932,23 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
   });
 
   it("the range/slice door books spansExcludingWindows over the renderer's sliceDisplay.elided", () => {
+    // TL-05 (plan §7.1, 2026-09-21): `keepComments` widened to
+    // `effectiveKeepComments` (`keepComments || rangeContentFullMarker`) so a
+    // `range`/`ranges` + `content:"full"` request is served UNELIDED too —
+    // see server.ts's own comment beside `effectiveKeepComments`'s
+    // declaration. Byte-identical for every call that does not set
+    // `content:"full"` alongside a range (this pattern's own subject):
+    // `rangeContentFullMarker` is then always false, so
+    // `effectiveKeepComments === keepComments` exactly. The
+    // spansExcludingWindows-over-the-renderer's-own-elided invariant this
+    // test pins is unchanged; only the boolean feeding the SAME renderer call
+    // gained a second, narrowly-scoped OR term.
+    // eval-0927 round 4 (P2-15): the booked window's END now comes from the
+    // slice's own declared range when it was not capped (a comment block of
+    // ~1,800 chars sits between the renderer call and `servedSpans`), so the
+    // second gap below is 10,000 chars; what it pins is unchanged.
     expect(SERVER).toMatch(
-      /const sliceDisplay = keepComments\s*\?[\s\S]{0,7500}?: elideDocCommentsForDisplay\([\s\S]{0,7500}?const servedSpans = spansExcludingWindows\(\s*actualStart,\s*actualEnd,\s*sliceDisplay\.elided,\s*\);[\s\S]{0,900}?rangeLedger = recordServedRange\(\s*workspace,\s*slicePath,\s*rawFileSha,\s*spanStart,\s*spanEnd,\s*countLines\(content\),\s*\{ mode: "slice", range: String\(sliceData\.range\),/,
+      /const sliceDisplay = effectiveKeepComments\s*\?[\s\S]{0,7500}?: elideDocCommentsForDisplay\([\s\S]{0,10000}?const servedSpans = spansExcludingWindows\(\s*actualStart,\s*actualEnd,\s*sliceDisplay\.elided,\s*\);[\s\S]{0,900}?rangeLedger = recordServedRange\(\s*workspace,\s*slicePath,\s*rawFileSha,\s*spanStart,\s*spanEnd,\s*countLines\(content\),\s*\{ mode: "slice", range: String\(sliceData\.range\),/,
     );
   });
 
@@ -1002,6 +1019,35 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
     ).not.toMatch(
       /serveGovernedFullHead\(elideDocComments/,
     );
+  });
+
+  it("TL-05: resolveRangedPathsBatchEntry books both its sites verbatim — that function renders NO elision at all, so there is nothing to exclude", () => {
+    // A `mode=full` multi-target batch entry that also names its own
+    // range/ranges/symbol is served UNELIDED by design (plan-0143 §7.1: a
+    // caller combining an explicit window with `content:"full"` is very
+    // likely staging an edit precondition, and eliding comment blocks would
+    // silently rewrite the bytes it later matches against) — see this
+    // function's own doc comment in server.ts. Both its recordServedRange
+    // call sites therefore book the resolved window's raw [start,end]
+    // directly, the same justification FX-OH F3's comments-keep head uses
+    // for its own a2 classification just above.
+    const fn = body(SERVER, "resolveRangedPathsBatchEntry");
+    expect(
+      fn,
+      "the ranges[] segment site must book each segment's own resolved span",
+    ).toMatch(
+      /const segStart = rangeStartLine\(segment\.range\);\s*const segEnd = Math\.min\(totalLines, segStart \+ countLines\(segment\.code\) - 1\);\s*recordServedRange\(workspace, path, rawSha, segStart, segEnd, totalLines, \{ mode: "full", range: segment\.range, call \}\);/,
+    );
+    expect(
+      fn,
+      "the single range/symbol site must book the resolved window's own span, guarded by !data.assembled",
+    ).toMatch(
+      /if \(!data\.assembled\) \{\s*const start = rangeStartLine\(data\.range\);\s*const end = Math\.min\(totalLines, start \+ countLines\(data\.content\) - 1\);\s*recordServedRange\(workspace, path, rawSha, start, end, totalLines, \{ mode: "full", range: data\.range, call: beginServeCall\(workspace\) \}\);/,
+    );
+    expect(
+      fn,
+      "and this function must never elide: an elided window would need a1 accounting instead",
+    ).not.toMatch(/elideDocCommentsForDisplay/);
   });
 
   it("dropServedBody books the verification kit's ALREADY-ASSEMBLED whole-file body verbatim (1..totalLines)", () => {

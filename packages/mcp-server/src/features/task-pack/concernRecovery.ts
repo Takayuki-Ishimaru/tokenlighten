@@ -481,6 +481,16 @@ export function isClauseCoveredByCandidates<T extends DiversifyCandidate>(
 export interface SeededCoverageSurface extends DiversifyCandidate {
   /** The surface's own served body text, when the caller was actually shown it -- a skeleton/handle-only surface has none. See isClauseCoveredBySeededSurfaces's own doc comment. */
   readonly bodyText?: string;
+  /**
+   * B5 (fix-b, 2026-09-21): true when this surface's own role is "doc"
+   * (README / docs / prose), as the caller's existing role classification
+   * already says -- never a fresh heuristic here. Gates ONLY the body-text
+   * branch below (see that function's own doc comment); undefined/false
+   * behaves exactly as before this fix for every non-doc surface, and a
+   * caller with no role signal at all simply never sets it, so the guard is
+   * inert (identical to pre-fix behavior) until a caller opts in.
+   */
+  readonly isDocSurface?: boolean;
 }
 
 /**
@@ -504,6 +514,23 @@ export interface SeededCoverageSurface extends DiversifyCandidate {
  * two-distinct-token bar, never the single-token one -- the same asymmetry
  * queryRecoveryTerms.ts's expansionsSupportCandidate already applies (its
  * own single-strong-token rule is scoped to path+symbol only).
+ *
+ * B5 (fix-b, 2026-09-21) — TL-04(b): a body-text match inside a DOC-role
+ * surface (README / docs / prose) is the noisiest of the signals this
+ * function checks, one level noisier than the plain body-text case the
+ * comment above already calls out — a README that names every one of a
+ * multi-concern query's concerns next to its own file path/description
+ * "covers" every remaining clause once served, starving each of a real
+ * locate (observed: an auth/cache/retry/config query where the README
+ * substituted for the never-served auth module). Mirrors the sibling guard
+ * `runClauseLocateRecovery` already applies to its own doc-role PICKS
+ * (`isDocPath(picked) && !clauseMentionsAny(clause, DOC_MENTION_WORDS)`):
+ * a doc surface's body text may establish coverage ONLY when the clause
+ * itself asks about documentation (recall control — a clause that really
+ * asks about the README/docs is still covered by it). The PATH/SYMBOL
+ * check just above is untouched and still counts regardless of doc-role
+ * (unchanged from before this fix): a deliberate file/symbol naming match
+ * is not the noisy signal this guard exists to gate.
  */
 export function isClauseCoveredBySeededSurfaces<T extends SeededCoverageSurface>(
   clauseTokens: ReadonlySet<string>,
@@ -511,10 +538,12 @@ export function isClauseCoveredBySeededSurfaces<T extends SeededCoverageSurface>
   tokenize: (text: string) => readonly string[],
 ): boolean {
   if (surfaces.length === 0) return false;
+  const clauseAsksAboutDocs = DOC_MENTION_WORDS.some((word) => clauseTokens.has(word));
   return surfaces.some((surface) => {
     const pathSymbolTokens = candidateTokenSet(surface, tokenize);
     if (clauseMatchesCandidate(clauseTokens, pathSymbolTokens)) return true;
     if (surface.bodyText === undefined) return false;
+    if (surface.isDocSurface === true && !clauseAsksAboutDocs) return false;
     const combinedTokens = new Set(pathSymbolTokens);
     for (const token of tokenize(surface.bodyText)) combinedTokens.add(token.toLowerCase());
     let distinctMatches = 0;
@@ -1105,6 +1134,18 @@ function clauseMentionsAny(
   return words.some((word) => tokens.has(word));
 }
 
+/**
+ * B5 (fix-b, 2026-09-21) — ONE VOCABULARY, NOT A MIRROR (this file's own
+ * established convention: see e.g. requestItems.ts's SHOULD-FIX 55). The
+ * words whose presence in a clause means "this clause itself asks about
+ * documentation" — shared by `runClauseLocateRecovery`'s own doc-role pick
+ * guard below (`isDocPath(picked) && !clauseMentionsAny(...)`) and
+ * `isClauseCoveredBySeededSurfaces`'s new doc-role coverage guard, so the
+ * two never drift into disagreeing about what counts as "asking about
+ * docs".
+ */
+export const DOC_MENTION_WORDS: readonly string[] = ["doc", "docs", "documentation"];
+
 export function collectNeighbourWords(
   baseTokens: ReadonlySet<string>,
   stemNeighbours: (token: string) => readonly string[],
@@ -1309,7 +1350,7 @@ export async function runClauseLocateRecovery<C extends { path: string; confiden
 
     if (picked === undefined) continue;
     if (deps.isTestPath(picked) && !clauseMentionsAny(clause.text, deps.tokenize, ["test", "tests", "spec", "specs"])) continue;
-    if (deps.isDocPath(picked) && !clauseMentionsAny(clause.text, deps.tokenize, ["doc", "docs", "documentation"])) continue;
+    if (deps.isDocPath(picked) && !clauseMentionsAny(clause.text, deps.tokenize, DOC_MENTION_WORDS)) continue;
 
     picks.push({ clauseId: clause.id, candidate: picked });
   }

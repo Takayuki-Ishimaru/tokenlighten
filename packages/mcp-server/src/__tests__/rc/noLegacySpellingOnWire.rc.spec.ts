@@ -43,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { killServerGroup } from "../helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -101,9 +102,9 @@ const tmpDirs: string[] = [];
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(ws: string): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, BIN_TS, ws, "--allow-write"], {
+  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, ws, "--allow-write"], {
     cwd: ws,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     // The property is about the RELEASE posture: legacy input refused. The
     // vitest setup exports TL_LEGACY_INPUT=accept for older suites, under which
     // an `unknown-arguments` refusal's `keys` list legitimately names the legacy
@@ -155,7 +156,7 @@ function startServer(ws: string): ServerHandle {
   const handle: ServerHandle = {
     initialize,
     rpc,
-    kill: () => { try { child.kill("SIGKILL"); } catch { /* ok */ } },
+    kill: () => { try { killServerGroup(child); } catch { /* ok */ } },
   };
   spawnedServers.push(handle);
   return handle;

@@ -53,6 +53,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 import {
   isMidSplicedHandle,
@@ -187,8 +188,8 @@ interface ServerHandle {
 function startServer(opts: { cwd: string; args: string[]; env?: Record<string, string> }): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, ...opts.args],
-    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...(opts.env ?? {}) } },
+    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
+    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, ...(opts.env ?? {}) } },
   );
   let stdoutBuf = "";
   let stderr = "";
@@ -229,7 +230,7 @@ function startServer(opts: { cwd: string; args: string[]; env?: Record<string, s
     });
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
   }
-  function kill(): void { try { child.kill("SIGKILL"); } catch { /* ok */ } }
+  function kill(): void { try { killServerGroup(child); } catch { /* ok */ } }
   return { initialize, rpc, kill };
 }
 

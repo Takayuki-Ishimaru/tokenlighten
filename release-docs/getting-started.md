@@ -78,7 +78,7 @@ Removes the machine install (staged runtime and app files) and TokenLighten-mana
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.14.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.3/tokenlighten-vscode-extension-0.14.3.vsix)** from the v0.14.3 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.14.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.4/tokenlighten-vscode-extension-0.14.4.vsix)** from the v0.14.4 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. This runs the same machine install described above (`tl install --from-extension --clients none`), using VS Code's own Node.js runtime instead of a bundled one: it stages the extension's bundled CLI as the machine install and sets up the current workspace, all in one operation — it does not register other hosts on the machine (Claude Code, Codex); do that separately with `tl clients activate`, or with an archive's `tl-setup`. Remove it with **TokenLighten: Uninstall TokenLighten from This Machine** from the command palette, or the absolute `tl install --uninstall` invocation described in [Uninstall](#uninstall) below.
 
@@ -168,7 +168,7 @@ By default the server advertises every capability (`full`), including Office doc
 tl mcp start --stdio --tool-surface code --workspace /path/to/project
 ```
 
-`tl workspace setup --tool-surface code` writes the same choice into generated client configuration. See [MCP tools](mcp-tools.md#tool-surface) for what each surface advertises and when to choose it.
+`tl workspace setup --tool-surface code` writes the same choice into generated client configuration. See [MCP tools](mcp-tools.md#tool-surface) for what each surface advertises and when to choose it. Measured on this build, the advertised `tools/list` schema is 13,414 bytes for `full` and 9,853 bytes for `code` — choose `code` for a workspace that is exclusively source code, text, documentation, configuration, or logs; keep `full` if it may contain Office documents, zip archives, or encrypted artifacts.
 
 With `--tool-surface code` and no explicit `--guide-profile`, `tl workspace setup` writes the **compact** guide instead of the full one — a code-only server has nothing to gain from the full guide's Office/archive/credential instructions, and the compact guide is the smaller default footprint. Pass `--guide-profile full` (or `medium`) explicitly to keep a larger guide under `--tool-surface code`; an explicit `--guide-profile` always wins over this default. See [Choose a guide profile](#choose-a-guide-profile-optional) below for the three guide profiles.
 
@@ -199,4 +199,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - If you use VS Code, see [VS Code extension](vscode-extension.md).
 - Deploying to a fleet or a policy-managed machine? See [Managed environments](managed-environments.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
-- Read the [v0.14.3 release notes](github-release-v0.14.3.md) for the current changes, compatibility, and known limitations.
+- Read the [v0.14.4 release notes](github-release-v0.14.4.md) for the current changes, compatibility, and known limitations.

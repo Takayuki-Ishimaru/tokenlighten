@@ -37,6 +37,7 @@ import * as path from "node:path";
 import { waitForExit } from "./helpers/rmDirWithRetry.js";
 
 import { applyAnswerLineGutter, stripAnswerLineGutter } from "../protocol/lineGutter.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const FLAG = "TL_ANSWER_LINE_GUTTER";
 const UMBRELLA = "TL_TURN_ECONOMY";
@@ -102,10 +103,15 @@ function makeWorkspace(): string {
   return root;
 }
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env[FLAG];
   delete process.env[UMBRELLA];
   for (const root of workspaces.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  // Every server here is started inside one test (`taskPackCall`'s own
+  // startServer call, or the two direct call sites below, never reused
+  // across tests); stop it now so the file's 9 tests never hold all their
+  // servers alive at once.
+  for (const server of spawnedServers.splice(0)) await server.kill();
 });
 
 // ---------------------------------------------------------------------------
@@ -126,9 +132,9 @@ interface ServerHandle {
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(cwd: string, env: Record<string, string>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, BIN_TS, cwd], {
+  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd], {
     cwd,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env, ...env },
   });
   let stdoutBuf = "";
@@ -187,7 +193,7 @@ function startServer(cwd: string, env: Record<string, string>): ServerHandle {
       return { body: JSON.parse(text!) as Record<string, unknown>, bytes: Buffer.byteLength(text!, "utf8") };
     },
     async kill() {
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      try { killServerGroup(child); } catch { /* already gone */ }
       await waitForExit(child);
     },
   };

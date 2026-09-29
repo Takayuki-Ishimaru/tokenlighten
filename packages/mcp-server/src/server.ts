@@ -10,7 +10,7 @@
 // return 'write-not-enabled' unless --allow-write is passed at startup.
 // kill-switch: TL_KILL_SWITCH=1 causes tools/list to return empty.
 
-import { existsSync, statSync, lstatSync, readdirSync } from "node:fs";
+import { existsSync, statSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import * as path from "path";
 import { createHash, randomBytes } from "crypto";
 import { deriveServerBuildId, deriveServerPackageVersion } from "./util/serverBuild.js";
@@ -33,7 +33,7 @@ import { findReferences } from "./tools/findReferences.js";
 import { renameSymbol } from "./tools/renameSymbol.js";
 import { locateTaskContext, projectRootOf } from "./features/locator/locateTaskContext.js";
 import { pathlessExactEdit, pathlessSymbolEdit } from "./write/pathlessEdit.js";
-import { resolveWorkspaceRoot as resolveWorkspaceRootBase, registeredWorktreeRoot } from "./write/resolveWorkspace.js";
+import { resolveWorkspaceRoot as resolveWorkspaceRootBase, registeredWorktreeRoot, realDirectory } from "./write/resolveWorkspace.js";
 import { isWorkspaceCandidateAccepted, nearestValidWorkspaceAncestor, WORKSPACE_CANDIDATE_LIMIT } from "./workspace/candidates.js";
 import { nestedWorkspaceCrossing, nestedWorkspaceRoots } from "./write/workspaceBoundary.js";
 import {
@@ -64,7 +64,7 @@ import {
   splitArchiveVirtualPath,
   virtualArchivePath,
 } from "./tools/archive.js";
-import { admitTaskPackBudget, autoBoundTaskProfile, buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, repairSuppressedNextCall } from "./features/task-pack/readCodeTaskPack.js";
+import { admitTaskPackBudget, autoBoundTaskProfile, buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, recordReadOnlyServedRangedServe, repairSuppressedNextCall } from "./features/task-pack/readCodeTaskPack.js";
 import { rescueStringifiedCanonicalFields as rescueCanonicalDialectFields } from "./mcp/transport/canonicalDialectRescue.js";
 function taskPackAdmission(
   args: Record<string, unknown>,
@@ -77,12 +77,330 @@ function taskPackAdmission(
   return refusal === undefined ? undefined : toolStructuredError(refusal);
 }
 
+/** TL-06 staleness pre-check: a fingerprint cap matching
+ *  `recordPackServedRanges`'s own `MAX_FINGERPRINT_FILE_BYTES`
+ *  (readCodeTaskPack.ts) — a file this large is skipped (fail-open: proceed
+ *  normally), not refused, matching that function's own fail-open shape. */
+const STALE_RANGE_PROBE_MAX_BYTES = 256 * 1024;
+
+/** `"start-end"` -> `[start,end]`, or `undefined` if unparseable. */
+function parseServedSpan(range: string): [number, number] | undefined {
+  const m = /^(\d+)-(\d+)$/.exec(range);
+  if (m === null) return undefined;
+  return [Number(m[1]), Number(m[2])];
+}
+
+/** The minimal single span covering every `"start-end"` string in `ranges`. */
+function mergeRangeSpans(ranges: readonly string[]): string | undefined {
+  let lo = Number.POSITIVE_INFINITY;
+  let hi = Number.NEGATIVE_INFINITY;
+  for (const r of ranges) {
+    const parsed = parseServedSpan(r);
+    if (parsed === undefined) continue;
+    lo = Math.min(lo, parsed[0]);
+    hi = Math.max(hi, parsed[1]);
+  }
+  return Number.isFinite(lo) && Number.isFinite(hi) ? `${lo}-${hi}` : undefined;
+}
+
+/**
+ * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): refuse — reusing the read
+ * cursor's own `cursor-stale` vocabulary (server.ts's cursor-continuation
+ * branch, ~:11633) — BEFORE the task-pack builder runs, when a caller-named
+ * ranged path this epoch's own continuation already served lines of is about
+ * to be re-served from a file revision that changed since.
+ *
+ * WHY THIS IS NEEDED AT ALL (plan-0143 §4, TL-01's `callerRangedAddress`,
+ * canonicalDecision.ts): a multi-target caller-ranged `next` is addressed by
+ * PATH, not by a sha-bound handle or cursor, so a verbatim follower that
+ * re-issues it after the file changed mid-chain carries no sha of its own to
+ * compare against — the wire call cannot detect the mismatch, only the
+ * server's own served-range ledger can (`servedRangeStaleness`,
+ * state/session.ts). Checked here, ahead of `buildTaskPack`/
+ * `buildSeededTaskPack`, so a stale re-ask never reaches candidate/body
+ * assembly at all — the same "admit before the builder runs" shape
+ * `admitTaskPackBudget` above already uses for the byte-floor refusal.
+ *
+ * Scoped to CALLER-RANGED entries only (`entry.range !== undefined`): an
+ * unranged `{path}` target is served as a whole-file read, which cannot mix
+ * two revisions across hops the way a partial-window continuation can, so it
+ * is left untouched here exactly as today.
+ *
+ * A HANDLE-ONLY entry (no `path` — the `handles=[]` A7 batch's own shape) is
+ * watched/compared under its handle's OWN resolved path (`handleTable`), so
+ * the identical protection covers a handle-addressed continuation, not just
+ * a path-addressed one; the entry's own addressing (handle or path) is
+ * preserved verbatim in the reconstructed `next` below — this function never
+ * rewrites one into the other.
+ *
+ * GATE-A (2026-09-21, v0.14.4 candidate item 2) — NARROWED to genuine
+ * continuations. The rule above, unqualified, refused pi03DedupHonesty's and
+ * servedReceipts's "edit between two identical-range requests" flow, AND
+ * reserveSmallWindows's "reuse the seeded task's handle to ask a small,
+ * independent follow-up question about a window already served" flow — none
+ * of these three is a continuation of anything the server minted; each is
+ * either two unrelated top-level requests or a caller-authored follow-up
+ * that happens to name a window already delivered.
+ *
+ * THE DISCRIMINATOR IS DATA, NOT A WIRE TOKEN. Two designs were tried and
+ * rejected before this one: (a) "the incoming call's fingerprint already
+ * appears in the executed-next ledger" (util/packServeLog.ts) is always true
+ * for a caller who simply repeats an identical call, genuine continuation or
+ * not — it cannot tell the two apart. (b) "the incoming call carries a
+ * resolvable task binding" (`canonicalTaskBindingOf`) is neither necessary
+ * (VS Code's `TL_LEAN_CALLS` drops `task.handle` from a plain targets-only
+ * continuation whenever serving it does not strictly need one —
+ * `continuationNeedsTaskHandle`, protocol/envelope.ts — so a genuine
+ * continuation can arrive with NO handle at all) nor sufficient (reserveSmall
+ * Windows deliberately reuses one task's handle across independent
+ * follow-up sub-questions — an encouraged, documented pattern, not evidence
+ * of continuing an interrupted delivery).
+ *
+ * What is both necessary and sufficient: a genuine continuation, BY
+ * CONSTRUCTION (`callerRangedAddress`, `partialFallback`), only ever asks
+ * for the window this path has NOT yet delivered — it advances the
+ * boundary. An independent re-read, whatever wire dress it wears, asks for a
+ * window the ledger already marked served. So: if the CURRENT request's
+ * range is FULLY CONTAINED in what this path already served earlier this
+ * epoch (`isRangeFullyCoveredBy` below), it is re-verification of a
+ * revision that has since moved — serve it fresh, never refuse (the `else`
+ * branch below), matching what clean HEAD already did for all three flows
+ * above. If it reaches even one line beyond that — advancing, not
+ * repeating — the strict refusal applies exactly as before.
+ *
+ * GATE-A2 (2026-09-21, v0.14.4 candidate item 2's own follow-up) — NARROWED
+ * AGAIN. "Reaches even one line beyond what was already served" is NOT the
+ * same fact as "is a continuation of something this server promised". The
+ * everyday flow "read a window, edit the file with a NATIVE tool (not
+ * `edit_file`), read the NEXT window" also reaches beyond what was served —
+ * it is an independent read of a window nobody ever promised — yet GATE-A's
+ * rule above refused it as though it were a continuation, and its own
+ * recovery `next` re-reads the growing union each cycle: a quadratic cost in
+ * exactly the hosts that edit natively (VS Code Copilot, Claude Code
+ * escapes). Pre-wave behaviour for that flow was: serve fresh, silently.
+ *
+ * THE DISCRIMINATOR IS NOW: DID THIS SERVER ITSELF PROMISE THIS WINDOW.
+ * `mintRangedContinuationWindow` / `mintedRangedContinuationWindows`
+ * (state/session.ts) record exactly the windows a `next`/`remaining_ranges`
+ * THIS PROCESS wrote have promised — written from the one seat every
+ * emitted continuation passes through (`canonicalToolCall`,
+ * protocol/envelope.ts; see its own doc comment). A request is STRICT only
+ * when it reaches into a minted window's still-UNDELIVERED part
+ * (`reachesUndeliveredMintedWindow`, below, checked against the per-span
+ * overlap rather than the whole minted span — a span can be PARTIALLY
+ * delivered by an earlier hop of the same chain); everything else —
+ * including a request that reaches past what was served, but into
+ * territory this server never promised — is independent and served fresh,
+ * exactly like a fully-covered request already was.
+ *
+ * This succeeds where the two ORIGINALLY rejected designs could not, and for
+ * the same underlying reason GATE-A's OWN heuristic above then failed: the
+ * executed-next-ledger fingerprint, the task-binding check, AND "reaches
+ * beyond what was served" all inspect a property of the INCOMING call (its
+ * wire shape, its metadata, or the caller/ledger's OWN prior activity) —
+ * data an independent caller reproduces identically whether or not it is
+ * continuing anything; a caller cannot help but reach beyond served lines
+ * the first time it asks for a brand-new window, continuation or not. A
+ * minted-window registry instead records a fact about SERVER OUTPUT — what
+ * this process itself proposed — which an independent caller has no way to
+ * coincidentally reproduce, because it never received that proposal.
+ */
+async function admitCallerRangedContinuation(
+  workspace: string,
+  rawPaths: unknown,
+  content: unknown,
+): Promise<ReturnType<typeof toolStructuredError> | undefined> {
+  if (!Array.isArray(rawPaths) || rawPaths.length === 0) return undefined;
+  const entries = mapTaskPackPaths(rawPaths);
+  const watchPathOf = (entry: { path: string; handle?: string }): string | undefined =>
+    entry.path !== "" ? entry.path : entry.handle !== undefined ? handleTable.get(entry.handle)?.path : undefined;
+  const staleByIndex = new Map<number, { priorRanges: string[]; mergedRange: string; watchPath: string }>();
+  const uncoveredIndependentStaleness: Array<{ priorRanges: string[]; watchPath: string }> = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
+    if (entry.range === undefined) continue;
+    const watchPath = watchPathOf(entry);
+    if (watchPath === undefined || watchPath === "") continue;
+    let text: string;
+    try {
+      const abs = safeResolve(watchPath, workspace);
+      if (abs === undefined) continue;
+      const real = realpathSync(abs);
+      if (!isWithin(real, resolveReal(workspace))) continue;
+      if (statSync(real).size > STALE_RANGE_PROBE_MAX_BYTES) continue;
+      // served-bytes: not-served (staleness pre-check: sha comparison only; the real serve re-reads and books independently)
+      text = readFileSync(real, "utf8");
+    } catch {
+      continue;
+    }
+    const freshSha = shaOfText(text);
+    // FIX-A6 (ordering fix): `servedRangeStaleness` MUST observe this path's
+    // watch state as it stood BEFORE this call touched it — its own doc
+    // comment (state/session.ts) names "the first hop of a genuinely fresh
+    // `task.epoch:"new"` chain that happens to reuse a path a PRIOR,
+    // unretired epoch also touched" as the exact false-alarm case membership
+    // in `epochRangeWatch` is meant to rule out. Calling
+    // `markRangeContinuationWatched` first (as this line used to) added the
+    // path to that set before the check ever ran, so the very "first touch"
+    // guard `servedRangeStaleness` documents could never fire — CONFIRMED
+    // live: a same-lane, same-session `task.epoch:"new"` re-read of a path a
+    // retired epoch had left a stale ledger entry for was refused
+    // `cursor-stale`, a false alarm, once this fix wired a THIRD caller
+    // (mode=slice) into this function and finally exercised the ordering.
+    // The mark still runs unconditionally, immediately after, so a SECOND
+    // hop within THIS SAME epoch is watched exactly as before.
+    const staleness = servedRangeStaleness(workspace, watchPath, freshSha);
+    markRangeContinuationWatched(workspace, watchPath);
+    if (staleness === undefined) continue;
+    const mintedRanges = mintedRangedContinuationWindows(workspace, watchPath) ?? [];
+    if (!reachesUndeliveredMintedWindow(entry.range, mintedRanges, staleness.ranges)) {
+      // GATE-A2: independent of anything THIS SERVER minted as a
+      // continuation — re-verification of a revision that has since moved,
+      // whether or not this request's own range happens to have been served
+      // before. Served fresh, never refused. Still acknowledge (below) so
+      // this exact (path, sha) is not re-flagged forever, and still
+      // disclose the portion of the prior serve THIS call does not itself
+      // re-cover (a one-line `note`, applied by the caller once the real
+      // serve completes).
+      const uncovered = staleRangesNotCoveredBy(staleness.ranges, entry.range);
+      if (uncovered.length > 0) uncoveredIndependentStaleness.push({ priorRanges: uncovered, watchPath });
+      acknowledgeRangeStaleness(workspace, watchPath, freshSha);
+      continue;
+    }
+    const mergedRange = mergeRangeSpans([...staleness.ranges, entry.range]) ?? entry.range;
+    staleByIndex.set(i, { priorRanges: staleness.ranges, mergedRange, watchPath });
+    // See acknowledgeRangeStaleness's own doc comment: this refusal is a
+    // pre-flight check, so the real serve that would otherwise advance the
+    // ledger's sha never runs on this hop — mark the disclosure now so a
+    // follower's retry of THIS exact restart admits the same sha and reaches
+    // the real serve, instead of being refused forever.
+    acknowledgeRangeStaleness(workspace, watchPath, freshSha);
+  }
+  // GATE-A: an independent (fully-covered) request never refuses, but a
+  // stale revision this call itself does not re-cover is still worth one
+  // line of disclosure — stashed here (consumed once, by the shared
+  // dispatch exit) rather than returned, since this function's only other
+  // return shape is "nothing to say" (`undefined`) or the bound refusal
+  // below.
+  if (uncoveredIndependentStaleness.length > 0) {
+    stashIndependentRangeStalenessNote(      workspace,
+      uncoveredIndependentStaleness
+        .map((info) => `${info.watchPath}: lines ${info.priorRanges.join(", ")} were served earlier this epoch under a since-changed revision and are not covered by this request`)
+        .join("; "),
+    );
+  }
+  if (staleByIndex.size === 0) return undefined;
+
+  const nextTargets = entries.map((entry, i) => {
+    const stale = staleByIndex.get(i);
+    return {
+      ...(entry.path !== "" ? { path: entry.path } : {}),
+      ...(stale !== undefined
+        ? { range: stale.mergedRange }
+        : entry.range !== undefined ? { range: entry.range } : {}),
+      ...(entry.symbol !== undefined ? { symbol: entry.symbol } : {}),
+      ...(entry.purpose !== undefined ? { purpose: entry.purpose } : {}),
+      ...(entry.handle !== undefined ? { handle: entry.handle } : {}),
+    };
+  });
+  const affected = [...staleByIndex.values()]
+    .map((info) => `${info.watchPath} (previously served ${info.priorRanges.join(", ")})`)
+    .join("; ");
+  return toolStructuredError({
+    ok: false,
+    code: "cursor-stale",
+    field: "targets",
+    error: `the source revision of ${affected} moved since this task last served it`,
+    detail: "a caller-ranged continuation is never mixed across revisions; the next call re-reads the stale range(s) under the current version",
+    retry: "call",
+    next: canonicalToolCall("read_file", {
+      targets: nextTargets,
+      ...(typeof content === "string" ? { content } : {}),
+    }),
+  });
+}
+
+/** GATE-A: the entries of `priorRanges` ("start-end" strings) that `currentRange` does not fully subsume — the part of an independent call's disclosure that is not moot because THIS request already re-reads it. An unparsable `currentRange` discloses everything (fail open toward disclosure, never silently drop it). */
+function staleRangesNotCoveredBy(priorRanges: readonly string[], currentRange: string): string[] {
+  const current = parseServedSpan(currentRange);
+  if (current === undefined) return [...priorRanges];
+  return priorRanges.filter((range) => {
+    const span = parseServedSpan(range);
+    return span === undefined || span[0] < current[0] || span[1] > current[1];
+  });
+}
+
+/**
+ * GATE-A: true iff every line of `range` ("start-end") already lies within
+ * the union of `priorRanges`. GATE-A2: no longer called directly on the
+ * caller's whole `entry.range` by `admitCallerRangedContinuation` (that
+ * conflated "not yet delivered" with "is a continuation" — see that
+ * function's own doc comment) — now a generic span-coverage utility,
+ * reused by `reachesUndeliveredMintedWindow` below to test whether a
+ * MINTED window's overlap with the request is already fully delivered. An
+ * unparsable `range` is conservatively treated as NOT covered (never
+ * silently waived into the lenient branch on a shape this cannot parse).
+ */
+function isRangeFullyCoveredBy(range: string, priorRanges: readonly string[]): boolean {
+  const target = parseServedSpan(range);
+  if (target === undefined) return false;
+  const spans = priorRanges
+    .map(parseServedSpan)
+    .filter((span): span is [number, number] => span !== undefined)
+    .sort((a, b) => a[0] - b[0]);
+  let covered = target[0];
+  for (const [start, end] of spans) {
+    if (start > covered) break; // a gap opens before `covered` is reached: cannot bridge it
+    if (end >= covered) covered = end + 1;
+    if (covered > target[1]) return true;
+  }
+  return false;
+}
+
+/**
+ * GATE-A2 (2026-09-21, v0.14.4 candidate item 2's own follow-up): true iff
+ * `range` reaches into a window THIS SERVER ITSELF minted as a continuation
+ * for the path being checked (`mintedRanges`,
+ * `state/session.ts`'s `mintedRangedContinuationWindows`) that is not
+ * itself already fully delivered under the stale sha (`deliveredRanges`,
+ * `servedRangeStaleness`'s own `ranges`). This is the necessary-and-
+ * sufficient test `admitCallerRangedContinuation`'s own doc comment
+ * describes: a genuine continuation is the caller reaching into a promise
+ * this server made and has not yet kept.
+ *
+ * Checked PER MINTED SPAN, against the OVERLAP with `range` specifically —
+ * NOT "is the whole minted span still open" — because a minted span can be
+ * PARTIALLY delivered by an earlier hop of the same chain (a second
+ * continuation minted for what a first continuation left over): a request
+ * that only touches the ALREADY-delivered part of an otherwise-still-open
+ * minted span must still be independent re-verification, not a
+ * continuation. An unparsable `range` never reaches anything (fails toward
+ * "independent", the same safe direction `isRangeFullyCoveredBy` fails
+ * toward "not covered").
+ */
+function reachesUndeliveredMintedWindow(
+  range: string,
+  mintedRanges: readonly string[],
+  deliveredRanges: readonly string[],
+): boolean {
+  const requested = parseServedSpan(range);
+  if (requested === undefined) return false;
+  for (const minted of mintedRanges) {
+    const span = parseServedSpan(minted);
+    if (span === undefined) continue;
+    const overlapStart = Math.max(requested[0], span[0]);
+    const overlapEnd = Math.min(requested[1], span[1]);
+    if (overlapStart > overlapEnd) continue; // no overlap with this minted window
+    if (!isRangeFullyCoveredBy(`${overlapStart}-${overlapEnd}`, deliveredRanges)) return true;
+  }
+  return false;
+}
+
 import {
   bindTaskContractHandle,
   consumeExecutableNextScope,
-  hasPendingExecutableNext,
-  recoverHandlelessTaskScope,
-  resolveExecutableNextScope,
+  hasPendingExecutableNext,  recoverHandlelessTaskScope,  resolveExecutableNextScope,
+  rawContractQueryForScope,
   recordAuthoritativeAbsentConcerns,
   recordServedConcernEvidence,
   registerExecutableNextScope,
@@ -90,7 +408,7 @@ import {
   taskContractDigest,
   type TaskContractScope,
 } from "./features/task-pack/taskContractStore.js";
-import { walkCodeFiles } from "./tools/walkRepo.js";
+import { walkCodeFiles, runWithWalkRequestScope } from "./tools/walkRepo.js";
 import { classifySurface, deriveTokenVariants } from "./util/impact.js";
 import { callWorkspace, handleTable, runWithCallWorkspace, runWithDeclaredWorkspace, setHandlePersistence, shaOfText, shaOfBytes, shortSha, type HandleEntry } from "./util/handles.js";
 // PI-09 (v0.10 alpha.2) explicit state: purpose-bound handles over the
@@ -146,10 +464,10 @@ import { deriveIrTaskRef, recordReasoningIrV2ClosureFromEdit, recordReasoningIrV
 import { deriveCanonicalTaskDecision, discoveryBundleNext, enforceCanonicalTaskDecisionAtExit } from "./features/task-pack/canonicalDecision.js";
 import type { TaskPackResult } from "./features/task-pack/model.js";
 import { projectLeanExecutionContract } from "./util/leanExecutionContract.js";
-import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCertifiedDecision, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, resolveTaskQueryRefBinding, resolveTaskQueryRefHandle, attachTaskQueryRefBinding, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, type ServedRangeLedgerReceipt } from "./state/session.js";
+import { recordReadMode, recordHandleEdit, recordPathSearchEdit, recordSingleEditCompletion, recordEditsBatchUsed, recordSingleFindCompletion, otherActiveRoots, recordConcernTokens, recordReadPath, getReadPaths, hasUnreadSiblingNoteFired, markUnreadSiblingNoteFired, recordEditedPath, getEditedPaths, getConcernTokens, guardExecutionDiscovery, noteDiscoveryServedNoBytes, guardExecutionEdit, recordExecutionContract, recordCandidateListPack, clearCandidateListPack, recordExecutionEditResult, recordCertifiedDecision, recordCreatedEditAdmissibility, getExecutionFence, takePreparedHandleAdvisory, rekeyExecutionFenceCertificate, runWithSessionLane, isClosureSatisfied, recordClosureReport, markClosureSatisfied, clearClosureSatisfied, wasFullyServed, unservedVerificationPaths, markVerificationPathsServed, isVerificationSurfaceServed, markVerificationSurfaceServed, recordServedRange, servedRangeReceipt, markRangeContinuationWatched, servedRangeStaleness, acknowledgeRangeStaleness, mintedRangedContinuationWindows, beginServeCall, repeatedEditRefusalAdvisory, artifactRangeReceipt, recordArtifactServedRange, taskQueryRef, rememberTaskQuery, resolveTaskQueryRef, resolveTaskQueryRefBinding, resolveTaskQueryRefHandle, attachTaskQueryRefBinding, clearTaskQueryRef, claimServerBuildAnnouncement, registerServerBuildId, servedRangeCoverage, deltaLedgerStatus, unservedLineCount, recordFullServeCompleteness, CREATE_BODY_PLACEHOLDER, EDIT_REPLACE_PLACEHOLDER, EDIT_SEARCH_PLACEHOLDER, READ_BACK_RANGE_PLACEHOLDER, servedClusterCount, servedClusterRanges, isHandleShippedInThisLane, recordReadFamilySingleTargetCall, tokenizeForEpoch, type ServedRangeLedgerReceipt } from "./state/session.js";
 import { buildVerificationManifest, verificationBodyIdentity, verificationDependencyNote, identifierTokens, type BodyMarker } from "./util/verificationPack.js";
 import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "./util/closureTracking.js";
-import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNextBoundOrUnbound, hasPrescribedSearchTerm, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordExecutedSearchResult, recordPrescribedSearchTerms, recordServedBytes, type ExecutedSearchAbsence, type ExecutedSearchHit } from "./util/packServeLog.js";
+import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNextBoundOrUnbound, hasPrescribedSearchTerm, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordExecutedSearchResult, recordPrescribedSearchTerms, recordServedBytes, recordServedWindow, stashIndependentRangeStalenessNote, consumeIndependentRangeStalenessNote, type ExecutedSearchAbsence, type ExecutedSearchHit } from "./util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "./util/laneKey.js";
 // DESIGN-v0.15 §5 (R2): the read-request continuation store. Q/D live here, not
 // in a handle payload and not in a second store (§10 item 3).
@@ -200,7 +518,7 @@ import { decideFullRead, TINY_BYTES, TINY_LINES, LARGE_BYTES, GOVERNED_FULL_SERV
 import { buildSmallFile, type SmallFileContentMode } from "./tools/readCodeSmallFile.js";
 import { buildOverview } from "./tools/readCodeOverview.js";
 import { applyIntent } from "./intents/index.js";
-import { resolveReal, readFileSafe, readBytesSafe, readServedTextSafe, safeResolve } from "./util/safePath.js";
+import { resolveReal, readFileSafe, readBytesSafe, readServedTextSafe, safeResolve, isWithin } from "./util/safePath.js";
 import { noteNulStrippedServe } from "./protocol/envelope.js";
 import {
   describeServedTextRefusal,
@@ -315,6 +633,11 @@ import {
 // by the read-cursor resume so an inherited `budget.tokens` sizes a page the
 // same way an inherited `budget.bytes` does — DESIGN-v0.15 §5.2.
 import { assertStartupBudgetsAreSane, estimateBytesFromTokens } from "./protocol/budget/wireBudget.js";
+// FIX-A3 (2026-09-21): the SAME Symbol a shed rung reads off `ShedContext.args`
+// (`readBatch.ts`'s rungs 4/6) to keep echoing `content:"full"` across a
+// minted continuation — see `RANGE_CONTENT_FULL_MARKER`'s own doc comment in
+// registry.ts for why the constant lives there rather than here.
+import { RANGE_CONTENT_FULL_MARKER } from "./protocol/budget/shedders/registry.js";
 // v0.10 alpha.1 dual-era transport (DESIGN-v0.10-expansion-plan-v1.3.md §4.5).
 // The transport modules import back from this file (advertisedTools, callTool,
 // handleRequest, ...); the cycle is safe because every one of those bindings is
@@ -346,8 +669,13 @@ function workspaceRootArg(args: readonly string[]): string | undefined {
 }
 
 // Exported as a live binding for ./mcp/transport/* (v0.10 alpha.1 transport
-// extraction); assigned exactly once, here.
-export let activeRoot = workspaceRootArg(argv) ?? process.env["TOKENLIGHTEN_ROOT"] ?? process.cwd();
+// extraction); assigned exactly once, here. `path.resolve` absolutizes a
+// relative `--workspace`/positional arg or TOKENLIGHTEN_ROOT against this
+// process's own launch cwd — ordinary CLI ergonomics, and a prerequisite for
+// `assertActiveRootExists` (below `run()`) to validate the SAME value every
+// downstream resolver (`resolveWorkspaceRoot`, `checkCwdOrRefuse`) sees; it
+// does not by itself make the path exist.
+export let activeRoot = path.resolve(workspaceRootArg(argv) ?? process.env["TOKENLIGHTEN_ROOT"] ?? process.cwd());
 
 // F-A7 (v0.11 wave C): the client identity `initialize`'s clientInfo declares,
 // captured once per connection below (the only leg where our own code ever
@@ -3145,6 +3473,25 @@ function rangeStartLine(range: string | undefined): number {
   return Number.isInteger(start) && start >= 1 ? start : 1;
 }
 
+/**
+ * P2-15 (round-4 evaluation): the END-line sibling of `rangeStartLine`, for
+ * the one call site (the mode=slice code-unchanged gate) that needs the
+ * NOMINAL end a simple "start-end" range string declares — as opposed to
+ * re-deriving it from `countLines(content)`, which cannot tell "N real lines
+ * with an ordinary trailing newline" apart from "N+1 lines whose LAST one is
+ * blank" (both serialize to the identical joined string). Returns `undefined`
+ * for a bare "start" (no explicit end) or a malformed range — the caller
+ * falls back to its own content-length-derived value in that case, exactly
+ * as it did before this helper existed.
+ */
+function rangeEndLine(range: string | undefined): number | undefined {
+  if (!range) return undefined;
+  const m = range.match(/^\d+-(\d+)$/);
+  if (!m) return undefined;
+  const end = Number(m[1]);
+  return Number.isInteger(end) && end >= 1 ? end : undefined;
+}
+
 /** 1-based inclusive logical line count — a trailing "\n" does not count as
  * an extra empty final line (mirrors applyEditsMulti.ts's countLogicalLinesEntry).
  * Thin alias kept for call-site readability at its one remaining call below;
@@ -5752,7 +6099,15 @@ function computeSliceContinuation(
   if (remaining <= 0) return undefined;
 
   const lines = fileContent.split(/\r?\n/);
-  const clampedEnd = Math.min(endLine, lines.length);
+  // FIX-ORIG (2026-09-27, eval-0927 P1 §6.1 chip, orchestrator-directed):
+  // was `Math.min(endLine, lines.length)` -- `lines.length` counts a phantom
+  // trailing empty element for content ending in "\n" (nearly every file),
+  // same class fixed at every task-pack producer this wave. Wire-visible
+  // here too: when this continuation reaches real EOF and the resulting
+  // (inflated-by-one) `windowText` fits under `remaining` without the
+  // byte-truncation branch below firing, `windowLineCount`/`contEnd` a few
+  // lines down inherit the same +1, landing directly in `sliceOut.continued`.
+  const clampedEnd = Math.min(endLine, countLines(fileContent));
   if (contStart > clampedEnd) return undefined;
 
   let windowText = lines.slice(contStart - 1, clampedEnd).join("\n");
@@ -9934,11 +10289,31 @@ function legacyPathTarget(target: Record<string, unknown>): string | Record<stri
 function resolvePathsBatchEntry(
   entry: unknown,
   workspace: string,
-): { path: string; handle?: string; handleReason?: "handle-unknown" | "handle-workspace-mismatch" | "not-found" } {
+): {
+  path: string;
+  handle?: string;
+  handleReason?: "handle-unknown" | "handle-workspace-mismatch" | "not-found";
+  // TL-05 (plan §7.1): an explicit per-entry selector, present only when the
+  // CALLER's own `{path,...}`/`{handle,...}` object carried it — never
+  // synthesized from a resolved handle's stored metadata (unlike the A7
+  // handles=[] batch's override precedence a few hundred lines below). Read
+  // by the `mode=full` paths[] batch loop to decide a ranged-slice serve vs.
+  // today's whole-file serve, per entry; the other two callers of this
+  // helper (the skeleton paths[] batches) never read these fields and are
+  // therefore byte-identical to before this addition.
+  range?: string;
+  ranges?: string[];
+  symbol?: string;
+} {
   if (typeof entry !== "object" || entry === null) return { path: String(entry ?? "") };
   const record = entry as Record<string, unknown>;
+  const selector = {
+    ...(typeof record["range"] === "string" ? { range: record["range"] } : {}),
+    ...(Array.isArray(record["ranges"]) ? { ranges: record["ranges"].map(String) } : {}),
+    ...(typeof record["symbol"] === "string" ? { symbol: record["symbol"] } : {}),
+  };
   const path = typeof record["path"] === "string" ? record["path"] : "";
-  if (path.length > 0) return { path };
+  if (path.length > 0) return { path, ...selector };
   const handle = typeof record["handle"] === "string" ? record["handle"] : undefined;
   if (handle === undefined) return { path: "" };
   const hEntry = handleTable.get(handle);
@@ -9947,8 +10322,186 @@ function resolvePathsBatchEntry(
   // Mirrors the handles=[] batch loop's own "not-found" reason for a live
   // handle entry that never recorded a path (same shape, same wording).
   return hEntry.path
-    ? { path: hEntry.path, handle }
+    ? { path: hEntry.path, handle, ...selector }
     : { path: "", handle, handleReason: "not-found" };
+}
+
+/**
+ * TL-05 (plan §7.1) — resolve ONE `paths[]` batch entry that carries its own
+ * `range`/`ranges`/`symbol` selector, for the `mode=full` batch loop below.
+ *
+ * Reaching that loop at all already means the call named `content:"full"`
+ * (the only place a multi-target canonical request sets `mode="full"" —
+ * see `RANGE_CONTENT_FULL_INPUT`'s doc comment), so every entry resolved
+ * here is a "range + full" request: served UNELIDED (no
+ * `elideDocCommentsForDisplay` call at all — `resolveSlice`/
+ * `resolveSliceRanges` already return the raw, uncompressed slice) and
+ * NEVER widened past the requested window, per the plan §7.1 contract table.
+ *
+ * Mirrors the A7 `handles=[]` batch's own per-item resolution (same
+ * `resolveSlice`/`resolveSliceRanges` calls) but is kept SEPARATE from it:
+ * A7 addresses an already-minted HANDLE (a prior resolution) and reads its
+ * content through the handle-workspace/archive-member guards; this one
+ * addresses a bare PATH (a first-time or plain re-read) via the ordinary
+ * `servedTextForRoute` route only.
+ *
+ * Returns `undefined` when this entry should fall back to today's ordinary
+ * whole-file `resolveFullReadForPath` route instead — an archive member, an
+ * Office document (neither has line-addressable ranges), or a content read
+ * that failed (not found / undecodable): `resolveFullReadForPath` already
+ * knows how to serve or refuse each of those correctly, and re-implementing
+ * that here would be a second, divergent copy of it.
+ */
+async function resolveRangedPathsBatchEntry(
+  workspace: string,
+  path: string,
+  selector: { range?: string; ranges?: string[]; symbol?: string },
+): Promise<
+  | { ok: true; items: Array<Record<string, unknown>> }
+  | { ok: false; reason: string }
+  | undefined
+> {
+  if (splitArchiveVirtualPath(path) !== undefined) return undefined;
+  const ext = (path.toLowerCase().match(/\.([^.\\/]+)$/)?.[1]) ?? "";
+  if (ext === "docx" || ext === "xlsx" || ext === "pptx" || ext === "pdf") return undefined;
+  // served-bytes: readServedText
+  const verdict = await servedTextForRoute(path, workspace);
+  if (verdict === null || verdict.kind === "undecodable") return undefined;
+  const content = verdict.text;
+  const rawSha = shaOfText(content);
+  const totalLines = countLines(content);
+
+  if (selector.ranges !== undefined && selector.ranges.length > 0) {
+    const batch = await resolveSliceRanges(workspace, path, content, selector.ranges);
+    if (!batch.ok) return { ok: false, reason: batch.error };
+    const batchData = batch.data;
+    const call = beginServeCall(workspace);
+    const items: Array<Record<string, unknown>> = batchData.segments.map((segment): Record<string, unknown> => {
+      const segStart = rangeStartLine(segment.range);
+      const segEnd = Math.min(totalLines, segStart + countLines(segment.code) - 1);
+      recordServedRange(workspace, path, rawSha, segStart, segEnd, totalLines, { mode: "full", range: segment.range, call });
+      return {
+        path,
+        handle: batchData.handle,
+        range: segment.range,
+        content: segment.code,
+        truncated: segment.truncated === true,
+        sha: shortSha(segment.sha),
+        ...(segment.note !== undefined ? { note: segment.note } : {}),
+      };
+    });
+    recordReadPath(workspace, path);
+    // A requested window this call never even attempted (resolveSliceRanges'
+    // OWN aggregate cap, independent of this loop's caller-declared byte
+    // ceiling) rides the LAST segment's own `next`/`remaining_ranges` — the
+    // same continuation a single-target `ranges:[...]` call would carry.
+    if (batchData.remaining_ranges !== undefined && batchData.remaining_ranges.length > 0 && items.length > 0) {
+      const last = items[items.length - 1]!;
+      last["remaining_ranges"] = batchData.remaining_ranges;
+      if (batchData.next !== undefined) last["next"] = batchData.next;
+    }
+    return { ok: true, items };
+  }
+
+  const sliceResult = await resolveSlice(workspace, path, content, selector.symbol, selector.range);
+  if (!sliceResult.ok) return { ok: false, reason: sliceResult.error };
+  const data = sliceResult.data;
+  if (!data.assembled) {
+    const start = rangeStartLine(data.range);
+    const end = Math.min(totalLines, start + countLines(data.content) - 1);
+    recordServedRange(workspace, path, rawSha, start, end, totalLines, { mode: "full", range: data.range, call: beginServeCall(workspace) });
+  }
+  return {
+    ok: true,
+    items: [{
+      path,
+      handle: data.handle,
+      range: data.range,
+      content: data.content,
+      truncated: data.truncated,
+      sha: shortSha(data.sha),
+      ...(data.note !== undefined ? { note: data.note } : {}),
+      ...(data.concern_note !== undefined ? { concern_note: data.concern_note } : {}),
+      ...(data.remaining_ranges !== undefined ? { remaining_ranges: data.remaining_ranges } : {}),
+      ...(data.next !== undefined ? { next: data.next } : {}),
+    }],
+  };
+}
+
+/**
+ * TL-05 (plan §7.1) — shrink ONE resolved ranged-batch item's `content` to at
+ * most `maxBytes` (of the whole item's own JSON encoding), on a line
+ * boundary, narrowing `range` and reporting the cut-off remainder as a
+ * "start-end" string.
+ *
+ * WHY THIS RUNS AT CONSTRUCTION TIME, NOT LEFT TO THE EMIT-TIME SHED LADDER.
+ * The mode=full paths[] batch loop's admission (below) guarantees progress by
+ * force-admitting ONE entry even when it alone exceeds the caller's declared
+ * ceiling (see that loop's own comment). Measured while building this fix:
+ * when that forced entry was left oversized and a DIFFERENT entry was ALSO
+ * deferred to the ceiling, the response ended up with TWO independent things
+ * needing a continuation — the deferred entry (this response's own
+ * `next`) and the forced entry's own overage (which only the emit-time
+ * ladder could shed, as a PER-ENTRY `next`). `wireLimit.ts`'s E3 merge
+ * (clause 4) keeps an emitter-provided `next` over the ladder's own
+ * continuation whenever one already exists, and a caller that runs a
+ * response's `next` verbatim (AGENTS.md) has no reason to also inspect a
+ * DIFFERENT entry's own `next` once it does — plan §7.1's own C01 fixture
+ * (two ranged targets, EACH alone over a 6500 B budget) reproduced this
+ * exactly: beta shipped, truncated by the ladder to a `next` naming its own
+ * remainder, but the response's actual `limit.next` (correctly) named
+ * alpha instead, and beta's remainder was never revisited. Truncating HERE
+ * — before either entry reaches the ladder — keeps the whole response
+ * within budget by construction, so there is only ever ONE thing left
+ * to name, and it can ride the SAME combined `targets:[]` continuation this
+ * loop already builds for its other deferred entries.
+ */
+function truncateResolvedItemToFit(
+  item: Record<string, unknown>,
+  maxBytes: number,
+): { item: Record<string, unknown>; deferredRange?: string } {
+  const range = typeof item["range"] === "string" ? item["range"] : undefined;
+  const content = typeof item["content"] === "string" ? item["content"] : undefined;
+  if (range === undefined || content === undefined) return { item };
+  const bounds = /^(\d+)-(\d+)$/.exec(range);
+  if (bounds === null) return { item };
+  const start = Number(bounds[1]);
+  const end = Number(bounds[2]);
+  // The item's own non-content bytes (handle/range/sha/…) count against the
+  // budget too — shrinking only `content` while ignoring that overhead would
+  // still overshoot on a small declared ceiling.
+  const overhead = Buffer.byteLength(JSON.stringify({ ...item, content: "" }), "utf8");
+  const budget = Math.max(1, maxBytes - overhead);
+  if (Buffer.byteLength(content, "utf8") <= budget) return { item };
+  const lines = content.split("\n");
+  if (lines.length < 2) return { item }; // one giant line: nothing to cut on a line boundary
+  let keep = lines.length;
+  let keptText = content;
+  while (keep > 1 && Buffer.byteLength(keptText, "utf8") > budget) {
+    keep = Math.max(1, Math.ceil(keep / 2));
+    keptText = lines.slice(0, keep).join("\n");
+  }
+  const keptEnd = start + keep - 1;
+  if (keptEnd >= end) return { item };
+  const priorRemaining = Array.isArray(item["remaining_ranges"])
+    ? (item["remaining_ranges"] as unknown[]).filter((value): value is string => typeof value === "string")
+    : [];
+  let unkeptEnd = end;
+  for (const span of priorRemaining) {
+    const parsed = /^(\d+)-(\d+)$/.exec(span);
+    if (parsed !== null && Number(parsed[2]) > unkeptEnd) unkeptEnd = Number(parsed[2]);
+  }
+  const deferredRange = `${keptEnd + 1}-${unkeptEnd}`;
+  return {
+    item: {
+      ...item,
+      range: `${start}-${keptEnd}`,
+      content: keptText,
+      truncated: true,
+      remaining_ranges: [deferredRange],
+    },
+    deferredRange,
+  };
 }
 
 // D-3 router bridge: canonical inputs become the existing serving arguments.
@@ -10003,6 +10556,36 @@ const LEGACY_PATHS_INTERNAL_HANDLE_INPUT = Symbol("tokenlighten.read-file-legacy
 // `budget.allowFull` (not a raw legacy top-level `allowFull`) is what
 // populated `args["allowFull"]`.
 const CANONICAL_ALLOWFULL_INPUT = Symbol("tokenlighten.canonical-allowfull-input");
+/** Marks a `force_serve` that WP-S10's small-window reserve set on the caller's behalf (see `forceServeCallerTargetsOnly`). */
+const SMALL_WINDOW_RESERVE_FORCE = Symbol("tokenlighten.small-window-reserve-force");
+
+// TL-05 (plan §7.1, 2026-09-21 fix wave): a canonical `content:"full"`
+// combined with an explicit `range`/`ranges`/`symbol` selector on the SAME
+// request must serve that window UNELIDED (no doc-comment collapsing, no
+// outline/skeleton substitution while the window still fits the budget) and
+// must never widen the target past the requested window. `content` is
+// consulted only to pick `args["mode"]` a few lines below and is then
+// deleted (`delete args["content"]`, this block's own tail) — by the time a
+// ranged dispatch (mode=slice, the `ranges[]` batch, or the `paths[]`
+// mode=full batch loop) decides whether to elide, there is no way left to
+// tell "range + full" apart from "range + auto" without this marker. Same
+// module-private Symbol pattern as HANDLE_OVERRIDES_INPUT/
+// CANONICAL_ALLOWFULL_INPUT above: unforgeable from the wire, survives the
+// `{...input}`/`{...args}` spreads between normalizeWireArgs and
+// dispatchTool. Deliberately NOT reused for `forceContentServe` — R6
+// (immediately below) already settled that `content:"full"` alone must never
+// force a resend; this marker only ever widens WHAT IS SHOWN of bytes that
+// were going to be served anyway, never WHETHER they are served.
+//
+// FIX-A3 (2026-09-21): this is now an ALIAS for `RANGE_CONTENT_FULL_MARKER`
+// (`protocol/budget/shedders/registry.ts`), not a second, locally-scoped
+// Symbol — a shed rung that mints a continuation for a truncated ranged serve
+// (`readBatch.ts`'s rungs 4/6) needs to read the SAME fact off `ShedContext.args`
+// to keep echoing `content:"full"` across the hop, and two distinct Symbols
+// keyed under two different names would make this file's own stamp invisible
+// to that reader. Every existing local use of `RANGE_CONTENT_FULL_INPUT`
+// below is unchanged; only the declaration moved.
+const RANGE_CONTENT_FULL_INPUT = RANGE_CONTENT_FULL_MARKER;
 
 // DESIGN-v0.15 §6.3 (R6, 2026-09-07): round-18A finding 3 / ruling (u-1) is
 // SUPERSEDED. That ruling treated "a canonical `content:"full"` repeat still
@@ -10502,6 +11085,14 @@ export function normalizeCanonicalRequest(canonical: string, input: Record<strin
     }
 
     if (targets.length > 0) {
+      // TL-05 (plan §7.1): record whether this canonical request named
+      // `content:"full"`, before the `content` consultation below picks
+      // `args["mode"]` and before this block's own tail deletes `content`
+      // entirely. See RANGE_CONTENT_FULL_INPUT's own doc comment for why a
+      // marker is needed and what it does (and does not) change.
+      if (args["content"] === "full") {
+        Object.defineProperty(args, RANGE_CONTENT_FULL_INPUT, { value: true, enumerable: true, configurable: true });
+      }
       if (args["query"] !== undefined || args["qref"] !== undefined) {
         args["paths"] = targets.map(legacyPathTarget);
         Object.defineProperty(args, LEGACY_PATHS_INTERNAL_HANDLE_INPUT, { value: true, enumerable: true, configurable: true });
@@ -11235,6 +11826,15 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       const commentsMode = parseCommentsMode(args["comments"]);
       if (!commentsMode.ok) return toolError("comments must be elide or keep", { code: "invalid-input" });
       const keepComments = commentsMode.keep;
+      // TL-05 (plan §7.1): the ORIGINAL canonical `content:"full"` fact,
+      // surviving normalizeCanonicalRequest's `delete args["content"]` via
+      // RANGE_CONTENT_FULL_INPUT (see that Symbol's own doc comment). Read
+      // once here; each ranged dispatch below ORs it into its own
+      // `effectiveKeepComments` rather than into this shared `keepComments`,
+      // so a plain whole-file `content:"full"` (no range) keeps eliding
+      // exactly as before — only a request that ALSO named a window is
+      // affected.
+      const rangeContentFullMarker = (args as Record<PropertyKey, unknown>)[RANGE_CONTENT_FULL_INPUT] === true;
 
       // DESIGN-v0.15 §6.3 (R6) MIGRATION NOTE.
       //
@@ -11581,6 +12181,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             && smallWindowTotal.bytes <= RESERVE_SMALL_WINDOWS_MAX_BYTES
           ) {
             args["force_serve"] = true;
+            (args as Record<PropertyKey, unknown>)[SMALL_WINDOW_RESERVE_FORCE] = true;
           }
         }
       }
@@ -12093,6 +12694,35 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           });
         }
 
+        // TL-06 (plan-0143 §4/§8.1, R04): the SAME staleness protection the
+        // task_pack promotion above gets, extended to this handle-addressed
+        // batch (admitCallerRangedContinuation resolves a handle-only entry
+        // to its path via handleTable itself). Per-item effective range/
+        // symbol mirrors the resolution the per-item loop below performs
+        // (override, else the handle's own stored range/symbol).
+        {
+          const rangeAdmissionTargets = requested.map((hId, idx) => {
+            const ov = handleOverrides?.[idx];
+            const overrideRange = typeof ov?.["range"] === "string" ? ov["range"] : undefined;
+            const overrideSymbol = typeof ov?.["symbol"] === "string" ? ov["symbol"] : undefined;
+            const hEntry = handleTable.get(hId);
+            const effectiveRange = overrideRange ?? hEntry?.range;
+            // P2-11: mirror the actual serve loop's rangeContentFullMarker
+            // suppression below (its own doc comment has the full
+            // repro/rationale) — this admission pre-check must reason about
+            // the SAME effective window the serve loop will honor.
+            const effectiveSymbol = overrideSymbol
+              ?? (overrideRange === undefined && !rangeContentFullMarker ? hEntry?.symbol : undefined);
+            return {
+              handle: hId,
+              ...(effectiveRange !== undefined ? { range: effectiveRange } : {}),
+              ...(effectiveSymbol !== undefined ? { symbol: effectiveSymbol } : {}),
+            };
+          });
+          const rangeAdmission = await admitCallerRangedContinuation(workspace, rangeAdmissionTargets, args["content"]);
+          if (rangeAdmission !== undefined) return rangeAdmission;
+        }
+
         // B1 batch pre-pass: all handles in one handles=[] call must share ONE
         // workspaceRoot. When cwd was omitted, adopt that single root (the
         // handles ARE the workspace pin); when the batch spans more than one
@@ -12168,9 +12798,24 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // reason, via `path` below — `projectBatch` reads it (when present)
           // to disclose the member as a `file-downgraded` batch entry.
           reason: "handle-unknown" | "handle-workspace-mismatch" | "not-found" | "cap-exceeded" | "not-decodable-text";
-          // Populated only for `not-decodable-text` (see above); every other
-          // reason is unaffected and still carries no `path`.
+          // Populated for `not-decodable-text` (see above) AND, since TL-A6-2
+          // (v0.14.4 candidate, item 2), for `cap-exceeded` WHEN the dropped
+          // handle resolves in THIS workspace — a construction-time cap drop
+          // is a deferral, not an unresolvable reference, so its path (and
+          // `next`, below) can be named for free from the handle table with
+          // no file I/O. `handle-unknown`/`handle-workspace-mismatch`/
+          // `not-found` are still untouched: none of them has a safe path to
+          // name.
           path?: string;
+          // held item 7 (2026-09-21, adversarial review of the v0.14.3
+          // improvement-plan fix wave): the SAME TL-A6-2 cap-exceeded drop
+          // also carries the dropped handle's OWN stored `range` (when it had
+          // one) and whether this call requested `content:"full"` — see the
+          // TL-A6-2 push site below for why. `readFamily.ts`'s `deriveNext`
+          // reads these to recover the entry with ITS OWN window instead of
+          // widening every drop to a whole-file `mode:"full"` continuation.
+          range?: string;
+          contentFull?: boolean;
           code?: "not-found" | "range-invalid";
           candidates?: string[];
           skeleton?: string;
@@ -12203,7 +12848,55 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         for (let hIdx = 0; hIdx < requested.length; hIdx++) {
           const hId = requested[hIdx]!;
           if (handlesBatchCapHit) {
-            omitted.push({ handle: hId, reason: "cap-exceeded" });
+            // TL-A6-2 (v0.14.4 candidate, item 2): a construction-time cap
+            // drop used to omit ONLY {handle, reason:"cap-exceeded"}, with no
+            // `path` — readFamily.ts's `deriveNext` (rung 3) can only turn a
+            // PATH-BEARING omission into a recoverable `mode:"full"`
+            // continuation, and it reads `.path` off every omitted entry
+            // regardless of `reason`, so this handle was UNREACHABLE by any
+            // executable `next` a follower could run even though (unlike a
+            // genuinely unknown handle) the server can name it for free: it
+            // is merely deferred, not invalid. Resolve its path via a plain
+            // handleTable lookup (no file I/O — this branch never reads the
+            // file) so `deriveNext` can fold it into the SAME "re-read what
+            // was omitted" continuation it already builds for other path-
+            // bearing omissions. An unresolvable or foreign-workspace handle
+            // falls back to today's bare omission unchanged — neither case
+            // has a path safe to name.
+            //
+            // held item 7 (2026-09-21): also carry the handle's OWN stored
+            // `range` (when it addressed one — `handleTable`'s entry, the
+            // SAME field `rangeAdmissionTargets` above reads) and whether
+            // THIS call requested `content:"full"`. Without `range`,
+            // `deriveNext`'s rung 3 could only widen every dropped entry —
+            // ranged or not — to a whole-file `mode:"full"` recovery, which
+            // re-serves lines the caller never asked for and, for a large
+            // file, can cost far more than the caller's own declared budget
+            // just to reach the one small window it actually wanted back.
+            const capHEntry = handleTable.get(hId);
+            if (capHEntry === undefined || capHEntry.workspaceRoot !== workspace || !capHEntry.path) {
+              omitted.push({ handle: hId, reason: "cap-exceeded" });
+              continue;
+            }
+            // The window THIS call asked for: the entry's own `range` override
+            // when it carries one, else the handle's stored range — the same
+            // resolution `rangeAdmissionTargets` above and the per-item loop
+            // below perform. The handle's stored range alone is the window it
+            // was MINTED from, which can be far narrower than what this batch
+            // requested (mint `1-1`, then ask `{handle, range:"1-400"}`):
+            // recovering the mint window would silently drop the rest. A symbol
+            // override names no line window, so it recovers whole-file.
+            const capOverride = handleOverrides?.[hIdx];
+            const capOverrideRange = typeof capOverride?.["range"] === "string" ? capOverride["range"] : undefined;
+            const capOverrideSymbol = typeof capOverride?.["symbol"] === "string" ? capOverride["symbol"] : undefined;
+            const capEffectiveRange = capOverrideRange ?? (capOverrideSymbol === undefined ? capHEntry.range : undefined);
+            omitted.push({
+              handle: hId,
+              path: capHEntry.path,
+              reason: "cap-exceeded",
+              ...(capEffectiveRange !== undefined ? { range: capEffectiveRange } : {}),
+              ...(args["content"] === "full" ? { contentFull: true } : {}),
+            });
             continue;
           }
           const hEntry = handleTable.get(hId);
@@ -12311,11 +13004,32 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // expression byte-for-byte: overrideRange/overrideSymbol are both
           // undefined, so effectiveRange/effectiveSymbol reduce to
           // hEntry.range/hEntry.symbol exactly as before this fix.
+          //
+          // P2-11 (round-4 evaluation): a bare `{handle}` batch target whose
+          // handle happens to be a `kind:"symbol"` mint (paymentStep0, minted
+          // by an earlier symbol-focused facet read) STILL fell back to
+          // `hEntry.symbol` here even when THIS call declared
+          // `content:"full"` — so a `form:"handle"` wire entry reported an
+          // honest `range` (the symbol's OWN stored span, e.g. "4-10", from
+          // `hEntry.range`) over a `content` that was actually
+          // getSymbolWithContext's ASSEMBLED view (a `// tokenlighten:scope`
+          // header + elided enclosing scope + sibling signatures + target —
+          // 20+ lines for a 7-line range), never the verbatim source of that
+          // range. AGENTS.md is explicit that `content:"full"` on a handle
+          // entry ships "the verbatim source of the handle's window" — the
+          // window a symbol handle stores IS `hEntry.range`, so
+          // `rangeContentFullMarker` suppresses the passive stored-symbol
+          // fallback exactly like an explicit override range already does,
+          // and the plain-range branch below reports (and serves) that same
+          // window honestly. An EXPLICIT per-item override symbol (a
+          // deliberate ask, not a passive fallback) still wins regardless —
+          // only the IMPLICIT `hEntry.symbol` fallback is suppressed.
           const override = handleOverrides?.[hIdx];
           const overrideRange = typeof override?.["range"] === "string" ? override["range"] : undefined;
           const overrideSymbol = typeof override?.["symbol"] === "string" ? override["symbol"] : undefined;
           const effectiveRange = overrideRange ?? hEntry.range;
-          const effectiveSymbol = overrideSymbol ?? (overrideRange === undefined ? hEntry.symbol : undefined);
+          const effectiveSymbol = overrideSymbol
+            ?? (overrideRange === undefined && !rangeContentFullMarker ? hEntry.symbol : undefined);
           const isSynthesizedFileRange = effectiveRange === undefined && effectiveSymbol === undefined;
           const hRange = effectiveRange
             ?? (effectiveSymbol === undefined ? `1-${Math.max(1, countLines(hContent))}` : undefined);
@@ -12353,7 +13067,19 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // item serves RAW content + a note rather than a lone elision marker,
           // parity with the single-handle mode=slice serve. Identical output to
           // elideDocComments for every non-empty item.
-          const itemDisplay = keepComments
+          //
+          // FIX-A3 (TL-05 follow-up, item 3, 2026-09-21): `rangeContentFullMarker`
+          // joins `keepComments` here exactly as it already does for the
+          // single-handle mode=slice branch's `effectiveKeepComments` — this A7
+          // `handles=[]` loop is itself a common CONTINUATION destination (a
+          // multi-handle `next`/cursor lands right back here), and it used to
+          // consult only the caller's `comments:"keep"` setting, silently
+          // re-eliding a window a `content:"full"` request had asked to see
+          // unelided. `hRange` is always populated here (a real per-item range,
+          // an override range, or the synthesized "1-N" whole-file window for a
+          // bare handle), so this follows the same "range + full => unelided"
+          // rule uniformly across every item of the batch.
+          const itemDisplay = (keepComments || rangeContentFullMarker)
             ? { content: sliceResult.data.content, note: undefined as string | undefined, elided: [] as Array<[number, number]> }
             : elideDocCommentsForDisplay(
                 sliceResult.data.content,
@@ -12749,6 +13475,42 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           });
         }
 
+        // TL-06 (plan-0143 §4/§8.1, R04, FIX-A6): the SAME staleness
+        // protection the A7 handles=[] batch and the task_pack doors already
+        // have — see admitCallerRangedContinuation's own doc comment. This
+        // mixed symbol/path batch is its own, separate multi-target serve
+        // loop (S6, above) with a per-entry effective range/symbol precedence
+        // (entry override, else a handle's own stored tag) that mirrors the
+        // A7 loop's own; a ranged entry here was exactly as unprotected as
+        // the single-target mode=slice door until this fix, since neither
+        // `pathlessExploratoryPaths` nor the A7 pre-pass ever sees a call
+        // shape that trips THIS branch (mode="symbol" or a mixed batch).
+        // MUST run BEFORE `declareKind("read.batch")` below, same reasoning
+        // as every other admission/refusal pre-pass in this function.
+        {
+          const rangeAdmissionTargets = rawEntries.map((raw) => {
+            const resolvedEntry = resolvePathsBatchEntry(raw, workspace);
+            const rawObject = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : undefined;
+            const entrySymbol = typeof rawObject?.["symbol"] === "string" ? rawObject["symbol"] : undefined;
+            const entryRange = typeof rawObject?.["range"] === "string" ? rawObject["range"] : undefined;
+            const hEntryForOverride = resolvedEntry.handle !== undefined ? handleTable.get(resolvedEntry.handle) : undefined;
+            // P2-11: mirror the actual serve loop's rangeContentFullMarker
+            // suppression below, so this admission pre-check reasons about the
+            // SAME effective window the serve loop will honor (see that loop's
+            // own P2-11 comment for the full rationale).
+            const effectiveSymbol = entrySymbol
+              ?? (entryRange === undefined && !rangeContentFullMarker ? hEntryForOverride?.symbol : undefined);
+            const effectiveRange = entryRange ?? (entrySymbol === undefined ? hEntryForOverride?.range : undefined);
+            return {
+              ...(resolvedEntry.handle !== undefined ? { handle: resolvedEntry.handle } : { path: resolvedEntry.path }),
+              ...(effectiveRange !== undefined ? { range: effectiveRange } : {}),
+              ...(effectiveSymbol !== undefined ? { symbol: effectiveSymbol } : {}),
+            };
+          });
+          const rangeAdmission = await admitCallerRangedContinuation(workspace, rangeAdmissionTargets, args["content"]);
+          if (rangeAdmission !== undefined) return rangeAdmission;
+        }
+
         // A.5.4: a multi-target serve reporting per-item completeness is
         // `read.batch` whatever `mode` says -- same declaration point (and
         // the same reason) as the A7 handles=[] batch above: a refusal
@@ -12787,7 +13549,17 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // the same override precedence the A7 handles=[] batch gives an
           // explicit per-target override over a handle's stored tag.
           const hEntryForOverride = resolvedEntry.handle !== undefined ? handleTable.get(resolvedEntry.handle) : undefined;
-          const effectiveSymbol = entrySymbol ?? (entryRange === undefined ? hEntryForOverride?.symbol : undefined);
+          // P2-11 (round-4 evaluation): the same fix as the A7 handles=[]
+          // batch loop above (see its own doc comment for the full
+          // repro/rationale) — a handle-addressed entry with no explicit
+          // symbol/range must not silently fall back to the handle's OWN
+          // stored symbol (an assembled getSymbolWithContext view) when THIS
+          // call declared `content:"full"`; AGENTS.md's own rule is that
+          // content:"full" ships the verbatim source of the handle's window,
+          // and a symbol handle's window is its stored `range`. An explicit
+          // per-entry symbol is a deliberate ask and still wins.
+          const effectiveSymbol = entrySymbol
+            ?? (entryRange === undefined && !rangeContentFullMarker ? hEntryForOverride?.symbol : undefined);
           const effectiveRange = entryRange ?? (entrySymbol === undefined ? hEntryForOverride?.range : undefined);
 
           // served-bytes: readServedText
@@ -12830,7 +13602,24 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             continue;
           }
 
-          const itemDisplay = keepComments
+          // FIX-A4 (TL-05 follow-up, 2026-09-21): `rangeContentFullMarker`
+          // joins `keepComments` here exactly as it already does for the
+          // single-handle mode=slice branch's `effectiveKeepComments` (FIX-A2)
+          // and the A7 `handles=[]` batch loop above (FIX-A3, item 3) — this
+          // S6 `paths[]`/mixed handle-path batch is itself a common
+          // CONTINUATION destination (a per-entry `next`/cursor lands right
+          // back here), and it used to consult only the caller's
+          // `comments:"keep"` setting, silently re-eliding a window a
+          // `content:"full"` request had asked to see unelided.
+          // `rangeForSlice` is always populated here (a real per-entry range,
+          // an override range, or the synthesized "1-N" whole-file window for
+          // a bare entry), so this follows the same "range + full =>
+          // unelided" rule uniformly across every item of the batch. The
+          // served-range booking below (`spansExcludingWindows` over
+          // `itemDisplay.elided`) stays consistent for free: an unelided item
+          // reports `elided: []`, exactly as the two sibling branches already
+          // do.
+          const itemDisplay = (keepComments || rangeContentFullMarker)
             ? { content: sliceResult.data.content, note: undefined as string | undefined, elided: [] as Array<[number, number]> }
             : elideDocCommentsForDisplay(
                 sliceResult.data.content,
@@ -12952,6 +13741,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           const taskBinding = canonicalTaskBindingOf(args, workspace) ?? taskPackQuery.taskBinding;
           const admission = taskPackAdmission(args, defaultResponseByteCeiling);
           if (admission !== undefined) return admission;
+          // TL-06 (plan-0143 §4/§8.1, R04): see admitCallerRangedContinuation's
+          // own doc comment — a caller-ranged targets[]/paths[] promotion is
+          // exactly the shape that lost sha-bound continuation protection.
+          const rangeAdmission = await admitCallerRangedContinuation(workspace, args["paths"], args["content"]);
+          if (rangeAdmission !== undefined) return rangeAdmission;
           declareKind("read.task_pack");
           const result = await runWithTaskContractScope(taskContractScope, () => buildTaskPack(
             ({
@@ -12967,6 +13761,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(typeof args["taskEpoch"] === "string" ? { taskEpoch: args["taskEpoch"] } : {}),
               // PI-09 close-out: the explicit "I lost my context" switch.
               ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
+              ...((args as Record<PropertyKey, unknown>)[SMALL_WINDOW_RESERVE_FORCE] === true ? { forceServeCallerTargetsOnly: true as const } : {}),
               ...(queryArg.length > 0 ? { query: queryArg } : {}),
               // C2: a qref replay is a call over a working set the caller still
               // holds, so a context-only addition must not re-derive coverage.
@@ -13042,6 +13837,16 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         const taskBinding = canonicalTaskBindingForHandle(workspace, taskContractScope.taskHandle) ?? taskPackQuery.taskBinding;
         const admission = taskPackAdmission(args, defaultResponseByteCeiling);
         if (admission !== undefined) return admission;
+        // TL-06 (plan-0143 §4/§8.1, R04): covers both an explicit paths[]/
+        // targets[] task_pack call and the single-target handle+range zoom
+        // continuation (tpZoomPaths) this same branch mints for — see
+        // admitCallerRangedContinuation's own doc comment.
+        const rangeAdmission = await admitCallerRangedContinuation(
+          workspace,
+          tpHasPaths ? args["paths"] : tpZoomPaths,
+          args["content"],
+        );
+        if (rangeAdmission !== undefined) return rangeAdmission;
         const result = await runWithTaskContractScope(taskContractScope, () => buildTaskPack(
           ({
             ...taskCredential,
@@ -13054,6 +13859,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             ...(typeof args["taskEpoch"] === "string" ? { taskEpoch: args["taskEpoch"] } : {}),
             // PI-09 close-out: the explicit "I lost my context" switch.
             ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
+            ...((args as Record<PropertyKey, unknown>)[SMALL_WINDOW_RESERVE_FORCE] === true ? { forceServeCallerTargetsOnly: true as const } : {}),
             query: taskPackQuery.query.length > 0 ? taskPackQuery.query : undefined,
             // C2: see the sibling promotion branch above.
             ...(taskPackQuery.fromRef === true ? { taskQueryRefReplay: true as const } : {}),
@@ -13878,6 +14684,93 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           }
           return toolError("path (or handle) is required for mode=slice", { code: "invalid-input" });
         }
+        // TL-06 (plan-0143 §4/§8.1, R04, FIX-A6): the single-target
+        // continuation door — see admitCallerRangedContinuation's own doc
+        // comment. A caller-ranged `{path,range}` / `{handle,range}` /
+        // `{...,ranges:[...]}` slice, addressed as a LONE `targets[]` element
+        // (normalizeCanonicalRequest's own `targets.length === 1` promotion
+        // projects it straight onto `args.path`/`args.handle`/`args.range`,
+        // never through the multi-target `pathlessExploratoryPaths`/
+        // mode=task_pack doors that already carry this check), is exactly the
+        // shape resolveSlice's OWN per-call byte-cap continuation
+        // (`remainingRange`) and buildSymbolDowngradePayload's downgrade
+        // continuation both re-enter: a bare `{handle,range}` `next`, never
+        // wrapped back into a multi-target batch. FIX-A5 instrumented the A7
+        // handles=[] batch and both task_pack doors but never this one — this
+        // is the door the acceptance harness calls out as "answers as
+        // kind:read.text". Scoped exactly like those callers: only when this
+        // call is about to re-serve a CALLER-RANGED window (a plain `range`,
+        // or the `ranges[]` batch handled just below) of a real path/handle;
+        // an unranged whole-symbol/whole-file slice is left untouched,
+        // matching admitCallerRangedContinuation's own "unranged target"
+        // exemption. `hasRangesBatch` wins over a stale `resolvedRange` when
+        // both happen to be set (a handle's own stored range copied forward
+        // alongside a caller `ranges[]`) — the same precedence the dispatch
+        // below gives the ranges[] sub-block, which never consults
+        // `resolvedRange` once `hasRangesBatch` is true.
+        if (resolvedRange !== undefined || hasRangesBatch) {
+          const rangeAdmission = await admitCallerRangedContinuation(
+            workspace,
+            [{
+              ...(handleArg !== undefined ? { handle: handleArg } : { path: slicePath }),
+              ...(hasRangesBatch ? { ranges: rangesArg } : { range: resolvedRange }),
+              ...(resolvedSymbol !== undefined ? { symbol: resolvedSymbol } : {}),
+            }],
+            args["content"],
+          );
+          if (rangeAdmission !== undefined) return rangeAdmission;
+        }
+        // R-A2 item 1 (2026-09-21, held item 4): computed once for this whole
+        // caller-ranged route (both the ranges[] batch and single-range
+        // sub-branches below feed it the same `slicePath`, under whichever
+        // handle each resolves) — see `resolveDeclaredAnswerEpochTokens`'s own
+        // doc comment for the fallback semantics of an empty (but not
+        // undefined) token list, and `recordReadOnlyServedRangedServe`'s doc
+        // comment for why this may never touch the cumulative served-surface
+        // log. Scoped to a genuine ranged re-serve for the identical reason
+        // `admitCallerRangedContinuation` just above is: an unranged whole-
+        // file/whole-symbol slice has its own coverage story.
+        const zoomAnswerEpochTokens = (resolvedRange !== undefined || hasRangesBatch)
+          ? resolveDeclaredAnswerEpochTokens(workspace, args)
+          : undefined;
+        // P1-9 (2026-09-28, review round 4/5, hugeFocalValue): `spans`/`sha`
+        // are optional so every pre-existing call this closure had (bare
+        // `handle`) stays byte-identical; a caller that also knows what it
+        // just shipped additionally books it into the EPOCH+LANE-SCOPED
+        // window ledger (`recordServedWindow`, util/packServeLog.ts) —
+        // the ledger `firstUnservedPartialRange`/`servedWindowHasUnservedLines`
+        // (readCodeTaskPack.ts) consult when a later task-pack REBUILD
+        // re-derives a required surface's completeness. Without this,
+        // `recordReadOnlyServedRangedServe` below proves only PATH membership
+        // (its own doc comment: "range is unused by that function"), so a
+        // byte-capped focal surface's already-delivered tail — fetched by
+        // exactly this caller-ranged `{handle,range}` route — was invisible
+        // to that byte-level check: the rebuild re-truncated the SAME surface
+        // identically and re-declared the SAME tail as `remaining_ranges`
+        // forever, so the completeness obligation could never close and the
+        // pack dead-ended on `await_input` with no `next` (observed live: a
+        // 168-line focal function capped at hop 0, the byte-capped tail
+        // fetched by this route, then a `{qref}` repack that still called it
+        // unserved). Scoped to `zoomAnswerEpochTokens.length > 0` — an empty
+        // array means no explicit `task.handle` resolved an epoch (see that
+        // const's own doc comment), so there is no query text to derive a
+        // matching `scope.epoch` string from, and this leaves that narrower
+        // case exactly as before rather than guess.
+        const noteZoomServedForAnswerEpoch = (
+          handle: string,
+          served?: { sha: string; spans: ReadonlyArray<readonly [number, number]> },
+        ): void => {
+          if (zoomAnswerEpochTokens !== undefined) {
+            recordReadOnlyServedRangedServe(workspace, { path: slicePath, handle }, zoomAnswerEpochTokens);
+            if (served !== undefined && zoomAnswerEpochTokens.length > 0) {
+              const epoch = zoomAnswerEpochTokens.join("\u0000");
+              const lane = normalizeContractLane(args["lane"]);
+              for (const [startLine, endLine] of served.spans) {
+                recordServedWindow({ workspaceRoot: workspace, epoch, lane, path: slicePath, sha: served.sha, startLine, endLine });
+              }
+            }
+          }
+        };
         // AA1 (round 10): the DIRECT SLICE route. Round 9's residuals W1-3/X1-1
         // were measured here: `targets:[{path, range}]` served a BOM-less UTF-16
         // file's 63 raw NULs and a 73-byte file's lone NUL while every task-pack
@@ -13890,6 +14783,16 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         }
         const content = sliceVerdict === null ? null : sliceVerdict.text;
         if (content === null) return toolError(`File not found or outside workspace: ${slicePath}`, { code: "not-found" });
+
+        // TL-05 (plan §7.1): this whole branch only ever slices an explicit
+        // range/ranges/symbol, so a request that named `content:"full"`
+        // alongside one is asking for that window UNELIDED — reuse the
+        // existing `comments:"keep"` axis (DESIGN-v0.8 §C3) rather than a new
+        // projection flag, so the served-range ledger's own elision-aware
+        // bookkeeping (`spansExcludingWindows`, `wasFullyServed`'s own
+        // `keepComments` key) keeps distinguishing an elided serve from this
+        // one automatically — no receipt gate here is otherwise touched.
+        const effectiveKeepComments = keepComments || rangeContentFullMarker;
 
         // DESIGN-v0.15 §5.1 (R2): an explicit window request has a Q too — the
         // windows the caller named — and §5.1 requires "複数targets、離れた
@@ -13912,7 +14815,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 end: Math.min(window.end, Math.max(1, sliceTotalLines)),
               })),
               content: "auto",
-              keepComments,
+              keepComments: effectiveKeepComments,
               args,
             });
           }
@@ -14085,7 +14988,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             if (alreadyHeld.has(segment.range)) continue;
             segmentDisplays.set(
               segment.range,
-              keepComments
+              effectiveKeepComments
                 ? { content: segment.code, note: undefined as string | undefined, elided: [] as Array<[number, number]> }
                 : elideDocCommentsForDisplay(
                     segment.code,
@@ -14096,6 +14999,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             );
           }
           let batchLedger: ServedRangeLedgerReceipt | undefined;
+          const batchServedSpans: Array<[number, number]> = [];
           {
             const batchCall = beginServeCall(workspace);
             for (const segment of batchData.segments) {
@@ -14116,9 +15020,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                   workspace, slicePath, rawFileSha, spanStart, spanEnd, fileTotalLines,
                   { mode: "slice", range: segment.range, call: batchCall },
                 );
+                batchServedSpans.push([spanStart, spanEnd]);
               }
             }
           }
+          noteZoomServedForAnswerEpoch(batchData.handle, { sha: rawFileSha, spans: batchServedSpans });
 
           // Every requested window is already held at this exact file sha — the
           // whole response collapses to the one shared receipt shape.
@@ -14183,7 +15089,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             // Composed above (F1) so the ledger could be fed from the wire
             // text; the fallback keeps this map total for any segment the
             // probe loop classified as held after the displays were built.
-            const display = segmentDisplays.get(segment.range) ?? (keepComments
+            const display = segmentDisplays.get(segment.range) ?? (effectiveKeepComments
               ? { content: segment.code, note: undefined as string | undefined }
               : elideDocCommentsForDisplay(
                   segment.code,
@@ -14405,7 +15311,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // and not what was asked for. This is a MOVE of the composition that
         // used to sit just below the ledger block (its rationale, C2, is kept
         // verbatim at the serve site) — not a second elision pass.
-        const sliceDisplay = keepComments
+        const sliceDisplay = effectiveKeepComments
           ? { content: sliceData.content, note: undefined as string | undefined, elided: [] as Array<[number, number]> }
           : elideDocCommentsForDisplay(
               sliceData.content,
@@ -14494,7 +15400,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               content,
               handleId: sliceData.handle,
               sha: coverageSha,
-              keepComments,
+              keepComments: effectiveKeepComments,
               mode: "slice",
               range: [coverageStart, coverageEnd],
               priorCoverage,
@@ -14524,9 +15430,32 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         ) {
           const rawFileSha = shaOfText(content);
           const actualStart = rangeStartLine(sliceData.range);
+          // P2-15 (round-4 evaluation, 2026-09-28): when this slice was NOT
+          // capped (`remaining_ranges` undefined — the same signal the
+          // code-unchanged gate below already keys on), `sliceData.range`'s
+          // own declared end is trustworthy — resolveSlice returned exactly
+          // the requested window verbatim, so it is authoritative over a
+          // content-length GUESS that cannot tell "N real lines with an
+          // ordinary trailing newline" apart from "N+1 lines whose LAST one
+          // is blank" (both `["...", "...", ""].join("\n")` and
+          // `["...", "..."].join("\n") + "\n"` produce the identical string,
+          // so `countLines` undercounts by exactly one whenever the slice's
+          // last requested line is blank). Live repro: a `range:"3-6"`
+          // request over `export interface ClientOptions {\n...\n}\n\n` (line
+          // 6 blank) resolved `sliceData.content` to 3 real lines; the OLD
+          // content-length `actualEnd` came out to 5, so the booking/
+          // code-unchanged check below never examined line 6 AT ALL, yet the
+          // eventual `read.receipt` answered for the caller's full "3-6" ask.
+          // A genuinely CAPPED slice (`remaining_ranges` defined) still falls
+          // back to the content-length value below exactly as before this
+          // fix (W2A-1's own reasoning, unchanged) — trusting the nominal end
+          // there would OVER-claim coverage for bytes the cap never served.
+          const nominalEnd = sliceData.remaining_ranges === undefined
+            ? rangeEndLine(sliceData.range)
+            : undefined;
           const actualEnd = Math.min(
             countLines(content),
-            actualStart + countLines(sliceData.content) - 1,
+            nominalEnd ?? (actualStart + countLines(sliceData.content) - 1),
           );
           // F1: an elided comment block inside this window never reaches the
           // caller, so it must not be booked. Recording LESS costs at most one
@@ -14561,6 +15490,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             );
             addedLines += rangeLedger.added_lines;
           }
+          noteZoomServedForAnswerEpoch(sliceData.handle, { sha: rawFileSha, spans: servedSpans });
           // A content-hash-bound range that has already been served carries no
           // new evidence. Return only the receipt instead of charging for the
           // same bytes again. The request still costs a turn; the ledger's
@@ -14812,6 +15742,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(taskBinding !== undefined ? { taskBinding } : {}),
               // PI-09 close-out: the explicit "I lost my context" switch.
               ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
+              ...((args as Record<PropertyKey, unknown>)[SMALL_WINDOW_RESERVE_FORCE] === true ? { forceServeCallerTargetsOnly: true as const } : {}),
               query: String(args["query"]),
               ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]), ...(inheritedTaskProfileArgs.has(args) ? { taskProfileInherited: true as const } : {}) } : {}),
               ...(resolvedPath ? { path: resolvedPath } : {}),
@@ -15375,17 +16306,36 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // "if the same plumbing reaches it", and it does, via the same
         // resolveCallerByteCeiling. `undefined` keeps this branch
         // byte-identical to today for every existing corpus/replay call (no
-        // explicit maxBytes/maxTokens, no client-profile ceiling). Whole-entry
-        // granularity: a path already through resolveFullReadForPath (whether
-        // served or governor-downgraded) always ships in full; only paths NOT
-        // YET resolved once the ceiling is crossed are deferred, so no
-        // wasted governor-state-mutating read happens for them.
+        // explicit maxBytes/maxTokens, no client-profile ceiling).
         const fullBatchCeiling = resolveCallerByteCeiling(
           typeof args["maxBytes"] === "number" ? args["maxBytes"] : undefined,
           typeof args["maxTokens"] === "number" ? args["maxTokens"] : undefined,
           defaultResponseByteCeiling,
         );
-        let fullBatchBytesSoFar = 0;
+        // TL-05: entries this loop deferred to the ceiling, in their
+        // ORIGINAL selector shape (range/ranges/symbol preserved, or a bare
+        // path for a whole-file entry) — never the widened `{path}`-only
+        // shape `deriveNext`'s generic `omitted[].path` fallback would
+        // otherwise build (readFamily.ts). Folded into this response's own
+        // top-level `next` below, which `deriveNext` reads FIRST and so
+        // never falls through to that generic, selector-losing fallback.
+        const deferredForNext: Array<Record<string, unknown>> = [];
+
+        // PASS 1: resolve every requested entry independently. A hard
+        // failure (not found, escapes workspace, invalid range/symbol) folds
+        // into `omitted` immediately — retrying the SAME call would not help.
+        // Everything else is collected here so admission (pass 2) can see the
+        // WHOLE picture before deciding what ships on THIS response —
+        // unchanged from before this fix: r2-batch-coverage's own guarantee
+        // ("no path is left unresolved because an earlier one already
+        // tripped the ceiling") depends on every entry being resolved here
+        // regardless of what pass 2 later decides about it.
+        const resolved: Array<{
+          path: string;
+          originalSelector: Record<string, unknown>;
+          items: Array<Record<string, unknown>>;
+          bytes: number;
+        }> = [];
         for (const requestedEntry of requestedEntries) {
           const p = requestedEntry.path;
           if (!p) {
@@ -15394,90 +16344,175 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               : { path: p, reason: "path is required" });
             continue;
           }
-          // DESIGN-v0.15 §5.1/§5.3 (R2): EVERY requested path is resolved —
-          // never skipped unread once an earlier oversized item trips the
-          // ceiling. `resolveFullReadForPath` is what stages this path's
-          // whole-file window into the batch's Q (via `buildFullServePayload`
-          // -> `stageFullReadRequest` -> `appendReadRequestTarget`), so
-          // skipping the call the way the old sticky "cap already hit, skip
-          // every path after" gate did silently dropped every later target
-          // from Q too — the exact defect `r2-batch-coverage` pins (a 3-target
-          // batch whose 2nd/3rd targets, both tiny, never entered Q at all
-          // because the 1st target alone already exceeded the budget).
-          const fr = await resolveFullReadForPath(workspace, p, allowFullRequested, keepComments, officeOpts);
-          if (fr.ok) {
-            const itemBytes = fullBatchCeiling !== undefined
-              ? Buffer.byteLength(JSON.stringify(fr.data), "utf8")
-              : 0;
-            // ADMISSION, PER ITEM — not a sticky "everything after the first
-            // overflow is omitted" flag. A small target (this batch's crlf.ts/
-            // empty.ts) still ships on THIS response even when an earlier,
-            // larger one (statusBar.ts) already used or alone exceeds the
-            // ceiling; the larger one is deferred to its own page(s) via the
-            // Q this call just staged for it, never silently lost.
-            //   "cap-exceeded"  — this ONE item's own wire cost already
-            //     exceeds the WHOLE declared ceiling; no admission order
-            //     could have shipped it on this response.
-            //   "aggregate response byte cap reached" — it would have fit a
-            //     fresh ceiling, just not what THIS response has left.
-            // Mirrors `readCodePack.ts`'s established two-tier vocabulary for
-            // the same distinction.
-            const exceedsFresh = fullBatchCeiling !== undefined && itemBytes > fullBatchCeiling;
-            const exceedsRemaining = !exceedsFresh
-              && fullBatchCeiling !== undefined
-              && fullBatchBytesSoFar + itemBytes > fullBatchCeiling;
-            if (exceedsFresh || exceedsRemaining) {
-              omitted.push({
-                path: p,
-                reason: exceedsFresh ? "cap-exceeded" : "aggregate response byte cap reached",
-              });
+          const hasSelector = requestedEntry.range !== undefined
+            || requestedEntry.ranges !== undefined
+            || requestedEntry.symbol !== undefined;
+          const originalSelector: Record<string, unknown> = {
+            path: p,
+            ...(requestedEntry.range !== undefined ? { range: requestedEntry.range } : {}),
+            ...(requestedEntry.ranges !== undefined ? { ranges: requestedEntry.ranges } : {}),
+            ...(requestedEntry.symbol !== undefined ? { symbol: requestedEntry.symbol } : {}),
+          };
+          // TL-05 (plan §7.1): a target that named its own range/ranges/
+          // symbol alongside `content:"full"` is served THAT WINDOW
+          // unelided, never the whole file. `undefined` (archive member,
+          // Office document, or a failed content read) falls through to the
+          // ordinary whole-file route below, unchanged.
+          const ranged = hasSelector
+            ? await resolveRangedPathsBatchEntry(workspace, p, requestedEntry)
+            : undefined;
+
+          let resolvedItems: Array<Record<string, unknown>> | undefined;
+          let failureReason: string | undefined;
+          if (ranged !== undefined) {
+            if (ranged.ok) resolvedItems = ranged.items;
+            else failureReason = ranged.reason;
+          } else {
+            // DESIGN-v0.15 §5.1/§5.3 (R2): EVERY requested path is resolved —
+            // never skipped unread once an earlier oversized item trips the
+            // ceiling. `resolveFullReadForPath` is what stages this path's
+            // whole-file window into the batch's Q (via `buildFullServePayload`
+            // -> `stageFullReadRequest` -> `appendReadRequestTarget`), so
+            // skipping the call the way the old sticky "cap already hit, skip
+            // every path after" gate did silently dropped every later target
+            // from Q too — the exact defect `r2-batch-coverage` pins (a 3-target
+            // batch whose 2nd/3rd targets, both tiny, never entered Q at all
+            // because the 1st target alone already exceeded the budget).
+            const fr = await resolveFullReadForPath(workspace, p, allowFullRequested, keepComments, officeOpts);
+            if (fr.ok) {
+              resolvedItems = [{ path: p, ...fr.data }];
+              // FX-N (ruling (s), round-16 finding 2): this branch SHIPS bodies,
+              // so it books them — the exact triad the single-path sibling runs,
+              // through the shared helper. Only the untruncated whole-file shape
+              // qualifies: `buildFullServePayload`'s governed head books its own
+              // narrower spans inline, and a downgrade/artifact-redirect item
+              // carries no body to book. The read is repeated (the file was just
+              // read inside `resolveFullReadForPath`) rather than threaded out of
+              // the resolution, so the helper sees the RAW bytes it must elide
+              // and sha — `fr.data.content` is already the compressed display
+              // text and would book spans that do not map to file lines.
+              if (fr.data["fullFileExpansion"] === true) {
+                // served-bytes: not-served (served-range ledger bookkeeping: the body was produced by resolveFullReadForPath)
+                const bookable = await readFileSafe(p, workspace);
+                if (bookable !== null) bookFullFileExpansionServe(workspace, p, bookable, keepComments);
+              }
+            } else {
+              // A per-path hard failure (not found, escapes workspace, doc
+              // extraction disabled) folds into omitted instead of aborting the
+              // whole batch — matching the handles=[] batch precedent.
+              // resolveFullReadForPath can't tell "missing" from "is a
+              // directory" apart (readFileSafe's fs.readFile throws EISDIR,
+              // caught the same as ENOENT, so both produce its generic "File
+              // not found or outside workspace" wording) — batch-branch-only
+              // re-stat to swap in an actionable reason when it really is a
+              // directory, since that's a caller mistake worth naming rather
+              // than reporting as a missing/escaped file.
+              const dirAbs = safeResolve(p, workspace);
+              const isDir = dirAbs !== undefined && existsSync(dirAbs) && statSync(dirAbs).isDirectory();
+              failureReason = isDir
+                ? 'is a directory — pass file paths; for discovery use search_files {action:"tree", scope:{path:"<dir>"}} or read_file {query:"...", targets:[{path:"<dir>"}]}'
+                : fr.error;
+            }
+          }
+
+          if (resolvedItems === undefined) {
+            omitted.push({ path: p, reason: failureReason ?? "read failed" });
+            continue;
+          }
+          const itemBytes = fullBatchCeiling !== undefined
+            ? resolvedItems.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item), "utf8"), 0)
+            : 0;
+          resolved.push({ path: p, originalSelector, items: resolvedItems, bytes: itemBytes });
+        }
+
+        // PASS 2: admission. Each entry is judged INDEPENDENTLY against the
+        // remaining budget (r2-batch-coverage's own contract: a small target
+        // still ships even when an earlier, larger one already used or alone
+        // exceeds the ceiling — readRequestContinuation.spec.ts's "delivers
+        // every target of a 3-target content:full batch under one budget too
+        // small for all three" pins this exactly), EXCEPT for one guarantee:
+        // if NOTHING has been admitted by the LAST entry, that last entry
+        // ships anyway, however large. TL-05 (plan §7.1): without that one
+        // exception, a caller-declared ceiling smaller than EVERY requested
+        // window (plan §7.1's C01 fixture: two ranged targets, each alone
+        // over budget) omitted every entry on every hop and never made
+        // progress — a worse outcome than one oversized entry shipping over
+        // the caller's declared ceiling once. This is deliberately NOT "the
+        // first entry always ships" (the A7 handles=[] batch's own rule,
+        // upstream in this file): that rule would have re-broken
+        // r2-batch-coverage's own fixture, whose first (and only oversized)
+        // target must be DEFERRED while its two small siblings ship.
+        //   "cap-exceeded"  — this ONE entry's own wire cost already exceeds
+        //     the WHOLE declared ceiling; no admission order could have
+        //     shipped it on this response.
+        //   "aggregate response byte cap reached" — it would have fit a
+        //     fresh ceiling, just not what THIS response has left.
+        // Mirrors `readCodePack.ts`'s established two-tier vocabulary for the
+        // same distinction.
+        let fullBatchBytesSoFar = 0;
+        for (let i = 0; i < resolved.length; i += 1) {
+          const entry = resolved[i]!;
+          const exceedsFresh = fullBatchCeiling !== undefined && entry.bytes > fullBatchCeiling;
+          const exceedsRemaining = !exceedsFresh
+            && fullBatchCeiling !== undefined
+            && fullBatchBytesSoFar + entry.bytes > fullBatchCeiling;
+          const overCeiling = exceedsFresh || exceedsRemaining;
+          const isLastUnadmitted = overCeiling && items.length === 0 && i === resolved.length - 1;
+          if (overCeiling && !isLastUnadmitted) {
+            omitted.push({
+              path: entry.path,
+              reason: exceedsFresh ? "cap-exceeded" : "aggregate response byte cap reached",
+            });
+            deferredForNext.push(entry.originalSelector);
+            continue;
+          }
+          // TL-05: the force-admitted LAST entry may still be individually
+          // oversized (that is the whole point of admitting it anyway) — fit
+          // it to the ceiling HERE, on a line boundary, rather than leaving a
+          // second, competing truncation for the emit-time shed ladder to
+          // discover. See `truncateResolvedItemToFit`'s own doc comment for
+          // the dead end this avoids. A single, addressable resolved item
+          // (a plain range/symbol/whole-file serve) is the reachable shape;
+          // a `ranges[]` entry's several segment items are left to the
+          // ladder unchanged (rare in the SAME response as a force-admit,
+          // and "never split a segment" is the existing rule for it).
+          if (isLastUnadmitted && fullBatchCeiling !== undefined && entry.items.length === 1) {
+            const fitted = truncateResolvedItemToFit(entry.items[0]!, fullBatchCeiling);
+            if (fitted.deferredRange !== undefined) {
+              items.push(fitted.item);
+              deferredForNext.push({ path: entry.path, range: fitted.deferredRange });
+              fullBatchBytesSoFar += Buffer.byteLength(JSON.stringify(fitted.item), "utf8");
               continue;
             }
-            // Each item carries the same fields a single-path mode=full
-            // response would (content + fullFileExpansion:true on success, or
-            // a downgraded skeleton/artifact-redirect shape carrying its own
-            // path/reason/handle) — request order preserved.
-            items.push({ path: p, ...fr.data });
-            // FX-N (ruling (s), round-16 finding 2): this branch SHIPS bodies,
-            // so it books them — the exact triad the single-path sibling runs,
-            // through the shared helper. Only the untruncated whole-file shape
-            // qualifies: `buildFullServePayload`'s governed head books its own
-            // narrower spans inline, and a downgrade/artifact-redirect item
-            // carries no body to book. The read is repeated (the file was just
-            // read inside `resolveFullReadForPath`) rather than threaded out of
-            // the resolution, so the helper sees the RAW bytes it must elide
-            // and sha — `fr.data.content` is already the compressed display
-            // text and would book spans that do not map to file lines.
-            if (fr.data["fullFileExpansion"] === true) {
-              // served-bytes: not-served (served-range ledger bookkeeping: the body was produced by resolveFullReadForPath)
-              const bookable = await readFileSafe(p, workspace);
-              if (bookable !== null) bookFullFileExpansionServe(workspace, p, bookable, keepComments);
-            }
-            if (fullBatchCeiling !== undefined) fullBatchBytesSoFar += itemBytes;
-          } else {
-            // A per-path hard failure (not found, escapes workspace, doc
-            // extraction disabled) folds into omitted instead of aborting the
-            // whole batch — matching the handles=[] batch precedent.
-            // resolveFullReadForPath can't tell "missing" from "is a
-            // directory" apart (readFileSafe's fs.readFile throws EISDIR,
-            // caught the same as ENOENT, so both produce its generic "File
-            // not found or outside workspace" wording) — batch-branch-only
-            // re-stat to swap in an actionable reason when it really is a
-            // directory, since that's a caller mistake worth naming rather
-            // than reporting as a missing/escaped file.
-            const dirAbs = safeResolve(p, workspace);
-            const isDir = dirAbs !== undefined && existsSync(dirAbs) && statSync(dirAbs).isDirectory();
-            omitted.push({
-              path: p,
-              reason: isDir
-                ? 'is a directory — pass file paths; for discovery use search_files {action:"tree", scope:{path:"<dir>"}} or read_file {query:"...", targets:[{path:"<dir>"}]}'
-                : fr.error,
-            });
           }
+          // Each item carries the same fields a single-path mode=full
+          // response would (content + fullFileExpansion:true on success, or
+          // a downgraded skeleton/artifact-redirect shape carrying its own
+          // path/reason/handle), or — for a ranged entry — the same fields
+          // the A7 handles=[] batch's own item shape carries (handle, range,
+          // content, truncated, sha) — request order preserved.
+          items.push(...entry.items);
+          if (fullBatchCeiling !== undefined) fullBatchBytesSoFar += entry.bytes;
         }
 
         const completeness = omitted.length === 0 ? "complete" : items.length === 0 ? "empty" : "partial";
-        return toolOk({ mode: "full", items, omitted, completeness });
+        return toolOk({
+          mode: "full",
+          items,
+          omitted,
+          completeness,
+          // TL-05 (plan §7.1): named ONLY when this loop deferred at least
+          // one entry to the ceiling above — never fabricated from an
+          // `omitted[]` reason that is not recoverable by retrying
+          // (not-found, is-a-directory, handle-unknown, ...).
+          // `readFamily.ts`'s `deriveNext` reads this `next` FIRST, ahead of
+          // its own generic `omitted[].path` fallback, so a ranged entry's
+          // window survives the recovery call instead of being silently
+          // widened back to the whole file.
+          ...(deferredForNext.length > 0
+            ? { next: canonicalToolCall("read_file", { targets: deferredForNext, content: "full" }) }
+            : {}),
+        });
       }
 
       // -----------------------------------------------------------------------
@@ -19972,6 +21007,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
               ...(taskBinding !== undefined ? { taskBinding } : {}),
               // PI-09 close-out: the explicit "I lost my context" switch.
               ...(args["force_serve"] === true ? { forceServe: true as const } : {}),
+              ...((args as Record<PropertyKey, unknown>)[SMALL_WINDOW_RESERVE_FORCE] === true ? { forceServeCallerTargetsOnly: true as const } : {}),
               query: args["query"] ? String(args["query"]) : undefined,
               ...(parseTaskProfile(args["taskProfile"]) ? { taskProfile: parseTaskProfile(args["taskProfile"]), ...(inheritedTaskProfileArgs.has(args) ? { taskProfileInherited: true as const } : {}) } : {}),
               ...(args["symbol"] !== undefined ? { symbol: String(args["symbol"]) } : {}),
@@ -20400,10 +21436,23 @@ async function dispatchWithWorkspaceNotes(canonical: string, args: Record<string
   if ((canonical === "read_file" || canonical === "search_files") && callWorkspaceRoot !== undefined) {
     noteReadServeWorkspace(callWorkspaceRoot);
   }
-  const result = await runWithCallWorkspace(callWorkspaceRoot, () => runWithDeclaredWorkspace(
+  // Perf (2026-09-27, item C): a per-request walkCodeFiles memo, open ONLY
+  // for read_file/search_files — never edit_file, since a write can change
+  // what the very next walk in the SAME request would see (see
+  // runWithWalkRequestScope's own doc comment in walkRepo.ts). Nested
+  // OUTSIDE runWithCallWorkspace/runWithDeclaredWorkspace: it is its own
+  // independent AsyncLocalStorage slot, so nesting order relative to those
+  // two does not matter, but keeping it outermost here means every walk
+  // triggered anywhere in dispatchTool's call tree for this dispatch sees it.
+  const runDispatch = () => runWithCallWorkspace(callWorkspaceRoot, () => runWithDeclaredWorkspace(
     declaredWorkspaceForCall(args),
     () => dispatchTool(canonical, args),
   ));
+  const result = await (
+    canonical === "read_file" || canonical === "search_files"
+      ? runWithWalkRequestScope(runDispatch)
+      : runDispatch()
+  );
   // Land this call's handle mints BEFORE the response is emitted. Flushing
   // here rather than on a timer is what makes "answer, then SIGKILL, then
   // replay the handle against a fresh process" a deterministic test instead of
@@ -20741,6 +21790,24 @@ function inheritDeclaredTaskProfile(
   // declaration changes the pack-dedupe fingerprint of a task that never
   // declared anything, and its re-packs would re-send bodies the caller
   // already holds (replay v0142c1).
+  //
+  // P2-12 (2026-09-28, review round 4/5, qrefAfterCertified) — WHY THIS STAYS
+  // TRUE EVEN UNDER force_serve, so the carve-out belongs elsewhere. The
+  // query+fingerprint pair available HERE cannot tell "explicitly declared,
+  // and inference happens to agree" from "never declared, inference landed
+  // on answer" apart — that ambiguity is exactly what this omission is
+  // conservative about, and force_serve does not resolve it (a coincidentally
+  // "answer"-shaped query that was NEVER declared is still never declared
+  // once force_serve is added — confirmed live: injecting here unconditionally
+  // under force_serve makes an UNDECLARED task also report `source:"explicit"`
+  // under force_serve, fabricating a declaration the caller never made). The
+  // one signal that DOES resolve the ambiguity — the stored pack record's own
+  // `requestProfileKey`, which remembers whether the ORIGINAL call that
+  // opened this task declared a profile or omitted it — lives in
+  // readCodeTaskPack.ts, not here, and stays valid under force_serve (it is a
+  // read-only fact about a past call, not a cache-hit); see
+  // `declaredProfileFromRecordUnderForceServe` there, consulted right before
+  // `bindTaskProfile` when `forceServe` is what skipped `tryServeCachedPack`.
   if (autoBoundTaskProfile(resolution.query) === "answer") return;
   args["taskProfile"] = "answer";
   inheritedTaskProfileArgs.add(args);
@@ -21005,6 +22072,48 @@ function taskContractScopeOf(args: Record<string, unknown>): TaskContractScope {
     lane: sessionLaneOf(args),
     ...(typeof taskHandle === "string" && taskHandle.length > 0 ? { taskHandle } : {}),
   };
+}
+
+/**
+ * R-A2 item 1 (2026-09-21 fix wave, held item 4): the epoch tokens a plain
+ * caller-ranged read (this file's own single-target/batch ranged dispatch,
+ * never a task-pack build) should attach its served span to in the read-only
+ * epoch-served view (`recordReadOnlyServedRangedServe`, readCodeTaskPack.ts)
+ * — so a later bare `{qref}` re-pack of the SAME declared-answer task can see
+ * bytes a caller already zoomed to by handle instead of running the pack's
+ * own `next`. See that function's own doc comment for the write-gate this
+ * must respect (the read-only view, never the cumulative served-surface log).
+ *
+ * Returns:
+ *  - `undefined` — do not record at all: an explicit `task.epoch:"new"`, an
+ *    explicitly declared non-answer profile, or a `task.handle` that
+ *    resolves (fails to resolve) to a DIFFERENT (non-answer) or unrecognized
+ *    task. A handle the caller bothered to name is authoritative; this never
+ *    second-guesses it by falling back to the lane's live view instead.
+ *  - `[]` — no usable `task.handle` was named at all: let
+ *    `recordReadOnlyServedRangedServe`'s own lane-scoped fallback decide (a
+ *    live view for this lane can only ever hold a declared-answer epoch's
+ *    tokens in the first place — see that module's write-gate).
+ *  - a non-empty token list — the explicit, resolved epoch of the named
+ *    `task.handle`, proven to have been packed under profile "answer" by the
+ *    same fingerprint comparison `inheritDeclaredTaskProfile` already makes
+ *    (`taskFingerprintFor`), never re-derived a second, divergent way.
+ */
+function resolveDeclaredAnswerEpochTokens(workspace: string, args: Record<string, unknown>): string[] | undefined {
+  if (args["taskEpoch"] === "new") return undefined;
+  const declaredProfile = typeof args["taskProfile"] === "string" ? args["taskProfile"] : undefined;
+  // "auto" declares nothing (it asks the server to infer) and is therefore
+  // not treated as a blocking non-answer declaration; every other named
+  // profile (generic, change_propagation, ...) is.
+  if (declaredProfile !== undefined && declaredProfile !== "answer" && declaredProfile !== "auto") return undefined;
+  const taskHandle = args["task_handle"];
+  if (typeof taskHandle !== "string" || taskHandle.length === 0) return [];
+  const scope = taskContractScopeOf(args);
+  const storedQuery = rawContractQueryForScope(workspace, scope);
+  if (storedQuery === undefined) return undefined;
+  const binding = canonicalTaskBindingOf(args, workspace);
+  if (binding === undefined || binding !== taskFingerprintFor("answer", storedQuery)) return undefined;
+  return tokenizeForEpoch(storedQuery);
 }
 
 /**
@@ -21358,6 +22467,33 @@ async function callToolTraced(
     if (outcomeIsError && inFlight !== undefined && !inFlightWasKnown) {
       forgetExecutedNext(inFlight.workspace, inFlight.lane, canonical, args, inFlight.taskBinding);
     }
+    // GATE-A (2026-09-21, item 2): an independent caller-ranged read that hit
+    // a since-changed revision it does not itself re-cover left a one-line
+    // disclosure for THIS call to attach — consumed here, once, right after
+    // the call that produced it returns (never on an error/refusal result,
+    // and never overwriting a `note` the response already carries).
+    if (!outcomeIsError && canonical === "read_file") {
+      const workspace = resolveWorkspaceRoot(typeof args["cwd"] === "string" ? args["cwd"] : undefined, activeRoot);
+      const independentStalenessNote = consumeIndependentRangeStalenessNote(workspace);
+      if (independentStalenessNote !== undefined) {
+        const first = (result as ToolCallResult).content?.[0];
+        if (first !== undefined && typeof first.text === "string") {
+          try {
+            const parsed: unknown = JSON.parse(first.text);
+            if (
+              parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+              && (parsed as Record<string, unknown>)["kind"] !== "refusal"
+              && typeof (parsed as Record<string, unknown>)["note"] !== "string"
+            ) {
+              (parsed as Record<string, unknown>)["note"] = independentStalenessNote;
+              first.text = JSON.stringify(parsed);
+            }
+          } catch {
+            // Not JSON (should not happen for read_file) — leave the result untouched.
+          }
+        }
+      }
+    }
     if (!outcomeIsError && (canonical === "read_file" || canonical === "search_files")) {
       const workspace = resolveWorkspaceRoot(typeof args["cwd"] === "string" ? args["cwd"] : undefined, activeRoot);
       recordExecutedNext(
@@ -21618,7 +22754,38 @@ export { runStdioFallback } from "./mcp/transport/fallbackStdio.js";
 // Public entry
 // ---------------------------------------------------------------------------
 
+/**
+ * FIX-FD (2026-09-28, external v0.14.3 evaluation §6.2, bogus-workspace-root
+ * finding): `activeRoot` (a `--workspace`/positional CLI arg, or
+ * TOKENLIGHTEN_ROOT) was never checked for existence. The first writer that
+ * opened a workspace-scoped store against it — `WorkspaceStateStore.open`'s
+ * `mkdirSync(dir, {recursive:true})` chief among them — then silently
+ * MATERIALIZED the entire missing chain, including the workspace root itself,
+ * wherever this process's own OS cwd happened to be at launch:
+ * `pack/.tokenlighten/state/meta.json` and `no-import/.tokenlighten/
+ * state/meta.json`, both found sitting directly at THIS repository's own
+ * root, trace to exactly this gap. `.tokenlighten/` may only ever be created
+ * inside an existing, validated root — a root that fails this check must
+ * never reach a writer.
+ */
+function assertActiveRootExists(): void {
+  if (realDirectory(activeRoot) === undefined) {
+    // No "[tl-mcp] " prefix here (round-2 evaluation finding P2-17(b)): bin.ts's
+    // catch-all already writes "[tl-mcp] fatal: <message>", so baking the same
+    // tag into the thrown message doubled it to "[tl-mcp] fatal: [tl-mcp]
+    // workspace root …" at startup.
+    throw new Error(`workspace root does not exist or is not a directory: ${activeRoot}`);
+  }
+}
+
 export async function run(): Promise<void> {
+  // Strictly before any transport is wired up, alongside this function's
+  // other pre-transport startup assertions below (assertStartupBudgetsAreSane,
+  // assertSemanticFrontierV2FlagConsistency) — a throw here propagates through
+  // this function's promise to bin.ts's existing fatal catch ([tl-mcp] fatal:
+  // <message>, exit 1), zero bytes ever written to stdout, exactly like those.
+  assertActiveRootExists();
+
   // v0.10 PI-09 deferred cell: resolved and validated BEFORE any transport
   // is wired up, so a TOKENLIGHTEN_HTTP_PORT set alongside
   // TOKENLIGHTEN_PROTOCOL_ERA=legacy fails fast with a clear message rather

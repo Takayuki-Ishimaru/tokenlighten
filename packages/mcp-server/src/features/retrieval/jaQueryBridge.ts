@@ -519,6 +519,33 @@ export interface JaBridgeResult {
 export const MAX_TOTAL_TOKENS = 12;
 
 /**
+ * R-B3 (2026-09-21, orchestrator ruling 3): the katakana runs of `text` (the
+ * same >=2-character runs `bridgeJaQuery` bridges) that resolve to NO word of
+ * `vocab` — neither a full phonetic cover nor an exact short-katakana glossary
+ * cover (`matchKatakanaRun`, the identical matcher). A katakana run is a
+ * loanword, transliterated phonetically against the workspace's own
+ * vocabulary, so an unresolved run means the name has no counterpart here: a
+ * CHECKABLE miss, as strong as an English word's. A kanji/kana concept word has
+ * no such channel — it reaches English only through the hand-kept glossary,
+ * whose miss proves nothing — so it never appears here. Read-only; changes no
+ * retrieval behaviour.
+ */
+export function unresolvedKatakanaRuns(text: string, vocab: JaBridgeVocabulary): string[] {
+  if (!containsJapanese(text)) return [];
+  const out: string[] = [];
+  for (const run of extractKatakanaRuns(text)) {
+    let words: string[];
+    try {
+      words = matchKatakanaRun(run, vocab);
+    } catch {
+      words = [];
+    }
+    if (words.length === 0) out.push(run);
+  }
+  return out;
+}
+
+/**
  * Bridge a (possibly Japanese) free-text query into extra ASCII lexical
  * terms drawn from `vocab`. Deterministic: same `query`/`vocab` always
  * yields the same expansions in the same order (katakana runs in

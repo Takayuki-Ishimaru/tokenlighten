@@ -112,6 +112,16 @@ export interface TaskPackSurface {
    */
   remaining_ranges?: string[];
   /**
+   * eval-0927 §6.1: windows cut from OTHER lines of this surface's file and
+   * appended to its `code` (`buildAnswerTaskPack`'s query-focused member and
+   * query facet excerpts), each introduced in `code` by its exact `marker`
+   * string, `range` being the lines the window holds. Internal only:
+   * `projectEvidence` (protocol/decisionWire.ts) splits the body at these
+   * markers so every wire row is verbatim source of its own `range`, and the
+   * markers never reach the wire.
+   */
+  appended_windows?: Array<{ marker: string; range: string }>;
+  /**
    * Set when a partial body's DECISION-CRITICAL anchor lines (e.g. a wiring
    * hub's insertion/producer-entry sites) are all inside the served ranges —
    * the partialness is context, not missing evidence. Readiness risk treats
@@ -369,8 +379,45 @@ export interface TaskPackResult {
    * never assume completeness, and never drop `omitted_count` when it is
    * `false` (finding 2's own false-positive was exactly this claim made
    * unconditionally).
+   *
+   * R-B3 (2026-09-21, ruling 5): `incidental` marks a served-but-only-
+   * mentioned-in-passing absence (the term DOES occur); both readers word it
+   * as such, never as "no occurrence".
+   *
+   * R-D2 (2026-09-21, item B, plan §5): `undetermined` marks an entry that is
+   * NOT a verified absence at all — a could-not-determine verdict
+   * (`RequestItemProof.undeterminedTerm`; e.g. a Japanese term with no
+   * confirmed normalisation to search against) minted only by the ALL-TOPIC,
+   * non-blocking request-item pass, which used to disclose nothing for this
+   * case. `scope_complete`/`omitted_count` do not apply to it (a
+   * could-not-determine verdict makes no scope claim) and are always `false`/
+   * `0` on such an entry; `undetermined_reason` is the short, already-capped
+   * reason text to disclose instead. Both wire readers must render this
+   * shape with the DIFFERENT `explicit-gap:request-item-undetermined:<term>`
+   * code word, never `request-item-absent`.
+   *
+   * FIX-G (2026-09-27, eval-0927 P0): `empty` marks a request FACET
+   * (`request-item:facet-<n>:<facet>`, readCodeTaskPack.ts's
+   * `buildFacetReadiness`) that is COVERED by a verified-empty fact — 0 call
+   * sites in the scanned scope, or a focal that reads no module constant and
+   * holds no literal. Not an absence either: the served focal is the evidence
+   * and the empty fact is what the answer must say. `empty_reason` is the
+   * short, capped fact; the certificate reader renders
+   * `explicit-gap:request-item-empty:<term> (<reason>)`, and the structured
+   * `decision.gaps` reader skips it (nothing to fetch, nothing absent).
+   * Facet entries (`id` "facet-<n>") are recomputed on every contract build.
    */
-  request_item_absences?: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }>;
+  request_item_absences?: Array<{
+    id: string;
+    term: string;
+    scope_complete: boolean;
+    omitted_count: number;
+    incidental?: boolean;
+    undetermined?: boolean;
+    undetermined_reason?: string;
+    empty?: boolean;
+    empty_reason?: string;
+  }>;
   /**
    * FIXALL-A group D (2026-09-14) — THIS REQUEST NAMES NOTHING ADDRESSABLE.
    *
@@ -645,6 +692,16 @@ export interface TaskPackArgs {
    * captures must be reusable by the caller's next ordinary call.
    */
   forceServe?: boolean;
+  /**
+   * Set together with `forceServe` when the force came from the turn-economy
+   * small-window reserve (server.ts WP-S10), not from `task.force_serve`: the
+   * caller re-asked for small windows it must receive as bodies, but it did
+   * NOT lose its context — so only the caller-supplied surfaces skip the
+   * residency dedup, and every surface the server adds (a counterexample, a
+   * closure window) is still deduped against what this task already shipped.
+   * Internal only; never projected to the wire.
+   */
+  forceServeCallerTargetsOnly?: boolean;
   /** Opaque reference safe to echo in follow-up call guidance. */
   credentialRef?: string;
   /** Resolved secret for in-process artifact extraction; never serialized. */

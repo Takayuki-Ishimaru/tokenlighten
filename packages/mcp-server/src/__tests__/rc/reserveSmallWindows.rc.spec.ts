@@ -32,13 +32,14 @@
  * ranking heuristic.
  */
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { killServerGroup } from "../helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -90,9 +91,9 @@ const tmpDirs: string[] = [];
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(ws: string, env?: Record<string, string>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, BIN_TS, ws], {
+  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, ws], {
     cwd: ws,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env, ...(env ?? {}) },
   });
   let stdoutBuf = "";
@@ -139,7 +140,7 @@ function startServer(ws: string, env?: Record<string, string>): ServerHandle {
   const handle: ServerHandle = {
     initialize,
     rpc,
-    kill: () => { try { child.kill("SIGKILL"); } catch { /* ok */ } },
+    kill: () => { try { killServerGroup(child); } catch { /* ok */ } },
     alive: () => child.exitCode === null && child.signalCode === null,
   };
   spawnedServers.push(handle);
@@ -151,6 +152,12 @@ function bodyOf(rpcResult: any): Record<string, unknown> {
   expect(typeof text, `expected text content, got: ${JSON.stringify(rpcResult)}`).toBe("string");
   return JSON.parse(text);
 }
+
+// Every server here is started inside one test, never reused across
+// `it`s; stop it now rather than letting it ride the file-level afterAll.
+afterEach(() => {
+  for (const s of spawnedServers.splice(0)) s.kill();
+});
 
 afterAll(() => {
   for (const s of spawnedServers.splice(0)) s.kill();

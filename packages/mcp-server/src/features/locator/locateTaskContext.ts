@@ -31,7 +31,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { LocateInput, LocateOutput, ImpactCandidate, ImpactSurface, LocateCandidateDetail } from "@tokenlighten/types";
-import { findText, scanLiteral, type TextMatch } from "../search/find/findText.js";
+import { findTextMany, scanManyLiteral, type TextMatch } from "../search/find/findText.js";
 import { decodeTextBuffer } from "../../util/textDecode.js";
 import { findReferences } from "../../tools/findReferences.js";
 import { searchSymbols } from "../../tools/searchSymbols.js";
@@ -170,12 +170,23 @@ const WIDE_TEXT_MATCH_CAP = 20;
  * findText() already sees is completely unaffected -- zero change to
  * today's ranking or scoring for anything already within the 1 MB cap.
  */
-function wideExactTextMatches(
-  query: string,
-  workspace: string,
+// Perf (2026-09-27, large-workspace task_pack cost, item A): batched over
+// every Layer 3/variant needle in one call instead of once per query — see
+// findTextMany's doc comment in findText.ts for the sibling fix to the main
+// (narrow-cap) scan. `result[i]` is exactly what
+// `wideExactTextMatches(queries[i], workspace, opts, walkCache)` (the
+// single-query version this replaces) would have returned: the SAME
+// `largeOnly` file set (computed once, not once per query) scanned in ONE
+// read pass shared across every needle via scanManyLiteral, each needle's
+// raw matches then sliced to the same WIDE_TEXT_MATCH_CAP. No `workspace`
+// parameter: unlike the single-query version, this never falls back to a
+// self-walking scanLiteral() call, so it never needs the workspace root.
+function wideExactTextMatchesMany(
+  queries: readonly string[],
   opts: { lang?: WalkOptions["lang"]; path?: string },
   walkCache: WalkCache,
-): TextMatch[] {
+): TextMatch[][] {
+  if (queries.length === 0) return [];
   const walkOpts = {
     ...(opts.lang ? { lang: opts.lang } : {}),
     ...(opts.path ? { subPath: opts.path } : {}),
@@ -184,14 +195,15 @@ function wideExactTextMatches(
   const narrow = walkCache.get(walkOpts);
   const narrowPaths = new Set(narrow.map((f) => f.relPath));
   const largeOnly = wide.filter((f) => !narrowPaths.has(f.relPath));
-  if (largeOnly.length === 0) return [];
+  if (largeOnly.length === 0) return queries.map(() => []);
   // Mirrors findText()'s own default caseInsensitive heuristic
   // (!input.regex && isSingleToken(query)) for the single-token queries
   // every Layer 3 call site here actually passes.
-  return scanLiteral(query, workspace, {
-    caseInsensitive: !/\s/u.test(query),
-    files: largeOnly,
-  }).slice(0, WIDE_TEXT_MATCH_CAP);
+  const raw = scanManyLiteral(
+    queries.map((query) => ({ query, caseInsensitive: !/\s/u.test(query) })),
+    largeOnly,
+  );
+  return raw.map((matches) => matches.slice(0, WIDE_TEXT_MATCH_CAP));
 }
 
 export interface ArtifactDiscoveryInput {
@@ -2792,25 +2804,80 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // Layer 3: Exact text search for quoted strings / distinctive identifiers
   // -------------------------------------------------------------------------
   const _distinctiveToken = extractDistinctiveToken(input.query);
-  const textQueries = extractTextSearchQueries(input.query);
-  for (const tq of textQueries.slice(0, 2)) {
-    if (isScopeOnlyTextQuery(tq, queryContext)) continue;
+  // Pre-filtered/sliced here (rather than inside the loop below) so it can be
+  // combined with variantSlice into ONE shared needle batch — see the perf
+  // comment above textLayerOpts. Net effect on which tq's produce candidates
+  // is unchanged: slice(0,2) then filter is the same set slice(0,2).forEach
+  // {if (isScopeOnlyTextQuery) continue; ...} would have visited.
+  const textQueries = extractTextSearchQueries(input.query)
+    .slice(0, 2)
+    .filter((tq) => !isScopeOnlyTextQuery(tq, queryContext));
+
+  // -------------------------------------------------------------------------
+  // Layer 3/4 extension: variant token search for impact surface discovery
+  // -------------------------------------------------------------------------
+  // (Computed here, ahead of Layer 4, so its needles can share Layer 3's
+  // batched scan below; the candidates it produces are still pushed AFTER
+  // Layer 4's own candidates, in the original relative order — see the loop
+  // further down.)
+  const variantTokens = buildVariantTokens(input.query, input.symbol);
+  const variantSlice = variantTokens.slice(0, 12);
+  // A "family stem" is a generic CSS-custom-property / BEM-modifier wrapper
+  // shape ("--value" / "-value") derived from an all-caps query token by
+  // deriveTokenVariants — not a hard-coded project vocabulary prefix. This
+  // is what lets the locator find sibling style declarations for the same
+  // enum/status/priority family across any repo's own naming convention.
+  const isFamilyStemToken = (v: string): boolean => v.startsWith("--") || (v.startsWith("-") && !v.startsWith("--"));
+
+  // Perf (2026-09-27, large-workspace task_pack cost, item A): Layer 3 and
+  // the variant loop both search literal needles over the exact same
+  // {lang, path} option-set (up to 2 exact-text queries + 12 variant tokens
+  // per task_pack). Each used to call findText()/wideExactTextMatches()
+  // independently, so every needle re-walked the workspace and re-read every
+  // matched file's bytes from disk (findText()'s internal scanLiteral call
+  // has no contentCache) — ~14 walks and ~14 full re-reads of the same file
+  // set per task_pack. findTextMany/wideExactTextMatchesMany share ONE walk
+  // and ONE read pass across every needle in both layers; each result below
+  // is byte-identical to the old per-needle findText()/wideExactTextMatches()
+  // call (see their doc comments in findText.ts / above).
+  const textLayerOpts = { ...(input.lang ? { lang: input.lang } : {}), ...(scope ? { path: scope } : {}) };
+  const textLayerNeedles = [...textQueries, ...variantSlice];
+  const textLayerFindResults = findTextMany(textLayerNeedles.map((query) => ({ query })), workspace, textLayerOpts);
+  const textLayerWideResults = wideExactTextMatchesMany(textLayerNeedles, textLayerOpts, walkCache);
+
+  // A4 (eval-0927 review-r8 round 9, rustMatchArmConstConditionWhen): a text
+  // needle that lands on the SAME line as an already-pushed candidate (most
+  // often ITS OWN declaration, already claimed by Layer 2's symbol search a
+  // few lines above) is dropped by the `candidates.some(...)` same-line dedup
+  // just below — deliberately, so the pool never carries two objects for one
+  // spot. But `uniqueExactText`/`distinctivePrimary` (below) read this as "the
+  // exact text occurs in exactly one place in the whole workspace", which is
+  // false whenever the dedup is why a SECOND real occurrence never became its
+  // own candidate: the file that DECLARES the named identifier (and so already
+  // owns a Layer-2 hit at that exact line) silently loses its vote in the
+  // uniqueness count, letting an unrelated file whose only connection is an
+  // incidental CALL/mention of the same text win the "unique exact text"
+  // shortcut outright — never disclosed, never re-considered. Tracked here
+  // from the RAW match list (before the same-line dedup), keyed by
+  // `path\0line` — NOT by path alone (measured regression, l2-artifact
+  // corpus replay: a file with the same needle repeated on MANY lines, e.g.
+  // 19 unrelated "Audit" log-message occurrences in one orchestrator file,
+  // must still count as 19 occurrences and so stay decisively non-unique,
+  // exactly like the pre-fix per-candidate count did — collapsing it to "1
+  // file" would wrongly promote that noisy file to the same "unique exact
+  // text" shortcut this fix exists to make HONEST, not merely coarser).
+  const exactTextMatchedOccurrences = new Set<string>();
+  const distinctiveTextMatchedOccurrences = new Set<string>();
+  for (let i = 0; i < textQueries.length; i++) {
+    const tq = textQueries[i]!;
     const isDistinctive = _distinctiveToken !== null && tq === _distinctiveToken;
-    const findResult = findText(
-      {
-        query: tq,
-        ...(input.lang ? { lang: input.lang } : {}),
-        ...(scope ? { path: scope } : {}),
-      },
-      workspace,
-    );
-    // T3 DEFECT A: supplement with whatever findText()'s own 1 MB-capped
-    // internal walk could never have seen (see wideExactTextMatches).
-    const wideMatches = wideExactTextMatches(
-      tq, workspace, { ...(input.lang ? { lang: input.lang } : {}), ...(scope ? { path: scope } : {}) }, walkCache,
-    );
+    const findResult = textLayerFindResults[i]!;
+    const wideMatches = textLayerWideResults[i]!;
     for (const m of [...findResult.matches, ...wideMatches]) {
       if (isExcluded(m.path, scope)) continue;
+      const occurrenceKey = `${m.path}\0${m.line}`;
+      if (isDistinctive) distinctiveTextMatchedOccurrences.add(occurrenceKey);
+      else exactTextMatchedOccurrences.add(occurrenceKey);
       if (candidates.some((c) => c.path === m.path && c.line === m.line)) continue;
       candidates.push({
         path: m.path,
@@ -2858,30 +2925,10 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Layer 3/4 extension: variant token search for impact surface discovery
-  // -------------------------------------------------------------------------
-  const variantTokens = buildVariantTokens(input.query, input.symbol);
-  // A "family stem" is a generic CSS-custom-property / BEM-modifier wrapper
-  // shape ("--value" / "-value") derived from an all-caps query token by
-  // deriveTokenVariants — not a hard-coded project vocabulary prefix. This
-  // is what lets the locator find sibling style declarations for the same
-  // enum/status/priority family across any repo's own naming convention.
-  const isFamilyStemToken = (v: string): boolean => v.startsWith("--") || (v.startsWith("-") && !v.startsWith("--"));
-  for (const vt of variantTokens.slice(0, 12)) {
-    const findResult = findText(
-      {
-        query: vt,
-        ...(input.lang ? { lang: input.lang } : {}),
-        ...(scope ? { path: scope } : {}),
-      },
-      workspace,
-    );
-    // T3 DEFECT A: same 1 MB walk blind spot as Layer 3 above (see
-    // wideExactTextMatches's doc comment).
-    const wideVariantMatches = wideExactTextMatches(
-      vt, workspace, { ...(input.lang ? { lang: input.lang } : {}), ...(scope ? { path: scope } : {}) }, walkCache,
-    );
+  for (let i = 0; i < variantSlice.length; i++) {
+    const vt = variantSlice[i]!;
+    const findResult = textLayerFindResults[textQueries.length + i]!;
+    const wideVariantMatches = textLayerWideResults[textQueries.length + i]!;
     const isFamilyStem = isFamilyStemToken(vt);
     for (const m of [...findResult.matches, ...wideVariantMatches]) {
       if (isExcluded(m.path, scope)) continue;
@@ -3430,7 +3477,7 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
 
   const uniqueExactText =
     top.kind === "text" &&
-    filteredCandidates.filter((c) => c.kind === "text" && c.why === "exact-text").length === 1;
+    exactTextMatchedOccurrences.size === 1;
 
   const largeMargin =
     second === undefined ||
@@ -3439,7 +3486,7 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // Distinctive-token gate: if the longest all-caps identifier (>=6 chars) in the
   // query has exactly ONE exact-text hit, that hit is the unambiguous primary.
   let distinctivePrimary: Candidate | null = null;
-  if (_distinctiveToken !== null) {
+  if (_distinctiveToken !== null && distinctiveTextMatchedOccurrences.size === 1) {
     const dtHits = filteredCandidates.filter((c) => c.why === "exact-text:distinctive");
     if (dtHits.length === 1) {
       distinctivePrimary = dtHits[0]!;
@@ -5382,6 +5429,37 @@ export function extractIdentifiers(query: string): string[] {
     if (!STOP_WORDS.has(m.toLowerCase()) && !tokens.includes(m)) {
       tokens.push(m);
     }
+  }
+  // P1-9 (eval-0927 review-r2 #9, perfEdge): an identifier outside BOTH
+  // ASCII and CJK -- Latin-with-diacritics (`größe`, `naïve`), Cyrillic,
+  // Greek, ... -- matched neither the ASCII-only regex above nor
+  // `tokenizeForEpoch`'s CJK-script alternation below, so a query naming
+  // one extracted NOTHING for it at all. ECMAScript ID_Start/ID_Continue
+  // shape (Unicode letters/letter-numbers to start, plus digits/combining
+  // marks/connectors to continue); matched in its OWN pass rather than
+  // widening the ASCII regex above so a CJK run -- ALSO `\p{L}` -- is never
+  // captured here as one undifferentiated blob competing with
+  // `tokenizeForEpoch`'s properly script-split tokens below.
+  //
+  // P1-7 (eval-0927 review-r3 #7, jaGluedCallers/jaGluedV03): the class
+  // above still crossed a Latin<->CJK boundary with NO space between them
+  // ("loadOptionsの呼び出し元" -- a real JA question glues its particle
+  // directly onto the identifier). The ASCII pass above already isolates
+  // "loadOptions" as its own token (a plain `\b` word boundary DOES fall
+  // between an ASCII letter and a non-ASCII one under this file's non-`u`
+  // first regex), so this pass's glued whole-clause match was pure noise --
+  // never a duplicate of the clean token already pushed (`tokens.includes`
+  // compares full strings), just an extra, useless candidate. The negative
+  // lookahead keeps every character of this class EXCEPT the CJK scripts
+  // `tokenizeForEpoch` already owns below, so a run here never crosses INTO
+  // one -- zero behavior change for a pure-ASCII or pure-CJK match (the two
+  // filters right below already special-cased both), narrower only for a
+  // MIXED run that used to glue the two together.
+  const NON_CJK_CONTINUE = "(?:(?![\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}ー])[\\p{L}\\p{N}\\p{Mn}\\p{Mc}\\p{Pc}_$])";
+  for (const m of cleaned.match(new RegExp(`[\\p{L}\\p{Nl}_$]${NON_CJK_CONTINUE}{2,}`, "gu")) ?? []) {
+    if (/^[\x00-\x7f]*$/.test(m)) continue; // pure ASCII -- already handled above
+    if (/^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]+$/u.test(m)) continue; // pure CJK -- handled by tokenizeForEpoch below
+    if (!STOP_WORDS.has(m.toLowerCase()) && !tokens.includes(m)) tokens.push(m);
   }
   // CJK spans are already script-split and stop-word filtered by the shared
   // deterministic tokenizer. They are exact repo-evidence probes, not translations.

@@ -42,5 +42,12 @@
       }
     ]
   },
+  "profile_binding": {
+    "requested": "auto",
+    "selected": "generic",
+    "source": "inferred",
+    "confidence": 0.4,
+    "reason": "no high-confidence task-shape marker"
+  },
   "qref": "$QREF"
 }

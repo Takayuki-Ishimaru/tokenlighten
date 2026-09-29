@@ -2,6 +2,39 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.14.4
+
+- Ranged reads across multiple files retain every requested range through
+  continuations, including when a response is shortened to fit its budget.
+  `content:"full"` preserves the selected range, and continuations retain
+  the caller's response budget.
+- Compound read-only questions in English and Japanese keep each requirement
+  until it has returned evidence or a disclosed unresolved point or scoped
+  absence. Questions about values, conditions, callers, and processing paths
+  request the related code before the task is marked ready to answer.
+- Japanese and identifier matching are more reliable. Evidence returned in
+  a response is not reported absent in that same response; translation-only
+  matches can remain undetermined.
+- Evidence bodies match their stated source ranges. Continuations detect
+  files changed during a read, and completed read-only tasks reuse their
+  evidence while the files are unchanged.
+- Dependency and virtual-environment folders are excluded from default
+  discovery. Explicitly named files remain readable.
+- Large-workspace discovery avoids redundant scans, and the standard MCP
+  launcher reduces WebAssembly memory use where supported.
+- Updated runtime and packaging dependencies to include upstream fixes.
+
+### Migration
+
+Upgrade the runtime or VSIX to v0.14.4. Managed agent instructions are
+unchanged from v0.14.3, so existing workspaces need no separate guide refresh.
+The fixes are enabled by default. Responses include additional evidence
+requirements and gap entries; clients should preserve those disclosures.
+The three tools, read-only default, and temporary legacy-input migration
+bridge remain unchanged.
+
+See the [v0.14.4 release notes](release-docs/github-release-v0.14.4.md).
+
 ## 0.14.3
 
 - Install from a platform archive with `tl-setup <workspace>`: no editor

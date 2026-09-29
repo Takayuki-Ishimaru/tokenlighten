@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { symlinkSupported } from "./helpers/symlinkSupported.js";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import {
   loadOrBuildSourceIndex,
   invalidateCachedWorkspaceFiles,
   MAX_CACHE_MANIFEST_BYTES,
+  resetManifestTooLargeMemo,
 } from "../indexStore.js";
 import type { SourceIndexManifestV1 } from "../indexStore.js";
 import { hashContent } from "../merkle.js";
@@ -41,6 +42,7 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
   if (ORIGINAL_SCAN_ENV === undefined) delete process.env["TL_INDEX_CONSISTENCY_SCAN"];
   else process.env["TL_INDEX_CONSISTENCY_SCAN"] = ORIGINAL_SCAN_ENV;
+  resetManifestTooLargeMemo();
 });
 
 function makeManifest(overrides: Partial<SourceIndexManifestV1> = {}): SourceIndexManifestV1 {
@@ -114,6 +116,104 @@ describe("loadManifest / writeManifest", () => {
       await expect(fs.readdir(outside)).resolves.toEqual([]);
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Perf (2026-09-27, large-workspace task_pack cost, item D): writeManifest
+// must reach the SAME "exceeds the 32 MiB cache limit" throw for an
+// oversized manifest WITHOUT calling the expensive JSON.stringify(sortKeys(
+// manifest)) that today's (unfixed) code always ran first only to discard
+// the result. See estimateManifestMinBytes's own doc comment for why a
+// cheap lower-bound sum can decide "too large" safely.
+// ---------------------------------------------------------------------------
+describe("writeManifest — item D: skip the doomed full stringify for an oversized manifest", () => {
+  function makeOversizedManifest(fileCount = 1): SourceIndexManifestV1 {
+    const files: SourceIndexManifestV1["files"] = {};
+    // ONE symbol whose signature alone is already well over
+    // MAX_CACHE_MANIFEST_BYTES (32 MiB) — estimateManifestMinBytes's lower
+    // bound sum crosses the cap from this single field, no need to build
+    // thousands of file entries to exercise the gate.
+    const hugeSignature = "x".repeat(MAX_CACHE_MANIFEST_BYTES + 1024);
+    for (let i = 0; i < fileCount; i++) {
+      const path = `huge-${i}.ts`;
+      files[path] = {
+        path,
+        language: "typescript",
+        sizeBytes: hugeSignature.length,
+        mtimeMs: 1,
+        contentSha256: "deadbeef",
+        symbols: [{ name: "Huge", kind: "function", signature: hugeSignature, lineStart: 1, lineEnd: 1, chunkIds: [] }],
+        chunks: [],
+        outgoingSymbolRefs: {},
+      };
+    }
+    return makeManifest({ files });
+  }
+
+  it("throws the SAME error as today's real-stringify path, and never calls JSON.stringify", async () => {
+    const spy = vi.spyOn(JSON, "stringify");
+    try {
+      await expect(writeManifest(tmpDir, makeOversizedManifest())).rejects.toThrow(
+        /exceeds the 32 MiB cache limit/,
+      );
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not create/replace the on-disk cache file", async () => {
+    await expect(writeManifest(tmpDir, makeOversizedManifest())).rejects.toThrow();
+    await expect(loadManifest(tmpDir)).resolves.toBeNull();
+  });
+
+  it("a SECOND write attempt for the SAME root reuses the remembered verdict — still no JSON.stringify call, no per-file estimate walk needed", async () => {
+    await expect(writeManifest(tmpDir, makeOversizedManifest(3))).rejects.toThrow();
+
+    const spy = vi.spyOn(JSON, "stringify");
+    try {
+      // A near-identical file count (not materially smaller) -- the
+      // remembered verdict must short-circuit immediately.
+      await expect(writeManifest(tmpDir, makeOversizedManifest(3))).rejects.toThrow(
+        /exceeds the 32 MiB cache limit/,
+      );
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a MATERIAL shrink in file count re-checks instead of trusting a stale verdict, and a now-small manifest writes successfully", async () => {
+    // First: a genuinely oversized manifest at a "large" file count.
+    await expect(writeManifest(tmpDir, makeOversizedManifest(10))).rejects.toThrow();
+
+    // Second: the SAME root, but now a tiny, well-under-cap manifest (file
+    // count dropped from 10 to 1, and this one carries no huge signature at
+    // all) -- must NOT be refused on the strength of the old verdict alone.
+    const small = makeManifest({ files: {} });
+    await writeManifest(tmpDir, small);
+    const loaded = await loadManifest(tmpDir);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.rootHash).toBe(small.rootHash);
+  });
+
+  it("a successful write forgets a PRIOR 'too large' verdict for the same root (no permanent poisoning)", async () => {
+    await expect(writeManifest(tmpDir, makeOversizedManifest(1))).rejects.toThrow();
+    const small = makeManifest({ builtFromCommit: "now-small" });
+    await writeManifest(tmpDir, small); // fileCount 0 < 1 * 0.5 -> real re-check, fits, writes
+    await expect(loadManifest(tmpDir)).resolves.not.toBeNull();
+
+    // Growing back to oversized must be judged freshly, not against a
+    // memo that a later successful write already cleared.
+    const spy = vi.spyOn(JSON, "stringify");
+    try {
+      await expect(writeManifest(tmpDir, makeOversizedManifest(1))).rejects.toThrow(
+        /exceeds the 32 MiB cache limit/,
+      );
+    } finally {
+      spy.mockRestore();
     }
   });
 });

@@ -48,6 +48,16 @@ export default defineConfig({
       // Legacy fixtures use the v0.13 compatibility escape hatch explicitly.
       TL_LEGACY_INPUT: "accept",
     },
+    // Memory (2026-09-27, measured): V8's optimizing compiler (TurboFan)
+    // re-compiling tree-sitter's WebAssembly grammars takes ~0.5-1 GB of
+    // transient native memory per process on the first query-bearing
+    // task_pack — retained by malloc afterwards, so every in-process worker and
+    // every spawned test server sat at ~1.4 GB (peaks of 5.6 GB of servers on
+    // one full-suite run). `--liftoff-only` keeps WebAssembly on the baseline
+    // compiler: the same pack stays at ~0.17 GB. Test semantics are unchanged
+    // (only code generation differs). Spawned test servers pass the same flag
+    // after the tsx CLI path (`testServerMemoryFence.spec.ts` checks both).
+    execArgv: ["--liftoff-only"],
     pool: "forks",
     isolate: true,
     // vitest 4 (2026-09-18, advisory GHSA-82fw-gwwq-j7x9 fix): poolOptions.forks

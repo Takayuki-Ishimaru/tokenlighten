@@ -3,7 +3,7 @@
  * It deliberately uses a temporary TypeScript project: the relation is proved
  * by actual import syntax, never a filename or identifier-stem heuristic.
  */
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { createRequire } from "node:module";
@@ -53,7 +53,7 @@ function writeProject(root: string): void {
 async function connect(root: string, home: string, guard: "0" | "1"): Promise<Client> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [TSX_CLI, BIN_TS, root],
+    args: [TSX_CLI, "--liftoff-only", BIN_TS, root],
     cwd: root,
     env: {
       ...process.env,
@@ -115,6 +115,14 @@ async function firstPack(client: Client, root: string, query: string, lane: stri
   expect(body["kind"], JSON.stringify(body)).toBe("read.task_pack");
   return body;
 }
+
+// Every client/server pair is started inside one test (`connect()` is called
+// fresh per case — up to 4 times within the first test's own loop, twice in
+// the second — never shared across tests); close them all when that test
+// ends, so this file never holds every case's client/server alive at once.
+afterEach(async () => {
+  for (const client of clients.splice(0)) await client.close().catch(() => undefined);
+});
 
 afterAll(async () => {
   for (const client of clients.splice(0)) await client.close().catch(() => undefined);

@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { __testOnlyOperationV2KeyPrefix } from "../server.js";
 import { resetStateStoresForTests, stateStoreFor } from "../state/stateStore.js";
 import { rmDirWithRetry, waitForExit } from "./helpers/rmDirWithRetry.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 type Body = Record<string, unknown>;
 
@@ -115,8 +116,8 @@ afterAll(async () => {
 function startWriteServer(cwd: string): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, cwd, "--allow-write"],
-    { cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } },
+    [TSX_CLI, "--liftoff-only", BIN_TS, cwd, "--allow-write"],
+    { cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env } },
   );
 
   let stdoutBuf = "";
@@ -171,7 +172,7 @@ function startWriteServer(cwd: string): ServerHandle {
     send({ jsonrpc: "2.0", method: "notifications/initialized" });
   }
 
-  async function kill(): Promise<void> { try { child.kill("SIGKILL"); } catch { /* ok */ } await waitForExit(child); }
+  async function kill(): Promise<void> { try { killServerGroup(child); } catch { /* ok */ } await waitForExit(child); }
 
   return { initialize, call: callFn, kill };
 }

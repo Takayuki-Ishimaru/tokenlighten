@@ -4,7 +4,7 @@
   "task": {
     "id": "$TH",
     "replay": "$QREF",
-    "coverage": "complete"
+    "coverage": "partial"
   },
   "profile": "answer",
   "evidence": [
@@ -24,37 +24,40 @@
     {
       "handle": "$H2",
       "path": "src/OrderFlow.java",
-      "range": "1-19",
-      "body": "public class OrderFlow {\n\n  private void helper0() { log(\"detail 0\"); }\n  private void helper1() { log(\"detail 1\"); }\n  private void helper2() { log(\"detail 2\"); }\n  private void helper3() { log(\"detail 3\"); }\n  private void helper4() { log(\"detail 4\"); }\n  private void helper5() { log(\"detail 5\"); }\n  private void helper6() { log(\"detail 6\"); }\n  private void helper7() { log(\"detail 7\"); }\n  private void helper8() { log(\"detail 8\"); }\n  private void helper9() { log(\"detail 9\"); }\n  private void helper10() { log(\"detail 10\"); }\n  private void helper11() { log(\"detail 11\"); }\n  private void helper12() { log(\"detail 12\"); }\n  private void helper13() { log(\"detail 13\"); }\n  private void helper14() { log(\"detail 14\"); }\n  private void helper15() { log(\"detail 15\"); }\n  private void helper16() { log(\"detail 16\"); }",
+      "range": "1-1",
+      "body": "public class OrderFlow {",
       "role": "unknown",
       "symbol": "helper1",
       "why": "readiness-falsification-counterexample"
     }
   ],
   "decision": {
-    "kind": "act.answer",
-    "certificate": {
-      "id": "$CERT",
-      "obligations": [
-        "surface-content",
-        "identifier:OrderFlow",
-        "behavior-body"
-      ],
-      "workspace": {
-        "fingerprint": "$SHA1",
-        "scope": "evidence-plus-inventory",
-        "evidence_files": 1,
-        "inventory_files": 1,
-        "inventory_complete": true
+    "kind": "discover",
+    "next": {
+      "tool": "read_file",
+      "arguments": {
+        "cwd": "$WS",
+        "query": "explain how OrderFlow sequences payment inventory shipping in its lifecycle",
+        "targets": [
+          {
+            "path": "src/OrderFlow.java",
+            "range": "323-323"
+          }
+        ],
+        "content": "auto",
+        "task": {
+          "handle": "$TH"
+        }
       }
-    }
-  },
-  "profile_binding": {
-    "requested": "answer",
-    "selected": "answer",
-    "source": "explicit",
-    "confidence": 0.98,
-    "reason": "caller supplied validated answer task shape"
+    },
+    "gaps": [
+      {
+        "code": "missing-evidence",
+        "refs": [
+          "request-item:facet-1:flow"
+        ]
+      }
+    ]
   },
   "server_build": "$BUILD",
   "qref": "$QREF"

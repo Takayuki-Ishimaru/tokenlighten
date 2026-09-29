@@ -16,19 +16,36 @@ import {
 } from "../features/task-pack/taskContractStore.js";
 import { CAPACITY_OBLIGATION, MAX_LEDGER_OBLIGATIONS } from "../state/obligationLedger.js";
 import { resetStateStoresForTests } from "../state/stateStore.js";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 const roots: string[] = [];
 
+/**
+ * A real, empty workspace root. The state store persists the ledger under
+ * `<root>/.tokenlighten/state` but never creates the root itself (a missing
+ * root is a caller mistake — bogusWorkspaceRoot.spec.ts), so each test owns
+ * an existing directory and removes it afterwards.
+ */
+function makeRoot(tag: string): string {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `tl-contract-${tag}-`)));
+  roots.push(root);
+  return root;
+}
+
 afterEach(() => {
-  for (const root of roots.splice(0)) clearTaskContract(root);
+  for (const root of roots.splice(0)) {
+    clearTaskContract(root);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
   resetTaskContractStoreForTest();
   resetStateStoresForTests();
 });
 
 describe("task-contract ledger architecture", () => {
   it("binds each ledger to lane and task handle instead of workspace alone", () => {
-    const root = `/tmp/tl-contract-architecture-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("architecture");
     const alpha: TaskContractScope = { lane: "alpha", taskHandle: "handle-a" };
     const beta: TaskContractScope = { lane: "beta", taskHandle: "handle-b" };
 
@@ -48,8 +65,7 @@ describe("task-contract ledger architecture", () => {
   });
 
   it("clears every durable handle in only the new-task lane", () => {
-    const root = `/tmp/tl-contract-lane-clear-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("lane-clear");
     const alphaOne: TaskContractScope = { lane: "alpha", taskHandle: "stable-one" };
     const alphaTwo: TaskContractScope = { lane: "alpha", taskHandle: "stable-two" };
     const beta: TaskContractScope = { lane: "beta", taskHandle: "stable-one" };
@@ -71,8 +87,7 @@ describe("task-contract ledger architecture", () => {
   });
 
   it("clears both the fresh default source and stable handle at a lane epoch boundary", () => {
-    const root = `/tmp/tl-contract-durable-move-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("durable-move");
     const source: TaskContractScope = { lane: "alpha" };
     const destination = bindTaskContractHandle(root, source, "stable-task");
     // Binding before a producer has recorded its ledger is intentionally a no-op.
@@ -96,8 +111,7 @@ describe("task-contract ledger architecture", () => {
   });
 
   it("replaces a same-identity destination with the current source ledger on rebind", () => {
-    const root = `/tmp/tl-contract-rebind-same-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("rebind-same");
     const source: TaskContractScope = { lane: "rebind-same" };
     const destination = bindTaskContractHandle(root, source, "stable-task");
     recordTaskContract(root, ["invoice", "total"], {
@@ -127,8 +141,7 @@ describe("task-contract ledger architecture", () => {
   });
 
   it("refuses to let a different task identity take over an existing destination handle", () => {
-    const root = `/tmp/tl-contract-rebind-foreign-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("rebind-foreign");
     const destination = bindTaskContractHandle(root, { lane: "rebind-foreign" }, "stable-task");
     recordTaskContract(root, ["invoice", "total"], {
       query: "invoice total",
@@ -155,8 +168,7 @@ describe("task-contract ledger architecture", () => {
   });
 
   it("round-trips the sole obligation ledger through the persistent state store", () => {
-    const root = `/tmp/tl-contract-roundtrip-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("roundtrip");
     const scope: TaskContractScope = { lane: "roundtrip", taskHandle: "task-1" };
     recordTaskContract(root, ["status", "report"], {
       query: "status report",
@@ -183,8 +195,7 @@ describe("task-contract ledger architecture", () => {
   });
 
   it("caps persisted task handles independently per lane and retains the newest scopes after restart", () => {
-    const root = `/tmp/tl-contract-lane-cap-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("lane-cap");
     for (let index = 0; index <= MAX_TASK_CONTRACTS_PER_LANE; index += 1) {
       recordTaskContract(root, ["invoice", "total"], { query: "invoice total", requiredRoles: [`role-${index}`] }, { lane: "alpha", taskHandle: `task-${index}` });
     }
@@ -210,8 +221,7 @@ describe("task-contract ledger architecture", () => {
    * dispatch. Proof immutability is still enforced — the first witness stands.
    */
   it("survives the repair flow's conflicting re-prove without throwing", () => {
-    const root = `/tmp/tl-contract-reprove-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("reprove");
     const scope: TaskContractScope = { lane: "repair", taskHandle: "task-1" };
     recordTaskContract(root, ["refunded", "invoicestatus"], {
       query: "Add REFUNDED everywhere InvoiceStatus is used.",
@@ -236,8 +246,7 @@ describe("task-contract ledger architecture", () => {
   // pack has nothing further to search for and is free to advance to an edit
   // frontier over the served enum/consumer surfaces.
   it("converts an absence-proven additive-mutation token into a discharged edit-polarity obligation", () => {
-    const root = `/tmp/tl-contract-edit-polarity-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("edit-polarity");
     const scope: TaskContractScope = { lane: "edit-polarity", taskHandle: "task-1" };
     const query = "Add REFUNDED everywhere InvoiceStatus is used.";
     recordTaskContract(root, ["refunded", "invoicestatus"], {
@@ -279,8 +288,7 @@ describe("task-contract ledger architecture", () => {
   });
 
   it("discloses rather than throws when evidence expansion overruns the ledger bound", () => {
-    const root = `/tmp/tl-contract-capacity-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("capacity");
     const scope: TaskContractScope = { lane: "capacity", taskHandle: "task-1" };
     recordTaskContract(root, ["invoice", "total"], { query: "invoice total", requiredRoles: ["domain"] }, scope);
     const targets = Array.from({ length: MAX_LEDGER_OBLIGATIONS * 2 }, (_, index) => `callee-${index}`);
@@ -296,8 +304,7 @@ describe("task-contract ledger architecture", () => {
 
   it("expires durable task-contract and lane-index state after the named TTL", () => {
     vi.useFakeTimers();
-    const root = `/tmp/tl-contract-ttl-${Date.now()}-${Math.random()}`;
-    roots.push(root);
+    const root = makeRoot("ttl");
     const scope: TaskContractScope = { lane: "ttl", taskHandle: "task" };
     recordTaskContract(root, ["status", "report"], { query: "status report", requiredRoles: ["domain"] }, scope);
     vi.advanceTimersByTime(TASK_CONTRACT_STATE_TTL_MS + 1);

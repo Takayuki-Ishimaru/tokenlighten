@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、�
 
 ## ビルドせずにインストールする
 
-v0.14.3のGitHub Releaseから**[tokenlighten-vscode-extension-0.14.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.3/tokenlighten-vscode-extension-0.14.3.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
+v0.14.4のGitHub Releaseから**[tokenlighten-vscode-extension-0.14.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.4/tokenlighten-vscode-extension-0.14.4.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
 2. **VSIXからのインストール…**を選びます。
@@ -14,7 +14,7 @@ v0.14.3のGitHub Releaseから**[tokenlighten-vscode-extension-0.14.3.vsix](http
 4. 求められた場合はVS Codeを再読み込みします。
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.14.3.vsix
+code --install-extension tokenlighten-vscode-extension-0.14.4.vsix
 ~~~
 
 ソースからビルドする場合:
@@ -75,4 +75,4 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 | `tokenlighten.toolSurface` | `full` | advertiseされるMCP tool surface: `full`（全能力）または`code`（コード・プレーンテキスト・設定のみ、より小さいtool schema）。変更には再接続が必要です。 |
 | `tokenlighten.guideProfile` | `full` | セットアップ時に書き込むguideのサイズ: `full`／`medium`／`compact`。未設定の場合、`tokenlighten.toolSurface`が`code`のときは`full`ではなく`compact`を書き込みます。明示的に設定した値は常にこのデフォルトより優先されます。 |
 
-デスクトップアプリケーションは公開v0.14.3リリースに含まれません。
+デスクトップアプリケーションは公開v0.14.4リリースに含まれません。

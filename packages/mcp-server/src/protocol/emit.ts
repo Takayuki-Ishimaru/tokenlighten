@@ -291,8 +291,48 @@ export function emitFinalizedPayload(
   // STILL OVER BUDGET AFTER THE LADDER — §4.3's tail, three outcomes and no
   // fourth. Unreachable at the calibrated table; reachable through
   // `budgetOverrideBytes`, which is how the sweep exercises it.
+  //
+  // R-A4 (v0.14.4 candidate, 2026-09-21): `read.batch` prefers its OWN,
+  // MORE ACTIONABLE reason over the generic `cap-exceeded` conversion below.
+  // `wireLimit.ts`'s `ladder.ts` never trims a target its accumulator
+  // already promised out of a continuation just to make room for a newer
+  // one (confirmed regression source of the silent line-loss this fix
+  // closes) — the union is unconditional and judged by the SAME progress
+  // check every other candidate answers to, not by a per-step budget gate
+  // (R-A5 retired that gate outright after it produced a WORSE regression —
+  // a multi-entry drop sequence stalling after one accepted drop — see
+  // `wireLimit.ts`'s own banner) — so a `read.batch` response can still
+  // legitimately reach here still over budget: the ladder simply ran out of
+  // rungs (or steps stopped making progress) while honest. `used` — the byte
+  // size of whatever payload THIS SAME ladder run already validated and
+  // accepted as its last honest state — is a byte count PROVEN achievable
+  // AGAINST THIS CALL'S OWN ALREADY-CONSTRUCTED PAYLOAD. `cap-exceeded`'s own
+  // generic `next` has no such guarantee (measured: it can re-name the SAME
+  // over-budget call verbatim, an unproductive loop) — `budget-below-minimum`
+  // (the EXISTING task-pack / read-cursor shape: `field`, `detail`,
+  // `required_min_bytes`, `retry:"call"`) is the honest, actionable one.
+  //
+  // R-A5: `used` ALONE is not quite safe as `required_min_bytes` for a
+  // RETRY, because a retry is a NEW call, and `server.ts`'s A7 construction
+  // loop (`handlesBatchCeiling`, outside this fix's file list) reads that
+  // new call's OWN declared budget before this ladder ever runs — a slightly
+  // larger declared budget can legally admit a few more bytes of per-handle
+  // content at construction than the FIRST call's construction did. MEASURED
+  // (`readBatchNextUnionMatrix.spec.ts`'s floor-adjacent matrix, both host
+  // configs): that delta is a few bytes, never a whole admitted/dropped
+  // entry. `readBatchRequiredMinBytes` pads `used` by a small, fixed margin
+  // comfortably above the observed range, so the very FIRST retry at
+  // `required_min_bytes` lands on a call this server can serve without
+  // shedding, rather than surfacing a second, smaller shortfall. The refusal
+  // also carries an executable `next` — the SAME windows `ladder.continuation`
+  // already names, with `budget.bytes` raised to that exact floor — so a
+  // caller that only ever runs `next` verbatim (never reconstructing "same
+  // call, higher budget" by hand) still recovers in one hop.
   if (used > limit) {
-    const converted = failClosed(kind, context, limit, used, ladder.continuation ?? existingNextOf(payload));
+    const readBatchContinuation = ladder.continuation ?? existingNextOf(payload);
+    const converted = kind === "read.batch"
+      ? budgetBelowMinimumRefusal(context, readBatchRequiredMinBytes(used), readBatchContinuation, current)
+      : failClosed(kind, context, limit, used, readBatchContinuation);
     if (converted !== undefined) {
       current = converted;
       onWire = "refusal";
@@ -669,6 +709,204 @@ function existingNextOf(payload: ShedPayload): ToolCall | undefined {
   return decision !== null && typeof decision === "object" && !Array.isArray(decision)
     ? asCall((decision as Record<string, unknown>)["next"])
     : undefined;
+}
+
+/**
+ * R-A5 (v0.14.4 candidate, 2026-09-21): the small, fixed safety margin that
+ * makes `required_min_bytes` survive being fed straight back in as the
+ * RETRY's own declared `budget.bytes` (see the call site's own doc comment
+ * for the mechanism — `server.ts`'s A7 construction loop reads that same
+ * declared value before this ladder ever runs, so a byte-for-byte-exact
+ * floor is not quite stable across two different calls). MEASURED
+ * (`readBatchNextUnionMatrix.spec.ts`'s floor-adjacent matrix: entry counts
+ * 2/9/12/16, both host configs, budgets swept across the measured floor):
+ * the observed delta between what `used` predicts and what a fresh
+ * construction at that exact budget actually needs is at most a few bytes,
+ * in either direction. 64 is comfortably above that observed range without
+ * materially loosening the floor (this kind's own responses run from
+ * several hundred bytes to several KB, so 64 B is noise against either) —
+ * chosen as a round number with headroom, not tuned to the last byte of any
+ * one case.
+ */
+const READ_BATCH_FLOOR_MARGIN_BYTES = 64;
+
+/**
+ * GATE-C1 (2026-09-22), FX-U3 extreme-tiny-budget finding. Mirrors
+ * `readCodeTaskPack.ts`'s `REQUIRED_MIN_TASK_PACK_BYTES` (not imported: this
+ * protocol-layer module sits below `features/task-pack/`, so the dependency
+ * would run the wrong way). No automated drift check exists between the two
+ * constants today — a future change to either should grep for the other.
+ *
+ * A `read.batch` continuation's `next` (`targets:[...]` + `budget`, no
+ * `query`) is a paths-list request that `server.ts` promotes straight into a
+ * task-pack build on resubmission, and `admitTaskPackBudget` there refuses
+ * ANYTHING below this floor before construction even runs. At an ordinary
+ * shortfall `used + READ_BATCH_FLOOR_MARGIN_BYTES` already clears it and this
+ * floor is a no-op. MEASURED live (`packWireBudgetFxU3.spec.ts` /
+ * `readCodePack.spec.ts`'s FX-U3 case, `maxTokens` 50/100 — `used` a few
+ * hundred bytes): without this floor, retrying at the refusal's own
+ * `required_min_bytes` hit that DIFFERENT gate's much larger floor and
+ * refused again, this time with no `next` at all — a dead end one hop after
+ * the "first retry always works" promise `READ_BATCH_FLOOR_MARGIN_BYTES` (R-A5,
+ * ruling 2) makes. Flooring `required_min_bytes` here — never `used` itself,
+ * which stays the honest measured size for every OTHER purpose this function
+ * feeds — is the minimal fix: it can only raise what the refusal advertises,
+ * never lower it.
+ *
+ * Must equal `REQUIRED_MIN_TASK_PACK_BYTES` in `readCodeTaskPack.ts` (not
+ * imported: that would invert the module dependency); `budgetFloorSync.spec.ts`
+ * fails if the two drift apart.
+ */
+export const READ_BATCH_TASK_PACK_PROMOTION_FLOOR_BYTES = 6144;
+
+/** `used`, padded by `READ_BATCH_FLOOR_MARGIN_BYTES`, floored at `READ_BATCH_TASK_PACK_PROMOTION_FLOOR_BYTES` — see both constants' own doc comments. */
+function readBatchRequiredMinBytes(used: number): number {
+  return Math.max(used + READ_BATCH_FLOOR_MARGIN_BYTES, READ_BATCH_TASK_PACK_PROMOTION_FLOOR_BYTES);
+}
+
+/**
+ * R-A5: the `next` a `read.batch` `budget-below-minimum` refusal carries,
+ * when `continuation` (the ladder's own accumulated union of every
+ * undelivered window — see `wireLimit.ts`'s no-trim rule) is read_file-
+ * shaped — the SAME windows, with `budget.bytes` raised to the exact floor
+ * this refusal names, so a caller that runs `next` verbatim (AGENTS.md:
+ * "never as a template") need not reconstruct "same call, higher budget"
+ * itself. `undefined` when `continuation` is absent or not a plain
+ * `read_file` call (defensive; every `read.batch` continuation this tree
+ * mints is `read_file`-shaped by construction) — the refusal then carries no
+ * `next` at all, exactly like the task-pack / read-cursor `budget-below-
+ * minimum` refusals, which rely on `retry:"call"` alone.
+ *
+ * Finding 13 (adversarial review, 2026-09-27): `continuation` is the
+ * pre-conversion shedder DRAFT's own "what I still have not included"
+ * union — a target that draft HAD already included (even a single small
+ * row can already exceed a tiny declared budget) is, from that draft's own
+ * point of view, no longer pending, so it is absent from `continuation`.
+ * But THIS refusal discards the draft wholesale — a `budget-below-minimum`
+ * response ships no `entries[]` at all — so every window the draft had
+ * quietly included is, on THIS wire response, exactly as undelivered as
+ * the ones `continuation` does name. Live repro: two targets, a 300-byte
+ * budget; the draft's first entry alone cleared 300 bytes, so its `next`
+ * named only the second target, and the refusal that replaced the whole
+ * draft silently dropped the first. The `next` therefore names the UNION of
+ * the draft's own entries (`path`/`handle` + the `range` each would have
+ * shipped) and `continuation`'s targets, merged per file. It is never
+ * rebuilt from `ProtocolCallContext.args`: by the time a read.batch reaches
+ * the ladder those are the dispatcher's legacy-translated arguments
+ * (`handles:[…]`), which have already lost each target's `range` — a retry
+ * built from them re-reads only each handle's own minted window (measured:
+ * `readBatchNextUnionMatrix.spec.ts`, every line past the first lost).
+ */
+function budgetBelowMinimumNext(
+  continuation: ToolCall | undefined,
+  requiredMinBytes: number,
+  draft: ShedPayload,
+  context: ProtocolCallContext,
+): ToolCall | undefined {
+  const continuationArgs = continuation !== undefined && continuation.tool === "read_file"
+    && continuation.arguments !== null && typeof continuation.arguments === "object"
+    && !Array.isArray(continuation.arguments)
+    ? continuation.arguments as Record<string, unknown>
+    : undefined;
+  const targets = unionRefusalTargets(draft, continuationArgs);
+  if (targets.length === 0) {
+    if (continuationArgs === undefined) return undefined;
+    return { tool: "read_file", arguments: { ...continuationArgs, budget: { bytes: requiredMinBytes } } } as ToolCall;
+  }
+  const base: Record<string, unknown> = continuationArgs ?? pickDefined(context.args, ["cwd", "lane", "content"]);
+  return {
+    tool: "read_file",
+    arguments: { ...base, targets, budget: { bytes: requiredMinBytes } },
+  } as ToolCall;
+}
+
+function pickDefined(source: Readonly<Record<string, unknown>> | undefined, keys: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of keys) if (source?.[key] !== undefined) out[key] = source[key];
+  return out;
+}
+
+/**
+ * `budgetBelowMinimumNext`'s target list: the draft's entries (the windows it
+ * would have shipped) and the continuation's targets (the windows it had not
+ * included), grouped per file (`handle`, else `path`) in first-appearance
+ * order. A file named without a `range` anywhere is requested whole; otherwise
+ * its ranges are merged where they overlap or touch, one target per span.
+ */
+function unionRefusalTargets(
+  draft: ShedPayload,
+  continuationArgs: Record<string, unknown> | undefined,
+): Record<string, unknown>[] {
+  type Group = { identity: Record<string, unknown>; whole: boolean; spans: Array<[number, number]> };
+  const groups = new Map<string, Group>();
+  const note = (source: unknown): void => {
+    if (source === null || typeof source !== "object" || Array.isArray(source)) return;
+    const record = source as Record<string, unknown>;
+    const handle = typeof record["handle"] === "string" ? record["handle"] : undefined;
+    const path = typeof record["path"] === "string" ? record["path"] : undefined;
+    if (handle === undefined && path === undefined) return;
+    const key = handle !== undefined ? `h:${handle}` : `p:${path}`;
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = { identity: {}, whole: false, spans: [] };
+      groups.set(key, group);
+    }
+    if (path !== undefined && group.identity["path"] === undefined) group.identity["path"] = path;
+    if (handle !== undefined) group.identity["handle"] = handle;
+    const range = typeof record["range"] === "string" ? /^(\d+)(?:-(\d+))?$/.exec(record["range"]) : null;
+    if (range === null) {
+      group.whole = true;
+      return;
+    }
+    const start = Number(range[1]);
+    group.spans.push([start, range[2] !== undefined ? Number(range[2]) : start]);
+  };
+  const entries = draft["entries"];
+  if (Array.isArray(entries)) for (const entry of entries) note(entry);
+  const continued = continuationArgs?.["targets"];
+  if (Array.isArray(continued)) for (const target of continued) note(target);
+  const out: Record<string, unknown>[] = [];
+  for (const group of groups.values()) {
+    if (group.whole || group.spans.length === 0) {
+      out.push({ ...group.identity });
+      continue;
+    }
+    const spans = [...group.spans].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const merged: Array<[number, number]> = [];
+    for (const [start, end] of spans) {
+      const last = merged[merged.length - 1];
+      if (last !== undefined && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+      else merged.push([start, end]);
+    }
+    for (const [start, end] of merged) out.push({ ...group.identity, range: `${start}-${end}` });
+  }
+  return out;
+}
+
+function budgetBelowMinimumRefusal(
+  context: ProtocolCallContext,
+  requiredMinBytes: number,
+  continuation: ToolCall | undefined,
+  draft: ShedPayload,
+): ShedPayload | undefined {
+  const forTool = advertisedTool(context.tool);
+  if (forTool === undefined) return undefined;
+  // Finding 13: only for a read_file shortfall — `read.batch` (the only kind
+  // that reaches this function) is exclusively a `read_file` response kind,
+  // but the guard stays explicit rather than assumed.
+  const next = context.tool === "read_file"
+    ? budgetBelowMinimumNext(continuation, requiredMinBytes, draft, context)
+    : undefined;
+  return canonicalizeEmittedToolCalls({
+    ...buildRefusal(forTool, {
+      code: "budget-below-minimum",
+      field: "budget",
+      detail: "raise budget.bytes to at least required_min_bytes and re-issue the same call",
+      required_min_bytes: requiredMinBytes,
+      retry: "call",
+      ...(next !== undefined ? { next } : {}),
+    }),
+  }) as ShedPayload;
 }
 
 function failClosed(

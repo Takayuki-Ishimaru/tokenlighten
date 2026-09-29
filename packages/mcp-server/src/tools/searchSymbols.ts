@@ -48,6 +48,8 @@ import type { SearchContext } from "@tokenlighten/skeleton-engine";
 import type { McpLang } from "@tokenlighten/types";
 import { isSourceOnlyExcludedPath } from "./walkRepo.js";
 import { applyRoles, deriveFileRole } from "../features/search/find/findText.js";
+import { graphIndexMode } from "../util/flags.js";
+import { GRAPH_INDEX_MAX_BYTES } from "../graph/index.js";
 import {
   collectSymbolsChecked,
   symbolCollectorSupports,
@@ -456,8 +458,17 @@ export async function searchSymbols(
   treeSitterPaths: TreeSitterPaths = {},
 ): Promise<SearchSymbolsResult> {
   // 1) Load or build the source index.
+  // Perf (2026-09-27, item D): thread this process's own TL_GRAPH_INDEX
+  // resolution (and the reader's own size cap) into skeleton-engine's
+  // write-side gate, so a graph the reader would never read back in
+  // auto/off mode is not stringified+written in the first place — see
+  // writeGraphIfStale's WriteGraphIfStaleOptions.graphIndexMode doc
+  // comment. skeleton-engine itself reads no environment; this is the one
+  // seam that resolves TL_GRAPH_INDEX and passes the decision down.
   const { manifest } = await loadOrBuildSourceIndex(workspace, {
     ignoreHash: "",
+    graphIndexMode: graphIndexMode(),
+    graphIndexMaxBytes: GRAPH_INDEX_MAX_BYTES,
   });
 
   // 2) Build fileScores from manifest symbol counts (Phase C proxy).

@@ -35,6 +35,7 @@
 // for a default-OFF flag whose only consumer re-walks the whole repo on
 // every call anyway.
 import * as fs from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { walkCodeFiles, type FoundFile } from "../../tools/walkRepo.js";
 import { decodeTextBuffer } from "../../util/textDecode.js";
 import { decomposeIdentifier } from "./tokenize.js";
@@ -57,6 +58,40 @@ interface CachedVocab {
 }
 
 const workspaceVocabCache = new Map<string, CachedVocab>();
+
+/**
+ * GATE-C2 (2026-09-22, perf wave) — scopes an ADDITIONAL, shorter-lived reuse
+ * of `getWorkspaceJaBridgeVocabulary`'s result to ONE `buildTaskPack` call:
+ * established by that function via `.run(new Map(), ...)`, the same
+ * "scope a resource to this one call" pattern readCodeTaskPack.ts's own
+ * `queryNamedFilesWalkStorage`/`unreadableNamedPathStorage`/
+ * `requestItemPrewalkStorage` ALS trio already applies at buildTaskPack's
+ * entry point (nested there for the identical reason: must not leak across
+ * two interleaved calls, and must not survive past the one call that treats
+ * the workspace as stable for its duration — the same assumption
+ * `RequestItemPassCache.universe` already makes for the far larger
+ * file-content universe).
+ *
+ * Root cause this closes: a single big multi-concern pack can call
+ * `concernTermVariants` (readCodeTaskPack.ts) once per Japanese TOPIC TERM,
+ * each of which reaches this module — and this module's own cache-hit path
+ * was, by design (see `getWorkspaceJaBridgeVocabulary`'s doc comment),
+ * "cheap: a walk (for the file-count invalidation check) plus a Map
+ * lookup" — cheap for the O(1-5)-calls-per-build frequency that held before
+ * the concern engine existed, not for O(topic terms) calls. Confirmed live
+ * (GATE-C2 2026-09-22 profiling): 244 of 346 `walkCodeFiles` calls in one
+ * seeded multi-directory pack build were this function's own
+ * cache-validity walk.
+ *
+ * No active scope (this getter called outside a `buildTaskPack` .run(), e.g.
+ * a direct unit test of this module) means `perCall` below is `undefined`
+ * and `getWorkspaceJaBridgeVocabulary` falls through to its ORIGINAL,
+ * unchanged per-call walk+cache-count-check — this only ever ADDS a faster
+ * early return for calls sharing one build's scope, never widens, replaces,
+ * or shortens the underlying per-workspace/file-count invalidation contract
+ * documented on that function.
+ */
+export const jaBridgeVocabPerCallStorage = new AsyncLocalStorage<Map<string, JaBridgeVocabulary>>();
 
 /** Split every path segment of `relPath` on camelCase/snake/kebab boundaries into lowercase word candidates (length >= 3) -- the same decomposition tokenize.ts already applies to identifiers, reused here for path segments/basenames. */
 function wordsFromRelPath(relPath: string): string[] {
@@ -185,12 +220,22 @@ function buildVocabFromFiles(files: readonly FoundFile[], opts: VocabBuildOption
  * word cap, or wall-clock budget cut the scan short.
  */
 export function getWorkspaceJaBridgeVocabulary(workspace: string): JaBridgeVocabulary {
+  // GATE-C2 (2026-09-22, perf wave): an active per-buildTaskPack-call scope
+  // (see jaBridgeVocabPerCallStorage's own doc comment) short-circuits every
+  // call after the first for the SAME workspace within that one call, before
+  // paying for another cache-validity walk. Absent a scope (undefined), or
+  // on the first call within one, behaviour below is 100% unchanged.
+  const perCall = jaBridgeVocabPerCallStorage.getStore();
+  const alreadyThisCall = perCall?.get(workspace);
+  if (alreadyThisCall !== undefined) return alreadyThisCall;
+
   const files: FoundFile[] = walkCodeFiles(workspace, {});
   const cached = workspaceVocabCache.get(workspace);
-  if (cached && cached.fileCount === files.length) return cached.vocab;
-
-  const vocab = buildVocabFromFiles(files, PRODUCTION_OPTIONS);
-  workspaceVocabCache.set(workspace, { vocab, fileCount: files.length });
+  const vocab = cached && cached.fileCount === files.length
+    ? cached.vocab
+    : buildVocabFromFiles(files, PRODUCTION_OPTIONS);
+  if (vocab !== cached?.vocab) workspaceVocabCache.set(workspace, { vocab, fileCount: files.length });
+  perCall?.set(workspace, vocab);
   return vocab;
 }
 

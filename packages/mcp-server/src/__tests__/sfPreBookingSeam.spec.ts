@@ -53,6 +53,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 import {
   applyCanonicalTaskDecision,
@@ -139,8 +140,8 @@ interface ServerHandle {
 function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, cwd, "--allow-write"],
-    { cwd, stdio: ["pipe", "pipe", "pipe"], env },
+    [TSX_CLI, "--liftoff-only", BIN_TS, cwd, "--allow-write"],
+    { cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env },
   );
   let stdout = "";
   let stderr = "";
@@ -209,7 +210,7 @@ function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
     },
     kill() {
       try {
-        child.kill("SIGKILL");
+        killServerGroup(child);
       } catch {
         /* already gone */
       }

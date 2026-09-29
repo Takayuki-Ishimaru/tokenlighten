@@ -125,6 +125,29 @@ const PRODUCERS: readonly ProducerSpec[] = [
           + "every same-call queryServedSurfaces epoch gate read. Books no entry. The empty "
           + "list is asserted literally by the 'books nothing' case below.",
       },
+      {
+        // repackMonotonicity.spec.ts fix (2026-09-27, eval-0927 wave): the SAME
+        // post-augmenter re-booking as recordPackServedRanges@buildAnswerTaskPack
+        // above, branched the SAME way bookShippedPackServeState branches
+        // (cumulativeEligible = task_profile !== "answer" ||
+        // profile_binding.source !== "explicit"). An INFERRED answer task
+        // (cumulativeEligible) must have the augmenters' final surfaces reach
+        // the SAME cumulative log the first (pre-augmenter) booking pass used
+        // for it, never only the declared-answer read-only view — measured:
+        // "leaves an INFERRED answer pack exactly as it was" expects
+        // cumulativeLogIn(...) to carry the pack's surfaces, which the
+        // unconditional recordReadOnlyServedSurfaces call used to withhold from
+        // it entirely.
+        enclosing: "buildAnswerTaskPack",
+        count: 1,
+        reason:
+          "the INFERRED-answer complement of recordReadOnlyServedSurfaces@buildAnswerTaskPack "
+          + "below: re-books the truly final `finalResult` into the cumulative log, off the SAME "
+          + "`shippedSurfaces(finalResult)` projection, but ONLY when this task is not a DECLARED "
+          + "answer (cumulativeEligible) — mirroring bookShippedPackServeState's own branch so the "
+          + "re-booking can never disagree with which ledger the first booking pass chose for the "
+          + "SAME task.",
+      },
     ],
   },
   {
@@ -164,16 +187,50 @@ const PRODUCERS: readonly ProducerSpec[] = [
         count: 1,
         reason: "CACHE RE-KEY of an already-booked seeded pack — see buildTaskPackCore",
       },
+      {
+        // FIX-FC (2026-09-27, eval-0927 review finding 3).
+        enclosing: "buildAnswerTaskPack",
+        count: 1,
+        reason:
+          "RE-CAPTURES the truly final `finalResult` after every post-trim answer augmenter "
+          + "and the 1.25x named-path cap: it supersedes (replace-by-signature) the record "
+          + "dedupeTrimAndPersist booked from its pre-cap draft, so a surface the cap removed "
+          + "is never claimed resident on a later call.",
+      },
     ],
   },
   {
     name: "recordPackServedRanges",
     kind: "booking",
-    sites: [{
-      enclosing: "captureServedPack",
-      count: 1,
-      reason: "the per-address served-range ledger, reachable only through captureServedPack",
-    }],
+    sites: [
+      {
+        enclosing: "captureServedPack",
+        count: 1,
+        reason: "the per-address served-range ledger, reachable only through captureServedPack",
+      },
+      {
+        // FIX-ORIG (2026-09-27, eval-0927 P1 hybrid-body finding): the answer-
+        // profile post-trim augmenters (augmentExplicitAnswerImportSurfaces,
+        // materializeExplicitAnswerAnchorEvidence, attachAnswerImportEvidenceGraph,
+        // capExtraEvidenceRelativeToNamedPaths) all run AFTER dedupeTrimAndPersist
+        // returns — i.e. after captureServedPack's own booking of `finalResult`
+        // already happened — so an anchor line one of them widens an existing
+        // surface's range to include, or admits as a brand-new one-line surface,
+        // was invisible to the served-range ledger until now. (Not
+        // `buildTaskPackCore`: this specific answer-profile call chain is
+        // `buildAnswerTaskPack`, the WS3 answer-profile builder.)
+        enclosing: "buildAnswerTaskPack",
+        count: 1,
+        reason:
+          "RE-BOOKS the truly final `finalResult` (after every post-trim answer "
+          + "augmenter, including the cap that can only ever REMOVE a surface) so a "
+          + "widened/added anchor surface's bytes reach the same ledger a normal "
+          + "surface does. packServedSpans re-derives spans from finalResult.surfaces' "
+          + "CURRENT state on every call (no cached pre-image), so re-invoking it here "
+          + "is a pure extension, never a stale re-assertion of the FIRST (pre-augmenter) "
+          + "booking captureServedPack already performed inside dedupeTrimAndPersist.",
+      },
+    ],
   },
   {
     name: "recordEpochTaskContract",
@@ -457,18 +514,34 @@ describe("FX-K static ordering fence: every booking producer is classified, and 
       .toBe(callSites(topLevelFunctionBody("dedupeTrimAndPersist"), SHIPPED_PASS));
   });
 
-  it("`shippedSurfaces` is the only definition of 'what this response shipped', with ONE consumer", () => {
+  it("`shippedSurfaces` is the only definition of 'what this response shipped', reused rather than re-derived by every consumer", () => {
     expect((SOURCE.match(/^function shippedSurfaces\(/m) ?? []).length).toBe(1);
     expect(SOURCE).toMatch(/return codeTaskPackSurfaces\(result\.surfaces\)\.filter\(hasServedCode\);/);
     // FX-K (round-15 finding 3): the certified-working-set writer used to take
     // its OWN projection, over `trimmed` rather than over the pack that ships.
-    // It now receives the one list, so the module has exactly one call site.
-    expect(callSites(SOURCE, "shippedSurfaces")).toBe(1);
+    // It now receives the one list, so `rememberCertifiedWorkingSet` itself has
+    // zero call sites of `shippedSurfaces` (asserted below) — that invariant is
+    // unchanged.
+    //
+    // FIX-ORIG (2026-09-27): a SECOND call site was added deliberately —
+    // buildAnswerTaskPack's post-answer-augmenter re-booking (see
+    // sfBookingOrderFence's recordPackServedRanges/recordReadOnlyServedSurfaces
+    // entries for the full reason) — over `finalResult`, the SAME final pack
+    // bookShippedPackServeState's own call already projects. Two call sites of
+    // the ONE canonical definition, both consuming — never re-deriving — "what
+    // shipped", is exactly what this test's own name asks for; a call site
+    // duplicating the FILTER LOGIC instead (the anti-pattern round-15 finding 3
+    // fixed) would still be caught by the single-definition assertion above.
+    expect(callSites(SOURCE, "shippedSurfaces")).toBe(2);
     expect(callSites(topLevelFunctionBody("rememberCertifiedWorkingSet"), "shippedSurfaces")).toBe(0);
     expect(
       withoutComments(topLevelFunctionBody("rememberCertifiedWorkingSet")),
       "the certified working set must consume the list it is handed",
     ).toMatch(/const surfaces = shipped;/);
+    expect(
+      callSites(topLevelFunctionBody("buildAnswerTaskPack"), "shippedSurfaces"),
+      "the second call site is buildAnswerTaskPack's post-augmenter re-booking",
+    ).toBe(1);
   });
 
   it("rejects the cheapest ways to smuggle a producer past the textual check", () => {

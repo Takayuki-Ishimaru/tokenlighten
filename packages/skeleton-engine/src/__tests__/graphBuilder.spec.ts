@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { SourceIndexManifestV1, IndexedFileV1 } from "../indexStore.js";
-import { buildTlGraphFromManifest, writeGraphIfStale, getTlGraphPath } from "../graphBuilder.js";
+import { buildTlGraphFromManifest, writeGraphIfStale, getTlGraphPath, DEFAULT_GRAPH_INDEX_MAX_BYTES } from "../graphBuilder.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -359,5 +359,95 @@ describe("writeGraphIfStale oversized staleness probe", () => {
     expect(result.written).toBe(true);
     const content = JSON.parse(await fs.readFile(graphPath, "utf8"));
     expect(content.rootHash).toBe("hash-new");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Perf (2026-09-27, large-workspace task_pack cost, item D): writeGraphIfStale
+// must skip the stringify+disk-write for a graph the READER (mcp-server's
+// GRAPH_INDEX_MAX_BYTES check) would never read back in non-"on" mode —
+// writing it changes nothing any caller can observe, so it must not pay for
+// JSON.stringify(graph) at all. "on" mode must still publish it, unchanged.
+// ---------------------------------------------------------------------------
+describe("writeGraphIfStale — item D: skip the doomed stringify+write for an oversized graph", () => {
+  // A single symbol whose OWN NAME is already bigger than the whole cap:
+  // estimateGraphMinBytes' lower-bound sum crosses DEFAULT_GRAPH_INDEX_MAX_BYTES
+  // from this one field, so only two small files are needed to exercise the
+  // gate (a symbol only enters `graph.symbols` once it has >=1 reference —
+  // see buildTlGraphFromManifest's own `if (!refs...) continue` filter).
+  function makeOversizedGraphManifest(): SourceIndexManifestV1 {
+    const hugeName = "H".repeat(DEFAULT_GRAPH_INDEX_MAX_BYTES + 1024);
+    return makeManifest({
+      "a.ts": makeFile({
+        path: "a.ts",
+        symbols: [{ name: hugeName, kind: "function", signature: "sig", lineStart: 1, lineEnd: 1, chunkIds: [] }],
+      }),
+      "b.ts": makeFile({ path: "b.ts", outgoingSymbolRefs: { [hugeName]: 1 } }),
+    });
+  }
+
+  it("in default (auto) mode, skips JSON.stringify entirely and reports written:false", async () => {
+    const spy = vi.spyOn(JSON, "stringify");
+    try {
+      const result = await writeGraphIfStale(tmpDir, makeOversizedGraphManifest());
+      expect(result.written).toBe(false);
+      expect(result.symbolCount).toBe(1); // the graph WAS built (cheap, no I/O) — just not stringified/written
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("in default (auto) mode, does not create the on-disk graph file", async () => {
+    await writeGraphIfStale(tmpDir, makeOversizedGraphManifest());
+    await expect(fs.access(getTlGraphPath(tmpDir))).rejects.toThrow();
+  });
+
+  it("leaves an EXISTING on-disk graph file untouched when the new build is oversized (never deletes/replaces it)", async () => {
+    const graphPath = getTlGraphPath(tmpDir);
+    await fs.mkdir(join(tmpDir, ".tokenlighten", "index"), { recursive: true });
+    const existing = '{"version":1,"rootHash":"hash-old","symbols":[],"files":[]}';
+    await fs.writeFile(graphPath, existing, "utf8");
+
+    const manifest = makeOversizedGraphManifest(); // rootHash differs from "hash-old" -> not a freshness-shortcut hit
+    const result = await writeGraphIfStale(tmpDir, manifest);
+    expect(result.written).toBe(false);
+    expect(await fs.readFile(graphPath, "utf8")).toBe(existing);
+  });
+
+  it("mode:\"on\" bypasses the gate: the same oversized graph IS built, stringified, and written", async () => {
+    const manifest = makeOversizedGraphManifest();
+    const result = await writeGraphIfStale(tmpDir, manifest, { graphIndexMode: "on" });
+    expect(result.written).toBe(true);
+    const content = JSON.parse(await fs.readFile(getTlGraphPath(tmpDir), "utf8"));
+    expect(content.symbols.length).toBe(1);
+  });
+
+  it("mode:\"off\" still applies the size gate (writing changes nothing the reader would ever surface in that mode either)", async () => {
+    const result = await writeGraphIfStale(tmpDir, makeOversizedGraphManifest(), { graphIndexMode: "off" });
+    expect(result.written).toBe(false);
+  });
+
+  it("an explicit graphIndexMaxBytes lets a caller apply a DIFFERENT cap than the default", async () => {
+    // A manifest whose graph fits comfortably under the real 64 MiB default
+    // but is deliberately made to exceed a much smaller caller-supplied cap.
+    const manifest = makeManifest({
+      "a.ts": makeFile({ path: "a.ts", symbols: [{ name: "Shared", kind: "function", signature: "sig", lineStart: 1, lineEnd: 1, chunkIds: [] }] }),
+      "b.ts": makeFile({ path: "b.ts", outgoingSymbolRefs: { Shared: 1 } }),
+    });
+    const result = await writeGraphIfStale(tmpDir, manifest, { graphIndexMaxBytes: 4 });
+    expect(result.written).toBe(false);
+  });
+
+  it("a graph that fits under the cap is written exactly as before this item existed", async () => {
+    const manifest = makeManifest({
+      "a.ts": makeFile({ path: "a.ts", symbols: [{ name: "Shared", kind: "function", signature: "sig", lineStart: 1, lineEnd: 1, chunkIds: [] }] }),
+      "b.ts": makeFile({ path: "b.ts", outgoingSymbolRefs: { Shared: 1 } }),
+    });
+    const result = await writeGraphIfStale(tmpDir, manifest);
+    expect(result.written).toBe(true);
+    const content = JSON.parse(await fs.readFile(getTlGraphPath(tmpDir), "utf8"));
+    expect(content.symbols).toHaveLength(1);
+    expect(content.symbols[0].name).toBe("Shared");
   });
 });

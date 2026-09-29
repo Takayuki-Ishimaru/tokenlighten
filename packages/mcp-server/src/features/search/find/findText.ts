@@ -765,30 +765,24 @@ export function scanLiteral(
   return out;
 }
 
-export function findText(input: FindTextInput, workspace: string): FindTextResult {
-  const query = input.query;
-  if (!query) {
-    return { query, matches: [], truncated: false, total: 0 };
-  }
-
-  const caseInsensitive = input.caseInsensitive ?? (!input.regex && isSingleToken(query));
-
-  const all = scanLiteral(query, workspace, {
-    ...(input.regex !== undefined ? { regex: input.regex } : {}),
-    ...(input.lang ? { lang: input.lang } : {}),
-    ...(input.path ? { path: input.path } : {}),
-    caseInsensitive,
-  });
-
+/**
+ * Shared tail of findText()/findTextMany(): apply the MAX_MATCHES cap, then
+ * the byte-cap trim, to one query's raw (unbounded) match list. Extracted so
+ * findTextMany (below) produces BYTE-IDENTICAL FindTextResult objects to
+ * calling findText() once per query, by construction (same code, not just
+ * "should behave the same").
+ *
+ * F5 (2026-09-19): intentionally the bare MAX_RESPONSE_BYTES constant, not
+ * findResponseCapBytes() — this primitive's callers (locateTaskContext.ts,
+ * server.ts's edit-review pass) are a different consumer than explore
+ * action=find and must stay unaffected by TL_FIND_WIDE_PAGE. See
+ * findResponseCapBytes()'s doc comment.
+ */
+function finalizeFindTextMatches(query: string, all: TextMatch[]): FindTextResult {
   const matchTruncated = all.length > MAX_MATCHES;
   let matches = matchTruncated ? all.slice(0, MAX_MATCHES) : all;
   let truncated = matchTruncated;
 
-  // Enforce byte cap: drop trailing matches until JSON fits, keeping MIN_MATCHES.
-  // F5 (2026-09-19): intentionally the bare constant, not findResponseCapBytes()
-  // — this primitive's callers (locateTaskContext.ts, server.ts's edit-review
-  // pass) are a different consumer than explore action=find and must stay
-  // unaffected by TL_FIND_WIDE_PAGE. See findResponseCapBytes()'s doc comment.
   function serialize(m: TextMatch[]): string {
     return JSON.stringify({ query, matches: m, truncated: true, total: all.length });
   }
@@ -809,6 +803,150 @@ export function findText(input: FindTextInput, workspace: string): FindTextResul
     truncated,
     total: all.length,
   };
+}
+
+export function findText(input: FindTextInput, workspace: string): FindTextResult {
+  const query = input.query;
+  if (!query) {
+    return { query, matches: [], truncated: false, total: 0 };
+  }
+
+  const caseInsensitive = input.caseInsensitive ?? (!input.regex && isSingleToken(query));
+
+  const all = scanLiteral(query, workspace, {
+    ...(input.regex !== undefined ? { regex: input.regex } : {}),
+    ...(input.lang ? { lang: input.lang } : {}),
+    ...(input.path ? { path: input.path } : {}),
+    caseInsensitive,
+  });
+
+  return finalizeFindTextMatches(query, all);
+}
+
+// ---------------------------------------------------------------------------
+// Perf (2026-09-27, large-workspace task_pack cost) — batched multi-needle
+// scan. locateTaskContext.ts's Layer 3 (exact-text) and variant-token loops
+// each called findText() once per literal (up to ~14 needles per task_pack,
+// all sharing the identical {lang, path} option-set): every call re-walked
+// the workspace via scanLiteral's own internal walkCodeFiles (no `files`
+// handed in) AND re-read every matched file's bytes from disk (no
+// contentCache), so one task_pack could re-read the same files ~14 times.
+// scanManyLiteral/findTextMany do ONE walk and ONE read-through per file for
+// the whole needle batch, then apply findText()'s own per-query
+// post-processing (via finalizeFindTextMatches, the identical code path) to
+// each needle — so every returned FindTextResult is byte-identical to what
+// findText() would have returned for that query alone.
+// ---------------------------------------------------------------------------
+
+export interface ScanManyItem {
+  query: string;
+  regex?: boolean;
+  /** Already-resolved case-sensitivity — unlike findText(), no isSingleToken default is applied here (mirrors scanLiteral's own contract). */
+  caseInsensitive?: boolean;
+}
+
+/**
+ * Multi-needle counterpart to scanLiteral: reads each file in `files` ONCE
+ * and evaluates every `items[]` needle against every line of that single
+ * read, instead of one independent walk+read per needle. Returns raw
+ * (unbounded, un-trimmed) match lists in `items` order — for a given index,
+ * identical to what `scanLiteral(items[i].query, workspace, {regex:
+ * items[i].regex, caseInsensitive: items[i].caseInsensitive, files})` would
+ * return, because it is the exact same per-line needle test, walking `files`
+ * in the same order and pushing `{path, line, text}` in the same way.
+ *
+ * Exported for findTextMany (below) and for locateTaskContext.ts's
+ * wide-tier batch (wideExactTextMatchesMany), which both need a shared read
+ * pass over a caller-supplied file list.
+ */
+export function scanManyLiteral(
+  items: readonly ScanManyItem[],
+  files: ReadonlyArray<Pick<FoundFile, "relPath" | "absPath" | "kind">>,
+  contentCache?: ScanContentCache,
+): TextMatch[][] {
+  const out: TextMatch[][] = items.map(() => []);
+  if (items.length === 0) return out;
+  const needles: Array<RegExp | null> = items.map((item) => {
+    if (item.regex) {
+      if (!isSafeRegexQuery(item.query)) return null;
+      try {
+        return new RegExp(item.query, item.caseInsensitive ? "i" : undefined);
+      } catch {
+        return null;
+      }
+    }
+    return new RegExp(escapeRegExp(item.query), item.caseInsensitive ? "i" : undefined);
+  });
+  if (needles.every((needle) => needle === null)) return out;
+
+  for (const f of files) {
+    // Mirrors scanLiteral: artifact participation in find is filename-only.
+    if (f.kind === "artifact") continue;
+    const lines = readLinesCached(f.absPath, contentCache);
+    if (lines === null || lines === "undecodable") continue;
+    for (let n = 0; n < needles.length; n++) {
+      const needle = needles[n];
+      if (!needle) continue;
+      const bucket = out[n]!;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        const m = needle.exec(line);
+        if (m) bucket.push({ path: f.relPath, line: i + 1, text: trimMatchText(line, m.index) });
+      }
+    }
+  }
+  return out;
+}
+
+export interface FindTextManyItem {
+  query: string;
+  regex?: boolean;
+  caseInsensitive?: boolean;
+}
+
+/**
+ * Batch counterpart to findText(): `result[i]` is byte-identical to what
+ * `findText({query: items[i].query, regex: items[i].regex, caseInsensitive:
+ * items[i].caseInsensitive, lang: opts.lang, path: opts.path}, workspace)`
+ * would return (same caseInsensitive default heuristic, same MAX_MATCHES cap,
+ * same per-query byte-cap trim — see finalizeFindTextMatches) — but performs
+ * ONE walk (the same option-set findText()'s own internal walk uses: `{lang,
+ * subPath, extraExts: FIND_EXTRA_EXTS}`) and reads each matched file's bytes
+ * ONCE for the whole batch, rather than once per query.
+ */
+export function findTextMany(
+  items: readonly FindTextManyItem[],
+  workspace: string,
+  opts: { lang?: LangKey; path?: string } = {},
+): FindTextResult[] {
+  // Mirrors findText()'s own `if (!query) return early` — an empty-query
+  // item must not consume a needle slot (an empty pattern would otherwise
+  // match every line of every file) nor force the shared walk to run when
+  // every item in the batch is empty.
+  const results: FindTextResult[] = items.map((item) => ({ query: item.query, matches: [], truncated: false, total: 0 }));
+  const activeIndexes: number[] = [];
+  const activeItems: ScanManyItem[] = [];
+  items.forEach((item, i) => {
+    if (!item.query) return;
+    activeIndexes.push(i);
+    activeItems.push({
+      query: item.query,
+      ...(item.regex !== undefined ? { regex: item.regex } : {}),
+      caseInsensitive: item.caseInsensitive ?? (!item.regex && isSingleToken(item.query)),
+    });
+  });
+  if (activeItems.length === 0) return results;
+
+  const files = walkCodeFiles(workspace, {
+    ...(opts.lang ? { lang: opts.lang } : {}),
+    ...(opts.path ? { subPath: opts.path } : {}),
+    extraExts: FIND_EXTRA_EXTS,
+  });
+  const raw = scanManyLiteral(activeItems, files);
+  activeIndexes.forEach((originalIndex, activeIndex) => {
+    results[originalIndex] = finalizeFindTextMatches(items[originalIndex]!.query, raw[activeIndex]!);
+  });
+  return results;
 }
 
 // ---------------------------------------------------------------------------

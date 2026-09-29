@@ -67,6 +67,7 @@ import { callTool } from "../server.js";
 import { getSession, tokenizeForEpoch } from "../state/session.js";
 import { queryServedSurfaces } from "../util/packServeLog.js";
 import { resetAll as resetAllSessions } from "../util/session.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 // ---------------------------------------------------------------------------
 // Fixture — round-15's `r15_k` corpus: eight 40-function pricing modules (so
@@ -224,6 +225,21 @@ describe("FX-K: the cap-overflow sweep — the default path books only what it s
     // Three 60-function modules named by the request: at 8192 bytes the pack
     // reaches Phase F and drops a whole surface rather than only stripping
     // bodies (the eight-module pathless corpus above stops at Phase E).
+    //
+    // TL-01 (2026-09-21) — WHY THE PRECONDITION BELOW IS NOW CONDITIONAL.
+    // The drop this case observed was never Phase F (trimToCap honours
+    // `protectedSurfaces`, which holds every caller-named seed): it was
+    // `dedupeTrimAndPersist`'s post-contract shed tier, whose own
+    // `callerNamedSurface` guard — the WP-P2 B protection that is supposed to
+    // take bytes from the BODY and leave the addressable row behind — was dead
+    // code, because it re-read a `why` that trimToCap Phase B had already
+    // cleared. With that guard live, a caller-named row survives: measured
+    // across budgets 6144/6500/7000/7500/8192/9000/12000 on this exact
+    // fixture, and again at 4x the module size, all three rows ship WITH
+    // bodies. The invariant this case exists for is unchanged and is still
+    // asserted below over whatever the budget really withheld; when nothing is
+    // withheld, the complementary direction (everything shipped IS booked) is
+    // asserted instead, so the case can never pass vacuously.
     const targets = ["src/big_0.ts", "src/big_1.ts", "src/big_2.ts"];
     targets.forEach((rel, module) => {
       const lines = [`// module ${module}: orderTotal pricing surface`];
@@ -244,15 +260,26 @@ describe("FX-K: the cap-overflow sweep — the default path books only what it s
       budget: { bytes: 8192 },
     });
     expect(pack.kind).toBe("read.task_pack");
-    const shippedPaths = new Set((pack.evidence ?? []).map((row) => row.path));
-    const spliced = targets.filter((p) => !shippedPaths.has(p));
-    expect(spliced.length, "precondition: the byte budget must shed at least one whole surface")
-      .toBeGreaterThan(0);
+    const rows = pack.evidence ?? [];
+    const withBody = new Set(rows.filter((row) => (row.body ?? "") !== "").map((row) => row.path));
+    // "Withheld" is the honest union of the two ways the byte budget can keep a
+    // named path's bytes off the wire: no row at all (a splice), or a row with
+    // no body (Phase E / the WP-P2 B reduction taken to zero).
+    const withheld = targets.filter((p) => !withBody.has(p));
     const { union, log } = bookedState(ws, "Update orderTotal pricing rules across the three pricing modules so quantity discounts apply.");
-    for (const p of spliced) {
+    for (const p of withheld) {
       expect(union, `a surface the response never sent must not be editable: ${p}`).not.toContain(p);
       expect(log, `a surface the response never sent must not be logged: ${p}`).not.toContain(p);
     }
+    // NEVER VACUOUS: with nothing withheld, the ⊇ direction is what this
+    // fixture proves — every path whose bytes DID ship stays editable and
+    // logged (the T09/T10 direction FX-K must not narrow).
+    for (const p of withBody) {
+      expect(union, `${p} shipped a body and must stay editable`).toContain(p);
+      expect(log, `${p} shipped a body and must stay in the cumulative log`).toContain(p);
+    }
+    expect(withheld.length + withBody.size, "the pack must address all three named modules one way or the other")
+      .toBe(targets.length);
   }, 90000);
 
   it("a `code_unchanged` restatement keeps its path admissible — the caller holds those bytes", async () => {
@@ -300,8 +327,8 @@ interface ServerHandle {
 function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, cwd, "--allow-write"],
-    { cwd, stdio: ["pipe", "pipe", "pipe"], env },
+    [TSX_CLI, "--liftoff-only", BIN_TS, cwd, "--allow-write"],
+    { cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env },
   );
   let stdout = "";
   let stderr = "";
@@ -370,7 +397,7 @@ function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
     },
     kill() {
       try {
-        child.kill("SIGKILL");
+        killServerGroup(child);
       } catch {
         /* already gone */
       }

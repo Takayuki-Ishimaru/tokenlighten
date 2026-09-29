@@ -41,6 +41,7 @@ import type { TaskPackResult } from "../features/task-pack/model.js";
 import { emittableToolCall } from "./refusal.js";
 import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow } from "../features/task-pack/canonicalDecision.js";
 import { semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
+import { ELISION_MARKER_RE } from "../util/formatCompress.js";
 import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
 import { noteSemanticFrontierDecisionSuppression, noteSemanticFrontierEvidenceSuppression, noteSemanticFrontierWithholding, semanticFrontierEvidenceWitnessId } from "./semanticFrontierTraceContext.js";
 import type { SemanticFrontierWithholdingMarks } from "./semanticFrontierTraceContext.js";
@@ -158,6 +159,172 @@ export function packUnchangedPriorLabel(result: Record<string, unknown>): string
     : "read_file mode=task_pack (earlier in this session)";
 }
 
+/**
+ * FIX-ORIG (2026-09-27, eval-0927 §6.1, brief-fix-orig.md C4): a cheap, pure,
+ * no-re-read structural guard at the LAST SEAT before projection — the SAFETY
+ * NET for C1 ("evidence[].body is verbatim source of its range") and C2 ("a
+ * residency pointer never appears inside body"), not the fix. Every known
+ * producer of these two defect shapes is fixed at its own source
+ * (queryEvidence.ts's `scoreWindow`; readCodeTaskPack.ts's
+ * `singleSiteShortCircuitSeed` and `recoverExplicitIdentifierAnswerCandidates`'s
+ * enclosing-symbol fallback; `selectCallableClosureEvidence`). This still runs
+ * on every row, because a producer no wave has found yet must not reach the
+ * wire uncorrected — see `evidenceOriginalityGuard.spec.ts`, which also proves
+ * it is a no-op on every FIXED producer's own output (a safety net that never
+ * fires in the ordinary path stays cheap and never masks a real regression).
+ *
+ * (a) POINTER-CONTAMINATED BODY: `code` itself contains one of the exact
+ *     residency-pointer phrases the three residency passes (applyPackDedupe /
+ *     applyResidentFileDedup / applyLedgerServedSurfaces, readCodeTaskPack.ts)
+ *     stamp into `code_unchanged` — confirmed LIVE (eval-0927 wave, one
+ *     session running V01 -> a JA two-line query -> V03 against the SAME
+ *     workspace): a `readiness-falsification-counterexample` surface's `code`
+ *     carried exactly such contamination by the time it reached this module,
+ *     though its own producer (readCodeTaskPack.ts's masked-counterexample
+ *     push) served it honestly — the exact intermediate mutator was not
+ *     pinned down this wave (see the wave report). This guard neutralizes the
+ *     symptom regardless of which producer it turns out to be: a
+ *     pointer-shaped body is demoted to a `prior` pointer (the exact line the
+ *     phrase appears on — never a partial/garbled remainder) and its body is
+ *     dropped, never both (C2).
+ * (b) OVER-LENGTH BODY: `code`'s own logical line count (trailing-newline-
+ *     aware, matching util/countLines.ts's algorithm — this module has no
+ *     filesystem access to re-derive it any other way) EXCEEDS the line span
+ *     `range` declares. Every confirmed instance overstates at the TAIL (an
+ *     extra line appended after masked/blank filler, mirroring the sibling
+ *     N+1-range defect's own always-at-the-end shape), so the correction
+ *     keeps the body's own first N lines (N = the declared span) and drops
+ *     the rest — the retained prefix is exactly the bytes the producer served
+ *     for those lines, nothing is fabricated.
+ *
+ *     A body SHORTER than its declared span is deliberately left UNCORRECTED
+ *     — an earlier version of this guard narrowed `range` down to match, and
+ *     `semanticFrontierTrace.spec.ts`'s "activates evidence witnesses only
+ *     for optional evidence that survives the actual shed ladder" caught it
+ *     live: the existing budget-shedding pipeline (protocol/budget/shedders/*)
+ *     legitimately ships a body shorter than `range` while separately
+ *     updating `remaining_ranges` to disclose exactly what the shed removed,
+ *     and this guard's own "fix" corrupted that already-correct disclosure
+ *     into a false, narrower `range` that no longer matched it. That spec is
+ *     this guard's recall control for the under-length direction — see its
+ *     own retainedOn/retainedOff assertions.
+ *
+ * Deliberately NOT checked here: whether `range` itself exceeds the FILE's
+ * real line count. That needs the file, which this module's own header
+ * forbids reading (`sanctionFromEvidence` — and by the same discipline,
+ * every function in this module — is a pure function of what it is handed);
+ * it is fixed at each producer instead (queryEvidence.ts / readCodeTaskPack.ts).
+ */
+const EVIDENCE_RESIDENCY_POINTER_PHRASES = [
+  " — see prior pack",
+  " — duplicate of an earlier surface in this pack",
+  "already served this session",
+] as const;
+
+function evidencePointerLineWithin(text: string): string | undefined {
+  for (const phrase of EVIDENCE_RESIDENCY_POINTER_PHRASES) {
+    const at = text.indexOf(phrase);
+    if (at === -1) continue;
+    const lineStart = text.lastIndexOf("\n", at) + 1;
+    const lineEndIdx = text.indexOf("\n", at);
+    const lineEnd = lineEndIdx === -1 ? text.length : lineEndIdx;
+    return text.slice(lineStart, lineEnd);
+  }
+  return undefined;
+}
+
+/** `code.split("\n")`'s logical (trailing-newline-aware) line count — the
+ *  same semantics as util/countLines.ts, restated here because this module
+ *  has no import boundary into util/ today and the check is one line. */
+function evidenceBodyLogicalLineCount(code: string): number {
+  if (code.length === 0) return 0;
+  const lines = code.split("\n");
+  return lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+}
+
+function guardEvidenceOriginality(
+  code: string,
+  range: string | undefined,
+): { body?: string; prior?: string } {
+  const pointer = evidencePointerLineWithin(code);
+  if (pointer !== undefined) return { prior: pointer };
+  const bounds = typeof range === "string" ? /^(\d+)-(\d+)$/.exec(range) : null;
+  if (bounds === null) return { body: code };
+  const span = Number(bounds[2]) - Number(bounds[1]) + 1;
+  if (!(span > 0)) return { body: code };
+  const logical = evidenceBodyLogicalLineCount(code);
+  if (logical <= span) {
+    // Under-length (or exact) is deliberately left uncorrected: the existing
+    // budget-shedding pipeline (protocol/budget/shedders/*) legitimately
+    // ships a body SHORTER than its own `range` while separately updating
+    // `remaining_ranges` to disclose exactly what that shed removed (see
+    // semanticFrontierTrace.spec.ts's "activates evidence witnesses only for
+    // optional evidence that survives the actual shed ladder" — the ORIGINAL
+    // regression control for this guard: an earlier version of this function
+    // also narrowed `range` to match a shed-shortened body, corrupting the
+    // shedder's own already-correct `remaining` disclosure into a false
+    // `range` that no longer matched it). A body that is under-length for a
+    // reason OTHER than a disclosed shed is a real, not-yet-observed defect
+    // this guard cannot safely distinguish from a legitimate shed without
+    // knowing which pass produced it — recall bar wins; leave it alone.
+    return { body: code };
+  }
+  // Over-length: the producer's real, verbatim content is the PREFIX (see
+  // header) — drop the excess tail rather than reject the whole body.
+  const lines = code.split("\n");
+  return { body: lines.slice(0, span).join("\n") };
+}
+
+/**
+ * eval-0927 §6.1: an answer surface's `code` can end in windows cut from OTHER
+ * lines of the same file (`buildAnswerTaskPack`'s query-focused member and
+ * query facet excerpts), each introduced by a marker line and recorded in
+ * `appended_windows`. Internally that stays one surface — trimming and the
+ * proof passes treat it as one — but on the wire every body must be verbatim
+ * source of its own range, so the head keeps the surface's `range` and each
+ * appended window ships as its own row on the same handle with the lines it
+ * holds; the marker lines never reach the wire. Before this split,
+ * `guardEvidenceOriginality` cut the glued body at the head's line span,
+ * which dropped the later windows (T03 lost its `shipping` window) while the
+ * earlier ones still shipped under the head's range.
+ *
+ * A marker a trim cut away is simply not found and its window does not ship.
+ * A window with no elision marker is contiguous source, so when a trim cut it
+ * short the lines it kept name its range.
+ */
+function splitAppendedWindows(
+  code: string,
+  recorded: unknown,
+): { head: string; windows: Array<{ range: string; body: string }> } | undefined {
+  if (!Array.isArray(recorded) || recorded.length === 0) return undefined;
+  const found: Array<{ at: number; end: number; range: string }> = [];
+  let from = 0;
+  for (const entry of recorded) {
+    if (entry === null || typeof entry !== "object") continue;
+    const marker = (entry as Record<string, unknown>)["marker"];
+    const range = (entry as Record<string, unknown>)["range"];
+    if (typeof marker !== "string" || marker === "" || typeof range !== "string") continue;
+    const at = code.indexOf(marker, from);
+    if (at === -1) continue;
+    found.push({ at, end: at + marker.length, range });
+    from = at + marker.length;
+  }
+  if (found.length === 0) return undefined;
+  const windows: Array<{ range: string; body: string }> = [];
+  found.forEach((entry, index) => {
+    const last = index === found.length - 1;
+    let body = code.slice(entry.end, last ? code.length : found[index + 1]!.at);
+    if (last) body = body.replace(/\n{2,}$/, "\n");
+    const bounds = /^(\d+)-(\d+)$/.exec(entry.range);
+    const kept = evidenceBodyLogicalLineCount(body);
+    if (bounds === null || kept === 0) return;
+    const start = Number(bounds[1]);
+    const end = ELISION_MARKER_RE.test(body) ? Number(bounds[2]) : Math.min(Number(bounds[2]), start + kept - 1);
+    windows.push({ range: `${start}-${end}`, body });
+  });
+  return { head: code.slice(0, found[0]!.at), windows };
+}
+
 export function projectEvidence(surfaces: unknown, priorForBodyless?: string): Evidence[] {
   if (!Array.isArray(surfaces)) return [];
   // D5: the two flags are mutually exclusive — `flags.ts`'s
@@ -235,6 +402,16 @@ export function projectEvidence(surfaces: unknown, priorForBodyless?: string): E
       if (Array.isArray(value) && value.length === 0) continue;
       carried[key] = value;
     }
+    // C4 (see guardEvidenceOriginality's own header): only when there IS a
+    // body to check (a demoted row already carries none, and its own branch
+    // below is untouched). `undefined` means "nothing to correct" so every
+    // OTHER row's projection stays byte-identical to before this guard existed.
+    const appended = !demotable && typeof record["code"] === "string"
+      ? splitAppendedWindows(record["code"], record["appended_windows"])
+      : undefined;
+    const originalityGuard = !demotable && typeof record["code"] === "string"
+      ? guardEvidenceOriginality(appended?.head ?? record["code"], typeof record["range"] === "string" ? record["range"] : undefined)
+      : undefined;
     const projected: Evidence = {
       handle,
       // §3.3's addressing triple, plus [R4-2] / A.9.2 row 22: `role` SURVIVES
@@ -245,7 +422,7 @@ export function projectEvidence(surfaces: unknown, priorForBodyless?: string): E
       // A demoted row is bodyless BY DEFINITION (§3.5.1's supporting tier):
       // no `body`, no `prior` — just enough to stay addressable via `handle`
       // + `remaining` in a follow-up call.
-      ...(!demotable && typeof record["code"] === "string" ? { body: record["code"] } : {}),
+      ...(originalityGuard?.body !== undefined ? { body: originalityGuard.body } : {}),
       // FX-M4 (P1, 2026-09-03): the fallback branch used to fire for EVERY
       // code-less, non-`code_unchanged` row on a `pack-unchanged` receipt,
       // regardless of whether THIS row's bytes were ever shipped — a
@@ -259,11 +436,19 @@ export function projectEvidence(surfaces: unknown, priorForBodyless?: string): E
       // carrying `remaining` here has an unserved window by construction and
       // must not also claim `prior`. A row with no `remaining` is unaffected
       // (byte-identical to before).
-      ...(!demotable && typeof record["code_unchanged"] === "string"
-        ? { prior: record["code_unchanged"] }
-        : !demotable && priorForBodyless !== undefined && typeof record["code"] !== "string" && remaining.length === 0
-          ? { prior: priorForBodyless }
-          : {}),
+      //
+      // C4: `originalityGuard.prior` (the pointer phrase the guard found
+      // INSIDE `code`) takes precedence — it is proof this row's `code` was
+      // never a genuine fresh body, so C2 forbids emitting it as one; a
+      // legitimate `code_unchanged`/`priorForBodyless` prior is unaffected
+      // (guard returns `undefined` whenever `code` is clean).
+      ...(originalityGuard?.prior !== undefined
+        ? { prior: originalityGuard.prior }
+        : !demotable && typeof record["code_unchanged"] === "string"
+          ? { prior: record["code_unchanged"] }
+          : !demotable && priorForBodyless !== undefined && typeof record["code"] !== "string" && remaining.length === 0
+            ? { prior: priorForBodyless }
+            : {}),
       ...(remaining.length > 0 ? { remaining } : {}),
       ...(typeof record["role"] === "string" ? { role: record["role"] as SurfaceRole } : {}),
       ...carried,
@@ -292,6 +477,16 @@ export function projectEvidence(surfaces: unknown, priorForBodyless?: string): E
       if (isSemanticFrontierNamedJoin(surface)) noteSemanticFrontierWithholding("named", projectedRecord);
     }
     (demotable ? demoted : primary).push(projected);
+    for (const window of appended?.windows ?? []) {
+      const guarded = guardEvidenceOriginality(window.body, window.range);
+      primary.push({
+        handle,
+        ...(typeof record["path"] === "string" ? { path: record["path"] } : {}),
+        range: window.range,
+        ...(guarded.body !== undefined ? { body: guarded.body } : {}),
+        ...(guarded.prior !== undefined ? { prior: guarded.prior } : {}),
+      });
+    }
   }
   return demoted.length > 0 ? [...primary, ...demoted] : primary;
 }
@@ -563,11 +758,39 @@ function projectCertificate(
           entry !== null && typeof entry["term"] === "string" && entry["term"] !== "")
         .map((entry) => {
           const term = entry["term"] as string;
+          // R-D2 (2026-09-21, item B): a could-not-determine verdict is NOT a
+          // verified absence — checked FIRST, before the scope_complete/
+          // incidental wording below (which does not apply to it: a
+          // could-not-determine verdict makes no scope claim at all). See
+          // `TaskPackResult.request_item_absences`'s own doc comment.
+          if (entry["undetermined"] === true) {
+            const reason = typeof entry["undetermined_reason"] === "string" && entry["undetermined_reason"] !== ""
+              ? entry["undetermined_reason"]
+              : "no confirmed normalisation available";
+            return `explicit-gap:request-item-undetermined:${term} (${reason})`;
+          }
+          // FIX-G (2026-09-27): a request FACET covered by a verified-empty
+          // fact (0 call sites in the scanned scope; no module constant or
+          // literal behind a value) — neither an absence nor undetermined, so
+          // it never takes the scope/incidental wording below. See
+          // `TaskPackResult.request_item_absences`'s own doc comment.
+          if (entry["empty"] === true) {
+            const reason = typeof entry["empty_reason"] === "string" && entry["empty_reason"] !== ""
+              ? entry["empty_reason"]
+              : "verified empty in the scanned workspace";
+            return `explicit-gap:request-item-empty:${term} (${reason})`;
+          }
           const scopeComplete = entry["scope_complete"] === true;
           const omittedCount = typeof entry["omitted_count"] === "number" ? entry["omitted_count"] : 0;
           const qualifier = scopeComplete
             ? "; scope complete"
             : `; ${omittedCount} ${omittedCount === 1 ? "path" : "paths"} excluded from the scan`;
+          // R-B3 (2026-09-21, ruling 5): a served-but-only-mentioned-in-passing
+          // absence (`incidental`) — the term DOES occur — is worded with the
+          // policy's own phrase for it, never "no occurrence".
+          if (entry["incidental"] === true) {
+            return `explicit-gap:request-item-absent:${term} (only an incidental mention in served workspace files${qualifier})`;
+          }
           return `explicit-gap:request-item-absent:${term} (no occurrence in scanned workspace files${qualifier})`;
         })
     : [];
@@ -1066,14 +1289,26 @@ function profileConflictAppliesTo(code: AwaitInputCode): boolean {
  * own CLOSED six-member kind vocabulary (`TaskCapabilityGap["kind"]`) and its
  * `obligation_ids` instead — never from `gap.reason`.
  */
-function projectedCapabilityGapReason(gap: TaskCapabilityGap): string {
+function projectedCapabilityGapReason(gap: TaskCapabilityGap, ambiguousTargetCandidateCount?: number): string {
   const ids = (gap.obligation_ids ?? []).filter((entry): entry is string => typeof entry === "string" && entry !== "");
   const idList = ids.length > 0 ? ids.join(", ") : undefined;
   switch (gap.kind) {
     case "ambiguous-target":
-      return idList !== undefined
-        ? `target ambiguous across ${ids.length} candidate obligation(s): ${idList}`
-        : "target ambiguous across multiple candidates";
+      if (idList !== undefined) {
+        return `target ambiguous across ${ids.length} candidate obligation(s): ${idList}`;
+      }
+      // Finding 20 (adversarial review, 2026-09-27): this fallback used to say
+      // "multiple candidates" unconditionally, including when this SAME
+      // response names exactly one in `candidates[]` — a caller then read
+      // "ambiguous across multiple candidates" beside "1 candidate target(s)
+      // match this request" for the identical blocker. `ambiguousTargetCandidateCount`
+      // is the caller's own count of THIS response's candidates (row 3 below
+      // computes the identical number for its own row), so the two rows can
+      // no longer disagree, and a genuinely single-candidate ambiguity is
+      // never misreported as "multiple".
+      return ambiguousTargetCandidateCount !== undefined && ambiguousTargetCandidateCount > 0
+        ? `${ambiguousTargetCandidateCount} candidate target(s) match this request; name the intended one`
+        : "the intended target is ambiguous and this response cannot narrow it further";
     case "missing-evidence":
       return idList !== undefined
         ? `required evidence not served: ${idList}`
@@ -1258,13 +1493,22 @@ function projectUnresolved(
   }
 
   // 2. Open readiness obligations.
+  //
+  // Finding 20: the SAME candidate count row 3 below computes for the
+  // "code's own question" row, threaded through so an `ambiguous-target` gap
+  // with no `obligation_ids` never asserts a candidate count that disagrees
+  // with what this response's own `candidates[]` (or `concern_ambiguities`)
+  // says — see `projectedCapabilityGapReason`'s doc comment.
+  const ambiguousTargetCandidateCount = candidates.length > 0
+    ? candidates.length
+    : (Array.isArray(result["concern_ambiguities"]) ? result["concern_ambiguities"].length : 0);
   for (const gap of contract.capability_gaps ?? []) {
     const id = (gap.obligation_ids ?? []).find((entry) => typeof entry === "string" && entry !== "");
     push({
       kind: gap.kind,
       // Finding 4: a projected declarative sentence, never `gap.reason`
       // verbatim -- that prose is guidance, not a residual statement.
-      reason: projectedCapabilityGapReason(gap),
+      reason: projectedCapabilityGapReason(gap, ambiguousTargetCandidateCount),
       ...(id !== undefined ? { id } : {}),
     });
   }
@@ -1304,12 +1548,10 @@ function projectUnresolved(
 
   // 3. The code's own question.
   if (awaitCode === "choose-candidate" || awaitCode === "name-intended-target") {
-    const ambiguities = Array.isArray(result["concern_ambiguities"]) ? result["concern_ambiguities"].length : 0;
-    const count = candidates.length > 0 ? candidates.length : ambiguities;
     push({
       kind: "ambiguous-target",
-      reason: count > 0
-        ? `${count} candidate target(s) match this request; name the intended one`
+      reason: ambiguousTargetCandidateCount > 0
+        ? `${ambiguousTargetCandidateCount} candidate target(s) match this request; name the intended one`
         : "the intended target is ambiguous and this response cannot narrow it further",
     });
   }

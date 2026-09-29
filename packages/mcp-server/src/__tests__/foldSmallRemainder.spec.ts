@@ -43,6 +43,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { waitForExit } from "./helpers/rmDirWithRetry.js";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 import {
   applyFoldSmallRemainder,
@@ -387,9 +388,9 @@ const spawnedServers: ServerHandle[] = [];
 
 /** Spawned-stdio harness, trimmed from seededGenerousPack.spec.ts / rangedBatchNextPreservation.spec.ts. */
 function startServer(cwd: string, env: Record<string, string>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, BIN_TS, cwd], {
+  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, cwd], {
     cwd,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env, ...env },
   });
   let stdoutBuf = "";
@@ -448,7 +449,7 @@ function startServer(cwd: string, env: Record<string, string>): ServerHandle {
       return { body: JSON.parse(text!) as Record<string, unknown>, bytes: Buffer.byteLength(text!, "utf8") };
     },
     async kill() {
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      try { killServerGroup(child); } catch { /* already gone */ }
       await waitForExit(child);
     },
   };

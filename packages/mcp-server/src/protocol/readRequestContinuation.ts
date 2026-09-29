@@ -196,9 +196,15 @@ function shippedWindowsByPath(payload: ShedPayload): Map<string, LineWindow[]> |
     if (!map.has(path)) map.set(path, []);
     const body = raw["body"];
     const range = raw["range"];
-    if (typeof body !== "string" || body === "" || typeof range !== "string") continue;
+    if (typeof body !== "string" || typeof range !== "string") continue;
     const window = parseWindow(range);
-    if (window !== undefined) map.get(path)!.push(window);
+    if (window === undefined) continue;
+    // A blank line's verbatim body is `""` (readFamily.ts `blankLineBody`) and
+    // it did ship; an empty body for a wider window ships nothing. Without
+    // this a budgeted read of a blank line stayed owed and its cursor
+    // re-served the same line forever.
+    if (body === "" && window.end !== window.start) continue;
+    map.get(path)!.push(window);
   }
   return map;
 }

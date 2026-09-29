@@ -78,7 +78,7 @@ import type { Kind, ToolCall } from "@tokenlighten/types";
 
 import { MAX_DEMOTIONS_PER_EMISSION, actFloorHolds, demoteToDiscover } from "./actFloor.js";
 import { measureResponseBytes } from "./measure.js";
-import { LIMIT_BEARING_RUNGS, mergeWireLimit } from "./wireLimit.js";
+import { LIMIT_BEARING_RUNGS, mergeWireLimit, unionBatchContinuations } from "./wireLimit.js";
 import type { ShedRecord } from "./wireBudget.js";
 import { shedderFor } from "./shedders/index.js";
 import type { ShedContext, ShedPayload } from "./shedders/registry.js";
@@ -138,7 +138,34 @@ export type LadderOutcome = {
    * loop.
    */
   readonly records: ShedRecord[];
-  /** The continuation the last limit-bearing rung named, if any. */
+  /**
+   * The continuation the last limit-bearing rung named, if any.
+   *
+   * R-A3 follow-up (found via `emit.ts`'s `failClosed`, which reads
+   * `ladder.continuation ?? existingNextOf(payload)` — since this field is
+   * defined whenever any limit-bearing rung fired, that fallback never
+   * reaches `existingNextOf`, so a refusal built from it saw only whatever
+   * this field held): for `read.batch`, this is `payload.limit.next` — the
+   * E3-merged result (`mergeWireLimit`, `wireLimit.ts`), CLAUSE 4's union of
+   * a pre-existing emitter `next` (server.ts's A7 construction-time drop)
+   * with the boundary's own accumulated continuation included — when it
+   * parses as an executable call, else the raw boundary-level value as a
+   * fallback. MEASURED: without this, a `read.batch` run that hit BOTH a
+   * construction-time drop (an emitter `next` naming several handles) and a
+   * boundary cut that still left the ladder over budget converted to a
+   * `refusal` whose OWN `next` named only the boundary's last handle,
+   * silently dropping every construction-time-omitted one — no other field
+   * ever re-addresses them.
+   *
+   * Every OTHER kind keeps exactly the raw boundary-level value, unchanged —
+   * this follow-up widens NOTHING for them. Clause 4 can still keep an
+   * emitter's own `next` over theirs too (by design, see `wireLimit.ts`'s
+   * file header), so the SAME divergence between this field and
+   * `published.limit.next` can occur there as well — a pre-existing
+   * characteristic of `failClosed`'s own `ladder.continuation ?? …`
+   * preference, not something this fix introduces, and out of this fix's
+   * `read.batch`-only scope to change for other kinds.
+   */
   readonly continuation?: ToolCall;
 };
 
@@ -180,7 +207,7 @@ export function runLadder(input: {
   // disclosure part of what the ladder is shedding TO FIT, which is the honest
   // accounting: the caller is charged for the recovery call it is being given.
   let shed = payload;
-  let published = publish(shed, records, continuation);
+  let published = publish(shed, records, continuation, kind);
   let text = JSON.stringify(published);
   let used = measureResponseBytes(text);
   let steps = 0;
@@ -218,9 +245,32 @@ export function runLadder(input: {
       // makes the response owe (E3/E5). Everything below judges this object,
       // not the bare cut.
       const candidateRecords = [...records, { rung: stepped.note.rung, bytes: 0 }];
-      const candidateContinuation = stepped.continuation ?? continuation;
+      const plainContinuation = stepped.continuation ?? continuation;
+      // R-A3/R-A4/R-A5 (v0.14.4 candidate, `read.batch` only): PREFER the
+      // union of this step's own continuation with whatever the ladder has
+      // already accumulated — see the "LAST LIMIT-BEARING RUNG WINS" comment
+      // below and `wireLimit.ts`'s own banner for the full history and the
+      // confirmed chains this closes.
+      //
+      // R-A5 (v0.14.4 candidate, SAME DAY) removed EVERY per-step budget-fit
+      // gate that used to sit here (`unionBatchContinuationsFitting`, R-A3's
+      // trim and R-A4's refuse-if-emitter-next-exists both retired — see
+      // `wireLimit.ts`'s own banner for the CONFIRMED regression a first,
+      // still-gated version of this fix produced: a 30-entry drop sequence
+      // stalled after ONE accepted drop because that single step's own
+      // candidate, measured alone, did not yet fit the CALIBRATED budget,
+      // even though 9 MORE drops were all that stood between it and fitting).
+      // The union is now taken UNCONDITIONALLY and judged EXACTLY like any
+      // other candidate — by the SAME progress check every other step in this
+      // loop answers to (`candidateUsed >= used` a few lines below), never by
+      // whether it alone already satisfies the caller's declared budget. That
+      // is `emit.ts`'s question, asked once at the end against the ladder's
+      // LAST accepted state, not this loop's to pre-empt one step at a time.
+      const candidateContinuation = kind === "read.batch"
+        ? unionBatchContinuations(continuation, stepped.continuation) ?? plainContinuation
+        : plainContinuation;
       let candidateShed = stepped.next;
-      let candidate = publish(candidateShed, candidateRecords, candidateContinuation);
+      let candidate = publish(candidateShed, candidateRecords, candidateContinuation, kind);
 
       // §2.1.1's ACT FLOOR (S5, `budget/actFloor.ts`). The plan puts the check
       // HERE — after the candidate exists, before it is accepted — so a shed
@@ -249,7 +299,7 @@ export function runLadder(input: {
         // may not ship shorn.
         if (demoted === undefined) break ladder;
         candidateShed = demoted;
-        candidate = publish(candidateShed, candidateRecords, candidateContinuation);
+        candidate = publish(candidateShed, candidateRecords, candidateContinuation, kind);
         // `demoteToDiscover` is intentionally a pure payload transform and is
         // also unit-tested in isolation. Its calls are minted after the
         // producer envelope pass, so run the envelope-owned canonicalizer here
@@ -258,7 +308,7 @@ export function runLadder(input: {
         // to the envelope (and without introducing an import cycle).
         if (canonicalize !== undefined) {
           candidateShed = canonicalize(candidateShed);
-          candidate = publish(candidateShed, candidateRecords, candidateContinuation);
+          candidate = publish(candidateShed, candidateRecords, candidateContinuation, kind);
         }
         demotions += 1;
         demotedThisStep = true;
@@ -301,10 +351,19 @@ export function runLadder(input: {
           : {}),
       });
       if (stepped.continuation !== undefined) {
-        // LAST LIMIT-BEARING RUNG WINS. Each step computes its continuation
-        // against the payload it just produced, so the most recent one is the
-        // only one guaranteed to describe the response that actually ships.
-        continuation = stepped.continuation;
+        // LAST LIMIT-BEARING RUNG WINS — for every kind except `read.batch`.
+        // Each step computes its continuation against the payload it just
+        // produced, so the most recent one is the only one guaranteed to
+        // describe the response that actually ships. `read.batch` instead
+        // carries forward `candidateContinuation` — the SAME already-unioned
+        // value this step was just measured and accepted with above — so the
+        // accumulator never diverges from what `published` actually contains.
+        // See this step's own `candidateContinuation` comment and
+        // `wireLimit.ts`'s R-A3 banner for the confirmed chain this closes.
+        // Every other kind's shedders only ever narrow one evidence body or
+        // page one cursor, so overwriting with `stepped.continuation` there
+        // remains exactly correct and byte-identical to before this fix.
+        continuation = kind === "read.batch" ? candidateContinuation : stepped.continuation;
       }
       shed = candidateShed;
       published = candidate;
@@ -319,8 +378,27 @@ export function runLadder(input: {
     text,
     used,
     records,
-    ...(continuation !== undefined ? { continuation } : {}),
+    ...(continuation !== undefined ? { continuation: outcomeContinuation(kind, published, continuation) } : {}),
   };
+}
+
+/** A payload value shaped like an executable `ToolCall` — same validation `emit.ts`'s own `existingNextOf` applies. */
+function asToolCall(value: unknown): ToolCall | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const tool = record["tool"];
+  const args = record["arguments"];
+  return typeof tool === "string" && args !== null && typeof args === "object" && !Array.isArray(args)
+    ? ({ tool, arguments: args } as ToolCall)
+    : undefined;
+}
+
+/** See `LadderOutcome.continuation`'s own doc comment for the defect this closes and its `read.batch`-only scope. */
+function outcomeContinuation(kind: Kind, published: ShedPayload, boundary: ToolCall): ToolCall {
+  if (kind !== "read.batch") return boundary;
+  const limit = published["limit"];
+  if (limit === null || typeof limit !== "object" || Array.isArray(limit)) return boundary;
+  return asToolCall((limit as Record<string, unknown>)["next"]) ?? boundary;
 }
 
 /**
@@ -336,7 +414,8 @@ function publish(
   shed: ShedPayload,
   records: readonly ShedRecord[],
   continuation: ToolCall | undefined,
+  kind: Kind,
 ): ShedPayload {
-  const decision = mergeWireLimit(shed["limit"], records, continuation);
+  const decision = mergeWireLimit(shed["limit"], records, continuation, kind);
   return decision === undefined ? shed : { ...shed, limit: decision.limit };
 }

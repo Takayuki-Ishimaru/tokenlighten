@@ -847,7 +847,9 @@ async function buildNotFoundRecovery(
 // the served body changes. A single absolute whole-file threshold (rather
 // than a header-to-body ratio) is the rule actually documented in the guide,
 // because it does not depend on the symbol being read. Larger files are
-// unaffected: the header stays.
+// unaffected: the header stays. So is any view that carries more than the
+// body (used imports, the enclosing scope, sibling signatures): the header
+// is the only thing that marks such a view as assembled (eval-0927 round 4).
 const SMALL_FILE_SCOPE_HEADER_OMIT_BYTES = 2048;
 
 // ---------------------------------------------------------------------------
@@ -926,8 +928,16 @@ export async function getSymbolWithContext(
   // Build scope header.
   const scopeHeader = commentNote(language, `tokenlighten:scope path=${path} symbol=${resolvedSymbol} lang=${language}`);
 
-  // Trim A: see SMALL_FILE_SCOPE_HEADER_OMIT_BYTES above the function.
-  const omitScopeHeader = Buffer.byteLength(fileContent, "utf8") <= SMALL_FILE_SCOPE_HEADER_OMIT_BYTES;
+  // Trim A: see SMALL_FILE_SCOPE_HEADER_OMIT_BYTES above the function. Only
+  // a view that IS the body alone may drop the header: once used imports,
+  // the enclosing scope or sibling signatures precede the body, the text is
+  // an assembled view, and the header is what labels it as one
+  // (envelope.ts `_isSyntheticRendering`) — without it a batch entry shipped
+  // `range:"25-30"` over ~20 assembled lines (eval-0927 §6.1, round 4).
+  const omitScopeHeader = Buffer.byteLength(fileContent, "utf8") <= SMALL_FILE_SCOPE_HEADER_OMIT_BYTES
+    && usedImports.length === 0
+    && !enclosingClass
+    && siblings.length === 0;
 
   // Build output block per docs/components/02-mcp-server.md §4.1.
   const parts: string[] = omitScopeHeader ? [] : [scopeHeader];

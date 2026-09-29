@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -100,8 +101,8 @@ interface ServerHandle {
 function startServer(opts: { cwd: string; args: string[]; env: NodeJS.ProcessEnv }): ServerHandle {
   const child: ChildProcess = spawn(
     process.execPath,
-    [TSX_CLI, BIN_TS, ...opts.args],
-    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], env: opts.env },
+    [TSX_CLI, "--liftoff-only", BIN_TS, ...opts.args],
+    { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: opts.env },
   );
   let stdoutBuf = "";
   let stderr = "";
@@ -160,7 +161,7 @@ function startServer(opts: { cwd: string; args: string[]; env: NodeJS.ProcessEnv
     rpc,
     kill(): void {
       try {
-        child.kill("SIGKILL");
+        killServerGroup(child);
       } catch {
         /* best effort */
       }

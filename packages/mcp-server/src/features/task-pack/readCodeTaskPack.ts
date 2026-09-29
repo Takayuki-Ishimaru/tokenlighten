@@ -65,6 +65,7 @@ import {
   widenFindUniverseForAbsence,
   type FindTextUniverse,
   type ScanContentCache,
+  type ScanCoverage,
 } from "../search/find/findText.js";
 import { extractSymbolsFromFile, extractSymbolsFromLines, resolveCallerByteCeiling, DEFAULT_RESPONSE_BYTE_FLOOR } from "../../tools/readCodeModes.js";
 import { queryRequestsTestEvidence, selectQueryEvidence } from "../../tools/queryEvidence.js";
@@ -72,10 +73,12 @@ import { resolveSemanticWiring, type SemanticWiringResolution } from "../../tool
 import {
   buildVerificationManifest,
   findBuildEntry,
+  nodeModulesReachableFrom,
   probeToolchain,
   surfaceToolchainDomain,
   type VerificationManifest,
 } from "../../util/verificationPack.js";
+import { classifyNodeTestRunnability, type NodePackageManifestLike } from "../../util/nodeTestRunnability.js";
 import { isNativeExtPath, widenNativeRangeString } from "../../util/nativeSymbolRange.js";
 import { dominantRoot } from "../../util/dominantRoot.js";
 import { countLines, sliceLinesToText } from "../../util/countLines.js";
@@ -140,7 +143,17 @@ import {
   queryHasQuotedLiteral,
   requestItemLeads,
   splitIntoLeadClauses,
-  isIndependentQuestionClause,
+  // H-4 (fix-b, 2026-09-21, TL-02/TL-04(a)): same predicate as
+  // `isIndependentQuestionClause` (still used, unchanged, inside
+  // requestItems.ts itself), widened to ALSO recognize a closed,
+  // already-reviewed read-only lead ("Explain"/"Show me"/...) ahead of the
+  // embedded question — see requestItems.ts's own doc comment. Used ONLY at
+  // the H-2 filter below (orchestrator ruling B2's second of exactly two
+  // call sites).
+  headIsWhAfterReadLead,
+  // R-B3 (ruling 6): the SAME rule's lead span, masked out of concern-anchor
+  // extraction (`concernGroupsForQuery`) exactly as `salientWords` masks it.
+  maskReadLeadSpan,
   type RequestItem,
 } from "./requestItems.js";
 // H-1/H-2 (2026-09-19, narrow false-completion fix): whole-word,
@@ -194,6 +207,7 @@ import {
   foldSmallRemainderEnabled,
   graphEvidenceEnabled,
   identifierGroundingEnabled,
+  jaQueryBridgeEnabled,
   literalFirstRoutingEnabled,
   namedTargetResolutionEnabled,
   noteProofCompletionPack,
@@ -227,6 +241,9 @@ import {
   recordSeededClauseRecoveryEntry,
   CUMULATIVE_LOCATE_BUDGET_MS,
   MAX_CLAUSE_LOCATES,
+  // B5-adjacent (fix-b, 2026-09-21, TL-04): shared "does this clause ask
+  // about documentation" vocabulary — see nonDocNoiseCandidatePaths below.
+  DOC_MENTION_WORDS,
   type ClauseHygieneItem,
   type ClauseRecoveryLocateResult,
   type DiversifyCandidate,
@@ -238,26 +255,90 @@ import {
   type SeededCoverageSurface,
 } from "./concernRecovery.js";
 import {
+  blockCommentLineStates,
   boundedCallerWindow,
   callerExpansionWhy,
+  declarationHeadShape,
   definitionSegment,
   fileNamesType,
   findCallOccurrences,
+  goInterfaceMemberDeclarationShape,
+  hasDeclarationHeadWord,
   hasHashComments,
+  isAlwaysKeywordLedLanguage,
+  isGoLanguage,
   maskNonCode,
+  normalizeCallerIdent,
   opensBlockDeclaration,
+  opensMultilineDeclarationParams,
   pickFocalMembers,
   queryMentionsTests,
   rankCallSites,
   receiverStrength,
+  rightHandOpensDeclarationBody,
   sharedPathPrefixSegments,
   MAX_CALLER_EXPANSION_BYTES,
   MAX_CALLER_FILES_EXAMINED,
   MAX_CALLER_SURFACES,
+  MAX_DECLARATION_HEAD_LOOKAHEAD_LINES,
+  type BlockCommentLineStates,
   type CallerFocalMember,
   type CallerSiteCandidate,
+  type CallSiteOccurrence,
   type FocalMemberCandidate,
 } from "./callerExpansion.js";
+// FIX-C1 (2026-09-27, eval-0927 P0-1/P0-2): the two new pure modules the
+// facet-closure hook (below) drives.
+import { extractFacetRequirements, type FacetRequirement, type RequestFacet } from "./requestFacets.js";
+import {
+  calleeNamesIn,
+  COMMON_BUILTIN_CALLEES,
+  constantLikeReferencesIn,
+  constructionOnlyInitializer,
+  declarationIsCallable,
+  declarationRealExtent,
+  findModuleConstantWindow,
+  findModuleExportsMemberWindow,
+  exportsMemberValueReadsOwnName,
+  propertyInitializerIsSelfContained,
+  findOwnerPropertyWindow,
+  focalParameterNames,
+  hasValuePositionOccurrence,
+  importedModuleAliasesIn,
+  importSpecifiersNaming,
+  isRequireModuleInitializer,
+  MAX_CALLEES_PER_REQUIREMENT,
+  MAX_CLOSURE_BYTES_PER_PACK,
+  MAX_CONSTANT_REAL_EXTENT_LINES,
+  MAX_CONSTANT_WINDOW_LINES,
+  MAX_CONSTANTS_PER_REQUIREMENT,
+  MAX_IMPORT_RESOLVED_FILES_PER_FOCAL,
+  ownerFieldNames,
+  rustUseBindings,
+  selfPropertyReferencesIn,
+  type ImportSpecifier,
+  type OwnerMemberSpan,
+} from "./evidenceClosure.js";
+// FIX-G (2026-09-27, eval-0927 P0): the answer-sufficiency gate over the
+// facet-closure plan the hook records (see `buildFacetReadiness`).
+import {
+  evaluateFacetRequirement,
+  facetClauseMatchesItem,
+  facetPlanFor,
+  focalRequiredSpan,
+  MAX_REQUIRED_CALL_SITES,
+  MAX_UNCLASSIFIED_MENTION_LINES,
+  noteUndeliveredFacetLines,
+  recordFacetPlan,
+  undeliveredFacetSpans,
+  unservedSubSpans as unservedFacetSubSpans,
+  type FacetCallSite,
+  type FacetFacts,
+  type FacetLineSpan,
+  type FacetMentionLine,
+  type FacetPlanEntry,
+  type FacetPlanWindow,
+} from "./facetGate.js";
 import { tokenizeQuery as tokenizeQueryForDiversification } from "../retrieval/tokenize.js";
 // FX-M (2026-09-19, TL_PACK_GUIDE_ELIDE): the canonical managed-block sentinel
 // strings, reused exactly the way locateTaskContext.ts's own
@@ -343,8 +424,8 @@ import {
   expansionsSupportCandidate,
   wordsFromIdentifierLikeText,
 } from "../retrieval/queryRecoveryTerms.js";
-import { containsJapanese } from "../retrieval/jaQueryBridge.js";
-import { getWorkspaceJaBridgeVocabulary } from "../retrieval/jaBridgeWorkspaceVocab.js";
+import { bridgeJaQuery, containsJapanese, unresolvedKatakanaRuns } from "../retrieval/jaQueryBridge.js";
+import { getWorkspaceJaBridgeVocabulary, jaBridgeVocabPerCallStorage } from "../retrieval/jaBridgeWorkspaceVocab.js";
 import { noteSemanticFrontierTraceSeed } from "../../protocol/semanticFrontierTraceContext.js";
 import { annotateSemanticFrontierContinuation, prepareSemanticFrontierTraceSeed } from "./semanticFrontier.js";
 import { xlsxRoster, xlsxTable } from "../../office/xlsx.js";
@@ -442,7 +523,7 @@ function deriveNextFromPlan(plan: ContinuationPlan): ContinuationCall | undefine
 }
 
 import { applySemanticFrontierDemotion, attachSfDemotionResidency, hasCertificateBinding, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
-import { markSemanticFrontierNamedJoin, markCallerRangeSurface, isCallerRangeSurface, wasSemanticFrontierBodyWithheld } from "./sfWithholdingMarks.js";
+import { markSemanticFrontierNamedJoin, markCallerRangeSurface, isCallerRangeSurface, markExplicitRangeSurface, markSurfaceProvenance, surfaceProvenance, wasSemanticFrontierBodyWithheld } from "./sfWithholdingMarks.js";
 
 export {
   applyCanonicalTaskDecision,
@@ -2364,6 +2445,10 @@ export async function buildTaskPack(
     // see unreadableNamedPathStorage's own doc comment.
     unreadableNamedPathStorage.run(new Map(), () =>
     requestItemPrewalkStorage.run(requestItemPrewalk, () =>
+    // GATE-C2 (2026-09-22, perf wave): scope getWorkspaceJaBridgeVocabulary's
+    // per-call reuse to this ONE call, same reasoning as the ALS runs already
+    // nested here — see jaBridgeVocabPerCallStorage's own doc comment.
+    jaBridgeVocabPerCallStorage.run(new Map(), () =>
     packByteCeilingStorage.run(byteCeiling, async () => {
     try {
       await prefetchArtifactSurfaceSections(args, workspace);
@@ -2419,7 +2504,7 @@ export async function buildTaskPack(
     } finally {
       artifactSectionPrefetch.delete(workspace);
     }
-  }))));
+  })))));
 }
 
 // ---------------------------------------------------------------------------
@@ -3849,7 +3934,15 @@ function singleSiteShortCircuitSeed(
   // file already goes through (centeredSliceForCap) rather than a second,
   // hand-rolled approximation of it. Seed a throwaway cache with the buffer
   // already decoded above so this does not re-read the file from disk.
-  const totalLines = content.split(/\r?\n/).length;
+  // FIX-ORIG (2026-09-27, eval-0927 P1 §6.1): was content.split(/\r?\n/).length,
+  // which counts a PHANTOM final segment for content ending in a trailing
+  // newline (util/countLines.ts's own doc comment) -- a 16-line file minted
+  // "1-17" here, and for a file small enough to take centeredSliceForCap's
+  // whole-range fast path (no `remaining_ranges` to re-derive `end` from
+  // below), that inflated value shipped verbatim as this seed's `range`.
+  // countLines() is the shared, trailing-newline-aware count the mint and
+  // edit_file's own bounds check already agree on.
+  const totalLines = countLines(content);
   const sliceCache = new FileReadCache();
   // served-bytes: readServedText
   sliceCache.seed(relPath, content, readServedText(buf));
@@ -4608,6 +4701,18 @@ async function buildTaskPackCore(
   // the caller's next ordinary call dedups against the freshly served pack.
   const fingerprint = computePackFingerprint(args, workspace);
   const forceServe = args.forceServe === true;
+  // P2-12: force_serve skips every cache door below, but the task's own
+  // DECLARED profile is not a cache fact — restore it from the stored
+  // record (read-only; see that function's own doc comment) before anything
+  // below reads `args.taskProfile`, so a force-served rebuild binds and
+  // reports `profile_binding` exactly as an ordinary continuation would.
+  if (forceServe) {
+    const declared = declaredProfileFromRecordUnderForceServe(workspace, args, fingerprint);
+    if (declared !== undefined) {
+      args.taskProfile = declared as TaskPackArgs["taskProfile"];
+      args.taskProfileInherited = true;
+    }
+  }
   const cached = forceServe ? undefined : tryServeCachedPack(workspace, args, fingerprint);
   if (cached !== undefined) {
     // Receipt/qref exits bypass the common build tail, but they still crossed
@@ -4629,6 +4734,20 @@ async function buildTaskPackCore(
       prepareSemanticFrontierTraceSeed(semanticDup, query, semanticFrontierGuardEnabled()),
     );
     return semanticDup;
+  }
+  // R-D2 (item A rule 2): both doors above can only ever rediscover a
+  // pathless SEED record (their own fingerprint/requestPaths matching is by
+  // design), which `recordPredatesAdditionalServedEvidence` may correctly
+  // decline once this task has moved on. Before falling all the way through
+  // to a full REBUILD from that seed shape, check whether this SAME task
+  // already reached a certified decision that is still current — see
+  // `tryServeSupersedingCertifiedRecord`'s own doc comment.
+  const superseding = forceServe ? undefined : tryServeSupersedingCertifiedRecord(workspace, args, fingerprint);
+  if (superseding !== undefined) {
+    noteSemanticFrontierTraceSeed(
+      prepareSemanticFrontierTraceSeed(superseding, query, semanticFrontierGuardEnabled()),
+    );
+    return superseding;
   }
 
   const initialProfile = bindTaskProfile(args.taskProfile, query, args.writeAllowed).selected;
@@ -5750,6 +5869,54 @@ async function buildAnswerTaskPack(
       for (const path of callerMerge.appliedPaths) concernRecoveredPaths.add(path);
     }
   }
+  // FIX-C1 (2026-09-27, eval-0927 P0-1/P0-2): a facet-driven bounded evidence
+  // closure. Beside the caller-expansion hook above, same seat (after every
+  // selection mechanism has settled, first pack of the task only -- no
+  // separate "answer profile" check needed: this function, buildAnswerTaskPack,
+  // is itself only ever reached when the pack's own profile inference already
+  // resolved to "answer" -- see its call sites), same strictly-additive merge
+  // with a ZERO displacement budget. `extractFacetRequirements` (requestFacets.ts)
+  // returns [] for an ordinary query with no value/condition/callers/flow ask,
+  // so this block is a no-op and every ordinary answer pack stays
+  // byte-identical -- see this wave's rule-19 table.
+  if (args.taskQueryRefReplay !== true) {
+    const facetRequirements = extractFacetRequirements(query);
+    if (facetRequirements.length > 0) {
+      const facetWindow = candidates.slice(0, Math.min(candidates.length, selectionLimit));
+      const { additions: facetAdditions, widenedPaths } = await recoverFacetClosureCandidates(
+        args,
+        query,
+        workspace,
+        cache,
+        facetWindow,
+        facetRequirements,
+      );
+      // A widened path's candidate object was mutated IN PLACE (it was
+      // already one of `candidates`' own elements — see
+      // `recoverFacetClosureCandidates`'s own `tryAddWindow` doc comment for
+      // why this exists at all: `mergeConcernAdditions` would otherwise
+      // silently DROP a same-path addition and keep the narrower pre-closure
+      // range). Its `.symbol` was cleared, so it needs the SAME drop-rule
+      // exemption a genuinely new addition gets below.
+      for (const path of widenedPaths) concernRecoveredPaths.add(path);
+      if (facetAdditions.length > 0) {
+        const facetMerge = mergeConcernAdditions(
+          candidates,
+          selectionLimit,
+          facetAdditions,
+          primaryCount,
+          0, // never displace: closure evidence is a bonus surface, never a replacement
+          MAX_SURFACES_DISTINCT,
+        );
+        candidates = facetMerge.candidates;
+        selectionLimit = facetMerge.selectionLimit;
+        // Same drop-rule exemption callerMerge takes above: a constant/callee
+        // window rarely carries a `.symbol` the "range-only hit past
+        // primaryCount is locator noise" rule would otherwise want.
+        for (const path of facetMerge.appliedPaths) concernRecoveredPaths.add(path);
+      }
+    }
+  }
   if (candidates.length === 0) return undefined;
   // 2026-08-21 directory-scoped-answer fix (Issue #4 follow-up): a candidate
   // past the locator's own primary/required-related front (index >=
@@ -5952,6 +6119,7 @@ async function buildAnswerTaskPack(
           <= MAX_SURFACE_CODE_BYTES
         ) {
           primarySurface.code = (primarySurface.code ?? "") + signatureMarker + signatureSnippet;
+          recordAppendedWindow(primarySurface, signatureMarker, member.signatureRange);
         }
         for (const window of distinctFacetWindows) {
           const current = primarySurface.code ?? "";
@@ -5964,6 +6132,7 @@ async function buildAnswerTaskPack(
             Buffer.byteLength(current + marker + snippet, "utf8") > MAX_SURFACE_CODE_BYTES
           ) break;
           primarySurface.code = current + marker + snippet;
+          recordAppendedWindow(primarySurface, marker, window.range);
           added++;
         }
         if (added === distinctFacetWindows.length) {
@@ -5974,10 +6143,12 @@ async function buildAnswerTaskPack(
         }
       }
       const current = primarySurface.code ?? "";
-      const marker = `\n\n/* query-focused member ${member.name} (${member.range}) */\n`;
+      // Budgeted with the member's whole range in the marker: the window the
+      // slice keeps lies inside it, so its own range string is never longer.
+      const budgetMarker = `\n\n/* query-focused member ${member.name} (${member.range}) */\n`;
       const remainingBudget = MAX_SURFACE_CODE_BYTES
         - Buffer.byteLength(current, "utf8")
-        - Buffer.byteLength(marker, "utf8");
+        - Buffer.byteLength(budgetMarker, "utf8");
       if (remainingBudget < 512) break;
       const focused = centeredSliceForCap(
         workspace,
@@ -5988,7 +6159,12 @@ async function buildAnswerTaskPack(
         remainingBudget,
       );
       if (!focused) continue;
+      // The marker names the lines the excerpt holds (the member's range minus
+      // the slice's own unserved spans), not the whole member.
+      const excerptRange = keptWindowOf(member.range, focused.remaining_ranges);
+      const marker = `\n\n/* query-focused member ${member.name} (${excerptRange}) */\n`;
       primarySurface.code = current + marker + focused.code;
+      recordAppendedWindow(primarySurface, marker, excerptRange);
       primarySurface.required = true;
       primarySurface.remaining_ranges = [...new Set([
         ...(primarySurface.remaining_ranges ?? []),
@@ -6048,13 +6224,21 @@ async function buildAnswerTaskPack(
       : { coverage: "partial" as const, reason: "candidate-list" as const, dominancePromoted: undefined };
   const needsConfirmation = !locateResult.hit && !strongRecoveredAnswer;
   const topRange = surfaces[0]!.range.match(/^(\d+)-(\d+)$/);
+  // The ±40-line confirmation window stops at the file's last line — the
+  // unclamped end asked for `1-47` of a 7-line file (orchestrator, round 4;
+  // the producer class of eval-0927 review-r2 P1-9).
+  const topLineCount = topRange === null ? 0 : countLines(readCached(workspace, surfaces[0]!.path, cache) ?? "");
   const confirmationNext: ContinuationCall = {
     tool: "read_file",
     arguments: {
       mode: "slice",
       handle: surfaces[0]!.handle,
       ...(topRange
-        ? { range: `${Math.max(1, Number(topRange[1]) - 40)}-${Number(topRange[2]) + 40}` }
+        ? {
+          range: `${Math.max(1, Number(topRange[1]) - 40)}-${topLineCount > 0
+            ? Math.max(Number(topRange[2]), Math.min(topLineCount, Number(topRange[2]) + 40))
+            : Number(topRange[2]) + 40}`,
+        }
         : {}),
     },
   };
@@ -6137,7 +6321,151 @@ async function buildAnswerTaskPack(
   // above have all had their chance to add surfaces, cap non-named evidence
   // relative to the named files' own size (report's own 1.25x bound).
   capExtraEvidenceRelativeToNamedPaths(finalResult.surfaces, query, workspace);
+  // FIX-FC (eval-0927 review finding 8, 2026-09-27): AFTER every augmenter
+  // above (anchor/import/graph) and the cap just above have all had their
+  // final say over `finalResult.surfaces` — see trimNextAgainstShippedEvidence's
+  // own doc comment for the live repro (a `next` re-reading a line the
+  // anchor pass just served in THIS SAME response).
+  trimNextAgainstShippedEvidence(finalResult);
+  // FIX-ORIG (2026-09-27, orchestrator ruling — see sfBookingOrderFence.spec.ts's
+  // PRODUCERS entries for both producers below, "buildAnswerTaskPack, post-answer-
+  // augmenters" site): every serve-booking producer (the edit gate's admissible
+  // union, rememberCertifiedWorkingSet, captureServedPack's
+  // recordPackServedRanges, bookShippedPackServeState's recordServedSurfaces/
+  // recordReadOnlyServedSurfaces) lives INSIDE dedupeTrimAndPersist, called
+  // above — so augmentExplicitAnswerImportSurfaces / materializeExplicit-
+  // AnswerAnchorEvidence / attachAnswerImportEvidenceGraph /
+  // capExtraEvidenceRelativeToNamedPaths all run AFTER booking already
+  // happened, and anything any of them add or widen would otherwise never
+  // reach either ledger — exactly the P1 hybrid-body finding's root cause.
+  // `shippedSurfaces` is THE canonical "what did this response actually ship
+  // bytes for" projection (its own doc: "so the next producer added
+  // downstream cannot disagree with the others about what shipped") — reused
+  // here, not re-derived, so this call can never disagree with
+  // bookShippedPackServeState's own projection over the SAME `finalResult`.
+  // Both producers below are idempotent, self-contained re-scans of
+  // `finalResult`'s CURRENT state (fresh disk reads, no cached pre-image), so
+  // calling them again here — on the truly final surface set, after the cap
+  // above can no longer remove anything — safely extends both ledgers to
+  // cover exactly what this response ships.
+  //
+  // repackMonotonicity.spec.ts fix (2026-09-27, this wave): the ORIGINAL text
+  // here unconditionally called `recordReadOnlyServedSurfaces`, on the belief
+  // that "an answer pack must never enter [the cumulative log]" — true for a
+  // DECLARED answer task (`profile_binding.source === "explicit"`), false for
+  // an INFERRED one (an undeclared query this router still answers from
+  // handles). `finalizePackServeState`/`bookShippedPackServeState` already
+  // drew that exact line (`cumulativeEligible`, ~line 43012) and branch on it;
+  // this call must branch the SAME way over the SAME final surface set, or an
+  // inferred answer task's re-pack loses the augmenters' surfaces from the
+  // cumulative log it is entitled to (measured: `repackMonotonicity.spec.ts`
+  // "leaves an INFERRED answer pack exactly as it was" — the unconditional
+  // call put the augmenters' surfaces in the read-only view instead, which
+  // only `epochServedEvidence` reads, not `priorEpochActionFrontier`).
+  recordPackServedRanges(workspace, finalResult);
+  const rebookedShipped = shippedSurfaces(finalResult);
+  const rebookCumulativeEligible = finalResult.task_profile !== "answer"
+    || finalResult.profile_binding?.source !== "explicit";
+  if (rebookCumulativeEligible) {
+    if (rebookedShipped.length > 0) {
+      recordServedSurfaces(
+        workspace,
+        workspace,
+        rebookedShipped.map((s) => ({
+          path: s.path,
+          role: s.role,
+          handle: s.handle,
+          fullyServed: surfaceAlreadyCoversWholeFile(s),
+        })),
+        tokenizeForEpoch(query),
+      );
+    }
+  } else if (rebookedShipped.length > 0) {
+    recordReadOnlyServedSurfaces(workspace, rebookedShipped, tokenizeForEpoch(query));
+  }
+  // FIX-FC (eval-0927 review finding 3, 2026-09-27): the FIX-ORIG rebooking
+  // just above re-derives the served-range ledger and the cumulative log
+  // from the truly-final `finalResult`, but `captureServedPack`'s OWN
+  // record — `servedPacksByWorkspace`'s `ServedPackRecord.surfaces`, the
+  // ONE index `residentSurfaceKeys`/`residentBodyIndex` consult to grant a
+  // `prior`/`code_unchanged` residency claim on a LATER call — was captured
+  // inside `dedupeTrimAndPersist` above, BEFORE `capExtraEvidenceRelative-
+  // ToNamedPaths` (or any other post-trim augmenter) can still remove a
+  // surface it had already added. Live repro (`priorProbe`, this wave): a
+  // query naming one file (`src/config.ts`) pulls in a same-file
+  // "readiness-falsification-counterexample" surface (`src/httpClient.ts`)
+  // with a real body; `dedupeTrimAndPersist` books it as shipped, then the
+  // 1.25x named-path cap a few lines above splices it out of
+  // `finalResult.surfaces` for being far larger than the named evidence — so
+  // the WIRE never sends it, yet the stale record still claims it resident.
+  // A later same-session re-pack resolves `httpClient.ts` again with a
+  // FRESH body, and `applyResidentFileDedup` (correctly, given that stale
+  // record) demotes it to a `prior` claim for bytes that were never on the
+  // wire. Re-capturing here — over `finalResult`, AFTER every post-dedup
+  // augmenter and cap has had its final say — closes the gap: the SAME
+  // fingerprint/signature this pack already registered inside
+  // `dedupeTrimAndPersist` is superseded (`captureServedPack`'s own "iter-2
+  // W1" replace-by-signature rule), so `servedPacksByWorkspace` ends up with
+  // exactly one record for this pack, and it is the accurate one. The
+  // resulting second `recordPackServedRanges` call (inside
+  // `captureServedPack`) is a harmless re-run over the same, now-corrected
+  // span set — the FIX-ORIG call three lines above already established that
+  // this function tolerates running twice per pack.
+  captureServedPack(workspace, args, computePackFingerprint(args, workspace), finalResult);
+  // FIX-FC2 (eval-0927 review finding 3 residual, VS Code config, 2026-09-27):
+  // `captureServedPack` just above is NOT the only ledger `dedupeTrimAndPersist`
+  // populates from its OWN pre-cap `trimmed` before returning to this function.
+  // `persistPackFingerprints(workspace, trimmed, ...)` (called near the end of
+  // `dedupeTrimAndPersist`, BEFORE the cap a few lines above ever runs) stamps
+  // `lastPackBlocksByWorkspace` — the single-slot cache `applyPackDedupe` reads
+  // at the TOP of the NEXT `dedupeTrimAndPersist` call — from that same stale,
+  // pre-cap surface list. Live repro (`priorProbe`, VS Code config: `TL_TURN_
+  // ECONOMY=1 TOKENLIGHTEN_TASK_PACK_MAX_BYTES=0`; also reproduces on c0922):
+  // under this config the single-candidate answer resolves in ONE pass (no
+  // `confirm_candidates` round trip), so `dedupeTrimAndPersist` adds the
+  // `src/httpClient.ts` counterexample AND stamps its fingerprint into
+  // `lastPackBlocksByWorkspace` BEFORE the 1.25x named-path cap splices it back
+  // out of `finalResult.surfaces` — the wire never ships it, exactly as
+  // `captureServedPack`'s own repro above. A later bare-`{qref}` replay takes a
+  // DIFFERENT internal rebuild path (a fresh fingerprint, so `tryServeCachedPack`
+  // misses `servedPacksByWorkspace` entirely — the ledger `captureServedPack`
+  // above corrects), re-derives the identical, content-addressed `httpClient.ts`
+  // surface, and `applyPackDedupe` (top of `dedupeTrimAndPersist`) matches it
+  // against the stale `lastPackBlocksByWorkspace` entry and demotes it to
+  // `code_unchanged: "<handle> — see prior pack"` — a `prior` claim for bytes
+  // this task never actually shipped. Re-running `persistPackFingerprints` here,
+  // over the SAME final, post-cap `finalResult` `captureServedPack` just used,
+  // closes the gap the same way: its own `.set()` (never an append/merge across
+  // calls — see its doc comment) replaces the whole per-workspace slot, so
+  // `lastPackBlocksByWorkspace` ends up describing exactly what this response
+  // shipped, not what an internal pre-cap draft once held.
+  persistPackFingerprints(workspace, finalResult, args.taskBinding);
   return finalResult;
+}
+
+/**
+ * eval-0927 §6.1: note a window appended to `surface.code` from other lines of
+ * the same file, so the wire projection can ship it as its own row
+ * (`TaskPackSurface.appended_windows`).
+ */
+function recordAppendedWindow(surface: TaskPackSurface, marker: string, range: string): void {
+  surface.appended_windows = [...(surface.appended_windows ?? []), { marker, range }];
+}
+
+/**
+ * The one contiguous window of `range` a centered slice kept: `range` minus
+ * its unserved spans. Falls back to `range` itself when the remainder is not
+ * a single window (a slice never splits one, so that is a malformed input).
+ */
+function keptWindowOf(range: string, unserved: readonly string[]): string {
+  const whole = /^(\d+)-(\d+)$/.exec(range);
+  if (whole === null) return range;
+  const holes = unserved.flatMap((entry) => {
+    const hole = /^(\d+)-(\d+)$/.exec(entry);
+    return hole === null ? [] : [{ start: Number(hole[1]), end: Number(hole[2]) }];
+  });
+  const kept = subtractLineSpans({ start: Number(whole[1]), end: Number(whole[2]) }, holes);
+  return kept.length === 1 ? `${kept[0]!.start}-${kept[0]!.end}` : range;
 }
 
 /**
@@ -6166,6 +6494,86 @@ function subtractServedLineFromRanges(ranges: readonly string[], line: number): 
   return out;
 }
 
+/**
+ * FIX-ORIG (2026-09-27, orchestrator ruling on eval-0927 P1's hybrid-body
+ * finding): the best evidence line for `anchor` among `lines` (a whole-file,
+ * 0-based split; caller reads the result as `index+1`, 1-based). Ranks a
+ * declaration/definition-shaped line (a declaration keyword immediately
+ * before the identifier, or the identifier itself immediately followed by
+ * `(` for a callable, or by `=`/`:` for an assignment-style declaration —
+ * the SAME shape `recoverExplicitIdentifierAnswerCandidates`'s
+ * `definitionShaped` already tests) above a bare mention; among bare
+ * mentions, an import/include/require line ranks LAST — it is the least
+ * informative occurrence (it restates the name being imported without
+ * showing how it is used), which is exactly why "shouldRetry" in
+ * httpClient.ts must resolve to its call site, not its import line 2.
+ * `undefined` when `anchor` occurs nowhere outside a comment.
+ */
+function findAnchorEvidenceLineIndex(lines: readonly string[], anchor: string): number | undefined {
+  const escaped = escapeRegExp(anchor);
+  const boundaryRe = new RegExp(`\\b${escaped}\\b`);
+  const importLineRe = /^\s*(?:import\b|from\s+\S+\s+import\b|require\s*\(|#include\b|using\s)/i;
+  let firstNonImport = -1;
+  let firstImport = -1;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    if (/^\s*(?:\/\/|\/\*|\*|#)/.test(line)) continue;
+    const at = line.search(boundaryRe);
+    if (at < 0) continue;
+    const before = line.slice(0, at);
+    const after = line.slice(at + anchor.length);
+    if (IDENTIFIER_DEFINITION_KEYWORD_RE.test(before) || /^\s*[(=:]/.test(after)) return index;
+    if (importLineRe.test(line)) {
+      if (firstImport < 0) firstImport = index;
+    } else if (firstNonImport < 0) {
+      firstNonImport = index;
+    }
+  }
+  return firstNonImport >= 0 ? firstNonImport : (firstImport >= 0 ? firstImport : undefined);
+}
+
+/** A query naming many identifiers must not turn into an unbounded number of
+ *  one-line "presence" surfaces. */
+const MAX_ANCHOR_EVIDENCE_SURFACES = 4;
+
+/**
+ * FIX-ORIG: admit `anchor`'s evidence line as its OWN small, exact-verbatim
+ * surface (mint+push), when no existing surface could be honestly widened to
+ * include it. Never a foreign line spliced onto someone else's body (C1/C2).
+ * A single-line range: this proves presence of the NAME only, deliberately —
+ * value/condition/callers are separate obligations (FIX-G).
+ */
+function addAnchorEvidenceSurface(
+  surfaces: TaskPackSurface[],
+  workspace: string,
+  path: string,
+  anchorLine: number,
+  lineText: string,
+  anchor: string,
+  budget: { remaining: number },
+): void {
+  if (budget.remaining <= 0) return;
+  const range = `${anchorLine}-${anchorLine}`;
+  if (surfaces.some((s) => s.path === path && s.range === range)) return;
+  const handle = handleTable.upsert({
+    kind: "range", path, range, workspaceRoot: workspace, sha: shaOfText(lineText),
+  });
+  surfaces.push({
+    role: classifySurface(path),
+    handle: handle.id,
+    path,
+    range,
+    symbol: anchor,
+    why: "explicit-identifier-anchor",
+    code: lineText,
+    required: true,
+  });
+  budget.remaining -= 1;
+}
+
+/** Bodyless candidate rows that may each receive their anchor line as a body. */
+const MAX_BODYLESS_ANCHOR_FILLS = 8;
+
 function materializeExplicitAnswerAnchorEvidence(
   surfaces: readonly TaskPackSurface[],
   query: string,
@@ -6175,35 +6583,67 @@ function materializeExplicitAnswerAnchorEvidence(
   const anchors = [...new Set(explicitCodeIdentifiers(query))]
     .filter((anchor) => anchor.length >= 3);
   if (anchors.length === 0) return;
-  for (const surface of surfaces) {
+  const mutableSurfaces = surfaces as TaskPackSurface[];
+  // Per FILE: a file whose served rows lack the line where it names an
+  // anchor (its definition when it has one) gets that one line, once — never
+  // once per surface of the same file (the original redundancy), and never
+  // skipped merely because ANOTHER file mentions the name (eval-0927 review:
+  // a consumer's `${INVOICE_V2_FLAG}` made the provider file's own definition
+  // line look "proven", and the provider shipped without it).
+  const fileShowsLine = (filePath: string, line: number): boolean =>
+    mutableSurfaces.some((s) => {
+      if (s.path !== filePath || s.code === undefined) return false;
+      const span = parseSurfaceSpan(String(s.range ?? ""));
+      if (span === undefined || line < span.start || line > span.end) return false;
+      return !(s.remaining_ranges ?? []).some((entry) => {
+        const hole = parseSurfaceSpan(entry);
+        return hole !== undefined && line >= hole.start && line <= hole.end;
+      });
+    });
+  const anchorBudget = { remaining: MAX_ANCHOR_EVIDENCE_SURFACES };
+  let bodylessFills = 0;
+  // This pass runs AFTER the pack was certified (dedupeTrimAndPersist), so it
+  // never rewrites a certified surface's range or body — the decision was
+  // made over those shapes (eval-0927 review, replay sfflag1: widening a
+  // two-line file's one-line focus surface to the whole file after
+  // certification made the discovery bundle the decision relied on look
+  // redundant, and the wire fell back to a dead-end symbol search). An anchor
+  // a served body lacks ships as its own one-line surface instead.
+  for (const surface of [...mutableSurfaces]) {
+    // A `code_unchanged` residency pointer is the CALLER's bytes, not this
+    // pass's to read as served text (C2): never extended.
+    if (surface.code === undefined && surface.code_unchanged !== undefined) continue;
     const full = readCached(workspace, surface.path, cache);
     if (full === undefined) continue;
     const lines = full.split(/\r?\n/);
-    for (const anchor of anchors) {
-      const served = surface.code ?? surface.code_unchanged ?? "";
-      if (hasIdentifierSegment(served, anchor) || !hasIdentifierSegment(full, anchor)) continue;
-      const declarationLine = lines.findIndex((line) =>
-        !/^\s*(?:\/\/|\/\*|\*)/.test(line) && hasIdentifierSegment(line, anchor));
-      if (declarationLine < 0) continue;
-      const declaration = lines[declarationLine]!;
-      const next = `${served}${served === "" ? "" : "\n"}${declaration}`;
-      if (Buffer.byteLength(next, "utf8") > MAX_SURFACE_CODE_BYTES) continue;
-      surface.code = next;
-      surface.required = true;
-      // Rule T (decisionWire.ts): per-source truncation IS `remaining`; one
-      // fact, one field. A pre-existing `remaining_ranges` (e.g. an
-      // ambiguous-candidate row `sfNamedFrontierRow` minted bodyless, with
-      // `remaining_ranges:[range]`) must be reconciled against the line just
-      // served here, in file coordinates — drop it when fully covered, narrow
-      // it otherwise — mirroring `ensureWiringEndpointSurface`'s
-      // `widenToWhole` branch. Without this, `code` and `remaining_ranges`
-      // both describe the identical window and `projectEvidence` ships a
-      // wire row that simultaneously claims and denies the same bytes.
-      const before = surface.remaining_ranges;
-      if (before === undefined || before.length === 0) {
-        surface.content_completeness = "partial";
-      } else {
-        const narrowed = subtractServedLineFromRanges(before, declarationLine + 1);
+    if (surface.code === undefined) {
+      // A genuinely bodyless row (a candidate joined without bytes, e.g. one
+      // of several same-basename files): its first anchor line becomes its
+      // body, and its `remaining` names exactly the rest (H1, review R26).
+      // Per row, not pack-wide — each row is a different file the caller has
+      // not seen, and the line is what tells the candidates apart.
+      if (bodylessFills >= MAX_BODYLESS_ANCHOR_FILLS) continue;
+      const span = parseSurfaceSpan(String(surface.range ?? ""));
+      if (span === undefined) continue;
+      for (const anchor of anchors) {
+        if (!hasIdentifierSegment(full, anchor)) continue;
+        // The first line naming the anchor identifies the file — a Markdown
+        // heading (`# Bravo contract`) included, which
+        // `findAnchorEvidenceLineIndex` (a code-definition finder) skips.
+        const lineIndex = lines.findIndex((line) =>
+          !/^\s*(?:\/\/|\/\*|\*)/.test(line) && hasIdentifierSegment(line, anchor));
+        if (lineIndex < 0) continue;
+        const anchorLine = lineIndex + 1;
+        if (anchorLine < span.start || anchorLine > span.end) continue;
+        const text = lines[lineIndex]!;
+        if (Buffer.byteLength(text, "utf8") > MAX_SURFACE_CODE_BYTES) continue;
+        surface.code = text;
+        const narrowed = subtractServedLineFromRanges(
+          surface.remaining_ranges !== undefined && surface.remaining_ranges.length > 0
+            ? surface.remaining_ranges
+            : [surface.range],
+          anchorLine,
+        );
         if (narrowed.length === 0) {
           delete surface.remaining_ranges;
           delete surface.content_completeness;
@@ -6211,9 +6651,178 @@ function materializeExplicitAnswerAnchorEvidence(
           surface.remaining_ranges = narrowed;
           surface.content_completeness = "partial";
         }
+        bodylessFills += 1;
+        break;
       }
+      continue;
+    }
+    for (const anchor of anchors) {
+      if (hasIdentifierSegment(surface.code, anchor) || !hasIdentifierSegment(full, anchor)) continue;
+      const lineIndex = findAnchorEvidenceLineIndex(lines, anchor);
+      if (lineIndex === undefined || fileShowsLine(surface.path, lineIndex + 1)) continue;
+      addAnchorEvidenceSurface(mutableSurfaces, workspace, surface.path, lineIndex + 1, lines[lineIndex]!, anchor, anchorBudget);
     }
   }
+}
+
+/**
+ * P2-12b (round-4 fable finding, 2026-09-28) — a PURE PREVIEW of
+ * `materializeExplicitAnswerAnchorEvidence`'s own NEW-ROW arm, run against a
+ * throwaway shallow COPY of `surfaces` so a READINESS check that runs
+ * strictly BEFORE the real pass (`buildReadinessObligations`, called from
+ * inside `dedupeTrimAndPersist` — see this file's own FIX-FC comment: the
+ * anchor pass runs deliberately AFTER certification) can know exactly what
+ * the real pass WILL add, before it runs — never by moving the real pass
+ * earlier (that is the change this file's other doc comments warn against:
+ * "never rewrites a certified surface's range or body", the sfflag1
+ * regression), only by giving the certificate the SAME fact the anchor pass
+ * itself is about to act on.
+ *
+ * Confirmed live (V01 flagship): hop 0 served `src/config.ts:14-14` as an
+ * `explicit-identifier-anchor` row containing `HTTP_TIMEOUT_MS`, in the SAME
+ * response whose `identifier:HTTP_TIMEOUT_MS` obligation still read
+ * "uncovered" — because `buildReadinessObligations` ran before that row
+ * existed. This closes the gap the RIGHT way (teach the obligation check
+ * the fact sooner) rather than pruning the already-built gap list afterward
+ * (which the FIX-FC comment a few lines below explicitly rules out: "`result.
+ * missing` / `result.execution_contract`'s gaps are untouched").
+ *
+ * Never runs the BODYLESS-FILL arm's mutation for real via this preview in a
+ * way that matters: that arm rewrites an EXISTING row's `.code` in place with
+ * no `why`/`symbol` marker naming which anchor filled it, so it cannot be
+ * attributed to one identifier here — a candidate row with no body has no
+ * OTHER identifier evidence either, so the obligation stays uncovered exactly
+ * as before for that shape (no regression, simply not yet improved).
+ *
+ * SAFE TO CALL TWICE with the same inputs: this module's only side effect,
+ * `handleTable.upsert`, is idempotent for the same (kind, path, range,
+ * workspaceRoot, sha) — the real pass's later call mints the identical
+ * handle this preview already caused to exist, never a second one.
+ */
+function previewAnchoredIdentifiers(
+  surfaces: readonly TaskPackSurface[],
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+): ReadonlyMap<string, TaskReadinessEvidence> {
+  const probe = surfaces.map((surface) => ({ ...surface }));
+  materializeExplicitAnswerAnchorEvidence(probe, query, workspace, cache);
+  const anchored = new Map<string, TaskReadinessEvidence>();
+  for (let i = surfaces.length; i < probe.length; i++) {
+    const row = probe[i]!;
+    if (row.why === "explicit-identifier-anchor" && row.symbol !== undefined && !anchored.has(row.symbol)) {
+      if (!anchorRowIsWholeEvidence(row, workspace, cache)) continue;
+      anchored.set(row.symbol, readinessEvidence(row));
+    }
+  }
+  return anchored;
+}
+
+/**
+ * Whether an anchor row carries the WHOLE evidence for its identifier: a
+ * use of the name (an env-var key, a property, a call — `HTTP_TIMEOUT_MS`
+ * on V01's `config.ts:14`) or a declaration that ends inside the row. The
+ * first line of a longer declaration (a function's signature, a table's
+ * opener) is not: counting it certified "Explain parseConfigHeader and
+ * finalizeShutdownSequence" with only `finalizeShutdownSequence`'s signature
+ * sent (orchestrator, round 4 — the §3 class of the evaluation). Exported
+ * for evaluation0927.anchorRowSufficiency.spec.ts.
+ */
+export function anchorRowIsWholeEvidence(row: TaskPackSurface, workspace: string, cache: FileReadCache): boolean {
+  const bounds = /^(\d+)-(\d+)$/.exec(row.range);
+  const lines = readCached(workspace, row.path, cache)?.split(/\r?\n/);
+  if (bounds === null || lines === undefined || row.symbol === undefined) return false;
+  const first = Number(bounds[1]);
+  const last = Number(bounds[2]);
+  const text = lines[first - 1];
+  if (text === undefined) return false;
+  if (!isDeclarationShapedMatchText(text, row.symbol)) return true;
+  const hashComment = hasHashComments(row.path);
+  if (declarationRealExtent(lines, first, hashComment).end > last) return false;
+  // A body on the following lines that no bracket opens on this one: an
+  // Allman-style `{`, or an indentation-scoped body (Python `def f():`).
+  const indent = (value: string): number => value.length - value.trimStart().length;
+  for (let next = last + 1; next <= lines.length; next++) {
+    const candidate = lines[next - 1]!;
+    if (candidate.trim() === "") continue;
+    return !(candidate.trimStart().startsWith("{") || (hashComment && indent(candidate) > indent(text)));
+  }
+  return true;
+}
+
+/**
+ * FIX-FC (eval-0927 review finding 8, 2026-09-27) — TRIM `next` AGAINST WHAT
+ * THIS RESPONSE ACTUALLY SHIPS, NEVER THE CERTIFICATE.
+ *
+ * Live repro (`sfflag1` replay fixture): the query names both
+ * `INVOICE_V2_FLAG` (line 1 of `src/feature_flags.ts`) and `invoiceVersion`
+ * (line 2); the answer-explicit-symbol-focus locator anchors on line 2 only,
+ * so `result.next` is computed — INSIDE `dedupeTrimAndPersist`, before this
+ * function's caller ever runs — as a discovery call naming `src/
+ * feature_flags.ts` (correctly: the identifier gap is real at that point).
+ * `materializeExplicitAnswerAnchorEvidence`, a few lines above, runs
+ * DELIBERATELY AFTER certification (its own doc comment: "never rewrites a
+ * certified surface's range or body") and adds the missing line as its OWN
+ * one-line surface (`src/feature_flags.ts:1-1`) to close exactly that gap —
+ * but nothing then revisits `next`, which still names the SAME `src/
+ * feature_flags.ts:1-1` window this response's own evidence now already
+ * carries. Running that `next` verbatim (AGENTS.md: "never as a template")
+ * re-reads a line the caller already has, for zero new information.
+ *
+ * THE FIX IS ADDITIVE, NEVER SUBTRACTIVE. `result.missing` /
+ * `result.execution_contract`'s gaps are untouched — the identifier's OWN
+ * evidence line closing does not by itself prove the OTHER obligations the
+ * gap named (`request-item:facet-1:flow` in the live repro still needs the
+ * file's relation to the caller, which line 1 alone does not show) — so this
+ * never claims more coverage than dedupeTrimAndPersist certified. It only
+ * asks: does `next`'s own explicit `range` name a window THIS response's
+ * surfaces now serve a real body for? If so, the range is dropped from that
+ * target (falling back to "read the whole file"), which is NEVER a
+ * regression versus the un-widened call: a target whose narrow range was
+ * fully redundant is redundant in exactly the same way when widened only if
+ * its ENTIRE file were already fully served too, and this pass leaves a
+ * target alone whenever ANY part of its file remains unserved — the common
+ * case, since `materializeExplicitAnswerAnchorEvidence` deliberately adds
+ * ONE line, never a whole file.
+ *
+ * P2-16 (eval-0927 review r2 finding 16) is deliberately NOT handled here:
+ * widening a `next` target whose range an EARLIER hop already shipped turned
+ * a narrow continuation into a whole-file read and left follow-up chains with
+ * no decision (requestItemGateMatrix, 2026-09-28). A facet continuation that
+ * re-asks for lines an earlier hop shipped costs one hop that comes back as
+ * `prior` — honest, and left as a known residual.
+ */
+function trimNextAgainstShippedEvidence(result: TaskPackResult): void {
+  const next = result.next;
+  if (next === undefined || next.tool !== "read_file") return;
+  const args = next.arguments;
+  if (args === null || typeof args !== "object" || Array.isArray(args)) return;
+  const targets = (args as Record<string, unknown>)["targets"];
+  if (!Array.isArray(targets) || targets.length === 0) return;
+  // The exact (path, range) windows this response's OWN surfaces now carry a
+  // real body for — computed ONCE, after every post-certification augmenter
+  // above (anchor/import/graph) has had its say, so this can see additions
+  // none of them individually knew about.
+  const shippedWindows = new Set(
+    codeTaskPackSurfaces(result.surfaces)
+      .filter(hasServedCode)
+      .map((s) => `${s.path}\u0000${s.range}`),
+  );
+  if (shippedWindows.size === 0) return;
+  let changed = false;
+  const widenedTargets = targets.map((entry) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const record = entry as Record<string, unknown>;
+    const path = record["path"];
+    const range = record["range"];
+    if (typeof path !== "string" || typeof range !== "string") return entry;
+    if (!shippedWindows.has(`${path}\u0000${range}`)) return entry;
+    changed = true;
+    const { range: _droppedRange, ...withoutRange } = record;
+    return withoutRange;
+  });
+  if (!changed) return;
+  (args as Record<string, unknown>)["targets"] = widenedTargets;
 }
 
 /**
@@ -9116,7 +9725,32 @@ function whyWithQualifier(why: string, qualifier: string): string {
     segments.splice(segments.length - 1, 0, qualifier);
     return segments.join("; ");
   }
-  return `${why}; ${qualifier}`;
+  return appendWhySegmentOnce(why, qualifier);
+}
+
+/**
+ * P2 (2026-09-27 evaluation §6.3): the ONE general join rule every site in
+ * this module that appends a trailing `; `-separated marker to an existing
+ * `why` must use, so a `why` string never repeats an identical segment --
+ * confirmed live: `buildSeededTaskPack`'s default per-path stamp for a
+ * plain caller-named seed is the BARE marker "caller-supplied" (correctly --
+ * that IS the whole fact for that seed), and `candidateToSurface` used to
+ * unconditionally re-append "; caller-supplied" whenever `surfaceWhyHasMarker`
+ * found that token ANYWHERE in the candidate's `why`, producing the wire
+ * shape `why:"caller-supplied; caller-supplied"` (model.ts's R1-B2 doc
+ * comment records the same defect class for a different producer: an
+ * executed-search-located seed wrongly defaulted to the plain
+ * "caller-supplied" stamp). `surfaceWhyHasMarker` itself is the wrong
+ * predicate for this -- it asks "is the marker ANYWHERE in the list", which
+ * is right for gating (e.g. "is this candidate caller-scoped at all") but
+ * would refuse to re-add a marker that legitimately appears earlier for an
+ * unrelated reason; the join-time hygiene bug is specifically about the
+ * LAST segment, the one this exact call is about to write again.
+ */
+function appendWhySegmentOnce(why: string | undefined, marker: string): string {
+  if (why === undefined || why === "") return marker;
+  const segments = why.split("; ");
+  return segments[segments.length - 1] === marker ? why : `${why}; ${marker}`;
 }
 
 /**
@@ -10357,10 +10991,14 @@ async function buildSeededTaskPack(
     const seededClauseWorkList = hygienicClauseWorkList(extractRequestItems(query));
     if (seededClauseWorkList.length >= 2) {
       recordSeededClauseRecoveryEntry();
+      // B5 (fix-b, 2026-09-21): `isDocSurface` lets isClauseCoveredBySeededSurfaces
+      // gate its own body-text branch (see that function's doc comment) — this
+      // pack's own `role` classification, never a fresh heuristic.
       const seededCoverageSurfaces: SeededCoverageSurface[] = seededSurfaces.map((surface) => ({
         path: surface.path,
         symbol: surface.symbol,
         bodyText: surface.code,
+        isDocSurface: surface.role === "doc",
       }));
       const seededUncoveredClauses = seededClauseWorkList.filter((clause) => {
         const isJapanese = containsJapanese(clause.text);
@@ -10407,6 +11045,37 @@ async function buildSeededTaskPack(
           seededSurfaces.push(surface);
         }
       }
+    }
+  }
+
+  // FIX-G (2026-09-27, eval-0927 P0): a seeded answer pack never runs the
+  // facet-closure hook (it lives in buildAnswerTaskPack), so a faceted
+  // question asked WITH explicit targets would reach the completion gate with
+  // no plan and could only be disclosed "not computed". Plan ONLY here —
+  // nothing is served and no caller-named surface is widened or reordered
+  // (`planOnly`): the gate then judges the caller's own served windows against
+  // the same closure a pathless ask would require, and names any missing
+  // window as a ranged `next`. First pack of the query only (a replay, or a
+  // follow-up of a query whose plan is already recorded and still valid,
+  // reuses that plan — see facetGate.ts's memo).
+  if (answerProfile && args.taskQueryRefReplay !== true) {
+    const facetRequirements = extractFacetRequirements(query);
+    const planRecorded = facetRequirements.length === 0
+      || facetPlanFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
+        const content = readCached(workspace, relPath, cache);
+        return content === undefined ? undefined : shaOfText(content);
+      }) !== undefined;
+    if (!planRecorded) {
+      const planSelection: ImpactCandidate[] = seededSurfaces.map((surface) => ({
+        path: surface.path,
+        line: parseSurfaceSpan(surface.range)?.start ?? 1,
+        range: surface.range,
+        ...(surface.symbol !== undefined ? { symbol: surface.symbol } : {}),
+        surface: asImpactSurface(surface.role),
+        why: "caller-supplied",
+        confidence: 1,
+      }));
+      await recoverFacetClosureCandidates(args, query, workspace, cache, planSelection, facetRequirements, true);
     }
   }
 
@@ -10877,6 +11546,20 @@ function explicitCodeIdentifiers(query: string): string[] {
 function unqualifiedSymbolTail(name: string): string {
   const match = /(?:::|[.#])([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(name);
   return match?.[1] ?? name;
+}
+
+/**
+ * The immediate owner name of a possibly-qualified symbol (`OrderService` of
+ * `OrderService::cancel`) -- the exact counterpart `unqualifiedSymbolTail`
+ * already strips off, read the same way, over the same three separators
+ * (`::`, `.`, `#`). `undefined` when `name` carries no qualifier at all. A
+ * nested qualifier (`NS::OrderService::cancel`) resolves to the LAST hop's
+ * own owner (`OrderService`, via a recursive tail read of everything before
+ * the final separator), never the whole prefix.
+ */
+function qualifiedSymbolOwner(name: string): string | undefined {
+  const match = /^(.+)(?:::|[.#])[A-Za-z_$][A-Za-z0-9_$]*$/.exec(name);
+  return match === null ? undefined : unqualifiedSymbolTail(match[1]!);
 }
 
 /**
@@ -11792,7 +12475,7 @@ function attachAnchorFocusAffordance(
   // caller-provided path. Preserve that provenance in the existing compact
   // `why` field so readiness cannot mistake a scoped artifact for an
   // untrusted repository-wide token hit.
-  surface.why = callerScoped ? `${focusWhy}; caller-supplied` : focusWhy;
+  surface.why = callerScoped ? appendWhySegmentOnce(focusWhy, "caller-supplied") : focusWhy;
   if (focus.runnerUps.length > 0) {
     surface.outline = anchorFocusRunnerUpOutline(focus.runnerUps, filePath, workspace);
   }
@@ -13615,7 +14298,13 @@ export function concernAnchorTokens(text: string, limit = 6): string[] {
 function concernGroupsForQuery(query: string): ConcernGroup[] {
   const clauses = splitConcernClauses(query);
   const groups = clauses
-    .map((clause) => ({ query: clause, tokens: concernAnchorTokens(clause) }))
+    // R-B3 (2026-09-21, orchestrator ruling 6): a clause's generalised read
+    // lead ("Walk me through", "Trace", "I want to understand") is not a
+    // concern anchor — anchors become `unmatchedConcernTokens` and from there
+    // Rule 5's bare `find` (confirmed live: `find "walk"` when the first pack
+    // served nothing). Masked by `headIsWhAfterReadLead`'s own rule; the
+    // group's `query` stays the clause as written.
+    .map((clause) => ({ query: clause, tokens: concernAnchorTokens(maskReadLeadSpan(clause)) }))
     .filter((group) => group.tokens.length > 0);
   return groups.length >= 2 ? groups : [];
 }
@@ -13893,7 +14582,8 @@ function unmatchedConcernTokens(
       .filter((t): t is string => t !== undefined)
       .slice(0, 4);
   }
-  return concernAnchorTokens(query, 8)
+  // R-B3 (ruling 6): the single-clause path masks the lead span too.
+  return concernAnchorTokens(maskReadLeadSpan(query), 8)
     .filter((t) => !WEAK_CONCERN_TOKENS.has(t.toLowerCase()) || !surfaces.some((s) => s.role !== "unknown"))
     .filter((t) => !concernTokenMatchesSurfaces(t, surfaces))
     .filter((t) => shaped.has(t.toLowerCase()))
@@ -14499,8 +15189,26 @@ async function rankAnswerEvidenceCandidates(
  * one literal scan each — the same order of work locate's own content scan
  * already performs for the query.
  */
+// R4-A2 (eval-0927 review-r3 callSiteClassificationMatrix, Kotlin `fun`):
+// `fn`/`func` never match the substring "fun" (no word boundary sits between
+// "fn" and "un"), so Kotlin's OWN declaration keyword was silently absent —
+// every Kotlin method declaration fell through to the shape heuristic, which
+// `isAlwaysKeywordLedLanguage` deliberately short-circuits to `false` for
+// Kotlin (no keyword-less declaration syntax there), so a Kotlin method's own
+// declaration line was misclassified as a call site of itself whenever it
+// was scanned as a caller candidate in another file (two same-named methods
+// in different classes; see `callSiteOccurrenceIsDeclaration`'s doc). Purely
+// additive: every other caller of this shared regex only gains a new
+// declaration-keyword match, never loses one.
+// R5-A2 (eval-0927 review-r4 P1-11, c-macro-define): `define` (C/C++
+// preprocessor `#define NAME(...)`, a function-like macro's own definition)
+// -- `\bdefine\b` matches inside `#define` too (`#` is a non-word character,
+// so a word boundary sits right before `d`). Purely additive, same as the
+// `fun`/`fn`/`func` note above; cross-boundary note (R5-A2 owns only
+// `callSiteOccurrenceIsDeclaration`/`isDeclarationShapedMatchText` in this
+// file, but this shared constant feeds both).
 const IDENTIFIER_DEFINITION_KEYWORD_RE =
-  /\b(?:function|class|def|struct|enum|interface|type|trait|impl|fn|func|module|const|let|var|val|public|private|protected|static|export|abstract|override|virtual|void|int|bool|double|float|auto)\b/;
+  /\b(?:function|class|def|define|struct|enum|interface|type|trait|impl|fun|fn|func|module|const|let|var|val|public|private|protected|static|export|abstract|override|virtual|void|int|bool|double|float|auto)\b/;
 
 async function recoverExplicitIdentifierAnswerCandidates(
   args: TaskPackArgs,
@@ -14578,7 +15286,14 @@ async function recoverExplicitIdentifierAnswerCandidates(
         range = `${enclosing.startLine}-${enclosing.endLine}`;
         symbol = enclosing.name;
       } else {
-        const total = content.split(/\r?\n/).length;
+        // FIX-ORIG (2026-09-27, eval-0927 P1 §6.1): was content.split(/\r?\n/).length
+        // -- the phantom-trailing-newline off-by-one (util/countLines.ts) --
+        // which this `Math.min` engages precisely for a short file (the
+        // common case a bare literal-identifier hit with no enclosing
+        // symbol lands in), mining an out-of-bounds `end` for the injected
+        // candidate's `range` that later becomes this surface's evidence
+        // range. countLines() matches edit_file's own bounds check.
+        const total = countLines(content);
         const start = Math.max(1, best.match.line - 8);
         const end = Math.min(total, best.match.line + 24);
         range = `${start}-${end}`;
@@ -14861,23 +15576,944 @@ async function focalMembersForSurface(
   return out;
 }
 
-/** Compatible call sites of ONE focal member, ranked. Bounded by MAX_CALLER_FILES_EXAMINED and by the caller's own wall clock. */
-function callSitesForFocalMember(
+/**
+ * FIX-FAB item 11 (orchestrator report, 2026-09-27 — replayCorpus `sfflag1`
+ * flaking under load): a caller-site scan's own completeness must be a fact
+ * about WORK DONE, never about wall-clock elapsed. This scan's work is
+ * already deterministically bounded before this function is ever called
+ * (`paths` is capped at MAX_FACET_CALLER_FILES_CLASSIFIED, and every file it reads is
+ * cache-backed), so "did we examine every path we intended to" is a plain
+ * count, independent of machine speed or concurrent load on the box — the
+ * OLD `planSitesComplete = Date.now() < deadline` (checked by the caller,
+ * readCodeTaskPack.ts's `recoverFacetClosureCandidates`, AFTER this
+ * function returned) instead re-read the clock a second time and could
+ * legitimately read `true` on a fast run of the SAME bounded work and
+ * `false` on a loaded one, flipping `act.answer` -> `discover` for reasons
+ * that have nothing to do with the evidence. `deadline` remains an EMERGENCY
+ * stop only (see `FACET_CLOSURE_EMERGENCY_BUDGET_MS`'s own doc comment):
+ * generous enough that it never fires for this bounded amount of work on a
+ * normal run, so `complete` is `true` on every normal run regardless of
+ * load, and `false` only in the genuinely pathological case the guard
+ * exists for.
+ */
+export interface CallerScanResult {
+  readonly sites: CallerSiteCandidate[];
+  readonly complete: boolean;
+  /**
+   * P1-7 (eval-0927 review-r2 #7's "40, 45 real" residual, goMethodManyCallers):
+   * true when MORE files mentioned the member than MAX_FACET_CALLER_FILES_CLASSIFIED
+   * ever let this scan open — a DIFFERENT fact from `complete`, which is
+   * deliberately about work done against the ALREADY-capped candidate list
+   * (FIX-FAB item 11's own doc above) and reads `true` even here (every
+   * path this scan intended to open, it did). Left `false`/absent, the plan
+   * would otherwise certify "covered" the moment every EXAMINED site is
+   * served, silently dropping whatever caller files sorted past the cap —
+   * never disclosed at all. The gate (facetGate.ts) downgrades to
+   * `undetermined` instead when this is `true`, exactly as it already does
+   * for a recorder-cap overflow.
+   */
+  readonly filesCapped?: boolean;
+  /** MENTION GUARD (R5-A1): see `unclassifiedMentionLines`'s own doc. */
+  readonly unclassifiedMentions?: readonly FacetMentionLine[];
+  /** MENTION GUARD: true when more than MAX_UNCLASSIFIED_MENTION_LINES were found. */
+  readonly unclassifiedMentionsCapped?: boolean;
+  /**
+   * P0-2 (R7-A, eval-0927 review-r6 finding 2, defaultExportedDeclCaller):
+   * true when the focal's OWN declaration statement is written as its
+   * module's default export — see `focalIsSoleDefaultExport`'s own doc.
+   * Every importer of this module binds the value under a name of ITS OWN
+   * CHOOSING, invisible to this by-NAME scan, so `callerSitesForFocal`
+   * (the one place that computes this) sets it regardless of how many sites
+   * were actually found — facetGate.ts's `callers` branch reads it only when
+   * `total === 0` (a real corroborated call still counts as covered).
+   */
+  readonly focalDefaultExported?: boolean;
+}
+
+/**
+ * MENTION GUARD (R5-A1, the round-5 principle). Among `paths` (the SAME
+ * examined files a callers/flow scan already opened), every word-bounded
+ * mention line of `member` (`linesByPath`, the SAME literal scan that found
+ * call sites) that did NOT already become a recorded call site
+ * (`recordedKeys`, `${path}#${line}`) and is not wholly a comment, an
+ * import/export specifier line, or a declaration of the member.
+ *
+ * Four review rounds kept finding new declaration/call-shape gaps this
+ * classifier itself misses (masked template/f-string interpolations,
+ * `yield*`, an explicit generic argument list, an overlooked declaration
+ * shape…). Rather than chase each one indefinitely, this is the STRUCTURAL
+ * backstop: whatever the classifier above missed, a raw mention of the
+ * member that could not be positively explained is recorded here and made
+ * a REQUIRED window (see facetGate.ts's `evaluateFacetRequirement`) —
+ * served or not, its mere EXISTENCE bars a `request-item-empty:callers:*`
+ * verdict, whatever gap produced it.
+ *
+ * Deliberately independent of `maskNonCode`: that helper blanks an entire
+ * quoted span (including a template/f-string interpolation) by design for
+ * call-shape column arithmetic, which is exactly backwards for THIS guard —
+ * a mention hiding inside `${…}`/an f-string field must still be caught, so
+ * this reads the RAW line text directly rather than trusting the same
+ * masking the classifier itself relies on. Bounded at
+ * MAX_UNCLASSIFIED_MENTION_LINES across every examined path; past it
+ * `capped` is true and `lines` stops growing (the facet becomes
+ * undetermined outright, never partially served).
+ */
+/** One line's worth of `BlockCommentLineStates` — what `memberOnlyInCommentText` needs to judge a line without re-scanning the whole file itself. Exported only for `evaluation0927.r7aFalseEmptyGuard.spec.ts`. */
+export interface MentionCommentLineState {
+  readonly masked: boolean;
+  readonly confident: boolean;
+  readonly codeFrom: number | undefined;
+}
+
+/**
+ * A4 (R7-A, eval-0927 review-r6 P1-6/P2-11 class). FIX: the line-start
+ * `*`/`/*` shortcuts below USED to be blind (`trimmed.startsWith("*")`
+ * unconditionally true, whatever the line actually was) — round-6 P2-8 had
+ * already found one shape this breaks (`* run(x) = 3;`, ordinary code
+ * outside any block comment, e.g. a pointer-dereference-and-assign or a
+ * stray continuation of a multiplication expression) and there is no reason
+ * to believe it is the only one. Now consults `state` — the SAME file-level
+ * multi-line scan (`blockCommentLineStates`, R7-C's C0) the call-site loops
+ * use — so a `*`-led line is comment text only when the file state itself
+ * says this line genuinely sits inside a block comment/docstring right now,
+ * never merely because of how the line's own text starts.
+ *
+ * `state.confident === true` decides the whole line outright (comment text,
+ * except any code the SAME closer line carries after `state.codeFrom`);
+ * `state.masked === true` with `confident === false` still backs the
+ * `*`-continuation shortcut (an interior doc-comment PROSE line, whose own
+ * opener could not be verified confidently, is still overwhelmingly more
+ * likely prose than code); anything else falls through to the ORIGINAL
+ * same-line, quote-aware scan, now also tracking an inline `/* … *\/` span
+ * opened AND closed on this one line (previously unrecognized — only a
+ * trailing `//`/`#` was).
+ */
+export function memberOnlyInCommentText(text: string, member: string, hashComment: boolean, state: MentionCommentLineState): boolean {
+  if (state.confident) {
+    if (state.codeFrom === undefined) return true;
+    for (let at = text.indexOf(member); at >= 0; at = text.indexOf(member, at + 1)) {
+      if (at >= state.codeFrom) return false; // real code after the closer
+    }
+    return true;
+  }
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("*") && state.masked) return true;
+  if (trimmed.startsWith("//") || (hashComment && trimmed.startsWith("#"))) return true;
+  let quote: string | undefined;
+  let inlineBlockOpenAt = -1;
+  const inlineSpans: Array<[number, number]> = [];
+  let lineCommentAt = -1;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote !== undefined) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (inlineBlockOpenAt >= 0) {
+      if (ch === "*" && text[i + 1] === "/") { inlineSpans.push([inlineBlockOpenAt, i + 2]); inlineBlockOpenAt = -1; i += 1; }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+    if (ch === "/" && text[i + 1] === "*") { inlineBlockOpenAt = i; continue; }
+    if ((ch === "/" && text[i + 1] === "/") || (hashComment && ch === "#")) { lineCommentAt = i; break; }
+  }
+  if (lineCommentAt < 0 && inlineSpans.length === 0) return false;
+  for (let at = text.indexOf(member); at >= 0; at = text.indexOf(member, at + 1)) {
+    if (lineCommentAt >= 0 && at >= lineCommentAt) continue;
+    if (inlineSpans.some(([start, end]) => at >= start && at < end)) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * MENTION GUARD (R7-A, eval-0927 review-r6 P0-1). THE ROUND-7 PRINCIPLE: a
+ * mention is explained away ONLY by a POSITIVE, exact match against one of a
+ * fixed list of import/export/using/include specifier shapes -- never, as
+ * every earlier round tried, a generic "this line starts like an import"
+ * prefix test plus a denylist of the alias forms found so far. That denylist
+ * approach (the OLD `FACET_IMPORT_EXPORT_LINE_RE` + `mentionLineIsAliased-
+ * Reference` pair this replaces) kept finding a NEW default-export
+ * expression shape the prefix test still waved through unexamined --
+ * `export default { fmt: formatBytes };`, `export default debounce(
+ * formatBytes, 100);`, `export default [formatBytes];` (review-r6 #1,
+ * exportDefaultObjAlias/exportDefaultCallRef/exportDefaultArrayRef) and TS
+ * `import fmt = F.formatBytes;` (review-r6 P2 #10, importEqualsAlias): the
+ * old regex matched any `export\s*default\b`/`import\b` PREFIX regardless of
+ * what followed, and the alias check only special-cased the bare `export
+ * default member;` form -- every OTHER expression shape looked "not
+ * aliased" and was silently explained away.
+ *
+ * `mentionExplainedByImportExportLine` tries each recognized shape in turn
+ * and returns `true` only when `member` sits in THAT shape's own PLAIN entry
+ * position -- exactly `m` (or a TS/JS type-only `type m`), never `m as x` /
+ * `x as m` / `m: x` / a Scala `m => x` / a C# `using X = …`. A line that
+ * matches none of these shapes at all -- `export default` of ANY expression,
+ * `export = …`, TS `import x = …`, `module.exports …`, `exports.x = …`, any
+ * aliased entry, any other line -- is left for the caller to record as an
+ * unexplained mention, whatever else it might be. Recognizes (member text
+ * only; these shapes do not overlap across languages, so no file-extension
+ * gate is needed):
+ *   - JS/TS `import [type] { …, m, … } from "…"`, `import m[, { … }] from
+ *     "…"` (default, optionally with a named list too), `import * as m from
+ *     "…"` (namespace); `export [type] { …, m, … } [from "…"]`, `export *
+ *     as m from "…"` (namespace re-export).
+ *   - CJS `const|let|var { …, m, … } = require("…")`.
+ *   - Python `from x import …m…` (single-line; the parenthesized multi-line
+ *     form is `mentionInsideMultilineImportList`'s own opener, below),
+ *     `import a.b.m` (any dotted segment -- the path names a MODULE, never a
+ *     call, so a match anywhere in it is safe regardless of which segment).
+ *   - Java/Kotlin/Scala/Dart `import [static] ….m;` (any dotted segment);
+ *     Dart `show m` on an import.
+ *   - Rust `use …::m;` / `use …::{…, m, …};`.
+ *   - PHP `use [function|const] …\m;`.
+ *   - C# `using …;` / `using static …;` and C++ `using ns::m;` (one shared
+ *     pattern, any `.`/`::`-separated segment -- an alias directive, `using
+ *     X = …;`, never matches: the trailing `=` breaks the pattern before it
+ *     reaches the line-ending `;`).
+ *   - C/C++ `#include …` (a preprocessor line can never contain a call, so
+ *     every occurrence on it is explained regardless of where `member`
+ *     sits).
+ * Deliberately does NOT attempt to resolve a genuine re-export/alias to its
+ * real call sites (cross-file specifier resolution is out of this guard's
+ * bounded, per-line scope) -- P2 already keeps the facet on `discover` for a
+ * concrete unread target elsewhere, and where none exists this guard's own
+ * job is only to keep the claim honest: `undetermined`, never `empty`.
+ */
+function isPlainListEntry(entry: string, member: string): boolean {
+  const trimmed = entry.trim();
+  return trimmed === member || trimmed === `type ${member}`;
+}
+
+/**
+ * Orchestrator (round 7): EVERY entry of `list` that names `member` must be
+ * plain, and at least one must exist. A list may name the same member twice
+ * — `export { formatBytes, formatBytes as formatSize }` (a deprecation
+ * alias), `import { f as g, f }` — and the aliased entry still introduces a
+ * second name callers use; one plain sibling must never explain it away.
+ */
+function listHasPlainEntry(list: string, member: string): boolean {
+  const mentioning = list.split(",").filter((entry) => listEntryNames(entry, member));
+  return mentioning.length > 0 && mentioning.every((entry) => isPlainListEntry(entry, member));
+}
+
+/** A2 (R8-A, eval-0927 review-r7 P1-2): `member` is named by SOME entry of `list`, plain or aliased -- distinguishes "absent from the list" (safe to fall back to a specifier/path-segment check) from "present but aliased" (never explained, whatever else the line also names -- see `mentionExplainedByImportExportLine`'s own callers below). */
+function listNamesEntry(list: string, member: string): boolean {
+  return list.split(",").some((entry) => listEntryNames(entry, member));
+}
+
+function listEntryNames(entry: string, member: string): boolean {
+  return new RegExp(`(?<![\\w$])${escapeRegExp(member)}(?![\\w$])`).test(entry);
+}
+
+/** Any `.`/`::`-separated segment of `path` equals `member` exactly -- see this section's own doc for why a path-segment match is always safe (never a call, whichever segment it names). */
+function pathHasSegment(path: string, member: string): boolean {
+  return path.split(/::|\./).some((segment) => segment.trim() === member);
+}
+
+/** A2 (R8-A, eval-0927 review-r7 P1-2, ktImportAliasCaller): like `pathHasSegment`, but only a NON-LEAF segment counts -- for a dotted path whose LAST segment is itself being aliased away (`import a.b.m as x`, Kotlin/Python/Java-shaped alike), `m` is never safe to explain (an importer reaches it only under `x`, invisible to a by-name scan) while `a`/`b` (mere namespace qualifiers the alias never touches) still are. */
+function pathHasNonLeafSegment(path: string, member: string): boolean {
+  const segments = path.split(/::|\./).map((segment) => segment.trim());
+  return segments.slice(0, -1).some((segment) => segment === member);
+}
+
+/** A4(iii) (R8-A, eval-0927 review-r7 P2-7, pyFromImportTrailingComment): a trailing, quote-aware `//`/`#` line comment stripped before any shape below is tried, so `# noqa`/`// eslint-disable-line` no longer breaks an otherwise-ordinary import/export/use line's own match. Never strips a `#`/`//` inside a quoted specifier, and never a `#` that is (ignoring leading whitespace) the line's OWN first character -- a genuine `#include …`/`#[attr]` directive is untouched; only a comment trailing SOME other content is removed. */
+function stripTrailingLineComment(text: string): string {
+  let quote: string | undefined;
+  let sawContent = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote !== undefined) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; sawContent = true; continue; }
+    if (ch === "/" && text[i + 1] === "/") return text.slice(0, i);
+    if (ch === "#" && sawContent) return text.slice(0, i);
+    if (!/\s/.test(ch)) sawContent = true;
+  }
+  return text;
+}
+
+/** A2 (R8-A, eval-0927 review-r7 P1-2): the per-language shape group `relPath`'s extension belongs to, for gating `mentionExplainedByImportExportLine`'s per-language shapes -- a Python-shaped bare-dotted-import regex must never explain a `.kt` line just because the TEXT happens to parse the same way, and vice versa. `undefined` (an unrecognized extension) tries every shape, same as when `relPath` itself is omitted. */
+function importShapeLangForPath(relPath: string): "js" | "py" | "jvm" | "dart" | "rust" | "cs" | "cpp" | "php" | "go" | undefined {
+  const dot = relPath.lastIndexOf(".");
+  const ext = dot > 0 ? relPath.slice(dot).toLowerCase() : "";
+  switch (ext) {
+    case ".ts": case ".tsx": case ".mts": case ".cts":
+    case ".js": case ".jsx": case ".mjs": case ".cjs":
+      return "js";
+    case ".py": case ".pyi": case ".pyw":
+      return "py";
+    case ".java": case ".kt": case ".kts":
+      return "jvm";
+    case ".dart":
+      return "dart";
+    case ".rs":
+      return "rust";
+    case ".cs":
+      return "cs";
+    case ".c": case ".h": case ".cc": case ".cpp": case ".cxx": case ".hpp": case ".hh": case ".hxx":
+      return "cpp";
+    case ".php":
+      return "php";
+    case ".go":
+      return "go";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A2/A4 (R8-A, eval-0927 review-r7 P1-2, P2-7). Two additions layered on the
+ * ROUND-7 PRINCIPLE (this function's own long-standing contract: a POSITIVE,
+ * exact match against a fixed list of shapes, never a generic prefix test),
+ * both still never resolving a real alias/re-export to its call sites:
+ *
+ *   A2 -- an ALIASED entry is never explained, in ANY language, including a
+ *   BARE dotted import whose trailing `as x` clause aliases its own last
+ *   segment (Kotlin/Scala/Java-shaped `import a.b.m as x`, Python's own
+ *   `import a.m as x` alike -- `pathHasNonLeafSegment` above). Each
+ *   language's shape is additionally gated by `relPath`'s extension
+ *   (`importShapeLangForPath`) when the caller supplies one; omitted (the
+ *   pre-existing pure-unit-test surface) every shape is tried exactly as
+ *   before extension gating existed.
+ *
+ *   A4 -- three narrow, still-positive additions: (i) an occurrence inside
+ *   the QUOTED MODULE SPECIFIER of a recognized line (the file path names a
+ *   module there, never a call) -- checked only once the line's own named
+ *   entries are ruled out (`listNamesEntry` distinguishes "member absent
+ *   from the list" -- safe to fall back to the specifier -- from "member
+ *   present but aliased" -- per A2, never explained by the specifier
+ *   either); a bare `import "spec";`/`export * from "spec";` with no local
+ *   name bound at all is always explained. (ii) a non-leaf path segment of a
+ *   dotted/`::`-joined module path, extended to `from x.y import z`'s own
+ *   `x.y` and Rust `use a::b::c;`'s own `a::b`. (iii) `stripTrailingLine-
+ *   Comment` above, applied before any shape is tried.
+ */
+export function mentionExplainedByImportExportLine(text: string, member: string, relPath?: string): boolean {
+  const stripped = stripTrailingLineComment(text);
+  const lang = relPath === undefined ? undefined : importShapeLangForPath(relPath);
+  const tryLang = (l: "js" | "py" | "jvm" | "dart" | "rust" | "cs" | "cpp" | "php" | "go"): boolean => lang === undefined || lang === l;
+
+  if (tryLang("js") || tryLang("go")) {
+    // A4(i)/A3 (Go `import "example.com/app/run"`): a bare quoted specifier
+    // with no binding at all -- textually identical for JS side-effect
+    // imports and Go's own single-spec form, so one shared shape covers
+    // both; any occurrence of `member` on such a line can only ever be
+    // inside the specifier, which names a module file, never a call.
+    if (/^\s*import\s+(["'][^"']+["'])\s*;?\s*$/.test(stripped)) return true;
+  }
+  if (tryLang("js")) {
+    const jsNamed = /^\s*import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*(["'][^"']+["'])/.exec(stripped);
+    if (jsNamed) {
+      if (listHasPlainEntry(jsNamed[1]!, member)) return true;
+      if (listNamesEntry(jsNamed[1]!, member)) return false;
+      return listEntryNames(jsNamed[2]!, member);
+    }
+    const jsDefault = /^\s*import\s+([A-Za-z_$][\w$]*)\s*(?:,\s*(?:type\s+)?\{([^}]*)\})?\s*from\s*(["'][^"']+["'])/.exec(stripped);
+    if (jsDefault) {
+      const named = jsDefault[2];
+      // Orchestrator (round 7, r7orchImportDoubleEntry): the default
+      // binding's own name matching `member` must NOT short-circuit before
+      // checking the named-list part for an ALIASED sibling of the SAME
+      // member (`import formatBytes, { formatBytes as fmt } from "./x";`) --
+      // that second, hidden `fmt` binding is exactly the shape a by-name
+      // scan cannot follow, so its presence must win even when the default
+      // name alone would otherwise explain the line.
+      if (named !== undefined && listNamesEntry(named, member) && !listHasPlainEntry(named, member)) return false;
+      if (jsDefault[1] === member) return true;
+      if (named !== undefined && listHasPlainEntry(named, member)) return true;
+      return listEntryNames(jsDefault[3]!, member);
+    }
+    const jsNamespace = /^\s*import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s*from\s*(["'][^"']+["'])/.exec(stripped);
+    if (jsNamespace) return jsNamespace[1] === member || listEntryNames(jsNamespace[2]!, member);
+    // A4(i): `export * from "…";` -- a bare re-export-everything with no
+    // local name bound at all; any occurrence of `member` on this line can
+    // only ever be inside the specifier.
+    if (/^\s*export\s+\*\s+from\s+(["'][^"']+["'])\s*;?\s*$/.test(stripped)) return true;
+    const jsExportNamed = /^\s*export\s+(?:type\s+)?\{([^}]*)\}(?:\s*from\s*(["'][^"']+["']))?/.exec(stripped);
+    if (jsExportNamed) {
+      if (listHasPlainEntry(jsExportNamed[1]!, member)) return true;
+      if (listNamesEntry(jsExportNamed[1]!, member)) return false;
+      return jsExportNamed[2] !== undefined && listEntryNames(jsExportNamed[2]!, member);
+    }
+    const jsExportNamespace = /^\s*export\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s*from\s*(["'][^"']+["'])/.exec(stripped);
+    if (jsExportNamespace) return jsExportNamespace[1] === member || listEntryNames(jsExportNamespace[2]!, member);
+    const cjsRequire = /^\s*(?:const|let|var)\s+\{([^}]*)\}\s*=\s*require\(\s*(["'][^"']+["'])\s*\)/.exec(stripped);
+    if (cjsRequire) {
+      if (listHasPlainEntry(cjsRequire[1]!, member)) return true;
+      if (listNamesEntry(cjsRequire[1]!, member)) return false;
+      return listEntryNames(cjsRequire[2]!, member);
+    }
+  }
+  if (tryLang("py")) {
+    const pyFrom = /^\s*from\s+([.\w]+)\s+import\s+\(?([^)]*)\)?\s*$/.exec(stripped);
+    if (pyFrom) {
+      if (listHasPlainEntry(pyFrom[2]!, member)) return true;
+      if (listNamesEntry(pyFrom[2]!, member)) return false;
+      return pathHasSegment(pyFrom[1]!, member); // A4(ii): `from app.validate import validate_email`'s own `app.validate`
+    }
+    const pyImport = /^\s*import\s+([.\w]+)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(stripped);
+    if (pyImport) return pyImport[2] !== undefined ? pathHasNonLeafSegment(pyImport[1]!, member) : pathHasSegment(pyImport[1]!, member);
+  }
+  if (tryLang("jvm")) {
+    const dottedImport = /^\s*import\s+(?:static\s+)?([\w.]+)\s*;?\s*$/.exec(stripped);
+    if (dottedImport) return pathHasSegment(dottedImport[1]!, member);
+  }
+  if (tryLang("dart")) {
+    const dartShow = /^\s*import\s+['"][^'"]+['"][^;]*\bshow\s+([\w\s,]+?)(?:\s+hide\b.*)?;?\s*$/.exec(stripped);
+    if (dartShow) return listHasPlainEntry(dartShow[1]!, member);
+  }
+  if (tryLang("rust")) {
+    const rustSingle = /^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([\w:]+)::([A-Za-z_]\w*)\s*;/.exec(stripped);
+    if (rustSingle) return rustSingle[2] === member || pathHasSegment(rustSingle[1]!, member); // A4(ii): `use crate::run::helper;`'s own `crate::run`
+    const rustList = /^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([\w:]+)::\{([^}]*)\}\s*;/.exec(stripped);
+    if (rustList) {
+      if (listHasPlainEntry(rustList[2]!, member)) return true;
+      if (listNamesEntry(rustList[2]!, member)) return false;
+      return pathHasSegment(rustList[1]!, member);
+    }
+  }
+  if (tryLang("php")) {
+    const php = /^\s*use\s+(?:function\s+|const\s+)?([\w\\]+)\s*;/.exec(stripped);
+    if (php) return pathHasSegment(php[1]!.replace(/\\/g, "."), member);
+  }
+  if (tryLang("cs")) {
+    const usingStatic = /^\s*using\s+static\s+([\w.]+)\s*;/.exec(stripped);
+    if (usingStatic) return pathHasSegment(usingStatic[1]!, member);
+  }
+  if (tryLang("cs") || tryLang("cpp")) {
+    // C# `using Some.Namespace;` and C++ `using ns::m;` share this one
+    // pattern -- an alias directive (`using X = …;`) never matches: the
+    // trailing `=` leaves no way for `\s*;` to follow the captured path.
+    const usingPlain = /^\s*using\s+([\w:.]+)\s*;/.exec(stripped);
+    if (usingPlain) return pathHasSegment(usingPlain[1]!, member);
+  }
+  if (tryLang("cpp") && /^\s*#include\b/.test(stripped)) return true;
+  return false;
+}
+
+/** Lines scanned backward for the opening `{`/`(` of a multi-line import/export/use list a bare entry line (`mentionInsideMultilineImportList`) sits inside. */
+const MAX_MENTION_IMPORT_LIST_BACKSCAN_LINES = 64;
+
+/**
+ * Whether `text` opens one of the multi-line-capable list shapes
+ * (`mentionExplainedByImportExportLine`'s JS/TS `import`/`export { … }`,
+ * Python `from x import ( … )`, Rust `use a::{ … }`, and -- A4(iv), R8-A,
+ * eval-0927 review-r7 P2-7, cjsMultilineRequireCaller/tsDefaultPlusNamed-
+ * Multiline -- a destructuring-assignment target `const|let|var {` and a
+ * combined default+named `import x, {`) with its OWN bracket left UNCLOSED
+ * on this line -- an opener that also closes on the same line is the
+ * single-line case `mentionExplainedByImportExportLine` already tries first,
+ * never reached from here. `text` is comment-stripped first (A4(iii)) so a
+ * `// {` inside a trailing comment is never mistaken for an opener.
+ */
+function multilineListOpenerKind(text: string): "curly" | "paren" | undefined {
+  const stripped = stripTrailingLineComment(text);
+  if (
+    /^\s*(?:import|export)\s+(?:type\s+)?\{/.test(stripped)
+    || /^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+[\w:]+::\{/.test(stripped)
+    || /^\s*import\s+[A-Za-z_$][\w$]*\s*,\s*(?:type\s+)?\{/.test(stripped)
+    || /^\s*(?:export\s+)?(?:const|let|var)\s*\{/.test(stripped)
+  ) {
+    const opens = stripped.match(/\{/g)?.length ?? 0;
+    const closes = stripped.match(/\}/g)?.length ?? 0;
+    return opens > closes ? "curly" : undefined;
+  }
+  if (/^\s*from\s+[.\w]+\s+import\s+\(/.test(stripped)) {
+    const opens = stripped.match(/\(/g)?.length ?? 0;
+    const closes = stripped.match(/\)/g)?.length ?? 0;
+    return opens > closes ? "paren" : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * R7-A (P0-1's own multi-line-list clause): 1-based `line` in `fileLines` is
+ * a bare plain entry (or a comma-list of them, `a, m,`) sitting inside an
+ * UNCLOSED bracketed list a bounded (<= MAX_MENTION_IMPORT_LIST_BACKSCAN_LINES)
+ * backward scan traces to one of `multilineListOpenerKind`'s recognized
+ * openers. Tracks curly/paren depth across the lines walked (each also
+ * comment-stripped first, A4(iii): `import {\n  a, // {\n  m,\n} from "…";`
+ * must not mistake the `{` inside that trailing comment for a second,
+ * unrelated opener) -- a net `}`/`)` above the entry means some OTHER,
+ * unrelated list closed there, and the scan stops rather than walk past it
+ * (bounded, best-effort: an entry line combined with its list's own closer
+ * on one line, `m } from "…";`, is the rarer hybrid this deliberately leaves
+ * unrecognized -- still safe, since an unrecognized shape only stays a
+ * mention, never becomes a false "empty"). An ordinary multi-line
+ * `import {\n  m,\n} from "…";` no longer becomes an unclassified mention
+ * merely because ITS OWN line carries no `import`/`export`/`from`/`use`
+ * keyword at all.
+ */
+function mentionInsideMultilineImportList(fileLines: readonly string[], line: number, member: string): boolean {
+  const text = fileLines[line - 1];
+  if (text === undefined) return false;
+  const entryLine = stripTrailingLineComment(text).trim().replace(/,\s*$/, "");
+  if (entryLine.length === 0 || !listHasPlainEntry(entryLine, member)) return false;
+  let curly = 0;
+  let paren = 0;
+  const floor = Math.max(0, line - 1 - MAX_MENTION_IMPORT_LIST_BACKSCAN_LINES);
+  for (let i = line - 2; i >= floor; i--) {
+    const above = stripTrailingLineComment(fileLines[i] ?? "");
+    curly += (above.match(/\}/g)?.length ?? 0) - (above.match(/\{/g)?.length ?? 0);
+    paren += (above.match(/\)/g)?.length ?? 0) - (above.match(/\(/g)?.length ?? 0);
+    const kind = multilineListOpenerKind(above);
+    if (kind === "curly" && curly < 0) return true;
+    if (kind === "paren" && paren < 0) return true;
+    if (curly < 0 || paren < 0) return false;
+  }
+  return false;
+}
+
+/** Combined MENTION GUARD import/export explanation: the single-line shapes (`mentionExplainedByImportExportLine`) plus a bare entry inside a multi-line list (`mentionInsideMultilineImportList`). Exported only for `evaluation0927.r7aFalseEmptyGuard.spec.ts`. `relPath`, when supplied, gates `mentionExplainedByImportExportLine`'s per-language shapes (A2); omitted, every shape is tried. */
+export function mentionExplainedByImportExport(fileLines: readonly string[], line: number, member: string, relPath?: string): boolean {
+  const text = fileLines[line - 1];
+  if (text !== undefined && mentionExplainedByImportExportLine(text, member, relPath)) return true;
+  return mentionInsideMultilineImportList(fileLines, line, member);
+}
+
+/**
+ * MENTION GUARD SAFETY OVERRIDE (R5-A1). A handful of EXPRESSION keywords
+ * (never able to open a declaration of the identifier right after them, in
+ * ANY of TS/JS/Python/Go/Java/C#/C/C++) that a shape-based declaration
+ * heuristic can still mistake for a TYPE token with a trailing pointer/
+ * reference marker when only `*`/`&` sits between them and the member --
+ * `yield* walkTree(root);` reads exactly like the C-style pointer
+ * declaration `Node* walkTree`, and `isDeclarationShapedMatchText`'s own
+ * `declarationHeadShape` path (callerExpansion.ts, R5-A2's classifier) can
+ * still say so (its OWN fix for this exact shape, R5-A2's P1-6, is a
+ * SEPARATE, in-flight concern). The guard's whole job is to hold whatever
+ * the classifier does, so it must not simply trust that same shape guess
+ * for a prefix this narrow, reliable list can already rule out on its own
+ * -- overriding a "declaration" verdict to `false`, never the reverse (a
+ * real method-shorthand declaration with no keyword at all,
+ * `render(input) {`, is untouched: this list is only ever consulted when
+ * a keyword from it is the literal last thing before the member).
+ */
+const MENTION_GUARD_NEVER_DECLARES_NEXT_RE = /\b(?:yield|return|await|throw|typeof|delete|void|new|in|of|instanceof|case|do|else)\s*[*&]?\s*$/;
+
+/**
+ * MENTION GUARD SAFETY OVERRIDE (R7-A, eval-0927 review-r6 P0-1,
+ * `export default [computeTotal];`-shaped). The shared classifier's own
+ * `IDENTIFIER_DEFINITION_KEYWORD_RE` matches the bare word `export`
+ * ANYWHERE in its definition segment, with no opinion on what follows
+ * `default` -- and unlike the object/call/arrow forms (whose segment is cut
+ * short at the `{`/`(` that `definitionSegment` already treats as a
+ * statement boundary, dropping the leading `export default` out of the
+ * segment entirely), a `[` after `default` is not one of those boundary
+ * characters, so `export default [` stays intact as one segment and the
+ * bare keyword match fires: `export default [member];` reads as "a
+ * declaration" even though it is plainly an array-literal EXPRESSION.
+ *
+ * Never true for a genuine declaration header either: `export default
+ * function member(...)`'s own occurrence of `member` never reaches this
+ * override (or `mentionLineLooksLikeDeclaration` at all) in the first
+ * place, since the CROSS-FILE mention scan excludes `focal.path` outright
+ * and the SAME-FILE scan excludes the focal's own body range (see
+ * `unclassifiedMentionLines`'s cross-file caller and
+ * `sameFileFacetCallSites`'s own `focal.startLine`/`endLine` skip) -- every
+ * line this guard ever examines is, by construction, never the focal's own
+ * declaration statement. So any line that opens with `export default` and
+ * is not itself one of `mentionExplainedByImportExportLine`'s recognized
+ * declaration-shaped forms (`function`/`class`, optionally `async`/
+ * `abstract`) can never be a declaration of the member either --
+ * overriding a "declaration" verdict to `false`, the same direction
+ * `MENTION_GUARD_NEVER_DECLARES_NEXT_RE` above already takes.
+ */
+const MENTION_GUARD_EXPORT_DEFAULT_EXPR_RE = /^\s*export\s+default\b(?!\s+(?:async\s+)?(?:abstract\s+)?(?:function|class)\s)/;
+
+/** `isDeclarationShapedMatchText` (R5-A2's shared classifier, called not edited), with the mention guard's own narrow overrides above applied first. */
+function mentionLineLooksLikeDeclaration(text: string, member: string): boolean {
+  const at = text.indexOf(member);
+  if (at < 0) return false;
+  if (MENTION_GUARD_NEVER_DECLARES_NEXT_RE.test(text.slice(0, at))) return false;
+  if (MENTION_GUARD_EXPORT_DEFAULT_EXPR_RE.test(text)) return false;
+  return isDeclarationShapedMatchText(text, member);
+}
+
+function unclassifiedMentionLines(
+  member: string,
+  paths: readonly string[],
+  linesByPath: ReadonlyMap<string, readonly number[]>,
+  recordedKeys: ReadonlySet<string>,
+  workspace: string,
+  cache: FileReadCache,
+): { lines: FacetMentionLine[]; capped: boolean } {
+  const lines: FacetMentionLine[] = [];
+  let capped = false;
+  for (const relPath of paths) {
+    if (capped) break;
+    const content = readCached(workspace, relPath, cache);
+    if (content === undefined) continue;
+    const fileLines = content.split(/\r?\n/);
+    const hashComment = hasHashComments(relPath);
+    // A3 (eval-0927 review-r6 P1-5): an embedded-code file this classifier's
+    // own language assumptions were never built for (a template/markup file
+    // mixing several languages, or a JSON notebook) -- see
+    // `isCallerMentionOnlyFile`'s own doc. Every occurrence stays an
+    // unclassified mention unconditionally: the comment/import-export/
+    // declaration heuristics below are untested for these shapes and could
+    // just as easily misfire either direction, so they are skipped entirely
+    // rather than risk explaining a real call away.
+    const mentionOnly = isCallerMentionOnlyFile(relPath);
+    // A4 (eval-0927 review-r6 P1-6/P2-11 class): the SAME file-level
+    // multi-line scan the call-site loops use, so `memberOnlyInCommentText`
+    // judges a masked/confident/codeFrom line here exactly as they do.
+    const commentState: BlockCommentLineStates | undefined = mentionOnly ? undefined : blockCommentLineStates(fileLines, relPath);
+    for (const line of linesByPath.get(relPath) ?? []) {
+      if (recordedKeys.has(`${relPath}#${line}`)) continue;
+      const text = fileLines[line - 1];
+      if (text === undefined) continue;
+      if (!mentionOnly && commentState !== undefined) {
+        const lineState: MentionCommentLineState = {
+          masked: commentState.masked[line - 1] === true,
+          confident: commentState.confident[line - 1] === true,
+          codeFrom: commentState.codeFrom[line - 1] ?? undefined,
+        };
+        if (memberOnlyInCommentText(text, member, hashComment, lineState)) continue;
+        if (mentionExplainedByImportExport(fileLines, line, member, relPath)) continue;
+        if (mentionLineLooksLikeDeclaration(text, member)) continue;
+      }
+      if (lines.length >= MAX_UNCLASSIFIED_MENTION_LINES) { capped = true; break; }
+      lines.push({ path: relPath, line });
+    }
+  }
+  return { lines, capped };
+}
+
+/**
+ * Up to `MAX_DECLARATION_HEAD_LOOKAHEAD_LINES` further RAW lines after
+ * 1-based `line` in `lines`, each already `maskNonCode`-d, IN ORDER — feeds
+ * `opensBlockDeclaration`'s multi-line paren-balance scan (R4-A2, eval-0927
+ * review-r3 P0-3/shape(2), wrapperAliasMultiline/multilineSigManyCallers: a
+ * declaration whose own parameter list spans SEVERAL lines before the body
+ * opens, e.g. `async fetchJson(\n  pathname: string,\n  init?: RequestInit,
+ * \n): Promise<unknown> {`). Deliberately keeps BLANK lines in place (unlike
+ * the old single-line "next NON-blank line" helper this replaces): a blank
+ * line inside a parameter list contributes no `(`/`)`/`{` and skipping it
+ * would misalign which line is "the one right after the close" for the
+ * deferred-body-opener check that runs once the scan actually closes.
+ * Bounded so a pathological unclosed occurrence, or a file ending mid-scan,
+ * never reads far.
+ */
+function subsequentMaskedLines(lines: readonly string[], line: number, hashComment: boolean): string[] {
+  const end = Math.min(lines.length, line + MAX_DECLARATION_HEAD_LOOKAHEAD_LINES);
+  const out: string[] = [];
+  for (let i = line; i < end; i++) {
+    const text = lines[i];
+    if (text === undefined) break;
+    out.push(maskNonCode(text, hashComment));
+  }
+  return out;
+}
+
+/**
+ * Extensions whose language gives `void` a SECOND meaning: the unary
+ * operator that discards an expression's result (`void someCall()`) —
+ * JS/TS only. Every OTHER language with a `void` keyword (C/C++/Java/C#/…)
+ * has no such operator and never writes a return type any way other than a
+ * prefix before the name (`void mixQuadX(...) {}`, no modifier required) —
+ * a bare `void` there is exactly as conclusive proof of a declaration as
+ * `function`/`def`/`class`. JS/TS, conversely, NEVER writes a C-style
+ * prefix return type at all (a TS return annotation sits AFTER the
+ * parameter list: `function f(): void {}`), so `void` immediately before a
+ * bare call-shaped name in one of these files is always the operator.
+ */
+const VOID_OPERATOR_EXTENSIONS: ReadonlySet<string> = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]);
+
+/** True when `relPath`'s language gives `void` an operator meaning (see `VOID_OPERATOR_EXTENSIONS`). */
+function isVoidOperatorLanguage(relPath: string): boolean {
+  const dot = relPath.lastIndexOf(".");
+  return dot > 0 && VOID_OPERATOR_EXTENSIONS.has(relPath.slice(dot).toLowerCase());
+}
+
+/**
+ * The ONE declaration-vs-call rule every call-site collector applies
+ * (`callSitesForFocalMember`, `plainFunctionCallerSites`,
+ * `sameFileFacetCallSites` — P0-1, eval-0927 review-r2 #1/#2/#12): `false`
+ * for anything but a bare/scope-qualified occurrence (a dot/arrow/scope-
+ * qualified call with a receiver can never BE the declaration of the name
+ * it invokes). A keyword-led declaration — the shared
+ * `IDENTIFIER_DEFINITION_KEYWORD_RE`, applied to `definitionSegment` exactly
+ * as before — is conclusive on its own EXCEPT a bare `void` hit in a
+ * VOID-OPERATOR language (JS/TS): `void` is ALSO the operator that discards
+ * a call's result there (`void recordEvent(..., {...})`, review-r2 #1's
+ * callersObjectArgTsAwait), so THAT one combination defers to the shape
+ * test instead of ending the check by itself. A `void` hit anywhere else —
+ * including a MODIFIER-LESS C/C++ free function (`void mixQuadX(...) {}`,
+ * FX-R3c D8/D9's `sfnf1`, no `public`/`static` to lean on) — stays
+ * conclusive exactly like any other keyword: those languages have no void
+ * operator to be ambiguous with, so narrowing this to the shape test's own
+ * `declarationHeadShape`-requires-a-modifier rule (FIX-FAB2, aimed
+ * specifically at the JS-operator ambiguity) would wrongly read the
+ * function's own declaration line as a call site of itself. The shape test
+ * itself (`opensBlockDeclaration`) now paren-matches the occurrence's OWN
+ * argument list on the right — possibly across SEVERAL further lines
+ * (R4-A2, eval-0927 review-r3 P0-3/shape(2): a multi-line parameter list),
+ * never an argument's own nested `{` — an object literal, callback or dict
+ * argument, review-r2 #1's other three cases — and is skipped entirely for
+ * an ALWAYS-keyword-led language (Kotlin/Rust/Swift/Python/Ruby/Scala): a
+ * bare occurrence there is always a CALL — most often a trailing
+ * lambda/closure argument — never a keyword-less declaration, which those
+ * languages have no syntax for at all. Go is the one ALWAYS-keyword-led
+ * exception (R4-A2, eval-0927 review-r3 #5, goIfaceMethod): its interface
+ * members ARE written with no `func` at all, so a Go file with no keyword
+ * hit tries `goInterfaceMemberDeclarationShape` (callerExpansion.ts's own
+ * doc has the narrow, unambiguous shape this accepts) before falling
+ * through to a call.
+ *
+ * Exported for `callSiteClassificationMatrix.spec.ts` (R4-A2) — the
+ * regression fence for every declaration-vs-call shape this rule and
+ * `opensBlockDeclaration`/`rightHandOpensDeclarationBody` together decide.
+ *
+ * FIX (R5-A2, eval-0927 review-r4 P0-2/P1-11, cpp-out-of-line-member-
+ * usertype/cpp-out-of-line-member-std): a SCOPE-qualified occurrence with no
+ * keyword hit used to fall straight to `return false` — correct for an
+ * ordinary namespaced/static CALL (`app::run(x);`, `Foo::run(x);`), but also
+ * wrong for C++'s out-of-line member DEFINITION (`OrderStatus
+ * OrderService::cancel(int id) {`), whose return type is exactly as often a
+ * custom class/struct name (never a recognized keyword) as a call's
+ * receiver expression is. The two are told apart by feeding the shape test
+ * only the part of `before` that is NOT the scope qualifier itself — the
+ * qualifier names WHICH type this belongs to, not a return-type word, and
+ * handing it to the modifier/type-word parser as one would only ever
+ * reject the line (as `app::run` / `Foo::run` already correctly do, since
+ * their remainder — an assignment, an empty head, or another statement's
+ * own leftovers — never parses as a valid head either).
+ */
+export function callSiteOccurrenceIsDeclaration(
+  occurrence: CallSiteOccurrence,
+  masked: string,
+  relPath: string,
+  lines: readonly string[],
+  line: number,
+  hashComment: boolean,
+): boolean {
+  if (occurrence.qualifier !== "bare" && occurrence.qualifier !== "scope") return false;
+  // A keyword inside a closed paren group is a cast (`(void) f(x);`,
+  // `return (int) f(x);`), and `export default f(x)` exports an expression:
+  // both are calls, never a declaration of `f` (orchestrator probe, round 4).
+  const segment = withoutClosedParenGroups(definitionSegment(occurrence.before));
+  if (/\bexport\s+default\s*$/.test(segment)) return false;
+  const keywordHit = segment.match(IDENTIFIER_DEFINITION_KEYWORD_RE)?.[0];
+  if (keywordHit !== undefined && !(keywordHit === "void" && isVoidOperatorLanguage(relPath))) return true;
+  if (occurrence.qualifier === "scope") {
+    if (occurrence.receiver === undefined) return false;
+    const scopeSuffixLength = occurrence.receiver.length + 2; // the trailing `Receiver::` itself
+    if (scopeSuffixLength > occurrence.before.length) return false; // defensive; should not happen
+    const returnTypeHead = occurrence.before.slice(0, occurrence.before.length - scopeSuffixLength);
+    const laterLines = subsequentMaskedLines(lines, line, hashComment);
+    if (!declarationHeadShape(returnTypeHead)) return false;
+    return rightHandOpensDeclarationBody(masked, occurrence.before.length, laterLines, hasDeclarationHeadWord(returnTypeHead));
+  }
+  const laterLines = subsequentMaskedLines(lines, line, hashComment);
+  if (isGoLanguage(relPath)) {
+    // A name that opens its line inside a Go `interface { … }` body is a
+    // method spec, never a call — including a void one (`Close()`), which
+    // the forward shape test cannot tell from a call statement.
+    if (occurrence.before.trim() === "" && insideGoInterfaceBody(lines, line, hashComment)) return true;
+    return goInterfaceMemberDeclarationShape(masked, occurrence.before.length, laterLines);
+  }
+  return opensBlockDeclaration(masked, occurrence.before, isAlwaysKeywordLedLanguage(relPath), laterLines);
+}
+
+/** Lines scanned backward for the enclosing Go `interface {` opener. */
+const MAX_GO_INTERFACE_LOOKBACK_LINES = 200;
+
+/**
+ * Whether 1-based `line` sits directly inside a Go `interface { … }` body:
+ * walks backward (≤ MAX_GO_INTERFACE_LOOKBACK_LINES) to the nearest `{` that
+ * is still open at `line` and tests whether it opens an interface type.
+ */
+function insideGoInterfaceBody(lines: readonly string[], line: number, hashComment: boolean): boolean {
+  let depth = 0;
+  for (let n = line - 1; n >= 1 && n >= line - MAX_GO_INTERFACE_LOOKBACK_LINES; n--) {
+    const text = maskNonCode(lines[n - 1] ?? "", hashComment);
+    for (let i = text.length - 1; i >= 0; i--) {
+      const ch = text[i];
+      if (ch === "}") depth += 1;
+      else if (ch === "{") {
+        if (depth === 0) return /\binterface\s*$/.test(text.slice(0, i));
+        depth -= 1;
+      }
+    }
+  }
+  return false;
+}
+
+/** `text` with every closed `( … )` group (innermost first) replaced by a space. */
+function withoutClosedParenGroups(text: string): string {
+  let out = text;
+  for (let previous = ""; previous !== out;) {
+    previous = out;
+    out = out.replace(/\([^()]*\)/g, " ");
+  }
+  return out;
+}
+
+/** The last path segment of `p`, extension stripped — a cheap, filesystem-free stand-in for "same file" when the two paths being compared are not identical strings (a workspace-relative focal path vs. a relative import specifier). */
+function basenameNoExt(p: string): string {
+  const last = p.split("/").pop() ?? p;
+  return last.replace(/\.[^./]+$/, "");
+}
+
+/**
+ * P0-2 (eval-0927 review-r2 #2, methodManyCallers/goMethodManyCallers): a
+ * receiver reaching this point already failed BOTH of `receiverStrength`'s
+ * name-based tiers (exact and weak-suffix) AND `fileNamesType` (the calling
+ * file never mentions the focal's type name as TEXT) — but a generically-
+ * named shared instance (`client: HttpClient`, `c: *zhttp.Client`) imported
+ * straight from the type's OWN defining file is common, ordinary code, and
+ * "the file names the type" is not the only legitimate corroboration for
+ * it. True when the calling file imports `receiver` from a specifier whose
+ * own file basename matches `focalPath`'s — reuses evidenceClosure.ts's
+ * `importSpecifiersNaming` (name -> specifier text; TS/JS/Python/Java/C#/
+ * C++ shapes) rather than a full resolver, which this boundary has no
+ * filesystem access to run. A same-basename file in an unrelated directory
+ * is the one (rare, harmless — it only adds an extra caller candidate)
+ * false positive this basename-only comparison accepts, the same recall-
+ * over-precision direction `receiverStrength`'s own weak tier already
+ * favors. Go has no per-name import trace at all (`importSpecifiersNaming`'s
+ * own documented limitation — a package import names no individual value),
+ * so `goMethodManyCallers`'s `c *zhttp.Client` receiver is covered instead
+ * by the plain `zhttp.Client`-vs-`Client` type-name match `receiverStrength`
+ * already performs (the qualifier is stripped before this function is ever
+ * reached) — this helper adds recall only for languages with a real
+ * per-binding import line.
+ */
+function receiverImportedFromFocalFile(lines: readonly string[], receiver: string, focalPath: string, hashComment: boolean): boolean {
+  const focalBase = basenameNoExt(focalPath);
+  if (focalBase.length === 0) return false;
+  return importSpecifiersNaming(lines, receiver, hashComment).some((spec) => basenameNoExt(spec.specifier) === focalBase);
+}
+
+/**
+ * Files a callers/flow FACET scan classifies line by line (eval-0927
+ * review-r3 P2-13, genericMethodManyCallers/multilineSigManyCallers: 45
+ * one-call caller files against the shared 40-file MAX_CALLER_FILES_EXAMINED
+ * ended `undetermined` with nothing left to read). Separate from that shared
+ * bound, which also sizes focal resolution and the edit-side caller
+ * expansion: here every file was already opened by the literal scan, so
+ * classifying one costs a cached read plus a regex per mentioning line, and
+ * the result is the whole answer to "who calls X". Past it the scan still
+ * reports `filesCapped` (disclosed `undetermined`).
+ */
+const MAX_FACET_CALLER_FILES_CLASSIFIED = 128;
+
+/** A member that is ASCII word characters end to end, so `\b<member>\b` is exact — see `facetCallerMentionScan`. */
+const ASCII_WORD_MEMBER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The literal scan behind both facet caller scans. Word-bounded when the
+ * member is plain ASCII word characters: every occurrence
+ * `findCallOccurrences` accepts has a non-identifier character before it and
+ * `(`/`<`/whitespace after it, so a line with no `\b<member>\b` match can
+ * never yield a site. Dropping such lines changes no site; it only keeps
+ * files that merely contain the letters (`get` inside `budget`) from
+ * spending MAX_FACET_CALLER_FILES_CLASSIFIED. Any other member keeps the
+ * substring scan.
+ *
+ * FIX (R6-A, eval-0927 review-r5 P1-4, vueCaller): `scanLiteral`'s default
+ * walk (`findText.ts`'s own `FIND_EXTRA_EXTS`, `.css` only) never opens a
+ * `.vue`/`.svelte`/`.astro` single-file-component at all, so a real call
+ * inside one of these was invisible to this scan and the facet was
+ * certified `empty` over a workspace it never actually read. Their
+ * `<script>` blocks are ordinary JS/TS lines once opened — no other
+ * classifier in this module keys on the file extension in a way that
+ * excludes them (`HASH_COMMENT_EXTENSIONS`/`VOID_OPERATOR_EXTENSIONS`/
+ * `ALWAYS_KEYWORD_LED_EXTENSIONS` simply do not list them, so they fall
+ * through to the same generic C-like path an untagged `.ts` file would)  —
+ * `extraExts` is `scanLiteral`'s own ADDITIVE-only walk hook (does not
+ * shrink the default tracked-code set), scoped to just this one call site
+ * rather than every `walkCodeFiles` caller. Kept local rather than
+ * imported: `findText.ts`'s own `FIND_EXTRA_EXTS` is module-private, and
+ * this scan's needs (a few named framework SFC extensions) are narrower
+ * than "whatever `find` walks" anyway.
+ *
+ * A3 (R7-A, eval-0927 review-r6 P1-5, cshtmlCaller/erbCaller/htmlScriptCaller/
+ * mdxCaller/ipynbCaller): a real call inside a server-side template or a
+ * notebook cell was equally invisible -- `.css`/`.vue`/`.svelte`/`.astro`
+ * stay CLASSIFIED as call sites (their embedded blocks are ordinary JS/TS),
+ * but the extensions below mix in markup, a template language this module
+ * has no grammar for, or a JSON envelope (`.ipynb`) whose "lines" are not
+ * source lines at all -- `isCallerMentionOnlyFile` routes every occurrence
+ * in one of THESE straight to the unclassified-mention list instead (see its
+ * own doc and `unclassifiedMentionLines`'s hookup), never through the
+ * call/declaration classifier this module built for C-like/Python-like
+ * source. `.mdx` behaves like Markdown with embedded JSX -- same reasoning.
+ */
+const CALLER_MENTION_ONLY_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".html", ".htm", ".xhtml", ".cshtml", ".razor", ".vbhtml", ".aspx", ".ascx",
+  ".jsp", ".erb", ".ejs", ".hbs", ".handlebars", ".mustache",
+  ".jinja", ".jinja2", ".j2", ".twig", ".njk", ".liquid",
+  ".pug", ".jade", ".haml", ".slim", ".mdx", ".ipynb",
+  // A3 (R8-A, eval-0927 review-r7 P1-3, javaCallerFromScala/rubyCallerFromRake/
+  // cCallerFromObjC): every source/script language this module's call-site
+  // classifier has no grammar for -- a real call in one of these was equally
+  // invisible to a by-name classified scan (the classifier's declaration/
+  // call-shape heuristics were built for the C-like/Python-like languages the
+  // rest of this file already handles). Every occurrence in one of these
+  // routes straight to the unclassified-mention list instead, exactly like
+  // the markup/template extensions above.
+  ".swift", ".scala", ".sc", ".dart", ".groovy", ".gvy", ".gradle",
+  ".m", ".mm", ".rake", ".gemspec", ".lua",
+  ".ex", ".exs", ".erl", ".hrl",
+  ".pl", ".pm", ".sh", ".bash", ".zsh", ".ps1", ".psm1",
+  ".r", ".jl", ".clj", ".cljs", ".cljc", ".hs", ".ml", ".mli",
+  ".fs", ".fsi", ".fsx", ".vb", ".coffee", ".elm", ".nim", ".zig",
+]);
+
+/**
+ * True when `relPath`'s extension is one of `CALLER_MENTION_ONLY_EXTENSIONS`
+ * -- see `FACET_MENTION_SCAN_EXTRA_EXTS`'s own A3 doc above for why these
+ * (and only these) route straight to the mention list. Exported only for
+ * `evaluation0927.r7aFalseEmptyGuard.spec.ts`.
+ */
+export function isCallerMentionOnlyFile(relPath: string): boolean {
+  const dot = relPath.lastIndexOf(".");
+  return dot > 0 && CALLER_MENTION_ONLY_EXTENSIONS.has(relPath.slice(dot).toLowerCase());
+}
+
+const FACET_MENTION_SCAN_EXTRA_EXTS = [
+  ".css", ".vue", ".svelte", ".astro",
+  ...CALLER_MENTION_ONLY_EXTENSIONS,
+] as const;
+
+function facetCallerMentionScan(member: string, workspace: string, args: TaskPackArgs): ReturnType<typeof scanLiteral> {
+  const wordBounded = ASCII_WORD_MEMBER_RE.test(member);
+  return scanLiteral(wordBounded ? `\\b${member}\\b` : member, workspace, {
+    caseInsensitive: false,
+    ...(wordBounded ? { regex: true } : {}),
+    ...(args.path ? { path: args.path } : {}),
+    extraExts: FACET_MENTION_SCAN_EXTRA_EXTS,
+  });
+}
+
+/**
+ * Compatible call sites of ONE focal member, ranked. Bounded by
+ * MAX_FACET_CALLER_FILES_CLASSIFIED; `deadline` is an emergency stop only, see
+ * `CallerScanResult`'s own doc comment. Exported only for
+ * `facetClosureTimingIndependence.spec.ts` (FIX-FAB item 11), which injects
+ * a synthetic slow clock to prove `complete` for a small, deterministically-
+ * bounded scan never depends on how fast that clock advances.
+ */
+export function callSitesForFocalMember(
   focal: CallerFocalMember,
   args: TaskPackArgs,
   workspace: string,
   cache: FileReadCache,
   allowTestPaths: boolean,
   deadline: number,
-): CallerSiteCandidate[] {
+): CallerScanResult {
   let scanned: ReturnType<typeof scanLiteral>;
   try {
-    scanned = scanLiteral(focal.member, workspace, {
-      caseInsensitive: false,
-      ...(args.path ? { path: args.path } : {}),
-    });
+    scanned = facetCallerMentionScan(focal.member, workspace, args);
   } catch {
-    return [];
+    return { sites: [], complete: true };
   }
   const linesByPath = new Map<string, number[]>();
   for (const match of scanned) {
@@ -14888,34 +16524,77 @@ function callSitesForFocalMember(
     if (existing) existing.push(match.line);
     else linesByPath.set(match.path, [match.line]);
   }
-  // Nearest files first, so a wall-clock or file-count cut keeps the files the
-  // ranking would have preferred anyway rather than an alphabetical prefix.
+  // Nearest files first, so an emergency-stop or file-count cut keeps the
+  // files the ranking would have preferred anyway rather than an
+  // alphabetical prefix.
+  const filesCapped = linesByPath.size > MAX_FACET_CALLER_FILES_CLASSIFIED; // P1-7: see CallerScanResult.filesCapped's own doc
   const paths = [...linesByPath.keys()].sort((a, b) =>
     sharedPathPrefixSegments(b, focal.path) - sharedPathPrefixSegments(a, focal.path)
     || a.localeCompare(b)
-  ).slice(0, MAX_CALLER_FILES_EXAMINED);
+  ).slice(0, MAX_FACET_CALLER_FILES_CLASSIFIED);
   const sites: CallerSiteCandidate[] = [];
+  // R6-A (eval-0927 review-r5 P2-6, cppUserTypeMemberFalseCaller): every
+  // `${path}#${line}` the occurrence loop below itself judged a DECLARATION
+  // (`callSiteOccurrenceIsDeclaration`, incl. its own C++ out-of-line-member
+  // scope-qualified case) — merged into `recordedKeys` alongside real call
+  // sites so `unclassifiedMentionLines`'s weaker, independent
+  // `mentionLineLooksLikeDeclaration` never re-examines and misclassifies
+  // the SAME line as an unclassified mention.
+  const declarationLineKeys = new Set<string>();
+  let examined = 0;
   for (const relPath of paths) {
     if (Date.now() >= deadline) break;
+    examined += 1;
+    // A3 (eval-0927 review-r6 P1-5): an embedded-code file this classifier's
+    // language assumptions do not cover at all (see `isCallerMentionOnlyFile`'s
+    // own doc) -- never run the call/declaration classifier or the
+    // `/* … */`/docstring block-comment mask against it (an HTML/ERB/JSP
+    // comment is neither), and never filter its matched lines here:
+    // `unclassifiedMentionLines` below picks up every one of them, straight
+    // from the SAME `linesByPath` entry the literal scan already populated.
+    if (isCallerMentionOnlyFile(relPath)) continue;
     const content = readCached(workspace, relPath, cache);
     if (content === undefined) continue;
     const lines = content.split(/\r?\n/);
     const hashComment = hasHashComments(relPath);
+    // A4 (eval-0927 review-r6 P1-6/P2-11 class, was R6-C P1-5): drop only a
+    // CONFIDENTLY masked line here — genuinely comment/docstring text, never
+    // a call site nor an unclassified mention. A line merely MASKED (the
+    // file-level scan could not confirm its own span's opener was at the
+    // START of its line) is kept in `linesByPath` for the MENTION GUARD
+    // below, which reads the very same map — but is never itself scanned
+    // for a call site (see the `codeFrom`/`masked` check inside the loop).
+    const commentState = blockCommentLineStates(lines, relPath);
+    const candidateLines = (linesByPath.get(relPath) ?? []).filter((line) => commentState.confident[line - 1] !== true);
+    linesByPath.set(relPath, candidateLines);
     const namesType = fileNamesType(lines, focal.typeName, hashComment);
     const inFile: Array<{ line: number; strength: 1 | 2 }> = [];
-    for (const line of linesByPath.get(relPath) ?? []) {
-      const text = lines[line - 1];
-      if (text === undefined) continue;
-      const masked = maskNonCode(text, hashComment);
+    for (const line of candidateLines) {
+      const codeFrom = commentState.codeFrom[line - 1];
+      // A non-confident masked line with no closer-carried code is never
+      // itself a call site (still eligible below as an unclassified
+      // mention, via the unfiltered `linesByPath` entry above).
+      if (commentState.masked[line - 1] === true && codeFrom === undefined) continue;
+      const rawText = lines[line - 1];
+      if (rawText === undefined) continue;
+      // P2-11 (eval-0927 review-r6, a call on a block-comment CLOSER line,
+      // `*/ run(2);`): classify from `codeFrom` on — the comment prefix is
+      // blanked (space-padded, keeping column positions aligned) rather
+      // than handed whole to `maskNonCode`, which has no memory of the
+      // PRIOR lines that opened this span and so cannot itself tell that
+      // prefix apart from real code (a comment's own PROSE could otherwise
+      // spuriously read as a declaration keyword or another occurrence).
+      const text = codeFrom !== undefined ? " ".repeat(codeFrom) + rawText.slice(codeFrom) : rawText;
+      const masked = maskNonCode(text, hashComment, relPath);
       for (const occurrence of findCallOccurrences(masked, focal.member)) {
-        if (occurrence.qualifier === "bare" || occurrence.qualifier === "scope") {
-          // A declaration is not a call. The keyword list is the shared
-          // IDENTIFIER_DEFINITION_KEYWORD_RE, applied to the segment that
-          // could actually govern this name (see `definitionSegment`).
-          if (IDENTIFIER_DEFINITION_KEYWORD_RE.test(definitionSegment(occurrence.before))) continue;
-          if (occurrence.qualifier === "bare" && opensBlockDeclaration(masked, occurrence.before)) continue;
+        if (callSiteOccurrenceIsDeclaration(occurrence, masked, relPath, lines, line, hashComment)) {
+          declarationLineKeys.add(`${relPath}#${line}`);
+          continue;
         }
-        const strength = receiverStrength(occurrence.receiver, focal.typeName, namesType);
+        const nameStrength = receiverStrength(occurrence.receiver, focal.typeName, namesType);
+        const strength = nameStrength !== 0
+          ? nameStrength
+          : (occurrence.receiver !== undefined && receiverImportedFromFocalFile(lines, occurrence.receiver, focal.path, hashComment) ? 1 : 0);
         if (strength === 0) continue;
         inFile.push({ line, strength });
         break; // one site per line is enough; the window is the same either way
@@ -14931,7 +16610,19 @@ function callSitesForFocalMember(
       });
     }
   }
-  return rankCallSites(sites);
+  // MENTION GUARD (R5-A1): among the SAME examined `paths`, every mention
+  // line this scan did not already record as a call site above — see
+  // `unclassifiedMentionLines`'s own doc.
+  const recordedKeys = new Set([...sites.map((site) => `${site.path}#${site.line}`), ...declarationLineKeys]);
+  const { lines: unclassifiedMentions, capped: unclassifiedMentionsCapped } =
+    unclassifiedMentionLines(focal.member, paths, linesByPath, recordedKeys, workspace, cache);
+  return {
+    sites: rankCallSites(sites),
+    complete: examined === paths.length,
+    ...(filesCapped ? { filesCapped } : {}),
+    ...(unclassifiedMentions.length > 0 ? { unclassifiedMentions } : {}),
+    ...(unclassifiedMentionsCapped ? { unclassifiedMentionsCapped: true } : {}),
+  };
 }
 
 /** What a caller window would really put on the wire — the same elided-embed measure `wholeFileEmbedBytes` takes, over one range. */
@@ -14986,7 +16677,7 @@ async function recoverCallerExpansionCandidates(
   const allowTestPaths = queryMentionsTests(query);
   const selectedPaths = new Set(selected.map((candidate) => candidate.path));
   const ranked = focal.map((member) =>
-    Date.now() >= deadline ? [] : callSitesForFocalMember(member, args, workspace, cache, allowTestPaths, deadline)
+    Date.now() >= deadline ? [] : callSitesForFocalMember(member, args, workspace, cache, allowTestPaths, deadline).sites
   );
   const additions: ImpactCandidate[] = [];
   const takenPaths = new Set<string>();
@@ -15053,6 +16744,4020 @@ async function recoverCallerExpansionCandidates(
     }
   }
   return additions;
+}
+
+// ---------------------------------------------------------------------------
+// FIX-C1 (2026-09-27, eval-0927 P0-1/P0-2): facet-driven bounded evidence
+// closure -- requestFacets.ts detects WHAT an answer must show
+// (value/condition/callers/flow); evidenceClosure.ts's pure functions find
+// same-file/one-import-hop constants and one-hop callee names; this section
+// is the ONLY place either module is reached from, turning a real workspace
+// read/parse into their plain-data inputs -- exactly the role
+// `recoverCallerExpansionCandidates` above plays for callerExpansion.ts. The
+// `callers`/`flow` facets reuse callerExpansion.ts's OWN pure functions
+// directly (its logic, not its `TL_CALLER_EXPANSION` flag -- brief-fix-c1.md
+// Deliverable 3 point 2) via `callSitesForFocalMember` above for a focal with
+// a REAL enclosing type, and `plainFunctionCallerSites` below (skipping the
+// receiver-strength gate) for a focal that is a plain top-level function: a
+// bare call `fetchWithRetry(url)` carries no receiver, and the ONLY textual
+// link to `callerExpansionTypeNameFor`'s file-stem fallback ("httpClient")
+// is inside the calling file's OWN import string, which `maskNonCode`
+// deliberately blanks -- so `fileNamesType` (and therefore
+// `receiverStrength`) can never see it. A top-level function name has no
+// cross-type ambiguity to guard against the way a class method's does, so
+// every call-shaped, non-declaration occurrence outside the focal's own file
+// counts.
+// ---------------------------------------------------------------------------
+
+/** Test-only observability, mirroring `callerExpansionEntryCount` above. */
+let facetClosureEntryCountForTest = 0;
+export function facetClosureEntryCount(): number {
+  return facetClosureEntryCountForTest;
+}
+export function resetFacetClosureEntryCountForTest(): void {
+  facetClosureEntryCountForTest = 0;
+}
+
+/**
+ * Chip 3 (2026-09-27, INT-A): the args-keyed `facetClosureOutcomesByArgs`
+ * WeakMap and its `facetClosureOutcomesFor` reader were removed here — dead
+ * code confirmed by reading: `buildTaskPackCore` replaces `args` with a fresh
+ * object before the hook that populated the map runs, and
+ * `buildTaskExecutionContract` never receives the original `args` at all, so
+ * nothing could ever look this map up by the same key it was written under
+ * (neither `facetClosureOutcomesFor` itself nor any test called it). The
+ * completion gate instead reads the plan `recoverFacetClosureCandidates`
+ * records via facetGate.ts's memo (`recordFacetPlan`, keyed by the resolved
+ * query), which also serves every later hop of the same query — this
+ * `FacetClosureOutcome` shape remains that function's own per-requirement
+ * bookkeeping, still computed and returned, just no longer squirreled away in
+ * an unreachable side channel.
+ */
+export interface FacetClosureOutcome {
+  readonly facet: RequestFacet;
+  readonly clause: string;
+  readonly subject: string;
+  readonly focal: readonly string[];
+  readonly windows: ReadonlyArray<{ readonly path: string; readonly range: string; readonly served: boolean }>;
+  readonly totalCallSites?: number;
+  readonly emptyVerified?: boolean;
+  readonly reason?: string;
+}
+
+interface ResolvedFacetFocal {
+  readonly path: string;
+  readonly name: string;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly typeName: string;
+  /** False when this SYMBOL itself is not a genuine member of a type (see `symbolIsRealMember`) -- the plain-top-level-function case `plainFunctionCallerSites` exists for. P0-1 (eval-0927 review-r4 #1): this is a fact about the resolved symbol, never about whether its FILE happens to declare some type elsewhere. */
+  readonly hasRealType: boolean;
+  /** FIX-G: the resolved symbol's parser kind (function / method / class / interface / …), so the completion gate can tell a callable focal from a type focal. */
+  readonly kind?: string;
+}
+
+interface NamedWindow {
+  readonly path: string;
+  readonly start: number;
+  readonly end: number;
+  readonly name: string;
+  /** FIX-FAB item 6 (eval-0927 review #10, bigConstants): true when `findModuleConstantWindow` capped this declaration's own extent — `end` is NOT the declaration's real close, and the value facet this window backs is not covered until the rest is served too (see facetGate.ts's continuation handling). Absent/false for every other window kind. */
+  readonly truncated?: boolean;
+}
+
+/**
+ * True when `symbol` is a genuine member of a type: the parser attached a
+ * real enclosing type (`enclosingSymbol`), or the language's own member
+ * syntax proves it even without that link.
+ *
+ * P0-1 (eval-0927 review-r4 #1, tsFreeFunctionBesideClass/
+ * goFreeFunctionBesideStruct/pyFreeFunctionBesideClass/
+ * cStructFreeFunction/cIfaceProtoTypedef; control cNoStructFreeFunction).
+ * The OLD test (`hasRealEnclosingType`, since removed) asked "does this
+ * FILE declare any real top-level type ANYWHERE" -- so a free top-level
+ * function sitting in the SAME file as an unrelated class/struct (or a
+ * struct defined via a separate `typedef`) was wrongly treated as THAT
+ * type's member, and its bare calls (which, exactly because it is not a
+ * member, carry no receiver at all) then lost `callSitesForFocalMember`'s
+ * receiver-strength gate outright -- a gate that exists only for a real
+ * member's cross-type ambiguity, which a plain top-level name never has
+ * (see this section's own header comment). The test must be about THIS
+ * symbol, never about the file it happens to sit in.
+ *
+ * Go's own grammar is the one carve-out: a receiver method
+ * (`func (m *T) Name(...)`) is a SIBLING of its receiver's `type T struct`
+ * in the parse tree, never a child of it (Go has no nested member syntax at
+ * all), so `collectSymbols.ts` can never attach a real `enclosingSymbol` to
+ * ANY Go method -- but it does still tell a receiver method (parser kind
+ * "method") apart from a receiver-less top-level func (kind "function"),
+ * which is exactly the fact this test needs and Go's own grammar already
+ * proves independently of nesting. TS/JS, Python, Java, C#, Kotlin, C++'s
+ * in-class-body methods, and a Go/C free function's absent receiver clause
+ * all already nest (or don't nest) a real member correctly via
+ * `enclosingSymbol`, so the Go kind check only ADDS coverage for Go, never
+ * substitutes for the ordinary test elsewhere.
+ */
+function symbolIsRealMember(symbol: { readonly kind: string; readonly enclosingSymbol?: { readonly name: string } }, relPath: string): boolean {
+  if (symbol.enclosingSymbol !== undefined) return true;
+  return symbol.kind === "method" && isGoLanguage(relPath);
+}
+
+/**
+ * A declared callable named `identifier` among the pack's OWN already-
+ * selected candidates (cheap: no new file beyond what the pack already
+ * read). Tier 1 of Deliverable 3 point 1.
+ *
+ * P0-3 (eval-0927 review-r3 #3, wrapperAliasFew/wrapperAliasMultiline): EXACT
+ * (case-sensitive) name identity only. This used to compare via `normIdent`
+ * (case/underscore-insensitive) as its ONLY test, so a same-named-modulo-
+ * case wrapper function (`fetchJSON`) that happened to sort into `selected`
+ * ahead of the REAL declaration (`fetchJson`, a different symbol entirely)
+ * won this tier outright and was returned as if it settled the question —
+ * `resolveFacetFocal` then certified it had zero callers under the
+ * WRAPPER's own name, a false "empty" for a function that in fact has
+ * several. A fuzzy match is never offered here at all (unlike the identity-
+ * matching tiers below it, which keep a same-named-mention safety net) --
+ * there is nothing this tier could safely fall back to: unlike a mere
+ * mention (whose enclosing-callable identity was never claimed as proof of
+ * anything), a fuzzy hit HERE would be presented as a solid declaration,
+ * exactly the failure mode above. A miss simply lets `resolveFacetFocal`'s
+ * later, exact-preferring tiers (Tier 2's own workspace-wide scan) look
+ * further, or fall through to `undetermined` -- never a wrong declaration.
+ */
+async function findDeclaredCallableAmong(
+  selected: readonly ImpactCandidate[],
+  identifier: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<ResolvedFacetFocal | undefined> {
+  const seenPaths = new Set<string>();
+  for (const candidate of selected) {
+    if (seenPaths.has(candidate.path)) continue;
+    seenPaths.add(candidate.path);
+    const content = readCached(workspace, candidate.path, cache);
+    if (content === undefined) continue;
+    const lang = languageForPath(candidate.path);
+    const parsed = (lang ? await cache.parsedSymbols(content, lang, candidate.path) : null) ?? [];
+    const symbol = parsed.find((s) => unqualifiedSymbolTail(s.name) === identifier);
+    if (symbol === undefined) continue;
+    const typeName = callerExpansionTypeNameFor(parsed, candidate.path);
+    return {
+      path: candidate.path,
+      name: unqualifiedSymbolTail(symbol.name),
+      startLine: symbol.startLine,
+      endLine: symbol.endLine,
+      typeName: unqualifiedSymbolTail(symbol.enclosingSymbol?.name ?? typeName),
+      hasRealType: symbolIsRealMember(symbol, candidate.path),
+      kind: symbol.kind,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * P0-1 (eval-0927 review-r3 #1, qualifiedTsMethod/qualifiedTsService/
+ * qualifiedPyMethod/tsDecoratorSameLine): a clause naming "A.b" asks about
+ * the MEMBER `b` declared INSIDE the type `A`, never the type itself and
+ * never a same-named member of some OTHER type -- an exact, case-sensitive
+ * match on BOTH the member's own name and its enclosing symbol's name (the
+ * P0-3 identity rule applied to a qualified pair). Searched among the
+ * pack's own already-selected candidates first (`resolveFacetFocal` calls
+ * this before anything else): the locator's own "class-method" layer
+ * (locateTaskContext.ts Layer 1b, `extractClassMethodPairs` +
+ * `refineFilenameMatchSymbol`) already anchors a qualified query on the
+ * member's own file/line when it can, so the owning file is ordinarily
+ * already selected by the time a facet hook runs.
+ */
+/**
+ * The shared owner/member proof `findDeclaredMemberOfOwner` and its own
+ * widening below apply to one file's already-parsed symbols: either the
+ * parser attached a real `enclosingSymbol` (TS/JS/Python/Java/C#/Kotlin/
+ * C++'s in-class-body methods), or the symbol's OWN NAME carries the
+ * qualifier (a C++ out-of-line member DEFINITION, `OrderStatus
+ * OrderService::cancel(int id) { ... }`, sits at file scope in its OWN
+ * translation unit -- the parser never nests it inside a class body at all
+ * (there is no class body in THAT file to nest it under), so
+ * `enclosingSymbol` is always absent for it; `qualifiedSymbolOwner` reads
+ * the qualifier off the name itself, the same way `unqualifiedSymbolTail`
+ * reads its member tail).
+ */
+function memberOfOwnerIn(parsed: ParsedSymbols, owner: string, member: string): ParsedSymbols[number] | undefined {
+  return parsed.find((s) =>
+    CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind)
+    && unqualifiedSymbolTail(s.name) === member
+    && (
+      (s.enclosingSymbol !== undefined && unqualifiedSymbolTail(s.enclosingSymbol.name) === owner)
+      || qualifiedSymbolOwner(s.name) === owner
+    )
+  );
+}
+
+async function findDeclaredMemberOfOwner(
+  selected: readonly ImpactCandidate[],
+  owner: string,
+  member: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<ResolvedFacetFocal | undefined> {
+  const seenPaths = new Set<string>();
+  for (const candidate of selected) {
+    if (seenPaths.has(candidate.path)) continue;
+    seenPaths.add(candidate.path);
+    const content = readCached(workspace, candidate.path, cache);
+    if (content === undefined) continue;
+    const lang = languageForPath(candidate.path);
+    const parsed = (lang ? await cache.parsedSymbols(content, lang, candidate.path) : null) ?? [];
+    const symbol = memberOfOwnerIn(parsed, owner, member);
+    if (symbol === undefined) continue;
+    // Ownership is already proven above (either via `enclosingSymbol` or via
+    // the qualified name) -- `owner` itself is the right typeName; falling
+    // back to `callerExpansionTypeNameFor`'s file-stem guess (as the
+    // `enclosingSymbol`-only tiers below still must, since THEY have no such
+    // proof) would misname an out-of-line definition's own translation unit
+    // (no type is declared in THAT file at all).
+    return {
+      path: candidate.path,
+      name: unqualifiedSymbolTail(symbol.name),
+      startLine: symbol.startLine,
+      endLine: symbol.endLine,
+      typeName: owner,
+      hasRealType: true,
+      kind: symbol.kind,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * P0-2's own widening for a QUALIFIED pair, called only when
+ * `findDeclaredMemberOfOwner` found nothing among the pack's OWN selected
+ * candidates. `owner.member`'s locator resolution (Layer 1b's own
+ * `extractClassMethodPairs`) anchors a qualified query on whichever file
+ * carries the member's IN-CLASS declaration when one exists -- but a C++
+ * member's in-class declaration is usually a bodyless prototype
+ * (`OrderStatus cancel(int id);`, a `field_declaration`), which
+ * `collectSymbols.ts`'s tree-sitter extractor never turns into a symbol at
+ * all; the file that actually PROVES ownership (the out-of-line definition,
+ * `memberOfOwnerIn`'s qualified-name arm) is a different translation unit
+ * the locator never had a reason to select. A bounded, declaration-shaped-
+ * only literal scan for `member` (the SAME reordering
+ * `findEnclosingCallableForLiteral` already applies) finds it; the owner
+ * check inside `memberOfOwnerIn` still guards against a same-named member
+ * of some unrelated type.
+ */
+async function widenDeclaredMemberOfOwnerByScan(
+  selected: readonly ImpactCandidate[],
+  owner: string,
+  member: string,
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<ResolvedFacetFocal | undefined> {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = scanLiteral(member, workspace, { caseInsensitive: false, ...(args.path ? { path: args.path } : {}) });
+  } catch {
+    return undefined;
+  }
+  const seenPaths = new Set(selected.map((c) => c.path));
+  const declarationShaped: typeof scanned = [];
+  const mentionOnly: typeof scanned = [];
+  for (const match of scanned) {
+    if (seenPaths.has(match.path)) continue;
+    (isDeclarationShapedMatchText(match.text, member) ? declarationShaped : mentionOnly).push(match);
+  }
+  const ordered = [...declarationShaped, ...mentionOnly].slice(0, MAX_CALLER_FILES_EXAMINED);
+  const parsedPaths = new Set<string>();
+  for (const match of ordered) {
+    if (parsedPaths.has(match.path)) continue;
+    parsedPaths.add(match.path);
+    const content = readCached(workspace, match.path, cache);
+    if (content === undefined) continue;
+    const lang = languageForPath(match.path);
+    const parsed = (lang ? await cache.parsedSymbols(content, lang, match.path) : null) ?? [];
+    const symbol = memberOfOwnerIn(parsed, owner, member);
+    if (symbol === undefined) continue;
+    return {
+      path: match.path,
+      name: unqualifiedSymbolTail(symbol.name),
+      startLine: symbol.startLine,
+      endLine: symbol.endLine,
+      typeName: owner,
+      hasRealType: true,
+      kind: symbol.kind,
+    };
+  }
+  return undefined;
+}
+
+/** A targeted disambiguation among a FEW same-named declarations — never a general scan. */
+const MAX_SAME_NAME_CANDIDATES = 4;
+
+/**
+ * Every symbol named EXACTLY `identifier` inside `filePath`'s own already-
+ * parsed symbols, appended to `out` (capped at MAX_SAME_NAME_CANDIDATES,
+ * deduped by path+line so the same declaration reached via two different
+ * routes is never counted twice). Shared by `findAllDeclaredCallablesNamed`
+ * and its workspace-scan widening below.
+ */
+async function collectDeclaredCallablesNamedInFile(
+  filePath: string,
+  identifier: string,
+  workspace: string,
+  cache: FileReadCache,
+  out: ResolvedFacetFocal[],
+  seenPaths: Set<string>,
+  seenKeys: Set<string>,
+  capped: { hit: boolean },
+): Promise<void> {
+  if (seenPaths.has(filePath)) return;
+  seenPaths.add(filePath);
+  const content = readCached(workspace, filePath, cache);
+  if (content === undefined) return;
+  const lang = languageForPath(filePath);
+  const parsed = (lang ? await cache.parsedSymbols(content, lang, filePath) : null) ?? [];
+  for (const symbol of parsed) {
+    if (unqualifiedSymbolTail(symbol.name) !== identifier) continue;
+    // P1-7 (eval-0927 review-r4 #7, sixSameNameOneFile; control
+    // sixSameNameSixFiles): a cap hit HERE must be visible to the caller,
+    // never silently swallowed -- see `resolveCallerCandidateForName`'s own
+    // doc for why presenting whichever MAX_SAME_NAME_CANDIDATES candidates
+    // happened to be collected first as "every declaration" risks a false
+    // empty for a real declaration this pass never even reached (this file
+    // alone held 6 same-named methods; the cap of 4 silently dropped the
+    // one that was actually called).
+    if (out.length >= MAX_SAME_NAME_CANDIDATES) { capped.hit = true; break; }
+    const key = `${filePath}#${symbol.startLine}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    const typeName = callerExpansionTypeNameFor(parsed, filePath);
+    out.push({
+      path: filePath,
+      name: unqualifiedSymbolTail(symbol.name),
+      startLine: symbol.startLine,
+      endLine: symbol.endLine,
+      typeName: unqualifiedSymbolTail(symbol.enclosingSymbol?.name ?? typeName),
+      hasRealType: symbolIsRealMember(symbol, filePath),
+      kind: symbol.kind,
+    });
+  }
+}
+
+/**
+ * P0-2 (eval-0927 review-r3 #2, tsTwoClassesSameMethod/kotlinFun): EVERY
+ * declared callable named EXACTLY `identifier` among the pack's OWN already-
+ * selected candidates (cheap: no new file read beyond what the pack already
+ * opened), up to MAX_SAME_NAME_CANDIDATES — not just the first, unlike
+ * `findDeclaredCallableAmong`'s own single-match Tier 1. Declaration ORDER
+ * carries no relationship to which candidate a real caller actually
+ * targets: with two classes declaring the same method name ("FakeClient.
+ * fetchJson" with zero callers of its own, "HttpClient.fetchJson" with a
+ * real one), whichever sorted first used to win the facet's identity by
+ * default and be certified "0 call sites" under that name — a real call
+ * site for the OTHER declaration sitting in the very same response.
+ * `resolveFacetFocal`'s own P0-2 branch calls this, then asks each candidate
+ * `callerSitesForFocal` (unedited — this repo's own "call the exported
+ * closure-scan function per candidate rather than editing it" contract)
+ * whether it has ANY real call site at all, and prefers the first one that
+ * does; only when EVERY candidate genuinely has zero (see
+ * `widenDeclaredCallablesNamedByScan` below) does the facet count as
+ * legitimately empty.
+ */
+/**
+ * P1-7 (eval-0927 review-r4 #7): `candidates` from a same-name declaration
+ * scan, plus whether MAX_SAME_NAME_CANDIDATES was hit anywhere while
+ * collecting them. `capped: true` means `candidates` may be MISSING a real
+ * declaration this pass never reached -- the caller must never treat it as
+ * exhaustive proof that "every declaration of this name is empty".
+ */
+interface DeclaredCallablesScan {
+  readonly candidates: readonly ResolvedFacetFocal[];
+  readonly capped: boolean;
+}
+
+async function findAllDeclaredCallablesNamed(
+  selected: readonly ImpactCandidate[],
+  identifier: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<DeclaredCallablesScan> {
+  const out: ResolvedFacetFocal[] = [];
+  const seenPaths = new Set<string>();
+  const seenKeys = new Set<string>();
+  const capped = { hit: false };
+  for (const candidate of selected) {
+    if (out.length >= MAX_SAME_NAME_CANDIDATES) { capped.hit = true; break; }
+    await collectDeclaredCallablesNamedInFile(candidate.path, identifier, workspace, cache, out, seenPaths, seenKeys, capped);
+  }
+  return { candidates: out, capped: capped.hit };
+}
+
+/**
+ * P0-2's own widening, called LAZILY (only once `findAllDeclaredCallablesNamed`'s
+ * cheap `selected`-only candidates ALL turned out to have zero call sites):
+ * a bounded, DECLARATION-SHAPED-only literal scan of the whole workspace
+ * (the SAME per-line test `findEnclosingCallableForLiteral` already
+ * applies, `isDeclarationShapedMatchText`) — the real declaration is not
+ * always among `selected` at all (kotlinFun: the locator selected only the
+ * caller file and a "readiness-falsification-counterexample" read of the
+ * WRONG class, never the file that actually declares the real, calling
+ * method), so a zero-caller decoy must never be the only candidate ever
+ * considered. Excludes every path `already` names (so a candidate the cheap
+ * pass already found and ruled empty is never re-parsed) -- UNLESS
+ * `reexamineAlreadySeenFiles` (P1-7, sixSameNameOneFile): when the cheap
+ * pass was itself capped, a truncated FILE must remain eligible for this
+ * widen scan to revisit (`seenKeys`, seeded from `already` regardless,
+ * still prevents re-adding the SAME declarations twice) -- otherwise the
+ * very file holding the declaration this pass most needs to find is the one
+ * PERMANENTLY excluded by `already`'s own bookkeeping, and the cap can never
+ * be overcome no matter how many further hops re-ask the same question.
+ */
+async function widenDeclaredCallablesNamedByScan(
+  already: readonly ResolvedFacetFocal[],
+  identifier: string,
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+  reexamineAlreadySeenFiles: boolean,
+): Promise<DeclaredCallablesScan> {
+  const out: ResolvedFacetFocal[] = [];
+  const seenPaths = new Set<string>(reexamineAlreadySeenFiles ? [] : already.map((c) => c.path));
+  const seenKeys = new Set<string>(already.map((c) => `${c.path}#${c.startLine}`));
+  const capped = { hit: false };
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = scanLiteral(identifier, workspace, { caseInsensitive: false, ...(args.path ? { path: args.path } : {}) });
+  } catch {
+    return { candidates: out, capped: false };
+  }
+  for (const match of scanned) {
+    if (out.length >= MAX_SAME_NAME_CANDIDATES) { capped.hit = true; break; }
+    if (seenPaths.has(match.path)) continue;
+    if (!isDeclarationShapedMatchText(match.text, identifier)) continue;
+    await collectDeclaredCallablesNamedInFile(match.path, identifier, workspace, cache, out, seenPaths, seenKeys, capped);
+  }
+  return { candidates: out, capped: capped.hit };
+}
+
+/**
+ * FIX-FAB item 2: cheap, no-parse declaration-shape test over a
+ * `scanLiteral` match's own trimmed line text (findText.ts's
+ * `trimMatchText`, <=80 chars, left-anchored on `identifier`'s occurrence
+ * unless it sits deep in an unusually long line) -- does `identifier` look
+ * DECLARED on this line, not merely called/mentioned? Reuses the shared
+ * governing-keyword test (`IDENTIFIER_DEFINITION_KEYWORD_RE` via
+ * `definitionSegment`) the caller-expansion call-site filter already applies
+ * for the SAME question, so `function`/`def`/`func`/`fn`/a modifier keyword
+ * is recognized identically everywhere in this file.
+ *
+ * FIX (eval-0927 review-r2 #2, methodManyCallers): a keyword-only test could
+ * never recognize a NON-keyword declaration -- TS/JS method shorthand
+ * (`fetchJson(pathname: string): Promise<unknown> {`), a Java/C#/C++ typed
+ * member head (`ClientOptions loadOptions(Foo x) {`) -- so `src/zclient.ts`,
+ * sorting past the 40-file cap behind 45 ordinary call sites, had its
+ * `fetchJson` declaration skipped entirely and the mention fallback handed
+ * back the WRONG focal under the WRONG name. Now also applies
+ * `opensBlockDeclaration`'s own left/right head rule directly (not
+ * `opensBlockDeclaration` itself, which additionally wants a `masked` line —
+ * this bounded, unmasked match text has no such guarantee, only the two
+ * pieces that rule is built from). `text` is a single, possibly TRUNCATED
+ * match line with no next line to look ahead to, so only a same-line
+ * declaration is recognized here; a false negative still only costs the
+ * reordering opportunity this function exists for -- `resolveFacetFocal`'s
+ * own P0-2 safety net (never present a name-mismatched mention as the
+ * clause's subject) is the backstop for whatever this heuristic still
+ * misses, so a false positive here costs nothing either (the resolved
+ * symbol is independently re-checked against `target`, as before).
+ *
+ * R4-A2 (eval-0927 review-r3, callSiteClassificationMatrix): now also
+ * recognizes a BODY-LESS declaration (a `;`-terminated prototype / interface
+ * member / overload signature — `rightHandOpensDeclarationBody`'s own doc
+ * has the exact rule, including why a bare `;` is only safe proof when
+ * `hasDeclarationHeadWord(before)` says the LEFT head already earns it) and
+ * a generic argument list directly after the name (`fetchJson<T>(` —
+ * `rightHandOpensDeclarationBody` skips it before paren-matching).
+ *
+ * FIX (R4-A2, eval-0927 review-r3 P0-3/shape(2), multilineSigManyCallers):
+ * `rightHandOpensDeclarationBody` itself still only PROVES a same-line (or
+ * same-line-plus-one) closure — this bounded, single, possibly TRUNCATED
+ * match line has no further lines to hand it at all. Left there, a real
+ * declaration whose OWN parameter list spans several lines
+ * (`async fetchJson(\n  pathname: string,\n  init?: RequestInit,\n):
+ * Promise<unknown> {`) never registered as declaration-shaped, so with 45
+ * ordinary call sites sorting ahead of it in workspace-walk order, the
+ * declaring file never even reached the 40-file cap
+ * `findEnclosingCallableForLiteral` bounds its expensive per-file parse to
+ * — nothing ever marked it worth reading first. `opensMultilineDeclarationParams`
+ * (callerExpansion.ts, own doc has the full reasoning) is the weaker
+ * one-line signal for exactly this: X's own argument list is still open at
+ * EOL, with no argument's own `{` seen — gated additionally by
+ * `hasDeclarationHeadWord` so a bare multi-line CALL (`schedule(x, () => {`
+ * truncated the same way) is never caught by it (an ordinary call is never
+ * preceded by a stray, unattached modifier/type keyword). A false positive
+ * here still costs nothing (this function's own header above) — ranking
+ * only; `findEnclosingCallableForLiteral` re-checks the resolved symbol's
+ * real name by real parsing once the file is actually read.
+ *
+ * Exported for `callSiteClassificationMatrix.spec.ts` (R4-A2).
+ */
+export function isDeclarationShapedMatchText(text: string | undefined, identifier: string): boolean {
+  if (text === undefined) return false;
+  const at = text.indexOf(identifier);
+  if (at < 0) return false;
+  const before = text.slice(0, at);
+  // The same cast / `export default` exclusions as `callSiteOccurrenceIsDeclaration`.
+  const segment = withoutClosedParenGroups(definitionSegment(before));
+  if (/\bexport\s+default\s*$/.test(segment)) return false;
+  if (IDENTIFIER_DEFINITION_KEYWORD_RE.test(segment)) return true;
+  if (!declarationHeadShape(before)) return false;
+  if (rightHandOpensDeclarationBody(text, at, undefined, hasDeclarationHeadWord(before))) return true;
+  return hasDeclarationHeadWord(before) && opensMultilineDeclarationParams(text, at);
+}
+
+/**
+ * `identifier` is NOT a declared symbol anywhere already selected (an
+ * env-var key, a property) -- a bounded literal occurrence, then the
+ * enclosing callable of the best occurrence. Tier 2, and the same mechanism
+ * that closes the "symbol-scope find for an env-var name" dead end
+ * (eval-0927 §3, arch-map Q7) for a faceted question specifically.
+ *
+ * "Best" is a DECLARATION occurrence (the enclosing callable IS `identifier`
+ * itself, case/underscore-normalized) when one exists anywhere in the
+ * scanned scope, never merely the first workspace-scan-ordered occurrence --
+ * FIX-C1 (2026-09-27, live V01 reproduction): `identifier` here is very
+ * often ALSO a real declared symbol the caller's own Tier 1 (searching only
+ * the pack's ALREADY-selected candidates) missed simply because that file
+ * was not yet selected when this tier ran (`fetchWithRetry`'s own
+ * `src/httpClient.ts` is not necessarily selected before a facet hook runs
+ * on the FIRST pack). `scanLiteral`'s workspace-walk order is not
+ * declaration-preferring (a lexically-earlier CALL SITE, e.g.
+ * `src/api/orders.ts`, sorted before `src/httpClient.ts`, was picked and
+ * treated as if that caller's own enclosing function -- `listOrders` --
+ * were what the query asked about). A one-pass scan over every match, kept
+ * to the SAME MAX_CALLER_FILES_EXAMINED bound scanLiteral itself is capped
+ * to, fixes this without a second workspace scan.
+ */
+async function findEnclosingCallableForLiteral(
+  identifier: string,
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ focal: ResolvedFacetFocal; declaration: boolean } | undefined> {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = scanLiteral(identifier, workspace, { caseInsensitive: false, ...(args.path ? { path: args.path } : {}) });
+  } catch {
+    return undefined;
+  }
+  const target = normIdent(identifier);
+  // FIX-FAB item 2 (eval-0927 review #2, manyCallers/manyCallers20/
+  // manyCallers12): `scanLiteral` is unbounded and workspace-walk-ordered
+  // (findText.ts's own doc: "no cap, no truncation"), so with 20+ caller
+  // files sorting alphabetically ahead of the declaring file (`src/api/*`,
+  // `src/handlers/*` before `src/httpClient.ts`), the OLD flat
+  // `scanned.slice(0, MAX_CALLER_FILES_EXAMINED)` exhausted its 40-match
+  // budget on caller mentions before this loop ever reached the declaration,
+  // and the mention fallback (the WRONG focal) won by default. A per-line
+  // declaration-shape test (the SAME `IDENTIFIER_DEFINITION_KEYWORD_RE` test
+  // the caller-expansion call-site filter already applies to
+  // `definitionSegment`, here read off `scanLiteral`'s own trimmed
+  // `match.text` instead of a fresh file read) is cheap enough to run over
+  // EVERY match, unbounded, so the file-parse cap below still only ever
+  // bounds the EXPENSIVE enclosing-callable resolution, never the search for
+  // the declaration itself (P2's own "the 40-file cap may only bound the
+  // enclosing-callable work"). A false positive here costs nothing — the
+  // resolved symbol is still checked against `target` below exactly as
+  // before, so a mis-guessed "declaration-shaped" mention simply becomes an
+  // ordinary fallback candidate, never a wrong declaration claim.
+  const declarationShaped: typeof scanned = [];
+  const mentionOnly: typeof scanned = [];
+  for (const match of scanned) {
+    (isDeclarationShapedMatchText(match.text, identifier) ? declarationShaped : mentionOnly).push(match);
+  }
+  const ordered = declarationShaped.length === 0
+    ? scanned.slice(0, MAX_CALLER_FILES_EXAMINED)
+    : [...declarationShaped, ...mentionOnly].slice(0, MAX_CALLER_FILES_EXAMINED);
+  let fallback: ResolvedFacetFocal | undefined;
+  for (const match of ordered) {
+    const content = readCached(workspace, match.path, cache);
+    if (content === undefined) continue;
+    const lang = languageForPath(match.path);
+    const parsed = (lang ? await cache.parsedSymbols(content, lang, match.path) : null) ?? [];
+    const enclosing = parsed
+      .filter((s) => CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind) && match.line >= s.startLine && match.line <= s.endLine)
+      .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+    if (enclosing === undefined) continue;
+    const typeName = callerExpansionTypeNameFor(parsed, match.path);
+    const resolved: ResolvedFacetFocal = {
+      path: match.path,
+      name: unqualifiedSymbolTail(enclosing.name),
+      startLine: enclosing.startLine,
+      endLine: enclosing.endLine,
+      typeName: unqualifiedSymbolTail(enclosing.enclosingSymbol?.name ?? typeName),
+      hasRealType: symbolIsRealMember(enclosing, match.path),
+      kind: enclosing.kind,
+    };
+    if (resolved.name === identifier) return { focal: resolved, declaration: true }; // EXACT identity -- best possible, stop here
+    // P0-3 (eval-0927 review-r3 #3, wrapperAliasFew/wrapperAliasMultiline): a
+    // case/underscore-only match on ITS OWN NAME is never used as a
+    // resolution (exact identity or nothing -- the same rule
+    // `findDeclaredCallableAmong` applies, see its own doc). Skipped rather
+    // than let it flow into `fallback` below: a fuzzy-named declaration
+    // (e.g. a wrapper `fetchJSON` for a query naming `fetchJson`) would
+    // otherwise become `fallback`, and `resolveFacetFocal`'s downstream
+    // `namesAnIdentifier` name-based safety net (built for a genuinely
+    // DIFFERENT-named mention) is normIdent-based too, so it would trivially
+    // accept the very same wrapper right back in -- reproducing the bug
+    // through this second channel instead of fixing it.
+    if (normIdent(resolved.name) === target) continue;
+    if (fallback === undefined) fallback = resolved; // a mere mention/call site of a genuinely different name; keep looking for the real declaration
+  }
+  return fallback === undefined ? undefined : { focal: fallback, declaration: false };
+}
+
+/**
+ * The concept-anchoring score for ONE file: its own callable NAME or a
+ * bounded peek of its BODY scored against `terms`, preferring `focusedTail`
+ * (the surface's OWN already-focused symbol, when it names a callable at
+ * all) over the file's first callable. `undefined` when the file is
+ * unreadable, has no callable, or anchors none of `terms`.
+ */
+async function bestConceptAnchoredInFile(
+  filePath: string,
+  focusedTail: string | undefined,
+  terms: readonly string[],
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ focal: ResolvedFacetFocal; score: number } | undefined> {
+  const content = readCached(workspace, filePath, cache);
+  if (content === undefined) return undefined;
+  const lang = languageForPath(filePath);
+  const parsed = (lang ? await cache.parsedSymbols(content, lang, filePath) : null) ?? [];
+  const focused = focusedTail === undefined ? undefined : parsed.find((s) => unqualifiedSymbolTail(s.name) === focusedTail);
+  const symbol = (focused !== undefined && CALLER_EXPANSION_CALLABLE_KINDS.has(focused.kind))
+    ? focused
+    : parsed.find((s) => CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind));
+  if (symbol === undefined) return undefined;
+  const lowerName = symbol.name.toLowerCase();
+  const bodyLower = content.slice(0, 4096).toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (term.length < 3) continue;
+    if (lowerName.includes(term)) score += 3;
+    if (bodyLower.includes(term)) score += 1;
+  }
+  if (score === 0) return undefined;
+  const typeName = callerExpansionTypeNameFor(parsed, filePath);
+  return {
+    score,
+    focal: {
+      path: filePath,
+      name: unqualifiedSymbolTail(symbol.name),
+      startLine: symbol.startLine,
+      endLine: symbol.endLine,
+      typeName: unqualifiedSymbolTail(symbol.enclosingSymbol?.name ?? typeName),
+      hasRealType: symbolIsRealMember(symbol, filePath),
+      kind: symbol.kind,
+    },
+  };
+}
+
+/**
+ * A facet-only clause (`inheritedFromLead`): the already-selected candidate
+ * whose own callable NAME or a bounded peek of its BODY anchors the most
+ * `subjectTerms` -- never proof, only the best available focus for a
+ * bounded closure scan. Tier 3.
+ *
+ * FIX-FAB item 9 (eval-0927 review #12, jaKanjiOnly): when `selected` is
+ * NOT empty, this is byte-for-byte the original behavior (same loop, same
+ * scoring, same preference for an already-focused symbol) -- ranking against
+ * the pack's own evidence always comes first. Only when the ordinary
+ * lexical locate found NOTHING AT ALL (a kanji-only JA query has no literal
+ * overlap with an English-named codebase, so `selected` is empty) does this
+ * fall back to a bounded, workspace-wide scan for a symbol whose name or
+ * body anchors the query's own BRIDGED concept terms (jaGlossary.ts) --
+ * without it, a zero-length `selected` was a hard dead end: concept-anchoring
+ * had nothing to rank, `resolveFacetFocal` returned nothing, and the pack
+ * could only end in `await_input` with no candidates and no `next` at all.
+ */
+async function bestConceptAnchoredCandidate(
+  selected: readonly ImpactCandidate[],
+  terms: readonly string[],
+  workspace: string,
+  cache: FileReadCache,
+): Promise<ResolvedFacetFocal | undefined> {
+  let best: { focal: ResolvedFacetFocal; score: number } | undefined;
+  for (const candidate of selected.slice(0, MAX_SURFACES_DISTINCT)) {
+    const focusedTail = candidate.symbol === undefined ? undefined : unqualifiedSymbolTail(candidate.symbol);
+    const found = await bestConceptAnchoredInFile(candidate.path, focusedTail, terms, workspace, cache);
+    if (found !== undefined && (best === undefined || found.score > best.score)) best = found;
+  }
+  if (best !== undefined || selected.length > 0) return best?.focal;
+  const usableTerms = terms.filter((term) => term.length >= 3);
+  if (usableTerms.length === 0) return undefined;
+  // FIX (eval-0927 review-r2 #3's kanji-fallback slice, "do not scan the
+  // first 40 walked files"): the OLD `walkCodeFiles(workspace,
+  // {}).slice(0, MAX_CALLER_FILES_EXAMINED)` bounded this fallback by
+  // FILE-WALK ORDER — on a workspace whose first 40 walked files happen not
+  // to be the one that anchors the query's bridged concept terms, that file
+  // was never even read, however far into the walk it sat. `scanLiteral`
+  // (unbounded — "no cap, no truncation", its own doc) finds every file that
+  // actually CONTAINS a term first; only that (typically far smaller) set is
+  // then read/parsed for real scoring, bounded to MAX_CALLER_FILES_EXAMINED
+  // of THOSE — bound by MATCHES, never by walk order. `walked` is walked
+  // once and reused across every term's scan (findText.ts's own documented
+  // `files` reuse mechanism, so this costs one directory walk, not one per
+  // term).
+  const walked = walkCodeFiles(workspace, {});
+  const candidatePaths = new Set<string>();
+  for (const term of usableTerms) {
+    let matches: ReturnType<typeof scanLiteral>;
+    try {
+      matches = scanLiteral(term, workspace, { caseInsensitive: true, files: walked });
+    } catch {
+      continue;
+    }
+    for (const match of matches) candidatePaths.add(match.path);
+  }
+  for (const relPath of [...candidatePaths].sort().slice(0, MAX_CALLER_FILES_EXAMINED)) {
+    const found = await bestConceptAnchoredInFile(relPath, undefined, usableTerms, workspace, cache);
+    if (found !== undefined && (best === undefined || found.score > best.score)) best = found;
+  }
+  return best?.focal;
+}
+
+/**
+ * P0-2 (eval-0927 review-r3 #2, tsTwoClassesSameMethod/kotlinFun): the full
+ * identity-then-disambiguation pipeline for ONE identifier-or-weak-
+ * candidate NAME, shared by `resolveFacetFocal`'s ordinary (code-shaped)
+ * identifier tier and its P1-8 weak-candidate tier below — an all-
+ * lowercase, no-underscore, unhumped word like "flush" is not code-shaped
+ * either (`explicitIdentifiersIn`'s own rule: no `_`, no camelCase/
+ * PascalCase hump, not ALL-CAPS), so it too only ever reaches
+ * `resolveFacetFocal` as a WEAK candidate — and the SAME "several same-named
+ * declarations, don't settle for whichever sorts first" ambiguity applies
+ * there just as much as to a proper explicit identifier; disambiguation
+ * cannot be tier-specific (confirmed live: the P0-2 fixture's own "flush"
+ * query never reached the explicit-identifier tier at all).
+ *
+ * Declared in SEVERAL classes/files -- among the pack's own selected
+ * candidates, or (kotlinFun: `selected` held only the caller file and an
+ * unrelated "readiness-falsification" read, never either class) only
+ * reachable via a workspace-wide scan. Either way, `findDeclaredCallableAmong`'s
+ * single-match Tier 1 and `findEnclosingCallableForLiteral`'s own "first
+ * exact match in scan order" would both return whichever sorts first
+ * regardless of whether it has any real callers. Asks each candidate
+ * (bounded, MAX_SAME_NAME_CANDIDATES) the SAME question the outcomes
+ * producer will ask the chosen focal later (`callerSitesForFocal`, unedited
+ * — called per candidate rather than changed) and prefers the first with a
+ * real site.
+ *
+ * Returns `{ settled }` when a declaration with a real call site was found
+ * (or is the sole exact declaration and the caller accepts it without a
+ * call-site check — see call sites' own comments); `{ allCandidates }`
+ * alone (`settled` undefined) when at least one exact declaration exists
+ * but every one found is genuinely empty (a legitimate, honest "empty" —
+ * P0-2's own policy); neither populated when no declaration of `name`
+ * exists anywhere this pack can see at all.
+ *
+ * P1-7 (eval-0927 review-r4 #7, sixSameNameOneFile): `capped` is true when
+ * MAX_SAME_NAME_CANDIDATES was hit anywhere in EITHER pass -- the caller
+ * must then never read `allCandidates` as "every declaration of `name`,
+ * all genuinely empty": a declaration this pass never reached might be the
+ * one with real callers. The widen pass re-examines a truncated file
+ * (`reexamineAlreadySeenFiles`) so the REALISTIC case (a cap hit only
+ * because too many same-named declarations sat in ONE file) still settles
+ * here; `capped` is the honest fallback for the rarer case where even that
+ * is not enough.
+ */
+async function resolveCallerCandidateForName(
+  name: string,
+  selected: readonly ImpactCandidate[],
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+  allowTestPaths: boolean,
+  deadline: number,
+): Promise<{ settled?: ResolvedFacetFocal; allCandidates: readonly ResolvedFacetFocal[]; capped: boolean }> {
+  const withCallSite = async (pool: readonly ResolvedFacetFocal[]): Promise<ResolvedFacetFocal | undefined> => {
+    for (const candidate of pool) {
+      if (Date.now() >= deadline) break;
+      const scan = await callerSitesForFocal(candidate, args, workspace, cache, allowTestPaths, deadline);
+      if (scan.sites.length > 0) return candidate;
+    }
+    return undefined;
+  };
+  const cheap = await findAllDeclaredCallablesNamed(selected, name, workspace, cache);
+  let settled: ResolvedFacetFocal | undefined = cheap.candidates.length > 0 ? await withCallSite(cheap.candidates) : undefined;
+  let allCandidates: readonly ResolvedFacetFocal[] = cheap.candidates;
+  let capped = cheap.capped;
+  if (settled === undefined) {
+    // Either no cheap (selected-derived) candidate at all, or every one of
+    // them genuinely has zero call sites -- widen to a bounded,
+    // declaration-shaped, whole-workspace scan before conceding. Paid only
+    // here, once the cheap pass alone could not settle it.
+    const widened = await widenDeclaredCallablesNamedByScan(cheap.candidates, name, args, workspace, cache, cheap.capped);
+    if (widened.candidates.length > 0) {
+      settled = await withCallSite(widened.candidates);
+      allCandidates = [...cheap.candidates, ...widened.candidates];
+    }
+    capped = capped || widened.capped;
+  }
+  return { settled, allCandidates, capped };
+}
+
+async function resolveFacetFocal(
+  requirement: FacetRequirement,
+  selected: readonly ImpactCandidate[],
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+  allowTestPaths: boolean,
+  deadline: number,
+): Promise<ResolvedFacetFocal | undefined> {
+  // P0-1 (eval-0927 review-r3 #1, qualifiedTsMethod/qualifiedTsService/
+  // qualifiedPyMethod/tsDecoratorSameLine): a clause naming "A.b" asks about
+  // the member `b` declared inside `A` -- try that exact, owner-scoped
+  // resolution before anything else.
+  const qualifiedMembers = requirement.qualifiedMembers ?? [];
+  for (const { owner, member } of qualifiedMembers) {
+    const found = await findDeclaredMemberOfOwner(selected, owner, member, workspace, cache);
+    if (found) return found;
+    // P0-2 (eval-0927 review-r4 #2, cppQualifiedDef/cppQualifiedDotSpelling):
+    // the pack's own selection may hold only the member's bodyless in-class
+    // declaration (or nothing at all) -- see `widenDeclaredMemberOfOwnerByScan`'s
+    // own doc for why the file that actually proves ownership is often a
+    // different translation unit the locator never selected.
+    const widened = await widenDeclaredMemberOfOwnerByScan(selected, owner, member, args, workspace, cache);
+    if (widened) return widened;
+  }
+  // A class is never the subject of a facet that names one of its members
+  // (P0-1's own second half): the bare owner name is excluded from every
+  // identifier tier below, so a query like "Who calls HttpClient.fetchJson?"
+  // can still resolve to `fetchJson` itself (via the ordinary tiers) even
+  // when the owner-scoped lookup just above found nothing, but never
+  // silently settles for the class instead.
+  const qualifiedOwners = new Set(qualifiedMembers.map((pair) => pair.owner));
+  if (requirement.facet === "value" || requirement.facet === "condition") {
+    for (const identifier of requirement.subjectIdentifiers) {
+      if (qualifiedOwners.has(identifier)) continue;
+      const found = await findDeclaredCallableAmong(selected, identifier, workspace, cache);
+      if (found) return found;
+    }
+    // The callable that merely READS an undeclared key (`process.env.X ??
+    // 30000`) is exactly where its value or condition is applied.
+    for (const identifier of requirement.subjectIdentifiers) {
+      if (qualifiedOwners.has(identifier)) continue;
+      const found = await findEnclosingCallableForLiteral(identifier, args, workspace, cache);
+      if (found) return found.focal;
+    }
+    if (requirement.subjectTerms.length > 0) {
+      return bestConceptAnchoredCandidate(selected, requirement.subjectTerms, workspace, cache);
+    }
+    return undefined;
+  }
+  // flow / callers: a declaration anywhere is the subject, but a callable
+  // that only mentions an undeclared name (`record.execution_contract?.state`
+  // in some consumer) is not — the pack's own concept-anchored selection
+  // comes before it (eval-0927 review: "trace how read_file task_pack builds
+  // execution_contract …" made a bench script's reader the flow focal and
+  // demanded its body instead of the builder the pack already served).
+  let mention: ResolvedFacetFocal | undefined;
+  for (const identifier of requirement.subjectIdentifiers) {
+    if (qualifiedOwners.has(identifier)) continue;
+    // P0-2 (eval-0927 review-r3 #2, tsTwoClassesSameMethod/kotlinFun): see
+    // `resolveCallerCandidateForName`'s own doc for the full disambiguation
+    // -- only when EVERY same-named declaration genuinely has zero call
+    // sites (or none exists at all) does this identifier fall through to
+    // the ordinary mention/undetermined path below.
+    const { settled, allCandidates, capped } = await resolveCallerCandidateForName(identifier, selected, args, workspace, cache, allowTestPaths, deadline);
+    if (settled !== undefined) return settled;
+    if (allCandidates.length > 0 && !capped) return allCandidates[0]; // a real declaration exists; every candidate found is legitimately empty
+    // P1-7 (eval-0927 review-r4 #7, sixSameNameOneFile): a cap that is STILL
+    // hit after widening must never settle for a first-match mention fallback
+    // either -- that would just move the same false-empty risk onto whatever
+    // sorts first in scan order (the exact P0-2 failure mode this whole
+    // function exists to prevent), only now under an identity this pass
+    // cannot even verify names `identifier` at all. Try the next named
+    // identifier, if any; if none settles, `resolveFacetFocal` returns
+    // `undefined` below and the gate discloses `undetermined` honestly.
+    if (capped) continue;
+    // No declaration of `identifier` exists anywhere this pack can see --
+    // the ordinary mention fallback (an unrelated call site's enclosing
+    // function, e.g. for an undeclared env-var-style name).
+    const found = await findEnclosingCallableForLiteral(identifier, args, workspace, cache);
+    mention ??= found?.focal;
+  }
+  // P0-2 (eval-0927 review-r2 #2, methodManyCallers): every named identifier
+  // failed to resolve to its OWN declaration above -- only a MENTION (the
+  // enclosing callable of some unrelated call site/reference) is available,
+  // and ITS name can differ from the identifier the clause actually asked
+  // about entirely (`fetchJson`'s method-shorthand declaration lost the
+  // 40-file-cap race to 45 ordinary call sites, and the enclosing function of
+  // one of THOSE -- "getA0" -- came back here instead). The same applies to a
+  // concept anchor chased only because the identifier search came up empty:
+  // it is scored against BODY/NAME term overlap, never against the named
+  // identifier. Presenting either as if it answered the named identifier --
+  // worse, certifying "0 call sites" under that wrong name -- is exactly what
+  // policy item 2 forbids; a candidate whose name matches NONE of the named
+  // identifiers is discarded here so the caller falls through to the
+  // ordinary "no-focal" -> undetermined path (facetGate.ts) instead.
+  const namesAnIdentifier = (focal: ResolvedFacetFocal | undefined): boolean =>
+    focal !== undefined && requirement.subjectIdentifiers.some((identifier) => normIdent(focal.name) === normIdent(identifier));
+  // P1-8 (eval-0927 review-r3 #8, unicodeCallersTs/cjkCallersEn): tried
+  // BEFORE the concept-anchor tier just below, not after -- a WEAK candidate
+  // (a bare word sitting in the clause's own identifier slot that
+  // `explicitIdentifiersIn` never extracted because it is not code-shaped:
+  // lowercase Latin-with-diacritics, a bare CJK word, OR an ordinary all-
+  // lowercase no-underscore/no-hump ASCII word like "flush" -- the SAME
+  // codeShaped rule rejects all three) is folded into `subjectTerms` too
+  // (P1-8's "never dropped from concept terms" rule, see requestFacets.ts),
+  // so with `subjectIdentifiers` empty the concept-anchor tier's own
+  // permissive accept-anything-when-no-identifier-was-named condition below
+  // would otherwise return WHATEVER file happens to score against the weak
+  // candidate's bare text (a mention, not the declaration) before this
+  // exact tier ever ran. Uses the SAME `resolveCallerCandidateForName`
+  // P0-2 disambiguation as the ordinary identifier tier above -- a weak
+  // candidate can be declared in several classes/files too (confirmed live:
+  // "flush", not code-shaped, only ever reaches resolution through this
+  // tier, so without disambiguation here it reproduced the exact P0-2 bug
+  // this function exists to fix). An EXACT declaration match is strictly
+  // better evidence than a fuzzy name/body score, so it is tried first; a
+  // miss here (no declaration of THIS weak candidate anywhere) falls
+  // through to the next weak candidate, then to the SAME concept-anchor
+  // guess as before, so nothing is lost when no exact declaration exists
+  // anywhere.
+  if (requirement.subjectIdentifiers.length === 0) {
+    for (const candidateWord of requirement.subjectWeakCandidates ?? []) {
+      const { settled, allCandidates, capped } = await resolveCallerCandidateForName(candidateWord, selected, args, workspace, cache, allowTestPaths, deadline);
+      if (settled !== undefined) return settled;
+      if (allCandidates.length > 0 && !capped) return allCandidates[0]; // a real declaration exists; every candidate found is legitimately empty
+      // P1-7: capped -- try the next weak candidate rather than settling for
+      // an unverified "empty" (see the identifier loop's own comment above).
+    }
+  }
+  if (requirement.subjectTerms.length > 0) {
+    const concept = await bestConceptAnchoredCandidate(selected, requirement.subjectTerms, workspace, cache);
+    if (concept !== undefined && (requirement.subjectIdentifiers.length === 0 || namesAnIdentifier(concept))) return concept;
+  }
+  return requirement.subjectIdentifiers.length === 0 || namesAnIdentifier(mention) ? mention : undefined;
+}
+
+/**
+ * FIX-FAB item 4 (eval-0927 review #5, python): Python's relative-import dot
+ * notation: N leading dots with NO slash mean "go up N-1 package levels from
+ * the importing file's own directory" (one dot = the SAME package, `from
+ * .config import X`; two = the parent package, `from ..pkg.mod import X`),
+ * and the dots are followed by a DOTTED MODULE PATH, not a filesystem path
+ * (`pkg.mod` -> `pkg/mod`). Distinguished from a TS/JS relative specifier
+ * (always slash-delimited: "./x", "../x") by the absence of a "/" right
+ * after the leading dots -- a bare "." (`from . import config`) is Python's
+ * own "just this package" spelling with no TS/JS equivalent at all; it
+ * names no module path of its own (the module name is the IMPORTED
+ * BINDING, `config`, which this function -- given only the specifier --
+ * cannot see), so it resolves to no candidate here (out of scope: a
+ * qualified `config.X` reference is this module's own stated limitation,
+ * see evidenceClosure.ts's header).
+ */
+const PYTHON_DOTTED_RELATIVE_RE = /^(\.+)([\w.]*)$/;
+
+/**
+ * P1-4 (eval-0927 review r2 finding 4, esmJsImport): a TypeScript NodeNext/
+ * Bundler-resolution ESM specifier names its OWN COMPILED OUTPUT extension
+ * (`import { X } from "./config.js"`) even though the source file on disk is
+ * `.ts`/`.tsx` (or `.mts`/`.cts` for a `.mjs`/`.cjs` specifier) — TypeScript's
+ * own resolution rule, not a project-specific convention. Appending FURTHER
+ * extensions to a base that ALREADY ends in one of these (the general loop
+ * below) only ever produces a nonsense path (`config.js.ts`); the specifier's
+ * own written extension must first be STRIPPED and replaced. Order mirrors
+ * the TS compiler's own preference (`.js` tries `.ts` before the less common
+ * `.tsx`); a literal `.js`/`.jsx`/`.mjs`/`.cjs` file (a plain JS project) is
+ * still tried too, via the unchanged general loop below — this only ADDS
+ * candidates, never removes the literal one.
+ */
+const ESM_COMPILED_EXTENSION_SOURCE_MAP: ReadonlyArray<readonly [string, readonly string[]]> = [
+  [".mjs", [".mts"]],
+  [".cjs", [".cts"]],
+  [".jsx", [".tsx"]],
+  [".js", [".ts", ".tsx"]],
+];
+
+function esmCompiledExtensionSourceCandidates(base: string): string[] {
+  for (const [suffix, sourceExts] of ESM_COMPILED_EXTENSION_SOURCE_MAP) {
+    if (base.endsWith(suffix)) return sourceExts.map((ext) => `${base.slice(0, -suffix.length)}${ext}`);
+  }
+  return [];
+}
+
+/** Candidate relative paths (with common extensions/index files tried) an import `spec` might resolve to, relative to `focalPath`'s own directory (relative specifiers) or the workspace root / focal directory (a dotted absolute specifier -- Python/Java/C#). Existence is decided by the caller simply trying `readCached` on each -- no separate fs check duplicated here. */
+function candidateRelativePaths(focalPath: string, spec: ImportSpecifier): string[] {
+  const EXTENSIONS = ["", ".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".java", ".cs", ".h", ".hpp", ".hh", ".c", ".cc", ".cpp"];
+  const baseDir = path.posix.dirname(focalPath.replace(/\\/g, "/"));
+  const pythonDotted = spec.relative ? PYTHON_DOTTED_RELATIVE_RE.exec(spec.specifier) : null;
+  let bases: string[];
+  let includeInitPy = false;
+  if (pythonDotted) {
+    const dots = pythonDotted[1]!.length;
+    const rest = pythonDotted[2]!; // "" for a bare "."/".." (see doc comment: no candidate to offer)
+    if (rest.length === 0) {
+      bases = [];
+    } else {
+      let dir = baseDir;
+      for (let level = 1; level < dots; level++) dir = path.posix.dirname(dir);
+      bases = [path.posix.normalize(path.posix.join(dir, rest.replace(/\./g, "/")))];
+      includeInitPy = true;
+    }
+  } else {
+    bases = spec.relative
+      ? [path.posix.normalize(path.posix.join(baseDir, spec.specifier))]
+      : [spec.specifier.replace(/\./g, "/"), path.posix.normalize(path.posix.join(baseDir, spec.specifier.replace(/\./g, "/")))];
+  }
+  const out: string[] = [];
+  for (const base of bases) {
+    // P1-4: the compiled-output-extension source candidates go FIRST — this
+    // is the one TypeScript itself would actually resolve, and the general
+    // loop below (unchanged) would otherwise reach the coincidentally-real
+    // `${base}${ext}`/`index` candidates further down the list, or miss the
+    // real source file entirely.
+    for (const sourceCandidate of esmCompiledExtensionSourceCandidates(base)) {
+      out.push(sourceCandidate.replace(/^\.\//, ""));
+    }
+    for (const ext of EXTENSIONS) {
+      out.push(`${base}${ext}`.replace(/^\.\//, ""));
+      out.push(`${base}/index${ext}`.replace(/^\.\//, ""));
+    }
+    // Python's own package-directory convention (`mod.py` OR `mod/__init__.py`)
+    // -- item 4's explicit acceptance shape, absent from the TS/JS-oriented
+    // "/index<ext>" loop above.
+    if (includeInitPy) out.push(`${base}/__init__.py`.replace(/^\.\//, ""));
+  }
+  return out;
+}
+
+async function resolveImportSpecifierFile(
+  focalPath: string,
+  spec: ImportSpecifier,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; content: string } | undefined> {
+  for (const relPath of candidateRelativePaths(focalPath, spec)) {
+    const content = readCached(workspace, relPath, cache);
+    if (content !== undefined) return { path: relPath, content };
+  }
+  return undefined;
+}
+
+/**
+ * `calleeName`'s own declaring file + symbol, one hop from `focalPath` via
+ * its import lines. Go is out of `importSpecifiersNaming`'s scope by
+ * design (a package import never names an individual binding) -- for a Go
+ * focal with no resolving import, sibling `.go` files in the SAME
+ * directory are tried instead (real Go same-package visibility), bounded to
+ * MAX_IMPORT_RESOLVED_FILES_PER_FOCAL.
+ *
+ * Chip 1 (2026-09-27, INT-A): tries `focal`'s OWN file FIRST, same rule
+ * `constantClosureForFocal` already applies for the value/condition facets
+ * (`findModuleConstantWindow` on `lines` before any import hop) -- a
+ * same-module helper or a sibling method of the same class needs no import
+ * line to reach, so the callee-resolution mirror of that same-file check was
+ * simply missing, and every such callee (the common "focal calls a private
+ * helper two lines below it" shape, TS/JS/Python/Go/Java/C#/C/C++ alike)
+ * never became a flow callee at all. Still exactly one hop: this is a file
+ * the hook already read for `focal` itself, not a new file the closure
+ * budget must account for.
+ */
+async function resolveCalleeFile(
+  calleeName: string,
+  focal: ResolvedFacetFocal,
+  focalFileLines: readonly string[],
+  hashComment: boolean,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; content: string; symbol?: { startLine: number; endLine: number } } | undefined> {
+  const focalContent = readCached(workspace, focal.path, cache);
+  if (focalContent !== undefined) {
+    const focalLang = languageForPath(focal.path);
+    const sameFileParsed = (focalLang ? await cache.parsedSymbols(focalContent, focalLang, focal.path) : null) ?? [];
+    const sameFileSymbol = sameFileParsed.find((s) =>
+      unqualifiedSymbolTail(s.name) === calleeName && CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind)
+    );
+    if (sameFileSymbol !== undefined) {
+      return { path: focal.path, content: focalContent, symbol: { startLine: sameFileSymbol.startLine, endLine: sameFileSymbol.endLine } };
+    }
+  }
+  const specifiers = importSpecifiersNaming(focalFileLines, calleeName, hashComment, focal.path).slice(0, MAX_IMPORT_RESOLVED_FILES_PER_FOCAL);
+  const candidateFiles: Array<{ path: string; content: string }> = [];
+  for (const spec of specifiers) {
+    const resolved = await resolveImportSpecifierFile(focal.path, spec, workspace, cache);
+    if (resolved !== undefined) candidateFiles.push(resolved);
+  }
+  if (candidateFiles.length === 0 && path.extname(focal.path) === ".go") {
+    const dir = path.posix.dirname(focal.path.replace(/\\/g, "/"));
+    // P0-3 (eval-0927 review r2 finding 3, goManyFiles/goMethodManyCallers):
+    // list the OWNER's directory directly (`subPath` walks that one
+    // subtree) instead of taking a `MAX_CALLER_FILES_EXAMINED` PREFIX of a
+    // whole-workspace walk — a package sibling sorting behind unrelated
+    // files elsewhere in the workspace must still be found.
+    for (const file of walkCodeFiles(workspace, { subPath: dir }).slice(0, MAX_CALLER_FILES_EXAMINED)) {
+      if (candidateFiles.length >= MAX_IMPORT_RESOLVED_FILES_PER_FOCAL) break;
+      if (file.relPath === focal.path || path.extname(file.relPath) !== ".go") continue;
+      if (path.posix.dirname(file.relPath.replace(/\\/g, "/")) !== dir) continue;
+      const content = readCached(workspace, file.relPath, cache);
+      if (content !== undefined) candidateFiles.push({ path: file.relPath, content });
+    }
+  }
+  for (const file of candidateFiles) {
+    const lang = languageForPath(file.path);
+    const parsed = (lang ? await cache.parsedSymbols(file.content, lang, file.path) : null) ?? [];
+    const symbol = parsed.find((s) => unqualifiedSymbolTail(s.name) === calleeName && CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind));
+    if (symbol !== undefined) return { path: file.path, content: file.content, symbol: { startLine: symbol.startLine, endLine: symbol.endLine } };
+  }
+  return undefined;
+}
+
+/**
+ * `value`/`condition` closure for `focal`: module-level constants its OWN
+ * body reads (same file), then -- for a candidate not declared in the same
+ * file -- one import-resolved file; then at most MAX_CALLEES_PER_REQUIREMENT
+ * direct in-workspace callees, one hop, each searched the SAME way
+ * (fetchWithRetry -> loadOptions -> DEFAULT_OPTIONS; fetchWithRetry ->
+ * shouldRetry -> RETRYABLE_STATUSES). Bounded to MAX_CONSTANTS_PER_REQUIREMENT
+ * total windows.
+ *
+ * FIX-G (2026-09-27, documented interface fix): the SAME walk now continues
+ * past the serving bound, up to MAX_PLANNED_CONSTANT_WINDOWS, and reports what
+ * it could NOT resolve — the gate (`buildFacetReadiness`) must know every
+ * constant the answer needs, not only the ones this pack had room to serve.
+ * `windows.slice(0, MAX_CONSTANTS_PER_REQUIREMENT)` is exactly FIX-C1's former
+ * return value (same order: the focal's own constants, then one-hop callee
+ * constants), so what the hook SERVES is unchanged; the rest is plan only.
+ */
+/** How many constant windows one requirement's PLAN may name (the hook still serves at most MAX_CONSTANTS_PER_REQUIREMENT of them). */
+const MAX_PLANNED_CONSTANT_WINDOWS = 12;
+/** FIX-FAB item 5 (eval-0927 review #8, twoConstants): how many levels deep a resolved constant's OWN initializer is scanned for further constant-like references (`TOTAL_BUDGET_MS = BASE_TIMEOUT_MS * MAX_ATTEMPTS` is depth 1 from `deadlineFor`'s own depth-0 read of `TOTAL_BUDGET_MS`). */
+const MAX_CONSTANT_INITIALIZER_DEPTH = 2;
+/**
+ * P1-4 (round-4/5 fable finding, arrowChainDepth3): a chain of PASS-THROUGH
+ * CALLABLE bindings (`fetchWithRetry` -> `shouldRetry` -> `isRetryable` ->
+ * `classify` -> `RETRYABLE_STATUSES`) never pushes a window for any hop
+ * that is itself callable (`chaseConstant`'s own `isCallableBinding` skip),
+ * so counting those hops against the SAME depth budget as a genuine VALUE's
+ * own nested-reference scan (MAX_CONSTANT_INITIALIZER_DEPTH, deliberately
+ * small — a value rarely nests more than one arithmetic level deep) cut the
+ * chase before it ever reached a real value at all. Callable hops cost
+ * nothing toward MAX_PLANNED_CONSTANT_WINDOWS (nothing is pushed for them),
+ * so a materially larger, still-bounded budget is safe; `visitedConstantNames`
+ * independently guards against a cycle regardless of either cap.
+ */
+const MAX_CALLABLE_CHASE_DEPTH = 4;
+/** FIX-FAB item 4 (eval-0927 review #7, barrel): how many files a re-export chase visits beyond the starting one before giving up (P2: undetermined, not a silent miss). */
+const MAX_REEXPORT_HOPS = 3;
+/** P1-5 (eval-0927 review r2 finding 5, barrelStar2): total files a re-export chase may VISIT across every hop combined — a ceiling on the breadth-first search below, independent of `MAX_IMPORT_RESOLVED_FILES_PER_FOCAL` (which bounds how many specifiers ONE file contributes to the next hop's frontier). */
+const MAX_REEXPORT_FILES_TOTAL = 8;
+
+/**
+ * FIX-FAB item 4 (barrel): `name`'s declaration may not be in the FIRST
+ * import-resolved file at all — a TS/JS barrel (`export { X } from
+ * "./defaults"`, `export { Y as X } from "./defaults"`, a wildcard `export *
+ * from "./defaults"`) only re-points to yet another file.
+ * `importSpecifiersNaming` (evidenceClosure.ts) recognizes those re-export
+ * shapes exactly like an import line, so following them is the SAME
+ * one-hop resolution repeated up to MAX_REEXPORT_HOPS hops beyond the
+ * starting one. Python/Go/Java/C# never reach a second hop here: their
+ * import shapes always name the declaring file directly (or, for Go, name
+ * nothing at all — `findGoPackageConstantWindow` below is the fallback for
+ * that), so the search finds nothing to chase past hop 1 and returns
+ * `undefined`, the same "give up" this had before this fix.
+ *
+ * P1-5 (eval-0927 review r2 finding 5, barrelStar2): a barrel commonly
+ * re-exports through SEVERAL wildcard specifiers on the SAME line set
+ * (`export * from "./env"; export * from "./defaults";`) — the declaration
+ * can be in ANY of them, so every hop must try EVERY specifier of EVERY
+ * file reached so far (a real breadth-first search over the frontier of
+ * files reached at this hop) before giving up, never stop advancing past
+ * the FIRST specifier that merely happens to RESOLVE to a real file
+ * (resolving to a file that itself lacks the name is not "the declaration
+ * wins", it is one dead end among several siblings still unexamined this
+ * same hop). First declaration found, in breadth-first order, wins; bounded
+ * by MAX_REEXPORT_HOPS hops and MAX_REEXPORT_FILES_TOTAL files total so a
+ * pathological fan-out still terminates.
+ */
+async function findConstantAcrossReexports(
+  startLines: readonly string[],
+  startPath: string,
+  name: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  const visited = new Set<string>([startPath]);
+  let frontier: Array<{ lines: readonly string[]; path: string }> = [{ lines: startLines, path: startPath }];
+  let filesVisited = 0;
+  for (let hop = 0; hop < MAX_REEXPORT_HOPS && frontier.length > 0 && filesVisited < MAX_REEXPORT_FILES_TOTAL; hop++) {
+    const nextFrontier: Array<{ lines: readonly string[]; path: string }> = [];
+    for (const { lines, path: filePath } of frontier) {
+      if (filesVisited >= MAX_REEXPORT_FILES_TOTAL) break;
+      let specifiers = importSpecifiersNaming(lines, name, hasHashComments(filePath), filePath);
+      // B4(b) (round-9 fable finding, pyTwoStarImportsLastWins): Python's
+      // `from x import *` re-binds the module namespace every time it runs
+      // -- when SEVERAL star-import lines in the SAME file could define
+      // `name`, the LAST one (source order) is the one whose binding
+      // survives at runtime, never the first. This BFS otherwise tries
+      // specifiers in source order and returns on the FIRST hit; reversing
+      // only the WILDCARD candidates for a Python file makes "first hit"
+      // coincide with "last declared" — a NAMED import already pins one
+      // exact file (only one can ever name `name` this way), so its
+      // position is untouched.
+      if (/\.py$/.test(filePath)) {
+        const wildcards = specifiers.filter((s) => s.wildcard === true).reverse();
+        const named = specifiers.filter((s) => s.wildcard !== true);
+        specifiers = [...named, ...wildcards];
+      }
+      specifiers = specifiers.slice(0, MAX_IMPORT_RESOLVED_FILES_PER_FOCAL);
+      for (const spec of specifiers) {
+        if (filesVisited >= MAX_REEXPORT_FILES_TOTAL) break;
+        const resolved = await resolveImportSpecifierFile(filePath, spec, workspace, cache);
+        if (resolved === undefined || visited.has(resolved.path)) continue;
+        visited.add(resolved.path);
+        filesVisited += 1;
+        const resolvedLines = resolved.content.split(/\r?\n/);
+        const resolvedHashComment = hasHashComments(resolved.path);
+        const window = findModuleConstantWindow(resolvedLines, name, resolvedHashComment)
+          // B3 (round-8 fable finding, cjsDestructureConst): `const { NAME } =
+          // require("./config")` already resolves the FILE via the `req`
+          // shape above -- the member itself may still be an EXPORTS-OBJECT
+          // key (`module.exports = { NAME: ... }`), not a plain top-level
+          // declaration, so this module's own export-member search is tried
+          // too before giving up on this file.
+          ?? findModuleExportsMemberWindow(resolvedLines, name, resolvedHashComment);
+        if (window) return { path: resolved.path, start: window.start, end: window.end, truncated: window.truncated };
+        nextFrontier.push({ lines: resolvedLines, path: resolved.path });
+      }
+    }
+    frontier = nextFrontier;
+  }
+  return undefined;
+}
+
+/**
+ * FIX-FAB item 3 (eval-0927 review #6, golang): Go's PACKAGE-level
+ * (same-directory) constant/var visibility — `DefaultTimeout`,
+ * `retryableStatuses` declared in SIBLING `.go` files of the same package,
+ * never through an import (Go has no per-name import for a package-local
+ * binding — `importSpecifiersNaming`'s own stated limitation). Mirrors
+ * `resolveCalleeFile`'s existing Go same-directory fallback, with the
+ * ADDITIONAL test-file exclusion item 3 asks for: a non-test owner never
+ * resolves a constant that lives only in a sibling `_test.go` file, while an
+ * owner that is ITSELF in a test file may still read one.
+ */
+async function findGoPackageConstantWindow(
+  ownerPath: string,
+  name: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  if (path.extname(ownerPath) !== ".go") return undefined;
+  const dir = path.posix.dirname(ownerPath.replace(/\\/g, "/"));
+  const ownerIsTest = isTestConcernPath(ownerPath);
+  let examined = 0;
+  // P0-3 (eval-0927 review r2 finding 3, goManyFiles): list the OWNER's
+  // directory directly, never a whole-workspace walk prefix — see
+  // `resolveCalleeFile`'s identical Go fallback above for the full reasoning.
+  for (const file of walkCodeFiles(workspace, { subPath: dir }).slice(0, MAX_CALLER_FILES_EXAMINED)) {
+    if (file.relPath === ownerPath || path.extname(file.relPath) !== ".go") continue;
+    if (path.posix.dirname(file.relPath.replace(/\\/g, "/")) !== dir) continue;
+    if (!ownerIsTest && isTestConcernPath(file.relPath)) continue;
+    if (examined >= MAX_IMPORT_RESOLVED_FILES_PER_FOCAL) break;
+    examined++;
+    const content = readCached(workspace, file.relPath, cache);
+    if (content === undefined) continue;
+    const window = findModuleConstantWindow(content.split(/\r?\n/), name, false);
+    if (window) return { path: file.relPath, start: window.start, end: window.end, truncated: window.truncated };
+  }
+  return undefined;
+}
+
+/**
+ * B4 (round-8 fable finding, rustUseConstPlain): a Rust `use path::to::NAME;`
+ * statement binds NAME directly (the body reads it BARE — `let timeout =
+ * TIMEOUT_MS;`, no qualifier at the use site at all) — `rustUseBindings`
+ * already parses this exact shape (`NAME -> [...modulePath, "NAME"]`); the
+ * MODULE is the path's own PARENT (every segment but the last), resolved
+ * the identical way `resolveModuleNamespaceFile`'s Rust branch already
+ * resolves a `use`d NAMESPACE, then `name` is looked up at that module's
+ * own top level. A `mod name;` binding (`["self", name]`, no further
+ * segments once the name itself is dropped) legitimately yields
+ * `"workspace-module-unresolved"` here — `resolveRustModulePath`'s own
+ * `rest.length === 0` rule — silently returned as `undefined`: `mod`
+ * declarations name a whole module, never a single constant, so this path
+ * simply does not apply to one and the ordinary candidate scan continues.
+ */
+async function resolveRustUseConstantWindow(
+  name: string,
+  ownerLines: readonly string[],
+  ownerPath: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  if (path.extname(ownerPath) !== ".rs") return undefined;
+  const segments = rustUseBindings(ownerLines, false).get(name);
+  if (segments === undefined || segments.length < 2) return undefined;
+  const resolvedModule = await resolveRustModulePath(segments.slice(0, -1), ownerPath, workspace, cache);
+  if (resolvedModule === undefined || resolvedModule === "workspace-module-unresolved") return undefined;
+  const moduleLines = resolvedModule.content.split(/\r?\n/);
+  const window = findModuleConstantWindow(moduleLines, name, false);
+  return window ? { path: resolvedModule.path, start: window.start, end: window.end, truncated: window.truncated } : undefined;
+}
+
+/**
+ * Shared by B2's Kotlin package-wildcard SHOULD case and (round-9)
+ * `findJvmImportedConstantWindow`'s lower-case-package branch: a TOP-LEVEL
+ * declaration of `name` in a file declaring `package packagePath` exactly
+ * (Kotlin/Scala convention — `findModuleConstantWindow`'s own column-0
+ * shapes), restricted to files matching `extRe`. First match, in scan order,
+ * wins; `undefined` when no file declares that exact package, or none of
+ * those that do declares `name` at its own top level.
+ */
+async function findPackageTopLevelDeclarationWindow(
+  packagePath: string,
+  name: string,
+  extRe: RegExp,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    // Exact package only: `\b` also matched `package cfg.aaa` for `cfg`, and a
+    // sub-package's same-named constant is neither imported nor visible.
+    // (scanLiteral's safe-regex guard refuses lookaheads, hence no `(?!…)`.)
+    scanned = scanLiteral(`^package\\s+${escapeRegExp(packagePath)}(?:\\s|;|$)`, workspace, { regex: true, caseInsensitive: false });
+  } catch {
+    return undefined;
+  }
+  for (const match of scanned) {
+    if (!extRe.test(match.path) || isTestConcernPath(match.path)) continue;
+    const fileContent = readCached(workspace, match.path, cache);
+    if (fileContent === undefined) continue;
+    const window = findModuleConstantWindow(fileContent.split(/\r?\n/), name, false);
+    if (window) return { path: match.path, start: window.start, end: window.end, truncated: window.truncated };
+  }
+  return undefined;
+}
+
+/**
+ * B3 (round-9 fable finding, javaStaticStarWrongOwner/csUsingStaticWrongOwner):
+ * the member-window search behind a TYPE wildcard import (`import
+ * a.b.C.*` Kotlin/Java, `import static a.b.C.*` Java, `using static A.B.C;`
+ * C#) — UNLIKE `findQualifiedConstantWindow`'s general "exactly one OTHER
+ * declaring file is still unambiguous" priority 3 (correct for an ORDINARY
+ * qualified reference, where the workspace usually declares the referenced
+ * type only once), a wildcard import's own specifier already NAMES the
+ * owner's full package/namespace path (`a.b`, `A.B`) — so "there happens to
+ * be only one OTHER class named C in the whole workspace" is not evidence
+ * this import resolved to THAT class. Own reproduction: an external `import
+ * static lib.external.Config.*` next to a local `app.Config` wrongly served
+ * the LOCAL class's field as though the WILDCARD import had named it. Only a
+ * file that BOTH declares `class|object|struct|… C` AND its own
+ * `package`/`namespace` line matches `packagePath` EXACTLY is a candidate;
+ * none such -> `undefined` (never a fallback to "the only other same-named
+ * class"), which the caller then leaves as "not from that import", exactly
+ * like an ordinary miss.
+ */
+async function findPackageQualifiedOwnerMemberWindow(
+  ownerLastSegment: string,
+  packagePath: string,
+  member: string,
+  isCSharp: boolean,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = scanLiteral(`\\b(?:class|object|struct|enum|interface|namespace|module|record|type)\\s+${escapeRegExp(ownerLastSegment)}\\b`, workspace, { regex: true, caseInsensitive: false });
+  } catch {
+    return undefined;
+  }
+  const packageRe = isCSharp
+    ? new RegExp(`^\\s*namespace\\s+${escapeRegExp(packagePath)}\\s*(?:;|\\{|$)`)
+    : new RegExp(`^\\s*package\\s+${escapeRegExp(packagePath)}\\s*(?:;|$)`);
+  const memberRe = new RegExp(`^\\s*(?:(?:export|public|private|protected|internal|static|readonly|final|const|val|var|let|def)\\s+|[A-Za-z_][\\w<>\\[\\],.?]*\\s+)*${escapeRegExp(member)}\\b\\s*(?::[^=;]*)?(?:=(?!=)|,|\\(|$)`);
+  for (const match of scanned) {
+    const content = readCached(workspace, match.path, cache);
+    if (content === undefined) continue;
+    const lines = content.split(/\r?\n/);
+    const hashComment = hasHashComments(match.path);
+    if (!lines.some((line) => packageRe.test(maskNonCode(line, hashComment, match.path)))) continue;
+    const bodyEnd = Math.min(ownerBraceExtentEnd(lines, match.line, hashComment), lines.length);
+    for (let i = match.line - 1; i < bodyEnd; i++) {
+      if (!memberRe.test(maskNonCode(lines[i]!, hashComment, match.path))) continue;
+      const start = i + 1;
+      const realEnd = declarationRealExtent(lines, start, hashComment).end;
+      const end = Math.min(realEnd, start + MAX_CONSTANT_WINDOW_LINES - 1, bodyEnd);
+      return { path: match.path, start, end, truncated: end < realEnd };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * B2 (round-8 fable finding, ktStarImportLowerConst/javaStaticStarImportConst/
+ * csUsingStaticPascalConst's TimeoutMs): a TYPE wildcard this file imports
+ * (`import a.b.C.*` Kotlin/Java, `import static a.b.C.*` Java, `using
+ * static A.B.C;` C#) makes every one of C's own members reachable under its
+ * BARE name — an otherwise-unresolved bare `name` is looked up as `C.name`,
+ * package-checked (B3, round-9: `findPackageQualifiedOwnerMemberWindow`,
+ * replacing the old, over-permissive `findQualifiedConstantWindow` call —
+ * see that function's own doc for why); several wildcard imports are tried
+ * in the order they appear, first match wins; not found there -> "not from
+ * that import" (never disclosed as if it were — `chaseConstant`'s own
+ * `namedSpecs` filter already excludes every wildcard spec from that
+ * wording). A specifier whose last dotted segment is lower-case names a
+ * PACKAGE, not a type — Kotlin is the one family here where a top-level
+ * (non-member) constant is reachable this way at all (Java/C# always
+ * require a class qualifier even under a package wildcard), so this SHOULD
+ * case is scoped to `.kt`/`.kts` files.
+ */
+async function findWildcardImportedConstantWindow(
+  name: string,
+  ownerLines: readonly string[],
+  ownerPath: string,
+  hashComment: boolean,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  const specs = importSpecifiersNaming(ownerLines, name, hashComment, ownerPath).filter((spec) => spec.wildcard === true);
+  const typeSpecs = specs.filter((spec) => /^[A-Z]/.test(spec.specifier.split(".").pop() ?? ""));
+  const isCSharp = /\.cs$/.test(ownerPath);
+  for (const spec of typeSpecs) {
+    const segments = spec.specifier.split(".");
+    const owner = segments.pop()!;
+    const packagePath = segments.join(".");
+    const resolution = await findPackageQualifiedOwnerMemberWindow(owner, packagePath, name, isCSharp, workspace, cache);
+    if (resolution !== undefined) return resolution;
+  }
+  if (!/\.kts?$/.test(ownerPath)) return undefined;
+  const packageSpecs = specs.filter((spec) => !/^[A-Z]/.test(spec.specifier.split(".").pop() ?? ""));
+  for (const spec of packageSpecs) {
+    const window = await findPackageTopLevelDeclarationWindow(spec.specifier, name, /\.kts?$/, workspace, cache);
+    if (window) return window;
+  }
+  return undefined;
+}
+
+/**
+ * B2 (round-9 fable finding, ktImportedTopLevelConst/ktImportedObjectMemberConst):
+ * a JVM (Kotlin/Scala) bare, non-wildcard member import `import a.b.NAME` —
+ * syntactically identical to Python's `import a.b [as x]`, so
+ * `importSpecifiersNaming`'s Python shape is now gated OFF for these
+ * extensions (evidenceClosure.ts's own B2 fix) and this is the JVM-specific
+ * resolution instead. The segment immediately before NAME decides the shape:
+ * CAPITALISED -> an owner TYPE (`import cfg.Settings.TIMEOUT_MS` ->
+ * `Settings.TIMEOUT_MS`, package-checked exactly like B3's wildcard-owner
+ * fix — `findPackageQualifiedOwnerMemberWindow`); lower-case -> a PACKAGE
+ * only (`import cfg.TIMEOUT_MS` -> a top-level declaration of package `cfg`
+ * — `findPackageTopLevelDeclarationWindow`, the SAME lookup B2's Kotlin
+ * package-wildcard SHOULD case already uses). Java is deliberately excluded:
+ * a plain (non-`static`) Java import always names a TYPE, never a field —
+ * Java's own per-member mechanism (`import static pkg.Class.NAME;`) is a
+ * DIFFERENT shape `importSpecifiersNaming`'s `javaStatic` regex already
+ * resolves untouched. `undefined` when this file names no such import at
+ * all, or the owner/package it names does not declare `NAME` — the ordinary
+ * "could not be resolved" disclosure follows exactly as for any other miss.
+ */
+async function findJvmImportedConstantWindow(
+  name: string,
+  ownerLines: readonly string[],
+  ownerPath: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  if (!/\.(?:kt|kts|scala|sc)$/.test(ownerPath)) return undefined;
+  const importRe = new RegExp(`^\\s*import\\s+([\\w.]+)\\.${escapeRegExp(name)}\\s*;?\\s*$`);
+  for (const rawLine of ownerLines) {
+    const m = importRe.exec(rawLine);
+    if (!m) continue;
+    const segments = m[1]!.split(".");
+    const prev = segments[segments.length - 1];
+    if (prev === undefined || prev.length === 0) continue;
+    if (/^[A-Z]/.test(prev)) {
+      const packagePath = segments.slice(0, -1).join(".");
+      const resolution = await findPackageQualifiedOwnerMemberWindow(prev, packagePath, name, false, workspace, cache);
+      if (resolution !== undefined) return resolution;
+    } else {
+      const packagePath = segments.join(".");
+      const window = await findPackageTopLevelDeclarationWindow(packagePath, name, /\.(?:kt|kts|java|scala|sc)$/, workspace, cache);
+      if (window) return window;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Round-9 review P1-2 (ktLoopVarShadowsSibling): names a Kotlin/Scala body
+ * binds itself — a `for (x in …)` / `for ((a, b) in …)` / `for (x <- …)`
+ * variable, a `catch (e: …)` parameter, a `{ a, b -> … }` lambda parameter.
+ * Such a name read in that body is the local binding, never a same-package
+ * top-level declaration, so `findJvmPackageSiblingConstantWindow` (the
+ * broadest, name-only lookup) is not tried for it.
+ */
+function kotlinScopedBindingNames(bodyLines: readonly string[], hashComment: boolean, relPath: string): Set<string> {
+  const out = new Set<string>();
+  const loopRe = /\bfor\s*\(\s*\(?\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*\)?\s*(?::\s*[\w.<>?, ]+?)?\s+(?:in\b|<-)/g;
+  const catchRe = /\bcatch\s*\(\s*([A-Za-z_]\w*)\s*:/g;
+  const lambdaRe = /\{\s*([A-Za-z_]\w*(?:\s*:\s*[\w.<>?]+)?(?:\s*,\s*[A-Za-z_]\w*(?:\s*:\s*[\w.<>?]+)?)*)\s*->/g;
+  for (const raw of bodyLines) {
+    const masked = maskNonCode(raw, hashComment, relPath);
+    for (const re of [loopRe, catchRe, lambdaRe]) {
+      for (const m of masked.matchAll(re)) {
+        // `when (x) { FAST -> … }` is a branch on a value, not a lambda.
+        if (re === lambdaRe && /\bwhen\b[^{]*$/.test(masked.slice(0, m.index))) continue;
+        for (const part of m[1]!.split(",")) {
+          const name = /^\s*([A-Za-z_]\w*)/.exec(part)?.[1];
+          if (name !== undefined && name !== "_") out.add(name);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * B2 (round-9 fable finding, P2-11 residual): Kotlin/Scala SAME-PACKAGE
+ * top-level visibility — a constant declared in a SIBLING file that declares
+ * the identical `package a.b` line is readable with NO import at all
+ * (mirroring Go's own same-directory package visibility, item 3 — but a JVM
+ * package is a declared NAME, not a directory, so this scans by that
+ * declared name workspace-wide via `findPackageTopLevelDeclarationWindow`,
+ * the same convention `findGoQualifiedPackageConstantWindow` already uses
+ * for Go). `undefined` when `ownerPath` itself declares no `package` line
+ * (nothing to match against — by the time this runs, `resolveConstantWindow`
+ * already tried `ownerPath`'s own top level and found nothing, so revisiting
+ * it here is harmless) or no sibling resolves the name.
+ */
+async function findJvmPackageSiblingConstantWindow(
+  ownerPath: string,
+  ownerLines: readonly string[],
+  name: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  if (!/\.(?:kt|kts|scala|sc)$/.test(ownerPath)) return undefined;
+  const ownPackage = /^\s*package\s+([\w.]+)/m.exec(ownerLines.join("\n"))?.[1];
+  if (ownPackage === undefined) return undefined;
+  return findPackageTopLevelDeclarationWindow(ownPackage, name, /\.(?:kt|kts|scala|sc)$/, workspace, cache);
+}
+
+/**
+ * Same-file (module-level, then exports-object member — B3; B4(a), round-9:
+ * a MODULE-ALIAS MEMBER lookup reverses that pair — see `preferExportsMember`
+ * below), then a bare Rust `use`-bound constant (B4), then barrel/re-export
+ * chase, then Go same-package sibling, then a JVM (Kotlin/Scala) same-package
+ * sibling and bare member import (B2, round-9), then a wildcard-imported
+ * type/package owner (B2) — the full resolution `constantClosureForFocal`
+ * applies to every candidate name, whichever file currently "owns" the
+ * search (the focal itself at depth 0, or a resolved constant's own
+ * initializer's file at depth >=1 — item 5).
+ */
+async function resolveConstantWindow(
+  name: string,
+  ownerLines: readonly string[],
+  ownerPath: string,
+  workspace: string,
+  cache: FileReadCache,
+  /**
+   * B4(a) (round-9 fable finding, P1-8): true ONLY from
+   * `resolveQualifiedReferencesIn`'s `viaAlias` branch — resolving a MODULE
+   * ALIAS's member (`config.TIMEOUT_MS` reached through a `require()`/default
+   * import) reads the module's OWN EXPORTS surface, so an explicit key of
+   * `module.exports = { TIMEOUT_MS: 6500 }` is what a caller of `config.
+   * TIMEOUT_MS` actually observes — it must win over a same-named top-level
+   * declaration in the same file (`const TIMEOUT_MS = 1000`, a private local
+   * the alias's member access never sees; own reproduction confirmed the
+   * local 1000 being served instead). A SHORTHAND key (`{ TIMEOUT_MS }`, no
+   * colon) is not matched by `findModuleExportsMemberWindow`'s own `keyRe`
+   * (colon-anchored) at all, so it falls through to the top-level
+   * declaration below unaffected — exactly right, since a shorthand key IS
+   * that same local binding, re-exported by reference (B4(a)'s own second
+   * half). The ORDINARY bare-name lookup (every other caller, this
+   * parameter omitted/false) keeps the pre-existing "same file first" order
+   * — a function inside config.js reading its OWN bare `TIMEOUT_MS` reads
+   * the top-level declaration in its own lexical scope, never an unrelated
+   * exports object assembled elsewhere in the same file.
+   */
+  preferExportsMember = false,
+  /**
+   * Round-9 review: `skipExportsMember` resolves the module's OWN binding
+   * behind a self-named export key (`{ TIMEOUT_MS: TIMEOUT_MS }`) — the key
+   * itself is not the value. `allowPackageSibling: false` keeps a name the
+   * focal binds itself (a loop/catch/lambda variable, a field of its own
+   * class) from resolving to an unrelated same-package declaration.
+   */
+  opts: { skipExportsMember?: boolean; allowPackageSibling?: boolean } = {},
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  const hashComment = hasHashComments(ownerPath);
+  const sameFile = findModuleConstantWindow(ownerLines, name, hashComment);
+  const exportsMember = opts.skipExportsMember === true ? undefined : findModuleExportsMemberWindow(ownerLines, name, hashComment);
+  if (preferExportsMember && exportsMember) {
+    return { path: ownerPath, start: exportsMember.start, end: exportsMember.end, truncated: exportsMember.truncated };
+  }
+  if (sameFile) return { path: ownerPath, start: sameFile.start, end: sameFile.end, truncated: sameFile.truncated };
+  if (exportsMember) return { path: ownerPath, start: exportsMember.start, end: exportsMember.end, truncated: exportsMember.truncated };
+  const rustUse = await resolveRustUseConstantWindow(name, ownerLines, ownerPath, workspace, cache);
+  if (rustUse) return rustUse;
+  const chased = await findConstantAcrossReexports(ownerLines, ownerPath, name, workspace, cache);
+  if (chased) return chased;
+  const goPkg = await findGoPackageConstantWindow(ownerPath, name, workspace, cache);
+  if (goPkg) return goPkg;
+  // Kotlin resolution order: an explicit member import wins over a
+  // same-package declaration (round-9 review P1-2, ktExplicitImportBeatsSibling).
+  const jvmImported = await findJvmImportedConstantWindow(name, ownerLines, ownerPath, workspace, cache);
+  if (jvmImported) return jvmImported;
+  if (opts.allowPackageSibling !== false) {
+    const jvmPkg = await findJvmPackageSiblingConstantWindow(ownerPath, ownerLines, name, workspace, cache);
+    if (jvmPkg) return jvmPkg;
+  }
+  return findWildcardImportedConstantWindow(name, ownerLines, ownerPath, hashComment, workspace, cache);
+}
+
+/**
+ * FIX-G: a constant-shaped name that — unresolved — makes a value/condition
+ * facet honestly undetermined: CONST_CASE with at least one underscore (the
+ * conventional module-constant spelling). A bare all-caps word (`JSON`, `URL`,
+ * `PORT`) or a Capitalized type/class name never qualifies: those are far more
+ * often globals, acronyms or types than an unresolved module constant, and a
+ * false "undetermined" disclosure is noise the caller cannot act on.
+ *
+ * P2-13 (round-4/5 fable finding, externalPackageConst): the underscore
+ * requirement alone missed a bare ALL-CAPS name with NO underscore
+ * (`DEFAULTS`) imported from an external PACKAGE (a non-relative specifier,
+ * `chaseConstant`'s own caller supplies `importedFromPackage`) — "whatever
+ * its spelling" (brief). Widened to accept ANY all-caps/digit/underscore run
+ * (no underscore required) ONLY when the caller can show the name was named
+ * by a non-relative import specifier in this same file: a bare mixed-case
+ * name (a called function like `createSlice`, however unresolvable) never
+ * matches this branch regardless of import origin — this is exactly the
+ * noise the original all-caps-word restriction above guards against, so a
+ * value/condition question about a focal that merely CALLS some unrelated
+ * imported function stays silent exactly as before. A same-workspace
+ * relative import that simply could not be found still needs the stricter
+ * underscored shape (second branch, unchanged).
+ */
+function isUnresolvableConstantName(name: string, importedFromPackage = false): boolean {
+  if (importedFromPackage && /^[A-Z][A-Z0-9_]*$/u.test(name)) return true;
+  return /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/u.test(name);
+}
+
+/** FIX-G: true when `bodyLines` itself declares `name` (a local `const X =`, a Python/Go local assignment) — its value is in the served body, so it is neither a module constant to fetch nor an unresolved one. */
+function bodyDeclaresLocal(bodyLines: readonly string[], name: string, hashComment: boolean): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const declRe = new RegExp(`(?:\\b(?:const|let|var|val|final|auto)\\s+(?:[\\w<>\\[\\],\\s]+\\s+)?${escaped}\\b)|(?:^\\s*${escaped}\\s*(?::[^=]*)?:?=(?!=))`, "u");
+  return bodyLines.some((line) => declRe.test(maskNonCode(line, hashComment)));
+}
+
+/** V2 (round-7 fable finding, classMethodJavaBareField/ktBareFieldConst): languages with IMPLICIT `this`/`self` member access -- a bare identifier inside a method body that also names a field the owner type declares is a self-property read with NO qualifier at all. TS/JS/Python explicitly excluded: both require an explicit `this.`/`self.` for a property read (a bare name there is a local/parameter, never a field) -- applying this to them would misattribute an ordinary same-named parameter. */
+function languageHasImplicitThisFields(relPath: string): boolean {
+  return /\.(?:java|kt|kts|cs|cpp|cc|cxx|hpp|hh|h|swift|scala|dart)$/.test(relPath);
+}
+
+interface ConstantClosure {
+  /** Every constant window found, in serving order (the hook serves the first MAX_CONSTANTS_PER_REQUIREMENT). */
+  readonly windows: NamedWindow[];
+  /** How many leading `windows` are the FOCAL's own constants (the rest were read by one-hop callees). */
+  readonly ownCount: number;
+  /** Constant-shaped names the FOCAL's own body reads with no declaration found (same file or one import hop). */
+  readonly unresolved: string[];
+  /** `unresolved` names resolved to a non-relative IMPORT specifier (P2-10, round-6 fable finding, externalPackageConst): name -> the package specifier that named it, so the gate can name the package in its disclosure. */
+  readonly unresolvedPackages: Readonly<Record<string, string>>;
+  /** P0-2 (round-6 fable finding): instance/static property names (`this.p`/`self.p`/`Owner.P`) the focal reads whose value this scan could not resolve to any served window -- the owner declaration was not found in the class body at all, OR it was found but its own initializer resolved to nothing servable (e.g. a qualified `Owner.CONST` reference `constantLikeReferencesIn` does not chase). Never covered by an inline literal alone (facetGate.ts, P3). */
+  readonly unresolvedProperties: string[];
+  /** V4 (round-7 fable finding, valueBehindConfigAccessor): name -> the exact construction/call expression (`new Settings()`) for a resolved binding whose own text carries no literal and is nothing but that one call -- `chaseConstant`'s `constructionOnlyInitializer` check. Never pushed to `windows` (P3: never silently "covered"); disclosed with this exact expression text. */
+  readonly unresolvedConstructedValues: Readonly<Record<string, string>>;
+  /** P1-4 (round-7 fable finding, item 4): `unresolved` qualified names (`Owner.member`) for which SEVERAL files declare `Owner` and neither the focal's own file nor its own imports proved which one -- `findQualifiedConstantWindow`'s own `ambiguousCandidates`, name -> the candidate file paths, so the gate can name them instead of the generic "could not be resolved" wording (never silently picks one, P1). */
+  readonly unresolvedConstantCandidates: Readonly<Record<string, readonly string[]>>;
+  /** False when the scan stopped at `deadline`. */
+  readonly complete: boolean;
+}
+
+async function constantClosureForFocal(
+  focal: ResolvedFacetFocal,
+  workspace: string,
+  cache: FileReadCache,
+  deadline: number,
+): Promise<ConstantClosure> {
+  const out: NamedWindow[] = [];
+  const unresolved: string[] = [];
+  const unresolvedPackages: Record<string, string> = {};
+  const unresolvedProperties: string[] = [];
+  const constructedValues: Record<string, string> = {};
+  const constantCandidates: Record<string, readonly string[]> = {};
+  let complete = true;
+  const content = readCached(workspace, focal.path, cache);
+  if (content === undefined) {
+    return {
+      windows: out, ownCount: 0, unresolved, unresolvedPackages, unresolvedProperties,
+      unresolvedConstructedValues: constructedValues, unresolvedConstantCandidates: constantCandidates, complete,
+    };
+  }
+  const lines = content.split(/\r?\n/);
+  const hashComment = hasHashComments(focal.path);
+  const bodyLines = lines.slice(focal.startLine - 1, focal.endLine);
+  // B1 (round-8 fable finding, cppScopedConst/pyStarImportLowerConst/
+  // csUsingStaticPascalConst): never a candidate for a MODULE-constant
+  // resolution/disclosure — the focal's own type (a bare `::`-qualified
+  // owner token, e.g. `Client` in `Client::request` reading `Config::X`,
+  // stays a candidate through `constantLikeReferencesIn`'s own `::`-member
+  // exception unless excluded here too), and the focal's own parameters —
+  // see `focalParameterNames`'s own doc. THE ROUND-9 LESSON (binding,
+  // pyKwargSameNameImportedConst/rustMatchArmConstCondition): every OTHER
+  // transient-binding shape (loop/catch/except/lambda/arrow/Kotlin-lambda/
+  // keyword-argument NAME) used to be excluded here too, by NAME, across the
+  // WHOLE body (`transientBindingNamesIn`) — round 8's own fix for a
+  // DIFFERENT bug (an accidental collision with `namesDeclaredWithin`'s
+  // locals). That NAME-level exclusion is over-broad: a keyword argument's
+  // NAME token (`timeout=`) and its VALUE token (`=timeout`) are the SAME
+  // string, so excluding the name everywhere ALSO dropped the value-side
+  // read of an imported/module constant that happens to share the
+  // parameter's name (`fetch(url, timeout=timeout)` reading an imported
+  // `timeout`); a Rust `match`/C#-switch-expression pattern arm
+  // (`RETRY_LIMIT => …`) is syntactically identical to a bare arrow-lambda
+  // parameter (`x => …`), so the SAME name-level rule silently dropped a
+  // genuine constant used as a match pattern. Exclusion is now POSITIONAL
+  // (only the exact kwarg-NAME token, gated to Python/Kotlin/Scala —
+  // `constantLikeReferencesIn`'s own `isKeywordArgumentNamePosition` check)
+  // — never a whole-body name drop — except for the focal's OWN parameters
+  // and own type immediately below, which the language itself binds for the
+  // entire body, no positional ambiguity possible. A loop/catch/lambda
+  // variable that fails to resolve as a module constant (the common case)
+  // simply costs one harmless failed lookup, exactly as any other
+  // non-resolving candidate already does.
+  const excludeNames = new Set<string>([
+    focal.name,
+    ...(focal.typeName ? [focal.typeName] : []),
+    ...focalParameterNames(bodyLines, hashComment, focal.name, focal.path),
+  ]);
+  // R6-C (eval-0927 review-r5 P1-3): `focal.path` lets `constantLikeReferencesIn`
+  // keep a constant visible inside a C#/Kotlin/Swift/Ruby interpolated string
+  // or past a JS/TS regex literal (csInterpolatedConst/ktTemplateConst/
+  // tsRegexQuoteConst) instead of silently masking it away.
+  const candidates = constantLikeReferencesIn(bodyLines, hashComment, focal.name, excludeNames, focal.path);
+  const visitedConstantNames = new Set<string>([focal.name]);
+  // V3 (round-7 fable finding, goCrossPackageConst): lowercase MODULE/PACKAGE
+  // aliases this FILE imports (Go package, Python module, Rust/C++
+  // namespace) -- `qualifiedConstantReferencesIn` accepts a lowercase owner
+  // ONLY when it is in this set, so an ordinary lowercase property chain
+  // (`response.status`) is never mistaken for a constant reference.
+  const moduleAliases = importedModuleAliasesIn(lines, hashComment);
+  // V3: qualified references (`Owner.member`/`Owner::member`) already pushed
+  // or disclosed, across every depth this closure visits -- avoids a repeat
+  // disclosure/lookup for the SAME qualified name reached from two different
+  // reading contexts (the focal's own body AND a chased window's text).
+  const visitedQualifiedNames = new Set<string>();
+
+  /**
+   * FIX-FAB item 5 (eval-0927 review #8, twoConstants): resolves `name`
+   * against `ownerLines`/`ownerPath` (same file, then barrel/re-export
+   * chase, then Go same-package sibling — items 3/4), pushes its window,
+   * then — within MAX_CONSTANT_INITIALIZER_DEPTH — scans the window's OWN
+   * served text for further constant-like references and chases those too
+   * (`TOTAL_BUDGET_MS = BASE_TIMEOUT_MS * MAX_ATTEMPTS` reads two more
+   * constants a depth-0-only resolution never saw). A TRUNCATED window's own
+   * tail is never scanned for further references — item 6: the tail wasn't
+   * served, so a reference inside it isn't served either, and the facet
+   * stays open on the truncation itself first (facetGate.ts's continuation).
+   * `depth === 0` is the focal's own direct read, the only depth
+   * `unresolved[]` is reported for — a depth>=1 miss is a constant's OWN
+   * dependency, not something the original clause named, and disclosing it
+   * under the SAME identifier would mislabel whose read it is.
+   */
+  // Round-9 review P1-2 (ktSiblingShadowedByField/ktLoopVarShadowsSibling):
+  // names the Kotlin/Scala focal binds itself or reads as a field of its own
+  // class never resolve to a same-package top-level declaration elsewhere.
+  let focalOwnBindings: Set<string> | undefined;
+  async function focalBindsItself(name: string): Promise<boolean> {
+    if (focalOwnBindings === undefined) {
+      focalOwnBindings = kotlinScopedBindingNames(bodyLines, hashComment, focal.path);
+      if (focal.hasRealType && content !== undefined) {
+        const lang = languageForPath(focal.path);
+        const parsed = (lang ? await cache.parsedSymbols(content, lang, focal.path) : null) ?? [];
+        const classSymbol = parsed.find((s) =>
+          CALLER_EXPANSION_TYPE_KINDS.has(s.kind)
+          && unqualifiedSymbolTail(s.name) === focal.typeName
+          && s.startLine <= focal.startLine && s.endLine >= focal.endLine);
+        if (classSymbol !== undefined) {
+          const methodSpans: OwnerMemberSpan[] = parsed
+            .filter((s) => CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind) && s.startLine >= classSymbol.startLine && s.endLine <= classSymbol.endLine)
+            .map((s) => ({ start: s.startLine, end: s.endLine, name: unqualifiedSymbolTail(s.name) }));
+          for (const field of ownerFieldNames(lines, classSymbol.startLine, classSymbol.endLine, methodSpans, hashComment)) focalOwnBindings.add(field);
+        }
+      }
+    }
+    return focalOwnBindings.has(name);
+  }
+
+  // Round-9 orchestrator check (o9RustAssocConst): a constant the focal reads
+  // through its OWN type with `::` — Rust `Self::X` / `Type::X` (declared in
+  // an `impl Type` block), PHP `self::X` / `static::X`, C++ `Type::X` inside
+  // Type — lives in that type's body, not at module level; it used to be
+  // disclosed as "could not be resolved" while sitting in the same file.
+  async function ownTypeScopedConstantWindow(name: string): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+    const typeName = focal.typeName;
+    if (typeName === undefined || typeName.length === 0) return undefined;
+    const ownRead = new RegExp(`(?:\\bSelf|\\bself|\\bstatic|(?<![\\w$])${escapeRegExp(typeName)})\\s*::\\s*${escapeRegExp(name)}(?![\\w$])`);
+    if (!bodyLines.some((line) => ownRead.test(maskNonCode(line, hashComment, focal.path)))) return undefined;
+    const found = await findQualifiedConstantWindow(typeName, name, focal.path, lines, workspace, cache);
+    const window = found.window;
+    return window === undefined ? undefined : { path: window.path, start: window.start, end: window.end, truncated: window.truncated === true };
+  }
+
+  /** Returns true when `name` is (now, or already) resolved to a servable window -- a dedup of an EARLIER visit counts (P2-7), not only a fresh push. */
+  async function chaseConstant(
+    name: string,
+    ownerLines: readonly string[],
+    ownerPath: string,
+    depth: number,
+    callableDepth = 0,
+  ): Promise<boolean> {
+    if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; return false; }
+    if (visitedConstantNames.has(name)) {
+      // P2-7 (round-7 fable finding, classMethodSharedConstProp/
+      // classMethodTwoPropsSameConst): a name a SECOND reading context (a
+      // sibling property's own initializer, or the focal's own body reading
+      // it directly too) also references may already have been resolved by
+      // an EARLIER visit this same closure made -- returning here without
+      // pushing a SECOND window for it is a dedup, not a miss: `out` already
+      // carries the resolved window under this exact name (or the earlier
+      // visit reached one through a callable hop -- the SAME
+      // `innerResolvedAny` fold below computes a fresh visit's own "resolved"
+      // fact identically).
+      return out.some((w) => w.name === name);
+    }
+    visitedConstantNames.add(name);
+    const allowPackageSibling = !(depth === 0 && ownerPath === focal.path && /\.(?:kt|kts|scala|sc)$/.test(ownerPath) && await focalBindsItself(name));
+    const resolved = await resolveConstantWindow(name, ownerLines, ownerPath, workspace, cache, false, { allowPackageSibling })
+      ?? (depth === 0 ? await ownTypeScopedConstantWindow(name) : undefined);
+    if (resolved === undefined) {
+      if (depth === 0 && !bodyDeclaresLocal(bodyLines, name, hashComment)) {
+        // P2-13 (round-4/5 fable finding, externalPackageConst): a name this
+        // FILE names through a non-relative (package) import specifier but
+        // could not resolve to any workspace file is disclosed whatever its
+        // case — see `isUnresolvableConstantName`'s own doc for why this is
+        // gated on import-origin, never a bare naming relaxation.
+        // P2-10 (round-6 fable finding, externalPackageConst): the PACKAGE
+        // specifier itself (`@acme/http-defaults`) is recorded here, the one
+        // place this scan still holds it, so the gate can name it.
+        const specs = importSpecifiersNaming(ownerLines, name, hashComment, ownerPath);
+        // B1 (round-8 fable finding, pyStarImportLowerConst/
+        // csUsingStaticPascalConst/cppScopedConst): a WILDCARD spec (Python
+        // `from x import *`, C# `using static`, a quoted #include, a TS/JS
+        // `export * from`, Java/Kotlin `.*`) does not NAME `name` at all --
+        // `resolveConstantWindow` may still resolve THROUGH it (already
+        // tried above, and failed, by the time this branch runs), but it
+        // never proves the file "imports" this exact identifier the way
+        // V1 requires, so both the package-wording gate and the value-read
+        // disclosure below only ever look at a NAMED (non-wildcard) spec —
+        // see `ImportSpecifier.wildcard`'s own doc.
+        const namedSpecs = specs.filter((spec) => spec.wildcard !== true);
+        const packageSpec = namedSpecs.find((spec) => !spec.relative && spec.packageEligible === true);
+        // V1 (round-7 fable finding, orchestrator generalization): ANY name
+        // this FILE imports (relative or package, any case) that this body
+        // reads in a VALUE position (not call-only -- `hasValuePositionOccurrence`)
+        // and could not resolve is ALSO disclosed, whatever its spelling --
+        // being explicitly imported is itself the proof this is a real
+        // binding, not noise; a call-only import is a CALLEE this scan may
+        // still chase through when it DOES resolve (P0-4), so a FAILED
+        // call-only resolution is never disclosed as missing VALUE evidence.
+        const importedValueRead = namedSpecs.length > 0 && depth === 0 && hasValuePositionOccurrence(bodyLines, hashComment, name);
+        if (isUnresolvableConstantName(name, packageSpec !== undefined) || importedValueRead) {
+          unresolved.push(name);
+          // V3 follow-up (MUST, orchestrator round-7 probe, oPyModuleAlias/
+          // oPyStarReexport): a specifier that resolves to a real workspace
+          // file (a Python absolute package import, `from app import
+          // settings`, IS `app/__init__.py` here) is not a package; it keeps
+          // the generic "could not be resolved" wording.
+          if (packageSpec !== undefined && !(await importSpecifierResolvesInWorkspace(ownerPath, packageSpec, workspace, cache))) {
+            unresolvedPackages[name] = packageSpec.specifier;
+          }
+        }
+      }
+      return false;
+    }
+    const winLines = resolved.path === ownerPath ? ownerLines : readCached(workspace, resolved.path, cache)?.split(/\r?\n/);
+    // P0-4 (round-4 fable finding, 2026-09-28; supersedes P2-11(b)'s r2 rule):
+    // `name` matched a module-binding SHAPE. When its initializer is itself
+    // CALLABLE (`declarationIsCallable`: a function/arrow/class binding —
+    // `export const shouldRetry = (status) => RETRYABLE_STATUSES.has(status)`)
+    // it is not itself a required VALUE (never `unresolved` either: it
+    // resolved fine, it is simply not what this facet needs) — but it is
+    // exactly the "callee path" this facet must still walk THROUGH: skip
+    // only the PUSH below, never the recursion, so the callable's own body
+    // is scanned for further constant-like references the SAME way any other
+    // resolved window's is (this is how `RETRYABLE_STATUSES` is reached one
+    // hop past `shouldRetry`). Every other resolved binding — computed by a
+    // call, built by a call, an object with a function-valued member, `new
+    // X(...)` — is pushed as a required window exactly as before. A
+    // truncated window's own tail was never served, so it is judged exactly
+    // as before (never silently dropped by a check run on a partial slice —
+    // item 6's own concern) — `declarationIsCallable` is never even asked
+    // about a truncated window's OWN callable-ness, mirroring the
+    // pre-existing truncated-always-pushed rule.
+    //
+    // CORRECTION (B3, round-8 fable finding, cjsRequireModuleConst): this
+    // comment used to list `require(...)` among the "pushed as a required
+    // window exactly as before" shapes — confirmed wrong (eval-0927 review
+    // round 7 #4, own reproduction): `const config = require("./config");`
+    // is a MODULE alias, and its specifier string is not a value any
+    // value/condition question can use; serving this line as the answer is
+    // exactly the P3 violation ("certified `covered` while never served")
+    // the review found. `isRequireModuleInitializer` below is checked
+    // BEFORE `isCallableBinding`/`constructedExpr` and returns immediately:
+    // never pushed as a window, never disclosed as a V4 "construction this
+    // pack did not follow" either — `config.TIMEOUT_MS` resolves instead
+    // through the qualified-alias branch (`importedModuleAliasesIn` /
+    // `resolveModuleNamespaceFile`'s own CJS/default-import shapes).
+    const isModuleAliasInitializer = !resolved.truncated && winLines !== undefined
+      && isRequireModuleInitializer(winLines.slice(resolved.start - 1, resolved.end), hasHashComments(resolved.path));
+    if (isModuleAliasInitializer) return true;
+    const isCallableBinding = !resolved.truncated && winLines !== undefined
+      && declarationIsCallable(winLines.slice(resolved.start - 1, resolved.end), hasHashComments(resolved.path));
+    // V4 (round-7 fable finding, valueBehindConfigAccessor): a resolved,
+    // non-callable window with NO literal anywhere whose value is NOTHING
+    // BUT a construction/call (`new Settings()`) answers nothing a value
+    // question needs -- never pushed (never silently "covered", P3);
+    // disclosed by name with the exact expression instead.
+    const constructedExpr = !isCallableBinding && !resolved.truncated && winLines !== undefined
+      ? constructionOnlyInitializer(winLines.slice(resolved.start - 1, resolved.end), hasHashComments(resolved.path))
+      : undefined;
+    if (!isCallableBinding && constructedExpr === undefined) {
+      out.push({
+        path: resolved.path, start: resolved.start, end: resolved.end, name,
+        ...(resolved.truncated ? { truncated: true } : {}),
+      });
+    } else if (constructedExpr !== undefined && !(name in constructedValues)) {
+      constructedValues[name] = constructedExpr;
+    }
+    // P1-4 (round-4/5 fable finding, arrowChainDepth3): a CALLABLE hop is
+    // judged against MAX_CALLABLE_CHASE_DEPTH (nothing was pushed for it
+    // above, so the chase has not yet reached a real value); every other
+    // hop (a genuine VALUE, already pushed above) keeps the SAME smaller
+    // MAX_CONSTANT_INITIALIZER_DEPTH bound on its OWN further nested-
+    // reference scan as before this fix. Stopping a callable chain before
+    // it reaches a value is never silent — `complete` goes false, so the
+    // gate's existing `constantsComplete === false` check disclosures this
+    // as undetermined instead of falling through to a value that happens to
+    // be `covered` merely because some UNRELATED value elsewhere already
+    // filled `out`. Stopping a value's OWN further nesting is not this: the
+    // value itself is already served, so leaving its own sub-references
+    // unchased is a bounded, honest depth choice, never a miss.
+    const depthForCap = isCallableBinding ? callableDepth : depth;
+    const cap = isCallableBinding ? MAX_CALLABLE_CHASE_DEPTH : MAX_CONSTANT_INITIALIZER_DEPTH;
+    if (depthForCap >= cap || resolved.truncated) {
+      if (isCallableBinding && depthForCap >= cap && !resolved.truncated) complete = false;
+      return constructedExpr === undefined;
+    }
+    if (winLines === undefined) return constructedExpr === undefined;
+    const winHashComment = hasHashComments(resolved.path);
+    const initializerLines = winLines.slice(resolved.start - 1, resolved.end);
+    const inner = constantLikeReferencesIn(initializerLines, winHashComment, name, new Set());
+    let innerResolvedAny = false;
+    for (const innerName of inner) {
+      if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; break; }
+      const ok = await chaseConstant(
+        innerName, winLines, resolved.path,
+        isCallableBinding ? depth : depth + 1,
+        isCallableBinding ? callableDepth + 1 : callableDepth,
+      );
+      if (ok) innerResolvedAny = true;
+    }
+    // V3 (round-7 fable finding): the SAME qualified-reference scan the
+    // focal's own body gets (below, depth 0) also runs on THIS resolved
+    // window's own text -- a Java field initializer (`= Defaults.
+    // DEFAULT_TIMEOUT_MS`), a re-exported `const TIMEOUT = Config.TIMEOUT_MS`
+    // module init -- at every depth this chase reaches, not only the top.
+    if (out.length < MAX_PLANNED_CONSTANT_WINDOWS && Date.now() < deadline) {
+      const qualifiedOk = await resolveQualifiedReferencesIn(initializerLines, winHashComment, resolved.path);
+      if (qualifiedOk) innerResolvedAny = true;
+    }
+    return constructedExpr === undefined || innerResolvedAny;
+  }
+
+  /**
+   * V3 (round-7 fable finding): `Owner.member`/`Owner::member` references in
+   * `scanLines` (the focal's own body at qualDepth 0, or ANY chased window's
+   * text at qualDepth >= 1 -- `chaseConstant` calls this too). P2-8 (round-7
+   * fable finding, asConstObjectQualified): `ref.owner` may already be
+   * resolved as an ordinary PLAIN candidate (`const Config = {...}`,
+   * `chaseConstant`'s own first-loop resolution) -- its FULL window already
+   * carries `ref.member`'s value, so a SEPARATE "declaration not found"
+   * disclosure for the class/struct-only lookup below would flatly
+   * contradict a window already served; reconciled BEFORE that lookup runs.
+   * Returns true when at least one reference resolved (or was already
+   * covered by an owner's own full window).
+   */
+  async function resolveQualifiedReferencesIn(
+    scanLines: readonly string[],
+    scanHashComment: boolean,
+    scanPath: string,
+    qualDepth = 0,
+  ): Promise<boolean> {
+    let resolvedAny = false;
+    if (Date.now() >= deadline) return false;
+    const refs = qualifiedConstantReferencesIn(scanLines, scanHashComment, scanPath, focal.typeName, moduleAliases).slice(0, MAX_CALLEES_PER_REQUIREMENT);
+    for (const ref of refs) {
+      if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; break; }
+      const qualified = `${ref.owner}.${ref.member}`;
+      if (out.some((w) => w.name === ref.owner)) { resolvedAny = true; continue; }
+      if (visitedQualifiedNames.has(qualified)) {
+        if (out.some((w) => w.name === qualified)) resolvedAny = true;
+        continue;
+      }
+      visitedQualifiedNames.add(qualified);
+      // V3 (goCrossPackageConst): a Go package alias is resolved through the
+      // package's OWN files (`package <alias>` declarations, workspace-wide
+      // — Go has no per-file "class body" a member could live inside), never
+      // through the class/struct/enum owner-body mechanism below, which
+      // simply does not apply to a package qualifier.
+      if (ref.viaAlias && /\.go$/.test(scanPath)) {
+        const goWindow = await findGoQualifiedPackageConstantWindow(ref.owner, ref.member, workspace, cache);
+        if (goWindow !== undefined) {
+          if (!out.some((existing) => existing.path === goWindow.path && existing.start === goWindow.start)) {
+            out.push({ ...goWindow, name: qualified });
+          }
+          resolvedAny = true;
+          if (qualDepth < MAX_CONSTANT_INITIALIZER_DEPTH && !goWindow.truncated) {
+            const bareOk = await chaseInitializerReferences(goWindow, ref.owner, ref.member, qualDepth);
+            if (bareOk) resolvedAny = true;
+          }
+        }
+        // A Go alias miss stays silently skipped: `findGoQualifiedPackageConstantWindow`
+        // itself has no notion of "this alias names no workspace package" vs
+        // "the package exists but the member does not" (it scans every
+        // `package <alias>`-declaring file directly), so a miss here is
+        // exactly as uncertain as it always was.
+        continue;
+      }
+      // V3 follow-up (SHOULD, orchestrator round-7 probe: oPyModuleAlias/
+      // oPyStarReexport/oTsNamespaceImport/oRustModuleConst): a non-Go
+      // module-namespace alias resolves through the alias's OWN defining
+      // file (TS `import * as ns from`, Python `from pkg import mod` /
+      // `import pkg.mod`, Rust `use …::mod;` / `mod mod;`), the member
+      // looked up at that module's own top level (`resolveConstantWindow`,
+      // the SAME one-hop re-export chase an ordinary bare candidate gets —
+      // this is how `oPyStarReexport`'s `from .defaults import *` is
+      // followed). `nsFile === undefined` means `owner` names NO workspace
+      // module at all (stdlib/external, `os`, `node:path`) — stays the
+      // silent skip today's behaviour already has, since asserting
+      // anything about it would be a guess this scan cannot back up.
+      if (ref.viaAlias) {
+        const nsFile = await resolveModuleNamespaceFile(ref.owner, focal.path, lines, workspace, cache);
+        if (nsFile === undefined) continue;
+        if (nsFile === "workspace-module-unresolved") {
+          if (!unresolved.includes(ref.owner) && !unresolved.includes(qualified)) unresolved.push(qualified);
+          continue;
+        }
+        // MUST (item 1's general form): the owner DOES resolve to a
+        // workspace module -- never ALSO left disclosed "declared outside
+        // the workspace" as a bare candidate (`chaseConstant`'s own
+        // depth-0 loop may have already tagged it before this qualified
+        // reference was reached).
+        const ownerIdx2 = unresolved.indexOf(ref.owner);
+        if (ownerIdx2 !== -1) { unresolved.splice(ownerIdx2, 1); delete unresolvedPackages[ref.owner]; }
+        const nsLines = nsFile.content.split(/\r?\n/);
+        // B4(a) (round-9 fable finding): this IS the module-alias-member
+        // lookup `resolveConstantWindow`'s own `preferExportsMember` param
+        // exists for -- `ref.owner` is a module alias (`config`), `nsFile`
+        // its resolved file, `ref.member` the key actually read off it.
+        const memberWindow = await resolveConstantWindow(ref.member, nsLines, nsFile.path, workspace, cache, true);
+        if (memberWindow === undefined) {
+          // SHOULD's own explicit rule: a module that DOES resolve but
+          // whose member does not is disclosed, never silently skipped —
+          // only a miss on the MODULE ITSELF (stdlib/external) stays silent.
+          if (!unresolved.includes(qualified)) unresolved.push(qualified);
+          continue;
+        }
+        if (!out.some((existing) => existing.path === memberWindow.path && existing.start === memberWindow.start)) {
+          out.push({ ...memberWindow, name: qualified });
+        }
+        resolvedAny = true;
+        // Round-9 review P0-1 (cjsExplicitSelfKey): a self-named key
+        // (`module.exports = { TIMEOUT_MS: TIMEOUT_MS }`, `exports.TIMEOUT_MS =
+        // TIMEOUT_MS`) holds no value itself; its value side reads the
+        // module's own `TIMEOUT_MS`, which the initializer chase below skips as
+        // the key's own name. Resolve that binding (same file, then the
+        // module's own imports); if nothing resolves, the member is disclosed
+        // instead of certified by the key line alone.
+        if (exportsMemberValueReadsOwnName(nsLines, memberWindow, ref.member, hasHashComments(nsFile.path))) {
+          const binding = await resolveConstantWindow(ref.member, nsLines, nsFile.path, workspace, cache, false, { skipExportsMember: true });
+          if (binding === undefined) {
+            if (!unresolved.includes(qualified)) unresolved.push(qualified);
+          } else {
+            if (!out.some((existing) => existing.path === binding.path && existing.start === binding.start)) {
+              out.push({ ...binding, name: qualified });
+            }
+            if (qualDepth < MAX_CONSTANT_INITIALIZER_DEPTH && !binding.truncated) {
+              await chaseInitializerReferences(binding, ref.owner, ref.member, qualDepth);
+            }
+          }
+        }
+        if (qualDepth < MAX_CONSTANT_INITIALIZER_DEPTH && !memberWindow.truncated) {
+          const bareOk = await chaseInitializerReferences(memberWindow, ref.owner, ref.member, qualDepth);
+          if (bareOk) resolvedAny = true;
+        }
+        continue;
+      }
+      const resolution = await findQualifiedConstantWindow(ref.owner, ref.member, focal.path, lines, workspace, cache);
+      if (resolution.window === undefined) {
+        // P2-10/V3 interaction (round-7 fable finding, own reproduction --
+        // externalPackageConst/GATEWAYDEFAULTS): when the BARE owner is
+        // ALREADY disclosed unresolved (V1's own widening -- typically a
+        // package-external import, `unresolvedPackages` already names it),
+        // a SEPARATE `Owner.member` disclosure would poison facetGate.ts's
+        // "every unresolved name traces to a package" wording (the
+        // qualified string carries no package tag of its own) for no new
+        // information: the bare disclosure already covers this binding.
+        if (!unresolved.includes(ref.owner) && !unresolved.includes(qualified)) unresolved.push(qualified);
+        // P1-4: several files declare `ref.owner` and neither priority (1)
+        // nor (2) proved one -- name the candidates instead of the generic
+        // "could not be resolved" wording (never silently picks one, P1).
+        if (resolution.ambiguousCandidates !== undefined) constantCandidates[qualified] = resolution.ambiguousCandidates;
+        continue;
+      }
+      // V1/V3 reconciliation (round-7 fable finding, own reproduction --
+      // otherClassStaticLowerProp/qualifiedConstObjectMember/pyEnumValueAccess):
+      // the OWNER (a real workspace class/object/enum, e.g. `Settings`) may
+      // already have been wrongly disclosed unresolved as a BARE candidate
+      // -- `findModuleConstantWindow` only recognizes a `const Owner = ...`
+      // shape, never a `class Owner {...}` declaration, so the bare
+      // resolution attempt legitimately fails even though `Owner.member`
+      // resolves fine right here. Un-disclose it: it is not "unresolved",
+      // it is a type accessed through a qualified member.
+      const ownerIdx = unresolved.indexOf(ref.owner);
+      if (ownerIdx !== -1) { unresolved.splice(ownerIdx, 1); delete unresolvedPackages[ref.owner]; }
+      if (!out.some((existing) => existing.path === resolution.window!.path && existing.start === resolution.window!.start)) {
+        out.push({ ...resolution.window, name: qualified });
+      }
+      resolvedAny = true;
+      if (qualDepth < MAX_CONSTANT_INITIALIZER_DEPTH && resolution.window.truncated !== true) {
+        const bareOk = await chaseInitializerReferences(resolution.window, ref.owner, ref.member, qualDepth);
+        if (bareOk) resolvedAny = true;
+      }
+    }
+    return resolvedAny;
+  }
+
+  /**
+   * V3: a qualified reference's OWN resolved window may itself read further
+   * bare/qualified names (`otherClassStaticLowerProp`: `Settings.defaults`
+   * resolves to `static readonly defaults: Options = DEFAULT_OPTIONS;`,
+   * which then needs `DEFAULT_OPTIONS` chased too) -- the SAME
+   * one-hop-further scan `chaseConstant` runs on an ordinary resolved
+   * window's initializer, shared here for a qualified one.
+   *
+   * `ownerName`/`memberName` are the QUALIFIED reference's own two parts
+   * (`Presets`/`FLUSH_MS`), passed SEPARATELY and excluded as BARE names --
+   * never the joined `"Owner.member"` string, which would fail to exclude
+   * the window's own bare member name from `constantLikeReferencesIn`'s
+   * candidate scan. Confirmed root cause (2026-09-28, own reproduction): two
+   * classes in one file both declare a field of the SAME name
+   * (`Presets.FLUSH_MS` / `LegacyPresets.FLUSH_MS`) -- passing the joined
+   * string left the window's OWN "FLUSH_MS" token unexcluded, so it became
+   * a candidate `chaseConstant` re-resolved via the UNSCOPED
+   * `findModuleConstantWindow` (whose Java/C#-style static-field shape is
+   * not owner-body-scoped), landing on the WRONG sibling class's
+   * same-named field.
+   */
+  async function chaseInitializerReferences(
+    win: { path: string; start: number; end: number },
+    ownerName: string,
+    memberName: string,
+    qualDepth: number,
+  ): Promise<boolean> {
+    const winLines = readCached(workspace, win.path, cache)?.split(/\r?\n/);
+    if (winLines === undefined) return false;
+    const winHashComment = hasHashComments(win.path);
+    const initializerLines = winLines.slice(win.start - 1, win.end);
+    const bareInner = constantLikeReferencesIn(initializerLines, winHashComment, memberName, new Set([ownerName]));
+    let resolvedAny = false;
+    for (const innerName of bareInner) {
+      if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; break; }
+      const ok = await chaseConstant(innerName, winLines, win.path, qualDepth + 1);
+      if (ok) resolvedAny = true;
+    }
+    if (out.length < MAX_PLANNED_CONSTANT_WINDOWS && Date.now() < deadline) {
+      const ok = await resolveQualifiedReferencesIn(initializerLines, winHashComment, win.path, qualDepth + 1);
+      if (ok) resolvedAny = true;
+    }
+    return resolvedAny;
+  }
+
+  for (const name of candidates) {
+    if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS) break;
+    if (Date.now() >= deadline) { complete = false; break; }
+    await chaseConstant(name, lines, focal.path, 0);
+  }
+  const ownCount = out.length;
+
+  if (out.length < MAX_PLANNED_CONSTANT_WINDOWS) {
+    if (Date.now() >= deadline) complete = false;
+    else {
+      const callees = calleeNamesIn(bodyLines, hashComment, focal.name, excludeNames).slice(0, MAX_CALLEES_PER_REQUIREMENT);
+      for (const calleeName of callees) {
+        if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS) break;
+        if (Date.now() >= deadline) { complete = false; break; }
+        const calleeFile = await resolveCalleeFile(calleeName, focal, lines, hashComment, workspace, cache);
+        if (calleeFile === undefined) continue;
+        const calleeLines = calleeFile.content.split(/\r?\n/);
+        const calleeHashComment = hasHashComments(calleeFile.path);
+        const calleeBody = calleeFile.symbol
+          ? calleeLines.slice(calleeFile.symbol.startLine - 1, calleeFile.symbol.endLine)
+          : calleeLines;
+        // R6-C: see the focal-body call above — same P1-3 dialect coverage, one hop out.
+        const innerCandidates = constantLikeReferencesIn(calleeBody, calleeHashComment, calleeName, new Set([calleeName]), calleeFile.path);
+        for (const name of innerCandidates) {
+          if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS) break;
+          if (Date.now() >= deadline) { complete = false; break; }
+          await chaseConstant(name, calleeLines, calleeFile.path, 1);
+        }
+      }
+    }
+  }
+
+  // P0-3 (round-4/5 fable finding, classMethod/classMethodCtorDefault/
+  // classMethodField/classMethodAssign/classMethodPy): a member focal's OWN
+  // instance-property reads (`this.options.timeoutMs`, `self.timeout`) are
+  // invisible to `constantLikeReferencesIn` above BY DESIGN (a `.`-prefixed
+  // token is a property access, never a bare module name) — so nothing ever
+  // followed `this.p`/`self.p` to the constant its OWNER assigns it from.
+  // One further hop, the SAME shape as the one-hop callee walk directly
+  // above: find `p`'s own declaration site within the enclosing class
+  // (`findOwnerPropertyWindow` — field initializer, constructor parameter
+  // default, or constructor assignment, itself chasing a bare-name
+  // assignment one hop further into the constructor's own same-named
+  // parameter default), then scan THAT site for constant-like references
+  // the ordinary way. Only for a resolved MEMBER focal with a real enclosing
+  // type — a class-itself focal's body already covers its own ctor/field
+  // lines directly (no property indirection to resolve).
+  if (out.length < MAX_PLANNED_CONSTANT_WINDOWS && Date.now() < deadline && focal.hasRealType) {
+    // P0-2 (round-6 fable finding, classMethodStaticProp): `focal.typeName`
+    // widens the match to a bare qualified self-reference too
+    // (`HttpClient.DEFAULTS`) -- exactly as much "this callable's own type's
+    // state" as `this.p`, just spelled without an instance. V2 (round-7
+    // fable finding, classMethodPyClassmethodCls/classMethodBracketThis):
+    // `focal.path` ALSO recognizes Python `cls.p`, Ruby `@p`, and
+    // `this["p"]`/`self['p']` bracket notation (language-gated inside
+    // `selfPropertyReferencesIn` itself).
+    const qualifiedSelfProps = selfPropertyReferencesIn(bodyLines, hashComment, focal.typeName, focal.path);
+    // V2 (round-7 fable finding, classMethodJavaBareField/ktBareFieldConst):
+    // a BARE candidate the ordinary module-constant loop above already
+    // tried and FAILED to resolve (it is neither a module binding nor,
+    // usually, CONST_CASE-shaped, so it fell through silently) may still be
+    // an IMPLICIT-`this` field read -- Java/Kotlin/C#/C++/Swift/Scala/Dart
+    // only (TS/JS/Python require an explicit qualifier, never reached here).
+    const bareFieldCandidates = languageHasImplicitThisFields(focal.path)
+      ? candidates.filter((name) => !out.some((w) => w.name === name))
+      : [];
+    if (qualifiedSelfProps.length > 0 || bareFieldCandidates.length > 0) {
+      const lang = languageForPath(focal.path);
+      const parsed = (lang ? await cache.parsedSymbols(content, lang, focal.path) : null) ?? [];
+      const classSymbol = parsed.find((s) =>
+        CALLER_EXPANSION_TYPE_KINDS.has(s.kind)
+        && unqualifiedSymbolTail(s.name) === focal.typeName
+        && s.startLine <= focal.startLine && s.endLine >= focal.endLine);
+      if (classSymbol !== undefined) {
+        const methodSpans: OwnerMemberSpan[] = parsed
+          .filter((s) => CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind) && s.startLine >= classSymbol.startLine && s.endLine <= classSymbol.endLine)
+          .map((s) => ({ start: s.startLine, end: s.endLine, name: unqualifiedSymbolTail(s.name) }));
+        const implicitFieldNames = bareFieldCandidates.length > 0
+          ? ownerFieldNames(lines, classSymbol.startLine, classSymbol.endLine, methodSpans, hashComment)
+          : new Set<string>();
+        const selfProps = [...qualifiedSelfProps];
+        for (const name of bareFieldCandidates) {
+          if (implicitFieldNames.has(name) && !selfProps.includes(name)) selfProps.push(name);
+        }
+        for (const propName of selfProps.slice(0, MAX_CALLEES_PER_REQUIREMENT)) {
+          if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; break; }
+          // P0-2 (round-6 fable finding, classMethodInherited/ParamNoDefault/
+          // Setter/Getter/StaticProp/JavaField/PyInherited): whether the
+          // owner declaration was never found at all (inherited from a base
+          // class in a different file, assigned by a non-getter method,
+          // a no-default constructor/method parameter) or it WAS found but
+          // its own initializer resolved to nothing servable (e.g. a
+          // qualified `Owner.CONST` reference `constantLikeReferencesIn`
+          // does not chase — the Java typed-field case), the effect is the
+          // same: this property contributes NO window to `out`. A before/
+          // after count over BOTH branches is the one check that catches
+          // both causes uniformly, so the value/condition facet can never
+          // fall through to "covered" merely because the focal's own body
+          // happens to hold an unrelated numeric literal (facetGate.ts's
+          // `lineHasLiteral`, P3) — recorded, never silently dropped.
+          //
+          // P2-7 (round-7 fable finding): `beforeCount` alone reads a DEDUP
+          // (the SAME constant another property, or the focal's own body,
+          // already resolved -- `chaseConstant`'s own `visitedConstantNames`
+          // guard then adds nothing new to `out`) as if it were a miss;
+          // `resolvedThroughChase` (each chase call's own return value) is
+          // the fact that actually distinguishes the two.
+          const beforeCount = out.length;
+          let resolvedThroughChase = false;
+          const propWindow = findOwnerPropertyWindow(lines, classSymbol.startLine, classSymbol.endLine, methodSpans, propName, hashComment);
+          let selfContained = false;
+          if (propWindow !== undefined) {
+            const propLines = lines.slice(propWindow.start - 1, propWindow.end);
+            selfContained = !propWindow.truncated
+              && propertyInitializerIsSelfContained(propLines, propName, hashComment)
+              && !declarationIsCallable(propLines, hashComment);
+            const inner = constantLikeReferencesIn(propLines, hashComment, propName, new Set([focal.name]));
+            for (const innerName of inner) {
+              if (out.length >= MAX_PLANNED_CONSTANT_WINDOWS || Date.now() >= deadline) { complete = false; break; }
+              const ok = await chaseConstant(innerName, lines, focal.path, 1);
+              if (ok) resolvedThroughChase = true;
+            }
+            // V3 (round-7 fable finding, classMethodJavaBareField/
+            // ktBareFieldConst): the property's own initializer may read a
+            // QUALIFIED name (`Defaults.DEFAULT_TIMEOUT_MS`) rather than a
+            // bare one -- the SAME scan the focal's own body gets, applied
+            // to this property's declaration text.
+            if (out.length < MAX_PLANNED_CONSTANT_WINDOWS && Date.now() < deadline) {
+              const qualifiedOk = await resolveQualifiedReferencesIn(propLines, hashComment, focal.path, 1);
+              if (qualifiedOk) resolvedThroughChase = true;
+            }
+          }
+          if (out.length === beforeCount && !resolvedThroughChase) {
+            // Round-9 orchestrator check (o9TsLiteralField & co.): a property
+            // whose own declaration holds a literal (`private timeoutMs =
+            // 2000`, `self.timeout = 6.5`) IS the value; only one whose value
+            // side reads something unresolved stays disclosed.
+            if (propWindow !== undefined && selfContained) {
+              out.push({ path: focal.path, start: propWindow.start, end: propWindow.end, truncated: propWindow.truncated, name: propName });
+            } else {
+              unresolvedProperties.push(propName);
+            }
+          }
+          // A bare candidate the module-level pass already disclosed (a
+          // Kotlin `companion object` constant read as `TIMEOUT_MS`, CONST_CASE
+          // so it was listed unresolved) is resolved now as the class's own
+          // member: never also disclosed as unresolved (o9KtCompanionConst).
+          if (out.length > beforeCount || resolvedThroughChase) {
+            const stale = unresolved.indexOf(propName);
+            if (stale !== -1) { unresolved.splice(stale, 1); delete unresolvedPackages[propName]; }
+          }
+        }
+      } else if (qualifiedSelfProps.length > 0) {
+        // Defensive (should not normally happen when `focal.hasRealType` is
+        // true): the enclosing type itself could not be re-parsed here --
+        // never silently drop the self-property reads this focal is known
+        // to make. Bare-field candidates are NOT pushed here: without a
+        // parsed class body nothing PROVED they are fields at all (unlike a
+        // qualified `this.p`, whose syntax alone proves a property read was
+        // intended).
+        unresolvedProperties.push(...qualifiedSelfProps);
+      }
+    }
+  }
+  // Orchestrator (round 6, csInterpolatedConst) / V3 (round-7 fable
+  // finding): a constant read through ANOTHER type's name
+  // (`Config.API_BASE`, `Defaults.TIMEOUT_MS`) or a module/package alias
+  // (`config.DefaultTimeout`) is a `.`/`::`-qualified token
+  // `constantLikeReferencesIn` never surfaces on its own, so it was dropped
+  // silently and the facet could still be certified on an unrelated inline
+  // literal (P3). Its declaration is served when found; otherwise it is
+  // unresolved — disclosed, never ignored (alias failures excepted, see
+  // `resolveQualifiedReferencesIn`'s own doc).
+  if (Date.now() < deadline) {
+    await resolveQualifiedReferencesIn(bodyLines, hashComment, focal.path);
+  }
+  reconcileQualifiedMemberDisclosures(bodyLines, hashComment, focal.path, out, unresolved, unresolvedPackages);
+  return {
+    windows: out, ownCount, unresolved, unresolvedPackages, unresolvedProperties,
+    unresolvedConstructedValues: constructedValues, unresolvedConstantCandidates: constantCandidates, complete,
+  };
+}
+
+/**
+ * The member half of a `::`-qualified read (`config::TIMEOUT_MS`) is also a
+ * bare candidate (`constantLikeReferencesIn`), so a CONST_CASE member that
+ * no bare lookup found is disclosed even when its qualified read resolved.
+ * Drops exactly that disclosure: a bare unresolved name every occurrence of
+ * which in the focal body is qualified by an owner whose `Owner.member`
+ * window was served. Any bare or differently-qualified occurrence keeps it.
+ */
+function reconcileQualifiedMemberDisclosures(
+  bodyLines: readonly string[],
+  hashComment: boolean,
+  relPath: string,
+  windows: readonly NamedWindow[],
+  unresolved: string[],
+  unresolvedPackages: Record<string, string>,
+): void {
+  for (let i = unresolved.length - 1; i >= 0; i--) {
+    const name = unresolved[i]!;
+    if (name.includes(".")) continue;
+    const occurrenceRe = new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`, "g");
+    let occurrences = 0;
+    let everyOccurrenceResolved = true;
+    for (const line of bodyLines) {
+      const masked = maskNonCode(line, hashComment, relPath);
+      for (const match of masked.matchAll(occurrenceRe)) {
+        occurrences++;
+        const owner = /([A-Za-z_][A-Za-z0-9_]*)(?:\.|::)$/.exec(masked.slice(0, match.index))?.[1];
+        if (owner === undefined || !windows.some((w) => w.name === `${owner}.${name}`)) {
+          everyOccurrenceResolved = false;
+          break;
+        }
+      }
+      if (!everyOccurrenceResolved) break;
+    }
+    if (occurrences > 0 && everyOccurrenceResolved) {
+      unresolved.splice(i, 1);
+      delete unresolvedPackages[name];
+    }
+  }
+}
+
+/** Standard-library namespaces whose upper-case members are language constants, never workspace values. */
+const BUILTIN_CONSTANT_OWNERS: ReadonlySet<string> = new Set([
+  "Math", "Number", "JSON", "Object", "Array", "String", "Symbol", "Date", "Reflect", "Promise", "Error", "BigInt",
+  "Integer", "Long", "Double", "Float", "Short", "Byte", "Character", "Boolean", "System", "Console", "Environment",
+  "StandardCharsets", "TimeUnit", "ChronoUnit", "Int", "UInt", "Int32", "Int64", "UInt32", "UInt64", "Decimal",
+]);
+
+/**
+ * `Owner.MEMBER` / `Owner::MEMBER` value reads in `bodyLines`: EITHER a
+ * Capitalized owner other than the focal's own type and not a builtin
+ * namespace (`isType`), OR a lowercase name `moduleAliases` proves this file
+ * imports as a module/package/namespace (`viaAlias`) — V3 (round-7 fable
+ * finding, otherC lassStaticLowerProp/goCrossPackageConst/csPascalQualifiedConst/
+ * pyEnumValueAccess/pure `Config::kTimeoutMs`/`config::TIMEOUT_MS`). Member of
+ * ANY case; a chain continuation after the first member (`.next`, further
+ * `.prop`, a call) is allowed -- excluded ONLY when the FIRST member is
+ * itself directly called (`Owner.method(`), which is a call, never a value
+ * read of `Owner.method`.
+ */
+function qualifiedConstantReferencesIn(
+  bodyLines: readonly string[],
+  hashComment: boolean,
+  relPath: string,
+  ownTypeName: string | undefined,
+  moduleAliases: ReadonlySet<string> = new Set(),
+): Array<{ owner: string; member: string; viaAlias: boolean }> {
+  const out: Array<{ owner: string; member: string; viaAlias: boolean }> = [];
+  const seen = new Set<string>();
+  // Own reproduction (2026-09-28, GATEWAYDEFAULTS/AbortSignal.timeout): the
+  // trailing `\b` BEFORE the negative lookahead is load-bearing, not
+  // decorative -- without it, a member immediately followed by `(`
+  // (`AbortSignal.timeout(...)`, correctly excluded: a call, not a value
+  // read) let the engine BACKTRACK the greedy member capture by one
+  // character (member="timeou", next char "t" is not "(") to satisfy
+  // `(?!\s*\()`, silently truncating the captured member instead of
+  // rejecting the match outright. `\b` immediately after the capture
+  // forbids a backtrack that lands mid-word (no word boundary between two
+  // letters), so a call-shaped member now correctly fails the WHOLE match
+  // at this position instead of matching a mangled substring.
+  // Own reproduction (2026-09-28, oRustModuleConst-derived, Rust `0..limits::MAX`
+  // range syntax): the owner lookbehind excluded ANY identifier preceded by a
+  // single "." as "already a property access" -- but Rust's `..`/`..=` range
+  // operator ALSO leaves a "." immediately before the next identifier, so
+  // `0..limits::MAX_RETRIES` wrongly excluded "limits" as an owner start.
+  // `(?<!(?<!\.)\.)` excludes a LONE "." only (not itself preceded by
+  // another "."), so a genuine property access (`a.b`, one dot) stays
+  // excluded while a range operator's second dot (`0..limits`) does not.
+  const ownerMemberRe = /(?<![\w$:])(?<!(?<!\.)\.)([A-Za-z_][A-Za-z0-9_]*)(?:\.|::)([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()/g;
+  for (const line of bodyLines) {
+    const masked = maskNonCode(line, hashComment, relPath);
+    for (const match of masked.matchAll(ownerMemberRe)) {
+      const owner = match[1]!;
+      const member = match[2]!;
+      // Rust `Self::X` names the focal's own type, like `ownTypeName::X`:
+      // its member is chased as a bare candidate in the focal's own file.
+      const isType = /^[A-Z]/.test(owner) && owner !== ownTypeName && owner !== "Self" && !BUILTIN_CONSTANT_OWNERS.has(owner);
+      const isAlias = !isType && moduleAliases.has(owner);
+      if (!isType && !isAlias) continue;
+      const key = `${owner}.${member}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ owner, member, viaAlias: isAlias });
+    }
+  }
+  return out;
+}
+
+/**
+ * P1-4 (round-7 fable finding): the body extent of a `class`/`struct`/etc.
+ * header at `headerLine` (1-based) in a PYTHON file -- indentation-bounded
+ * (Python has no braces), unlike `declarationRealExtent`'s brace-depth scan,
+ * which would wrongly close on the header line's OWN parens
+ * (`class Timeouts(Enum):`). Extends while a subsequent non-blank line is
+ * indented MORE than the header; a blank line inside the block is included
+ * provisionally, trimmed away only by the NEXT less-indented line ending the
+ * scan (a mild, harmless over-extension into trailing blank lines never
+ * affects member-search correctness, only the search's upper bound).
+ */
+function pythonBlockExtent(lines: readonly string[], headerLine: number): { start: number; end: number } {
+  const indentOf = (s: string): number => /^[ \t]*/.exec(s)?.[0].length ?? 0;
+  const headerIndent = indentOf(lines[headerLine - 1] ?? "");
+  let end = headerLine;
+  for (let i = headerLine; i < lines.length; i++) {
+    const raw = lines[i] ?? "";
+    if (raw.trim() === "") { end = i + 1; continue; }
+    if (indentOf(raw) <= headerIndent) break;
+    end = i + 1;
+  }
+  return { start: headerLine, end };
+}
+
+/**
+ * P1-4 (round-7 fable finding, own reproduction — qualifiedConstant.spec.ts's
+ * pre-existing csInterpolatedConst case): the body extent of a brace-bodied
+ * owner header at `headerLine` whose OPENING brace may be on a LATER line
+ * (Allman style, `public static class Config\n{\n...`, common in C#, legal
+ * in Java/C++ too) — `declarationRealExtent`'s own depth scan starts
+ * counting AT `headerLine` and stops the FIRST time depth returns to 0,
+ * which is already true (depth starts at 0) when the header line itself
+ * opens no bracket at all — an Allman-style header would wrongly report a
+ * ONE-LINE extent, never reaching the real body. This scans forward,
+ * bracket-depth aware, and never stops at depth 0 until at least one
+ * bracket has opened; a header whose brace never opens within the bound
+ * (an interface/forward-declaration with no body, or a malformed file)
+ * degrades to the bound itself, never an unbounded scan.
+ */
+function ownerBraceExtentEnd(lines: readonly string[], headerLine: number, hashComment: boolean): number {
+  let depth = 0;
+  let opened = false;
+  const limit = Math.min(lines.length, headerLine + MAX_CONSTANT_REAL_EXTENT_LINES);
+  for (let line = headerLine; line <= limit; line++) {
+    const masked = maskNonCode(lines[line - 1] ?? "", hashComment);
+    for (const ch of masked) {
+      if (ch === "{" || ch === "(" || ch === "[") { depth++; opened = true; }
+      else if (ch === "}" || ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    }
+    if (opened && depth === 0) return line;
+  }
+  return limit;
+}
+
+/**
+ * P1-4 (round-7 fable finding, item 4): owner resolution PREFERS (1) the
+ * focal's own file, (2) a file the focal's file imports `owner` from
+ * (relative specifiers resolved), then (3) other declaring files -- a
+ * SINGLE remaining candidate is still unambiguous even though neither (1)
+ * nor (2) proved it; SEVERAL with neither proving one is reported
+ * `ambiguousCandidates`, never silently picked (qualifiedConstTwoOwnersImportLegacy/
+ * ImportRoot/TwoClassesOneFile). The member is searched ONLY inside the
+ * resolved owner's OWN body span (Python: indentation; every other language:
+ * brace/paren/bracket depth) — never anywhere else in the file
+ * (qualifiedConstTwoClassesOneFile's `LegacyConfig`/`Config` sharing one
+ * file).
+ */
+async function findQualifiedConstantWindow(
+  owner: string,
+  member: string,
+  focalPath: string,
+  focalLines: readonly string[],
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ window?: { path: string; start: number; end: number; truncated?: boolean }; ambiguousCandidates?: readonly string[] }> {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = scanLiteral(`\\b(?:class|object|struct|enum|interface|namespace|module|record|type)\\s+${escapeRegExp(owner)}\\b`, workspace, { regex: true, caseInsensitive: false });
+  } catch {
+    return {};
+  }
+  if (scanned.length === 0) return {};
+  const memberRe = new RegExp(`^\\s*(?:(?:export|public|private|protected|internal|static|readonly|final|const|val|var|let|def)\\s+|[A-Za-z_][\\w<>\\[\\],.?]*\\s+)*${escapeRegExp(member)}\\b\\s*(?::[^=;]*)?(?:=(?!=)|,|\\(|$)`);
+  // B4 (round-8 fable finding, rustImplConstOtherType): a Rust type's OWN
+  // body (`struct Owner { … }`) never carries its associated constants —
+  // those live in a SEPARATE `impl Owner { … }` / `impl Trait for Owner {
+  // … }` block elsewhere in the same file. Tried only for `.rs`, only after
+  // the struct/enum's own body missed the member: every `impl [… for]
+  // Owner {` header in this file is a second owner body, searched the
+  // identical member-line way. Without this, `Defaults::TIMEOUT_MS` (member
+  // declared in `impl Defaults`, not in `struct Defaults`'s own braces)
+  // fails to resolve, and the bare `TIMEOUT_MS` member half — kept as a
+  // candidate by `constantLikeReferencesIn`'s own `::`-member exception —
+  // is disclosed SEPARATELY alongside the qualified `Defaults.TIMEOUT_MS`
+  // (a double disclosure); fixing resolution here also fixes that, since
+  // `reconcileQualifiedMemberDisclosures` already drops the bare half once
+  // the qualified window is actually served.
+  const rustImplMemberWindow = (path: string, lines: readonly string[], hashComment: boolean): { path: string; start: number; end: number; truncated?: boolean } | undefined => {
+    const implHeaderRe = new RegExp(`^\\s*impl(?:<[^>]*>)?\\s+(?:[\\w:<>,\\s]+\\s+for\\s+)?${escapeRegExp(owner)}\\b`);
+    for (let i = 0; i < lines.length; i++) {
+      if (!implHeaderRe.test(maskNonCode(lines[i]!, hashComment, path))) continue;
+      const implBodyEnd = Math.min(ownerBraceExtentEnd(lines, i + 1, hashComment), lines.length);
+      for (let j = i; j < implBodyEnd; j++) {
+        if (!memberRe.test(maskNonCode(lines[j]!, hashComment, path))) continue;
+        const start = j + 1;
+        const realEnd = declarationRealExtent(lines, start, hashComment).end;
+        const end = Math.min(realEnd, start + MAX_CONSTANT_WINDOW_LINES - 1, implBodyEnd);
+        return { path, start, end, ...(end < realEnd ? { truncated: true } : {}) };
+      }
+    }
+    return undefined;
+  };
+  const windowFor = (path: string, headerLine: number): { path: string; start: number; end: number; truncated?: boolean } | undefined => {
+    const content = readCached(workspace, path, cache);
+    if (content === undefined) return undefined;
+    const lines = content.split(/\r?\n/);
+    const hashComment = hasHashComments(path);
+    const bodyEnd = /\.py$/.test(path) ? pythonBlockExtent(lines, headerLine).end : ownerBraceExtentEnd(lines, headerLine, hashComment);
+    const limit = Math.min(bodyEnd, lines.length);
+    for (let i = headerLine - 1; i < limit; i++) {
+      if (!memberRe.test(maskNonCode(lines[i]!, hashComment, path))) continue;
+      const start = i + 1;
+      const realEnd = declarationRealExtent(lines, start, hashComment).end;
+      const end = Math.min(realEnd, start + MAX_CONSTANT_WINDOW_LINES - 1, bodyEnd);
+      return { path, start, end, ...(end < realEnd ? { truncated: true } : {}) };
+    }
+    return /\.rs$/.test(path) ? rustImplMemberWindow(path, lines, hashComment) : undefined;
+  };
+  // Priority 1: the focal's own file.
+  const ownFile = scanned.find((m) => m.path === focalPath);
+  if (ownFile !== undefined) return { window: windowFor(ownFile.path, ownFile.line) };
+  // Priority 2: a file the focal's file imports `owner` from.
+  for (const spec of importSpecifiersNaming(focalLines, owner, hasHashComments(focalPath), focalPath)) {
+    const resolved = await resolveImportSpecifierFile(focalPath, spec, workspace, cache);
+    if (resolved === undefined) continue;
+    const match = scanned.find((m) => m.path === resolved.path);
+    if (match !== undefined) return { window: windowFor(match.path, match.line) };
+  }
+  // Priority 3: exactly one OTHER declaring file is still unambiguous.
+  const candidatePaths = [...new Set(scanned.map((m) => m.path))].slice(0, 3);
+  if (candidatePaths.length > 1) return { ambiguousCandidates: candidatePaths };
+  const only = scanned.find((m) => m.path === candidatePaths[0]);
+  return only === undefined ? {} : { window: windowFor(only.path, only.line) };
+}
+
+/**
+ * V3 (round-7 fable finding, goCrossPackageConst): a Go cross-package
+ * qualified constant (`config.DefaultTimeout`) is NOT a class/struct member
+ * -- Go has no owner BODY to search inside at all; `packageAlias` names a
+ * PACKAGE, resolved through that package's own `package <alias>`-declaring
+ * files (workspace-wide; Go's import path -> directory mapping needs the
+ * module root this pure lookup does not have, so this matches on the
+ * package's OWN declared name instead, the same identity `goNamed`/`goPlain`
+ * import parsing already assumes by convention). Non-test files only, mirroring `findGoPackageConstantWindow`'s existing rule.
+ */
+async function findGoQualifiedPackageConstantWindow(
+  packageAlias: string,
+  member: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; start: number; end: number; truncated: boolean } | undefined> {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = scanLiteral(`^package\\s+${escapeRegExp(packageAlias)}\\b`, workspace, { regex: true, caseInsensitive: false });
+  } catch {
+    return undefined;
+  }
+  for (const match of scanned) {
+    if (path.extname(match.path) !== ".go" || isTestConcernPath(match.path)) continue;
+    const fileContent = readCached(workspace, match.path, cache);
+    if (fileContent === undefined) continue;
+    const window = findModuleConstantWindow(fileContent.split(/\r?\n/), member, false);
+    if (window) return { path: match.path, start: window.start, end: window.end, truncated: window.truncated };
+  }
+  return undefined;
+}
+
+/** A Rust file's own module directory: `mod.rs`/`lib.rs`/`main.rs` own their directory, `a/b.rs` owns `a/b/`. */
+function rustModuleDir(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/");
+  const base = path.posix.basename(normalized);
+  const dir = path.posix.dirname(normalized);
+  if (base === "mod.rs" || base === "lib.rs" || base === "main.rs") return dir;
+  return rustJoin(dir, base.replace(/\.rs$/, ""));
+}
+
+function rustJoin(dir: string, rel: string): string {
+  return dir === "." || dir === "" ? rel : `${dir}/${rel}`;
+}
+
+/** The nearest directory at or above `filePath`'s own that holds a crate root (`lib.rs` or `main.rs`). */
+function rustCrateRootDir(filePath: string, workspace: string, cache: FileReadCache): string | undefined {
+  let dir = path.posix.dirname(filePath.replace(/\\/g, "/"));
+  for (let level = 0; level < 32; level++) {
+    if (readCached(workspace, rustJoin(dir, "lib.rs"), cache) !== undefined) return dir;
+    if (readCached(workspace, rustJoin(dir, "main.rs"), cache) !== undefined) return dir;
+    if (dir === "." || dir === "" || dir === "/") return undefined;
+    dir = path.posix.dirname(dir);
+  }
+  return undefined;
+}
+
+/**
+ * The file of the Rust module a `use`/`mod` path names (`rustUseBindings`):
+ * `crate::…` from the crate root, `self::…` from the focal's own module
+ * directory, `super::…` from its parent, a leading plain name only when it
+ * is a child module of the focal's own module -- otherwise it is an
+ * external crate (`undefined`, nothing about it is asserted). A path that
+ * starts inside this crate but has no `name.rs`/`name/mod.rs` (an inline
+ * `mod name { … }`, a `#[path]` attribute) is `"workspace-module-unresolved"`:
+ * disclosed, never skipped, and never guessed from a same-named file
+ * elsewhere (two crates, or `crate::config` and `crate::net::config`,
+ * routinely share a basename).
+ */
+async function resolveRustModulePath(
+  segments: readonly string[],
+  focalPath: string,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; content: string } | "workspace-module-unresolved" | undefined> {
+  const head = segments[0];
+  if (head === undefined) return undefined;
+  let base: string | undefined;
+  let rest: readonly string[];
+  if (head === "crate") {
+    base = rustCrateRootDir(focalPath, workspace, cache);
+    rest = segments.slice(1);
+  } else if (head === "self" || head === "super") {
+    let dir = rustModuleDir(focalPath);
+    let index = 0;
+    for (; segments[index] === "self" || segments[index] === "super"; index++) {
+      if (segments[index] === "super") dir = path.posix.dirname(dir);
+    }
+    base = dir;
+    rest = segments.slice(index);
+  } else {
+    const modDir = rustModuleDir(focalPath);
+    const isChildModule = readCached(workspace, rustJoin(modDir, `${head}.rs`), cache) !== undefined
+      || readCached(workspace, rustJoin(modDir, `${head}/mod.rs`), cache) !== undefined;
+    if (!isChildModule) return undefined;
+    base = modDir;
+    rest = segments;
+  }
+  if (base === undefined || rest.length === 0) return "workspace-module-unresolved";
+  const dir = rest.slice(0, -1).reduce((acc, segment) => rustJoin(acc, segment), base);
+  const leaf = rest[rest.length - 1]!;
+  for (const candidate of [rustJoin(dir, `${leaf}.rs`), rustJoin(dir, `${leaf}/mod.rs`)]) {
+    const content = readCached(workspace, candidate, cache);
+    if (content !== undefined) return { path: candidate, content };
+  }
+  return "workspace-module-unresolved";
+}
+
+/**
+ * V3 follow-up (round-7 orchestrator probe): resolves a MODULE-NAMESPACE
+ * alias's own defining file -- `owner` is a bare name `importedModuleAliasesIn`
+ * already proved is a module alias, but that set only carries the name, not
+ * WHICH import shape produced it (a Python submodule `from pkg import mod`
+ * differs from a plain package `import pkg`; a TS namespace import differs
+ * from either). Re-derives the shape from `focalLines` directly. Every
+ * shape's own failure falls through to the NEXT line/shape (never throws,
+ * never guesses): `undefined` overall means `owner` names no workspace
+ * module this scan could find, the SAME "stdlib/external" signal the
+ * caller's silent-skip already keys on. A Rust path that provably starts
+ * inside this crate but whose file was not found is
+ * `"workspace-module-unresolved"` (`resolveRustModulePath`), which the
+ * caller discloses.
+ */
+async function resolveModuleNamespaceFile(
+  owner: string,
+  focalPath: string,
+  focalLines: readonly string[],
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ path: string; content: string } | "workspace-module-unresolved" | undefined> {
+  if (path.extname(focalPath) === ".rs") {
+    const segments = rustUseBindings(focalLines, false).get(owner);
+    return segments === undefined ? undefined : resolveRustModulePath(segments, focalPath, workspace, cache);
+  }
+  const escapedOwner = escapeRegExp(owner);
+  const baseDir = path.posix.dirname(focalPath.replace(/\\/g, "/"));
+  for (const rawLine of focalLines) {
+    const trimmed = rawLine.trim();
+    // TS/JS: import * as owner from "spec"
+    const tsNs = new RegExp(`^import\\s+\\*\\s+as\\s+${escapedOwner}\\s+from\\s+["']([^"']+)["']`).exec(trimmed);
+    if (tsNs) {
+      const specifier = tsNs[1]!;
+      const resolved = await resolveImportSpecifierFile(focalPath, { specifier, relative: specifier.startsWith(".") || specifier.startsWith("/") }, workspace, cache);
+      if (resolved !== undefined) return resolved;
+      continue;
+    }
+    // B3 (round-8 fable finding, cjsRequireModuleConst/tsDefaultImportObjectConst):
+    // CJS `const|let|var owner = require("spec")`, TS `import owner =
+    // require("spec")`, and a TS/JS DEFAULT import `import owner from
+    // "spec"` all bind `owner` to that MODULE's own exports object --
+    // resolved via the SAME specifier-file lookup `resolveImportSpecifierFile`
+    // already gives every other import shape here.
+    const cjsRequire = new RegExp(`^(?:const|let|var)\\s+${escapedOwner}\\s*=\\s*require\\(\\s*["']([^"']+)["']\\s*\\)`).exec(trimmed);
+    const tsImportEqualsRequire = new RegExp(`^import\\s+${escapedOwner}\\s*=\\s*require\\(\\s*["']([^"']+)["']\\s*\\)`).exec(trimmed);
+    const tsDefaultImport = new RegExp(`^import\\s+${escapedOwner}\\s*(?:,\\s*\\{[^}]*\\})?\\s*from\\s*["']([^"']+)["']`).exec(trimmed);
+    const moduleAliasMatch = cjsRequire ?? tsImportEqualsRequire ?? tsDefaultImport;
+    if (moduleAliasMatch) {
+      const specifier = moduleAliasMatch[1]!;
+      const resolved = await resolveImportSpecifierFile(focalPath, { specifier, relative: specifier.startsWith(".") || specifier.startsWith("/") }, workspace, cache);
+      if (resolved !== undefined) return resolved;
+      continue;
+    }
+    // Python: from X import owner [as owner] -- owner is the ALREADY-bound
+    // name we were given, so match whichever item (plain or "as") bound it,
+    // then resolve owner as X's own submodule (`X/owner.py` or
+    // `X/owner/__init__.py`), never X's OWN file (a DIFFERENT module).
+    const pyFrom = /^from\s+([.\w]+)\s+import\s+(.+)$/.exec(trimmed);
+    if (pyFrom) {
+      const items = pyFrom[2]!.split(",").map((s) => s.trim()).filter(Boolean);
+      let originalName: string | undefined;
+      for (const item of items) {
+        if (item === "*") continue;
+        const asMatch = /^([A-Za-z_]\w*)\s+as\s+([A-Za-z_]\w*)$/.exec(item);
+        const bound = asMatch ? asMatch[2]! : item;
+        if (bound === owner) { originalName = asMatch ? asMatch[1]! : item; break; }
+      }
+      if (originalName !== undefined) {
+        const packageBase = pyFrom[1]!;
+        const pkgDirs = packageBase.startsWith(".")
+          ? candidateRelativePaths(focalPath, { specifier: packageBase, relative: true }).filter((p) => p.endsWith("__init__.py")).map((p) => p.replace(/\/__init__\.py$/, ""))
+          : [packageBase.replace(/\./g, "/"), path.posix.normalize(path.posix.join(baseDir, packageBase.replace(/\./g, "/")))];
+        for (const dir of pkgDirs) {
+          for (const candidate of [`${dir}/${originalName}.py`, `${dir}/${originalName}/__init__.py`]) {
+            const content = readCached(workspace, candidate, cache);
+            if (content !== undefined) return { path: candidate, content };
+          }
+        }
+      }
+      continue;
+    }
+    // Python: import owner [as owner] / import x.owner [as owner]
+    const pyImport = /^import\s+([\w.]+)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(trimmed);
+    if (pyImport) {
+      const alias = pyImport[2];
+      const dotted = pyImport[1]!;
+      const bound = alias ?? dotted.split(".")[0]!;
+      if (bound === owner) {
+        const asPath = dotted.replace(/\./g, "/");
+        for (const root of ["", "src/"]) {
+          for (const candidate of [`${root}${asPath}.py`, `${root}${asPath}/__init__.py`]) {
+            const content = readCached(workspace, candidate, cache);
+            if (content !== undefined) return { path: candidate, content };
+          }
+        }
+      }
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * V3 follow-up (MUST, orchestrator round-7 probe): true when `spec` resolves
+ * to a real file somewhere in the workspace -- `chaseConstant`'s own
+ * package-wording gate: an import specifier that DOES resolve (a Python
+ * absolute package `from app import settings`, where `app` is
+ * `app/__init__.py`) is never named as a package; only a specifier that
+ * resolves to no workspace file is. Tries
+ * `resolveImportSpecifierFile` first (TS/JS packages -- a bare
+ * `node_modules`-shaped candidate simply will not exist as a workspace
+ * file; Python dotted-RELATIVE specifiers, via that helper's own
+ * `__init__.py` convention), then a Python ABSOLUTE package/module
+ * convention (workspace root, then a `src/` root) that helper does not
+ * cover (its Python `__init__.py` fallback is gated to a DOTTED-RELATIVE
+ * specifier only).
+ */
+async function importSpecifierResolvesInWorkspace(
+  ownerPath: string,
+  spec: ImportSpecifier,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<boolean> {
+  if (await resolveImportSpecifierFile(ownerPath, spec, workspace, cache) !== undefined) return true;
+  if (spec.relative) return false;
+  const base = spec.specifier.replace(/\./g, "/");
+  for (const root of ["", "src/"]) {
+    if (readCached(workspace, `${root}${base}.py`, cache) !== undefined) return true;
+    if (readCached(workspace, `${root}${base}/__init__.py`, cache) !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Caller sites of a plain top-level FUNCTION (no real enclosing type) --
+ * see this section's own header comment for why `callSitesForFocalMember`'s
+ * receiver-strength gate cannot see a bare call's only textual link (an
+ * import specifier string, masked). Mirrors `callSitesForFocalMember`
+ * except every call-shaped, non-declaration occurrence counts (a plain
+ * top-level name has no cross-TYPE ambiguity a receiver could resolve).
+ *
+ * P2-15 (eval-0927 review-r4 #15, sameNameTwoDeclsBothCalled): strength is
+ * NOT fixed at 2 for every occurrence. A plain function's own canonical
+ * call form is BARE (no receiver) -- `orderService.cancel(id)` calls some
+ * OBJECT's `cancel` member, never the free-standing `cancel` function of
+ * the same name, even though this scan (by construction, scanning for the
+ * bare name only) still finds the line. Grading a qualified occurrence at
+ * strength 1 (matching `receiverStrength`'s own "weak" tier) rather than 2
+ * keeps it as a real, RECORDED site (recall is not sacrificed — a genuine
+ * namespace-qualified re-export call, `utils.fetchWithRetry(url)`, still
+ * counts) while letting the plan-entry assembly (readCodeTaskPack.ts,
+ * `recoverFacetClosureCandidates`) tell a clean, unambiguous fan-in (every
+ * site strength 2) apart from one MIXED with sites that could just as
+ * easily belong to a different, same-named declaration elsewhere, and word
+ * its disclosure accordingly rather than presenting both as one clean count.
+ *
+ * Exported only for `facetClosureTimingIndependence.spec.ts` (FIX-FAB item
+ * 11) — see `callSitesForFocalMember`'s own export note.
+ */
+export function plainFunctionCallerSites(
+  member: string,
+  focalPath: string,
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+  allowTestPaths: boolean,
+  deadline: number,
+): CallerScanResult {
+  let scanned: ReturnType<typeof scanLiteral>;
+  try {
+    scanned = facetCallerMentionScan(member, workspace, args);
+  } catch {
+    return { sites: [], complete: true };
+  }
+  const linesByPath = new Map<string, number[]>();
+  for (const match of scanned) {
+    if (match.path === focalPath) continue;
+    if (!allowTestPaths && isTestConcernPath(match.path)) continue;
+    if (CALLER_EXPANSION_DOC_PATH_RE.test(match.path)) continue;
+    const existing = linesByPath.get(match.path);
+    if (existing) existing.push(match.line);
+    else linesByPath.set(match.path, [match.line]);
+  }
+  const filesCapped = linesByPath.size > MAX_FACET_CALLER_FILES_CLASSIFIED; // P1-7: see CallerScanResult.filesCapped's own doc
+  const paths = [...linesByPath.keys()].sort((a, b) =>
+    sharedPathPrefixSegments(b, focalPath) - sharedPathPrefixSegments(a, focalPath) || a.localeCompare(b)
+  ).slice(0, MAX_FACET_CALLER_FILES_CLASSIFIED);
+  const sites: CallerSiteCandidate[] = [];
+  // R6-A (eval-0927 review-r5 P2-6): see `callSitesForFocalMember`'s own
+  // `declarationLineKeys` doc — the identical merge, for the plain-function
+  // scan.
+  const declarationLineKeys = new Set<string>();
+  let examined = 0;
+  for (const relPath of paths) {
+    if (Date.now() >= deadline) break;
+    examined += 1;
+    // A3 (eval-0927 review-r6 P1-5): see `callSitesForFocalMember`'s own
+    // `isCallerMentionOnlyFile` hookup — the identical skip, for the
+    // plain-function scan.
+    if (isCallerMentionOnlyFile(relPath)) continue;
+    const content = readCached(workspace, relPath, cache);
+    if (content === undefined) continue;
+    const hashComment = hasHashComments(relPath);
+    const lines = content.split(/\r?\n/);
+    // A4 (eval-0927 review-r6 P1-6/P2-11 class): see `callSitesForFocalMember`'s
+    // own `commentState` doc — the identical confident/masked/codeFrom
+    // split, for the plain-function scan.
+    const commentState = blockCommentLineStates(lines, relPath);
+    const candidateLines = (linesByPath.get(relPath) ?? []).filter((line) => commentState.confident[line - 1] !== true);
+    linesByPath.set(relPath, candidateLines);
+    const inFile: Array<{ line: number; strength: 1 | 2 }> = [];
+    for (const line of candidateLines) {
+      const codeFrom = commentState.codeFrom[line - 1];
+      if (commentState.masked[line - 1] === true && codeFrom === undefined) continue;
+      const rawText = lines[line - 1];
+      if (rawText === undefined) continue;
+      const text = codeFrom !== undefined ? " ".repeat(codeFrom) + rawText.slice(codeFrom) : rawText;
+      const masked = maskNonCode(text, hashComment, relPath);
+      for (const occurrence of findCallOccurrences(masked, member)) {
+        if (callSiteOccurrenceIsDeclaration(occurrence, masked, relPath, lines, line, hashComment)) {
+          declarationLineKeys.add(`${relPath}#${line}`);
+          continue;
+        }
+        inFile.push({ line, strength: occurrence.qualifier === "bare" ? 2 : 1 });
+        break;
+      }
+    }
+    for (const site of inFile) {
+      sites.push({ path: relPath, line: site.line, strength: site.strength, callsInFile: inFile.length, proximity: sharedPathPrefixSegments(relPath, focalPath) });
+    }
+  }
+  // MENTION GUARD (R5-A1): see `callSitesForFocalMember`'s own hookup.
+  const recordedKeys = new Set([...sites.map((site) => `${site.path}#${site.line}`), ...declarationLineKeys]);
+  const { lines: unclassifiedMentions, capped: unclassifiedMentionsCapped } =
+    unclassifiedMentionLines(member, paths, linesByPath, recordedKeys, workspace, cache);
+  return {
+    sites: rankCallSites(sites),
+    complete: examined === paths.length,
+    ...(filesCapped ? { filesCapped } : {}),
+    ...(unclassifiedMentions.length > 0 ? { unclassifiedMentions } : {}),
+    ...(unclassifiedMentionsCapped ? { unclassifiedMentionsCapped: true } : {}),
+  };
+}
+
+/**
+ * P0-2 (R7-A, eval-0927 review-r6 finding 2, defaultExportedDeclCaller):
+ * `member`'s own declaration STATEMENT is written as its module's default
+ * export — `export default [async] function member`, `export default
+ * [abstract] class member`, CJS `module.exports = [async] function member` /
+ * `= class member`. Every importer of this module then binds the value under
+ * a name of ITS OWN CHOOSING (`import fmt from "./format"`, `const foo =
+ * require("./format")`) — invisible to a by-NAME call-site scan, which can
+ * only ever find `member(`. Checked only against the declaration's own
+ * header (`startLine`, and the line right before it, for the rarer split
+ * `export default\nfunction member() {}`) — deliberately never a general
+ * file-wide scan for a SEPARATE `module.exports = member;` line naming an
+ * already-declared function elsewhere: that shape is not this focal's own
+ * declaration, and stays an ordinary unclassified mention instead (the
+ * existing MENTION GUARD already keeps that case out of `empty` with no help
+ * from this check, since none of `mentionExplainedByImportExportLine`'s
+ * shapes match a bare `module.exports = member;`/`export default member;`
+ * reference either).
+ *
+ * A1 (eval-0927 review-r8/r9 round 9, defaultExportedGeneratorCaller): the
+ * `function` alternative also accepts an optional `*` (any spacing —
+ * `function* g`, `function *g`, `function * g`) for a generator's own
+ * default export (`export default function* rootSaga() {}`, a common
+ * redux-saga/async-generator shape) — `class` never takes one, so that
+ * branch stays bare.
+ */
+const DEFAULT_EXPORT_DECL_RE = /^\s*export\s+default\s+(?:@[\w$.]+(?:\([^)]*\))?\s+)*(?:async\s+)?(?:abstract\s+)?(?:function\s*\*?\s*|class\s+)([A-Za-z_$][\w$]*)\b/;
+const CJS_DEFAULT_EXPORT_DECL_RE = /^\s*module\.exports\s*=\s*(?:async\s+)?(?:function\s*\*?\s*|class\s+)([A-Za-z_$][\w$]*)\b/;
+/** The bare declaration head with no `export default`/`module.exports =` prefix — the SECOND line of a split `export default\nfunction member() {}` statement. */
+const BARE_DECL_HEAD_RE = /^\s*(?:async\s+)?(?:abstract\s+)?(?:function\s*\*?\s*|class\s+)([A-Za-z_$][\w$]*)\b/;
+/** A line that is, trimmed, nothing but `export default` — the FIRST line of that same split statement. */
+const DEFAULT_EXPORT_BARE_PREFIX_RE = /^\s*export\s+default\s*$/;
+
+/**
+ * A1 (R8-A, eval-0927 review-r7 P0-1, defaultExportedDeclCallerJsdoc/
+ * defaultExportedClassDecoratorCaller). The resolved focal's own `startLine`
+ * is the SYMBOL's range start, which a leading doc comment or decorator/
+ * attribute pushes ahead of the declaration's own header line (the parser
+ * attaches leading trivia to the symbol it documents) -- the two-line check
+ * below (`header - 1`/`header`) only ever finds the real header when nothing
+ * precedes it on the focal's own range. `declarationHeaderLine` walks forward
+ * from `startLine`, skipping blank lines, `/** … *\/`/`/* … *\/` block
+ * comments (single- or multi-line), `///`/`//` line comments, `#` line
+ * comments (never a leading `#[` attribute), `@decorator(...)` (possibly
+ * spanning several lines via unbalanced `(`/`[`), and `[Attribute]`
+ * annotations, to the first real code line -- bounded ONLY at `endLine` (a
+ * doc comment must never walk into an unrelated declaration below the
+ * focal's own range) and the file's own last line. `endLine` is an optional
+ * trailing parameter (default `lines.length`) so the pre-existing 3-arg
+ * pure-unit-test surface (`classprobe7.mts`'s own `focalIsSoleDefaultExport`
+ * rows, `evaluation0927.r7aFalseEmptyGuard.spec.ts`) keeps working unchanged;
+ * the real caller (`callerSitesForFocal`, below) passes the focal's own
+ * `endLine`.
+ *
+ * A1 (eval-0927 review-r8/r9 round 9, defaultExportedLongJsdocCaller): this
+ * walk USED to also cap itself at a flat 40 lines past `startLine`
+ * (`DECLARATION_HEADER_SEARCH_BOUND`, now removed) regardless of how much
+ * further `endLine` allowed -- a JSDoc block longer than that (a `@example`
+ * per reviewer, per parameter, ...) hit the cap before ever reaching its own
+ * `*\/` closer, so `declarationHeaderLine` returned `undefined` and the
+ * caller had no header text to test at all. A doc comment of ANY length is
+ * now skippable, bounded only by the focal's own recorded `endLine` (never
+ * past it, so a giant doc comment still cannot walk into an unrelated
+ * declaration below the focal's own range) -- see `focalIsSoleDefaultExport`
+ * for what happens when the walk still finds nothing within that bound.
+ */
+
+/** Bounded forward walk past a (possibly multi-line) `@decorator(...)`/`[Attribute]` -- returns the 1-based line right after it, capped at `limit`. String-aware (A1, eval-0927 review-r8/r9 round 9, pure row decorator-paren-in-string): a `(`/`[`/`)`/`]` INSIDE a quoted string argument (`@Foo(")")`) is not a real paren/bracket and must never be balanced against the decorator's own argument list -- only quote-aware scanning (with `\`-escape skipped, mirroring every other string scan in this codebase) tells the two apart. */
+function skipAnnotationLines(lines: readonly string[], from: number, limit: number): number {
+  let depth = 0;
+  let line = from;
+  let quote: string | undefined;
+  do {
+    const text = lines[line - 1] ?? "";
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quote !== undefined) {
+        if (ch === "\\") { i++; continue; }
+        if (ch === quote) quote = undefined;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+      if (ch === "(" || ch === "[") depth++;
+      else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    }
+    line++;
+  } while (depth > 0 && line <= limit);
+  return line;
+}
+
+/** See `focalIsSoleDefaultExport`'s own A1 doc above. Returns `undefined` when no code line was found within bound (the caller then treats this as UNPROVEN, never as proof of a non-default export -- see `focalIsSoleDefaultExport`). */
+function declarationHeaderLine(lines: readonly string[], startLine: number, endLine: number): number | undefined {
+  const limit = Math.min(endLine, lines.length);
+  let i = startLine;
+  while (i <= limit) {
+    const text = lines[i - 1];
+    if (text === undefined) return undefined;
+    const trimmed = text.trim();
+    if (trimmed.length === 0) { i++; continue; }
+    if (trimmed.startsWith("/*")) {
+      // Scan forward (possibly from THIS same line) for the closer `*/`;
+      // code trailing the closer on its own line becomes the header itself
+      // rather than being skipped past. Further comments on the closer's
+      // line (`/* a */ /* b */`, `*/ // note`) are trivia too: a line with no
+      // code left is never the header (round-9 review P1-3).
+      let j = i;
+      let rest = trimmed;
+      let from = 2;
+      for (;;) {
+        let closeAt = rest.indexOf("*/", from);
+        while (closeAt < 0 && j < limit) {
+          j++;
+          rest = lines[j - 1] ?? "";
+          closeAt = rest.indexOf("*/");
+        }
+        if (closeAt < 0) return undefined;
+        rest = rest.slice(closeAt + 2).trim();
+        if (!rest.startsWith("/*")) break;
+        from = 2;
+      }
+      if (rest.length > 0 && !rest.startsWith("//")) return j;
+      i = j + 1;
+      continue;
+    }
+    if (trimmed.startsWith("///") || trimmed.startsWith("//")) { i++; continue; }
+    if (trimmed.startsWith("#[")) { i = skipAnnotationLines(lines, i, limit); continue; }
+    if (trimmed.startsWith("#")) { i++; continue; }
+    if (trimmed.startsWith("@")) { i = skipAnnotationLines(lines, i, limit); continue; }
+    if (/^\[[A-Za-z_]/.test(trimmed)) { i = skipAnnotationLines(lines, i, limit); continue; }
+    return i;
+  }
+  return undefined;
+}
+
+/**
+ * A1 (eval-0927 review-r8/r9 round 9; round-9 review P1-3): the header line's
+ * own code after any leading comment text — a doc comment's closer with or
+ * without text before it (`*\/ export default …`, ` * end *\/ export default
+ * …`) and complete block comments on the same line (`/* istanbul ignore
+ * next *\/ export default function f() {}`). Callers test BOTH this and the raw
+ * line, so a `*\/` inside a string on an ordinary header can never hide a match;
+ * a spurious match only ever makes the focal "possibly default-exported"
+ * (undetermined), never proves it is not.
+ */
+function afterLeadingBlockCommentCloser(text: string): string {
+  let rest = text.trimStart();
+  const closer = rest.indexOf("*/");
+  const opener = rest.indexOf("/*");
+  if (closer >= 0 && (opener < 0 || opener > closer)) rest = rest.slice(closer + 2).trimStart();
+  while (rest.startsWith("/*")) {
+    const end = rest.indexOf("*/", 2);
+    if (end < 0) break;
+    rest = rest.slice(end + 2).trimStart();
+  }
+  return rest;
+}
+
+/** Exported only for `evaluation0927.r7aFalseEmptyGuard.spec.ts`. */
+export function focalIsSoleDefaultExport(lines: readonly string[], startLine: number, member: string, endLine: number = lines.length): boolean {
+  const header = declarationHeaderLine(lines, startLine, endLine);
+  // A1 (eval-0927 review-r8/r9 round 9): the walk could not resolve a real
+  // code line within the focal's own range at all (an exotic leading-trivia
+  // shape, or content past what this bounded scan can parse) -- that is NOT
+  // proof the declaration is some other shape. The old `?? startLine`
+  // fallback tested the TRIVIA line itself (almost never a match), so an
+  // unresolved header silently read as "not a default export" and could
+  // certify a false `request-item-empty:callers`. Fail toward the safe
+  // direction instead: never resolved, never proven NON-default.
+  if (header === undefined) return true;
+  for (const lineNo of [header - 1, header]) {
+    const text = lines[lineNo - 1];
+    if (text === undefined) continue;
+    for (const codeText of [text, afterLeadingBlockCommentCloser(text)]) {
+      const match = DEFAULT_EXPORT_DECL_RE.exec(codeText) ?? CJS_DEFAULT_EXPORT_DECL_RE.exec(codeText);
+      if (match !== null && match[1] === member) return true;
+    }
+  }
+  // The rarer split form: `export default` alone on the line right before
+  // the declaration's own bare head (`function`/`class` never sees an
+  // `export default` prefix on ITS line at all, so neither regex above ever
+  // matches either line of this shape on its own).
+  const prevText = lines[header - 2];
+  const ownText = lines[header - 1];
+  if (prevText !== undefined && ownText !== undefined && DEFAULT_EXPORT_BARE_PREFIX_RE.test(prevText)) {
+    const bare = BARE_DECL_HEAD_RE.exec(ownText) ?? BARE_DECL_HEAD_RE.exec(afterLeadingBlockCommentCloser(ownText));
+    if (bare !== null && bare[1] === member) return true;
+  }
+  return false;
+}
+
+async function callerSitesForFocal(
+  focal: ResolvedFacetFocal,
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+  allowTestPaths: boolean,
+  deadline: number,
+): Promise<CallerScanResult> {
+  const focalMember: CallerFocalMember = { path: focal.path, typeName: focal.typeName, member: focal.name };
+  const result = focal.hasRealType
+    ? callSitesForFocalMember(focalMember, args, workspace, cache, allowTestPaths, deadline)
+    : plainFunctionCallerSites(focal.name, focal.path, args, workspace, cache, allowTestPaths, deadline);
+  const focalContent = readCached(workspace, focal.path, cache);
+  const defaultExported = focalContent !== undefined
+    && focalIsSoleDefaultExport(focalContent.split(/\r?\n/), focal.startLine, focal.name, focal.endLine);
+  return defaultExported ? { ...result, focalDefaultExported: true } : result;
+}
+
+/** FIX-FAB item 7 (eval-0927 review #11, flowEn): how many callee layers `calleeDefinitionsForFocal` expands transitively -- 1 = the focal's own direct callees (the old bound); 2 additionally expands each of THOSE callees' own direct callees ("which functions run and in what order" needs the layer the served callee itself calls, e.g. `shouldRetry`/`backoffDelay` behind a one-hop-served handler -- reproduced live, never served before this fix, no gap disclosing the cut). */
+const MAX_FLOW_CALLEE_DEPTH = 2;
+
+/**
+ * `flow`'s "definitions of the focal body's direct in-workspace callees" --
+ * the SAME one-hop resolution `constantClosureForFocal` uses, but returning
+ * each callee's own full definition window instead of scanning inside it
+ * for constants. Recurses up to MAX_FLOW_CALLEE_DEPTH layers (item 7):
+ * `visited` is shared across the whole recursion (keyed by NAME, matching
+ * this module's existing name-keyed resolution everywhere else), so a
+ * callee reachable two different ways is never double-counted and a
+ * recursive call chain can never loop back on itself.
+ */
+async function calleeDefinitionsForFocal(
+  focal: ResolvedFacetFocal,
+  workspace: string,
+  cache: FileReadCache,
+  depth = 1,
+  visited: Set<string> = new Set([focal.name]),
+): Promise<NamedWindow[]> {
+  const content = readCached(workspace, focal.path, cache);
+  if (content === undefined) return [];
+  const lines = content.split(/\r?\n/);
+  const hashComment = hasHashComments(focal.path);
+  const bodyLines = lines.slice(focal.startLine - 1, focal.endLine);
+  const callees = calleeNamesIn(bodyLines, hashComment, focal.name, new Set([focal.name])).slice(0, MAX_CALLEES_PER_REQUIREMENT);
+  const out: NamedWindow[] = [];
+  for (const calleeName of callees) {
+    if (visited.has(calleeName)) continue;
+    visited.add(calleeName);
+    const resolved = await resolveCalleeFile(calleeName, focal, lines, hashComment, workspace, cache);
+    if (resolved?.symbol === undefined) continue;
+    out.push({ path: resolved.path, start: resolved.symbol.startLine, end: resolved.symbol.endLine, name: calleeName });
+    if (depth >= MAX_FLOW_CALLEE_DEPTH) continue;
+    const calleeFocal: ResolvedFacetFocal = {
+      path: resolved.path,
+      name: calleeName,
+      startLine: resolved.symbol.startLine,
+      endLine: resolved.symbol.endLine,
+      typeName: focal.typeName,
+      hasRealType: focal.hasRealType,
+    };
+    out.push(...await calleeDefinitionsForFocal(calleeFocal, workspace, cache, depth + 1, visited));
+  }
+  return out;
+}
+
+/**
+ * FIX-FAB2 (eval-0927 orchestrator repro, 2026-09-28, afx): flow's own
+ * "steps" over a NON-callable focal — a class/interface/enum/type
+ * (`focal.kind` defined and outside `CALLER_EXPANSION_CALLABLE_KINDS`).
+ * Flattening the WHOLE type body through `calleeNamesIn` (the
+ * callable-focal path above) treats every one of the type's OWN member
+ * declarations as a candidate "callee" of the type — even with FIX-FAB2's
+ * declaration exclusion in `calleeNamesIn` removing the false CALLS, the
+ * type's own members are exactly what a flow question about the type is
+ * asking to see ("how does OrderFlow sequence payment/inventory/shipping"
+ * asks about `place`/`fulfil`, not about some external free function the
+ * class body happens to mention once, in whatever order `calleeNamesIn`'s
+ * flat first-appearance scan and MAX_CALLEES_PER_REQUIREMENT cap happen to
+ * reach first — reproduced live: with 320 filler members between `place`
+ * and `fulfil`, the flat scan never even reached `fulfil`'s body).
+ *
+ * The focal's own DIRECT member callables (by line-range containment AND
+ * enclosing-symbol name, so a nested type's own members are never this
+ * type's members) whose name or body mentions a content term of the clause
+ * (case-insensitive substring — the same rule `conceptGrounded` above
+ * already applies, which matches inside a concatenated identifier like
+ * `shippingService` for free; the focal's own name is never a term) become
+ * the flow steps, in SOURCE ORDER, each then expanded one further hop
+ * through the UNCHANGED `calleeDefinitionsForFocal` (so a step's own
+ * callees are found exactly as a callable focal's are).
+ *
+ * P1-8 (eval-0927 review r2 finding 8, classFlowHandle/classFlowLifecycle):
+ * `membersComplete` used to go false as soon as more members matched than
+ * MAX_CALLEES_PER_REQUIREMENT (3) allowed to be SERVED — but that cap exists
+ * to bound the cost of the deeper one-hop callee-expansion below, not the
+ * number of members the facet may REQUIRE; a small, ordinary class (here:
+ * constructor + place + payment + fulfil, four matches) whose WHOLE body
+ * was already on the wire (a small-file whole-serve, or any other surface
+ * that happens to cover it) was certified "undetermined" purely because it
+ * had a 4th matching member, even though every one of them was already
+ * served. Every matched member's OWN span is now a required window (see
+ * `out`'s first loop below) — the closure's serving budget only limits how
+ * many of them get the DEEPER one-hop callee-expansion (`steps`, unchanged);
+ * the gate's ordinary unservedSubSpans/open machinery then judges each
+ * member window on whether it is ACTUALLY served, giving an unserved member
+ * an executable `next` instead of a flat dead-end (P2). `membersComplete` is
+ * now false only past MAX_FLOW_REQUIRED_MEMBER_WINDOWS, a much larger safety
+ * ceiling guarding against a pathological type with an unreasonable number
+ * of matching members (never silently dropping the rest, same as before —
+ * the failure mode this function exists to fix one layer up — just at a
+ * bound that does not fire for an ordinary small class).
+ *
+ * `ungroundedTerms` lists every clause term (subjectTerms, length >= 3,
+ * excluding the focal's own name) that matched NO member at all. The gate
+ * (facetGate.ts's `evaluateFacetRequirement`) refuses to certify "covered"
+ * while either is non-empty (P1/P3 — brief-fab2.md required behaviour 2/3):
+ * a class whose relevant members are still unserved, or whose clause names
+ * something no served member accounts for, is not yet answered.
+ */
+/** P1-8: safety ceiling on how many matched members become required flow windows at all — MAX_CALLEES_PER_REQUIREMENT (3) still bounds the costlier one-hop callee-expansion (`steps`), a separate, smaller concern. */
+const MAX_FLOW_REQUIRED_MEMBER_WINDOWS = 64;
+
+async function flowStepWindowsForNonCallableFocal(
+  focal: ResolvedFacetFocal,
+  requirement: FacetRequirement,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ windows: NamedWindow[]; membersComplete: boolean; ungroundedTerms: string[] }> {
+  const content = readCached(workspace, focal.path, cache);
+  if (content === undefined) return { windows: [], membersComplete: true, ungroundedTerms: [] };
+  const lang = languageForPath(focal.path);
+  const parsed = (lang ? await cache.parsedSymbols(content, lang, focal.path) : null) ?? [];
+  const ownName = normalizeCallerIdent(focal.name);
+  const members = parsed
+    .filter((s) =>
+      CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind)
+      && s.startLine >= focal.startLine && s.endLine <= focal.endLine
+      && normalizeCallerIdent(unqualifiedSymbolTail(s.enclosingSymbol?.name ?? "")) === ownName)
+    .sort((a, b) => a.startLine - b.startLine);
+  const lines = content.split(/\r?\n/);
+  const terms = [...new Set(
+    requirement.subjectTerms.map((t) => t.toLowerCase()).filter((t) => t.length >= 3 && t !== ownName),
+  )];
+  const ungroundedTerms = new Set(terms);
+  const matched: typeof members = [];
+  for (const member of members) {
+    if (terms.length === 0) break;
+    const nameLower = unqualifiedSymbolTail(member.name).toLowerCase();
+    const bodyLower = lines.slice(member.startLine - 1, member.endLine).join("\n").toLowerCase();
+    let hit = false;
+    for (const term of terms) {
+      if (nameLower.includes(term) || bodyLower.includes(term)) {
+        ungroundedTerms.delete(term);
+        hit = true;
+      }
+    }
+    if (hit) matched.push(member);
+  }
+  const membersComplete = matched.length <= MAX_FLOW_REQUIRED_MEMBER_WINDOWS;
+  const required = matched.slice(0, MAX_FLOW_REQUIRED_MEMBER_WINDOWS);
+  const steps = required.slice(0, MAX_CALLEES_PER_REQUIREMENT);
+  const out: NamedWindow[] = [];
+  // Every matched member (up to the safety ceiling) is a required window on
+  // its own -- cheap (no expansion), and lets the gate recognize a member
+  // already served by some OTHER surface (e.g. the whole class on the wire)
+  // without limiting how many of them can be accepted as covered.
+  for (const member of required) {
+    out.push({ path: focal.path, start: member.startLine, end: member.endLine, name: unqualifiedSymbolTail(member.name) });
+  }
+  const visited = new Set<string>([focal.name]);
+  for (const member of steps) {
+    const stepName = unqualifiedSymbolTail(member.name);
+    if (visited.has(stepName)) continue;
+    visited.add(stepName);
+    const stepFocal: ResolvedFacetFocal = {
+      path: focal.path,
+      name: stepName,
+      startLine: member.startLine,
+      endLine: member.endLine,
+      typeName: focal.typeName,
+      hasRealType: focal.hasRealType,
+      kind: member.kind,
+    };
+    out.push(...await calleeDefinitionsForFocal(stepFocal, workspace, cache, 1, new Set(visited)));
+  }
+  return { windows: out, membersComplete, ungroundedTerms: [...ungroundedTerms] };
+}
+
+/**
+ * FIX-FAB2: dispatches flow's own callee/step windows on whether `focal` is
+ * itself callable (FIX-FAB's unchanged `calleeDefinitionsForFocal` above,
+ * direct callees of the callable body) or a type
+ * (`flowStepWindowsForNonCallableFocal`, the type's own matching members).
+ * `membersComplete`/`ungroundedTerms` are only ever non-trivial for the type
+ * path — a callable focal's flow requirement is judged exactly as before
+ * this wave (required behaviour 4).
+ */
+async function flowWindowsForFocal(
+  focal: ResolvedFacetFocal,
+  requirement: FacetRequirement,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ windows: NamedWindow[]; membersComplete: boolean; ungroundedTerms: string[] }> {
+  if (focal.kind !== undefined && !CALLER_EXPANSION_CALLABLE_KINDS.has(focal.kind)) {
+    return flowStepWindowsForNonCallableFocal(focal, requirement, workspace, cache);
+  }
+  return { windows: await calleeDefinitionsForFocal(focal, workspace, cache), membersComplete: true, ungroundedTerms: [] };
+}
+
+/** The enclosing-symbol (or bounded-margin) window of one ranked call site — same rule `recoverCallerExpansionCandidates` applies to its own sites above. */
+async function windowForCallSite(
+  site: CallerSiteCandidate,
+  workspace: string,
+  cache: FileReadCache,
+): Promise<{ start: number; end: number; symbolName?: string }> {
+  const content = readCached(workspace, site.path, cache);
+  if (content === undefined) return { start: site.line, end: site.line };
+  const lang = languageForPath(site.path);
+  const parsed = (lang ? await cache.parsedSymbols(content, lang, site.path) : null) ?? [];
+  const enclosing = parsed
+    .filter((s) => CALLER_EXPANSION_CALLABLE_KINDS.has(s.kind) && site.line >= s.startLine && site.line <= s.endLine)
+    .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+  const totalLines = countLines(content);
+  // P1-9 (eval-0927 review-r2 #9's "1-47 for a 7-line file" producer): the
+  // enclosing symbol's OWN parsed `endLine` was returned verbatim, with no
+  // floor/ceiling against THIS file's real extent — a parser miscount (measured
+  // alongside non-ASCII content elsewhere in the same file) could hand back an
+  // end line past EOF, and the caller (a facet `next`/`remaining` target) has
+  // no way to tell a real large symbol apart from a bogus one without this
+  // clamp. `boundedCallerWindow`'s own fallback path already clamps this way
+  // (`Math.min(Math.max(totalLines, 1), ...)`); this makes the enclosing-symbol
+  // path the same guarantee, never a silent out-of-bounds `next`.
+  if (enclosing !== undefined) {
+    return {
+      start: Math.max(1, Math.min(enclosing.startLine, totalLines)),
+      end: Math.max(1, Math.min(enclosing.endLine, totalLines)),
+      symbolName: enclosing.name,
+    };
+  }
+  const bounded = boundedCallerWindow(site.line, totalLines);
+  return { start: bounded.start, end: bounded.end };
+}
+
+/**
+ * FIX-G (2026-09-27): call sites of `focal` inside its OWN file, outside its
+ * own body. Both cross-file scanners above deliberately skip the focal's file
+ * ("never its own caller" — right for caller EXPANSION, whose point is the
+ * entry point elsewhere), but a callers question is answered only by EVERY
+ * caller: a sibling function in the same module that calls the focal is one.
+ * Same masking and declaration exclusions as `plainFunctionCallerSites`.
+ * Plan-only: these sites are required by the gate, never served by the hook
+ * (serving stays FIX-C1's), so an unserved one becomes a ranged `next`.
+ *
+ * MENTION GUARD (R5-A1): also returns same-file `mentions`/`mentionsCapped`
+ * — a raw mention the classifier's own masking pre-filter above hides (e.g.
+ * inside a template/f-string interpolation) is otherwise invisible to this
+ * scan entirely, so it is found independently, over the RAW lines, exactly
+ * like the cross-file scanners' own guard (`unclassifiedMentionLines`).
+ */
+function sameFileFacetCallSites(
+  focal: ResolvedFacetFocal,
+  workspace: string,
+  cache: FileReadCache,
+): { sites: FacetCallSite[]; mentions: FacetMentionLine[]; mentionsCapped: boolean } {
+  const content = readCached(workspace, focal.path, cache);
+  if (content === undefined) return { sites: [], mentions: [], mentionsCapped: false };
+  const hashComment = hasHashComments(focal.path);
+  const lines = content.split(/\r?\n/);
+  // A4 (eval-0927 review-r6 P1-6/P2-11 class): the file-level multi-line
+  // scan, consulted by BOTH passes below -- see `callSitesForFocalMember`'s
+  // own `commentState` doc for the confident/non-confident/codeFrom split
+  // this replaces the old boolean-only `computeBlockCommentMask` filter
+  // with (a CONFIDENT line is dropped from both; a merely MASKED,
+  // non-confident line stays visible to the mention pass; a closer line
+  // with `codeFrom` is classified from that column).
+  const commentState = blockCommentLineStates(lines, focal.path);
+  const out: FacetCallSite[] = [];
+  const recordedLines = new Set<number>();
+  for (let index = 0; index < lines.length; index++) {
+    const lineNo = index + 1;
+    if (lineNo >= focal.startLine && lineNo <= focal.endLine) continue;
+    if (commentState.confident[index]) continue;
+    const codeFrom = commentState.codeFrom[index];
+    if (commentState.masked[index] && codeFrom === undefined) continue; // non-confident: never a call site, still a possible mention below
+    const rawLine = lines[index]!;
+    const scanLine = codeFrom !== undefined ? " ".repeat(codeFrom) + rawLine.slice(codeFrom) : rawLine;
+    const masked = maskNonCode(scanLine, hashComment, focal.path);
+    if (!masked.includes(focal.name)) continue;
+    for (const occurrence of findCallOccurrences(masked, focal.name)) {
+      if (callSiteOccurrenceIsDeclaration(occurrence, masked, focal.path, lines, lineNo, hashComment)) {
+        // R6-A (eval-0927 review-r5 P2-6, cppUserTypeMemberFalseCaller): this
+        // occurrence IS the declaration `callSiteOccurrenceIsDeclaration`
+        // itself found (its own C++ out-of-line-member scope-qualified case
+        // included) -- the line is explained; it must never ALSO be re-tried
+        // by the weaker, independent `mentionLineLooksLikeDeclaration` below,
+        // which lacks that same special case and would otherwise re-flag an
+        // already-classified declaration line as an unclassified mention.
+        recordedLines.add(lineNo);
+        continue;
+      }
+      out.push({ path: focal.path, line: lineNo });
+      recordedLines.add(lineNo);
+      break;
+    }
+  }
+  const mentionRe = ASCII_WORD_MEMBER_RE.test(focal.name) ? new RegExp(`\\b${escapeRegExp(focal.name)}\\b`) : undefined;
+  // A3 (eval-0927 review-r6 P1-5): see `unclassifiedMentionLines`'s own doc
+  // on `isCallerMentionOnlyFile` -- symmetry only (a focal is never actually
+  // resolved inside one of these embedded-code extensions today), kept so
+  // this scan stays correct automatically if focal resolution ever learns to
+  // find a declaration inside one.
+  const mentionOnly = isCallerMentionOnlyFile(focal.path);
+  const mentions: FacetMentionLine[] = [];
+  let mentionsCapped = false;
+  for (let index = 0; index < lines.length; index++) {
+    const lineNo = index + 1;
+    if (lineNo >= focal.startLine && lineNo <= focal.endLine) continue;
+    if (recordedLines.has(lineNo)) continue;
+    // A4: a CONFIDENT masked line is dropped outright here too (never a
+    // mention); a merely masked, non-confident line stays -- its true
+    // classification is left to `memberOnlyInCommentText`'s own state-aware
+    // judgment below, never a blind drop.
+    if (commentState.confident[index]) continue;
+    const text = lines[index]!;
+    if (mentionRe === undefined ? !text.includes(focal.name) : !mentionRe.test(text)) continue;
+    if (!mentionOnly) {
+      const lineState: MentionCommentLineState = {
+        masked: commentState.masked[index] === true,
+        confident: commentState.confident[index] === true,
+        codeFrom: commentState.codeFrom[index] ?? undefined,
+      };
+      if (memberOnlyInCommentText(text, focal.name, hashComment, lineState)) continue;
+      if (mentionExplainedByImportExport(lines, lineNo, focal.name, focal.path)) continue;
+      if (mentionLineLooksLikeDeclaration(text, focal.name)) continue;
+    }
+    if (mentions.length >= MAX_UNCLASSIFIED_MENTION_LINES) { mentionsCapped = true; break; }
+    mentions.push({ path: focal.path, line: lineNo });
+  }
+  return { sites: out, mentions, mentionsCapped };
+}
+
+/**
+ * FIX-G: call sites a plan records per callers/flow requirement --
+ * `totalCallSites` keeps the true count from the scan itself (which may
+ * still exceed this). P1-7 (eval-0927 review-r2 #7): the GATE now requires
+ * every ONE of these recorded sites (facetGate.ts's own doc), so this is the
+ * real completeness bound, not merely a memo-size cap -- raised from 32 to
+ * 48 (2026-09-28), then to 512 (R4-A2, eval-0927 review-r3 #10,
+ * manyCallers60in3): 48 silently assumed at most ~40 distinct caller FILES
+ * with one site each (`MAX_CALLER_FILES_EXAMINED`'s own mental model), but a
+ * single file can hold many compatible call sites (three files, 20 sites
+ * each = 60) -- the closure hook that records this plan runs ONLY ONCE, on
+ * the first pack of a query (see its own call sites' doc), so a cap this
+ * small permanently discarded the tail of a realistic fan-in with no later
+ * hop ever able to recompute a wider slice. 512 plain `{path,line}` pairs
+ * cost a few KB of PROCESS memory (never the wire -- this plan is an
+ * in-process memo, `facetGate.ts`'s own header) and comfortably covers any
+ * realistic fan-in within the SAME `MAX_CALLER_FILES_EXAMINED`-bounded
+ * scan; `callSitesRecordedCapped` (facetGate.ts) is the honest disclosure
+ * for the now-rare case where even this is not enough, kept distinct from
+ * `callSitesFilesCapped` (a scan that never even OPENED some caller files at
+ * all, the one bound this cap was never meant to paper over) so the two
+ * causes are never confused on the wire.
+ */
+const MAX_RECORDED_FACET_CALL_SITES = 512;
+
+/**
+ * FIX-FAB item 10 (eval-0927 review #21, PLAUSIBLE-not-reproduced): the
+ * facet plan memo and its undelivered-lines ledger (facetGate.ts) were keyed
+ * on the bare workspace root alone -- exactly the (workspace, query)-only
+ * keying `util/laneKey.ts`'s own module doc documents as a CONFIRMED,
+ * already-fixed defect for OTHER stores (`certifiedWorkingSets`, F-V13-3):
+ * two concurrent lanes asking the same query text shared one plan, and a
+ * heavy lane could evict a peer lane's in-flight entry out of the shared
+ * 32-per-workspace FIFO. `laneScopedKey` is the SAME mechanism this file
+ * already uses for `readOnlyServedViewKey`/`lastPackBlocksByWorkspace` --
+ * exact backward compatibility (returns the root UNCHANGED outside any
+ * bound lane), and it also gives each lane its OWN dedicated 32-entry FIFO
+ * instead of every lane competing for one shared one. `readCodeTaskPack.ts`'s
+ * own three call sites (the seeded-pack plan check, `recoverFacetClosureCandidates`'s
+ * `recordFacetPlan`, and `buildFacetReadiness`'s read side) all key through
+ * this ONE function, so the write and read sides can never disagree.
+ */
+function facetPlanWorkspaceKey(workspace: string): string {
+  return laneScopedKey(path.resolve(workspace));
+}
+
+/**
+ * FIX-FAB item 11 (orchestrator report, 2026-09-27): the facet-closure
+ * completeness decision (`planSitesComplete`, `constantClosureForFocal`'s
+ * `complete`) must be a function of deterministic WORK budgets (files/call
+ * sites/bytes examined via MAX_CALLER_FILES_EXAMINED, MAX_PLANNED_CONSTANT_WINDOWS,
+ * MAX_CONSTANT_INITIALIZER_DEPTH, MAX_REEXPORT_HOPS, MAX_CALLEES_PER_REQUIREMENT
+ * etc.), never of elapsed time -- confirmed root cause of replayCorpus
+ * `sfflag1` flaking under load: `concernRecovery.ts`'s `CUMULATIVE_LOCATE_BUDGET_MS`
+ * (1000 ms) was designed for a DIFFERENT, genuinely variable-cost operation
+ * (a workspace-wide locate call) and was too tight a race for the closure
+ * work this module added on top (barrel/re-export hops, a Go same-package
+ * directory walk, depth-2 flow/initializer recursion) once the SAME box
+ * carries concurrent load -- the certificate flipped `act.answer` ->
+ * `discover` purely from machine speed, never from the evidence.
+ *
+ * This is deliberately generous and used ONLY as a last-resort circuit
+ * breaker across every requirement + sub-scan combined: every individual
+ * sub-scan's own WORK is already deterministically capped (a handful of
+ * cached file reads and bounded recursion), so on any normal run --
+ * including under the concurrent load several agents sharing one box
+ * produce -- this is never reached and the decision is 100% a function of
+ * the evidence found, not of how fast the box happened to be. If it is EVER
+ * reached (a genuinely pathological case: a directory walk over an unusually
+ * large workspace, a hung parse), every consumer already degrades to
+ * `complete:false` / `constantsComplete:false`, which the gate discloses as
+ * `request-item-undetermined` (P1) -- never a silent pass, never `empty`.
+ */
+export const FACET_CLOSURE_EMERGENCY_BUDGET_MS = 20_000;
+
+/**
+ * The facet-closure additions for one answer pack, for the caller to MERGE
+ * (never to inject into the ranking) -- mirrors
+ * `recoverCallerExpansionCandidates`'s own contract exactly, one requirement
+ * at a time, with a shared byte budget (MAX_CLOSURE_BYTES_PER_PACK) and
+ * per-path/range dedupe across requirements (two requirements naming the
+ * same window add it once). Never guesses: a requirement with no resolvable
+ * focal, or a focal with genuinely no compatible window, records that
+ * outcome (`reason`/`emptyVerified`) rather than fabricating a window.
+ */
+async function recoverFacetClosureCandidates(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  cache: FileReadCache,
+  selected: readonly ImpactCandidate[],
+  requirements: readonly FacetRequirement[],
+  /** FIX-G: record the gate's plan only — serve nothing, widen nothing (the seeded flow, whose caller-named surfaces must stand exactly as selected). */
+  planOnly = false,
+): Promise<{ additions: ImpactCandidate[]; outcomes: FacetClosureOutcome[]; widenedPaths: ReadonlySet<string> }> {
+  facetClosureEntryCountForTest += 1;
+  // FIX-FAB item 9 (eval-0927 review #12, jaKanjiOnly): a zero-length
+  // `selected` used to be an unconditional dead end. When the query's own
+  // requirements ALSO carry no usable concept term, that is still correct —
+  // there is nothing for `bestConceptAnchoredCandidate`'s workspace-wide
+  // fallback to rank against either, so bailing here is unchanged from
+  // before. But a kanji-only JA query bridged through jaGlossary.ts DOES
+  // carry concept terms (待ち時間/既定/再試行/呼び出し元/条件, once resolved to
+  // their EN stems) with NO lexical overlap in an English-named codebase, so
+  // the ordinary locator selects nothing at all — and bailing here left
+  // `resolveFacetFocal`'s own concept-anchored tier (which needs `selected`
+  // to rank against) unreached, so the pack could only end in `await_input`
+  // with no candidates and no `next`.
+  const hasUsableConceptTerm = requirements.some((r) => r.subjectTerms.some((t) => t.length >= 3));
+  if (selected.length === 0 && !hasUsableConceptTerm) return { additions: [], outcomes: [], widenedPaths: new Set() };
+  // FIX-FAB item 11: an EMERGENCY stop only (see FACET_CLOSURE_EMERGENCY_BUDGET_MS's
+  // own doc comment), not the routine budget every sub-scan's completeness is
+  // judged against -- those are work-bounded now (CallerScanResult.complete,
+  // constantClosureForFocal's own count/depth caps).
+  const deadline = Date.now() + FACET_CLOSURE_EMERGENCY_BUDGET_MS;
+  const allowTestPaths = queryMentionsTests(query);
+  const additions: ImpactCandidate[] = [];
+  const outcomes: FacetClosureOutcome[] = [];
+  const widenedPaths = new Set<string>();
+  const takenWindowKeys = new Set<string>();
+  let bytesUsed = 0;
+
+  const subjectLabel = (requirement: FacetRequirement): string =>
+    requirement.subjectIdentifiers[0] ?? requirement.subjectTerms.slice(0, 3).join(",") ?? requirement.clause;
+
+  /**
+   * FIX-C1 (2026-09-27, live V01 reproduction): `mergeConcernAdditions`'s
+   * rule (a) ("the window's own entry for this file stands") DROPS an
+   * addition whose path is already in the pack's own selected window --
+   * exactly RETRYABLE_STATUSES's own case, since `shouldRetry` (range 3-5)
+   * is typically already selected by the ordinary locator/identifier
+   * mechanisms for a "the shouldRetry conditions" clause, and the closure's
+   * own window (RETRYABLE_STATUSES, line 1) would be silently discarded in
+   * favour of the unchanged 3-5 entry -- reproducing the EXACT eval-0927 bug
+   * this whole mechanism exists to fix, just one layer further down. Any
+   * such collision is caught HERE (against `selected`, the SAME window
+   * `mergeConcernAdditions` itself would check) and resolved by WIDENING
+   * that existing candidate's `.range` in place instead of proposing a
+   * same-path addition that would only be dropped: `selected`'s elements
+   * are the SAME object references `candidates` holds
+   * (`Array.prototype.slice` copies the array, never its elements), so
+   * mutating one here reaches the live, still-being-assembled pack. A
+   * widened entry's `.symbol` is cleared -- the same rule
+   * `recoverCallerExpansionCandidates`'s own whole-file serve above
+   * applies, and for the same reason: `candidateToSurface` re-points a
+   * symbol-pinned candidate at that symbol's own (now stale, too narrow)
+   * range, which would silently undo the widening.
+   *
+   * Residual limitation (not hit by V01/V03/§4/V05 nor by
+   * evidenceClosure.spec.ts's per-language unit cases, so left as a
+   * documented gap rather than fixed under time pressure): a collision with
+   * a path selected BEYOND `selected`'s own window (candidates.length >
+   * selectionLimit) is not detected here and would still be proposed as a
+   * same-path addition; `mergeConcernAdditions`'s rule (b) then PROMOTES
+   * that far entry's OWN narrower range unchanged, the same silent-drop
+   * shape one layer further out.
+   */
+  /** Whether a selected candidate already carries the focal's required lines (its own symbol, or a range spanning them). */
+  const selectedCoversFocal = (path: string, name: string, start: number, end: number): boolean => selected.some((candidate) => {
+    if (candidate.path !== path) return false;
+    if (candidate.symbol !== undefined) return candidate.symbol === name;
+    const bounds = candidate.range?.match(/^(\d+)-(\d+)$/);
+    const candidateStart = bounds ? Number(bounds[1]) : candidate.line;
+    const candidateEnd = bounds ? Number(bounds[2]) : candidate.line;
+    return candidateStart <= start && end <= candidateEnd;
+  });
+
+  const tryAddWindow = (path: string, start: number, end: number, why: string): boolean => {
+    const range = `${start}-${end}`;
+    const key = `${path}\0${range}`;
+    if (takenWindowKeys.has(key)) return true; // already covered, not a failure
+    const existing = selected.find((c) => c.path === path);
+    if (existing !== undefined) {
+      const bounds = existing.range?.match(/^(\d+)-(\d+)$/);
+      const existingStart = bounds ? Number(bounds[1]) : existing.line;
+      const existingEnd = bounds ? Number(bounds[2]) : existing.line;
+      const widenedStart = Math.min(existingStart, start);
+      const widenedEnd = Math.max(existingEnd, end);
+      const widenedKey = `${path}\0${widenedStart}-${widenedEnd}`;
+      if (takenWindowKeys.has(widenedKey)) return true;
+      if (bytesUsed >= MAX_CLOSURE_BYTES_PER_PACK) return false;
+      const content = readCached(workspace, path, cache);
+      if (content === undefined) return false;
+      const widenedBytes = Buffer.byteLength(sliceLinesToText(content, widenedStart, widenedEnd), "utf8");
+      const existingBytes = Buffer.byteLength(sliceLinesToText(content, existingStart, existingEnd), "utf8");
+      // Only the MARGINAL bytes count against the closure budget -- the
+      // existing entry's own bytes were already going to be served
+      // regardless of this hook.
+      const marginalBytes = Math.max(0, widenedBytes - existingBytes);
+      if (bytesUsed + marginalBytes > MAX_CLOSURE_BYTES_PER_PACK) return false;
+      bytesUsed += marginalBytes;
+      existing.range = `${widenedStart}-${widenedEnd}`;
+      existing.line = widenedStart;
+      delete existing.symbol;
+      takenWindowKeys.add(widenedKey);
+      widenedPaths.add(path);
+      return true;
+    }
+    if (bytesUsed >= MAX_CLOSURE_BYTES_PER_PACK) return false;
+    const content = readCached(workspace, path, cache);
+    if (content === undefined) return false;
+    // P2-12 (round-4 review, V01 flagship; refined by the orchestrator): ONE
+    // addition per path. `mergeConcernAdditions` keeps only the first
+    // addition for a path, so a second window in a file this closure already
+    // added — the focal and the constant it reads (`loadOptions` 13-15 and
+    // `DEFAULT_OPTIONS` 7-11 of one 15-line config.ts), or two constants of
+    // one module — widens that addition to their union, charged at the
+    // marginal bytes, instead of being dropped and costing a second hop.
+    // (Round 4 first promoted the whole small file whenever it fit the
+    // remaining budget: that shipped a 4 KB config module for one line, and a
+    // file promoted first could leave no room for another file's required
+    // window.)
+    const sibling = additions.find((addition) => addition.path === path);
+    if (sibling !== undefined) {
+      const bounds = /^(\d+)-(\d+)$/.exec(sibling.range ?? "");
+      const siblingStart = bounds ? Number(bounds[1]) : sibling.line;
+      const siblingEnd = bounds ? Number(bounds[2]) : sibling.line;
+      const unionStart = Math.min(siblingStart, start);
+      const unionEnd = Math.max(siblingEnd, end);
+      const marginalBytes = Buffer.byteLength(sliceLinesToText(content, unionStart, unionEnd), "utf8")
+        - Buffer.byteLength(sliceLinesToText(content, siblingStart, siblingEnd), "utf8");
+      if (bytesUsed + marginalBytes > MAX_CLOSURE_BYTES_PER_PACK) return false;
+      bytesUsed += marginalBytes;
+      sibling.range = `${unionStart}-${unionEnd}`;
+      sibling.line = unionStart;
+      takenWindowKeys.add(key);
+      return true;
+    }
+    const bytes = Buffer.byteLength(sliceLinesToText(content, start, end), "utf8");
+    if (bytesUsed + bytes > MAX_CLOSURE_BYTES_PER_PACK) return false;
+    bytesUsed += bytes;
+    takenWindowKeys.add(key);
+    // P2-11(a) (eval-0927 review r2 finding 11, fanInConsts): this window's
+    // bytes were budgeted against MAX_CLOSURE_BYTES_PER_PACK using EXACTLY
+    // the bytes actually served (above) -- `callerRange: true` is the
+    // existing "hard window, never widen" contract candidateToSurface
+    // already honours for a caller-pinned exact line (literal-first source
+    // witnesses, callerRange windows) -- reusing it here stops a LATER,
+    // unaccounted small-file promotion (`tinyFileWholeRange`) from silently
+    // re-widening a window this closure already budgeted exactly past what
+    // MAX_CLOSURE_BYTES_PER_PACK ever charged for it.
+    additions.push({
+      path, line: start, range, surface: classifySurface(path), why,
+      confidence: 0.85, callerRange: true,
+    });
+    return true;
+  };
+
+  // FIX-G (2026-09-27): the PLAN the completion gate judges every hop of this
+  // query against (facetGate.ts's memo) — recorded beside, never instead of,
+  // FIX-C1's own serving below. `servingOpen` keeps FIX-C1's surface-count
+  // guard for SERVING only: a requirement reached after that guard closes is
+  // still planned (its windows become an honest ranged `next`), where it used
+  // to be recorded as "budget-exhausted" with nothing known about it. Only the
+  // wall-clock deadline genuinely stops planning.
+  const planEntries: FacetPlanEntry[] = [];
+  const planPaths = new Set<string>();
+  for (const requirement of requirements) {
+    if (Date.now() >= deadline) {
+      outcomes.push({ facet: requirement.facet, clause: requirement.clause, subject: subjectLabel(requirement), focal: [], windows: [], reason: "budget-exhausted" });
+      planEntries.push({ facet: requirement.facet, clause: requirement.clause, resolution: "budget-exhausted", windows: [] });
+      continue;
+    }
+    const servingOpen = !planOnly && additions.length < MAX_SURFACES_DISTINCT;
+    const serve = (path: string, start: number, end: number, why: string): boolean =>
+      servingOpen && tryAddWindow(path, start, end, why);
+    const focal = await resolveFacetFocal(requirement, selected, args, workspace, cache, allowTestPaths, deadline);
+    if (focal === undefined) {
+      outcomes.push({ facet: requirement.facet, clause: requirement.clause, subject: subjectLabel(requirement), focal: [], windows: [], reason: "no-focal" });
+      planEntries.push({ facet: requirement.facet, clause: requirement.clause, resolution: "no-focal", windows: [] });
+      continue;
+    }
+    const windows: Array<{ path: string; range: string; served: boolean }> = [];
+    let totalCallSites: number | undefined;
+    const planWindows: FacetPlanWindow[] = [];
+    // P2-12 (orchestrator, round 4): every facet but `callers` requires the
+    // focal's own lines (facetGate.ts `focalRequiredSpan`). When the pack
+    // selected other lines but not these — the locator anchored on something
+    // else, V01's config constant — serve them here, first, so a constant of
+    // the same file then widens this one window and the answer needs no
+    // second hop. A pack that selected NOTHING keeps the facet gate's own
+    // query-bearing `next` for them: a closure window would become the pack's
+    // only surface and turn it into a candidate confirmation (a plain slice
+    // read with no decision after it).
+    if (requirement.facet !== "callers" && selected.length > 0) {
+      const focalSpan = focalRequiredSpan(focal.startLine, focal.endLine, readCached(workspace, focal.path, cache)?.split(/\r?\n/));
+      if (focalSpan !== undefined && !selectedCoversFocal(focal.path, focal.name, focalSpan.start, focalSpan.end)) {
+        serve(focal.path, focalSpan.start, focalSpan.end, `closure:${requirement.facet} ${focal.name}`);
+      }
+    }
+    let planSites: FacetCallSite[] | undefined;
+    let planTotalSites: number | undefined;
+    let planSitesComplete: boolean | undefined;
+    let planSitesFilesCapped: boolean | undefined;
+    let planSitesRecordedCapped: boolean | undefined;
+    let planUnresolved: string[] | undefined;
+    let planUnresolvedPackages: Record<string, string> | undefined;
+    let planUnresolvedSelfProperties: string[] | undefined;
+    /** V4 (round-7 fable finding, valueBehindConfigAccessor): see `ConstantClosure.unresolvedConstructedValues`'s own doc. */
+    let planUnresolvedConstructedValues: Record<string, string> | undefined;
+    /** P1-4 (round-7 fable finding, item 4): see `ConstantClosure.unresolvedConstantCandidates`'s own doc. */
+    let planUnresolvedConstantCandidates: Record<string, readonly string[]> | undefined;
+    let planConstantsComplete: boolean | undefined;
+    let planUnclassifiedMentions: FacetMentionLine[] | undefined;
+    let planUnclassifiedMentionsCapped: boolean | undefined;
+    /** P0-2 (R7-A, eval-0927 review-r6 finding 2): see `focalIsSoleDefaultExport`'s own doc. */
+    let planFocalDefaultExported: boolean | undefined;
+    planPaths.add(focal.path);
+
+    if (requirement.facet === "value" || requirement.facet === "condition") {
+      const closure = await constantClosureForFocal(focal, workspace, cache, deadline);
+      // Served exactly as before: the first MAX_CONSTANTS_PER_REQUIREMENT.
+      for (const win of closure.windows.slice(0, MAX_CONSTANTS_PER_REQUIREMENT)) {
+        const served = serve(win.path, win.start, win.end, `closure:${requirement.facet} ${win.name} (read by ${focal.name})`);
+        windows.push({ path: win.path, range: `${win.start}-${win.end}`, served });
+      }
+      // Required: every constant the focal itself reads, plus one-hop callee
+      // constants within the serving bound (a callee's constants past it are
+      // speculative context, not the answer).
+      const requiredCount = Math.max(closure.ownCount, Math.min(closure.windows.length, MAX_CONSTANTS_PER_REQUIREMENT));
+      for (const win of closure.windows.slice(0, requiredCount)) {
+        planWindows.push({
+          kind: "constant", path: win.path, start: win.start, end: win.end, name: win.name,
+          ...(win.truncated ? { truncated: true } : {}),
+        });
+        planPaths.add(win.path);
+      }
+      planUnresolved = closure.unresolved;
+      if (Object.keys(closure.unresolvedPackages).length > 0) planUnresolvedPackages = closure.unresolvedPackages;
+      if (closure.unresolvedProperties.length > 0) planUnresolvedSelfProperties = closure.unresolvedProperties;
+      if (Object.keys(closure.unresolvedConstructedValues).length > 0) planUnresolvedConstructedValues = closure.unresolvedConstructedValues;
+      if (Object.keys(closure.unresolvedConstantCandidates).length > 0) planUnresolvedConstantCandidates = closure.unresolvedConstantCandidates;
+      planConstantsComplete = closure.complete;
+    }
+
+    if (requirement.facet === "callers" || requirement.facet === "flow") {
+      // FIX-FAB item 11: `complete` is a WORK-based fact from the scan itself
+      // (every deterministically-bounded path examined), never a second,
+      // racy read of the clock after the fact — see `CallerScanResult`'s doc.
+      const {
+        sites, complete: sitesComplete, filesCapped: sitesFilesCapped,
+        unclassifiedMentions: crossFileMentions, unclassifiedMentionsCapped: crossFileMentionsCapped,
+        focalDefaultExported,
+      } = await callerSitesForFocal(focal, args, workspace, cache, allowTestPaths, deadline);
+      planSitesComplete = sitesComplete;
+      planSitesFilesCapped = sitesFilesCapped;
+      if (focalDefaultExported === true) planFocalDefaultExported = true;
+      totalCallSites = sites.length;
+      // eval-0927 review (pi01HostCap B-F3): serve up to the call sites the
+      // completion gate will require (MAX_REQUIRED_CALL_SITES), within this
+      // closure's byte budget and the pack's surface cap. MAX_CALLER_SURFACES
+      // (2) is the caller-EXPANSION feature's own bound; used here it left
+      // every question about a function with 3+ callers one hop short of the
+      // evidence the gate then demanded. The `why` names how many were served.
+      //
+      // P2-15 (eval-0927 review-r4 #15, sameNameTwoDeclsBothCalled): when the
+      // served sites mix strength 2 (a bare/exact-receiver site, unambiguously
+      // this declaration) with strength 1 (a weak-receiver or namespace-
+      // qualified site that could just as easily belong to a DIFFERENT
+      // same-named declaration elsewhere), the disclosure must not present
+      // the count as one clean, unambiguous total.
+      const mixedAttribution = sites.some((s) => s.strength === 1) && sites.some((s) => s.strength === 2);
+      const siteWhy = `closure:callers ${focal.name}`;
+      const firstAddition = additions.length;
+      let servedSites = 0;
+      for (const site of sites.slice(0, MAX_REQUIRED_CALL_SITES)) {
+        if (additions.length >= MAX_SURFACES_DISTINCT) break;
+        const window = await windowForCallSite(site, workspace, cache);
+        const served = serve(site.path, window.start, window.end, siteWhy);
+        if (served) servedSites += 1;
+        windows.push({ path: site.path, range: `${window.start}-${window.end}`, served });
+        planWindows.push({ kind: "caller", path: site.path, start: window.start, end: window.end, name: window.symbolName ?? focal.name });
+      }
+      // P0-2 (R7-A, eval-0927 review-r6 finding 2): "sites found -> the usual
+      // rules, and the `why` says default importers under other names were
+      // not followed" -- a served site is real evidence either way, but a
+      // default-exported focal's TRUE fan-in may still include importers
+      // this by-name scan cannot see at all.
+      const defaultExportNote = focalDefaultExported === true
+        ? "; a default import bound under a different local name would not be found here"
+        : "";
+      for (const addition of additions.slice(firstAddition)) {
+        if (addition.why === siteWhy) {
+          addition.why = mixedAttribution
+            ? `${siteWhy} (${servedSites} of ${sites.length} call sites; attribution mixed with a same-named declaration elsewhere)${defaultExportNote}`
+            : `${siteWhy} (${servedSites} of ${sites.length} call sites)${defaultExportNote}`;
+        }
+      }
+      const { sites: sameFile, mentions: sameFileMentions, mentionsCapped: sameFileMentionsCapped } = sameFileFacetCallSites(focal, workspace, cache);
+      const allSites: FacetCallSite[] = [...sites.map((site) => ({ path: site.path, line: site.line })), ...sameFile];
+      planTotalSites = allSites.length;
+      // MENTION GUARD (R5-A1): merge cross-file and same-file unclassified
+      // mentions, deduped by path+line, capped at the SAME
+      // MAX_UNCLASSIFIED_MENTION_LINES total the gate discloses against.
+      const mentionKeys = new Set<string>();
+      const mergedMentions: FacetMentionLine[] = [];
+      let mentionsCapped = crossFileMentionsCapped === true || sameFileMentionsCapped;
+      for (const mentionLine of [...(crossFileMentions ?? []), ...sameFileMentions]) {
+        const key = `${mentionLine.path}#${mentionLine.line}`;
+        if (mentionKeys.has(key)) continue;
+        mentionKeys.add(key);
+        if (mergedMentions.length >= MAX_UNCLASSIFIED_MENTION_LINES) { mentionsCapped = true; break; }
+        mergedMentions.push(mentionLine);
+      }
+      if (mergedMentions.length > 0) {
+        planUnclassifiedMentions = mergedMentions;
+        for (const mentionLine of mergedMentions) planPaths.add(mentionLine.path);
+      }
+      if (mentionsCapped) planUnclassifiedMentionsCapped = true;
+      // P2-10 (eval-0927 review-r3 #10, manyCallers60in3): distinct from
+      // `planSitesFilesCapped` (the scan never OPENED some caller files at
+      // all) -- this is the recorder's OWN memo-size cap discarding sites the
+      // scan already found and read. True only past MAX_RECORDED_FACET_CALL_SITES
+      // (512), so an ordinary many-caller fixture records its full fan-in and
+      // the gate's existing per-hop pagination (facetGate.ts) carries it all
+      // the way to `covered`; the disclosure below is now the rare, honest
+      // last resort for a fan-in even that generous cap cannot hold in one
+      // in-process memo.
+      planSitesRecordedCapped = allSites.length > MAX_RECORDED_FACET_CALL_SITES;
+      planSites = allSites.slice(0, MAX_RECORDED_FACET_CALL_SITES);
+      for (const site of planSites) planPaths.add(site.path);
+    }
+    let planFocalMakesCalls: boolean | undefined;
+    let planFlowMembersComplete: boolean | undefined;
+    let planUngroundedFlowTerms: string[] | undefined;
+    if (requirement.facet === "flow") {
+      const flow = await flowWindowsForFocal(focal, requirement, workspace, cache);
+      for (const callee of flow.windows) {
+        const served = serve(callee.path, callee.start, callee.end, `closure:flow callee ${callee.name} (of ${focal.name})`);
+        windows.push({ path: callee.path, range: `${callee.start}-${callee.end}`, served });
+        planWindows.push({ kind: "callee", path: callee.path, start: callee.start, end: callee.end, name: callee.name });
+        planPaths.add(callee.path);
+      }
+      planFlowMembersComplete = flow.membersComplete;
+      if (flow.ungroundedTerms.length > 0) planUngroundedFlowTerms = flow.ungroundedTerms;
+      // FIX-G: whether the focal calls ANYTHING (resolved or not) — decides
+      // "no flow evidence resolved" (undetermined) vs a genuinely empty flow.
+      const focalContent = readCached(workspace, focal.path, cache);
+      planFocalMakesCalls = focalContent !== undefined
+        && calleeNamesIn(focalContent.split(/\r?\n/).slice(focal.startLine - 1, focal.endLine), hasHashComments(focal.path), focal.name, new Set([focal.name])).length > 0;
+    }
+
+    outcomes.push({
+      facet: requirement.facet,
+      clause: requirement.clause,
+      subject: focal.name,
+      focal: [`${focal.path}#${focal.name}`],
+      windows,
+      ...(totalCallSites !== undefined ? { totalCallSites } : {}),
+      ...(windows.length === 0 ? { emptyVerified: true } : {}),
+    });
+    planEntries.push({
+      facet: requirement.facet,
+      clause: requirement.clause,
+      resolution: "resolved",
+      focal: {
+        path: focal.path,
+        name: focal.name,
+        start: focal.startLine,
+        end: focal.endLine,
+        ...(focal.kind !== undefined && !CALLER_EXPANSION_CALLABLE_KINDS.has(focal.kind) ? { callable: false } : {}),
+      },
+      windows: planWindows,
+      ...(planSites !== undefined ? { callSites: planSites } : {}),
+      ...(planTotalSites !== undefined ? { totalCallSites: planTotalSites } : {}),
+      ...(planSitesComplete !== undefined ? { callSitesComplete: planSitesComplete } : {}),
+      ...(planSitesFilesCapped === true ? { callSitesFilesCapped: true } : {}),
+      ...(planSitesRecordedCapped === true ? { callSitesRecordedCapped: true } : {}),
+      ...(planUnresolved !== undefined && planUnresolved.length > 0 ? { unresolvedConstants: planUnresolved } : {}),
+      ...(planUnresolvedPackages !== undefined ? { unresolvedConstantPackages: planUnresolvedPackages } : {}),
+      ...(planUnresolvedSelfProperties !== undefined ? { unresolvedSelfProperties: planUnresolvedSelfProperties } : {}),
+      ...(planUnresolvedConstructedValues !== undefined ? { unresolvedConstructedValues: planUnresolvedConstructedValues } : {}),
+      ...(planUnresolvedConstantCandidates !== undefined ? { unresolvedConstantCandidates: planUnresolvedConstantCandidates } : {}),
+      ...(planConstantsComplete !== undefined ? { constantsComplete: planConstantsComplete } : {}),
+      ...(allowTestPaths ? {} : { callSitesExcludeTests: true }),
+      ...(planFocalMakesCalls !== undefined ? { focalMakesCalls: planFocalMakesCalls } : {}),
+      ...(planFlowMembersComplete !== undefined ? { flowMembersComplete: planFlowMembersComplete } : {}),
+      ...(planUngroundedFlowTerms !== undefined ? { ungroundedFlowTerms: planUngroundedFlowTerms } : {}),
+      ...(planUnclassifiedMentions !== undefined ? { unclassifiedMentions: planUnclassifiedMentions } : {}),
+      ...(planUnclassifiedMentionsCapped === true ? { unclassifiedMentionsCapped: true } : {}),
+      ...(planFocalDefaultExported === true ? { focalDefaultExported: true } : {}),
+    });
+  }
+  const fileShas: Record<string, string> = {};
+  for (const planPath of planPaths) {
+    const content = readCached(workspace, planPath, cache);
+    if (content !== undefined) fileShas[planPath] = shaOfText(content);
+  }
+  recordFacetPlan(facetPlanWorkspaceKey(workspace), { query, entries: planEntries, fileShas });
+  return { additions, outcomes, widenedPaths };
 }
 
 /**
@@ -15950,8 +21655,12 @@ function applyDominancePromotion(
  *      design point 1/4c). `buildRoute` then falls through past its
  *      "candidate-list" branch to the plain partial-coverage route, an
  *      existing, unmodified path.
- *   6. otherwise → partial / (locate said a role is missing ? "missing-roles" : "candidate-list")
+ *   6. otherwise → partial / (locate said a role is missing ? "missing-roles" : "candidate-list").
+ *      A single-primary "candidate-list" is kept on purpose: the generic/edit routes and the write
+ *      frontier read it as "not yet confirmed" (eval-0927 review r2 P2-17(a) — a one-candidate
+ *      confirmation round trip — is a known residual, not fixed here).
  *
+
  * `dominantSurfaceIndex` is the caller's OWN precomputed
  * `resolveDominantSurfaceIndex(surfaces)` (-1 by default, for any caller that
  * does not care — rule 5 then behaves exactly as before). It is a parameter
@@ -17000,6 +22709,9 @@ export function autoBoundTaskProfile(query: string): TaskProfile {
   return bindTaskProfile(undefined, query).selected;
 }
 
+/** The note `noteInheritedTaskProfile` appends; readFamily.ts detects it by its "kept for this continuation" phrase. */
+const INHERITED_TASK_PROFILE_NOTE = "declared when this task was opened and kept for this continuation — send task.profile to change it";
+
 /**
  * A profile the dispatcher carried over from the task this call continues
  * (server.ts's `inheritDeclaredTaskProfile`) binds exactly like a restated
@@ -17014,9 +22726,16 @@ function noteInheritedTaskProfile(
   args: Pick<TaskPackArgs, "taskProfileInherited"> | undefined,
 ): TaskProfileBinding {
   if (args?.taskProfileInherited !== true) return binding;
+  // A stored binding replayed by a later door (a receipt, a cached-pack
+  // serve) is noted here too, but only a declaration was "declared when this
+  // task was opened" — an undeclared, inferred one stays as it was — and one
+  // that already carries the note is not noted twice (both measured on a
+  // qref replay after `act.answer`).
+  if (binding.requested === "auto") return binding;
+  if (binding.reason.includes(INHERITED_TASK_PROFILE_NOTE)) return binding;
   return {
     ...binding,
-    reason: `${binding.reason}; declared when this task was opened and kept for this continuation — send task.profile to change it`,
+    reason: `${binding.reason}; ${INHERITED_TASK_PROFILE_NOTE}`,
   };
 }
 
@@ -24568,21 +30287,110 @@ function probeFileText(workspace: string, filePath: string): string | undefined 
   }
 }
 
+/**
+ * FIX-ORIG (2026-09-27, orchestrator ruling): now returns the SERVED spans it
+ * blanked, not just the blanked text. `.text` still feeds `selectQueryEvidence`
+ * below (biasing window SELECTION away from already-known content stays a
+ * legitimate, reviewed 2026-08-21 byte-saving heuristic); `.servedSpans` is
+ * the new, honest way the counterexample admission narrows its FINAL emitted
+ * `range`/`code` to the UNSERVED remainder instead of shipping blanked lines
+ * inside a served window (no new marker vocabulary; see the admission loop).
+ */
 function maskServedRanges(
   content: string,
   filePath: string,
   surfaces: readonly TaskPackSurface[],
-): string {
+): { text: string; servedSpans: Array<{ start: number; end: number }> } {
   const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const servedSpans: Array<{ start: number; end: number }> = [];
   for (const surface of surfaces) {
     if (surface.path !== filePath) continue;
     const match = /^(\d+)-(\d+)$/.exec(surface.range);
     if (!match) continue;
     const start = Math.max(1, Number(match[1]));
     const end = Math.min(lines.length, Number(match[2]));
+    if (end >= start) servedSpans.push({ start, end });
     for (let line = start; line <= end; line++) lines[line - 1] = "";
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), servedSpans };
+}
+
+/**
+ * FIX-ORIG (2026-09-27, orchestrator ruling): `[windowStart,windowEnd]` minus
+ * every span in `servedSpans` that overlaps it — the same gap-subtraction
+ * shape `packServedSpans` already uses for the inverse question ("what of
+ * this surface's OWN range did IT serve"), applied here to find what a
+ * counterexample window has left to serve after the lines another surface in
+ * this same response already covers. Order-preserving, left to right.
+ */
+function unservedSubSpans(
+  windowStart: number,
+  windowEnd: number,
+  servedSpans: ReadonlyArray<{ start: number; end: number }>,
+): Array<{ start: number; end: number }> {
+  const relevant = servedSpans
+    .filter((s) => s.end >= windowStart && s.start <= windowEnd)
+    .map((s) => ({ start: Math.max(s.start, windowStart), end: Math.min(s.end, windowEnd) }))
+    .sort((a, b) => a.start - b.start);
+  const out: Array<{ start: number; end: number }> = [];
+  let cursor = windowStart;
+  for (const span of relevant) {
+    if (span.start > cursor) out.push({ start: cursor, end: span.start - 1 });
+    cursor = Math.max(cursor, span.end + 1);
+    if (cursor > windowEnd) break;
+  }
+  if (cursor <= windowEnd) out.push({ start: cursor, end: windowEnd });
+  return out;
+}
+
+/** True when `lines[start-1..end-1]` (1-based, inclusive) has at least one
+ *  non-whitespace-only line — an unserved span of pure blank lines proves
+ *  nothing and must not be admitted as counterexample evidence. */
+function spanHasNonBlankLine(lines: readonly string[], start: number, end: number): boolean {
+  for (let line = start; line <= end; line++) {
+    if ((lines[line - 1] ?? "").trim().length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Index of the unserved sub-span a counterexample shows: the one containing
+ * the probe's own matched line when it has real content, else the non-blank
+ * sub-span nearest to that line (the earlier one on a tie); -1 when every
+ * sub-span is blank. The matched line is the point of the evidence — taking
+ * the first sub-span in file order served a file's import header and pushed
+ * the matched declaration into `remaining` (2026-09-27 integration).
+ */
+function nearestNonBlankSubSpanIndex(
+  spans: ReadonlyArray<{ start: number; end: number }>,
+  lines: readonly string[],
+  matchedLine: number,
+): number {
+  let best = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  spans.forEach((span, index) => {
+    if (!spanHasNonBlankLine(lines, span.start, span.end)) return;
+    const distance = matchedLine < span.start ? span.start - matchedLine : matchedLine > span.end ? matchedLine - span.end : 0;
+    if (distance < bestDistance) {
+      best = index;
+      bestDistance = distance;
+    }
+  });
+  return best;
+}
+
+/**
+ * `span` without its leading and trailing blank lines (a span holding at
+ * least one non-blank line never becomes empty). A server-chosen range must
+ * not end on a blank line: its body would then end in "\n", which a reader
+ * that drops a trailing newline (Python's `splitlines()`, for one) counts as
+ * one line short of the declared range.
+ */
+function trimBlankEdgeLines(lines: readonly string[], span: { start: number; end: number }): { start: number; end: number } {
+  let { start, end } = span;
+  while (start < end && (lines[start - 1] ?? "").trim().length === 0) start += 1;
+  while (end > start && (lines[end - 1] ?? "").trim().length === 0) end -= 1;
+  return { start, end };
 }
 
 function inferCallableSymbol(content: string, line: number): string | undefined {
@@ -24612,6 +30420,17 @@ function selectCallableClosureEvidence(
   compoundTerms: readonly string[],
 ): { range: string; content: string; line: number; score: number } | undefined {
   const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  // FIX-C1 (2026-09-27, eval-0927 P1): `end` must clamp against the file's
+  // REAL logical line count (countLines.ts), not `lines.length` -- a file
+  // ending in "\n" (nearly every file) makes `split("\n")` count a phantom
+  // trailing empty element, so clamping to `lines.length` reported "1-17" for
+  // a 16-line file (also observed at 15->16 and 13->14 lines). `content`
+  // below is still built from the SAME (inflated) `lines` array via
+  // `sliceLinesToText`, which reconstructs the identical trailing-newline
+  // byte the old `lines.slice(...).join("\n")` produced by accident when a
+  // window reached end-of-file -- served BYTES are unchanged; only the
+  // label was wrong.
+  const totalLines = countLines(content);
   let best: { range: string; content: string; line: number; score: number } | undefined;
   for (let index = 0; index < lines.length; index++) {
     const rawLine = lines[index]!;
@@ -24630,8 +30449,8 @@ function selectCallableClosureEvidence(
     const line = index + 1;
     if (inferCallableSymbol(content, line) === undefined) continue;
     const start = Math.max(1, line - 18);
-    const end = Math.min(lines.length, line + 18);
-    const selected = lines.slice(start - 1, end).join("\n");
+    const end = Math.min(totalLines, line + 18);
+    const selected = sliceLinesToText(content, start, end);
     const scoringText = selected.split("\n")
       .map((candidate) => candidate.replace(/\/\/.*$/, ""))
       .filter((candidate) => {
@@ -24949,7 +30768,7 @@ function runInternalReadinessFalsification(
     range: string;
     line: number;
     content: string;
-    maskedContent: string;
+    servedSpans: Array<{ start: number; end: number }>;
     symbol?: string;
     score: number;
     role: string;
@@ -24961,10 +30780,14 @@ function runInternalReadinessFalsification(
     const masked = maskServedRanges(content, filePath, existing);
     // Admission is decided on CODE only (see stripCommentOnlyLines) — a
     // comment mentioning the query's identifier is not a competing
-    // implementation. `masked` (comment-inclusive) is still what
+    // implementation. `masked.text` (comment-inclusive) is still what
     // selectQueryEvidence windows below, so a file that DOES admit still
-    // gets its normal surrounding-context window.
-    const lower = stripCommentOnlyLines(masked).toLowerCase();
+    // gets its normal surrounding-context window. FIX-ORIG (orchestrator
+    // ruling): masking still legitimately biases WINDOW SELECTION away from
+    // already-known content (the reviewed 2026-08-21 byte-saving intent);
+    // it must never again reach the EMITTED body, which is narrowed to the
+    // unserved remainder below instead (`servedSpans`).
+    const lower = stripCommentOnlyLines(masked.text).toLowerCase();
     const queryTokenHits = queryTokens.filter((token) => lower.includes(token)).length;
     const matchedIdentifiers = explicitIdentifiers.filter((identifier) => lower.includes(identifier));
     const identifierHit = matchedIdentifiers.length > 0;
@@ -24994,7 +30817,7 @@ function runInternalReadinessFalsification(
     const probeQuery = preferredPaths.includes(filePath) && matchedIdentifiers.length > 0
       ? matchedIdentifiers.join(" ")
       : query;
-    const evidence = selectQueryEvidence(masked, probeQuery, { path: filePath, windowLines: 18 });
+    const evidence = selectQueryEvidence(masked.text, probeQuery, { path: filePath, windowLines: 18 });
     if (evidence === undefined) continue;
     const key = `${filePath}:${evidence.range}`;
     if (existingKeys.has(key)) continue;
@@ -25011,7 +30834,7 @@ function runInternalReadinessFalsification(
       range: evidence.range,
       line: evidence.line,
       content: evidence.content,
-      maskedContent: masked,
+      servedSpans: masked.servedSpans,
       symbol: inferCallableSymbol(content, evidence.line),
       score: evidence.score + endpointScore + sameFileScore + roleScore,
       role,
@@ -25040,21 +30863,41 @@ function runInternalReadinessFalsification(
   let added = 0;
   const usedPaths = new Set<string>();
   const admitted = new Map<string, { bytes: number; disposition: "required" | "supporting" }>();
-  // Wire-baseline drift fix (2026-08-21, W7 integration): centeredSliceForCap
-  // reads the file fresh from `workspace` (via `readCached`), bypassing the
-  // `maskServedRanges` blanking this pass already applied to select
-  // `candidate.range`/`candidate.content` above. Unseeded, that reintroduced
-  // an already-served range's raw text into the counterexample body — e.g.
-  // duplicating a symbol already served as a separate evidence item onto
-  // this one, wasting bytes on content the caller already has (exactly what
-  // masking exists to prevent). Seed a per-candidate cache with the SAME
-  // masked text used for range/window selection so the byte-capped body
-  // stays consistent with it.
+  // FIX-ORIG (2026-09-27, orchestrator ruling — supersedes the 2026-08-21 W7
+  // "seed with masked text" fix, which stopped the duplicate-served-content
+  // waste by BLANKING already-served lines inside the emitted body: that
+  // traded byte waste for a body that was no longer verbatim source of its
+  // own `range` (eval-0927 P1's finding, confirmed live). The reviewed
+  // 2026-08-21 intent — never repeat lines already served in the same
+  // response — is kept the HONEST way instead: narrow `range`/`code` to the
+  // UNSERVED remainder of the selected window (never blank a served line),
+  // and disclose any OTHER unserved remainder via `remaining_ranges`. No new
+  // marker vocabulary. `counterexampleCache` is now seeded with the REAL
+  // (unmasked) file per candidate, exactly like every other oversize-surface
+  // cap in this file.
   const counterexampleCache = new FileReadCache();
   for (const candidate of ranked) {
     if (added >= probeLimit) break;
     if (usedPaths.has(candidate.path) && profile !== "answer") continue;
     if (candidate.role === "unknown" && sameRootTestExists) continue;
+    const span = parseSurfaceSpan(candidate.range);
+    if (span === undefined) continue;
+    const fullContent = probeFileText(workspace, candidate.path);
+    if (fullContent === undefined) continue;
+    const fullLines = fullContent.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    const unserved = unservedSubSpans(span.start, span.end, candidate.servedSpans);
+    const chosenIndex = nearestNonBlankSubSpanIndex(unserved, fullLines, candidate.line);
+    // Every unserved sub-span of the selected window is either fully covered
+    // by an earlier served surface or is itself blank — there is nothing left
+    // in this window this item could honestly show as counterexample
+    // evidence. Per the ruling: drop the candidate outright rather than admit
+    // a body with nothing to prove (re-testing the admission logic against
+    // just the unserved remainder would need re-deriving identifierHit/
+    // endpointHit from a sub-window `stripCommentOnlyLines` scan this pass
+    // does not otherwise need — left as a documented simplification; the
+    // fallback the ruling itself sanctions).
+    if (chosenIndex < 0) continue;
+    const chosen = trimBlankEdgeLines(fullLines, unserved[chosenIndex]!);
     // W5-B (item 1c): a counterexample is supporting negative evidence, not
     // primary content — cap it far under MAX_SURFACE_CODE_BYTES using the
     // same centered/graceful-truncation mechanism every other oversize
@@ -25062,16 +30905,39 @@ function runInternalReadinessFalsification(
     // (root cause of the pre-fix 9.4KB body: selectQueryEvidence's +-18
     // LINE window has no BYTE ceiling, and this file's matched lines were
     // very long).
-    counterexampleCache.seed(candidate.path, candidate.maskedContent);
+    counterexampleCache.seed(candidate.path, fullContent);
+    const centerLine = Math.min(Math.max(candidate.line, chosen.start), chosen.end);
     const capped = centeredSliceForCap(
       workspace,
       candidate.path,
-      candidate.range,
+      `${chosen.start}-${chosen.end}`,
       counterexampleCache,
-      candidate.line,
+      centerLine,
       READINESS_PROBE_COUNTEREXAMPLE_MAX_BYTES,
     );
     if (capped === undefined) continue;
+    // Recover the served bounds from centeredSliceForCap's own
+    // remaining_ranges by POSITION relative to centerLine (same technique
+    // singleSiteShortCircuitSeed uses): a "before" entry narrows the start, an
+    // "after" entry narrows the end, so `range` always names exactly the
+    // lines `capped.code` verbatim contains — never the wider pre-cap window.
+    let servedStart = chosen.start;
+    let servedEnd = chosen.end;
+    for (const remainingWindow of capped.remaining_ranges) {
+      const bounds = /^(\d+)-(\d+)$/.exec(remainingWindow);
+      if (bounds === null) continue;
+      const [, remStart, remEnd] = bounds.map(Number) as [number, number, number];
+      if (remEnd < centerLine) servedStart = remEnd + 1;
+      else if (remStart > centerLine) servedEnd = remStart - 1;
+    }
+    const finalRange = `${servedStart}-${servedEnd}`;
+    // eval-0927 review (bisect: replay p11b, the zoomEpochServedView probe):
+    // the item is exactly `finalRange` — its handle is minted for that range
+    // below — so it names no `remaining`. The selection window's other
+    // unserved spans and the lines the byte cap left out lie OUTSIDE this
+    // item's range: they are not this handle's unsent windows, and naming them
+    // made a complete pack look partial (a `surface-content` gap whose `next`
+    // re-read lines the same response had just shipped).
     // TL142-05 (2026-09-13): relation gating. When the request names
     // explicit path(s), an additional (non-named) counterexample survives
     // only with a stated relation to one of them (report's own acceptance:
@@ -25117,10 +30983,9 @@ function runInternalReadinessFalsification(
       && hasIdentifierSegment(candidate.content, primarySymbol);
     const identifierGrounded = candidate.strong || referencesPrimarySymbol;
     if (namedPaths.length > 0) {
-      const fullContent = probeFileText(workspace, candidate.path);
-      const relation = fullContent === undefined
-        ? undefined
-        : statedRelationToNamedPath(candidate.path, fullContent, namedPaths, workspace, counterexampleCache);
+      // FIX-ORIG: `fullContent` is already hoisted above (it now also feeds
+      // the unserved-span narrowing) — no second probe read.
+      const relation = statedRelationToNamedPath(candidate.path, fullContent, namedPaths, workspace, counterexampleCache);
       if (relation !== undefined) {
         counterexampleWhy = `${relation} (readiness-falsification-counterexample)`;
       } else {
@@ -25131,19 +30996,23 @@ function runInternalReadinessFalsification(
       if (!identifierGrounded) continue;
       if (looksLikeMarkupOrCssWindow(capped.code)) continue;
     }
+    // FIX-ORIG: the handle/surface identify the NARROWED, verbatim-served
+    // window (`finalRange`/`capped.code`) — never the wider pre-narrowing
+    // selection (`candidate.range`), which may include lines this item does
+    // not itself carry any bytes for.
     const handle = handleTable.upsert({
       kind: "range",
       path: candidate.path,
-      range: candidate.range,
+      range: finalRange,
       ...(candidate.symbol ? { symbol: candidate.symbol } : {}),
       workspaceRoot: workspace,
-      sha: shaOfText(candidate.content),
+      sha: shaOfText(capped.code),
     });
     (result.surfaces as TaskPackResultSurface[]).push({
       role: candidate.role,
       handle: handle.id,
       path: candidate.path,
-      range: candidate.range,
+      range: finalRange,
       ...(candidate.symbol ? { symbol: candidate.symbol } : {}),
       // Issue #4 (2026-08-21): only a strong (identifier/endpoint) match
       // forces a REQUIRED obligation; a weak (generic-word-only) match still
@@ -25153,10 +31022,11 @@ function runInternalReadinessFalsification(
       required: candidate.strong,
       why: counterexampleWhy,
       code: capped.code,
-      ...(capped.remaining_ranges.length > 0
-        ? { content_completeness: "partial" as const, remaining_ranges: capped.remaining_ranges }
-        : {}),
     });
+    // Dedup/cap bookkeeping stays keyed on the ORIGINAL selected window
+    // (`candidate.range`): that is what selectQueryEvidence chose and what a
+    // later ranking pass would choose again, independent of how this item
+    // narrowed its own served range.
     existingKeys.add(`${candidate.path}:${candidate.range}`);
     usedPaths.add(candidate.path);
     admitted.set(`${candidate.path}:${candidate.range}`, {
@@ -25352,14 +31222,25 @@ function closureSlice(
 ): { range: string; code: string } | undefined {
   const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   if (lines.length === 0) return undefined;
+  // FIX-C1 (2026-09-27, eval-0927 P1): same bug class as
+  // selectCallableClosureEvidence above -- `lines.length` over-counts by one
+  // for a file ending in "\n". A bare `{handle}`/`{path}` continuation with
+  // no per-target `range` (executeClosureRead's `target.range` is genuinely
+  // `undefined` for a `paths[]` entry with no `range`, or a handle whose
+  // stored entry carries none) used to default `end` to that inflated count
+  // and report e.g. "1-17" for a 16-line whole-file closure read. Clamping
+  // against `countLines(content)` instead, and building `code` with
+  // `sliceLinesToText` (which reconstructs the same trailing-newline byte the
+  // old inflated slice produced by accident), keeps served bytes identical.
+  const totalLines = countLines(content);
   const match = requestedRange ? /^(\d+)-(\d+)$/.exec(requestedRange) : undefined;
   let start = match ? Math.max(1, Number(match[1])) : 1;
-  let end = match ? Math.min(lines.length, Number(match[2])) : lines.length;
+  let end = match ? Math.min(totalLines, Number(match[2])) : totalLines;
   if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start > lines.length) return undefined;
-  let code = lines.slice(start - 1, end).join("\n");
+  let code = sliceLinesToText(content, start, end);
   while (Buffer.byteLength(code, "utf8") > MAX_SURFACE_CODE_BYTES && end > start) {
     end -= 1;
-    code = lines.slice(start - 1, end).join("\n");
+    code = sliceLinesToText(content, start, end);
   }
   if (Buffer.byteLength(code, "utf8") > MAX_SURFACE_CODE_BYTES) {
     code = Buffer.from(code, "utf8").subarray(0, MAX_SURFACE_CODE_BYTES).toString("utf8");
@@ -25573,8 +31454,14 @@ function executeClosureSearch(
   const scopes = (typeof args["path"] === "string" ? [args["path"]] : scopePaths ?? [])
     .map((entry) => path.posix.normalize(entry.replace(/\\/g, "/")).replace(/^\.\//, ""))
     .filter((entry) => entry.length > 0);
+  // Only rows whose bytes the caller will hold count as "already there": a
+  // row that names a window WITHOUT its body (a filename-matched or
+  // caller-named file joined codeless) is exactly what this read can serve —
+  // see the bodyless branch in the admission loop below.
   const existingKeys = new Set(
-    codeTaskPackSurfaces(result.surfaces).map((surface) => `${surface.path}:${surface.range}`),
+    codeTaskPackSurfaces(result.surfaces)
+      .filter((surface) => hasServedCode(surface) || surface.code_unchanged !== undefined)
+      .map((surface) => `${surface.path}:${surface.range}`),
   );
   // D2 (FX-R3): the exact `path:range` key above cannot see a NARROWER window
   // of a path this pack already serves with a wider body — that is how a
@@ -25651,10 +31538,16 @@ function executeClosureSearch(
         terms.some((term) => candidate.toLowerCase().includes(term.toLowerCase()))
       );
       if (index < 0) continue;
+      // FIX-C1 (2026-09-27, eval-0927 P1): same bug class as
+      // selectCallableClosureEvidence/closureSlice above -- clamp against the
+      // real logical line count, and build `code` with `sliceLinesToText` so
+      // served bytes stay byte-identical while the reported `range` no
+      // longer overstates by one for a window that reaches end-of-file.
+      const totalLines = countLines(searchableContent);
       const start = Math.max(1, index - 5 + 1);
-      const end = Math.min(lines.length, index + 5 + 1);
+      const end = Math.min(totalLines, index + 5 + 1);
       range = `${start}-${end}`;
-      code = lines.slice(start - 1, end).join("\n");
+      code = sliceLinesToText(searchableContent, start, end);
       line = index + 1;
       score = hitCount;
     }
@@ -25689,6 +31582,25 @@ function executeClosureSearch(
     if (alreadyServedWindow(candidate.path, candidate.range)) continue;
     const code = elideDocComments(candidate.code, languageForPath(candidate.path));
     if (!closureCanMerge(result, code)) break;
+    // eval-0927 review (handsOnReport0141 r2f4): the pack already names this
+    // exact window without its bytes — serve them on that row instead of
+    // minting a duplicate. Before the N+1 range fixes this window read one
+    // line past EOF ("1-13" for a 12-line file), never matched the codeless
+    // "1-12" row, and reached the pack only by accident as a second row.
+    const bodyless = codeTaskPackSurfaces(result.surfaces).find((surface) =>
+      surface.path === candidate.path
+      && surface.range === candidate.range
+      && !hasServedCode(surface)
+      && surface.code_unchanged === undefined);
+    if (bodyless !== undefined) {
+      bodyless.code = code;
+      delete bodyless.content_completeness;
+      delete bodyless.remaining_ranges;
+      existingKeys.add(`${candidate.path}:${candidate.range}`);
+      noteServedWindow(candidate.path, candidate.range);
+      added += 1;
+      continue;
+    }
     const handle = handleTable.upsert({
       kind: "range",
       path: candidate.path,
@@ -26292,6 +32204,8 @@ function groundedAnalysisEvidence(
 // ---------------------------------------------------------------------------
 
 const REQUEST_ITEM_OBLIGATION_PREFIX = "request-item:";
+/** A `request_item_absences` entry minted by this pack's OWN request-item pass (`extractRequestItems`' `ri-N` ids), as opposed to an external `identifier:*` proof. */
+const REQUEST_ITEM_ABSENCE_ID_RE = /^ri-\d+$/u;
 /** Bound on one batched discover call for still-uncovered request items. */
 const MAX_REQUEST_ITEM_BATCH = 8;
 /** Bound on distinct candidate files a topic item's literal find may return before it is too ambiguous to batch. */
@@ -26326,6 +32240,8 @@ interface RequestItemProof {
   absentScopeComplete?: boolean;
   /** Paired with `absentScopeComplete`: the raw excluded-path count backing an incomplete scope's wording ("N paths excluded from the scan"). `0` whenever `absentScopeComplete` is `true`. */
   absentOmittedCount?: number;
+  /** R-B3 (ruling 5): the absence is "served but only mentioned in passing" — the term DOES occur, so the disclosure must not say "no occurrence". */
+  absentIncidental?: boolean;
   /**
    * DESIGN-v0.15 R1 false-completion fix (2026-09-07, P1): set when a
    * candidate PATH is served but the proof-critical line range (a decision
@@ -26348,6 +32264,14 @@ interface RequestItemProof {
    * serves fresh bytes for the new span.
    */
   rangeCandidates?: Array<{ path: string; range: string }>;
+  /**
+   * R-D2 (2026-09-21, item B): mirrors `ConcernVerdict.undeterminedTerm` —
+   * set only for a could-not-determine verdict that carries no `absentTerm`
+   * (see that field's own doc comment for why those two never overlap).
+   * `proved` is `false` whenever this is set, exactly like the plain "open,
+   * no candidate" case it used to be indistinguishable from.
+   */
+  undeterminedTerm?: string;
 }
 
 function evidenceSurfacesForPath(priorEvidence: readonly TaskPackSurface[], relPath: string): TaskPackSurface[] {
@@ -26837,7 +32761,23 @@ function isInsideRegexLiteralAt(line: string, index: number): boolean {
   return false;
 }
 
-function isCallOrImportOccurrence(text: string, term: string, language: string | undefined): boolean {
+/**
+ * FIX-C2 (2026-09-21): the comment/string/regex-skipping scan skeleton
+ * `isCallOrImportOccurrence` has always used, extracted VERBATIM so the
+ * concern-status policy's "does this term live at a real CODE position?"
+ * anchor (`concernCodeOnlyText` below) can reuse it instead of forking a
+ * second, separately-tuned notion of "not in a comment". Behaviour is
+ * unchanged for the original caller: the loop, the identifier-boundary
+ * rejection, the quote/regex skips and the block-comment state machine are
+ * the same statements in the same order; only the per-occurrence VERDICT
+ * moved into `visit`.
+ */
+function forEachCodePositionOccurrence(
+  text: string,
+  term: string,
+  language: string | undefined,
+  visit: (ctx: { rawLine: string; codePart: string; at: number }) => boolean,
+): boolean {
   if (term.length === 0) return false;
   const lines = text.split(/\r\n|\r|\n/);
   let inBlockComment = false;
@@ -26861,18 +32801,24 @@ function isCallOrImportOccurrence(text: string, term: string, language: string |
       if (isIdentifierChar(before) || isIdentifierChar(after)) continue;
       if (isInsideQuotesAt(codePart, at)) continue;
       if (isInsideRegexLiteralAt(codePart, at)) continue;
-      const trailing = codePart.slice(at + term.length);
-      const isCall = /^\s*\(/.test(trailing);
-      const isImportShaped = /^\s*import\b/.test(rawLine.trimStart())
-        || /\brequire\s*\(\s*["'][^"']*["']\s*\)/.test(rawLine)
-        || /^\s*from\s+\S+\s+import\b/.test(rawLine)
-        || /\bfrom\s+["'][^"']+["']\s*;?\s*$/.test(rawLine);
-      if (isCall || isImportShaped) return true;
+      if (visit({ rawLine, codePart, at })) return true;
     }
     const openAt = rawLine.indexOf("/*");
     if (openAt >= 0 && rawLine.indexOf("*/", openAt + 2) < 0) inBlockComment = true;
   }
   return false;
+}
+
+function isCallOrImportOccurrence(text: string, term: string, language: string | undefined): boolean {
+  return forEachCodePositionOccurrence(text, term, language, ({ rawLine, codePart, at }) => {
+    const trailing = codePart.slice(at + term.length);
+    const isCall = /^\s*\(/.test(trailing);
+    const isImportShaped = /^\s*import\b/.test(rawLine.trimStart())
+      || /\brequire\s*\(\s*["'][^"']*["']\s*\)/.test(rawLine)
+      || /^\s*from\s+\S+\s+import\b/.test(rawLine)
+      || /\bfrom\s+["'][^"']+["']\s*;?\s*$/.test(rawLine);
+    return isCall || isImportShaped;
+  });
 }
 
 const JSON_KEY_TOKEN_RE = /"([A-Za-z0-9_.$-]{2,})"\s*:/gu;
@@ -27079,6 +33025,1139 @@ function servedRangeSourceHasSalientWord(surface: TaskPackSurface, word: string,
 }
 
 /**
+ * C2 (fix-c, 2026-09-21, plan §6.1) — THE ONE generator for "every normalised
+ * form of `word` this file will accept as evidence of it", consulted by BOTH
+ * absence scanners (`distinctiveSalientAbsence` and
+ * `proveUnbindableRequestItem`) so "found by search" and "not absent" can
+ * never disagree — never a second, independently-tuned normalisation.
+ * Routes to machinery already reviewed and shipped for RETRIEVAL, never a
+ * fresh dictionary or heuristic of this function's own:
+ *   - a word containing Japanese script: the SAME workspace-vocabulary-gated
+ *     bridge retrieval already uses (`jaBridgeExpansionTokens` — katakana
+ *     phonetic matching plus the kanji/kana glossary, `TL_JA_QUERY_BRIDGE`-
+ *     gated, default ON); an unsegmented CJK clause is never treated as one
+ *     opaque token. A bridged token this file's own Tier C would never
+ *     accept as a DISTINGUISHING absence candidate (a bare "cache"/
+ *     "implementation"/a light verb — `GENERIC_SOFTWARE_ABSENCE_WORDS`/
+ *     `LIGHT_VERB_WORDS`) is filtered out of `variants` before it can count
+ *     as evidence: a compound like レディスキャッシュ ("Redis Cache")
+ *     bridging ONLY to the generic "cache" (its distinctive "Redis" half
+ *     has no vocabulary match at all) must not read as "found" merely
+ *     because the workspace has SOME cache — `search_files`'s own recovery
+ *     path is untouched and stays free to use the unfiltered token. Never
+ *     filters the literal spelling itself, only bridge OUTPUT — when
+ *     filtering leaves nothing, `variants` falls back to exactly the
+ *     literal (untranslated) spelling, the pre-existing behaviour.
+ *   - an ASCII word: `inflectionVariants` (salientWordMatch.ts) — plural/
+ *     past/gerund/nominalisation, the same widening `proveUnbindableRequest
+ *     Item`'s own H-1(ii) veto already trusted for English.
+ * Never refactors retrieval ranking itself (C2's own limit) — this only
+ * WIDENS the set of strings a caller may treat as "the same concern", the
+ * same relationship `inflectionVariants` already documents for English.
+ */
+interface ConcernTermVariants {
+  /** `word` itself (as written, and lowercased) plus every normalised form. */
+  readonly variants: readonly string[];
+  /**
+   * Ruling C1/C6: whether a literal miss over `variants` may be trusted as a
+   * genuine "not found" rather than "could not determine". True for an
+   * ASCII word unconditionally (`inflectionVariants` needs no workspace
+   * lookup). For a word containing Japanese script, this tracks the BRIDGE
+   * MECHANISM's availability (`TL_JA_QUERY_BRIDGE`), never its per-word
+   * outcome — see `concernTermVariants`'s own doc comment for why keying
+   * this on the raw bridge output instead (tempting, and correct in
+   * isolation for one candidate) is unsafe for `proveUnbindableRequestItem`
+   * callers, which evaluate this per word inside one item's WHOLE
+   * salient-word list: a purely meta/framing JA fragment the same clause
+   * also contributed (never a real domain concept, so the bridge
+   * legitimately finds nothing for it) must never poison the aggregate's
+   * verdict for the item's OTHER, genuine candidate words. With the flag
+   * on, even a confirmed empty (or generic-only) bridge result is itself a
+   * real, checked signal; with it off, the mechanism never ran at all, so a
+   * literal miss proves nothing (ruling C6: `TL_JA_QUERY_BRIDGE=0` stays a
+   * retrieval-only rollback — off, JA terms have no normalisation, so they
+   * are "could not determine", never "absent").
+   */
+  readonly hasNormalization: boolean;
+}
+
+/** R-B3 (ruling 3): true when `word` is one of `item`'s own explicitly QUOTED literals — a literal string, so its miss is checkable whatever its script (TL142-04 Decision 6). */
+function quotedLiteralTerm(item: RequestItem, word: string): boolean {
+  const lower = word.toLowerCase();
+  return containsJapanese(word) && item.terms.some((term) => term.toLowerCase() === lower);
+}
+
+/** R-B3 (ruling 3): true when `word` carries a katakana loanword the workspace vocabulary has no counterpart for — see `unresolvedKatakanaRuns`. A failed vocabulary lookup is "no" (the safe, weaker verdict). */
+function jaTermHasUnresolvedLoanword(word: string, workspace: string): boolean {
+  try {
+    return unresolvedKatakanaRuns(word, getWorkspaceJaBridgeVocabulary(workspace)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function concernTermVariants(word: string, workspace: string): ConcernTermVariants {
+  const trimmed = word.trim();
+  if (trimmed.length === 0) return { variants: [], hasNormalization: false };
+  const variants = new Set<string>([trimmed, trimmed.toLowerCase()]);
+  if (containsJapanese(trimmed)) {
+    const bridged = jaBridgeExpansionTokens(trimmed, workspace);
+    const meaningful = bridged.filter((t) => !GENERIC_SOFTWARE_ABSENCE_WORDS.has(t.toLowerCase()) && !LIGHT_VERB_WORDS.has(t.toLowerCase()));
+    for (const token of meaningful) {
+      variants.add(token);
+      variants.add(token.toLowerCase());
+    }
+    // Ruling C1/C6: `hasNormalization` tracks the BRIDGE MECHANISM's
+    // availability (`TL_JA_QUERY_BRIDGE`), not its per-word outcome.
+    // Considered, and REJECTED, keying this on the raw bridge output
+    // instead (`bridged.length > 0`): correct in isolation for a single
+    // candidate (a compound like レディスキャッシュ bridging only to
+    // generic "cache" still gets a real, checked "absent" — the bridge
+    // confirmed nothing more specific exists), but `proveUnbindableRequest
+    // Item` evaluates this per WORD inside one item's whole salient-word
+    // list, and a purely meta/framing JA fragment salientWords() also
+    // extracted from the SAME clause (confirmed live: "3点すべてに触れて
+    // ください" -- "please touch on all 3 points" -- contributes
+    // "点すべて"/"触れて", neither a real domain concept, so the bridge
+    // legitimately finds nothing for either) would then poison the WHOLE
+    // aggregate's `everyWordHasNormalization` into "could not determine",
+    // silently blocking a genuine, reviewed absence disclosure
+    // (requestItemCompletion.spec.ts's "splitLeadAndBody JA parity" case).
+    // The flag is the one signal available uniformly at both call sites
+    // without that risk: on, even a confirmed empty (or generic-only)
+    // bridge result for a GENUINE candidate is itself a real, checked
+    // outcome; off, the mechanism never ran at all, so a literal miss
+    // proves nothing (ruling C6: `TL_JA_QUERY_BRIDGE=0` stays a
+    // retrieval-only rollback — off, JA terms have no normalisation, so
+    // they are "could not determine", never "absent").
+    //
+    // R-B3 (2026-09-21, orchestrator ruling 3; plan §6.1 「日本語原文の不一致を
+    // 機能不在へ格上げしない」): with the flag ON, the per-word STRENGTH of a
+    // miss now depends on the CHANNEL that could have found the term, never
+    // on whether it did. A katakana loanword is bridged PHONETICALLY against
+    // the workspace vocabulary (`unresolvedKatakanaRuns`), so a loanword with
+    // no counterpart is a checkable miss, exactly as strong as an English
+    // word (Q02's マイグレーション, a coined ヴァントレル). A term reachable only
+    // through the hand-kept kanji glossary is a SEMANTIC guess — code spells
+    // 期限切れ as ttl / maxAge / stale as often as expire — so its miss is
+    // "could not determine", never absent-in-scope. A term whose loanword
+    // part DID resolve (キャッシュ -> cache) leaves only its kanji remainder
+    // unmatched, which is semantic. The aggregate over one item's words
+    // still never lets a weak meta fragment poison a strong word (the
+    // reviewed 3点すべてに触れてください case above): the callers certify
+    // absence off the item's STRONG words only.
+    return { variants: [...variants], hasNormalization: jaQueryBridgeEnabled() && jaTermHasUnresolvedLoanword(trimmed, workspace) };
+  }
+  for (const variant of inflectionVariants(trimmed)) variants.add(variant);
+  return { variants: [...variants], hasNormalization: true };
+}
+
+/**
+ * C4 (fix-c, 2026-09-21, plan §6.1 last paragraph / Q06) — an absence
+ * statement's scope must be honest about everything it did NOT actually
+ * search, not just what the workspace WALK excluded up front
+ * (`WalkOmissions` — .gitignore/.tokenlightenignore/oversize/symlinks/...,
+ * computed once at enumeration time). A file the walk enumerated and opened
+ * but could not decode as text is invisible to `WalkOmissions` — findText.ts's
+ * own `ScanCoverage.undecodable` doc comment: "never folded into scanned...
+ * that would certify absence over content nobody actually read" — but is
+ * exactly the same honesty risk: a term whose only occurrence sits inside
+ * that unreadable file must never be certified "scope complete". Combines
+ * both signals the same way `findText.ts`'s own absence-extra machinery
+ * already does for `search_files find`
+ * (`anyWalkOmission(...) || coverage.undecodable.size > 0`) — every
+ * `scanLiteral` call in the two functions below shares ONE per-call
+ * `ScanCoverage` so this can see every file either scanner skipped.
+ */
+/**
+ * N7(c) (r-b2, 2026-09-21, review finding N7) — `WalkOmissions.ignored`
+ * (DEFAULT_IGNORE's heuristic layer) is where a top-level `.git` directory
+ * always lands, so `anyWalkOmission`/`totalOmittedPaths` alone make EVERY
+ * git-tracked workspace's scan "incomplete" purely from skipping VCS
+ * plumbing no query could ever mean to search — confirmed live: an ordinary
+ * two-file workspace with nothing else excluded still reported
+ * `scope_complete:false, omitted_count:1` for its `.git` directory alone.
+ * `vcs_metadata` (walkRepo.ts) is a SUBSET of `ignored` (the walker
+ * increments both for the same `.git` entry, never one without the other),
+ * so subtracting it back out here can never go negative and never hides a
+ * DIFFERENT DEFAULT_IGNORE exclusion sharing the same `ignored` bucket
+ * (`node_modules/`, `dist/`, `vendor/`, …stay real, disclosed omissions).
+ * Deliberately does NOT call `anyWalkOmission`/reuse its exact boolean —
+ * those stay untouched for every OTHER caller (e.g. `search.tree`'s own
+ * `scope_report`, whose `excluded_by_reason`/`counts.excluded` invariant
+ * this must not perturb: `ignored` itself, and everything derived from it
+ * there, is unchanged by this fix) — this is a second, narrower honesty
+ * question local to the absence-scope wording built below.
+ */
+function scopeCompletenessAfterScan(universe: FindTextUniverse, coverage: ScanCoverage): { scopeComplete: boolean; omittedCount: number } {
+  const o = universe.omissions;
+  const meaningfulIgnored = Math.max(0, o.ignored - o.vcs_metadata);
+  const meaningfulOmission =
+    meaningfulIgnored > 0
+    || o.gitignored > 0
+    || o.tokenlighten_ignored > 0
+    || o.oversize > 0
+    || o.symlinks > 0
+    || o.non_text > 0
+    || o.secrets > 0
+    || o.unreadable_dirs > 0
+    || o.outside_workspace > 0
+    || o.source_only_excluded > 0;
+  const scopeComplete = !meaningfulOmission && coverage.undecodable.size === 0;
+  const omittedCount = scopeComplete ? 0 : Math.max(0, totalOmittedPaths(o) - o.vcs_metadata) + coverage.undecodable.size;
+  return { scopeComplete, omittedCount };
+}
+
+// ---------------------------------------------------------------------------
+// FIX-C2 (2026-09-21, plan §5「完了ゲート」/ §6.1) — THE ONE CONCERN-STATUS
+// POLICY.
+//
+// Before this section a concern's status was decided in FOUR places with four
+// rule sets that disagreed: `proveUnbindableRequestItem`'s pre-search
+// `alreadyServed` (two different bars depending on an opt-in flag), its
+// post-search `majorityFloor` check, `absenceContradictsServedEvidence`'s C1
+// veto, and — in the mixed-kind loop — nothing at all. Three consecutive
+// waves each fixed one edge and each fix exposed the next:
+//
+//  - Q05 (four concerns): "Explain how authentication works" reduces to ONE
+//    real topic word after light-verb filtering, and the two floors were
+//    sized from the PRE-filter word count (`min(2, rawWordCount)` = 2), so
+//    the bar was UNREACHABLE — `src/auth.ts` could be served in the SAME
+//    response that reported its concern still open.
+//  - Q02 (JA, asymmetric fixture): the mirror image. A JA clause is ONE
+//    unsegmented salient word, so `min(2, 1)` = 1 and a single incidental
+//    bridged mention inside a comment that explicitly DISCLAIMS the concept
+//    ("no migration/DDL code lives in this fixture") certified a genuinely
+//    absent concern COVERED — and so never disclosed it at all.
+//
+// Both are the same mistake: counting HOW MANY DIFFERENT WORDS a clause has
+// instead of asking WHERE the concern's term lives in the surface that is
+// supposed to answer it. This section replaces both floors with one rule:
+//
+//    covered(surface) := the surface carries served CODE, at least ONE of the
+//    concern's topic terms is evidenced in it, and either TWO distinct topic
+//    terms are (today's concentration bar, kept for multi-word clauses) or
+//    the term is ANCHORED there — it is in the file's PATH, it occurs at a
+//    real CODE position (outside comments and string literals), or it occurs
+//    more than once in that one surface.
+//
+// The anchor is what makes the bar reachable for a one-topic-word concern
+// without reopening the defect FIX-C's `rawWordCount` sizing was written for
+// (its own comment, now superseded, is reproduced in this wave's report): a
+// README that merely narrates "authentication (`src/auth.ts`)" is a DOC-role
+// surface, so it can never anchor, and a single prose/comment mention in a
+// code file is not a code position and is not a repeat. The implementing
+// module always anchors — `authenticateRequest` sits at a code position in
+// `src/auth.ts`, `lookupStoredCredential` in `store.ts` — in ANY language,
+// because the anchor is positional, never a hand-kept keyword list.
+//
+// INVARIANT (i) "covered => never absent in the same response" is enforced by
+// this being the FIRST question every path asks, so no path can skip it.
+// INVARIANT (ii) holds because the evidence it reads is the epoch-served view
+// (`epochServedEvidence`, sha-gated) rather than one call's fresh surfaces.
+// Each path keeps its OWN reviewed routing of what a non-covered status DOES
+// (the ALL-TOPIC branch still mints no blocking obligation — invariant (iv);
+// only `requireDistinctConcentration` callers may mint an absence out of
+// "every candidate served but unconcentrated").
+// ---------------------------------------------------------------------------
+
+/** plan §5's status vocabulary (also `TL_TRACE`'s `request_item_status`). */
+type ConcernStatus = "covered" | "absent-in-scope" | "could-not-determine" | "open";
+
+/**
+ * A concern's TOPIC terms — the ONE derivation every path uses. `salientWords`
+ * minus `LIGHT_VERB_WORDS` (C3: "Explain how authentication works" asks about
+ * authentication, never about the word "works").
+ */
+function concernTopicTerms(itemText: string): string[] {
+  return salientWords(itemText).filter((word) => !LIGHT_VERB_WORDS.has(word.toLowerCase()));
+}
+
+/**
+ * R-B3 (2026-09-21, orchestrator ruling 1) — "is this topic term provably
+ * absent from the WHOLE scanned scope?", the collision rule's test (see
+ * `concernCoveredByServedEvidence`). A term is provably absent only when NONE
+ * of its forms occurs anywhere in the scan universe: not the literal, not an
+ * inflected or derived variant (`concernTermVariants` — the SAME generator
+ * every absence scanner uses), not inside an identifier (`textHasWordVariant`
+ * re-verifies every substring hit on its own line, so `tag` inside `stage`
+ * is no occurrence while `replenish` inside `replenishInventory` is one), and
+ * not in any file NAME (the path-name occurrence rule of
+ * `proveUnbindableRequestItem`). A Japanese term counts only when its miss is
+ * checkable (ruling 3: `hasNormalization` — a loanword with no counterpart);
+ * a glossary-only term is never "provably absent". Memoised per scan
+ * universe and term; every scan books into ONE coverage record so the
+ * absence's scope qualifier is honest (C4).
+ */
+interface ConcernAbsenceProbe {
+  provablyAbsent(term: string): boolean;
+  scope(): { scopeComplete: boolean; omittedCount: number };
+}
+
+interface ConcernAbsenceMemoEntry { absent: boolean; scopeComplete: boolean; omittedCount: number }
+const concernAbsenceMemo = new WeakMap<FindTextUniverse, Map<string, ConcernAbsenceMemoEntry>>();
+
+function concernAbsenceProbe(
+  workspace: string,
+  universe: FindTextUniverse,
+  variantsByTerm: ReadonlyMap<string, ConcernTermVariants>,
+  contentCache?: ScanContentCache,
+): ConcernAbsenceProbe {
+  let memo = concernAbsenceMemo.get(universe);
+  if (memo === undefined) {
+    memo = new Map();
+    concernAbsenceMemo.set(universe, memo);
+  }
+  const cache = memo;
+  const consulted: ConcernAbsenceMemoEntry[] = [];
+  const occurs = (term: string, entry: ConcernTermVariants, coverage: ScanCoverage): boolean => {
+    const japanese = containsJapanese(term);
+    const variants = entry.variants.filter((variant) => variant.length > 0);
+    for (const variant of variants) {
+      for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+        if (japanese || containsJapanese(variant)) return true;
+        if (match.text === undefined || textHasWordVariant(match.text, term) || textHasWordVariant(match.text, variant)) return true;
+      }
+    }
+    for (const file of universe.files) {
+      const nameWithoutExtension = file.relPath.replace(/\.[^./]+$/u, "");
+      if (variants.some((variant) => (containsJapanese(variant) ? nameWithoutExtension.includes(variant) : textHasWordVariant(nameWithoutExtension, variant)))) return true;
+    }
+    return false;
+  };
+  return {
+    provablyAbsent(term: string): boolean {
+      const key = term.toLowerCase();
+      let known = cache.get(key);
+      if (known === undefined) {
+        const entry = variantsByTerm.get(term) ?? concernTermVariants(term, workspace);
+        const coverage = createScanCoverage();
+        // Generic software vocabulary ("entries", "value", "cache", …) is never
+        // a DISCLOSABLE absence (`GENERIC_SOFTWARE_ABSENCE_WORDS`'s own test:
+        // its absence tells a reader nothing distinguishing), so it can never
+        // be the term that blocks an anchor either — "how entries are
+        // invalidated" against a map-backed `invalidate(k)` is not a collision.
+        const absent = !GENERIC_SOFTWARE_ABSENCE_WORDS.has(key)
+          && entry.hasNormalization
+          && entry.variants.length > 0
+          && !occurs(term, entry, coverage);
+        known = { absent, ...scopeCompletenessAfterScan(universe, coverage) };
+        cache.set(key, known);
+      }
+      consulted.push(known);
+      return known.absent;
+    },
+    // The weakest qualifier among every term this probe decided: an absence
+    // is "scope complete" only when none of the scans behind it skipped a file.
+    scope: () => ({
+      scopeComplete: consulted.every((entry) => entry.scopeComplete),
+      omittedCount: consulted.reduce((max, entry) => Math.max(max, entry.omittedCount), 0),
+    }),
+  };
+}
+
+/** One `concernTermVariants` set per topic term, computed once per concern and reused by every check below. */
+function concernVariantMap(terms: readonly string[], workspace: string): Map<string, ConcernTermVariants> {
+  const map = new Map<string, ConcernTermVariants>();
+  for (const term of terms) {
+    if (!map.has(term)) map.set(term, concernTermVariants(term, workspace));
+  }
+  return map;
+}
+
+/**
+ * May a DOC-role surface anchor this concern? Only when the concern itself
+ * asks about documentation — the same recall control `nonDocNoiseCandidate-
+ * Paths` and `isClauseCoveredBySeededSurfaces` already apply, so the three
+ * places that judge "is a README the answer?" agree. A doc surface is never
+ * excluded outright (it can still satisfy the two-distinct-terms bar), so
+ * this never drops the last surface: it only stops a narration of a concern's
+ * NAME from outranking the module that implements it.
+ */
+function concernAdmitsDocAnchor(itemText: string): boolean {
+  return DOC_MENTION_WORD_RE.test(itemText);
+}
+
+/** A doc-role surface speaks for a concern only when the concern asks about docs — the same recall control, reused by the absence veto. */
+function docAnchorsEligible(itemText: string, surface: TaskPackSurface): boolean {
+  return classifySurface(surface.path) !== "doc" || concernAdmitsDocAnchor(itemText);
+}
+
+/**
+ * The served text with line comments, block comments and quoted runs removed,
+ * so "occurs at a code position" can be asked with the SAME camelCase-aware
+ * whole-word matcher (`textHasWordVariant`) every other check uses — a bare
+ * `indexOf` cannot, because "authenticate" inside `authenticateRequest` fails
+ * its own identifier-boundary test. Same line-comment / block-comment /
+ * quoted-run rules as `forEachCodePositionOccurrence` above (that function
+ * decides per OCCURRENCE and so cannot hand back a per-line projection).
+ */
+function concernCodeOnlyText(text: string, language: string | undefined): string {
+  const parts: string[] = [];
+  const lines = text.split(/\r\n|\r|\n/);
+  let inBlockComment = false;
+  for (const rawLine of lines) {
+    let line = rawLine;
+    if (inBlockComment) {
+      const closeAt = line.indexOf("*/");
+      if (closeAt < 0) continue;
+      line = line.slice(closeAt + 2);
+      inBlockComment = false;
+    }
+    const commentAt = lineCommentMarkerIndex(line, language);
+    const codePart = commentAt >= 0 ? line.slice(0, commentAt) : line;
+    parts.push(stripQuotedRuns(codePart));
+    const openAt = rawLine.indexOf("/*");
+    if (openAt >= 0 && rawLine.indexOf("*/", openAt + 2) < 0) inBlockComment = true;
+  }
+  return parts.join("\n");
+}
+
+/** Replace every single/double/backtick-quoted run of ONE line with spaces (naive, unnested — the same "good enough" scope `isInsideQuotesAt` documents). */
+function stripQuotedRuns(line: string): string {
+  let out = "";
+  let quote: string | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote === undefined) {
+      if ((ch === "\"" || ch === "'" || ch === "`") && !isEscapedAt(line, i)) {
+        quote = ch;
+        out += " ";
+        continue;
+      }
+      out += ch;
+    } else {
+      out += " ";
+      if (ch === quote && !isEscapedAt(line, i)) quote = undefined;
+    }
+  }
+  return out;
+}
+
+/** Whole-word (camelCase-aware) occurrences of `variant` in `text`, counted up to `cap`. CJK variants have no identifier decomposition, so they fall back to a substring count. */
+function concernVariantOccurrences(text: string, variant: string, cap = 2): number {
+  if (variant.length === 0) return 0;
+  if (containsJapanese(variant)) {
+    const hay = text.toLowerCase();
+    const needle = variant.toLowerCase();
+    let count = 0;
+    let from = 0;
+    for (;;) {
+      const at = hay.indexOf(needle, from);
+      if (at < 0) return count;
+      count += 1;
+      if (count >= cap) return count;
+      from = at + needle.length;
+    }
+  }
+  const target = variant.toLowerCase();
+  let count = 0;
+  for (const word of splitIdentifierWords(text)) {
+    if (word.toLowerCase() === target) {
+      count += 1;
+      if (count >= cap) return count;
+    }
+  }
+  return count;
+}
+
+/**
+ * WHERE the term lives: the three positional signals that distinguish "this
+ * surface is about the concern" from "this surface mentions the concern once,
+ * in prose". Never a word count.
+ */
+function concernTermAnchoredInSurface(
+  surface: TaskPackSurface,
+  variant: string,
+  docAnchorsAllowed: boolean,
+): { anchored: boolean; codePosition: boolean } {
+  const none = { anchored: false, codePosition: false };
+  if (!docAnchorsAllowed && classifySurface(surface.path) === "doc") return none;
+  const text = servedSurfaceText(surface);
+  // (a) CODE POSITION — outside comments and string literals, in any
+  // language (positional, never a per-language declaration keyword list).
+  if (textHasWordVariant(concernCodeOnlyText(text, languageForPath(surface.path)), variant)) {
+    return { anchored: true, codePosition: true };
+  }
+  // A PATH match is deliberately NOT an anchor. It still EVIDENCES the term
+  // (the caller's `surfaceEvidencesSalientWord` channel — the reviewed "its
+  // tests" vs a served `src/cache.test.ts` case), but it says nothing about
+  // whether the bytes actually delivered explain the concern. Confirmed live
+  // on the matrix: a one-topic-word concern ("how renewal works") certified
+  // itself covered from a single served line of `src/sessionRenewal.ts` —
+  // the file's interface header — while `renewSessionToken`, the function
+  // that answers it, was never on the wire. Anchors are about the SERVED
+  // CONTENT; the path only ever contributes a term to the two-term bar.
+  //
+  // (b) REPEATED use inside this ONE surface's served content.
+  return concernVariantOccurrences(text, variant) >= 2 ? { anchored: true, codePosition: false } : none;
+}
+
+/**
+ * GATE-B (2026-09-21, closes the confirmed `calc.ts` request-side
+ * regression): true when `itemText` NAMES `relPath` directly — its full
+ * relative path, or its basename WITH EXTENSION, spelled out verbatim
+ * (case-insensitive, word-boundary guarded so "calc.ts" never matches
+ * inside "calc.tsx" or "mycalc.ts"). Deliberately narrower than the
+ * pre-existing bare path-NAME-match pass (`proveUnbindableRequestItem`'s own
+ * "a file whose own NAME carries the concern's term" scan, which strips the
+ * extension and accepts any path SEGMENT): a bare directory name, or an
+ * extension-less word that merely equals a path segment, must stay exactly
+ * as unnamed as FIX-C2 left it (its own false anchor: a clause naming
+ * "session renewal" credited by the fragment "renewal" inside
+ * `src/sessionRenewal.ts`). The dot (or a real leading directory component)
+ * is exactly what makes the reference unambiguous enough to name an
+ * artefact on its own.
+ */
+function concernNamesServedPath(itemText: string, relPath: string): boolean {
+  const base = path.basename(relPath);
+  const candidates = new Set<string>();
+  if (relPath.includes("/")) candidates.add(relPath);
+  if (looksLikeFileTerm(base)) candidates.add(base);
+  for (const candidate of candidates) {
+    if (new RegExp(`\\b${escapeRegExp(candidate)}\\b`, "iu").test(itemText)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when THIS epoch's served spans for `relPath` cover the file's WHOLE
+ * current line range — "no real remainder" (GATE-B's ruling). Deliberately
+ * NOT the same question `proveUnbindableRequestItem`'s own
+ * `candidateFullyServed` asks (whether some one surface's OWN claimed range
+ * came through with nothing trimmed FROM IT — true even for a narrow
+ * symbol-scoped slice): a concern whose only wording IS the file's name has
+ * nothing else to concentrate on, so nothing short of the WHOLE file
+ * answers it. Reuses the exact union machinery DESIGN-v0.15 R1 built for
+ * declaration-range coverage rather than a second line-math implementation.
+ */
+function pathServedWholeFile(priorEvidence: readonly TaskPackSurface[], relPath: string, workspace: string): boolean {
+  const surfacesForPath = evidenceSurfacesForPath(priorEvidence, relPath);
+  if (surfacesForPath.length === 0) return false;
+  const totalLines = currentFileLineCount(workspace, relPath);
+  if (totalLines === undefined) return false;
+  return lineSpansCover(servedLineSpansOf(surfacesForPath), { start: 1, end: totalLines });
+}
+
+/**
+ * GATE-B: true when `term` is a symbol AST-DECLARED in `relPath`, and that
+ * declaration's own range lies inside this epoch's served spans for it — the
+ * same "named artefact is covered by serving it" rule as
+ * `concernNamesServedPath` above, for a symbol instead of a file. Deliberately
+ * authoritative (AST-resolved) rather than routed through the code-position
+ * anchor's own literal-EN/two-term gate above, so a declared symbol named as
+ * a concern's ONLY topic term (amid unrelated prose the anchor's
+ * `anchorRouteAvailable` gate would otherwise require) is still covered.
+ */
+function concernNamesDeclaredSymbol(
+  term: string,
+  relPath: string,
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+): boolean {
+  const decl = declarationRangeInFile(workspace, relPath, term);
+  if (decl.source !== "ast") return false;
+  const served = servedLineSpansOf(evidenceSurfacesForPath(priorEvidence, relPath));
+  return lineSpansCover(served, decl.span);
+}
+
+/**
+ * R-B1 (held item 1): true when a topic term the SERVED part of `relPath`
+ * does not carry occurs at a real code position in the file's UNSERVED part
+ * — see the route-(b) guard in `concernCoveredByServedEvidence`. English
+ * variants only: a Japanese term never reaches route (b) (it is a bridge
+ * guess, never `literalCodeAnchor`).
+ */
+function unservedRemainderCarriesMissingTerm(
+  relPath: string,
+  terms: readonly string[],
+  contentEvidenced: ReadonlySet<string>,
+  variantsByTerm: ReadonlyMap<string, ConcernTermVariants>,
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+): boolean {
+  const missing = terms.filter((term) => !contentEvidenced.has(term.toLowerCase()));
+  if (missing.length === 0) return false;
+  const content = readCached(workspace, relPath);
+  if (content === undefined) return false;
+  const lines = content.split(/\r\n|\r|\n/);
+  const pieces = subtractLineSpans({ start: 1, end: Math.max(1, lines.length) }, servedLineSpansOf(evidenceSurfacesForPath(priorEvidence, relPath)));
+  if (pieces.length === 0) return false;
+  const variants = missing
+    .flatMap((term) => variantsByTerm.get(term)?.variants ?? [term])
+    .filter((variant) => variant.length > 0 && !containsJapanese(variant));
+  if (variants.length === 0) return false;
+  const codeLines = concernCodeOnlyLines(lines, languageForPath(relPath));
+  for (const piece of pieces) {
+    for (let n = Math.max(1, piece.start); n <= Math.min(piece.end, lines.length); n += 1) {
+      const code = codeLines[n - 1] ?? "";
+      if (code.trim().length > 0 && variants.some((variant) => textHasWordVariant(code, variant))) return true;
+    }
+  }
+  return false;
+}
+
+interface ConcernCoverageVerdict {
+  covered: boolean;
+  /** The served surfaces that cover the concern (empty when `covered` is false). */
+  surfaces: TaskPackSurface[];
+  /** Topic terms evidenced by the covering surfaces, for the reason string and TL_TRACE. */
+  matchedTerms: string[];
+  /**
+   * The STRONGEST form of coverage: some covering surface carries the term at
+   * a real CODE position, i.e. the implementation itself is on the wire — not
+   * just a matching file name or a mention in that file's header comment.
+   * Consulted only where "the caller actually holds the implementation"
+   * matters on its own (the `analysis-source` reconciliation below).
+   */
+  codeAnchored: boolean;
+  reason: string;
+  /**
+   * R-B3 (ruling 1): set only when NOTHING covers the concern and at least
+   * one served surface WOULD have covered it through a single anchored term,
+   * but another of the concern's topic terms is provably absent from the
+   * whole scanned scope — the provably absent term, for the caller to
+   * disclose as absent-in-scope (certification with a truthful disclosure,
+   * no extra hop).
+   */
+  collisionAbsentTerm?: string;
+}
+
+/**
+ * THE policy's coverage half — "is this concern backed by evidence served in
+ * this epoch?", asked identically by every request-item path. See this
+ * section's header for the rule and why it is positional.
+ */
+function concernCoveredByServedEvidence(
+  itemText: string,
+  terms: readonly string[],
+  variantsByTerm: ReadonlyMap<string, ConcernTermVariants>,
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+  /** R-B3 (ruling 1): the collision rule's whole-scope absence test; callers without a scan universe pass none and keep the single-anchor route unconditionally (their own terms are a single absence claim, so there is no OTHER term to collide with). */
+  absenceProbe?: ConcernAbsenceProbe,
+): ConcernCoverageVerdict {
+  if (terms.length === 0) {
+    return { covered: false, surfaces: [], matchedTerms: [], codeAnchored: false, reason: "no topic term to look for" };
+  }
+  const docAnchorsAllowed = concernAdmitsDocAnchor(itemText);
+  // R-B3 (ruling 2): the clause's generic PROCESS predicate(s), read only by
+  // the sliver guard below — see `GENERIC_PROCESS_VERB_WORDS`.
+  const processPredicates = salientWords(itemText).filter((word) => GENERIC_PROCESS_VERB_WORDS.has(word.toLowerCase()));
+  const processPredicateVariants = processPredicates.length > 0 ? concernVariantMap(processPredicates, workspace) : undefined;
+  // R-B3 (ruling 1): the clause's content predicates — the only terms the
+  // collision rule below lets block a single anchor.
+  const contentPredicates = contentPredicateWords(itemText);
+  const surfaces: TaskPackSurface[] = [];
+  const matchedTerms = new Set<string>();
+  let anchoredAnywhere = false;
+  let codeAnchoredAnywhere = false;
+  let firstCollision: string | undefined;
+  for (const surface of priorEvidence) {
+    if (!hasServedCode(surface)) continue;
+    const haystack = `${surface.path}\n${servedSurfaceText(surface)}`;
+    const distinct = new Set<string>();
+    /** Terms carried by the served CONTENT, not merely by the file's name. */
+    const contentEvidenced = new Set<string>();
+    /** Terms ANCHORED in the served content (code position or repeated use) — GATE-B's partial-serve route reads this. */
+    const anchoredTerms = new Set<string>();
+    let anchored = false;
+    let codePosition = false;
+    let literalCodeAnchor = false;
+    for (const term of terms) {
+      const variants = variantsByTerm.get(term)?.variants ?? [term];
+      // A Japanese term reaches a workspace only through the JA bridge, so
+      // every one of its variants is a TRANSLATION guess; an EN term's
+      // variants are its own inflections. Only the latter can carry the
+      // "the user literally named this and it is in the served code" signal
+      // the multi-term anchor route below requires.
+      const literalTerm = !containsJapanese(term);
+      let evidenced = false;
+      for (const variant of variants) {
+        if (
+          textHasWordVariant(haystack, variant)
+          || surfaceEvidencesSalientWord(surface, variant)
+          // TL_IDENTIFIER_GROUNDING: the body on the wire has its doc
+          // comments elided, so a concern whose wording lives in the served
+          // member's OWN doc comment must still count — the reviewed
+          // 2026-09-20 widening, carried into the single policy unchanged.
+          || (identifierGroundingEnabled() && servedRangeSourceHasSalientWord(surface, variant, workspace))
+        ) {
+          evidenced = true;
+        }
+        if (
+          textHasWordVariant(servedSurfaceText(surface), variant)
+          || (identifierGroundingEnabled() && servedRangeSourceHasSalientWord(surface, variant, workspace))
+        ) {
+          evidenced = true;
+          contentEvidenced.add(term.toLowerCase());
+        }
+        const anchor = concernTermAnchoredInSurface(surface, variant, docAnchorsAllowed);
+        if (anchor.anchored) {
+          evidenced = true;
+          anchored = true;
+          anchoredTerms.add(term.toLowerCase());
+          if (anchor.codePosition) {
+            codePosition = true;
+            if (literalTerm) literalCodeAnchor = true;
+          }
+        }
+        if (evidenced && codePosition) break;
+      }
+      if (evidenced) distinct.add(term.toLowerCase());
+    }
+    // GATE-B (2026-09-21): a concern that NAMES this served artefact — by
+    // this surface's own path/basename, or by a symbol DECLARED in it — is
+    // covered by SERVING that artefact, even when nothing below concentrates
+    // (a single-topic-word concern whose only wording IS the file's own
+    // name, e.g. "Explain what calc.ts does", can never concentrate inside
+    // calc.ts's own body: the file's name is not a word inside itself).
+    // Two independent forms, each gated on its OWN "the artefact is actually
+    // on the wire" condition so this can never reopen the false anchor the
+    // very next comment documents (a bare path/segment match with an
+    // unrelated line served):
+    //   - PATH: `concernNamesServedPath` requires the concern's own text to
+    //     spell this surface's FULL relative path or its basename WITH
+    //     EXTENSION — never a bare directory name or an extension-less word
+    //     that merely equals a path segment (that stays exactly as
+    //     uncovered as FIX-C2 left it). Covered when this path's served
+    //     spans leave no real remainder of the CURRENT file (the naming
+    //     term cannot concentrate against its own file, so the whole file
+    //     must be on the wire), or when some OTHER topic term's CONTENT
+    //     (not merely its path) is already evidenced, even over a partial
+    //     serve.
+    //   - SYMBOL: a topic term is a symbol AST-declared in this surface's
+    //     file, with the declaration's own range inside this epoch's served
+    //     spans — authoritative, so unlike the anchor below it needs
+    //     neither a second term nor a literal-EN code-position match to
+    //     fire.
+    let namedArtefactCovered = false;
+    if (concernNamesServedPath(itemText, surface.path)) {
+      const namingStem = path.basename(surface.path).replace(/\.[^./]+$/u, "").toLowerCase();
+      // R-B1 (2026-09-21, held item 2): over a PARTIAL serve the other topic
+      // term must be ANCHORED in the served lines (a code position or
+      // repeated use — the same positional test every other route uses),
+      // not merely present once. "Present once" let a naming concern be
+      // covered by a partly served file whose only other hit was a word in a
+      // header comment. Coverage by NAME alone still needs the whole file
+      // (`pathServedWholeFile`); coverage by CONTENT needs an anchor.
+      const otherContentAnchored = [...anchoredTerms].some((t) => t !== namingStem);
+      if (otherContentAnchored || pathServedWholeFile(priorEvidence, surface.path, workspace)) {
+        namedArtefactCovered = true;
+      }
+    }
+    if (!namedArtefactCovered) {
+      for (const term of terms) {
+        if (concernNamesDeclaredSymbol(term, surface.path, priorEvidence, workspace)) {
+          namedArtefactCovered = true;
+          break;
+        }
+      }
+    }
+    if (distinct.size === 0 && !namedArtefactCovered) continue;
+    // TWO distinct topic terms in one surface is the pre-existing
+    // concentration bar and stays exactly as it was. The ANCHOR route is what
+    // this wave adds, under one of two conditions:
+    //
+    //  (a) the concern HAS no second term to concentrate on — one term is the
+    //      whole clause (an EN clause reduced by light-verb filtering, or a JA
+    //      clause that is one unsegmented run), so the two-term bar is
+    //      unreachable by construction and WHERE the term lives is the only
+    //      discriminator left; or
+    //  (b) a term the user LITERALLY typed (never a JA-bridge translation
+    //      guess) is in the served CODE itself — "Explain what the
+    //      `ParseResult` type looks like" against a served `export interface
+    //      ParseResult`, where the clause's other words ("type", "looks",
+    //      "like") were never going to match anything.
+    //
+    // A multi-term concern anchored only through a BRIDGED term keeps the old
+    // two-term bar deliberately: a JA request listing several distinctive
+    // points ("… の API endpoint、… の cancel 処理 …") must not be certified
+    // covered off one vague run translating onto whatever was served — that
+    // is the reviewed `TL_IDENTIFIER_GROUNDING (C)` contract ("the rule
+    // widens 'served', it does not waive the point").
+    const anchorRouteAvailable = terms.length === 1 || literalCodeAnchor;
+    // R-B1 (2026-09-21, held item 1 — "coverage must not certify off a
+    // sliver"): route (b) lets ONE literal term at a code position cover a
+    // multi-term concern because the clause's other words usually never
+    // match anything. That premise is false when the SAME file's unserved
+    // part carries another of the concern's terms at a code position: the
+    // body that answers the point is right there, just not on the wire.
+    // Confirmed live: "how refunds are processed" certified from a served
+    // four-line slice whose only hit was the `RefundRequest` interface name,
+    // while `processRefund` sat unserved six lines below. Such a surface does
+    // not cover; the point stays open and its continuation addresses the
+    // unserved window (`concernWindowInUnservedPart`). Positional and
+    // language-agnostic; it can only ever REMOVE a route-(b) coverage and
+    // never turns a concern absent (the term demonstrably occurs), so the
+    // two-term bar, route (a) and the named-artefact route are untouched.
+    const slivered = anchored
+      && anchorRouteAvailable
+      && contentEvidenced.size < 2
+      && !namedArtefactCovered
+      && (
+        (terms.length > 1 && unservedRemainderCarriesMissingTerm(surface.path, terms, contentEvidenced, variantsByTerm, priorEvidence, workspace))
+        // R-B3 (ruling 2): excluding the generic process verbs from the topic
+        // terms must not reopen this very sliver through route (a): "how
+        // refunds are processed" reduces to ONE term, and one served
+        // `RefundRequest` interface line anchors it — while `processRefund`,
+        // the body the clause asks for, sits unserved in the same file. The
+        // predicate stays non-evidential (it never covers and is never
+        // disclosed); it only says the processing body is not on the wire.
+        || (processPredicateVariants !== undefined
+          && !processPredicates.some((word) => (processPredicateVariants.get(word)?.variants ?? [word]).some((variant) => textHasWordVariant(servedSurfaceText(surface), variant)))
+          && unservedRemainderCarriesMissingTerm(surface.path, processPredicates, new Set<string>(), processPredicateVariants, priorEvidence, workspace))
+      );
+    // A file NAME never covers a concern: the BYTES on the wire must carry
+    // it. Confirmed live on the matrix: a clause naming "session renewal"
+    // was certified covered by `src/sessionRenewal.ts` while only that file's
+    // unrelated interface header line had been delivered — two terms
+    // "matched", one of them off the path alone, and the function that
+    // answers the point was never sent. A path match still makes the file a
+    // CANDIDATE (so the concern can never be certified absent over it — see
+    // the path-name pass in `proveUnbindableRequestItem`); it just does not
+    // COVER anything by itself. plan §5: "covered は『同じファイルが見つかった』
+    // 『単語が一つ出現した』だけでは成立させ[ない]". GATE-B's own named-artefact
+    // route above is the one deliberate exception this ruling carves out —
+    // gated on the concern SPELLING the artefact's own path/declaration,
+    // never merely on it happening to be the file a candidate scan turned up.
+    // R-B3 (2026-09-21, orchestrator ruling 1) — THE COLLISION RULE. A
+    // concern is covered by ONE anchored topic term only if none of its OTHER
+    // topic terms is provably absent from the whole scanned scope (every
+    // variant — literal, identifier split, inflection, derivation — occurs
+    // nowhere; `ConcernAbsenceProbe`). Confirmed live (R-B1's matrix, the
+    // copied multi-package tree): "how inventory is replenished" was
+    // certified covered by a served `inventory_files` field in unrelated
+    // budget code while replenishment exists nowhere — a word collision, not
+    // an implementation. When a term is provably absent the concern needs the
+    // two-term bar; failing it, the absent term is what the caller discloses
+    // (`collisionAbsentTerm`). A term that merely occurs somewhere unserved
+    // never blocks the anchor, so today's recall and hop count are kept, and
+    // route (a) (one topic term, nothing else to collide with) and the
+    // named-artefact route are untouched.
+    const singleAnchor = anchored && anchorRouteAvailable && !slivered;
+    let collision: string | undefined;
+    // The one thing a collision can never be: an anchor that NAMES the served
+    // file itself (`src/cache.ts` anchoring "cache"). The surface is then
+    // about the concern's subject, and a provably absent modifier is a
+    // synonym gap the lexical scan cannot bridge (a TTL-only cache answering
+    // "how expired cache entries are handled"), not a coincidence — the
+    // recall control this rule is checked against.
+    const nameWithoutExtension = surface.path.replace(/\.[^./]+$/u, "");
+    const anchorNamesFile = [...anchoredTerms].some((anchoredTerm) => {
+      const original = terms.find((term) => term.toLowerCase() === anchoredTerm) ?? anchoredTerm;
+      return (variantsByTerm.get(original)?.variants ?? [original]).some((variant) => !containsJapanese(variant) && textHasWordVariant(nameWithoutExtension, variant));
+    });
+    if (singleAnchor && contentEvidenced.size < 2 && !namedArtefactCovered && terms.length > 1 && absenceProbe !== undefined && !anchorNamesFile) {
+      // The blocking term is the clause's own CONTENT PREDICATE ("is
+      // replenished", "are renewed" — an auxiliary-governed participle outside
+      // the light/generic class, `contentPredicateWords`): what the concern
+      // says happens to its subject. Never a framing word — route (b)'s own
+      // reviewed case ("what the `ParseResult` type looks like": "looks",
+      // "like" occur nowhere and were never going to) and C5's example
+      // phrases ("a comment like \"// TODO\"") keep their single anchor.
+      collision = terms.find((term) => contentPredicates.has(term.toLowerCase())
+        && !anchoredTerms.has(term.toLowerCase())
+        && absenceProbe.provablyAbsent(term));
+      if (collision !== undefined && firstCollision === undefined) firstCollision = collision;
+    }
+    if (contentEvidenced.size >= 2 || (singleAnchor && collision === undefined) || namedArtefactCovered) {
+      surfaces.push(surface);
+      for (const term of distinct) matchedTerms.add(term);
+      if (anchored) anchoredAnywhere = true;
+      if (codePosition) codeAnchoredAnywhere = true;
+      if (namedArtefactCovered) anchoredAnywhere = true;
+    }
+  }
+  if (surfaces.length === 0) {
+    if (firstCollision !== undefined) {
+      return {
+        covered: false,
+        surfaces: [],
+        matchedTerms: [],
+        codeAnchored: false,
+        reason: `a served surface names this point only through one term while ${firstCollision} occurs nowhere in the scanned scope`,
+        collisionAbsentTerm: firstCollision,
+      };
+    }
+    return { covered: false, surfaces: [], matchedTerms: [], codeAnchored: false, reason: "no served surface concentrates this point's wording" };
+  }
+  return {
+    covered: true,
+    surfaces,
+    matchedTerms: [...matchedTerms],
+    codeAnchored: codeAnchoredAnywhere,
+    reason: anchoredAnywhere
+      ? "a served surface carries this point's wording where it is implemented (path, code position, or repeated use)"
+      : "a served surface already contains this point's salient wording",
+  };
+}
+
+/**
+ * What the CALLER's own candidate resolution established for a concern the
+ * policy did not find covered. Each path resolves candidates its own way
+ * (literal/variant scan, declaration sites, relation consumers, manifests) —
+ * only the STATUS mapping below is shared.
+ */
+type ConcernScanOutcome =
+  /** The caller ran no scan of its own (a structural arm that already has its verdict). */
+  | { kind: "not-scanned"; reason: string }
+  /** Zero occurrences anywhere in the scanned scope. */
+  | { kind: "no-occurrence"; scopeComplete: boolean; omittedCount: number; everyTermNormalized: boolean }
+  /** Every candidate is served, none concentrates the concern — a scope-bound absence. */
+  | { kind: "served-unconcentrated"; scopeComplete: boolean; omittedCount: number }
+  /** Candidates exist but are not served yet. */
+  | { kind: "unserved-candidates"; candidatePaths: readonly string[] }
+  /** The scan could not be bounded (caps, too many candidates, no usable normalisation). */
+  | { kind: "indeterminate"; reason: string };
+
+interface ConcernVerdict {
+  status: ConcernStatus;
+  evidence: TaskReadinessEvidence[];
+  reason: string;
+  candidatePaths: string[];
+  absentTerm?: string;
+  scopeComplete?: boolean;
+  omittedCount?: number;
+  /** R-B3 (ruling 5): the served-unconcentrated outcome — the term occurs, only in passing. */
+  incidental?: boolean;
+  /**
+   * R-D2 (2026-09-21, item B, plan §5): set ONLY on the two `could-not-
+   * determine` shapes below that carry NO `absentTerm` (a term with no
+   * confirmed normalisation to search against, or an unboundable/
+   * indeterminate scan) — the genuinely SILENT case before this fix: with no
+   * `absentTerm`, `requestItemProofFromVerdict` maps them to `proved:false`
+   * with no candidate and no disclosure at all, so the caller learns
+   * NOTHING happened for this concern. The `scopeComplete:false` could-not-
+   * determine shapes just below already carry `absentTerm` and are already
+   * disclosed via the existing "N paths excluded" wording — this field is
+   * never set alongside `absentTerm` (invariant (i): never beside a
+   * covered/disclosed claim for the SAME concern). The one term this
+   * verdict is about, so a caller can name it without re-deriving
+   * `termLabel`.
+   */
+  undeterminedTerm?: string;
+}
+
+/**
+ * THE ONE concern-status policy. Coverage is asked FIRST and wins over every
+ * scan outcome (invariant (i)); only then is the caller's own scan mapped
+ * onto the remaining three statuses.
+ *
+ * `coverage` is passed in rather than recomputed because every caller must
+ * consult it BEFORE running its own (expensive) candidate scan — that
+ * short-circuit is the point. It is only ever produced by
+ * `concernCoveredByServedEvidence`, the single coverage rule above.
+ */
+function decideConcernStatus(
+  terms: readonly string[],
+  coverage: ConcernCoverageVerdict,
+  outcome: ConcernScanOutcome,
+): ConcernVerdict {
+  if (coverage.covered) {
+    return { status: "covered", evidence: coverage.surfaces.map(readinessEvidence), reason: coverage.reason, candidatePaths: [] };
+  }
+  const termLabel = terms.join("/");
+  switch (outcome.kind) {
+    case "not-scanned":
+      return { status: "covered", evidence: [], reason: outcome.reason, candidatePaths: [] };
+    case "no-occurrence":
+      if (!outcome.everyTermNormalized) {
+        // Ruling C1/C6: a raw literal miss for a term the normalisation
+        // MECHANISM never ran for is "could not determine", never absent.
+        // FIX-G (2026-09-27): the parenthetical must be TRUE — with the bridge
+        // ON (its default for answer packs) the cause is that this term has no
+        // confirmed normalisation (a kanji glossary word or a meta fragment,
+        // R-B3 ruling 3), never "the bridge is disabled" (eval-0927 §4 read the
+        // old wording on every Japanese pack).
+        return {
+          status: "could-not-determine",
+          evidence: [],
+          reason: `no confirmed normalisation available to search ${termLabel} against (${jaQueryBridgeEnabled() ? "this Japanese term has no loanword or glossary counterpart to search" : "TL_JA_QUERY_BRIDGE is disabled for a Japanese term"}) — not a verified absence`,
+          candidatePaths: [],
+          undeterminedTerm: termLabel,
+        };
+      }
+      return {
+        status: outcome.scopeComplete ? "absent-in-scope" : "could-not-determine",
+        evidence: [],
+        reason: outcome.scopeComplete
+          ? `verified absent: no occurrence of ${termLabel} in scanned workspace files; scope complete`
+          : `verified absent: no occurrence of ${termLabel} in scanned workspace files; ${outcome.omittedCount} ${outcome.omittedCount === 1 ? "path" : "paths"} excluded from the scan`,
+        candidatePaths: [],
+        absentTerm: termLabel,
+        scopeComplete: outcome.scopeComplete,
+        omittedCount: outcome.omittedCount,
+      };
+    case "served-unconcentrated":
+      return {
+        status: outcome.scopeComplete ? "absent-in-scope" : "could-not-determine",
+        evidence: [],
+        reason: `every already-served candidate for ${termLabel} shows only an incidental, unconcentrated mention — treated as verified absent, not covered`,
+        candidatePaths: [],
+        absentTerm: termLabel,
+        scopeComplete: outcome.scopeComplete,
+        omittedCount: outcome.omittedCount,
+        incidental: true,
+      };
+    case "unserved-candidates":
+      return {
+        status: "open",
+        evidence: [],
+        reason: `literal-find candidate(s) not yet served for ${termLabel}`,
+        candidatePaths: [...outcome.candidatePaths],
+        };
+    case "indeterminate":
+    default:
+      return { status: "could-not-determine", evidence: [], reason: outcome.reason, candidatePaths: [], undeterminedTerm: termLabel };
+  }
+}
+
+/**
+ * `ConcernVerdict` -> the pre-existing `RequestItemProof` shape, which
+ * conflates status into `proved` + `absentTerm`. Kept as ONE adapter so the
+ * mapping (and therefore `requestItemTraceStatus`'s inverse of it) is written
+ * down once: a concern is `proved` when it is covered OR when its status is a
+ * verified, disclosable absence; `open` and an indeterminate/unnormalisable
+ * outcome are both `proved: false` — the latter with no candidate, which is
+ * how "could not determine" has always reached the wire from here.
+ */
+function requestItemProofFromVerdict(verdict: ConcernVerdict): RequestItemProof {
+  const proved = verdict.status === "covered" || verdict.absentTerm !== undefined;
+  return {
+    proved,
+    evidence: verdict.evidence,
+    reason: verdict.reason,
+    candidatePaths: verdict.candidatePaths,
+    ...(verdict.absentTerm !== undefined
+      ? {
+          absentTerm: verdict.absentTerm,
+          absentScopeComplete: verdict.scopeComplete ?? false,
+          absentOmittedCount: verdict.omittedCount ?? 0,
+          ...(verdict.incidental === true ? { absentIncidental: true } : {}),
+        }
+      : {}),
+    // R-D2 (item B): carried independently of the `absentTerm` branch above —
+    // `ConcernVerdict`'s own doc comment guarantees the two never both be set.
+    ...(verdict.undeterminedTerm !== undefined ? { undeterminedTerm: verdict.undeterminedTerm } : {}),
+  };
+}
+
+/**
+ * `text` split into lines with comments and quoted runs blanked, ONE entry per
+ * source line (unlike `concernCodeOnlyText`, which drops lines inside a block
+ * comment and so cannot map back to line numbers). Same comment rules.
+ */
+function concernCodeOnlyLines(lines: readonly string[], language: string | undefined): string[] {
+  const out: string[] = [];
+  let inBlockComment = false;
+  for (const rawLine of lines) {
+    let line = rawLine;
+    if (inBlockComment) {
+      const closeAt = line.indexOf("*/");
+      if (closeAt < 0) {
+        out.push("");
+        continue;
+      }
+      line = line.slice(closeAt + 2);
+      inBlockComment = false;
+    }
+    const commentAt = lineCommentMarkerIndex(line, language);
+    let code = commentAt >= 0 ? line.slice(0, commentAt) : line;
+    const openAt = code.indexOf("/*");
+    if (openAt >= 0) {
+      const closeAt = code.indexOf("*/", openAt + 2);
+      if (closeAt < 0) {
+        inBlockComment = true;
+        code = code.slice(0, openAt);
+      } else {
+        code = `${code.slice(0, openAt)} ${code.slice(closeAt + 2)}`;
+      }
+    }
+    out.push(stripQuotedRuns(code));
+  }
+  return out;
+}
+
+/** Hits closer than this many lines belong to one cluster (`concernWindowInUnservedPart`). */
+const CONCERN_WINDOW_CLUSTER_GAP = 20;
+/** Context lines kept above a window's first hit. */
+const CONCERN_WINDOW_LEAD_LINES = 2;
+/** How far past the last hit the enclosing block may extend. */
+const CONCERN_WINDOW_MAX_BLOCK_LINES = 60;
+/** Hard bound on one window. */
+const CONCERN_WINDOW_MAX_LINES = 120;
+
+/**
+ * R-B1 (2026-09-21, review B2 item 1): the window of `relPath` that carries a
+ * request item's own wording inside the file's UNSERVED part — so the
+ * continuation for an open concern addresses the lines that answer it rather
+ * than the hull of every unserved line. Positional, never a keyword list:
+ * lines where any of the concern's term variants occur (`textHasWordVariant`,
+ * the policy's own matcher; a Japanese variant by substring), clustered, the
+ * cluster with the most CODE-position hits chosen (a doc-comment mention
+ * ranks below the implementation), then extended over the block that follows
+ * its last hit by indentation. `undefined` when the wording does not occur in
+ * the unserved part at all — the caller then keeps the whole remainder as the
+ * target, so this can only ever NARROW an existing continuation.
+ */
+function concernWindowInUnservedPart(
+  workspace: string,
+  relPath: string,
+  missingPieces: readonly LineSpan[],
+  variantsByTerm: ReadonlyMap<string, ConcernTermVariants>,
+): LineSpan | undefined {
+  const content = readCached(workspace, relPath);
+  if (content === undefined || missingPieces.length === 0) return undefined;
+  const variants = [...new Set([...variantsByTerm.values()].flatMap((entry) => entry.variants))].filter((v) => v.length > 0);
+  if (variants.length === 0) return undefined;
+  const lines = content.split(/\r\n|\r|\n/);
+  const codeLines = concernCodeOnlyLines(lines, languageForPath(relPath));
+  const matches = (text: string): boolean => variants.some((variant) => (containsJapanese(variant)
+    ? text.toLowerCase().includes(variant.toLowerCase())
+    : textHasWordVariant(text, variant)));
+  const hits: Array<{ line: number; piece: number; code: boolean }> = [];
+  missingPieces.forEach((piece, pieceIndex) => {
+    for (let n = Math.max(1, piece.start); n <= Math.min(piece.end, lines.length); n += 1) {
+      if (!matches(lines[n - 1]!)) continue;
+      hits.push({ line: n, piece: pieceIndex, code: matches(codeLines[n - 1] ?? "") });
+    }
+  });
+  if (hits.length === 0) return undefined;
+  const clusters: Array<typeof hits> = [];
+  for (const hit of hits) {
+    const current = clusters[clusters.length - 1];
+    const previous = current?.[current.length - 1];
+    if (current !== undefined && previous !== undefined && previous.piece === hit.piece && hit.line - previous.line <= CONCERN_WINDOW_CLUSTER_GAP) {
+      current.push(hit);
+    } else {
+      clusters.push([hit]);
+    }
+  }
+  const codeCount = (cluster: typeof hits): number => cluster.filter((hit) => hit.code).length;
+  const chosen = clusters.reduce((best, cluster) => (codeCount(cluster) > codeCount(best) ? cluster : best), clusters[0]!);
+  const piece = missingPieces[chosen[0]!.piece]!;
+  const first = chosen[0]!.line;
+  const last = chosen[chosen.length - 1]!.line;
+  const indentOf = (line: string): number => (line.match(/^[ \t]*/u)?.[0] ?? "").replace(/\t/gu, "    ").length;
+  const baseIndent = indentOf(lines[last - 1] ?? "");
+  const blockLimit = Math.min(piece.end, lines.length, last + CONCERN_WINDOW_MAX_BLOCK_LINES);
+  let end = last;
+  for (let n = last + 1; n <= blockLimit; n += 1) {
+    const line = lines[n - 1]!;
+    if (line.trim().length === 0 || indentOf(line) > baseIndent) {
+      end = n;
+      continue;
+    }
+    if (/^\s*(?:[}\])]|end\b)/u.test(line)) end = n;
+    break;
+  }
+  while (end > last && (lines[end - 1] ?? "").trim().length === 0) end -= 1;
+  const start = Math.max(piece.start, first - CONCERN_WINDOW_LEAD_LINES);
+  return { start, end: Math.min(end, start + CONCERN_WINDOW_MAX_LINES - 1) };
+}
+
+/**
  * Proof for an unbindable item (a `topic` point, or any other kind whose own
  * structural resolution found no candidate at all): design §4.2's absence
  * path. Reuses the shared walk (`enumerateFindTextUniverse`/`scanLiteral`)
@@ -27099,50 +34178,80 @@ function proveUnbindableRequestItem(
   workspace: string,
   universe: FindTextUniverse,
   contentCache?: ScanContentCache,
-  // H-2 (2026-09-19): OPT-IN tightening for the new independent-question
-  // obligation path only — every existing caller omits this and keeps
-  // today's behavior byte-identical (the `requireDistinctConcentration ===
-  // true` branch below is unreachable from any pre-existing call site).
-  options?: { requireDistinctConcentration?: boolean },
+  // H-2 (2026-09-19), rescoped by FIX-C2 (2026-09-21): this is ROUTING, not a
+  // status rule. The concern's STATUS now comes from the one policy
+  // (`decideConcernStatus`) for every caller alike; this flag only decides
+  // whether THIS path may additionally turn "every candidate is served and
+  // none of them concentrates the concern" into a scope-bound ABSENCE
+  // (`served-unconcentrated`). Every pre-existing caller omits it and keeps
+  // falling through to the pre-existing "candidates are served" close, so
+  // no path that never minted an absence starts minting one.
+  options?: {
+    requireDistinctConcentration?: boolean;
+    /**
+     * R-B1 (2026-09-21, held item 1): the caller mints a BLOCKING obligation
+     * from this proof (the mixed-kind loop, via `proveRequestItem`'s
+     * fallbacks), so the "candidate only partly served" frontier below
+     * applies to it exactly as it does to the independent-question route.
+     * Without it, a passive-voice clause that `extractRequestItems` routed
+     * through the mixed-kind branch fell to the "every literal-find
+     * candidate is served" close and was certified off the ONE served line
+     * of its module (confirmed: the `concernStatusPolicyMatrix` derived-name
+     * cell, `src/sessionRenewal.ts:1-1`, `renewSessionToken` never served).
+     * It never enables the served-unconcentrated ABSENCE, which stays
+     * `requireDistinctConcentration`-only.
+     */
+    partialServeFrontier?: boolean;
+  },
 ): RequestItemProof {
-  const words = salientWords(item.text);
+  // FIX-C2 (2026-09-21): the concern's topic terms and its coverage verdict
+  // both come from the ONE policy above (`concernTopicTerms` /
+  // `decideConcernStatus`). The two word-count floors this function used to
+  // carry (`concentrationFloor` from the PRE-light-verb-filter count, and
+  // the post-search `majorityFloor`) are gone: sized from a word count they
+  // were simultaneously UNREACHABLE for a one-topic-word EN clause (Q05) and
+  // TRIVIAL for a one-run JA clause (Q02). The policy asks WHERE the term
+  // lives instead — see that section's header for the rule, the two
+  // confirmed reproductions, and why the doc-role recall control that FIX-C's
+  // `rawWordCount` sizing was protecting is now explicit rather than
+  // emergent.
+  const words = concernTopicTerms(item.text);
   if (words.length === 0) {
     return { proved: true, evidence: [], reason: "residual point has no salient searchable wording", candidatePaths: [] };
   }
-  const requireDistinctConcentration = options?.requireDistinctConcentration === true;
-  // H-2 tightening: when requested, "already served" requires a REAL
-  // concentration of this item's own wording in ONE surface — min(2, n)
-  // DISTINCT salient words, variant-aware (`textHasWordVariant`) — rather
-  // than any single stem-matched word (today's default path, unchanged
-  // below). Fixes the "served but still certified absent" half of D1: one
-  // incidental word match no longer silently closes a genuine question.
-  const concentrationFloor = Math.min(2, words.length);
-  const alreadyServed = requireDistinctConcentration
-    ? priorEvidence.filter((surface) => {
-        if (!hasServedCode(surface)) return false;
-        const haystack = `${surface.path}\n${servedSurfaceText(surface)}`;
-        const distinct = new Set(words.filter((word) => textHasWordVariant(haystack, word)));
-        return distinct.size >= concentrationFloor;
-      })
-    : priorEvidence.filter(
-        (surface) => hasServedCode(surface) && words.some((word) =>
-          surfaceEvidencesSalientWord(surface, word)
-          // TL_IDENTIFIER_GROUNDING: the body on the wire has its doc comments
-          // elided, so a point whose wording lives in the Javadoc of the very
-          // member this pack serves read as "not served", fell through to the
-          // literal scan, matched too many files to batch, and held the pack
-          // in `discover` behind a `next` that could never resolve it
-          // (replayed 2026-09-20: "…API endpoint" vs `cancel`'s own comment,
-          // lines the served range 27-420 covers). The served RANGE is what
-          // was delivered; its comments are one zoom away and marked with
-          // their true line numbers.
-          || (identifierGroundingEnabled() && servedRangeSourceHasSalientWord(surface, word, workspace))
-        ),
-      );
-  if (alreadyServed.length > 0) {
-    return { proved: true, evidence: alreadyServed.map(readinessEvidence), reason: "a served surface already contains this point's salient wording", candidatePaths: [] };
+  const mayCertifyUnconcentratedAbsence = options?.requireDistinctConcentration === true;
+  // C2: ONE variant set per sampled word, computed once and reused by the
+  // policy's coverage check and by the literal+variant scan below — never a
+  // second, independently-tuned normalisation, and never re-derived per
+  // surface.
+  const wordVariants = concernVariantMap(words, workspace);
+  const absenceProbe = concernAbsenceProbe(workspace, universe, wordVariants, contentCache);
+  const covered = concernCoveredByServedEvidence(item.text, words, wordVariants, priorEvidence, workspace, absenceProbe);
+  if (covered.covered) {
+    return { proved: true, evidence: covered.surfaces.map(readinessEvidence), reason: covered.reason, candidatePaths: [] };
+  }
+  if (covered.collisionAbsentTerm !== undefined) {
+    // R-B3 (ruling 1): the concern's single anchor was blocked by a topic
+    // term that occurs nowhere in the scanned scope, and no served surface
+    // meets the two-term bar. That term is what the concern asks about and
+    // the workspace does not have — disclosed as absent-in-scope now
+    // (invariant (iii): a certification with a truthful disclosure, no
+    // extra hop), never re-scanned into a candidate chase the anchor's own
+    // file already answered.
+    const { scopeComplete, omittedCount } = absenceProbe.scope();
+    return requestItemProofFromVerdict(decideConcernStatus([covered.collisionAbsentTerm], covered, {
+      kind: "no-occurrence",
+      scopeComplete,
+      omittedCount,
+      everyTermNormalized: true,
+    }));
   }
   const matchedPaths = new Set<string>();
+  // C4 (fix-c, 2026-09-21): accumulates across EVERY scanLiteral call this
+  // function makes, so a file the walk enumerated but could not decode as
+  // text is never silently invisible to the scope-completeness verdict
+  // below — see `scopeCompletenessAfterScan`'s own doc comment.
+  const coverage = createScanCoverage();
   // WP-S5 (B): a hit inside TokenLighten's OWN managed guide block is not a
   // candidate — see `managedGuideBlockSpan`'s section comment. Counted, never
   // silently dropped: the absence branch below must not read "no occurrence in
@@ -27158,30 +34267,105 @@ function proveUnbindableRequestItem(
     matchedPaths.add(matchPath);
   };
   for (const word of words.slice(0, 4)) {
-    for (const match of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
+    for (const match of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
       addMatch(match.path, match.line);
     }
   }
-  if (matchedPaths.size === 0) {
-    // H-1(ii) veto (2026-09-19, D1): an exact-literal miss across every
-    // sampled word is not yet a verified absence when a common English
-    // inflection of one of them occurs as a WHOLE WORD (never a raw
-    // substring — salientWordMatch.ts's own const/constant guard) somewhere
-    // in scope (validated/validateCouponCode, retried/
-    // retryFailedNotifications). Widen matchedPaths with confirmed variant
-    // hits before concluding absence; the normal matched/missing logic just
-    // below this block then proves or requests them exactly as it would an
-    // exact match — never a forked absence algorithm.
+  // D2 (fix-c, 2026-09-21): a literal hit confined to DOC-classified paths
+  // (a README that narrates a concern's name next to its file path) is not
+  // a real candidate in the sense this veto cares about — see
+  // `nonDocNoiseCandidatePaths`'s own doc comment just below this function
+  // for the confirmed live repro (four-concern fixture: the exact-match
+  // pass found ONLY README.md for "authentication", and under the OLD
+  // "widen only when literally nothing matched" rule this never even tried
+  // the inflected "authenticate" that would have found the real `auth.ts` —
+  // a doc-role mention silently outranked the implementing code surface by
+  // never letting it compete at all). Widen with C2's normalised variants
+  // (English inflection, or the SAME workspace-vocabulary-gated JA bridge
+  // retrieval uses) whenever every literal match so far is doc-role —
+  // including the zero-match case (trivially "every match is doc" over an
+  // empty set) — never only on an exact zero count.
+  const hasNonDocLiteralMatch = [...matchedPaths].some((p) => classifySurface(p) !== "doc");
+  // Ruling C1: whether EVERY sampled word had a confirmed normalisation to
+  // search against — false only for a Japanese word the bridge could not
+  // expand (disabled, or not in the workspace vocabulary), which this scan
+  // could then only ever check by its raw literal spelling against
+  // (typically) an English-only codebase. That is not a meaningful check
+  // either way, so it must end in "could not determine", never "absent".
+  // R-B3 (ruling 3): that per-word verdict is now read at the no-occurrence
+  // branch below (strong words only), so this scan no longer aggregates it.
+  if (!hasNonDocLiteralMatch) {
     for (const word of words.slice(0, 4)) {
-      for (const variant of inflectionVariants(word)) {
+      const { variants } = wordVariants.get(word)!;
+      // TL-03 (fix-c, 2026-09-21): a Japanese `word` can never be
+      // re-verified against the matched line via `textHasWordVariant` —
+      // that check is EN-only (salientWordMatch.ts's own module doc) and
+      // would reject every bridged hit, silently reproducing TL-03's exact
+      // defect one level down (a bridge lookup that "succeeds" in finding
+      // the right file, then gets discarded by a verification step that
+      // was never able to confirm it in the first place — observed live:
+      // クーポン割引はどこで判定されますか bridged to "coupon"/"discount",
+      // found `couponEngine.ts` via literal scan, then every hit was
+      // rejected here and the clause fell through to "verified absent").
+      // A bridged variant found literally IS the confirmation for a
+      // Japanese word — there is no separate EN re-check to run.
+      const isJapaneseWord = containsJapanese(word);
+      for (const variant of variants) {
         if (variant === word.toLowerCase()) continue;
-        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
-          if (match.text !== undefined && textHasWordVariant(match.text, word)) {
+        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+          if (isJapaneseWord || (match.text !== undefined && textHasWordVariant(match.text, word))) {
             addMatch(match.path, match.line);
           }
         }
       }
     }
+  }
+  // FIX-C2 (2026-09-21): a file whose own NAME carries the concern's term is
+  // an occurrence too. `scanLiteral` only ever looks inside file CONTENT, so
+  // a concern spelled only in a path ("how renewal works" against
+  // `src/sessionRenewal.ts`, whose code spells it `renewSessionToken`)
+  // reached the absence branch and shipped "no occurrence in scanned
+  // workspace files; scope complete" beside the very file that answers it —
+  // a false statement about the workspace, confirmed live on the matrix.
+  // Added AFTER the content scan so it can only ever ADD a candidate, never
+  // remove one, and bounded by the same candidate cap as the rest.
+  const pathNameMatches = new Set<string>();
+  if (matchedPaths.size <= MAX_REQUEST_ITEM_TOPIC_CANDIDATES) {
+    for (const word of words.slice(0, 4)) {
+      const { variants } = wordVariants.get(word)!;
+      for (const file of universe.files) {
+        if (matchedPaths.has(file.relPath)) continue;
+        // The trailing EXTENSION is not part of the name: a point naming a
+        // `.json` file must not turn every manifest in the repo into its
+        // candidate (`requestItemCompletion.spec.ts`'s verified-absence case
+        // regressed exactly that way).
+        const nameWithoutExtension = file.relPath.replace(/\.[^./]+$/u, "");
+        if (variants.some((variant) => textHasWordVariant(nameWithoutExtension, variant))) {
+          pathNameMatches.add(file.relPath);
+          addMatch(file.relPath, undefined);
+        }
+      }
+    }
+  }
+  // R-B1 (2026-09-21): a candidate this process cannot read as text is not a
+  // candidate a bounded call can ever serve. Found by its NAME (the content
+  // scan skips an undecodable file and books it in `coverage.undecodable`),
+  // it used to become the point's `next` target; reading it fails, the point
+  // stays open, and the identical `next` came back every hop (confirmed live:
+  // an eight-hop oscillation on a binary file named after the concern).
+  // Removed from the candidate set, never silently: when it was the ONLY
+  // candidate the status is "could not determine" — the workspace does name
+  // the concern, so it is not absent, and nothing on the wire answers it.
+  const unreadableCandidates = [...matchedPaths].filter((candidatePath) => currentFileLineCount(workspace, candidatePath) === undefined);
+  for (const candidatePath of unreadableCandidates) {
+    matchedPaths.delete(candidatePath);
+    pathNameMatches.delete(candidatePath);
+  }
+  if (matchedPaths.size === 0 && unreadableCandidates.length > 0) {
+    return requestItemProofFromVerdict(decideConcernStatus(words, covered, {
+      kind: "indeterminate",
+      reason: `the only candidate(s) for ${words.join("/")} could not be read as text (${unreadableCandidates.slice(0, 3).join(", ")}) — not a verified absence`,
+    }));
   }
   if (matchedPaths.size === 0 && guideOnlyMatch) {
     // WP-S5 (B): every occurrence was TokenLighten's own injected instructions.
@@ -27198,33 +34382,148 @@ function proveUnbindableRequestItem(
     };
   }
   if (matchedPaths.size === 0) {
-    const scopeComplete = !anyWalkOmission(universe.omissions);
-    const omittedCount = scopeComplete ? 0 : totalOmittedPaths(universe.omissions);
-    return {
-      proved: true,
-      evidence: [],
-      reason: scopeComplete
-        ? `verified absent: no occurrence of ${words.join("/")} in scanned workspace files; scope complete`
-        : `verified absent: no occurrence of ${words.join("/")} in scanned workspace files; ${omittedCount} ${omittedCount === 1 ? "path" : "paths"} excluded from the scan`,
-      candidatePaths: [],
-      absentTerm: words.join("/"),
-      absentScopeComplete: scopeComplete,
-      absentOmittedCount: omittedCount,
-    };
+    // Ruling C1/C6 lives in the policy now: with no usable normalisation
+    // (`TL_JA_QUERY_BRIDGE=0` for a Japanese term) a raw literal miss is
+    // "could not determine", never a fabricated absence.
+    //
+    // R-B3 (ruling 3): a verified absence is certified off the item's STRONG
+    // words only — an English word, or a Japanese term whose katakana
+    // loanword has no counterpart (`ConcernTermVariants.hasNormalization`).
+    // Nothing occurs anywhere, so every strong word IS provably absent, and
+    // the disclosure names exactly those. A weak word (a kanji glossary term,
+    // or a meta fragment such as 点すべて) is never claimed and never poisons
+    // the strong ones; an item with no strong word at all is "could not
+    // determine".
+    const { scopeComplete, omittedCount } = scopeCompletenessAfterScan(universe, coverage);
+    const strongWords = words.filter((word) => wordVariants.get(word)?.hasNormalization === true || quotedLiteralTerm(item, word));
+    return requestItemProofFromVerdict(decideConcernStatus(strongWords.length > 0 ? strongWords : words, covered, {
+      kind: "no-occurrence",
+      scopeComplete,
+      omittedCount,
+      everyTermNormalized: strongWords.length > 0,
+    }));
   }
   if (matchedPaths.size > MAX_REQUEST_ITEM_TOPIC_CANDIDATES) {
     // Too ambiguous to batch; leave uncovered with no candidate — the
     // decision falls back to await-input once nothing else can progress,
     // rather than a fabricated/oversized frontier.
-    return { proved: false, evidence: [], reason: `${matchedPaths.size} candidate files for ${words.join("/")} exceed the batch bound`, candidatePaths: [] };
+    return requestItemProofFromVerdict(decideConcernStatus(words, covered, {
+      kind: "indeterminate",
+      reason: `${matchedPaths.size} candidate files for ${words.join("/")} exceed the batch bound`,
+    }));
   }
   const served = servedPathSet(priorEvidence);
   const missing = [...matchedPaths].filter((p) => !served.has(p));
   if (missing.length === 0) {
-    const evidence = [...matchedPaths].flatMap((p) => evidenceSurfacesForPath(priorEvidence, p)).map(readinessEvidence);
+    const matchedServedSurfaces = [...matchedPaths].flatMap((p) => evidenceSurfacesForPath(priorEvidence, p));
+    // Guard (fix-c, 2026-09-21, kept): a surface that is only PARTIALLY
+    // served (non-empty `remaining_ranges`) was never actually checked for
+    // concentration — the policy reads `servedSurfaceText`, which is a
+    // FRAGMENT for such a surface (e.g. one symbol's body), not the whole
+    // candidate file `matchedPaths`' own literal/inflection scan matched
+    // against. A concentration miss against that fragment proves nothing
+    // about the unserved remainder (confirmed live: a query word literally
+    // present only in the file's header comment or a sibling function
+    // neither one of THIS pack's served ranges covers) — declaring absence
+    // there would be exactly the self-contradiction ruling C1 exists to
+    // prevent, just one level removed (served-path-but-not-really-served-
+    // content). Only declare absent when every matched, served candidate is
+    // FULLY served; otherwise fall through to the pre-existing "candidates
+    // are served" close.
+    //
+    // FIX-C2 (2026-09-21): judged per PATH over the UNION of that path's
+    // served spans, not per SURFACE. A path is routinely represented twice in
+    // `priorEvidence` — this pack's own (partial) surface plus the
+    // epoch-served view's reconstruction of the whole served ledger for it —
+    // and the old per-surface `.every()` let the partial half veto a file the
+    // caller demonstrably holds in full, so a genuinely absent concern could
+    // never be disclosed once its only candidate had been zoomed into in two
+    // hops (confirmed live on the JA two-concern acceptance chain).
+    //
+    // R-B1 (2026-09-21, held item 2): ONLY the union test. The shortcut that
+    // stood in front of it — "some surface for this path has no
+    // `remaining_ranges`" — read a surface's OWN claimed range arriving
+    // untrimmed as "the file is served whole". A narrow caller/symbol range
+    // has no remainder of its own, and neither does a served-view
+    // reconstruction (`reconstructServedEntryEvidence` never sets the field),
+    // so a four-line slice of a 419-line file passed as fully served and the
+    // concern whose function sat below it was certified ABSENT as "only an
+    // incidental mention" (confirmed live, both on the first pack and on the
+    // bare-`{qref}` re-pack). A whole small file served through an explicit
+    // full-length range still passes: its union covers every line.
+    const candidateFullyServed = (candidatePath: string): boolean => pathServedWholeFile(priorEvidence, candidatePath, workspace);
+    const fullyServedCandidates = [...matchedPaths].every(candidateFullyServed);
+    if ((mayCertifyUnconcentratedAbsence || options?.partialServeFrontier === true) && !fullyServedCandidates) {
+      // FIX-C2 (2026-09-21), plan §5: `covered` may not be granted because
+      // "the same file was found" — it must bind to the BODY that answers the
+      // point. The policy already said this concern is NOT covered by what is
+      // on the wire, and its candidate is only PARTLY served, so the honest
+      // status is OPEN with the unserved remainder as the frontier — not a
+      // silent "every candidate is served" close. Confirmed live on the
+      // matrix: a one-topic-word concern certified itself covered from a
+      // single served interface line of its own module while the function
+      // that answers it was never delivered. Scoped to the blocking
+      // (independent-question) route exactly like the absence branch below,
+      // so no path that never blocked starts blocking.
+      const rangeCandidates: Array<{ path: string; range: string }> = [];
+      const unservedPaths: string[] = [];
+      for (const candidatePath of matchedPaths) {
+        if (candidateFullyServed(candidatePath)) continue;
+        const surfacesForPath = evidenceSurfacesForPath(priorEvidence, candidatePath);
+        const totalLines = currentFileLineCount(workspace, candidatePath);
+        if (surfacesForPath.length === 0 || totalLines === undefined) {
+          unservedPaths.push(candidatePath);
+          continue;
+        }
+        const missingPieces = subtractLineSpans({ start: 1, end: totalLines }, servedLineSpansOf(surfacesForPath));
+        if (missingPieces.length === 0) continue;
+        // R-B1 (review B2): address the point's own wording inside the
+        // UNSERVED part when it occurs there, instead of the hull of every
+        // missing piece (confirmed live: a 413-line hull of filler around a
+        // ten-line function — three hops and ~27 KB to reach it). Only when
+        // no position is known does the whole remainder stay the target.
+        const window = concernWindowInUnservedPart(workspace, candidatePath, missingPieces, wordVariants);
+        rangeCandidates.push({
+          path: candidatePath,
+          range: window !== undefined
+            ? `${window.start}-${window.end}`
+            : `${missingPieces[0]!.start}-${missingPieces[missingPieces.length - 1]!.end}`,
+        });
+      }
+      if (rangeCandidates.length > 0 || unservedPaths.length > 0) {
+        return {
+          proved: false,
+          evidence: [],
+          reason: `the candidate(s) for ${words.join("/")} are only partly served; the body that would answer this point is not on the wire yet`,
+          candidatePaths: unservedPaths,
+          rangeCandidates,
+        };
+      }
+    }
+    // A candidate found by its FILE NAME is a real, checkable occurrence of
+    // the concern's wording — the concentration test simply does not apply to
+    // it (there is no "mention" in the content to be incidental). Certifying
+    // absence over it would state "no occurrence in scanned workspace files"
+    // about a workspace that demonstrably names the concern, which ruling C1
+    // forbids; the honest close is the pre-existing "every candidate for this
+    // point is served".
+    const anyPathNameCandidate = [...matchedPaths].some((candidatePath) => pathNameMatches.has(candidatePath));
+    if (mayCertifyUnconcentratedAbsence && fullyServedCandidates && !anyPathNameCandidate) {
+      // The policy already said this concern is NOT covered, and every
+      // candidate the scan found is fully served — so the mention that made
+      // it a candidate is incidental (D1's confirmed shape: a comment that
+      // only names "migration" while explicitly disclaiming the concept).
+      const { scopeComplete, omittedCount } = scopeCompletenessAfterScan(universe, coverage);
+      return requestItemProofFromVerdict(decideConcernStatus(words, covered, {
+        kind: "served-unconcentrated",
+        scopeComplete,
+        omittedCount,
+      }));
+    }
+    const evidence = matchedServedSurfaces.map(readinessEvidence);
     return { proved: true, evidence, reason: "every literal-find candidate for this point is served", candidatePaths: [] };
   }
-  return { proved: false, evidence: [], reason: `literal-find candidate(s) not yet served for ${words.join("/")}`, candidatePaths: missing };
+  return requestItemProofFromVerdict(decideConcernStatus(words, covered, { kind: "unserved-candidates", candidatePaths: missing }));
 }
 
 function proveRequestItem(
@@ -27300,7 +34599,7 @@ function proveRequestItem(
   if (item.kind === "decision" && item.terms.length > 0) {
     const identifier = item.terms[0]!;
     const candidates = declarationCandidatePaths(workspace, universe, identifier, contentCache);
-    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache);
+    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache, { partialServeFrontier: true });
     const missing = candidates.filter((p) => !served.has(p));
     if (missing.length > 0) {
       return { proved: false, evidence: [], reason: `decision identifier ${identifier} has ${missing.length} unserved candidate definition site(s)`, candidatePaths: missing };
@@ -27390,7 +34689,7 @@ function proveRequestItem(
     const candidates = fileTerm !== undefined
       ? fileTermCandidatePaths(workspace, universe, fileTerm)
       : manifestCandidatePaths(workspace);
-    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache);
+    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache, { partialServeFrontier: true });
     const missing = candidates.filter((p) => !served.has(p));
     if (missing.length > 0) {
       return { proved: false, evidence: [], reason: `definition candidate(s) not yet served: ${missing.join(", ")}`, candidatePaths: missing };
@@ -27444,7 +34743,7 @@ function proveRequestItem(
   if (item.kind === "relation" && item.relation !== undefined && item.relation.to.length > 0) {
     const relation = item.relation;
     const candidates = relationConsumerCandidatePaths(workspace, universe, item, relation.to);
-    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache);
+    if (candidates.length === 0) return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache, { partialServeFrontier: true });
     const missing = candidates.filter((p) => !served.has(p));
     if (missing.length > 0) {
       return { proved: false, evidence: [], reason: `relation consumer candidate(s) not yet served: ${missing.join(", ")}`, candidatePaths: missing };
@@ -27493,7 +34792,7 @@ function proveRequestItem(
     return { proved: false, evidence: servedBodies.map(readinessEvidence), reason: "every relation consumer candidate is served but none contains the producer term", candidatePaths: [] };
   }
 
-  return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache);
+  return proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache, { partialServeFrontier: true });
 }
 
 interface RequestItemReadiness {
@@ -27509,7 +34808,17 @@ interface RequestItemReadiness {
    * (`decisionWire.ts`, `buildCapabilityGaps`) never claims "scope complete"
    * for a scan that excluded paths.
    */
-  absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }>;
+  absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number; incidental?: boolean }>;
+  /**
+   * R-D2 (2026-09-21, item B, plan §5): topic items the ALL-TOPIC pass found
+   * genuinely `could-not-determine` (`RequestItemProof.undeterminedTerm`) —
+   * never covered, never a verified absence, and never blocking (invariant
+   * (iv) is unchanged: this array mints no obligation). Before this fix such
+   * a concern was silent — the pack certified without naming it anywhere
+   * (plan §5: 「…見つからないこと、または未確定であることを必ず示す」).
+   * Always present (possibly empty), mirroring `absences`.
+   */
+  undetermined: Array<{ id: string; term: string; reason: string }>;
 }
 
 /**
@@ -27528,6 +34837,98 @@ interface RequestItemReadiness {
  * ABSENCE disclosure candidacy — "implementation" legitimately sits on
  * both, doing two unrelated jobs).
  */
+/**
+ * C3 (fix-c, 2026-09-21, plan §6.1/chip 1) — light/predicate verbs that
+ * describe HOW a topic behaves rather than naming any distinguishing
+ * subject of their own: "Explain how authentication works" is a question
+ * ABOUT authentication, not about the word "works". Chip 1's exact
+ * reproduction: `distinctiveSalientAbsence` skipped "authentication" as
+ * already-evidenced (an incidental README mention), then fell through to
+ * "works" — zero literal occurrences anywhere — and certified THAT absent,
+ * which reads as "authentication itself is broken" rather than the true,
+ * unrelated fact that the word "works" never appears in source.
+ *
+ * Folded into `GENERIC_SOFTWARE_ABSENCE_WORDS` below (excludes these from
+ * Tier C candidacy — the REPRESENTATIVE-term selection `distinctiveSalient
+ * Absence` uses) and separately consulted by `proveUnbindableRequestItem`'s
+ * own word sample (excludes these from the search/concentration bag).
+ * Deliberately narrow and kept as its own set — unlike
+ * `GENERIC_SOFTWARE_ABSENCE_WORDS` (which also excludes ordinary nouns like
+ * "cache"/"module" from Tier C candidacy, safe there ONLY because that list
+ * never gates a SEARCH), a light verb is semantically empty regardless of
+ * which mechanism consults it, so it is safe to exclude from both.
+ *
+ * R-B3 (2026-09-21, orchestrator ruling 2) — THE ONE CLOSED CLASS of
+ * predicates that is not a topic term. FIX-C's C3 had additionally excluded
+ * EVERY participle after an auxiliary (`PREDICATE_AUXILIARY_RE`, Tier C
+ * only), which made content verbs non-evidential: "how inventory is
+ * replenished" asked about replenishment, yet only "inventory" could ever be
+ * reported absent, so a workspace whose real code merely NAMES inventory
+ * certified the point without a word. A predicate is excluded only when it is
+ * semantically LIGHT or GENERIC — it says that something happens to the
+ * topic, never WHAT happens — and every member below is here for exactly that
+ * reason (all inflections listed, because the three consumers compare whole
+ * lowercase words):
+ *  - light verbs: be, do, have, get, make, go, take — the auxiliary/support
+ *    verbs of English ("how is it done", "what does it take"); work, happen,
+ *    run, occur, behave — "how X works/happens/runs/occurs/behaves" asks about
+ *    X, never about the verb (C3's original chip-1 reproduction).
+ *  - generic process verbs: execute, handle, perform, process, implement,
+ *    use, apply, manage, call, invoke, trigger, and configure (the
+ *    multi-syllable synonym of "set") — "how X is executed/handled/
+ *    processed/implemented/applied/…" names no mechanism of its own; any code
+ *    that does anything at all "processes"/"handles"/"uses" something, so the
+ *    word neither locates nor distinguishes the concern (and "handling"/
+ *    "implementation"/"manager" were already Tier C generic nouns).
+ *  - generic participles: done, made (set is below the salient length).
+ * Every OTHER predicate ("replenished", "renewed", "resolved", "validated",
+ * "invalidated", "enqueued", "computed", …) is a topic term with its
+ * derivational variants (`concernTermVariants`), exactly like a noun.
+ */
+/**
+ * R-B3 (ruling 2): the generic PROCESS verbs of the closed class, kept as their
+ * own list because one reader needs them apart: `concernCoveredByServedEvidence`'s
+ * sliver guard. Non-evidential for coverage and absence like every member of
+ * the class, but "how refunds are processed" still says the answer is a
+ * PROCESSING body — so when the served lines of the anchoring file lack it and
+ * its unserved part spells it at a code position (`processRefund` below a
+ * served `RefundRequest` interface), the point is not covered off the sliver.
+ */
+const GENERIC_PROCESS_VERB_WORDS: ReadonlySet<string> = new Set([
+  "execute", "executes", "executed", "executing",
+  "handle", "handles", "handled", "handling",
+  "perform", "performs", "performed", "performing",
+  "process", "processes", "processed", "processing",
+  "implement", "implements", "implemented", "implementing",
+  "use", "uses", "used", "using",
+  "apply", "applies", "applied", "applying",
+  "manage", "manages", "managed", "managing",
+  "call", "calls", "called", "calling",
+  "invoke", "invokes", "invoked", "invoking",
+  "trigger", "triggers", "triggered", "triggering",
+  // "set" is below the salient length; "configure" is its multi-syllable
+  // synonym — it says the subject HAS a setting, never which one.
+  "configure", "configures", "configured", "configuring",
+]);
+
+const LIGHT_VERB_WORDS: ReadonlySet<string> = new Set([
+  // light verbs
+  "be", "been", "being",
+  "do", "does", "did", "done", "doing",
+  "have", "has", "had", "having",
+  "get", "gets", "got", "gotten", "getting",
+  "make", "makes", "made", "making",
+  "go", "goes", "went", "gone", "going",
+  "take", "takes", "took", "taken", "taking",
+  "work", "works", "worked", "working",
+  "happen", "happens", "happened", "happening",
+  "run", "runs", "ran", "running",
+  "occur", "occurs", "occurred", "occurring",
+  "behave", "behaves", "behaved", "behaving",
+  // generic process verbs
+  ...GENERIC_PROCESS_VERB_WORDS,
+]);
+
 // Adversarial review 2 finding 5 (2026-09-08): the original 36-word list
 // below missed a large swath of ordinary software/English vocabulary — a
 // composite request naming any of them (in a workspace that happens to
@@ -27564,6 +34965,10 @@ const GENERIC_SOFTWARE_ABSENCE_WORDS: ReadonlySet<string> = new Set([
   "table", "tables", "index", "key", "keys", "path", "paths", "directory",
   "folder", "name", "names", "count", "counter", "limit", "limits", "size",
   "length", "format", "formats", "mode", "modes", "flag", "flags", "options",
+  // C3 (fix-c, 2026-09-21): light/predicate verbs — see LIGHT_VERB_WORDS'
+  // own doc comment just above for why these can never be Tier C's
+  // reported term.
+  ...LIGHT_VERB_WORDS,
 ]);
 
 /**
@@ -27642,6 +35047,55 @@ const GENERIC_SOFTWARE_ABSENCE_WORDS: ReadonlySet<string> = new Set([
  * zero occurrences — at most one absent term per item, same as before this
  * generalization.
  */
+/**
+ * C3 (fix-c, 2026-09-21, plan §6.1) — a participle immediately governed by
+ * one of these auxiliaries/copulas in the CLAUSE's own text ("are
+ * executed", "is configured", "are validated") describes HOW the topic
+ * behaves, not WHAT is missing: "how database migrations are executed"
+ * asks about migrations, not about the word "executed". Matched with a
+ * short (<=2-word) gap so it stays anchored to a genuine auxiliary+
+ * participle span rather than firing on an unrelated later verb in a long
+ * clause. Deliberately narrower than the ruling's own "or a clause-final
+ * -s/-ed verb after the topic" alternative, which risks false positives
+ * against ordinary plural nouns ("credentials", "migrations", "notifications"
+ * all end in -s) with nothing anchoring them as verbs; the auxiliary anchor
+ * has no such risk (a bare plural noun is never itself captured — only a
+ * later word ending -ed/-en/-ing is).
+ *
+ * R-B3 (2026-09-21, orchestrator ruling 2): the auxiliary still ANCHORS the
+ * participle, but only a participle in the closed light/generic class
+ * (`LIGHT_VERB_WORDS`) is predicate-shaped now. "are executed" stays excluded
+ * (a generic process verb); "is replenished" is a topic term again — see the
+ * class's own doc comment for why every other predicate names what the
+ * concern is about.
+ */
+const PREDICATE_AUXILIARY_RE = /\b(?:is|are|was|were|be|been|being|get|gets)\s+(?:[a-z]+\s+){0,2}([a-z]+(?:ed|en|ing))\b/giu;
+
+/**
+ * R-B3 (ruling 1): the clause's CONTENT predicates — auxiliary-governed
+ * participles (`PREDICATE_AUXILIARY_RE`) OUTSIDE the light/generic class
+ * ("is replenished", "are renewed", "is resolved"). The collision rule's only
+ * blockers: see `concernCoveredByServedEvidence`.
+ */
+function contentPredicateWords(text: string): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(PREDICATE_AUXILIARY_RE)) {
+    const word = m[1]!.toLowerCase();
+    if (!LIGHT_VERB_WORDS.has(word)) out.add(word);
+  }
+  return out;
+}
+
+/** Every clause-text word C3 identifies as predicate-shaped — see `PREDICATE_AUXILIARY_RE`'s own doc comment. */
+function structuralPredicateWords(text: string): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(PREDICATE_AUXILIARY_RE)) {
+    const word = m[1]!.toLowerCase();
+    if (LIGHT_VERB_WORDS.has(word)) out.add(word);
+  }
+  return out;
+}
+
 function distinctiveSalientAbsence(
   item: RequestItem,
   priorEvidence: readonly TaskPackSurface[],
@@ -27649,6 +35103,11 @@ function distinctiveSalientAbsence(
   universe: FindTextUniverse,
   contentCache?: ScanContentCache,
 ): { term: string; scopeComplete: boolean; omittedCount: number } | undefined {
+  // C4 (fix-c, 2026-09-21): accumulates across EVERY scanLiteral call this
+  // function makes, so a file the walk enumerated but could not decode as
+  // text is never silently invisible to the scope-completeness verdict —
+  // see `scopeCompletenessAfterScan`'s own doc comment.
+  const coverage = createScanCoverage();
   const text = item.text;
   const leadWord = text.trim().match(/^[A-Za-z0-9_]+/u)?.[0];
   const pool = salientWords(text).slice(0, 4);
@@ -27690,16 +35149,57 @@ function distinctiveSalientAbsence(
   // (yet) proved absent. When Tier A/B are both empty, lowercase-led ASCII
   // salient words minus the item's own leading token and the (2026-09-08:
   // much larger) generic-software vocabulary — already in text order.
-  const tierC = tierA.length > 0 || tierB.length > 0
+  const tierCPool = tierA.length > 0 || tierB.length > 0
     ? []
     : pool.filter((word) => {
         if (word === leadWord) return false;
         if (!/^[a-z]/u.test(word)) return false;
         return !GENERIC_SOFTWARE_ABSENCE_WORDS.has(word.toLowerCase());
       });
+  // C3 (fix-c, 2026-09-21): a predicate/participle candidate ("executed" in
+  // "how database migrations are executed") is never Tier C's reported term
+  // while the SAME clause names a non-predicate topic candidate too — see
+  // `PREDICATE_AUXILIARY_RE`'s own doc comment. Only when EVERY Tier C
+  // candidate is predicate-shaped (nothing else to report) do they stay
+  // eligible — never over-restrict to zero candidates when a predicate is
+  // genuinely the only salient word left.
+  const tierC = (() => {
+    if (tierCPool.length === 0) return tierCPool;
+    const predicateWords = structuralPredicateWords(text);
+    const topicOnly = tierCPool.filter((word) => !predicateWords.has(word.toLowerCase()));
+    return topicOnly.length > 0 ? topicOnly : tierCPool;
+  })();
 
   for (const word of [...tierA, ...tierB, ...tierC]) {
-    if (priorEvidence.some((surface) => hasServedCode(surface) && surfaceEvidencesSalientWord(surface, word))) continue;
+    // TL-03 root cause (fix-c, 2026-09-21, C1/C2): a Tier B (Japanese)
+    // candidate's "already answered by this pack's own evidence" check, and
+    // its final workspace scan below, must use the SAME normalisation
+    // (`concernTermVariants`) search/retrieval already trusts — the SAME
+    // workspace-vocabulary-gated JA bridge, not the candidate's raw,
+    // unsegmented spelling. Without this, a CJK clause can never match
+    // (typically) English source text even when the concept is fully,
+    // concentratedly served (Q03: the whole cache module served, plus two
+    // absence entries quoting the very clauses that module answers — the
+    // absence and the evidence that contradicts it rode the SAME
+    // response). Every non-Japanese candidate (tiers A/C, and any Tier B
+    // entry that is somehow ASCII) keeps its existing EN-only check,
+    // unchanged.
+    const bridged = containsJapanese(word) ? concernTermVariants(word, workspace) : undefined;
+    if (bridged !== undefined) {
+      if (
+        priorEvidence.some(
+          (surface) =>
+            hasServedCode(surface) &&
+            bridged.variants.some(
+              (v) => surfaceEvidencesSalientWord(surface, v) || textHasWordVariant(`${surface.path}\n${servedSurfaceText(surface)}`, v),
+            ),
+        )
+      ) {
+        continue;
+      }
+    } else if (priorEvidence.some((surface) => hasServedCode(surface) && surfaceEvidencesSalientWord(surface, word))) {
+      continue;
+    }
     // H-1(i) veto (2026-09-19, D1): scoped to Tier C (lowercase-EN) only —
     // tierA/tierB are non-empty only when tierC is forced empty (see the
     // tier computation above), so this membership check exactly identifies
@@ -27718,7 +35218,7 @@ function distinctiveSalientAbsence(
       for (const variant of inflectionVariants(word)) {
         if (variantFound) break;
         if (variant === word.toLowerCase()) continue;
-        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
+        for (const match of scanLiteral(variant, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
           if (match.text !== undefined && textHasWordVariant(match.text, word)) {
             variantFound = true;
             break;
@@ -27727,14 +35227,46 @@ function distinctiveSalientAbsence(
       }
       if (variantFound) continue;
     }
+    // TL-03 (fix-c, 2026-09-21): the final workspace-wide scan for a
+    // Japanese candidate is widened the same way — the raw clause plus
+    // every bridged expansion token, never the unsegmented CJK run alone.
+    if (bridged !== undefined) {
+      let jaMatch = false;
+      for (const candidate of bridged.variants) {
+        for (const _ of scanLiteral(candidate, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
+          jaMatch = true;
+          break;
+        }
+        if (jaMatch) break;
+      }
+      if (jaMatch) continue;
+      // R-B3 (ruling 3): an explicitly QUOTED literal is checked as the exact
+      // string the caller singled out (TL142-04 Decision 6), never as a
+      // bridged concept, so its miss is checkable whatever its script.
+      if (!bridged.hasNormalization && !quotedLiteralTerm(item, word)) {
+        // C1/C6 (fix-c, 2026-09-21): the normalisation MECHANISM never ran
+        // for this candidate (`TL_JA_QUERY_BRIDGE=0`) — checked only by its
+        // raw literal spelling, which is not a meaningful proof either way
+        // against a typically non-Japanese codebase. "Could not determine",
+        // never "absent": move on without reporting it (the next
+        // tier/candidate may still be a genuine, checkable absence). With
+        // the flag ON (the default), `bridged.hasNormalization` is true
+        // here regardless of whether the bridge found anything — a
+        // confirmed empty (or generic-only, already filtered out of
+        // `bridged.variants`) result is itself a real, checked signal.
+        continue;
+      }
+      const { scopeComplete, omittedCount } = scopeCompletenessAfterScan(universe, coverage);
+      return { term: word, scopeComplete, omittedCount };
+    }
     let hasMatch = false;
-    for (const _ of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, ...(contentCache ? { contentCache } : {}) })) {
+    for (const _ of scanLiteral(word, workspace, { files: universe.files, caseInsensitive: true, coverage, ...(contentCache ? { contentCache } : {}) })) {
       hasMatch = true;
       break;
     }
     if (!hasMatch) {
-      const scopeComplete = !anyWalkOmission(universe.omissions);
-      return { term: word, scopeComplete, omittedCount: scopeComplete ? 0 : totalOmittedPaths(universe.omissions) };
+      const { scopeComplete, omittedCount } = scopeCompletenessAfterScan(universe, coverage);
+      return { term: word, scopeComplete, omittedCount };
     }
   }
   return undefined;
@@ -27929,6 +35461,356 @@ function ensureAbsenceUniverse(workspace: string, pass: RequestItemPassCache): F
   return pass.absenceUniverse;
 }
 
+const DOC_MENTION_WORD_RE = new RegExp(`\\b(?:${DOC_MENTION_WORDS.join("|")})\\b`, "iu");
+
+/**
+ * C5 (fix-c, 2026-09-21, plan §6.1) — an item whose text OPENS with one of
+ * these markers is itself an example/elaboration of a preceding point
+ * ("such as X", "like Y", "e.g. Z", "for example/for instance W"), never an
+ * independent concern — see the call site's own doc comment.
+ */
+const EXAMPLE_FRAGMENT_LEAD_RE = /^(?:such as|for example|for instance|like|e\.g\.?|i\.e\.?)\b/iu;
+
+/**
+ * TL-04 (fix-b, 2026-09-21) — "no noise file standing in for a concern".
+ *
+ * `proveUnbindableRequestItem` (this file, the absence-proof engine FIX-C
+ * owns) reports every literal/inflection-variant occurrence of a point's
+ * salient words as a candidate, with no doc-role awareness of its own — it
+ * is an absence proof, not a relevance ranker. Once a reported candidate is
+ * served, its own "every literal-find candidate for this point is served"
+ * close certifies the point PROVED regardless of what that candidate
+ * actually explains. Confirmed live (four-concern fixture, 2026-09-21): a
+ * README that narrates every concern next to its own file paths ("...
+ * authentication (`src/auth.ts`) ...") literally CONTAINS the word
+ * "authentication", `proveUnbindableRequestItem`'s exact-match scan finds
+ * ONLY that README (never trying the auth.ts-matching inflection variant,
+ * since the exact pass already found something — a second, separate
+ * candidate-discovery defect, also inside that same excluded engine and
+ * reported alongside this fix), and once the README is served the point is
+ * certified proved from a file that never explains authentication at all.
+ *
+ * This does not — cannot, from here — fix candidate DISCOVERY inside the
+ * excluded proof engine. It narrows what THIS file (the request-item gap →
+ * next-target selection, squarely this fix's own region) offers as a
+ * point's candidate: a DOC-role path (`classifySurface(path) === "doc"`,
+ * the same classification `runClauseLocateRecovery`'s own `isDocPath` guard
+ * and `isClauseCoveredBySeededSurfaces`'s new one (B5) already trust) is
+ * dropped from a point's own candidate list unless the point's text itself
+ * asks about documentation (recall control — a point that really asks
+ * about the README/docs still gets it offered). Never touches
+ * `proof.proved`/`evidence`/`reason` — an item whose ONLY candidate was
+ * doc-role is simply left with none here, which reads as an honest, bounded
+ * dead end for THAT item (its own obligation stays `"uncovered"`,
+ * `gapIds` still names it) rather than a false "proved". Other items'
+ * candidates, and the overall chain's ability to progress on THEM, are
+ * unaffected.
+ */
+function nonDocNoiseCandidatePaths(candidatePaths: readonly string[], itemText: string): string[] {
+  if (DOC_MENTION_WORD_RE.test(itemText)) return [...candidatePaths];
+  return candidatePaths.filter((p) => classifySurface(p) !== "doc");
+}
+
+/**
+ * C1 consistency veto (fix-c, 2026-09-21, plan §6.1) — a defense-in-depth
+ * backstop consulted at every point this function turns an absence into a
+ * wire entry: an absence whose concern is backed by served evidence, per
+ * the SAME normalisation (C2's `concernTermVariants`) the scanners above
+ * already used to look for it, must never reach the wire beside the
+ * evidence that answers it (Q03: the whole cache module served, plus two
+ * `explicit-gap:request-item-absent:` entries quoting the very JP clauses
+ * that module answers). The per-candidate scanners in `distinctiveSalient
+ * Absence`/`proveUnbindableRequestItem` already skip a term their OWN loop
+ * finds evidenced FIRST — this is the one place every absence THIS
+ * function mints funnels through before joining `absences[]`, so a
+ * multi-hop pack where the evidence and the absence claim are computed a
+ * turn apart (or a future absence source) can never reintroduce the
+ * contradiction by skipping that upstream check.
+ *
+ * FIX-C2 (2026-09-21): this is no longer a SECOND concentration rule of its
+ * own — it delegates to the single policy
+ * (`concernCoveredByServedEvidence`), so "covered" and "not absent" can
+ * never disagree by construction (invariant (i)). `itemText` is the concern
+ * the absence belongs to: the policy needs it for the doc-role recall
+ * control (a concern that really asks about documentation still accepts a
+ * README as its anchor).
+ */
+/** Han ideographs (CJK Unified + Extension A). */
+const KANJI_CHAR_RE = /[㐀-䶿一-鿿]/u;
+
+/**
+ * R-B1 (2026-09-21, review B3 / held 9) — "disclose truthfully or not at
+ * all" for a Japanese clause. `concernTermVariants` drops GENERIC bridge
+ * tokens ("cache") from a JA term's search variants, and rightly so for
+ * CANDIDACY: a compound like レディスキャッシュ must still be disclosed absent
+ * when only the generic half exists. But the same filtering made the veto
+ * blind to what the clause's statement is ABOUT: キャッシュが期限切れの場合の処理
+ * ("the processing when the cache has expired") shipped "no occurrence …;
+ * scope complete" beside the served `class Cache` whose `get()` performs the
+ * very expiry check — the clause's subject was on the wire, only its kanji
+ * predicate had no glossary counterpart in the workspace vocabulary.
+ *
+ * The two cases differ in the MECHANISM that failed to find the missing
+ * part, which is what makes the rule general rather than lexical luck: a
+ * katakana loanword is transliterated phonetically against the workspace
+ * vocabulary (`bridgeJaQuery`'s katakana route), so a miss means that name
+ * genuinely has no counterpart here — a checkable absence (Redis). A kanji
+ * concept word reaches English only through the hand-kept glossary, whose
+ * miss is NOT proof: code spells expiry as ttl / maxAge / stale as often as
+ * expire. So: when some bridged part of the clause (generic included) sits at
+ * a real CODE position in a served code surface, and what is left unbridged
+ * still carries a kanji concept word, the claim cannot be verified and is
+ * not made. It only ever REMOVES an absence; a clause with no served subject,
+ * or whose unbridged remainder is a loanword, keeps today's disclosure.
+ */
+function japaneseClauseUnverifiableBesideServedSubject(
+  word: string,
+  itemText: string,
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+): boolean {
+  if (!containsJapanese(word) || !jaQueryBridgeEnabled()) return false;
+  // R-B3 (ruling 3): a term carrying a loanword with no counterpart in the
+  // workspace is a CHECKABLE absence (this veto's own premise: "a miss means
+  // that name genuinely has no counterpart here") — never vetoed as
+  // unverifiable, even when a generic half such as キャッシュ is served.
+  if (jaTermHasUnresolvedLoanword(word, workspace)) return false;
+  let expansions: ReturnType<typeof bridgeJaQuery>["expansions"];
+  try {
+    expansions = bridgeJaQuery(word, getWorkspaceJaBridgeVocabulary(workspace)).expansions;
+  } catch {
+    return false;
+  }
+  if (expansions.length === 0) return false;
+  let remainder = word;
+  for (const expansion of expansions) {
+    if (expansion.source.length > 0) remainder = remainder.split(expansion.source).join(" ");
+  }
+  if (!KANJI_CHAR_RE.test(remainder)) return false;
+  const tokens = [...new Set(expansions.flatMap((expansion) => expansion.tokens))]
+    .filter((token) => token.length > 0 && !LIGHT_VERB_WORDS.has(token.toLowerCase()));
+  if (tokens.length === 0) return false;
+  const docAnchorsAllowed = concernAdmitsDocAnchor(itemText);
+  return priorEvidence.some((surface) => hasServedCode(surface)
+    && docAnchorsEligible(itemText, surface)
+    && tokens.some((token) => concernTermAnchoredInSurface(surface, token, docAnchorsAllowed).codePosition));
+}
+
+function absenceContradictsServedEvidence(
+  term: string,
+  itemText: string,
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+): boolean {
+  // FIX-C2: `absentTerm` is a "/"-joined word list from the topic-scan path,
+  // but the structured `definition`/`relation` arms fall back to the item's
+  // WHOLE CLAUSE (`fromTerms[0] ?? item.text`). A clause is not a searchable
+  // term — `concernTermVariants` passes it through untouched, so the veto
+  // could never match anything and a served implementation sat next to an
+  // absence claim quoting the very clause it answers (confirmed live on the
+  // matrix's derived-name column). Decompose any multi-word piece into the
+  // same topic terms every other path uses; a genuine single distinctive
+  // term (`p12d`'s "Redis") is left exactly as it is.
+  const words = term
+    .split("/")
+    .map((w) => w.trim())
+    .filter((w) => w.length > 0)
+    .flatMap((w) => (/\s/u.test(w) ? concernTopicTerms(w) : [w]));
+  if (words.length === 0) return false;
+  const variantsByTerm = concernVariantMap(words, workspace);
+  if (concernCoveredByServedEvidence(itemText, words, variantsByTerm, priorEvidence, workspace).covered) return true;
+  // Only when EVERY word of the claim is such a clause: an absence that also
+  // names a checkable term ("Redis" beside キャッシュ無効化の実装) is still true
+  // about that term and must keep being disclosed.
+  if (words.every((word) => japaneseClauseUnverifiableBesideServedSubject(word, itemText, priorEvidence, workspace))) return true;
+  // Ruling C1 in its widest form: "absent" is certified only when NEITHER the
+  // literal term NOR any of its normalised variants occurs in the searched
+  // scope — and a served file whose own NAME carries the term IS such an
+  // occurrence, whatever the coverage bar says about its bytes. Coverage and
+  // absence answer different questions: `src/localeTag.ts` served but not
+  // concentrated enough to COVER "how locale resolution is applied" still
+  // makes "no occurrence in scanned workspace files; scope complete" a false
+  // statement. This half of the veto only ever REMOVES an absence claim (the
+  // concern stays uncovered and keeps its own routing), so it can never
+  // manufacture a completion — it closes the derivational-morphology gaps
+  // (resolution/resolve, renewal/renew) no variant generator reaches.
+  return priorEvidence.some((surface) => {
+    if (!hasServedCode(surface)) return false;
+    if (!docAnchorsEligible(itemText, surface)) return false;
+    const nameWithoutExtension = surface.path.replace(/\.[^./]+$/u, "");
+    return words.some((word) => (variantsByTerm.get(word)?.variants ?? [word]).some((variant) => textHasWordVariant(nameWithoutExtension, variant)));
+  });
+}
+
+/**
+ * FIX-D (TL-06, 2026-09-21, plan §8.3) — compact, opt-in per-request-item
+ * diagnostics on the EXISTING `TL_TRACE=1` channel (util/trace.ts). Off by
+ * default (`isTraceEnabled()` false) and a guaranteed no-op then — every
+ * caller below checks it FIRST, before doing any of the extra work these
+ * helpers do, so a disabled channel costs nothing beyond that one check.
+ * Never reaches the wire: `trace()` only ever appends to a local JSONL file.
+ *
+ * Deliberately terse and bounded: a request item's own clause text is
+ * capped at 80 chars, term/evidence lists are capped small, and evidence
+ * carries `{path, range, sha}` only — never a served body, a full query, or
+ * a credential. `capWords` bounds `reason` to <=12 words on a word
+ * boundary, matching the "why" a human skimming a trace file needs without
+ * re-deriving the internal proof engine's own long-form comments.
+ */
+function capWords(text: string, maxWords: number): string {
+  const words = text.trim().split(/\s+/).filter((w) => w.length > 0);
+  return words.length <= maxWords ? words.join(" ") : words.slice(0, maxWords).join(" ") + "...";
+}
+
+/** `RequestItemProof` -> the plan §8.3 four-way status vocabulary, from fields every proof already sets. */
+function requestItemTraceStatus(proof: RequestItemProof): "covered" | "absent-in-scope" | "could-not-determine" | "open" {
+  if (!proof.proved) {
+    // R-D2 (item B): before `undeterminedTerm` existed, this branch could
+    // not distinguish a genuinely open candidate from a could-not-determine
+    // verdict (both were `proved:false` with no `absentTerm`) and always
+    // reported "open" — see `requestItemProofFromVerdict`'s own comment on
+    // how "could not determine" reached the wire (nowhere) before this fix.
+    return proof.undeterminedTerm !== undefined ? "could-not-determine" : "open";
+  }
+  if (proof.absentTerm === undefined) return "covered";
+  return proof.absentScopeComplete === true ? "absent-in-scope" : "could-not-determine";
+}
+
+/** Bounded `{path, range, sha}` refs for a proof's own evidence — never a body. Sha is a live disk read (cheap, single stat+hash per evidence row, and only under the trace gate). */
+function traceEvidenceRefs(workspace: string, evidence: readonly TaskReadinessEvidence[], cap = 4): Array<{ path: string; range?: string; sha?: string }> {
+  return evidence.slice(0, cap).map((e) => ({
+    path: e.path,
+    ...(e.range ? { range: e.range } : {}),
+    ...(surfaceFileSha(workspace, e.path) ? { sha: surfaceFileSha(workspace, e.path) } : {}),
+  }));
+}
+
+/**
+ * ONE record per request item per pack, at the exact point `buildRequest-
+ * ItemReadiness`'s three status-minting sites (the H-2 independent-question
+ * loop, the mixed-kind per-item loop, and the all-topic absence-only pass)
+ * decide it. `terms` are `salientWords(item.text)` — the SAME base word set
+ * every proof path samples from (before any per-proof light-verb/variant
+ * filtering) — words only, never the query they came from.
+ *
+ * Takes a plain descriptor rather than a `RequestItemProof` directly: the
+ * absence-only pass decides some items via `distinctiveSalientAbsence`
+ * (a differently-shaped result, no `RequestItemProof` ever built for those),
+ * so `traceRequestItemProof` below adapts the common `RequestItemProof`
+ * shape into this same descriptor rather than this function knowing about
+ * two call shapes.
+ */
+function traceRequestItemStatus(
+  workspace: string | undefined,
+  item: RequestItem,
+  info: {
+    status: "covered" | "absent-in-scope" | "could-not-determine" | "open";
+    evidence: readonly TaskReadinessEvidence[];
+    reason: string;
+    scopeComplete?: boolean;
+  },
+): void {
+  if (!isTraceEnabled() || workspace === undefined) return;
+  trace("request_item_status", {
+    item_id: item.id,
+    kind: item.kind,
+    clause: item.text.slice(0, 80),
+    status: info.status,
+    evidence: traceEvidenceRefs(workspace, info.evidence),
+    terms: salientWords(item.text).slice(0, 6),
+    ...(info.scopeComplete !== undefined ? { scope_complete: info.scopeComplete } : {}),
+    caps_hit: /exceed the batch bound/.test(info.reason),
+    reason: capWords(info.reason, 12),
+  }, workspace);
+}
+
+/** `traceRequestItemStatus` for the common `RequestItemProof` shape (the H-2 and mixed-kind per-item loops). */
+/**
+ * FIX-C2 (2026-09-21) — the `analysis-source` obligation's EVIDENCE LOOKUP,
+ * routed through the same policy every request item uses.
+ *
+ * `buildReadinessObligations` mints `analysis-source` from this call's OWN
+ * fresh surfaces only (`groundedAnalysisEvidence(result, query, served)`),
+ * with no epoch carry-forward of any kind. Confirmed live on the JA
+ * two-concern acceptance chain: hop 0 serves a slice and proposes a zoom,
+ * hop 1 delivers it as a decision-less `read.text`, and hop 2's bare
+ * `{qref}` re-pack then holds `analysis-source` uncovered forever — every
+ * request-item concern is resolved, the caller holds the whole module, and
+ * the pack still ends `await_input` naming only this obligation. A verbatim
+ * follower loops there (the same class of stall FIX-D closed for request
+ * items themselves).
+ *
+ * Reconciled IN PLACE, exactly like the `identifier:<X>` reconciliation in
+ * the mixed-kind loop — the reviewed precedent for "two obligations about
+ * the identical fact must not disagree", and for the same reason: this one
+ * checks only fresh surfaces while the request-item engine already proved
+ * the same fact from the sha-gated epoch-served view. STANDARD, deliberately
+ * high: the concern must be covered by a CODE-POSITION anchor
+ * (`codeAnchored` — the caller holds the implementation itself, not merely a
+ * matching file name or that file's header comment) and no request item may
+ * still be open. So this can only ever DISCHARGE an obligation the caller's
+ * own held evidence already satisfies; it never grounds an analysis in a
+ * file-name match, and it never un-proves anything.
+ */
+function reconcileAnalysisSourceFromRequestItems(
+  otherObligations: readonly TaskReadinessObligation[],
+  items: readonly RequestItem[],
+  anyItemOpen: boolean,
+  priorEvidence: readonly TaskPackSurface[],
+  workspace: string,
+): void {
+  if (anyItemOpen) return;
+  const stale = otherObligations.find((obligation) => obligation.id === "analysis-source" && obligation.status !== "proved");
+  if (stale === undefined) return;
+  for (const item of items) {
+    const terms = concernTopicTerms(item.text);
+    if (terms.length === 0) continue;
+    const coverage = concernCoveredByServedEvidence(item.text, terms, concernVariantMap(terms, workspace), priorEvidence, workspace);
+    if (!coverage.covered || !coverage.codeAnchored) continue;
+    stale.status = "proved";
+    stale.evidence = coverage.surfaces.map(readinessEvidence).slice(0, 6);
+    stale.reason = `analysis is grounded in evidence already served for request-item:${item.id} in this epoch`;
+    return;
+  }
+}
+
+function traceRequestItemProof(workspace: string | undefined, item: RequestItem, proof: RequestItemProof): void {
+  traceRequestItemStatus(workspace, item, {
+    status: requestItemTraceStatus(proof),
+    evidence: proof.evidence,
+    reason: proof.reason,
+    scopeComplete: proof.absentScopeComplete,
+  });
+}
+
+/**
+ * ONE record per pack when a re-pack's request-item proofs consulted
+ * SAME-EPOCH evidence this call did not itself (re-)serve — i.e.
+ * `priorEvidence` (`epochServedEvidence`) held a path outside this pack's
+ * OWN fresh surfaces. Names which paths were reused and leaves the
+ * per-item detail to `request_item_status` above; never a body, never the
+ * full query.
+ */
+function traceRequestItemEpochReuse(
+  workspace: string | undefined,
+  priorEvidence: readonly TaskPackSurface[],
+  ownSurfaces: readonly TaskPackSurface[],
+): void {
+  if (!isTraceEnabled() || workspace === undefined) return;
+  const ownPaths = new Set(ownSurfaces.map((s) => s.path));
+  const reused = priorEvidence.filter((s) => hasServedCode(s) && !ownPaths.has(s.path));
+  if (reused.length === 0) return;
+  const seen = new Set<string>();
+  const refs: Array<{ path: string; sha?: string }> = [];
+  for (const surface of reused) {
+    if (seen.has(surface.path) || refs.length >= 8) continue;
+    seen.add(surface.path);
+    const sha = surfaceFileSha(workspace, surface.path);
+    refs.push({ path: surface.path, ...(sha ? { sha } : {}) });
+  }
+  trace("request_item_epoch_reuse", { reused_refs: refs }, workspace);
+}
+
 function buildRequestItemReadiness(
   workspace: string | undefined,
   query: string,
@@ -27941,7 +35823,7 @@ function buildRequestItemReadiness(
    */
   otherObligations: readonly TaskReadinessObligation[] = [],
 ): RequestItemReadiness {
-  const none: RequestItemReadiness = { obligations: [], absences: [] };
+  const none: RequestItemReadiness = { obligations: [], absences: [], undetermined: [] };
   if (workspace === undefined) return none;
   // Scoped to the two profiles the R1 corpus exercises (omitted defaults to
   // "generic"); specialized profiles keep their own existing obligation
@@ -28024,7 +35906,19 @@ function buildRequestItemReadiness(
     // re-scan demanded for it.
     const epochTokens = tokenizeForEpoch(query);
     const priorEvidence = epochServedEvidence(workspace, result, epochTokens, profile);
-    const absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }> = [];
+    traceRequestItemEpochReuse(workspace, priorEvidence, codeTaskPackSurfaces(result.surfaces));
+    const absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number; incidental?: boolean }> = [];
+    // R-D2 (item B): the ALL-TOPIC pass's own could-not-determine disclosures
+    // — see `RequestItemReadiness.undetermined`'s own doc comment. Populated
+    // by the SAME per-item loop that fills `absences`, so every exit of this
+    // branch returns both.
+    const undetermined: Array<{ id: string; term: string; reason: string }> = [];
+    // FIX-C2: whether the absence-only pass left any item genuinely OPEN
+    // (`proof.proved === false` — a candidate exists but is not served, or the
+    // scan could not be bounded). Only read by the `analysis-source`
+    // reconciliation below, which refuses to discharge anything while a
+    // concern of this same query is still open.
+    let absencePassAnyOpen = false;
 
     // H-2 (2026-09-19): an all-topic composite request made of >=2
     // INDEPENDENT QUESTION clauses (each its own interrogative head, or JA
@@ -28036,8 +35930,20 @@ function buildRequestItemReadiness(
     // above protects. Scoped to `profile:"answer"` only (H-2 spec) — a
     // `generic` (edit) task keeps the unconditional absence-only treatment
     // below for every all-topic query, exactly as before this fix.
+    //
+    // H-4 (fix-b, 2026-09-21, TL-04(a)): `isIndependentQuestionClause` widened
+    // to `headIsWhAfterReadLead` — a clause led by a closed, already-reviewed
+    // read-only verb ("Explain how X", "Show me how X") is exactly as
+    // independent a question as a bare "How is X". Without this, clause 1 of
+    // `<read lead> <wh1>, <wh2>, …, and <whN>` was SYSTEMATICALLY excluded
+    // from this set (it alone carries the shared lead verb, so it alone
+    // failed the OLD bare-wh-head test), so its own point silently never
+    // became a blocking obligation while every later clause's did. See
+    // requestItems.ts's own doc comment on `headIsWhAfterReadLead` for the
+    // full root-cause writeup and why this cannot widen to an arbitrary
+    // imperative.
     const independentQuestions = profile === "answer"
-      ? items.filter((item) => isIndependentQuestionClause(item.text))
+      ? items.filter((item) => headIsWhAfterReadLead(item.text))
       : [];
     const questionIds = independentQuestions.length >= 2
       ? new Set(independentQuestions.map((item) => item.id))
@@ -28045,6 +35951,19 @@ function buildRequestItemReadiness(
 
     for (const item of items) {
       if (questionIds?.has(item.id)) continue;
+      // C5 (fix-c, 2026-09-21, plan §6.1): an item that IS ITSELF just an
+      // example/elaboration fragment ("such as trailing whitespace") names
+      // no independent concern of its own to disclose absent — it is
+      // illustrative prose `splitEnumerated`'s comma-based split has cut
+      // into its own item, not a second point the query asks about
+      // (confirmed live: "Explain how the parser handles comments, such as
+      // trailing whitespace, and how errors are logged." certified
+      // "trailing" request-item-absent — a fragment of the FIRST point's
+      // own example, never a concern on its own). Recognized structurally
+      // by this item's own leading words; never a change to the splitting
+      // mechanism itself (requestItems.ts, out of this fix's region) —
+      // this only ever REMOVES a spurious absence claim, never widens one.
+      if (EXAMPLE_FRAGMENT_LEAD_RE.test(item.text.trim())) continue;
       // A distinctive, non-diluted term takes priority: `cache`/
       // `implementation` co-occurring in the same clause as a genuinely
       // absent `Redis`/`redis`/`実装` otherwise satisfies the whole-item
@@ -28059,27 +35978,69 @@ function buildRequestItemReadiness(
       // narrower `universe`.
       const distinctiveAbsence = distinctiveSalientAbsence(item, priorEvidence, workspace, absenceUniverse, contentCache);
       if (distinctiveAbsence !== undefined) {
-        absences.push({
-          id: item.id,
-          term: distinctiveAbsence.term,
-          scope_complete: distinctiveAbsence.scopeComplete,
-          omitted_count: distinctiveAbsence.omittedCount,
+        // C1 (fix-c, 2026-09-21): defense-in-depth veto — see
+        // `absenceContradictsServedEvidence`'s own doc comment. The
+        // per-candidate scanner already skips a term ITS OWN loop finds
+        // evidenced; this catches the case where a DIFFERENT surface (or a
+        // later hop's evidence) answers it instead.
+        const vetoed = absenceContradictsServedEvidence(distinctiveAbsence.term, item.text, priorEvidence, workspace);
+        if (!vetoed) {
+          absences.push({
+            id: item.id,
+            term: distinctiveAbsence.term,
+            scope_complete: distinctiveAbsence.scopeComplete,
+            omitted_count: distinctiveAbsence.omittedCount,
+          });
+        }
+        traceRequestItemStatus(workspace, item, {
+          status: vetoed ? "covered" : (distinctiveAbsence.scopeComplete ? "absent-in-scope" : "could-not-determine"),
+          evidence: [],
+          reason: vetoed
+            ? `served evidence contradicts distinctive absence of ${distinctiveAbsence.term}`
+            : `distinctive absent term ${distinctiveAbsence.term}`,
+          scopeComplete: distinctiveAbsence.scopeComplete,
         });
         continue;
       }
       const proof = proveUnbindableRequestItem(item, priorEvidence, workspace, absenceUniverse, contentCache);
-      if (proof.proved && proof.absentTerm !== undefined) {
+      const vetoedProof = proof.proved && proof.absentTerm !== undefined
+        && absenceContradictsServedEvidence(proof.absentTerm, item.text, priorEvidence, workspace);
+      if (proof.proved && proof.absentTerm !== undefined && !vetoedProof) {
         absences.push({
           id: item.id,
           term: proof.absentTerm,
           scope_complete: proof.absentScopeComplete ?? false,
           omitted_count: proof.absentOmittedCount ?? 0,
+          ...(proof.absentIncidental === true ? { incidental: true } : {}),
         });
+      } else if (!proof.proved && proof.undeterminedTerm !== undefined) {
+        // R-D2 (item B): `proof.undeterminedTerm` is set ONLY when
+        // `decideConcernStatus` returned `could-not-determine` with no
+        // `absentTerm` (see that field's own doc comment) — the ELSE here is
+        // structural, not a narrowing choice: the two never both hold on one
+        // proof. Invariant (i) holds by construction: `decideConcernStatus`
+        // checks coverage FIRST and only reaches could-not-determine when
+        // this exact evidence already failed to cover the concern.
+        undetermined.push({ id: item.id, term: proof.undeterminedTerm, reason: proof.reason });
       }
+      if (!proof.proved) absencePassAnyOpen = true;
+      traceRequestItemStatus(workspace, item, {
+        status: vetoedProof ? "covered" : requestItemTraceStatus(proof),
+        evidence: proof.evidence,
+        reason: vetoedProof ? `served evidence contradicts absence of ${proof.absentTerm}` : proof.reason,
+        scopeComplete: proof.absentScopeComplete,
+      });
     }
 
     if (questionIds === undefined) {
-      return { obligations: [], absences };
+      // FIX-C2: the absence-only pass mints no obligation of its own (the
+      // reviewed d12a/"observed directory" guarantee, invariant (iv)), but it
+      // DOES establish every item's status — so it can still discharge an
+      // `analysis-source` obligation that is stuck on this call's own fresh
+      // surfaces while the caller demonstrably holds the implementation.
+      // Discharge only: this branch still adds no blocking obligation.
+      reconcileAnalysisSourceFromRequestItems(otherObligations, items, absencePassAnyOpen, priorEvidence, workspace);
+      return { obligations: [], absences, undetermined };
     }
 
     // >=2 independent questions: mint the SAME blocking obligations and
@@ -28118,21 +36079,37 @@ function buildRequestItemReadiness(
         reason: proof.reason,
         origin: "query",
       });
+      const vetoedQuestion = proof.proved && proof.absentTerm !== undefined
+        && absenceContradictsServedEvidence(proof.absentTerm, item.text, priorEvidence, workspace);
       if (!proof.proved) {
         gapIds.push(item.id);
-        for (const p of proof.candidatePaths) missingTargets.add(p);
+        for (const p of nonDocNoiseCandidatePaths(proof.candidatePaths, item.text)) missingTargets.add(p);
         for (const rt of proof.rangeCandidates ?? []) missingRangeTargets.push(rt);
-      } else if (proof.absentTerm !== undefined) {
+      } else if (proof.absentTerm !== undefined && !vetoedQuestion) {
         absences.push({
           id: item.id,
           term: proof.absentTerm,
           scope_complete: proof.absentScopeComplete ?? false,
           omitted_count: proof.absentOmittedCount ?? 0,
+          ...(proof.absentIncidental === true ? { incidental: true } : {}),
         });
       }
+      traceRequestItemStatus(workspace, item, {
+        status: vetoedQuestion ? "covered" : requestItemTraceStatus(proof),
+        evidence: proof.evidence,
+        reason: vetoedQuestion ? `served evidence contradicts absence of ${proof.absentTerm}` : proof.reason,
+        scopeComplete: proof.absentScopeComplete,
+      });
     }
+    reconcileAnalysisSourceFromRequestItems(
+      otherObligations,
+      independentQuestions,
+      obligations.some((obligation) => obligation.status !== "proved"),
+      priorEvidence,
+      workspace,
+    );
     if (missingTargets.size === 0 && missingRangeTargets.length === 0) {
-      return { obligations, absences };
+      return { obligations, absences, undetermined };
     }
     const rangeTargetPaths = new Set(missingRangeTargets.map((t) => t.path));
     const pathTargets = [...missingTargets].filter((p) => !rangeTargetPaths.has(p)).map((p) => ({ path: p }));
@@ -28140,6 +36117,7 @@ function buildRequestItemReadiness(
     return {
       obligations,
       absences,
+      undetermined,
       gap: {
         next_call: {
           tool: "read_file",
@@ -28156,6 +36134,7 @@ function buildRequestItemReadiness(
 
   const epochTokens = tokenizeForEpoch(query);
   const priorEvidence = epochServedEvidence(workspace, result, epochTokens, profile);
+  traceRequestItemEpochReuse(workspace, priorEvidence, codeTaskPackSurfaces(result.surfaces));
 
   // OWNERSHIP RULE: the query's own enumerated-item facets (F-V13-6/F-V14),
   // computed the identical way `buildReadinessObligations` mints them —
@@ -28179,7 +36158,7 @@ function buildRequestItemReadiness(
   // DESIGN-v0.15 R1 (2026-09-07): request items PROVED by verified absence
   // (`RequestItemProof.absentTerm`) — see `RequestItemReadiness.absences`'s
   // own doc comment for where this feeds the wire.
-  const absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number }> = [];
+  const absences: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number; incidental?: boolean }> = [];
 
   for (const item of items) {
     // WP-S5 (A): a clause that only constrains the answer's FORM or the
@@ -28198,17 +36177,36 @@ function buildRequestItemReadiness(
       reason: proof.reason,
       origin: "query",
     });
+    // FIX-C2 (2026-09-21), invariant (i) — the mixed-kind loop was the ONE
+    // request-item path that never consulted the served-evidence veto, so a
+    // structured `definition`/`relation`/`decision` arm could (and did, on
+    // the four-concern fixture) emit `request-item-absent` for a concern in
+    // the SAME response that served the body of the file implementing it.
+    // Same single policy, same call shape as the H-2 and all-topic loops.
+    const vetoedMixed = proof.proved && proof.absentTerm !== undefined
+      && absenceContradictsServedEvidence(proof.absentTerm, item.text, priorEvidence, workspace);
     if (!proof.proved) {
       gapIds.push(item.id);
-      for (const p of proof.candidatePaths) missingTargets.add(p);
+      for (const p of nonDocNoiseCandidatePaths(proof.candidatePaths, item.text)) missingTargets.add(p);
       for (const rt of proof.rangeCandidates ?? []) missingRangeTargets.push(rt);
-    } else if (proof.absentTerm !== undefined) {
+    } else if (proof.absentTerm !== undefined && !vetoedMixed) {
       absences.push({
         id: item.id,
         term: proof.absentTerm,
         scope_complete: proof.absentScopeComplete ?? false,
         omitted_count: proof.absentOmittedCount ?? 0,
+        ...(proof.absentIncidental === true ? { incidental: true } : {}),
       });
+    }
+    if (vetoedMixed) {
+      traceRequestItemStatus(workspace, item, {
+        status: "covered",
+        evidence: proof.evidence,
+        reason: `served evidence contradicts absence of ${proof.absentTerm}`,
+        scopeComplete: proof.absentScopeComplete,
+      });
+    } else {
+      traceRequestItemProof(workspace, item, proof);
     }
     // Finding 3 fix (2026-09-07, residual dead end): a PROVED `decision`
     // item here and an UNRELATED, older `identifier:<X>` obligation
@@ -28257,8 +36255,20 @@ function buildRequestItemReadiness(
     }
   }
 
+  reconcileAnalysisSourceFromRequestItems(
+    otherObligations,
+    items,
+    obligations.some((obligation) => obligation.status !== "proved"),
+    priorEvidence,
+    workspace,
+  );
   if (missingTargets.size === 0 && missingRangeTargets.length === 0) {
-    return { obligations, absences };
+    // R-D2 (item B): the mixed-kind loop mints a BLOCKING obligation per
+    // item, so a could-not-determine item here is already surfaced through
+    // the ordinary uncovered-obligation -> gap/await_input path (never
+    // silent the way the ALL-TOPIC pass's non-blocking items were) — this
+    // side channel is scoped to that ALL-TOPIC pass only, per plan §5.
+    return { obligations, absences, undetermined: [] };
   }
   // A path riding missingRangeTargets already has a scoped entry in this
   // same batch — never ALSO add its plain-path form (that would be exactly
@@ -28271,6 +36281,7 @@ function buildRequestItemReadiness(
   return {
     obligations,
     absences,
+    undetermined: [],
     gap: {
       next_call: {
         tool: "read_file",
@@ -28285,6 +36296,329 @@ function buildRequestItemReadiness(
   };
 }
 
+// ---------------------------------------------------------------------------
+// FIX-G (2026-09-27, eval-0927 P0) — THE FACET COMPLETION GATE.
+//
+// eval-0927 §3: "Explain the default HTTP_TIMEOUT_MS value, the shouldRetry
+// conditions, and the callers of fetchWithRetry." certified `act.answer` with
+// neither constant's definition and ZERO callers on the wire. None of the
+// obligations above can see that: `identifier:<X>` is proved by any MENTION of
+// X, `behavior-body` by any callable body, and the ALL-TOPIC request-item
+// branch never mints a blocking obligation (d12a — see its own comment).
+//
+// A FACET (requestFacets.ts: value / condition / callers / flow) is a
+// structural evidence duty, not a prose "point": the question names WHICH KIND
+// of evidence an answer must show, and FIX-C1's closure hook resolved WHERE it
+// lives (a focal callable, the module constants it reads, its call sites, its
+// callees) and recorded that as a plan (facetGate.ts). So every facet mints ONE
+// required obligation here — independent of the request-item item-count gates
+// and of the ALL-TOPIC branch — and the d12a guarantee still holds in its own
+// terms: no facet obligation is ever BLOCKING without a concrete closure
+// target (a known, unserved line window that its `next` reads); a facet with no
+// target is covered, verified-empty (disclosed), or could-not-determine
+// (disclosed, non-blocking).
+//
+// STATUS goes through THE ONE policy, `decideConcernStatus`: the facts from
+// facetGate.ts become a ConcernCoverageVerdict (covered: every required window
+// served in this epoch — this pack's surfaces plus the same-sha served-range
+// ledger, `epochServedEvidence`) and a ConcernScanOutcome (`unserved-
+// candidates` → open; `indeterminate` → could-not-determine). Status →
+// obligation: covered / could-not-determine → "proved" (the latter with an
+// `explicit-gap:request-item-undetermined:` disclosure); open → "uncovered",
+// blocking, and its exact unserved windows join `request_item_gap.next_call`
+// (the batched, query-bearing ranged read every request-item path already
+// rides — `nextCallForUnresolved`, the R-B1 route lift and the no-dead-end
+// guard all key on the shared `request-item:` prefix).
+//
+// ID: `request-item:facet-<n>:<facet>`, n = the 1-based position in
+// `extractFacetRequirements(query)` — deterministic per query, so a re-pack
+// names the same obligation; one grep (`request-item:facet-`); and never an
+// `ri-N` id, so no request-item consumer that looks an item up by id (the
+// absence re-veto's REQUEST_ITEM_ABSENCE_ID_RE, the enumerated-item owner
+// check) can mistake one for the other.
+//
+// `inventory_complete` (the certificate's workspace marker) is scan coverage
+// and is never read here: readiness is decided only by served evidence.
+// ---------------------------------------------------------------------------
+
+const FACET_OBLIGATION_ID_PREFIX = `${REQUEST_ITEM_OBLIGATION_PREFIX}facet-`;
+
+interface FacetReadinessEntry {
+  /** 1-based position in `extractFacetRequirements(query)`. */
+  readonly index: number;
+  readonly requirement: FacetRequirement;
+  readonly facts: FacetFacts;
+  readonly status: ConcernStatus;
+  readonly obligation: TaskReadinessObligation;
+  /** The served surfaces behind `facts.servedWindows`, whatever the status (an OPEN facet can still have part of its closure on the wire). */
+  readonly servedEvidence: readonly TaskReadinessEvidence[];
+}
+
+interface FacetReadiness {
+  readonly entries: readonly FacetReadinessEntry[];
+  /** Exact unserved windows of every OPEN facet, in requirement order, deduped. */
+  readonly openTargets: ReadonlyArray<{ readonly path: string; readonly range: string }>;
+  /** `certificate.gaps` disclosures (verified-empty / could-not-determine), ids `facet-<n>`. */
+  readonly disclosures: ReadonlyArray<{ readonly id: string; readonly term: string; readonly word: "request-item-empty" | "request-item-undetermined"; readonly reason: string }>;
+}
+
+/** `content` split into its REAL logical lines (a trailing newline never yields a phantom last line — the eval-0927 N+1 class). */
+function logicalLines(content: string): string[] {
+  const lines = content.split(/\r\n|\r|\n/);
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function buildFacetReadiness(
+  workspace: string | undefined,
+  query: string,
+  profile: TaskProfile,
+  result: TaskPackResult,
+): FacetReadiness | undefined {
+  if (workspace === undefined || profile !== "answer") return undefined;
+  // Same two terminal proof shapes `buildRequestItemReadiness` leaves alone.
+  if (result.create_target !== undefined || result.literal_source_absence !== undefined) return undefined;
+  const requirements = extractFacetRequirements(query);
+  // No facet → nothing here runs: every ordinary pack stays byte-identical.
+  if (requirements.length === 0) return undefined;
+  const plan = facetPlanFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
+    const content = readCached(workspace, relPath);
+    return content === undefined ? undefined : shaOfText(content);
+  });
+  // Served = bytes THIS response ships (`code`) plus the session's sha-gated
+  // served-range ledger (earlier hops of this epoch). A `code_unchanged`
+  // restatement ("already served, resident in your context") is a CLAIM about
+  // an earlier serve, so it counts only where that ledger confirms it —
+  // measured: a residency claim for lines an earlier hop had disclosed as
+  // `remaining` (never shipped) would otherwise have covered the facet.
+  const shipped = codeTaskPackSurfaces(result.surfaces).filter((surface) => (surface.code?.length ?? 0) > 0);
+  const carried = reconstructServedEntryEvidence(
+    workspace,
+    epochServedSurfaceEntriesWithView(workspace, tokenizeForEpoch(query), result, true),
+  );
+  const evidence = [...shipped, ...carried];
+  const surfacesByPath = new Map<string, TaskPackSurface[]>();
+  for (const surface of evidence) {
+    const bucket = surfacesByPath.get(surface.path);
+    if (bucket === undefined) surfacesByPath.set(surface.path, [surface]);
+    else bucket.push(surface);
+  }
+  const spansByPath = new Map<string, FacetLineSpan[]>();
+  const servedSpans = (relPath: string): readonly FacetLineSpan[] => {
+    let spans = spansByPath.get(relPath);
+    if (spans === undefined) {
+      spans = servedLineSpansOf(surfacesByPath.get(relPath) ?? []);
+      spansByPath.set(relPath, spans);
+    }
+    return spans;
+  };
+  const linesByPath = new Map<string, string[] | undefined>();
+  const fileLines = (relPath: string): readonly string[] | undefined => {
+    if (!linesByPath.has(relPath)) {
+      const content = readCached(workspace, relPath);
+      linesByPath.set(relPath, content === undefined ? undefined : logicalLines(content));
+    }
+    return linesByPath.get(relPath);
+  };
+  // Termination (facetGate.ts `noteUndeliveredFacetLines`): lines THIS call
+  // requested (a caller-supplied surface) and got no byte of — no `code`, and
+  // not confirmed by the ledger — are never requested again for this query.
+  // A partially shipped surface (budget paging: body + `remaining`) is
+  // progress and is not recorded.
+  const workspaceKey = facetPlanWorkspaceKey(workspace);
+  for (const surface of codeTaskPackSurfaces(result.surfaces)) {
+    if (!surfaceWhyHasMarker(surface.why, "caller-supplied") || (surface.code?.length ?? 0) > 0) continue;
+    const requested = parseSurfaceSpans(surface.range);
+    const confirmed = servedSpans(surface.path);
+    for (const span of requested) {
+      noteUndeliveredFacetLines(workspaceKey, query, surface.path, unservedFacetSubSpans(span, confirmed));
+    }
+  }
+  const undeliveredSpans = (relPath: string): readonly FacetLineSpan[] => undeliveredFacetSpans(workspaceKey, query, relPath);
+
+  const entries: FacetReadinessEntry[] = [];
+  const openTargets: Array<{ path: string; range: string }> = [];
+  const seenTargets = new Set<string>();
+  const disclosures: Array<{ id: string; term: string; word: "request-item-empty" | "request-item-undetermined"; reason: string }> = [];
+  requirements.forEach((requirement, position) => {
+    const index = position + 1;
+    const entry = plan?.entries.find((candidate) => candidate.facet === requirement.facet && candidate.clause === requirement.clause);
+    const facts = evaluateFacetRequirement(requirement, entry, { servedSpans, fileLines, undeliveredSpans });
+    const coveringSurfaces = evidence.filter((surface) => facts.servedWindows.some((window) => window.path === surface.path));
+    const coverage: ConcernCoverageVerdict = facts.kind === "covered" || facts.kind === "empty"
+      ? { covered: true, surfaces: coveringSurfaces, matchedTerms: [facts.term], codeAnchored: coveringSurfaces.length > 0, reason: facts.reason }
+      : { covered: false, surfaces: [], matchedTerms: [], codeAnchored: false, reason: facts.reason };
+    const outcome: ConcernScanOutcome = facts.kind === "open"
+      ? { kind: "unserved-candidates", candidatePaths: [...new Set(facts.openTargets.map((target) => target.path))] }
+      : { kind: "indeterminate", reason: facts.reason };
+    const verdict = decideConcernStatus([facts.term], coverage, outcome);
+    const obligation: TaskReadinessObligation = {
+      id: `${FACET_OBLIGATION_ID_PREFIX}${index}:${requirement.facet}`,
+      kind: "concern",
+      status: verdict.status === "open" ? "uncovered" : "proved",
+      required: true,
+      evidence: verdict.evidence.slice(0, 6),
+      reason: verdict.status === "could-not-determine"
+        ? `could not determine (disclosed): ${verdict.reason}`
+        : verdict.status === "covered" && facts.kind === "empty"
+          ? `verified empty (disclosed): ${facts.reason}`
+          : verdict.reason,
+      origin: "query",
+    };
+    if (verdict.status === "open") {
+      for (const target of facts.openTargets) {
+        const range = `${target.start}-${target.end}`;
+        const key = `${target.path}\u0000${range}`;
+        if (seenTargets.has(key)) continue;
+        seenTargets.add(key);
+        openTargets.push({ path: target.path, range });
+      }
+    }
+    if (facts.disclosure !== undefined && verdict.status !== "open") {
+      disclosures.push({ id: `facet-${index}`, term: facts.term, word: facts.disclosure.word, reason: facts.disclosure.reason });
+    }
+    if (isTraceEnabled()) {
+      trace("facet_gate_status", {
+        id: obligation.id,
+        facet: requirement.facet,
+        kind: facts.kind,
+        status: verdict.status,
+        plan: entry === undefined ? "missing" : entry.resolution,
+        open: facts.openTargets.length,
+        served: facts.servedWindows.length,
+      }, workspace);
+    }
+    entries.push({ index, requirement, facts, status: verdict.status, obligation, servedEvidence: coveringSurfaces.map(readinessEvidence).slice(0, 6) });
+  });
+  return { entries, openTargets, disclosures };
+}
+
+/**
+ * FIX-G G5 — ONE point, ONE owner. A request item (requestItems.ts's split of
+ * the same query) whose clause is a facet this gate RESOLVED (a focal exists)
+ * is tracked by that facet's obligation: its own blocking obligation (if any)
+ * is marked proved with a pointer to the facet — the same "owned, not
+ * duplicated" rule the enumerated-item facets (F-V13-6) already impose on
+ * request items — and its could-not-determine disclosure is dropped, because
+ * the facet reports a real determination for the same point (eval-0927 §4:
+ * "既定値" / "リクエストの処理経路" were disclosed as undetermined while the pack
+ * served DEFAULT_OPTIONS and the request path). A VERIFIED ABSENCE is never
+ * dropped here: `absenceContradictsServedEvidence` already vetoed every absence
+ * the served bytes contradict, and a surviving one is still true.
+ */
+function reconcileRequestItemsWithFacets(
+  readiness: RequestItemReadiness,
+  facets: FacetReadiness,
+  query: string,
+): ReadonlySet<string> {
+  const ownedIds = new Set<string>();
+  const resolved = facets.entries.filter((entry) => entry.facts.focalResolved);
+  if (resolved.length === 0) return ownedIds;
+  const items = extractRequestItems(query);
+  for (const item of items) {
+    if (resolved.some((entry) => facetClauseMatchesItem(entry.requirement.clause, item.text))) ownedIds.add(item.id);
+  }
+  if (ownedIds.size === 0) return ownedIds;
+  const ownerOf = (itemId: string): FacetReadinessEntry | undefined => {
+    const text = items.find((item) => item.id === itemId)?.text;
+    return text === undefined ? undefined : resolved.find((entry) => facetClauseMatchesItem(entry.requirement.clause, text));
+  };
+  for (const obligation of readiness.obligations) {
+    const itemId = obligation.id.slice(REQUEST_ITEM_OBLIGATION_PREFIX.length);
+    if (!ownedIds.has(itemId) || obligation.status === "proved") continue;
+    const owner = ownerOf(itemId)!;
+    obligation.status = "proved";
+    obligation.evidence = [...owner.servedEvidence];
+    obligation.reason = `this point is tracked by ${owner.obligation.id} (its evidence closure); not duplicated as a separate request-item obligation`;
+  }
+  readiness.undetermined = readiness.undetermined.filter((entry) => !ownedIds.has(entry.id));
+  const gap = readiness.gap;
+  if (gap !== undefined) {
+    const remaining = gap.ids.filter((id) => !ownedIds.has(id));
+    if (remaining.length === 0) delete readiness.gap;
+    else gap.ids = remaining;
+  }
+  return ownedIds;
+}
+
+/**
+ * FIX-G G4 — `analysis-source` asks for grounded evidence (caller-scoped,
+ * artifact, or an explicit identifier) so a same-word decoy cannot close an
+ * analysis. A RESOLVED facet whose focal / closure windows are on the wire is
+ * that grounding in structural form: the server resolved the question's subject
+ * to a callable and served the constants it reads / its call sites — never a
+ * bare token match. Discharge only (never re-opens anything), mirroring
+ * `reconcileAnalysisSourceFromRequestItems`.
+ */
+function reconcileAnalysisSourceFromFacets(
+  otherObligations: readonly TaskReadinessObligation[],
+  facets: FacetReadiness,
+): void {
+  const stale = otherObligations.find((obligation) => obligation.id === "analysis-source" && obligation.status !== "proved");
+  if (stale === undefined) return;
+  const grounded = facets.entries.find((entry) => entry.facts.focalResolved && entry.facts.servedWindows.length > 0);
+  if (grounded === undefined) return;
+  stale.status = "proved";
+  stale.evidence = [...grounded.servedEvidence];
+  stale.reason = `analysis is grounded in the structural evidence closure served for ${grounded.obligation.id}`;
+}
+
+/** A facet `next` asks for no more window bytes than this share of the call's byte ceiling (the follow-up runs under the same client ceiling) — always at least one window, the rest ride later hops. */
+const FACET_NEXT_CEILING_SHARE = 0.75;
+/** The ceiling assumed for sizing a facet `next` when no caller/client ceiling is active (the default ladder's lowest step). */
+const FACET_NEXT_DEFAULT_CEILING = 24576;
+
+/**
+ * The request-item gap with every OPEN facet's exact windows appended
+ * (query-bearing, ranged, ≤ MAX_REQUEST_ITEM_BATCH targets), sized so the
+ * follow-up response fits the same byte ceiling this call runs under:
+ * a caller-ranged follow-up serves what it names, so an over-long batch would
+ * ship above a client's ceiling rather than page (measured: a 10-constant
+ * closure batch returned 24 KB under the VS Code 14 KB ceiling). Windows past
+ * the budget are simply requested by the next hop — each hop serves at least
+ * one, so the chain still terminates.
+ */
+function mergeFacetGap(
+  gap: RequestItemReadiness["gap"],
+  facets: FacetReadiness | undefined,
+  query: string,
+  workspace: string | undefined,
+): RequestItemReadiness["gap"] {
+  if (facets === undefined || facets.openTargets.length === 0 || workspace === undefined) return gap;
+  const openIds = facets.entries.filter((entry) => entry.status === "open").map((entry) => `facet-${entry.index}`);
+  const baseTargets = ((gap?.next_call.arguments as { targets?: unknown } | undefined)?.targets as Array<{ path: string; range?: string }> | undefined) ?? [];
+  const keyOf = (target: { path: string; range?: string }): string => `${target.path}\u0000${target.range ?? ""}`;
+  const seen = new Set(baseTargets.map(keyOf));
+  const targets = [...baseTargets];
+  const byteBudget = Math.floor((activePackByteCeiling() ?? FACET_NEXT_DEFAULT_CEILING) * FACET_NEXT_CEILING_SHARE);
+  let bytes = 0;
+  let added = 0;
+  for (const target of facets.openTargets) {
+    if (seen.has(keyOf(target))) continue;
+    const bounds = /^(\d+)-(\d+)$/.exec(target.range);
+    const content = readCached(workspace, target.path);
+    const windowBytes = bounds !== null && content !== undefined
+      ? Buffer.byteLength(sliceLinesToText(content, Number(bounds[1]), Number(bounds[2])), "utf8")
+      : 0;
+    if (added > 0 && bytes + windowBytes > byteBudget) break;
+    bytes += windowBytes;
+    added += 1;
+    seen.add(keyOf(target));
+    targets.push({ path: target.path, range: target.range });
+  }
+  return {
+    next_call: {
+      tool: "read_file",
+      arguments: {
+        query,
+        targets: targets.slice(0, MAX_REQUEST_ITEM_BATCH),
+        content: "auto",
+      },
+    },
+    ids: [...(gap?.ids ?? []), ...openIds],
+  };
+}
+
 function buildReadinessObligations(
   result: TaskPackResult,
   profile: TaskProfile,
@@ -28295,6 +36629,71 @@ function buildReadinessObligations(
 ): TaskReadinessObligation[] {
   const surfaces = codeTaskPackSurfaces(result.surfaces);
   const served = surfaces.filter(hasServedCode);
+  // R-D2 (2026-09-21, TL-06 REBUILD class) — THE SAME epoch-served evidence
+  // request items already read (`epochServedEvidence`, the `priorEvidence` of
+  // `buildRequestItemReadiness`) must also reach the two BASE obligations
+  // this function mints (`surface-content`, `behavior-body`). Before this fix
+  // only the identifier obligation (further below) and request-item proofs
+  // consulted ANY carried-forward evidence, so a bare-qref/task.handle
+  // REBUILD of a declared-answer task saw only its own fresh (often sparse,
+  // pathless-auto-sliced) `served` for these two checks even though an
+  // earlier call of the SAME task had already served the exact bytes that
+  // prove them, under the identical sha.
+  //
+  // MUST CHECK BOTH STORES, not just the WP-S11 read-only view — see
+  // `recordPredatesAdditionalServedEvidence`'s own "MUST CHECK BOTH STORES"
+  // section, which this obligation-level fix must honor for the identical
+  // reason: `cumulativeEligible` (and therefore which of the two stores a
+  // given hop's OWN surfaces land in) is recomputed PER CALL from THAT call's
+  // own `profile_binding.source`, so a declared task's later, wording-
+  // inferred hop can file its surfaces in the CUMULATIVE log even though the
+  // task's own seed was a declared answer. `epochServedEvidence` is the one
+  // reader that already assembles the complete picture from both stores for
+  // an answer-profile caller — reusing it here (rather than the narrower,
+  // WP-S11-only `readOnlyViewCarriedEvidence` the identifier obligation below
+  // historically used) is what closes a REBUILD whose own auto-discovery
+  // finds nothing at all to re-derive from (measured: a numbered "Walk me
+  // through: 1. ... 2. ..." query over a one-small fixture — hop 1's own call
+  // omits `task.profile` and binds `source:"inferred"`, so its whole-file
+  // serve lands in the cumulative log, not the read-only view; a bare-qref
+  // repack whose own fresh discovery yields zero surfaces then never triggers
+  // the existing cumulative-coverage flip either, since that flip itself is
+  // gated on the rebuild's OWN surfaces being non-empty first).
+  //
+  // Scoped exactly like the identifier obligation's own carry: answer profile
+  // only (`profile === "answer"`), and a documented no-op for every other
+  // task, so nothing about the generic (edit) profile moves. NEVER granted
+  // write authority: `actionFrontierForCertificate` decides
+  // edit-frontier/action-frontier membership from `result.surfaces` and the
+  // cumulative log directly, never from this function's obligations, so
+  // widening what proves `surface-content`/`behavior-body` cannot widen what
+  // an edit may touch.
+  const servedWithCarried = profile === "answer" && workspace !== undefined
+    ? epochServedEvidence(workspace, result, tokenizeForEpoch(query), profile).filter(hasServedCode)
+    : served;
+  const servedWithCarriedPaths = new Set(servedWithCarried.map((surface) => surface.path));
+  // P1-9 (eval-0927 review-r4, hugeFocalValue): a required surface an earlier
+  // hop cut at the transport cap is re-listed by a later rebuild as `prior`
+  // with its stale `remaining`, and a cut surface never grants residency for
+  // its unshipped half — so after the zooms its own `next` prescribed had
+  // shipped every remaining line, `surface-content` still read "codeless" and
+  // the chain ended `await_input` with nothing left to read. Answer tasks only
+  // (never write authority): the session's served-range ledger proving every
+  // line of the surface's range shipped is the evidence.
+  const ledgerShippedRequired = profile === "answer" && workspace !== undefined
+    ? surfaces.filter((surface) => surface.required !== false
+      && !servedWithCarriedPaths.has(surface.path)
+      && surfaceRangeShipped(workspace, surface.path, surface.range))
+    : [];
+  const ledgerShippedPaths = new Set(ledgerShippedRequired.map((surface) => surface.path));
+  // The same fact for a surface this rebuild cut AGAIN (it carries code, but
+  // re-lists the already-zoomed lines as `remaining`, and the pack reads
+  // `needs-followup`): every cut required surface whose whole range the
+  // ledger shows shipped needs no follow-up.
+  const cutRequired = surfaces.filter((surface) => surface.required !== false
+    && (surface.content_completeness === "partial" || (surface.remaining_ranges?.length ?? 0) > 0));
+  const cutRequiredAllShipped = profile === "answer" && workspace !== undefined && cutRequired.length > 0
+    && cutRequired.every((surface) => surfaceRangeShipped(workspace, surface.path, surface.range));
   const obligations: TaskReadinessObligation[] = [];
   const focusedAnswerEvidence = profile === "answer"
     && (result.answer_resolution !== undefined || hasExactNamedAnswerFacetEvidence(result, query));
@@ -28331,12 +36730,64 @@ function buildReadinessObligations(
   // `result.missing` stays unfiltered — it is required-role-scoped by
   // construction (coverage_reason "missing-roles" docs).
   const literalSourceAbsent = result.literal_source_absence;
+  // R-D2: a REBUILD whose own fresh discovery names no candidate surface at
+  // all (`surfaces.length === 0`) stamps a bare default "missing required
+  // role" list (e.g. `["contract","api"]`, set upstream of this function,
+  // before any readiness obligation runs) that reflects having found NOTHING
+  // on THIS call, not a genuine per-role gap — the same upstream pass clears
+  // that SAME list wholesale, irrespective of role, the moment this call
+  // finds any candidate of its own (measured: a served `role:"unknown"`
+  // surface clears a `missing:["contract","api"]` list with no role string
+  // in common). When this epoch's carried-forward evidence already proves
+  // content exists (`servedWithCarried` beyond nothing), that "found
+  // nothing" signal is stale, not a real gap. Scoped to the
+  // `surfaces.length === 0` REBUILD shape specifically: a call that DID pick
+  // candidate surfaces of its own but still leaves a role genuinely
+  // uncovered keeps today's stricter behavior (this stays false for it).
+  const carriedContentDischargesMissingRoles =
+    surfaces.length === 0
+    && servedWithCarried.length > 0
+    && !result.missing.every((entry) => entry.startsWith("explicit-gap:"));
   const contentComplete = literalSourceAbsent !== undefined || provedArtifactCreate || provedCreate || provedArtifactContent || (
-    served.length > 0
-    && result.missing.every((entry) => entry.startsWith("explicit-gap:"))
-    && surfaces.filter((surface) => surface.required !== false).every(hasServedCode)
-    && (result.content_sufficiency !== "needs-followup" || focusedAnswerEvidence)
+    (servedWithCarried.length > 0 || ledgerShippedRequired.length > 0)
+    && (result.missing.every((entry) => entry.startsWith("explicit-gap:")) || carriedContentDischargesMissingRoles)
+    // R-D2: a required surface this call did not itself serve still counts
+    // when this epoch's carried-forward evidence (`servedWithCarried`, see
+    // its doc comment above) already covers its exact path. A path absent
+    // from both never passes, so a generic/inferred task with no carried
+    // entries (`servedWithCarriedPaths` reduces to `served`'s own paths)
+    // keeps today's behavior exactly.
+    && surfaces.filter((surface) => surface.required !== false)
+      .every((surface) => servedWithCarriedPaths.has(surface.path) || ledgerShippedPaths.has(surface.path))
+    && (result.content_sufficiency !== "needs-followup" || focusedAnswerEvidence || ledgerShippedRequired.length > 0 || cutRequiredAllShipped)
   );
+  if (carriedContentDischargesMissingRoles && contentComplete) {
+    // R-D2 — `buildReadinessObligations`'s own "surface-content" obligation is
+    // now proved from carried evidence, but `result.missing` /
+    // `result.coverage` were stamped by the EARLIER, non-epoch-aware
+    // surface-selection pass (see the comment above), and
+    // `projectCompletion` (canonicalDecision.ts) only ever DEMOTES or
+    // PRESERVES `result.coverage` from here — it never promotes it on its
+    // own. Left alone, every obligation certifies "proved" while
+    // `result.coverage` stays "partial"/"missing-roles" from that now-stale
+    // verdict, and the overall decision never reaches `act.answer`. This
+    // mirrors `refreshAfterRecursiveClosure`'s existing (same-CALL) role
+    // clearing + coverage promotion exactly, generalized to same-EPOCH
+    // (carried) evidence. Bare role-name entries only: an `explicit-gap:`/
+    // `unresolved-ledger:`-prefixed entry is a disclosed, user-facing fact
+    // and is never touched here.
+    result.missing = result.missing.filter(
+      (entry) => entry.startsWith("explicit-gap:") || entry.startsWith("unresolved-ledger:"),
+    );
+    if (
+      result.missing.length === 0
+      && (result.coverage_reason === "missing-roles" || result.coverage_reason === "concerns-uncovered")
+    ) {
+      result.coverage = "focused";
+      delete result.coverage_reason;
+      delete result.blocking_next_steps;
+    }
+  }
   obligations.push({
     id: "surface-content",
     kind: "surface-content",
@@ -28347,7 +36798,7 @@ function buildReadinessObligations(
           handle: surface.handle,
           path: surface.path,
         })).slice(0, 6)
-      : served.map(readinessEvidence).slice(0, 6),
+      : [...servedWithCarried, ...ledgerShippedRequired].map(readinessEvidence).slice(0, 6),
     reason: contentComplete
       ? literalSourceAbsent !== undefined
         ? `directed literal source ${literalSourceAbsent.subject} has zero measured workspace occurrences`
@@ -28406,16 +36857,25 @@ function buildReadinessObligations(
     // re-minted `identifier:X` obligations pack 1 had discharged and proposed
     // a `find` for a body the caller already held — a relay loop, measured.
     //
-    // The read-only serve view is that missing channel, and this is its ONE
-    // readiness-obligation reader outside `epochServedEvidence`. Scoped to
+    // The read-only serve view is that missing channel. Scoped to
     // `explicit-identifier` obligations, which is the single obligation kind
     // `actionFrontierForCertificate` structurally excludes from
     // `provedImplementation` — so carried-forward evidence can never become
     // write authority, whatever a later `editObserved` does. Empty for every
     // task that is NOT a declared answer task, so nothing else moves.
-    const identifierServed = workspace === undefined
-      ? served
-      : [...served, ...readOnlyViewCarriedEvidence(workspace, result, tokenizeForEpoch(query))];
+    //
+    // R-D2: this is now the SAME `servedWithCarried` the two base obligations
+    // above (`surface-content`, `behavior-body`) read — one carried-evidence
+    // computation per pack build, not three (see its own doc comment at this
+    // function's top).
+    const identifierServed = servedWithCarried;
+    // P2-12b: the SAME fact `materializeExplicitAnswerAnchorEvidence` will
+    // act on moments after this contract is built — see
+    // `previewAnchoredIdentifiers`'s own doc comment for why this is safe to
+    // compute here rather than moving that pass earlier.
+    const anchorPreview = workspace !== undefined
+      ? previewAnchoredIdentifiers(result.surfaces, query, workspace, new FileReadCache())
+      : undefined;
     for (const identifier of explicitCodeIdentifiers(query).slice(0, 6)) {
       const exactEvidence = exactIdentifierEvidence(identifierServed, identifier);
       const semanticEvidence = result.answer_resolution
@@ -28424,7 +36884,12 @@ function buildReadinessObligations(
             .filter((surface) => surface.handle === result.answer_resolution!.resolved_handle)
             .map(readinessEvidence)
         : [];
-      const evidence = exactEvidence.length > 0 ? exactEvidence : semanticEvidence;
+      const anchorEvidence = anchorPreview?.get(identifier);
+      const evidence = exactEvidence.length > 0
+        ? exactEvidence
+        : semanticEvidence.length > 0
+          ? semanticEvidence
+          : anchorEvidence !== undefined ? [anchorEvidence] : [];
       // WP-S5 (TL_IDENTIFIER_GROUNDING, default OFF): an UNPROVED obligation
       // for a bare camelCase/PascalCase word the workspace defines nowhere is
       // dropped rather than minted — its only recovery would be a `find` this
@@ -28448,14 +36913,23 @@ function buildReadinessObligations(
         reason: evidence.length > 0
           ? exactEvidence.length > 0
             ? `explicit identifier ${identifier} is present in served evidence`
-            : `requested identifier ${identifier} resolves to the served multi-facet responsibility owner`
+            : semanticEvidence.length > 0
+              ? `requested identifier ${identifier} resolves to the served multi-facet responsibility owner`
+              : `explicit identifier ${identifier} is proved by its own answer-explicit-identifier-anchor row of this same response`
           : verifiedAbsentIdentifiersFor(result).includes(identifier)
             ? `explicit identifier ${identifier} has zero literal occurrences in the workspace (verified absent — answer from that fact or correct the name)`
             : `explicit identifier ${identifier} has no served evidence`,
       });
     }
     if (BEHAVIOR_QUERY_RE.test(query)) {
-      const callable = served.filter(hasCallableBody);
+      // R-D2: `servedWithCarried`, not `served` — see this function's own
+      // top-of-body doc comment. Without this, `behavior-body` was the one
+      // BASE obligation with no epoch memory at all: a bare-qref/task.handle
+      // REBUILD of a declared-answer task re-tested every callable-body facet
+      // against only its own fresh (often sparse) surfaces, even when an
+      // earlier call of the same task had already served the exact callable
+      // body under the identical sha.
+      const callable = servedWithCarried.filter(hasCallableBody);
       const facets = requiredQueryFacets(query);
       const missingFacets = facets.filter((facet) => !callable.some((surface) => surfaceContainsToken(surface, facet)));
       const proved = callable.length > 0 && missingFacets.length === 0;
@@ -29061,6 +37535,55 @@ export function readOnlyServedViewForTest(
   };
 }
 
+/**
+ * R-A2 item 1 (2026-09-21 fix wave, held item 4): admits a PLAIN
+ * caller-ranged serve — server.ts's own single-target/batch
+ * `targets:[{path|handle, range}]` dispatch, which never runs through
+ * `buildTaskPack` at all — into this SAME read-only view. Without this,
+ * "query -> discover -> the caller zooms by handle instead of running `next`
+ * verbatim -> a bare `{qref}` re-pack" left the re-pack blind to bytes the
+ * caller already holds: `recordReadOnlyServedSurfaces` above is reachable
+ * only from `bookShippedPackServeState`, i.e. only a task-pack BUILD ever
+ * wrote here.
+ *
+ * `epochTokens` is the CALLER's (server.ts's) determination of which
+ * declared-answer epoch this serve belongs to — this function does not
+ * second-guess it, except for one fallback: an EMPTY array means "no
+ * explicit `task.handle` resolved to an epoch", in which case this falls
+ * back to whatever epoch this SAME (workspace, lane) view already has open.
+ * That fallback can never leak a generic/edit task's state, because a live
+ * view only ever holds tokens a declared-answer pack's own
+ * `recordReadOnlyServedSurfaces` call wrote in the first place (this
+ * module's write-gate, above) — an empty/absent view (no answer epoch ever
+ * opened in this lane) makes the fallback a deliberate no-op, matching "a
+ * zoom with no task binding at all -> today's behaviour" exactly. A file
+ * whose sha has since changed is handled by the existing reader, not here:
+ * `reconstructServedEntryEvidence` re-checks the served-range ledger's sha
+ * against the file on disk every time, so a stale entry simply yields no
+ * evidence rather than needing a second invalidation path.
+ *
+ * Deliberately mirrors `recordReadOnlyServedSurfaces`'s own shape (a minimal
+ * `TaskPackSurface`; `range` is unused by that function) instead of exposing
+ * the view's internals to server.ts. Role is inferred the same coarse way
+ * every other unclassified surface gets one (`classifySurface`), since a
+ * plain ranged read carries no task-inferred role of its own.
+ */
+export function recordReadOnlyServedRangedServe(
+  workspace: string,
+  entry: { path: string; handle: string },
+  epochTokens: readonly string[],
+): void {
+  const tokens = epochTokens.length > 0
+    ? epochTokens
+    : (readOnlyServedViews.get(readOnlyServedViewKey(workspace))?.epochTokens ?? []);
+  if (tokens.length === 0) return;
+  recordReadOnlyServedSurfaces(
+    workspace,
+    [{ role: classifySurface(entry.path), handle: entry.handle, path: entry.path, range: "" }],
+    tokens,
+  );
+}
+
 function epochServedSurfaceEntries(
   workspace: string,
   epochTokens: readonly string[],
@@ -29582,6 +38105,21 @@ function buildCapabilityGaps(
   // point keeps the pack from closing `act.answer`/`act.edit` outright —
   // never by itself changing which decision this pack reaches.
   for (const absence of result.request_item_absences ?? []) {
+    // R-D2 (2026-09-21, item B): a could-not-determine entry is not a
+    // verified absence (see `TaskPackResult.request_item_absences`'s own doc
+    // comment) and the orchestrator ruling scopes its NEW code word to the
+    // `certificate.gaps` STRING array only (no new `kind` on this STRUCTURED
+    // `TaskCapabilityGap` shape). Rendering it here as `request-item-absent`
+    // would be the exact false "no occurrence" claim this fix exists to
+    // avoid, so it is skipped: the ALL-TOPIC pass that minted it is
+    // non-blocking by design (invariant (iv)) and never the reason this pack
+    // is `discover`, and it still reaches the wire via `certificate.gaps`
+    // once the pack certifies.
+    if (absence.undetermined === true) continue;
+    // FIX-G: a verified-EMPTY facet (see `request_item_absences`' doc) is
+    // covered, not absent — same reasoning as the undetermined skip above:
+    // it reaches the wire through `certificate.gaps` once the pack certifies.
+    if (absence.empty === true) continue;
     // Review finding 2(c) fix (2026-09-08): same qualification rule as
     // `decisionWire.ts`'s `projectCertificate` (the OTHER `request_item_absences`
     // reader) so `decision.gaps` and `decision.certificate.gaps` never
@@ -29594,7 +38132,11 @@ function buildCapabilityGaps(
     gaps.push({
       kind: "request-item-absent",
       recoverable: false,
-      reason: `no occurrence of ${absence.term} in scanned workspace files${qualifier}`,
+      // R-B3 (ruling 5): a served-but-incidental absence (the term DOES occur)
+      // reuses the policy's own wording for it, never "no occurrence".
+      reason: absence.incidental === true
+        ? `only an incidental mention of ${absence.term} in served workspace files${qualifier}`
+        : `no occurrence of ${absence.term} in scanned workspace files${qualifier}`,
       obligation_ids: [absence.id, absence.term],
     });
   }
@@ -29710,6 +38252,15 @@ const NEXT_CALL_GENERIC_QUERY_TERMS = new Set([
 /** A token made only of hiragana (plus the長音 mark) — see repairedNextCallTerms. */
 const HIRAGANA_ONLY_TERM_RE = /^[\p{Script=Hiragana}ー]+$/u;
 
+/** R-B3 (ruling 6): the lowercase words of `query`'s generalised read-lead span — exactly the characters `maskReadLeadSpan` blanks (empty when the rule does not fire). */
+function readLeadSpanWords(query: string): ReadonlySet<string> {
+  const masked = maskReadLeadSpan(query);
+  if (masked === query) return new Set<string>();
+  let lead = "";
+  for (let i = 0; i < query.length; i++) lead += masked[i] === query[i] ? " " : query[i];
+  return new Set(tokenizeForEpoch(lead).map((word) => word.toLowerCase()));
+}
+
 function repairedNextCallTerms(query: string): string[] {
   const terms = tokenizeForEpoch(query)
     .filter((term) => !NEXT_CALL_GENERIC_QUERY_TERMS.has(term));
@@ -29815,7 +38366,17 @@ function admitReadOnlyNextCall(call: ContinuationCall, originalQuery: string): C
     : typeof args["query"] === "string"
       ? args["query"]
       : originalQuery;
-  const terms = repairedNextCallTerms(seed);
+  // R-B3 (2026-09-21, orchestrator ruling 6): a word of the request's own
+  // generalised READ LEAD ("Walk me through", "Trace", "I want to
+  // understand") is no search term — the same treatment `NEXT_CALL_GENERIC_
+  // QUERY_TERMS` has always given the two classic leads "explain"/"describe",
+  // with the span identified by `headIsWhAfterReadLead`'s own rule instead of
+  // a word list (`maskReadLeadSpan`). Confirmed live: a pack that served
+  // nothing prescribed `find "walk"` from "Walk me through how …". Dropping
+  // the candidate leaves the chain's next producer, or an honest
+  // `await_input`, exactly as a rejected "explain" always has.
+  const leadWords = readLeadSpanWords(originalQuery);
+  const terms = repairedNextCallTerms(seed).filter((term) => !leadWords.has(term.toLowerCase()));
   if (terms.length === 0) return undefined;
 
   delete args["queries"];
@@ -29882,6 +38443,85 @@ function enumeratedItemFindCall(
   return undefined;
 }
 
+/** FIX-G G3: literal matches examined when recovering an undeclared identifier. */
+const MAX_UNDECLARED_IDENTIFIER_MATCHES = 200;
+/** FIX-G G3: one literal scan per (pack, identifier) — the contract builder runs several times per pack build. `null` = scanned, nothing qualifies. */
+const undeclaredIdentifierReadMemo = new WeakMap<TaskPackResult, Map<string, ContinuationCall | null>>();
+
+/**
+ * FIX-G G3 — the recovery read for an uncovered `identifier:<X>` that NO file
+ * declares (an env-var key, a property, a string key): a bounded ranged read of
+ * the window around X's best literal occurrence, over the pack's already-walked
+ * universe (`cachedRequestItemPass`, memoized per pack build — no new walk).
+ * "Best" = a code position (not a comment line) in a non-doc file, outside test
+ * files unless the request mentions tests, not already served. `undefined`
+ * whenever X IS declared somewhere (a `const`/`function`/`class`/`def`/… line,
+ * a column-anchored `X = …` assignment, a `#define X`) — the symbol lookup is
+ * then the right call and is kept — or when nothing qualifies (a verified
+ * absence is other machinery's job). Language-independent: pure line text.
+ */
+function undeclaredIdentifierReadCall(
+  result: TaskPackResult,
+  identifier: string,
+  query: string,
+  workspace: string,
+): ContinuationCall | undefined {
+  let memo = undeclaredIdentifierReadMemo.get(result);
+  if (memo === undefined) {
+    memo = new Map();
+    undeclaredIdentifierReadMemo.set(result, memo);
+  }
+  const key = `${identifier}\u0000${query}`;
+  if (memo.has(key)) return memo.get(key) ?? undefined;
+  const call = computeUndeclaredIdentifierReadCall(result, identifier, query, workspace);
+  memo.set(key, call ?? null);
+  return call;
+}
+
+function computeUndeclaredIdentifierReadCall(
+  result: TaskPackResult,
+  identifier: string,
+  query: string,
+  workspace: string,
+): ContinuationCall | undefined {
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(identifier)) return undefined;
+  const pass = cachedRequestItemPass(workspace, result);
+  if (pass === undefined) return undefined;
+  let matches: ReturnType<typeof scanLiteral>;
+  try {
+    matches = scanLiteral(identifier, workspace, { files: pass.universe.files, contentCache: pass.contentCache });
+  } catch {
+    return undefined;
+  }
+  const bounded = matches.slice(0, MAX_UNDECLARED_IDENTIFIER_MATCHES);
+  if (bounded.length === 0) return undefined;
+  const escaped = escapeRegExp(identifier);
+  const declarationShapes = [
+    declarationLineRegex(identifier),
+    new RegExp(`^\\s*${escaped}\\s*(?::[^=]*)?=(?!=)`, "u"),
+    new RegExp(`^\\s*#\\s*define\\s+${escaped}\\b`, "u"),
+  ];
+  if (bounded.some((match) => match.text !== undefined && declarationShapes.some((re) => re.test(match.text!)))) return undefined;
+  const allowTests = queryMentionsTests(query);
+  const surfaces = codeTaskPackSurfaces(result.surfaces).filter(hasServedCode);
+  for (const match of bounded) {
+    if (classifySurface(match.path) === "doc") continue;
+    if (!allowTests && isTestConcernPath(match.path)) continue;
+    const trimmed = (match.text ?? "").trim();
+    if (trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue;
+    const served = servedLineSpansOf(surfaces.filter((surface) => surface.path === match.path));
+    if (served.some((span) => span.start <= match.line && match.line <= span.end)) continue;
+    const content = readCached(workspace, match.path);
+    if (content === undefined) continue;
+    const window = boundedCallerWindow(match.line, countLines(content));
+    return {
+      tool: "read_file",
+      arguments: { query, targets: [{ path: match.path, range: `${window.start}-${window.end}` }], content: "auto" },
+    };
+  }
+  return undefined;
+}
+
 function nextCallForUnresolved(
   result: TaskPackResult,
   obligations: readonly TaskReadinessObligation[],
@@ -29905,7 +38545,18 @@ function nextCallForUnresolved(
     return enumeratedItemFindCall(obligations, workspace);
   }
   const identifier = unresolved.id.startsWith("identifier:") ? unresolved.id.slice("identifier:".length) : undefined;
-  if (identifier) return { tool: "search_files", arguments: { action: "symbols", query: identifier } };
+  if (identifier) {
+    // FIX-G G3 (2026-09-27, eval-0927 "also seen"): a symbol lookup is the
+    // right recovery only for a name something DECLARES. An env-var key /
+    // property / string key (`HTTP_TIMEOUT_MS`) is declared nowhere, so the
+    // symbol-scoped find answered with an unrelated symbol and no `next` — a
+    // dead end. Read the window around its best literal occurrence instead,
+    // query-bearing so the response re-enters the pack with a decision.
+    const literalRead = workspace === undefined
+      ? undefined
+      : undeclaredIdentifierReadCall(result, identifier, query, workspace);
+    return literalRead ?? { tool: "search_files", arguments: { action: "symbols", query: identifier } };
+  }
   const connection = result.wiring?.connections[0];
   // Raw-query fallbacks manufactured junk sweeps (references on the whole
   // sentence / a stopword — 2026-07-31 T13 rep0 forensics); endpoint recovery
@@ -30282,25 +38933,103 @@ export function buildTaskExecutionContract(
   // independent correctness ledger (design §4.1). Must run before
   // `projectCompletion` so its verdict already reflects them.
   const requestItemReadiness = buildRequestItemReadiness(workspace, query, profile, result, obligations);
+  // FIX-G (2026-09-27): the facet completion gate — see `buildFacetReadiness`'s
+  // own header. `undefined` for every facet-free query (no read, no mutation),
+  // so an ordinary pack is byte-identical. Reconciled BEFORE the request-item
+  // obligations join the array: a point a resolved facet owns must not also
+  // block (or be disclosed undetermined) under its request-item id.
+  const facetReadiness = buildFacetReadiness(workspace, query, profile, result);
+  const facetOwnedItemIds = facetReadiness === undefined
+    ? new Set<string>()
+    : reconcileRequestItemsWithFacets(requestItemReadiness, facetReadiness, query);
+  if (facetReadiness !== undefined) reconcileAnalysisSourceFromFacets(obligations, facetReadiness);
   obligations.push(...requestItemReadiness.obligations);
-  if (requestItemReadiness.gap !== undefined) {
-    result.request_item_gap = requestItemReadiness.gap;
+  if (facetReadiness !== undefined) obligations.push(...facetReadiness.entries.map((entry) => entry.obligation));
+  const requestItemGap = mergeFacetGap(requestItemReadiness.gap, facetReadiness, query, workspace);
+  if (requestItemGap !== undefined) {
+    result.request_item_gap = requestItemGap;
   }
   // DESIGN-v0.15 R1: see `TaskPackResult.request_item_absences`'s own doc
   // comment for the wire path this feeds (`buildCapabilityGaps`, gated to a
   // `discover` decision by D-4).
-  if (requestItemReadiness.absences.length > 0) {
+  {
     // TL142-01B: MERGE, never overwrite. `promoteExecutedSearchAbsences` may
     // already have recorded an absence an EXTERNAL executed search proved, and
     // this builder runs several times per pack — a plain assignment silently
     // discarded that disclosure on any pack whose own request-item pass also
     // found something.
-    const existing = result.request_item_absences ?? [];
-    const merged = [...existing];
+    //
+    // R-B1 (2026-09-21, review B3) — THE ONE EMISSION POINT for this pack's
+    // OWN request-item absences (ids `ri-N`; every path in
+    // `buildRequestItemReadiness` applies the served-evidence veto before an
+    // entry reaches `absences`). The merge above kept them append-only across
+    // those builder runs, so an absence minted by an EARLY run — before a
+    // later stage put the implementing file on the wire — survived the later
+    // run whose veto rejected it, and the certificate shipped the absence
+    // beside the very body that contradicts it. Every carried `ri-N` entry is
+    // therefore RE-VETOED here against the evidence of THIS run (the same
+    // single policy, `absenceContradictsServedEvidence`), so accumulation can
+    // keep a still-true disclosure but can never keep a contradicted one.
+    // External (`identifier:*`) proofs keep the merge-never-overwrite rule
+    // and their own staleness gate.
+    const carried = result.request_item_absences ?? [];
+    let keptCarried = carried;
+    if (workspace !== undefined && carried.some((entry) => REQUEST_ITEM_ABSENCE_ID_RE.test(entry.id))) {
+      const itemTextById = new Map(extractRequestItems(query).map((item) => [item.id, item.text]));
+      const evidenceNow = epochServedEvidence(workspace, result, tokenizeForEpoch(query), profile);
+      keptCarried = carried.filter((entry) => !REQUEST_ITEM_ABSENCE_ID_RE.test(entry.id)
+        || !absenceContradictsServedEvidence(entry.term, itemTextById.get(entry.id) ?? entry.term, evidenceNow, workspace));
+    }
+    // FIX-G: a facet's disclosure is recomputed on every build of this pack
+    // (its served spans can only shrink under a trim), so a carried `facet-<n>`
+    // entry is replaced, never accumulated; and a carried could-not-determine
+    // for a point a resolved facet now owns is superseded by the facet's own
+    // determination (G5) — the same rule `reconcileRequestItemsWithFacets`
+    // applied to this build's own entries.
+    if (facetReadiness !== undefined) {
+      keptCarried = keptCarried.filter((entry) => !entry.id.startsWith("facet-")
+        && !(entry.undetermined === true && facetOwnedItemIds.has(entry.id)));
+    }
+    const merged = [...keptCarried];
     for (const absence of requestItemReadiness.absences) {
       if (!merged.some((entry) => entry.term === absence.term)) merged.push(absence);
     }
-    result.request_item_absences = merged;
+    // R-D2 (item B): the SAME array, the SAME carry-forward/re-veto
+    // discipline just above (a later run's evidence can invalidate an
+    // undetermined disclosure exactly as it invalidates a verified-absent
+    // one — `REQUEST_ITEM_ABSENCE_ID_RE`/`absenceContradictsServedEvidence`
+    // key on `id`/`term` alone and do not care which flavor an entry is), so
+    // this reuses that protection rather than re-implementing it. Tagged
+    // with `undetermined:true` so `decisionWire.ts`'s projector renders the
+    // NEW `request-item-undetermined` code word instead of
+    // `request-item-absent`; `scope_complete`/`omitted_count` do not apply
+    // to a could-not-determine verdict and are never read for a tagged
+    // entry (see the projector), so they are set to their inert defaults.
+    for (const item of requestItemReadiness.undetermined) {
+      if (merged.some((entry) => entry.term === item.term)) continue;
+      merged.push({
+        id: item.id,
+        term: item.term,
+        scope_complete: false,
+        omitted_count: 0,
+        undetermined: true,
+        undetermined_reason: capWords(item.reason, 20),
+      });
+    }
+    // FIX-G: facet disclosures ride the SAME array (decisionWire.ts's
+    // `projectCertificate` renders them into `certificate.gaps`): a verified-
+    // empty facet as `explicit-gap:request-item-empty:<facet>:<subject> (...)`,
+    // a could-not-determine one as the existing
+    // `explicit-gap:request-item-undetermined:<facet>:<subject> (...)`.
+    // Neither is a verified absence, so neither claims a scan scope.
+    for (const disclosure of facetReadiness?.disclosures ?? []) {
+      if (merged.some((entry) => entry.term === disclosure.term)) continue;
+      merged.push(disclosure.word === "request-item-empty"
+        ? { id: disclosure.id, term: disclosure.term, scope_complete: false, omitted_count: 0, empty: true, empty_reason: capWords(disclosure.reason, 24) }
+        : { id: disclosure.id, term: disclosure.term, scope_complete: false, omitted_count: 0, undetermined: true, undetermined_reason: capWords(disclosure.reason, 24) });
+    }
+    if (merged.length > 0) result.request_item_absences = merged;
+    else delete result.request_item_absences;
   }
   const completion = projectCompletion(result, obligations);
   result.coverage = completion.coverage;
@@ -30641,12 +39370,49 @@ export function buildTaskExecutionContract(
   const enumeratedItemOpen = obligations.some((obligation) =>
     obligation.status !== "proved"
     && obligation.id.startsWith(ENUMERATED_ITEM_OBLIGATION_PREFIX));
+  // R-B1 (2026-09-21, review B2): the SAME contradiction F-V13-6 documents
+  // just above, for the other stricter obligation class. An uncovered
+  // BLOCKING request item (`request-item:*` — only ever minted for a
+  // mixed-kind point or an independent-question clause; the ALL-TOPIC branch
+  // mints none, invariant (iv)) is the proof model saying a point the caller
+  // asked about has no served body yet. Before this, the route's own
+  // "discovery is closed" verdict suppressed EVERY candidate — including
+  // `request_item_gap.next_call`, the one bounded read of that point's own
+  // candidates — so the contract fell to awaiting-input and the no-dead-end
+  // guard rewrote it to a bare `search_files tree`, whose response carries
+  // no `next` and no decision (confirmed live: the concern's evidence sat in
+  // the unserved remainder of the very file the pack had half-served). The
+  // escape stays bounded: the gap call is re-derived from the CURRENT proof
+  // model each turn and targets only unserved candidate windows, so once
+  // they are served the item is covered, absent, or could-not-determine and
+  // nothing is proposed again.
+  //
+  // Lifted ONLY when that point actually has its own bounded call. A request
+  // item with no candidate to read (a doc-only mention, an unreadable file,
+  // an unbounded scan) is not helped by re-opening discovery — that would
+  // only let an unrelated generic fallback (a zoom of some other surface)
+  // through, and the honest state for such an item is the awaiting-input
+  // that names it.
+  const requestItemOpen = obligations.some((obligation) =>
+    obligation.status !== "proved"
+    && obligation.id.startsWith(REQUEST_ITEM_OBLIGATION_PREFIX));
+  const requestItemCall = requestItemOpen ? result.request_item_gap?.next_call : undefined;
   const routeClosedAnswer = result.route?.action === "answer_from_handles"
     && (result.route.max_additional_tl_calls ?? 0) === 0
-    && !enumeratedItemOpen;
+    && !enumeratedItemOpen
+    && requestItemCall === undefined;
+  // R-B1 (review B2): `proofNext` only reaches the request-item batch when
+  // the FIRST uncovered obligation is itself a request item. When it is not
+  // (a pack that served nothing yet leaves `surface-content` first), the
+  // point's own candidate read must still outrank the pack's generic
+  // pre-contract next — confirmed live: a `find` for the request's LEAD VERB
+  // ("walk", from "Walk me through …") was prescribed while the batched read
+  // of the one file that answers both points sat unused. Order for an open
+  // request item: its candidate windows first, the generic fallbacks after.
+  const requestItemNext = requestItemCall;
   const candidateCall = accepted || humanChoicePending || routeClosedAnswer
     ? undefined
-    : [artifactFallback, continuationCall, proofNext, parsedNextAfterProof, gapFallback, partialFallback, missingAffordance]
+    : [artifactFallback, continuationCall, proofNext, requestItemNext, parsedNextAfterProof, gapFallback, partialFallback, missingAffordance]
         .filter((call): call is ContinuationCall => call !== undefined)
         .map((call) => admitReadOnlyNextCall(call, query))
         .filter((call): call is ContinuationCall => call !== undefined)
@@ -30738,7 +39504,19 @@ export function buildTaskExecutionContract(
   // choose-candidate keeps the 2026-07-16a fence: a single served candidate is
   // not authorization — its route already sanctions a bounded follow-up, so it
   // is not a dead end.
-  const grantServedTerminal = requiredServed && readiness === "needs-followup" && !humanChoicePending;
+  // R-B1 (2026-09-21, review B2): never while a BLOCKING request item is
+  // still uncovered. The grant's own words are "the selected windows of every
+  // required surface are served — act on the served evidence"; an uncovered
+  // `request-item:*` is the proof model saying a point the caller asked about
+  // has NO served body, so that guidance is false for it. Worse, the wire
+  // re-sites this branch onto `discover` with a restoring zoom of evidence the
+  // caller already holds (decisionWire.ts, ruling 6 step 2), which executes to
+  // a bodyless receipt with no decision — confirmed live for a concern whose
+  // only candidate is an undecodable file. Without the grant the branch is
+  // "no evidence-grounded call remains", whose `await_input` NAMES the open
+  // concern (invariant (iii)). A request item with a call never reaches here
+  // (`requestItemCall` keeps `nextCall` defined).
+  const grantServedTerminal = requiredServed && readiness === "needs-followup" && !humanChoicePending && !requestItemOpen;
   const actionFrontier = actionFrontierForCertificate(
     result,
     profile,
@@ -31379,13 +40157,42 @@ export function enforceNoDeadEndContract(
   if ((result.concern_ambiguities?.length ?? 0) > 0) return;
   if (grantsTerminal || hasBoundedCall) return;
   const surfaces = codeTaskPackSurfaces(result.surfaces);
-  const codeless = surfaces.find((surface) => !hasServedCode(surface));
-  const unmatched = unmatchedConcernTokens(query, surfaces)[0];
-  const candidates: ContinuationCall[] = [
-    ...(codeless !== undefined ? [{ tool: "read_file", arguments: { handle: codeless.handle } } as ContinuationCall] : []),
-    ...(unmatched !== undefined ? [{ tool: "search_files", arguments: { action: "find", query: unmatched } } as ContinuationCall] : []),
-    { tool: "search_files", arguments: { action: "tree" } },
-  ];
+  // R-B1 (2026-09-21, review B2): an open REQUEST ITEM changes what "one
+  // bounded evidence call" may be. Neither a `search_files tree` nor a
+  // `find` can discharge a request item, and neither response carries a
+  // decision or a `next` — so a verbatim follower was stranded there, and
+  // only an out-of-band `{qref}` re-pack recovered (confirmed live on this
+  // repository and on a one-file fixture whose concern sat in the unserved
+  // remainder of the named file). For a request-item gap the candidates are,
+  // in order: (1) the point's own batched read (`request_item_gap`: the
+  // window where its wording occurs in a candidate's unserved part, or the
+  // unserved candidate itself), (2) a query-bearing read of the unserved
+  // remainder of a partly served surface when no position is known. Both
+  // carry the query, so the response re-enters the pack and answers with a
+  // decision. Never a bare tree. With nothing unexecuted left the contract
+  // stays awaiting-input, whose `unresolved` names the open concern — an
+  // honest terminal state, never a dead end.
+  const openRequestItem = (contract.falsification?.unresolved ?? []).some((id) => id.startsWith(REQUEST_ITEM_OBLIGATION_PREFIX));
+  let candidates: ContinuationCall[];
+  if (openRequestItem) {
+    const gapCall = result.request_item_gap?.next_call as ContinuationCall | undefined;
+    const remainderReads: ContinuationCall[] = [];
+    for (const surface of surfaces) {
+      const remaining = surface.remaining_ranges?.[0];
+      if (!hasServedCode(surface) || remaining === undefined) continue;
+      remainderReads.push({ tool: "read_file", arguments: { query, targets: [{ path: surface.path, range: remaining }], content: "auto" } });
+      break;
+    }
+    candidates = [...(gapCall !== undefined ? [gapCall] : []), ...remainderReads];
+  } else {
+    const codeless = surfaces.find((surface) => !hasServedCode(surface));
+    const unmatched = unmatchedConcernTokens(query, surfaces)[0];
+    candidates = [
+      ...(codeless !== undefined ? [{ tool: "read_file", arguments: { handle: codeless.handle } } as ContinuationCall] : []),
+      ...(unmatched !== undefined ? [{ tool: "search_files", arguments: { action: "find", query: unmatched } } as ContinuationCall] : []),
+      { tool: "search_files", arguments: { action: "tree" } },
+    ];
+  }
   // A-F2: re-opening a call whose result is already consumed is the same
   // non-progress this guard exists to prevent, one indirection removed. With a
   // ledger in hand the guard picks the first UNEXECUTED candidate; with every
@@ -32218,7 +41025,7 @@ export async function candidateToSurface(
     ? (nulStrippedByCache ? "nul-stripped" : undefined)
     : nulStrippedByCache ? `${summarizedWhy}; nul-stripped` : summarizedWhy;
   const why = callerScoped && strippedWhy
-    ? `${strippedWhy}; caller-supplied`
+    ? appendWhySegmentOnce(strippedWhy, "caller-supplied")
     : strippedWhy;
 
   // Build likely_edits: a single generic hint based on role (or the
@@ -32362,7 +41169,7 @@ export async function candidateToSurface(
     }
   }
 
-  return {
+  const surface = {
     role,
     handle: handleId,
     path: candidate.path,
@@ -32384,6 +41191,33 @@ export async function candidateToSurface(
       : {}),
     ...(outline ? { outline } : {}),
   };
+  // B1 fix (2026-09-21). A SEPARATE, narrower mark from `markCallerRangeSurface`
+  // below (the P2/2026-09-19 mark `dedupeTrimAndPersist` still sets from `why`
+  // — deliberately UNCHANGED, see that call site's own comment for why: it
+  // feeds `settleCallerRangeDelivery`/`reconcileCallerRangeRemaining`/
+  // `applyFoldSmallRemainder`, disclosure-accuracy functions that
+  // `firstPackCompleteness.spec.ts`'s "B" suite proves must keep reconciling
+  // `remaining_ranges` for ANY caller-named surface, ranged or not — narrowing
+  // THAT mark broke it: a range-less named target's stale `remaining_ranges`
+  // (double-booked with the surface's own whole `range`) went unreconciled).
+  //
+  // This mark answers a DIFFERENT, narrower question those functions never
+  // needed to ask: was THIS call's own targets[]/paths[] entry an EXPLICIT
+  // range/ranges (`candidate.callerRange === true`, the pre-existing, precise
+  // bit the widening suppression above already keys on — never survives onto
+  // the returned TaskPackSurface as an ordinary field, so `candidateToSurface`
+  // — the one place every surface is built — is the only point it can be
+  // captured). Consumed ONLY by `unservedCallerRangedTargetsNext`
+  // (canonicalDecision.ts) — the actual WITHHOLD-THE-CERTIFICATE gate — so
+  // that gate binds ruling case (a) alone: an explicit caller/continuation
+  // range. A range-less candidate inside a query-bearing pack — however it
+  // got into targets[], caller-typed or a server `next` re-offering it (B1's
+  // repro) — never sets this mark, so the gate never withholds a certificate
+  // or mints a paging `next` for it; `remaining` stays exactly what ruling
+  // (b)/the HEAD behaviour says it always was: an offered zoom, computed by
+  // the UNCHANGED broader mark's own reconciliation.
+  if (candidate.callerRange === true) markExplicitRangeSurface(surface);
+  return surface;
 }
 
 // ---------------------------------------------------------------------------
@@ -32828,6 +41662,27 @@ interface ServedPackRecord {
    * compact receipt on a qref replay rather than silently dropping that fact
    * — the same structural gap tryServeSubsetReceipt's own guard closed for
    * its (unstored, ad-hoc) record.
+   *
+   * P1-6 (round-4 evaluation, 2026-09-28): `remaining_ranges` joins the two
+   * fields above for the SAME reason, closing the gap `recordPredatesAdditional
+   * ServedEvidence`'s own doc comment already named ("`prev.surfaces` lacks
+   * `remaining_ranges` (never stored on `ServedPackRecord`), so a capture-time
+   * PARTIAL surface's nominal `range` reads as fully covered here"). Without
+   * it, `servedLineSpansOf(prev.surfaces...)` — fed a `content_completeness:
+   * "partial"` surface whose disclosed gaps are invisible — subtracts NO holes
+   * from the nominal `range` and treats the WHOLE numeric span as already
+   * served, even when most of it was never shipped. Live repro
+   * (classFlowOver64Long): a capture-time surface `range:"1-564"`,
+   * `content_completeness:"partial"`, disclosed `remaining_ranges:["495-564",
+   * "565-620"]` after shipping only lines 1-494 — a LATER call's genuinely new
+   * serve of lines 495-514 (real bytes, on the session's servedRangeLedger)
+   * numerically falls inside the stale record's [1,564] nominal span, so the
+   * staleness check answered "nothing new" and a `{qref}` re-pack after that
+   * later call CERTIFIED an `act.answer` replayed the ORIGINAL, now-superseded
+   * `discover` verbatim — the loop this record exists to prevent. Threading
+   * the real gaps through lets `servedLineSpansOf` compute the record's TRUE
+   * prior-served extent ([1,494] here), so the newly-ledgered 495-514 is
+   * correctly seen as evidence the record never captured.
    */
   surfaces: Array<{
     handle: string;
@@ -32836,6 +41691,7 @@ interface ServedPackRecord {
     role: string;
     content_completeness?: "partial";
     total_lines?: number;
+    remaining_ranges?: string[];
   }>;
   /**
    * D2 (F-B2, 2026-08-21): the workspace_state THIS record's own `surfaces`
@@ -33719,9 +42575,10 @@ function captureServedPack(
     path: s.path,
     range: s.range,
     role: s.role,
-    // B5: thread the honesty markers through — see ServedPackRecord.surfaces.
+    // B5/P1-6: thread the honesty markers through — see ServedPackRecord.surfaces.
     ...(s.content_completeness !== undefined ? { content_completeness: s.content_completeness } : {}),
     ...(s.total_lines !== undefined ? { total_lines: s.total_lines } : {}),
+    ...(s.remaining_ranges !== undefined ? { remaining_ranges: [...s.remaining_ranges] } : {}),
   }));
   const record: ServedPackRecord = {
     lane: currentSessionLane(),
@@ -34419,8 +43276,33 @@ function alternativeProgressAxis(
   }
   // Rule 3 — a required surface with no served code re-serves its own handle
   // (the contract builder's `gapFallback`, reachable after suppression).
+  //
+  // P1-8 (2026-09-28, review round 4/5, kotlinFun): `hasServedCode` asks only
+  // whether THIS REBUILD's own in-memory `TaskPackSurface` carries inline
+  // `.code` — which is FALSE for a candidate-list surface this same response
+  // ships as `prior` (already fully resident, so the wire correctly omits the
+  // bytes rather than re-sending them). Rule 3 read that omission as "never
+  // served" and kept re-offering the SAME candidate's handle every time the
+  // discovery bundle it was bundled with got suppressed as already-executed —
+  // observed live (kotlinFun): an `ambiguous-target` choose-candidate pack
+  // whose OWN evidence already served both candidates in full re-proposed
+  // candidate A's handle, then (once THAT read came back as a fresh, un-deduped
+  // serve — the plain `content:auto` handle route does not consult the
+  // ledger either) candidate B's handle, then dead-ended on a bodyless
+  // `code-unchanged` receipt with no `next`. Gate Rule 3 on the SAME
+  // session-wide served-range ledger `receiptContinuationDisposition` already
+  // trusts over the record's own self-report (`surfaceRangeShipped` — "does
+  // the caller already hold these bytes", not "does this rebuild's object
+  // happen to embed them"): a surface the ledger proves already shipped is
+  // never re-offered, so once every candidate is genuinely resident this axis
+  // contributes nothing and `repairSuppressedNextCall` can reach its own
+  // honest "exhausted" disclosure instead of looping.
   for (const surface of surfaces) {
-    if (surface.required !== false && !hasServedCode(surface)) {
+    if (
+      surface.required !== false
+      && !hasServedCode(surface)
+      && !surfaceRangeShipped(workspace, surface.path, surface.range)
+    ) {
       candidates.push({ tool: "read_file", arguments: { handle: surface.handle } });
     }
   }
@@ -34999,6 +43881,201 @@ function answerRecordPredatesProvenAbsence(
     && tokenizeForEpoch(entry.term).some((token) => epochTokens.has(token)));
 }
 
+/**
+ * FIX-D (TL-06, 2026-09-21, plan §8.1) — A NON-TERMINAL DECLARED-ANSWER
+ * RECORD MUST NOT BE REPLAYED ONCE THIS TASK HAS SERVED EVIDENCE THE RECORD
+ * NEVER CAPTURED.
+ *
+ * CONFIRMED regression (repackMonotonicitySpawned.spec.ts "same-task record
+ * supersession" cases; live trace against both a hand-written fixture and
+ * the four-concern quality-first fixture, `qualityFirst0143.acceptance.
+ * spec.ts`'s Q05). A declared `task.profile:"answer"` task's pathless
+ * discover seed serves one or more surfaces and proposes the rest of the
+ * request's targets as its own `next`; the caller runs that `next` (explicit
+ * `targets` + `task.handle`) and this SAME task serves the remaining
+ * surfaces. A bare `{qref, cwd}` resume — or a plain query resend with no
+ * `task` field, or a `task.handle` continuation that happens to carry no new
+ * `targets` — all fingerprint like the ORIGINAL pathless seed
+ * (`computePackFingerprint` hashes `paths`, which the seed never had), so
+ * `tryServeCachedPack` / `tryServeSemanticDuplicatePack` match the SEED
+ * record, several calls back in the bounded window, and (absent this check)
+ * `revalidateRecordToReceipt` replayed it verbatim: the seed's own stale
+ * `discover`, the identical already-executed `next`, the identical `gaps` —
+ * as if the intervening targets-bearing call had never happened. A verbatim
+ * follower then loops.
+ *
+ * MUST CHECK BOTH STORES. A naive reading of `cumulativeEligible` suggests a
+ * declared-answer task's later progress lives ONLY in the WP-S11 read-only
+ * served view — but `cumulativeEligible` is recomputed PER CALL from THAT
+ * call's OWN `profile_binding.source`, not once for the whole task:
+ * `inheritDeclaredTaskProfile` (server.ts) only injects `taskProfile:
+ * "answer"` onto a continuation when auto-inference would otherwise pick
+ * something else, so a continuation whose wording ALSO auto-infers "answer"
+ * on its own is left exactly as sent and binds with `source:"inferred"`,
+ * NOT "explicit" — measured live: the seed call (explicit) and its own
+ * targets-bearing follow-up (inferred) disagreed on `cumulativeEligible`
+ * within the SAME task, so the follow-up's surfaces landed in the
+ * CUMULATIVE served-surface log while the seed's own surfaces sat in the
+ * read-only view. A check that only reads one store therefore still missed
+ * same-task progress recorded by a differently-sourced sibling call. Both
+ * `queryServedSurfaces` (the cumulative log) and `readOnlyServedEntries`
+ * (WP-S11) are consulted for exactly this reason — together they are the
+ * complete picture `epochServedEvidence` itself already assembles for an
+ * answer-profile reader.
+ *
+ * SCOPED TO A DECLARED-ANSWER RECORD ONLY (`prev.taskProfile === "answer"`),
+ * deliberately narrower than "any record with a newer signal": the reviewed
+ * constraint on `answerRecordPredatesProvenAbsence` just above already found
+ * that declining a NON-answer record on "any newer signal" reopens a concern
+ * its own concern-token ledger had correctly closed (sequenceCorpus.spec.ts
+ * I1/I3) — that finding was about a newer SEARCH RESULT, not a served
+ * surface, but absent a control case proving the served-surface signal is
+ * equally safe for that ledger, staying inside the already-reviewed
+ * declared-answer boundary is the honest, minimal fix; a change/generic
+ * record's cumulative-log trace is read by the EXISTING, narrower
+ * `createPendingRecordIsStale` (its own "pending create" conjunct) and is
+ * otherwise left exactly as before this fix. Never mints a new store and
+ * never writes request-item state into the cumulative log — it only READS
+ * the two stores `epochServedEvidence` already reads.
+ *
+ * Never fires for a record that already reached a certified terminal
+ * decision (`recordCertifiedTerminal`): a complete `act.answer`/`act.edit`
+ * has nothing left to discover, so restating it is correct and is exactly
+ * the receipt economy this path exists for (TL142-01C's own conjunct, same
+ * rule `createPendingRecordIsStale` applies).
+ *
+ * Self-limiting like its siblings: the rebuild this decline forces captures
+ * every path this task now holds, so the very next identical repeat is
+ * served from the (now current) receipt again — this cannot loop.
+ */
+function recordPredatesAdditionalServedEvidence(workspace: string, prev: ServedPackRecord): boolean {
+  if (prev.taskProfile !== "answer") return false;
+  if (recordCertifiedTerminal(prev.executionContract)) return false;
+  const capturedPaths = new Set(prev.surfaces.map((s) => s.path));
+  if (queryServedSurfaces(workspace, workspace, { epochTokens: prev.epochTokens })
+    .some((entry) => !capturedPaths.has(entry.path))) return true;
+  const readOnlyEntries = readOnlyServedEntries(workspace, prev.epochTokens);
+  if (readOnlyEntries.some((entry) => !capturedPaths.has(entry.path))) return true;
+  // R-A2 item 1 (2026-09-21): a plain caller-ranged zoom
+  // (`recordReadOnlyServedRangedServe`, server.ts) of a path THIS record
+  // already knew about is still evidence the record never captured when it
+  // reaches lines the record's own surfaces for that path never served — the
+  // path-only checks above cannot see it (a zoom never introduces a NEW path,
+  // only new lines of a known one). Compares the ledger's CURRENT spans for
+  // that path (which the zoom's own `recordServedRange` call already
+  // advanced, same session) against the union this record's own surfaces
+  // declared at capture time (`servedLineSpansOf`, the same partial-aware
+  // union `isWholeAuthoritySurface`'s callers already trust).
+  //
+  // P1-6 (round-4 evaluation, 2026-09-28), fix 1 of 2: `prev.surfaces` USED TO
+  // lack `remaining_ranges` (never stored on `ServedPackRecord`), so a
+  // capture-time PARTIAL surface's nominal `range` read as fully covered here
+  // — the opposite of the safe direction this comment used to claim. Live
+  // repro (classFlowOver64Long): a seed record's own surface disclosed
+  // `range:"1-564"` with only lines 1-494 actually shipped
+  // (`remaining_ranges:["495-564","565-620"]`); a later call served lines
+  // 495-514 for real (on the ledger this loop reads), but `servedLineSpansOf`
+  // — seeing no `remaining_ranges` on the STORED surface — treated the WHOLE
+  // [1,564] as prior-served, so `lineSpansCover` answered "yes" for the
+  // genuinely-new 495-514 span and this function returned `false`. Fixed by
+  // threading `remaining_ranges` through `ServedPackRecord.surfaces` (see its
+  // own doc comment, and `captureServedPack`/`tryServeSubsetReceipt`'s record
+  // builders), so `servedLineSpansOf` sees the record's TRUE prior-served
+  // extent here, same as it always has for a freshly-built (never-stored)
+  // `TaskPackSurface[]`.
+  //
+  // P1-6, fix 2 of 2: this loop used to iterate `readOnlyEntries` ONLY,
+  // checking the ledger for a path only when THAT path also happened to
+  // appear in the WP-S11 read-only store — but the "MUST CHECK BOTH STORES"
+  // reasoning above applies just as much to a RANGE-extension of a known
+  // path as it does to a wholly NEW path: live repro (replayFlipGrFollow) had
+  // the seed's own surface at `src/größe.ts:"1-4"` (`remaining_ranges:
+  // ["5-61"]`), and the task's own certified `act.answer` follow-up (an
+  // "inferred"-bound continuation) served lines 5-17 of the SAME path — but
+  // that continuation's surface landed in the CUMULATIVE log
+  // (`queryServedSurfaces`), which carries no per-entry range to compare and
+  // whose path-only check above cannot see it (größe.ts is already in
+  // `capturedPaths`), while `readOnlyEntries` came back EMPTY for this task —
+  // so the ledger check never ran at all. The ledger itself
+  // (`getSession(workspace).servedRangeLedger`) is a single, store-agnostic,
+  // byte-level record of every range this session has actually shipped for a
+  // path, regardless of which attribution store recorded the surface that
+  // shipped it — iterating `capturedPaths` directly (every path THIS record
+  // claims to know about) checks it uniformly for both stores' shape, instead
+  // of only the one `readOnlyEntries` happened to enumerate.
+  for (const path of capturedPaths) {
+    const priorSpans = servedLineSpansOf(prev.surfaces.filter((s) => s.path === path));
+    const ledgerRanges = getSession(workspace).servedRangeLedger.get(path)?.ranges ?? [];
+    if (ledgerRanges.some(([start, end]) => !lineSpansCover(priorSpans, { start, end }))) return true;
+  }
+  return false;
+}
+
+/**
+ * FIX-FC (eval-0927 review finding 16, 2026-09-27) — THE GENERIC/EDIT-PROFILE
+ * COUNTERPART OF `recordPredatesAdditionalServedEvidence`, ABOVE.
+ *
+ * Live repro (`changeEn`-shaped query, no declared profile): call 1 (pathless
+ * query) locates ambiguously and captures a `confirm_candidates`/discovery
+ * record (`SEED`, fingerprinted over EMPTY `paths`). Call 2 (a bare `{qref}`
+ * replay) finds `isCandidateListPackPending` armed, AUTO-BINDS the pending
+ * candidate as `args.paths` (readCodeTaskPack.ts's own B1c seam, a few
+ * thousand lines above), which changes `computePackFingerprint`'s hash (it
+ * hashes `paths`) and reaches a genuinely fresh, correctly certified
+ * `act.edit` — captured as ITS OWN record under a DIFFERENT fingerprint, and
+ * the successful bind CLEARS the pending-candidate memory (the ambiguity is
+ * resolved, by the same B1c seam's own "else" arm). Call 3 — the SAME bare
+ * `{qref}` replay AGAIN — now finds no pending candidate to bind (call 2
+ * consumed it), so it resolves right back to the ORIGINAL, pathless args,
+ * hashes to SEED's fingerprint again, and `tryServeCachedPack` restates
+ * SEED's stale, pre-resolution `confirm_candidates` verdict verbatim — as if
+ * call 2's certification had never happened. `act.edit` -> `discover`.
+ *
+ * `recordPredatesAdditionalServedEvidence` cannot be widened to catch this:
+ * its `prev.taskProfile !== "answer"` early return is a REVIEWED constraint
+ * (its own doc comment names the regression widening it once caused,
+ * sequenceCorpus.spec.ts I1/I3) and this is a generic/edit task. This is a
+ * NARROWER, DIFFERENT, ADDITIVE question — not "does more CONCERN evidence
+ * exist", but "did THIS SAME TASK, since `prev` was captured, reach a
+ * CERTIFIED TERMINAL decision (`recordCertifiedTerminal`: `act.answer` OR
+ * `act.edit`) that `prev` itself never reached" — the exact question
+ * `tryServeSupersedingCertifiedRecord` already asks for the answer-profile
+ * case (its own `candidate.taskProfile !== "answer"` filter excludes every
+ * other profile from BOTH ends of that check; see the companion fix at that
+ * function's own call site).
+ *
+ * Scoped to `prev.taskProfile !== "answer"` explicitly at both call sites
+ * (never invoked for an answer-profile `prev`), so the already-reviewed
+ * answer-profile path is untouched byte-for-byte by this addition.
+ */
+function recordSupersededByLaterCertifiedTerminal(
+  workspace: string,
+  prev: ServedPackRecord,
+  lane: string,
+): boolean {
+  if (recordCertifiedTerminal(prev.executionContract)) return false;
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
+  if (records === undefined) return false;
+  // `prev` may be a `receiptRecordWithoutConsumedSearch` COPY, not the exact
+  // object stored in `records` — re-locate it by the same signature
+  // `tryServeCachedPack`/`tryServeSupersedingCertifiedRecord` already match
+  // on, mirroring the latter's own `seedPos` search.
+  const prevPos = records.findIndex(
+    (r) => r.fingerprint === prev.fingerprint
+      && r.extraArgsKey === prev.extraArgsKey
+      && r.requestProfileKey === prev.requestProfileKey
+      && r.lane === prev.lane,
+  );
+  if (prevPos < 0) return false;
+  for (let i = records.length - 1; i > prevPos; i--) {
+    const candidate = records[i]!;
+    if (candidate.lane !== lane) continue;
+    if (!epochsOverlap(candidate.epochTokens, prev.epochTokens)) continue;
+    if (recordCertifiedTerminal(candidate.executionContract)) return true;
+  }
+  return false;
+}
+
 function compactReceiptFromRecord(
   workspace: string,
   prev: ServedPackRecord,
@@ -35229,6 +44306,27 @@ function compactReceiptFromRecord(
     missing: [...prev.missing],
     ...(receiptRoute ? { route: receiptRoute } : {}),
     ...(prev.taskProfile ? { task_profile: prev.taskProfile } : {}),
+    // Finding 14 (adversarial review, 2026-09-27): a receipt restates the
+    // captured record's fields (coverage, route, task_profile, …) as "the
+    // same answer as before" — `profile_binding` had no row here at all, so
+    // EVERY receipt (the stored-record door via `revalidateRecordToReceipt`
+    // and the ad-hoc subset-receipt door via `tryServeSubsetReceipt`, both of
+    // which set `ServedPackRecord.profileBinding` from the pack that was
+    // actually served) dropped the field outright — the exact wire gap the
+    // guide's "omit if unknown and observe `profile_binding`" instruction
+    // cannot survive. `readFamily.ts`'s `profileBindingIsExplicitEcho` would
+    // otherwise misread `prev.profileBinding` verbatim as a FRESH explicit
+    // declaration this call just made (SEND-ONCE/NO-ECHO) and strip it again
+    // — so it is run through `noteInheritedTaskProfile` exactly as a fresh
+    // build's inherited binding would be: a receipt is, by construction,
+    // never this call's own declaration, so the marker always applies here
+    // (a receipt that also happens to redeclare the identical profile is at
+    // worst a harmless restatement, never a false one — every other field
+    // in `binding` stays the accurate requested/selected/source/confidence
+    // this task was actually packed under).
+    ...(prev.profileBinding
+      ? { profile_binding: noteInheritedTaskProfile(prev.profileBinding, { taskProfileInherited: true }) }
+      : {}),
     ...(compactExecutionContract ? { execution_contract: compactExecutionContract } : {}),
     ...(receiptAdvance === "suppressed" ? { retry_same_call: false } : {}),
     ...(prev.contentSufficiency ? { content_sufficiency: prev.contentSufficiency } : {}),
@@ -35286,6 +44384,54 @@ function compactReceiptFromRecord(
  * just the single latest slot, so a verbatim re-call that was NOT the
  * immediately-preceding call (an intervening pack sat between them) still hits.
  */
+/**
+ * P2-12 (2026-09-28, review round 4/5, qrefAfterCertified) — WHAT PROFILE DID
+ * THE CALL THAT OPENED THIS TASK DECLARE, if this exact call omitted one?
+ *
+ * `force_serve:true` skips `tryServeCachedPack` outright (the doc comment at
+ * its call site: "every proof this dedup rests on... is proof about a
+ * context that no longer exists" — correct for BODY bytes), so a force-served
+ * rebuild used to bind its `profile_binding` from `args.taskProfile` alone —
+ * `undefined` on a bare `{qref, task:{force_serve:true}}}` continuation — and
+ * report `requested:"auto", source:"inferred"` even for a task this session
+ * explicitly opened with `task.profile:"answer"`. `server.ts`'s
+ * `inheritDeclaredTaskProfile` cannot repair this the way it repairs an
+ * ordinary continuation: the only signal it has (the task's identity
+ * fingerprint equals what an explicit "answer" declaration would hash to) is
+ * genuinely ambiguous with "never declared anything, and auto-inference
+ * happened to land on answer too" — confirmed live (this function's own
+ * regression spec): injecting unconditionally under force_serve made an
+ * UNDECLARED task also report `source:"explicit"`, fabricating a declaration.
+ *
+ * The one place that ambiguity is NOT present is the stored pack record
+ * itself: `requestProfileKey` (`computeRequestProfileKey`, above) remembers,
+ * per capture, whether the ORIGINAL call that produced it declared a profile
+ * or left it `"auto"` — a fact about a past call, not a cache-hit, so reading
+ * it stays honest under force_serve (this function returns a PROFILE STRING
+ * only, never a served pack, never evidence, never a receipt). Matched on
+ * the SAME `fingerprint`/`extraArgsKey`/`lane` triple `tryServeCachedPack`
+ * uses, minus the profile-compatibility gate — that gate is what we are
+ * trying to establish, not a precondition for asking. `undefined` (no
+ * matching record, or the matching record was itself `"auto"`) leaves the
+ * caller exactly as before: plain auto-inference, same as an ordinary
+ * undeclared task.
+ */
+function declaredProfileFromRecordUnderForceServe(
+  workspace: string,
+  args: TaskPackArgs,
+  fingerprint: string,
+): string | undefined {
+  if (args.taskProfile !== undefined) return undefined;
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
+  if (records === undefined || records.length === 0) return undefined;
+  const extraArgsKey = computeExtraArgsKey(args);
+  const lane = currentSessionLane();
+  const prev = [...records].reverse().find(
+    (r) => r.fingerprint === fingerprint && r.extraArgsKey === extraArgsKey && r.lane === lane,
+  );
+  return prev === undefined || prev.requestProfileKey === "auto" ? undefined : prev.requestProfileKey;
+}
+
 function tryServeCachedPack(
   workspace: string,
   args: TaskPackArgs,
@@ -35433,6 +44579,15 @@ function revalidateRecordToReceipt(
   if (createPendingRecordIsStale(workspace, prev)) return undefined;
   // TL142-01B: see `answerRecordPredatesProvenAbsence`.
   if (answerRecordPredatesProvenAbsence(workspace, prev, consumption.taskBinding)) return undefined;
+  // FIX-D (TL-06): see `recordPredatesAdditionalServedEvidence`.
+  if (recordPredatesAdditionalServedEvidence(workspace, prev)) return undefined;
+  // FIX-FC (finding 16): the generic/edit-profile counterpart, scoped away
+  // from the answer-profile record the check above already owns — see
+  // `recordSupersededByLaterCertifiedTerminal`'s own doc comment.
+  if (
+    prev.taskProfile !== "answer"
+    && recordSupersededByLaterCertifiedTerminal(workspace, prev, consumption.lane)
+  ) return undefined;
   return compactReceiptFromRecord(workspace, prev, currentWorkspaceState, consumption);
 }
 
@@ -35519,6 +44674,135 @@ function tryServeSemanticDuplicatePack(
       args.taskQueryRefReplay === true,
       // P1-1: same consumption scope as the exact-fingerprint door — the
       // staleness is a property of the RECORD, not of how it was selected.
+      { lane, ...(typeof args.taskBinding === "string" && args.taskBinding !== "" ? { taskBinding: args.taskBinding } : {}) },
+    );
+    if (receipt !== undefined) return receipt;
+  }
+  return undefined;
+}
+
+/**
+ * R-D2 (2026-09-21, TL-06 REBUILD class, item A rule 2, plan §8.1) — WHEN THE
+ * PATHLESS SEED RECORD IS DECLINED BECAUSE THIS TASK HAS MOVED ON, RESTATE
+ * THE CERTIFICATE IT MOVED ON TO, INSTEAD OF REBUILDING FROM THE SEED SHAPE.
+ *
+ * THE DEFECT (arch-map-b.md §1 Chip 2, R-B3 probe chain): one epoch + lane —
+ * pathless query -> `discover` (the SEED record, fingerprinted over EMPTY
+ * paths); the caller runs the seed's own `next` (explicit `targets` +
+ * `task.handle`) and THIS SAME task certifies `act.answer`, captured as its
+ * OWN record under a DIFFERENT fingerprint (`computePackFingerprint` hashes
+ * `paths`, and the follow-up carried some); a bare `{qref}` / `task.handle`
+ * resume re-resolves to the ORIGINAL pathless query text, so
+ * `tryServeCachedPack` / `tryServeSemanticDuplicatePack` can only ever
+ * rediscover the SEED record — `tryServeSemanticDuplicatePack`'s own
+ * `requestPaths` equality is the reviewed guard that "a pathless re-ask …
+ * must not collapse" into a record seeded WITH paths, and it is exactly as
+ * strict in reverse. `recordPredatesAdditionalServedEvidence` (FIX-D)
+ * correctly declines the now-stale seed once this task has served evidence
+ * the seed never captured — but the two callers above then simply give up
+ * and force a full REBUILD from the pathless seed shape, which re-derives
+ * `result.surfaces` from scratch and can be strictly poorer than the
+ * certificate this task already earned (measured: a REBUILD whose own
+ * pathless auto-discovery finds no candidate surface at all regresses
+ * `behavior-body`/`surface-content` to "uncovered" and a downstream
+ * capability-gap arm invents an unrelated `search_files` dead end).
+ *
+ * THE FIX. After both existing lookups decline, and ONLY because the decline
+ * was FIX-D's "newer evidence exists" verdict (never a genuinely changed
+ * file, an uncertified pending create, or a proven-absence supersession —
+ * their own declines still force the ordinary rebuild, unchanged), search
+ * this SAME bounded per-workspace/per-lane record window — already sorted
+ * oldest-first, so positions AFTER the seed's own are chronologically LATER —
+ * for the freshest record of the SAME TASK (epoch tokens overlapping the
+ * seed's own; `computePackFingerprint`/`requestPaths` do not need to match —
+ * that is the whole point, this is deliberately a DIFFERENTLY-SHAPED call of
+ * the same task) that reached a CERTIFIED terminal decision
+ * (`recordCertifiedTerminal`: `act.answer` or `act.edit`, `discovery_complete`,
+ * a bound certificate id). That candidate is then run through the IDENTICAL
+ * `revalidateRecordToReceipt` staleness gate the two lookups above use —
+ * every served file byte-unchanged, the whole-workspace inventory fingerprint
+ * unchanged, no read continuation spent to nothing — so a candidate that
+ * happens to ALSO be stale (a file changed after it was captured) is declined
+ * exactly as honestly, falling through to the ordinary rebuild.
+ *
+ * SAME TASK, NEVER A NEW QUERY (the reviewed constraint's other half). This
+ * function is reachable ONLY after `tryServeCachedPack` already matched
+ * `seed` by EXACT fingerprint — `computePackFingerprint` hashes the
+ * normalized query tokens (plus paths/roles/workspace), so that match is
+ * itself the proof this call's own query is not a "genuinely different
+ * pathless re-ask": a bare `{qref}`, an explicit/recovered `task.handle`
+ * continuation, and a plain query resend with byte-identical text all
+ * fingerprint identically and are equally "this same request, asked again"
+ * (`concernStatusPolicyMatrix.spec.ts`'s "restate" chain shape — no `qref`,
+ * no `task.handle` at all — pins that a plain resend gets the SAME
+ * monotonicity as a `qref`/`task.handle` resume). A caller that changes the
+ * query text produces a DIFFERENT fingerprint and never reaches `seed`, hence
+ * never reaches this function at all — the exact-match precondition IS the
+ * "never a new query" guard, so no separate continuation flag is checked
+ * here.
+ *
+ * SELF-LIMITING like its siblings: this never writes a new record, so a
+ * later identical resume finds the SAME two candidates in the SAME order.
+ *
+ * FIX-FC (eval-0927 review finding 16, 2026-09-27) ADDENDUM: the seed-decline
+ * test now also accepts `recordSupersededByLaterCertifiedTerminal` — the
+ * SAME defect shape, live for a `taskProfile !== "answer"` seed (an
+ * edit-shaped task whose ambiguity was resolved by the B1c pending-candidate
+ * bind, then the bind's own success cleared that memory before a SECOND
+ * identical replay could reuse it). The candidate search below mirrors the
+ * seed check's own profile: an answer-profile seed still searches only
+ * answer-profile candidates (unchanged), and a generic-superseded seed
+ * searches only non-answer candidates — the two searches never cross.
+ */
+function tryServeSupersedingCertifiedRecord(
+  workspace: string,
+  args: TaskPackArgs,
+  fingerprint: string,
+): TaskPackResult | undefined {
+  const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
+  if (records === undefined || records.length === 0) return undefined;
+  const extraArgsKey = computeExtraArgsKey(args);
+  const requestProfileKey = computeRequestProfileKey(args);
+  const lane = currentSessionLane();
+  let seedPos = -1;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const r = records[i]!;
+    if (
+      r.fingerprint === fingerprint
+      && r.extraArgsKey === extraArgsKey
+      && r.lane === lane
+      && packProfileCompatible(requestProfileKey, r.requestProfileKey)
+    ) {
+      seedPos = i;
+      break;
+    }
+  }
+  if (seedPos < 0) return undefined;
+  const seed = records[seedPos]!;
+  // FIX-FC (finding 16): `seedIsGenericSuperseded` is the generic/edit-profile
+  // sibling of the answer-only `recordPredatesAdditionalServedEvidence` decline
+  // just below — see `recordSupersededByLaterCertifiedTerminal`'s own doc
+  // comment for the full defect (a bare-qref replay whose fingerprint reverts
+  // to a stale pathless SEED once the pending-candidate memory that had
+  // resolved it is consumed). Exactly one of the two fires per `seed`
+  // (mutually exclusive on `taskProfile`), so the answer-profile path this
+  // function already served is untouched.
+  const seedIsGenericSuperseded = seed.taskProfile !== "answer"
+    && recordSupersededByLaterCertifiedTerminal(workspace, seed, lane);
+  if (!recordPredatesAdditionalServedEvidence(workspace, seed) && !seedIsGenericSuperseded) return undefined;
+  for (let i = records.length - 1; i > seedPos; i--) {
+    const candidate = records[i]!;
+    if (candidate.lane !== lane) continue;
+    // The generic-superseded seed's own candidate search accepts a candidate
+    // of the SAME (non-answer) profile — the answer-only search below is
+    // unchanged for an answer-profile seed.
+    if (seedIsGenericSuperseded ? candidate.taskProfile === "answer" : candidate.taskProfile !== "answer") continue;
+    if (!epochsOverlap(candidate.epochTokens, seed.epochTokens)) continue;
+    if (!recordCertifiedTerminal(candidate.executionContract)) continue;
+    const receipt = revalidateRecordToReceipt(
+      workspace,
+      receiptRecordWithoutConsumedSearch(workspace, candidate, args.taskBinding),
+      args.taskQueryRefReplay === true,
       { lane, ...(typeof args.taskBinding === "string" && args.taskBinding !== "" ? { taskBinding: args.taskBinding } : {}) },
     );
     if (receipt !== undefined) return receipt;
@@ -35635,12 +44919,13 @@ function tryServeSubsetReceipt(
       path: s.path,
       range: s.range,
       role: s.role,
-      // B5: keep this ad-hoc record's fields accurate too — never stored (see
-      // the "never F2-matched" note below), but compactReceiptFromRecord's
+      // B5/P1-6: keep this ad-hoc record's fields accurate too — never stored
+      // (see the "never F2-matched" note below), but compactReceiptFromRecord's
       // shared surface-projection reads them uniformly regardless of which
       // caller built the record.
       ...(s.content_completeness !== undefined ? { content_completeness: s.content_completeness } : {}),
       ...(s.total_lines !== undefined ? { total_lines: s.total_lines } : {}),
+      ...(s.remaining_ranges !== undefined ? { remaining_ranges: [...s.remaining_ranges] } : {}),
     })),
     // D2 (F-B2): this record is synthetic and never stored, so it never reaches
     // revalidateRecordToReceipt's freshness equality — but the field is
@@ -35879,30 +45164,6 @@ function reconstructServedEntryEvidence(
       code,
     }];
   });
-}
-
-/**
- * WP-S11 — the SAME-TASK carried-forward evidence of a DECLARED-answer task,
- * and nothing else: the read-only serve view alone, never the cumulative log,
- * minus the paths this pack is serving itself.
- *
- * Separate from `epochServedEvidence` on purpose. A task excluded from the
- * cumulative log is also excluded from every channel that log feeds — the
- * coverage flip, `served_earlier`, `stampEpochServedPaths` — so a re-pack of
- * such a task has NO way to see its own pack 1. An undeclared/inferred answer
- * task does have those channels and keeps exactly the behaviour it has today:
- * widening them is a policy change, not this defect.
- */
-function readOnlyViewCarriedEvidence(
-  workspace: string,
-  result: TaskPackResult,
-  epochTokens: readonly string[],
-): TaskPackSurface[] {
-  const ownPaths = new Set(codeTaskPackSurfaces(result.surfaces).map((surface) => surface.path));
-  return reconstructServedEntryEvidence(
-    workspace,
-    readOnlyServedEntries(workspace, epochTokens).filter((entry) => !ownPaths.has(entry.path)),
-  );
 }
 
 /**
@@ -36194,11 +45455,30 @@ function recordEpochTaskContract(
   // open-universe request.  Applying it to a finite generic list manufactures
   // a new dependency requirement after all of that list's named roles have
   // been served, making a cumulative same-epoch pack impossible to close.
+  //
+  // P2-16 (round-4 fable finding, 2026-09-28, manyCallers): the query's OWN
+  // named subject (`explicitCodeIdentifiers`, the same set `identifier:<X>`
+  // obligations already track) is never a "dependency" of the answer — it IS
+  // the answer. "Who calls fetchWithRetry?" served over 30 callers, each of
+  // which (correctly) names `fetchWithRetry` as a callee of ITS OWN body via
+  // `calleesOf` — but `fetchWithRetry`'s own DEFINITION is never required
+  // reading for a CALLERS question (its residency is proved by the separate,
+  // already-correct `identifier:fetchWithRetry` obligation, satisfied by any
+  // occurrence in served text), so listing it here only ever manufactured an
+  // unresolvable "dependency-definitions:fetchWithRetry" gap beside a
+  // response that had, in fact, served it throughout — confirmed live:
+  // `act.answer` disclosed `explicit-gap:dependency-definitions:fetchWithRetry`
+  // forever, never proved, even once its own file was served. Excluding it
+  // from the TARGET LIST (rather than relying on `recordEvidenceExpansion`'s
+  // keep-first "served" proof racing an earlier hop's premature explicit-gap
+  // proof for the same obligation) fixes it at the source for every hop, not
+  // only a hop lucky enough to resolve it before the capacity-gap fires.
+  const queryOwnIdentifiers = new Set(explicitCodeIdentifiers(query));
   const expansionTargets = literalSourceUniverse || !hasOpenUniverseIntent(query) || isAdditiveEnumIntent(query)
     ? []
     // Every candidate must pass expandOneHop's language gate. Feeding the raw
     // TS/JS call regex here made Go/Python keywords into false dependencies.
-    : [...(effectiveExpansion?.targets ?? [])];
+    : [...(effectiveExpansion?.targets ?? [])].filter((target) => !queryOwnIdentifiers.has(target));
   // -------------------------------------------------------------------------
   // R2 (2026-08-28): THE SERVED-DEFINITION WITNESS IS THE BODY, NOT THE LABEL.
   //
@@ -36652,8 +45932,14 @@ function discloseUnservedQualifiedAnchorDefinition(
  * each disclosed remainder. Anything left is content the caller cannot reach
  * without another call, which is exactly when one same-handle zoom is
  * sanctioned. A trimmed body (content_completeness "partial") always counts.
+ *
+ * A blank line holds nothing to serve, so it never counts as unserved content
+ * (eval-0927 review, `readCodeTaskPack.spec.ts` WS3: two functions served as
+ * two exact surfaces left only the blank line between them, and that line
+ * alone granted a zoom call). Blank lines are read from the file when
+ * `workspace` is given; without it every disclosed line counts, as before.
  */
-function packHasUnservedDisclosure(result: TaskPackResult): boolean {
+function packHasUnservedDisclosure(result: TaskPackResult, workspace?: string): boolean {
   const parseSpan = (text: string): [number, number] | undefined => {
     const match = /^(\d+)-(\d+)$/.exec(text);
     if (!match) return undefined;
@@ -36671,6 +45957,16 @@ function packHasUnservedDisclosure(result: TaskPackResult): boolean {
     spans.push(span);
     servedByPath.set(surface.path, spans);
   }
+  const blankLinesByPath = new Map<string, readonly string[] | undefined>();
+  const isBlankLine = (filePath: string, line: number): boolean => {
+    if (workspace === undefined) return false;
+    if (!blankLinesByPath.has(filePath)) {
+      const text = probeFileText(workspace, filePath);
+      blankLinesByPath.set(filePath, text === undefined ? undefined : text.replace(/\r\n?/g, "\n").split("\n"));
+    }
+    const lines = blankLinesByPath.get(filePath);
+    return lines !== undefined && line >= 1 && line <= lines.length && (lines[line - 1] ?? "").trim() === "";
+  };
   for (const surface of surfaces) {
     if (surface.content_completeness === "partial") return true;
     const disclosed = surface.remaining_ranges ?? [];
@@ -36680,10 +45976,11 @@ function packHasUnservedDisclosure(result: TaskPackResult): boolean {
       const span = parseSpan(item);
       if (!span) continue;
       let cursor = span[0];
-      for (const [from, to] of served) {
-        if (from > cursor) break;
-        if (to >= cursor) cursor = to + 1;
-        if (cursor > span[1]) break;
+      for (;;) {
+        while (cursor <= span[1] && isBlankLine(surface.path, cursor)) cursor += 1;
+        const covering = served.find(([from, to]) => from <= cursor && to >= cursor);
+        if (covering === undefined) break;
+        cursor = covering[1] + 1;
       }
       if (cursor <= span[1]) return true;
     }
@@ -36696,7 +45993,7 @@ function packHasUnservedDisclosure(result: TaskPackResult): boolean {
  * coverage is complete/focused (single-call OR cumulative). GUIDANCE ONLY — see
  * applyCompleteStopRoute; never a refusal, never raises the call budget.
  */
-function applyCompleteStopRouteToResult(result: TaskPackResult): void {
+function applyCompleteStopRouteToResult(result: TaskPackResult, workspace?: string): void {
   if (result.coverage !== "complete" && result.coverage !== "focused") return;
   const isAnswer = result.route?.action === "answer_from_handles" || result.task_profile === "answer";
   // A5 (2026-08-01 signal5-2 T03): answer packs disclose partial primaries via
@@ -36728,7 +46025,7 @@ function applyCompleteStopRouteToResult(result: TaskPackResult): void {
   // still gets budget 0) while granting the AGENTS.md zoom ("prepared+partial
   // primary grants route.max_additional_tl_calls=1 — spend it on the served
   // zoom") when the remainder genuinely is not in the caller's hands.
-  const partialPrimary = isAnswer && packHasUnservedDisclosure(result);
+  const partialPrimary = isAnswer && packHasUnservedDisclosure(result, workspace);
   const route = applyCompleteStopRoute(result.route, result.coverage, isAnswer, partialPrimary);
   if (route !== undefined) result.route = route;
 }
@@ -37583,6 +46880,16 @@ function downgradeToAwaitingInput(
  * this session delivered AND whose file is still byte-identical (so the caller
  * holds an up-to-date copy). Epoch scoping is the caller's responsibility — the
  * W4 latch consult has already confirmed the same task epoch before this runs.
+ *
+ * eval-0927 §6.1 fix (2026-09-27): a captured surface whose OWN serve was
+ * disclosed-partial (`content_completeness:"partial"`, ALWAYS paired with a
+ * non-empty `remaining_ranges` per TaskPackSurface's own contract — see
+ * model.ts) shipped only part of its declared `range`. `downgradeToAwaitingInput`
+ * (this function's one caller) strips a resident surface's body down to
+ * identity — doing that for a range this session never actually delivered in
+ * full would tell the caller it already holds bytes it does not have. Skipped
+ * here exactly as `applyResidentFileDedup` already skips it on its own pack's
+ * surfaces (this function's sibling below) for the identical reason.
  */
 function residentSurfaceKeys(workspace: string, _result: TaskPackResult): Set<string> {
   const out = new Set<string>();
@@ -37591,6 +46898,7 @@ function residentSurfaceKeys(workspace: string, _result: TaskPackResult): Set<st
   for (const rec of records) {
     const shaByPath = new Map(rec.fileShas.map(({ path: p, sha }) => [p, sha]));
     for (const s of rec.surfaces) {
+      if (s.content_completeness === "partial") continue;
       const capturedSha = shaByPath.get(s.path);
       if (capturedSha === undefined) continue;
       if (surfaceFileSha(workspace, s.path) !== capturedSha) continue;
@@ -37608,6 +46916,22 @@ function residentSurfaceKeys(workspace: string, _result: TaskPackResult): Set<st
  * served under a DIFFERENT task may have been compacted out of the caller's
  * context, so only records whose epoch overlaps the current one count. First
  * writer wins (the earliest serve owns the resident handle the caller holds).
+ *
+ * eval-0927 §6.1 fix (2026-09-27): SAME skip as `residentSurfaceKeys` above,
+ * for the SAME reason, on the subsumption side this time. Before this fix a
+ * surface captured with `range:"1-40"` but shipped only lines 1-20
+ * (`content_completeness:"partial"`, `remaining_ranges:["21-40"]`) still
+ * indexed key `path\u00001-40` as fully resident, so a LATER request for
+ * exactly the disclosed-but-never-shipped `21-40` window matched by
+ * SUBSUMPTION in `applyResidentFileDedup` (`entry.span.start <= start &&
+ * entry.span.end >= end`) and was answered with a body-less `code_unchanged`
+ * "already served this session" pointer for bytes that had never shipped —
+ * confirmed live (`scratchpad/int/probe-prior2.mts dev query`): call B's
+ * `21-40`/`64-83`/`107-126` all came back `prior`/`code_unchanged` although
+ * only their first halves were ever on the wire. `applyResidentFileDedup`
+ * already refuses to STRIP a partial surface's OWN body one loop below
+ * (`if (surf.content_completeness === "partial") continue;`); this is the
+ * missing other half — refusing to grant a FUTURE surface residency FROM one.
  */
 function residentBodyIndex(
   workspace: string,
@@ -37620,6 +46944,7 @@ function residentBodyIndex(
     if (!epochsOverlap(rec.epochTokens, epochTokens)) continue;
     const shaByPath = new Map(rec.fileShas.map(({ path: p, sha }) => [p, sha]));
     for (const s of rec.surfaces) {
+      if (s.content_completeness === "partial") continue;
       const capturedSha = shaByPath.get(s.path);
       if (capturedSha === undefined) continue;
       if (surfaceFileSha(workspace, s.path) !== capturedSha) continue;
@@ -37649,14 +46974,59 @@ function shortSha(sha: string): string {
  * preserved server-side (dedupedSurfaceBody) so proof passes stay deterministic,
  * exactly as applyPackDedupe does. Conservative:
  *   - only bodies >= RESIDENT_DEDUP_MIN_BYTES (tiny ones aren't worth indirection);
- *   - never a `required` edit-frontier surface (its body stays fully visible);
+ *   - never a `required` edit-frontier surface (its body stays fully visible),
+ *     UNLESS `allowRequiredDedup` says this pack has no edit frontier to protect;
  *   - exact (path,range) match with the file proven byte-unchanged (so the marker
  *     truthfully points at bytes the caller already has).
+ *
+ * FIX-FC (eval-0927 review finding 15, 2026-09-27) — TWO FIXES, ONE ROOT CAUSE.
+ *
+ * Live repro (`bigConstants`): a facet/closure chain's own re-added "anchor"
+ * window (`src/retry.ts:66-87`, a `runInternalReadinessFalsification`
+ * counterexample) shipped as a brand-new body on hop 1, then AGAIN,
+ * byte-for-byte, several hops later in the SAME task — 1954 B repeated for
+ * bytes the caller already held.
+ *
+ * (1) `allowRequiredDedup` (new parameter, default `false` — every EXISTING
+ *     caller keeps today's behaviour byte-for-byte). The counterexample
+ *     surface above is marked `required: candidate.strong` — a signal that it
+ *     is IMPORTANT EVIDENCE for the answer's proof, not that it is an EDIT
+ *     TARGET. The pre-existing skip conflated the two: "keep the edit
+ *     target's body inline" is the right call for a write-shaped pack (an
+ *     edit needs the caller to hold the literal current bytes), but an
+ *     "answer" task profile never carries a write frontier at all — nothing
+ *     `required` on such a pack is ever an edit target, so exempting it from
+ *     residency here only re-ships bytes the caller already has, with no
+ *     compensating benefit. Callers pass `true` exactly when this pack's own
+ *     `task_profile`/`profile_binding` proves it is answer-only.
+ *
+ * (2) The historical "same handle → applyPackDedupe/pack_unchanged own this"
+ *     skip assumed any handle match already went through `applyPackDedupe`.
+ *     That is true only for the IMMEDIATELY PRIOR pack (`applyPackDedupe`'s
+ *     own single-slot `lastPackBlocksByWorkspace`) — this function exists
+ *     specifically for the case that assumption fails, "a shared file
+ *     resurfacing two packs later" (its own doc, above). By the time this
+ *     loop reaches a surface with `surf.code !== undefined`, `applyPackDedupe`
+ *     (which runs immediately before this pass, in every caller) has already
+ *     had its chance at THIS exact object and evidently found no match —
+ *     otherwise `code` would already be `undefined`. So a residency-index hit
+ *     sharing the current surface's own (deterministic, content-addressed)
+ *     handle is not evidence of anything special: it is simply the same
+ *     window, byte-identical, resident from an OLDER pack `applyPackDedupe`'s
+ *     one-slot cache no longer remembers — exactly what this function is for.
+ *     The skip is removed; no code path relied on it (no test constructs a
+ *     resident hit whose handle equals the surface's own).
  */
 export function applyResidentFileDedup(
   workspace: string,
   result: TaskPackResult,
   epochTokens: readonly string[],
+  options?: {
+    /** True when this pack's own task profile proves `required` never means "edit target" here — see this function's own doc comment, fix (1). */
+    allowRequiredDedup?: boolean;
+    /** Surfaces that must keep their body regardless of residency (the caller's own windows under a small-window reserve force). */
+    exempt?: (surface: TaskPackSurface) => boolean;
+  },
 ): void {
   if (result.pack_unchanged === true) return;
   const idx = residentBodyIndex(workspace, epochTokens);
@@ -37688,7 +47058,8 @@ export function applyResidentFileDedup(
   }
   for (const surf of codeTaskPackSurfaces(result.surfaces)) {
     if (surf.code === undefined) continue; // nothing to strip (or already deduped)
-    if (surf.required === true) continue; // keep the edit target's body inline
+    if (options?.exempt?.(surf) === true) continue;
+    if (surf.required === true && options?.allowRequiredDedup !== true) continue; // keep the edit target's body inline
     if (Buffer.byteLength(surf.code, "utf8") < RESIDENT_DEDUP_MIN_BYTES) continue;
     // A disclosed-partial body is NOT the whole `range`; claiming residency
     // over that range would over-state what the caller holds.
@@ -37701,7 +47072,6 @@ export function applyResidentFileDedup(
       );
     }
     if (hit !== undefined) {
-      if (hit.handle === surf.handle) continue; // same handle → applyPackDedupe/pack_unchanged own this
       dedupedSurfaceBody.set(surf, surf.code);
       surf.code_unchanged =
         `${hit.handle} — already served this session (${surf.path}:${surf.range}, sha ${shortSha(hit.sha)}); `
@@ -37803,12 +47173,18 @@ function applyLedgerServedSurfaces(workspace: string, result: TaskPackResult): v
  * `undefined`, or a genuinely different task), the skip still fires and the
  * body is resent — fail toward resending, never toward a false "same task".
  */
-export function applyPackDedupe(workspace: string, result: TaskPackResult, taskBinding?: string): void {
+export function applyPackDedupe(
+  workspace: string,
+  result: TaskPackResult,
+  taskBinding?: string,
+  exempt?: (surface: TaskPackSurface) => boolean,
+): void {
   const prior = lastPackBlocksByWorkspace.get(laneScopedKey(workspace)) ?? [];
   const running: PackedBlockFingerprint[] = prior.map((f) => ({ ...f, fromPriorPack: true }));
 
   for (const surf of result.surfaces) {
     if (surf.code === undefined) continue;
+    if (exempt?.(surf) === true) continue;
     const hash = shaOfText(surf.code);
     const match = running.find((f) => f.handle === surf.handle && f.range === surf.range && f.hash === hash);
     if (match) {
@@ -38009,7 +47385,7 @@ function contentFollowupTarget(surface: TaskPackSurface, preferOutline = false):
 }
 
 /** Keep coverage structural; gate editing separately on the bodies actually served. */
-function reconcileContentSufficiency(result: TaskPackResult): void {
+function reconcileContentSufficiency(result: TaskPackResult, workspace?: string): void {
   // W9 defense-in-depth (2026-08-22): a resolved create route's terminal
   // fields are authoritatively owned by assertCreateRoute (the create-target
   // block sets them once; assertCreateRoute re-asserts them verbatim at the
@@ -38048,6 +47424,14 @@ function reconcileContentSufficiency(result: TaskPackResult): void {
   );
   const incomplete = actionTargets.find((surface) => {
     if (hasSufficientEditContent(surface)) return false;
+    // P1-9 (eval-0927 review-r4, hugeFocalValue): an answer task's surface
+    // re-cut at the transport cap still lists lines its own earlier zooms
+    // already shipped; the session's served-range ledger proving the whole
+    // range shipped means no follow-up read remains (a spent zoom re-offered
+    // as the route's `next` ended the chain `await_input`). Never for an edit
+    // task — its frontier readiness stays on the surface's own content.
+    if (workspace !== undefined && result.task_profile === "answer"
+      && surfaceRangeShipped(workspace, surface.path, surface.range)) return false;
     // When the caller supplied both the exact implementation and a test slice
     // that mentions it, runner-up navigation is optional evidence rather than
     // a reason to re-read the implementation. A lone source seed does not get
@@ -38730,7 +48114,6 @@ function bookShippedPackServeState(
   const shipped = shippedSurfaces(returned);
   if (bookings.pack !== undefined) pendingOwnServedSurfaces.delete(bookings.pack);
 
-
   // Record only CHANGE-pack surfaces (an answer pack has no edit closure to
   // cumulatively complete a later change pack from, and its read-only surfaces
   // should not stand in for edit-served roles).
@@ -39145,8 +48528,14 @@ function buildVerificationVerdict(
     const found = findNearestNpmScripts(workspace, rel);
     if (found?.pkg.scripts?.test !== undefined) {
       const { dir } = found;
-      const nodeModules = dir ? `${dir}/node_modules` : "node_modules";
-      const installed = statKindCached(workspace, workspace, nodeModules) === "dir";
+      // 2026-09-27 (external evaluation §6.2): runnable = an installed node_modules is reachable from `dir`
+      // (ancestors included), OR nothing is declared to install and the script only runs builtins (a
+      // zero-dependency `node --test …` suite). Same classifier as the edit-time kit (verificationPack.ts
+      // detectTestEntry), so the two verdicts cannot disagree about one checkout.
+      const installed = classifyNodeTestRunnability(
+        found.pkg as NodePackageManifestLike,
+        nodeModulesReachableFrom(workspace, dir),
+      ).runnable;
       const cmd = dir ? `cd ${dir} && npm test` : "npm test";
       return installed
         ? { available: true, command: cmd }
@@ -39387,7 +48776,9 @@ function discloseUnwritableStrippedPaths(result: TaskPackResult, query: string):
 // single-answer zoom, and a symbol-anchored surface (a DIFFERENT remaining/
 // pointer contract; "anchor-focus: … caller-supplied" also contains the
 // substring, which is why `.symbol === undefined` is required too — see
-// `markCallerRangeSurface`'s own call site) are both untouched.
+// `markCallerRangeSurface`'s own call site) are both untouched. UNCHANGED by
+// the B1 fix (2026-09-21) — this reconciliation is disclosure-accuracy, not a
+// withholding gate; see that call site's own "DELIBERATELY UNCHANGED" note.
 //
 // P3 CORRECTION (2026-09-19, orchestrator-caught regression): the P2 version
 // above computed `firstUndelivered` from the RAW line count of `surf.code`,
@@ -39585,6 +48976,128 @@ function reconcileCallerRangeRemaining(
   }
 }
 
+/**
+ * GATE-A (2026-09-21): the last line in `(floorExclusive, ceiling]` that both
+ * EXISTS in `relPath`'s CURRENT content and is not blank/whitespace-only — or
+ * `floorExclusive` when every line in that window is beyond EOF or blank.
+ *
+ * `settleCallerRangeDelivery` below needs this because a DISPLAY-line count
+ * mapped back to a source line cannot distinguish "a real line beyond it was
+ * cut" from "every line beyond it is blank, so joining the body's lines with
+ * a newline produced the exact same bytes as if they had never been sliced in
+ * at all" (`Array.prototype.join` cannot represent a trailing blank element
+ * distinctly from one fewer element — `["a", ""].join("\n")` is byte-identical
+ * to `["a"].join("\n") + "\n"`). A requested end past the file's CURRENT
+ * length is the same question from the other side: there is no byte there to
+ * omit either. Both are resolved the same way — read the source once, trim
+ * the tail — rather than re-derived a second time from rendered text.
+ *
+ * Returns `ceiling` unchanged when the source cannot be read, matching the
+ * pre-fix behavior, since blankness cannot be verified without it.
+ */
+function trailingBlankOrMissingTrimmedEnd(
+  workspace: string,
+  relPath: string,
+  floorExclusive: number,
+  ceiling: number,
+  cache?: FileReadCache,
+): number {
+  const sourceText = readCached(workspace, relPath, cache);
+  if (sourceText === undefined) return ceiling;
+  const sourceLines = sourceText.split(/\r?\n/);
+  let end = Math.min(ceiling, countLines(sourceText));
+  while (end > floorExclusive) {
+    const text = sourceLines[end - 1];
+    if (text !== undefined && text.trim() !== "") return end;
+    end -= 1;
+  }
+  return floorExclusive;
+}
+
+/**
+ * TL-01 (2026-09-21) — `U = R − S`, computed from the body that ACTUALLY SHIPS.
+ *
+ * `reconcileCallerRangeRemaining` above settles a caller-ranged surface against
+ * the SNAPSHOT `trimToCap` was handed, which is exactly right for the cut
+ * trimToCap itself made and says nothing about a later one. This function needs
+ * no snapshot: it re-derives, for every surviving caller-range-marked surface,
+ * the source line its CURRENT body reaches, and unions whatever is left of the
+ * caller's own requested window into `remaining_ranges`.
+ *
+ * WIDENING-ONLY, deliberately. It never clears an entry and never narrows one:
+ * the undelivered set can only be under-stated by an upstream pass, never
+ * over-stated, and a `remaining` this cannot corroborate is still honest. That
+ * also makes it idempotent, so running it after a later mutation is safe.
+ *
+ * PREFIX ASSUMPTION, stated: a caller-ranged surface's body is head-anchored at
+ * the caller's own start line (`explicitSeedStart`), and every pass that can
+ * shorten it keeps a leading prefix (`trimToCap` Phase E's `lines.slice(0,
+ * kept)`, Phase F's whole-body strip, `reduceCallerNamedBody`'s own ladder).
+ * This is the SAME assumption `reconcileCallerRangeRemaining` and
+ * `reduceCallerNamedBody` already document and rely on. Elision is accounted
+ * for the sanctioned way — `callerRangeElisionWindows` +
+ * `sourceLineAfterDisplayLines`, never by re-parsing rendered marker text — so
+ * a COMPLETE body containing a doc-elision marker still settles to
+ * `deliveredEnd === requestedEnd` and gains no false `remaining`.
+ *
+ * GATE-A (2026-09-21): raw `deliveredEnd` can UNDER-count by exactly the
+ * source's own trailing blank/whitespace-only lines within the requested
+ * window (see `trailingBlankOrMissingTrimmedEnd`'s doc comment) — measured on
+ * a caller-named whole-file target whose file's last line is blank: clean HEAD
+ * certified `act.answer`; this function, unpatched, flipped it to `discover`
+ * with a `next` for a line that serves empty. A requested end beyond the
+ * file's CURRENT length is the same blind spot from the other side. Both are
+ * resolved the same way, once, against the real source, before
+ * `remaining_ranges` is ever written — never by re-deriving from rendered
+ * text a second time. Still widening-only: the span added below can only
+ * shrink or disappear relative to the OLD `${deliveredEnd + 1}-${requestedEnd}`,
+ * it is never wider, and an entry another pass already wrote is still never
+ * narrowed.
+ */
+function settleCallerRangeDelivery(
+  result: TaskPackResult,
+  workspace: string,
+  cache?: FileReadCache,
+): void {
+  for (const surf of codeTaskPackSurfaces(result.surfaces)) {
+    if (!isCallerRangeSurface(surf)) continue;
+    const requested = /^(\d+)-(\d+)$/.exec(surf.range);
+    if (requested === null) continue;
+    const requestedStart = Number(requested[1]);
+    const requestedEnd = Number(requested[2]);
+    if (requestedEnd < requestedStart) continue;
+
+    // A `code_unchanged` row is FULLY DELIVERED, and its value is a residency
+    // POINTER, not a body ("<handle> — see prior pack"; §2.3's `prior` on the
+    // wire). The dedup that writes it refuses to claim residency over a
+    // disclosed-partial surface — see its own "A disclosed-partial body is NOT
+    // the whole `range`" guard — so its presence means the caller already holds
+    // this window in full. Measuring the pointer's own line count instead
+    // stamped a `remaining` over four lines the caller could already read, and
+    // demoted a `prepared` certificate to `discover` (replay corpus
+    // `v0142a3c_bare_qref_repack_keeps_act_edit`).
+    if (surf.code_unchanged !== undefined) continue;
+
+    const deliveredEnd = surf.code === undefined
+      ? requestedStart - 1
+      : sourceLineAfterDisplayLines(
+          requestedStart,
+          callerRangeElisionWindows(workspace, surf.path, requestedStart, requestedEnd, cache),
+          displayLineCount(surf.code),
+          requestedEnd,
+        );
+    if (deliveredEnd >= requestedEnd) continue;
+
+    const settledEnd = trailingBlankOrMissingTrimmedEnd(workspace, surf.path, deliveredEnd, requestedEnd, cache);
+    if (settledEnd <= deliveredEnd) continue; // the whole gap is blank/whitespace or past EOF: nothing real is missing
+
+    surf.content_completeness = "partial";
+    surf.remaining_ranges = mergeRangeStrings([
+      `${deliveredEnd + 1}-${settledEnd}`,
+      ...(surf.remaining_ranges ?? []),
+    ]);
+  }
+}
 // ---------------------------------------------------------------------------
 // WP-S7 (2026-09-20, TL_FOLD_SMALL_REMAINDER) -- do not leave a remainder
 // that is cheaper to serve than to ask for. See util/flags.ts's
@@ -39860,15 +49373,25 @@ function dedupeTrimAndPersist(
   // surface in the SAME response) is suppressed with it, and deliberately: the
   // response then repeats those bytes, which is what "send it again" means
   // when the caller cannot be assumed to have read the first copy.
-  const forceServePack = opts?.args?.forceServe === true;
+  const forceServePack = opts?.args?.forceServe === true && opts?.args?.forceServeCallerTargetsOnly !== true;
+  // A small-window reserve force (`forceServeCallerTargetsOnly`) keeps the
+  // dedup passes for everything the SERVER adds; only the caller's own
+  // requested windows are exempt, so they come back as bodies.
+  const dedupExempt = opts?.args?.forceServeCallerTargetsOnly === true
+    ? (surface: TaskPackSurface): boolean => surfaceWhyHasMarker(surface.why, "caller-supplied")
+    : undefined;
   if (!forceServePack) {
-    applyPackDedupe(workspace, result, opts?.args?.taskBinding);
+    applyPackDedupe(workspace, result, opts?.args?.taskBinding, dedupExempt);
     // iter-3 F3: after the prior-pack (handle-keyed) dedup, strip any NON-required
     // body whose exact (path,range) was already served this epoch and is
     // byte-unchanged — the cross-pack, content-addressed case applyPackDedupe's
     // single-slot handle match misses (a shared file resurfacing two packs later or
     // under a fresh handle). Runs pre-trim so the freed bytes feed the trim ladder.
-    applyResidentFileDedup(workspace, result, tokenizeForEpoch(effectiveQuery));
+    // FIX-FC finding 15: `allowRequiredDedup` for an answer pack — see
+    // `applyResidentFileDedup`'s own doc comment, fix (1); an answer profile
+    // never carries an edit frontier, so nothing `required` here is an edit
+    // target the dedup would wrongly hide.
+    applyResidentFileDedup(workspace, result, tokenizeForEpoch(effectiveQuery), { allowRequiredDedup: profile === "answer", ...(dedupExempt ? { exempt: dedupExempt } : {}) });
     // P1-1 item 2: the codeless half of the same residency fact. Inside the
     // `force_serve` guard with its siblings, and for the same reason — that
     // switch is the caller's "I lost my context", which denies the premise
@@ -40074,12 +49597,14 @@ function dedupeTrimAndPersist(
   if (
     opts?.args !== undefined
     && opts.artifactSurfacesAlreadyAttached !== true
-    && result.route?.action !== "answer_from_handles"
     // 残Stage2 (2026-08-01 probe F1): this wire choke point appended
     // query-token-matched artifact files to EVERY pack — a code question
     // mentioning "skeleton" picked up a microbench CSV as a surface. Gate on
-    // the same caller-spoke-artifacts test prefetch already uses; the T10
-    // caller-NAMED artifact path in paths[] keeps passing it.
+    // the same caller-spoke-artifacts test prefetch already uses (see
+    // decoyDemotion.spec.ts's own regression test, whose comment names this
+    // exact gate as the fix); the T10 caller-NAMED artifact path in paths[]
+    // keeps passing it.
+    && result.route?.action !== "answer_from_handles"
     && mayNameCallerArtifact(opts.args, effectiveQuery)
   ) {
     const artifacts = collectArtifactSurfaces(opts.args, workspace);
@@ -40336,10 +49861,32 @@ function dedupeTrimAndPersist(
   // was pinned against (server.ts's `targets[]`/`paths[]` entries with a
   // `range` and no `symbol`) without narrowing trimToCap's OWN halving
   // population, which is untouched and stays byte-identical.
+  //
+  // DELIBERATELY UNCHANGED by the B1 fix (2026-09-21) despite covering every
+  // NAMED target, ranged or not: `isCallerRangeSurface` here feeds
+  // `settleCallerRangeDelivery`/`reconcileCallerRangeRemaining`/
+  // `snapshotCallerRangeSurfaces`/`applyFoldSmallRemainder` — disclosure and
+  // remaining_ranges-accuracy functions, never a withholding gate — and
+  // `firstPackCompleteness.spec.ts`'s "B" suite (pre-existing, unrelated to
+  // this wave) proves those must keep reconciling `remaining_ranges` for ANY
+  // caller-named surface: narrowing this mark left a range-less named
+  // target's stale, self-contradictory `remaining_ranges` (double-booked
+  // with its own whole `range`) unreconciled. The actual completeness-GATE
+  // fix lives in `candidateToSurface`'s separate, narrower
+  // `markExplicitRangeSurface` call (see its own doc comment) and
+  // `unservedCallerRangedTargetsNext` (canonicalDecision.ts), which consumes
+  // that new mark instead of this one.
   for (const surface of result.surfaces) {
     if (surface.why?.includes("caller-supplied") === true && surface.symbol === undefined) {
       markCallerRangeSurface(surface);
     }
+    // TL-01 (2026-09-21): the SAME Phase-B problem, for the two provenance
+    // predicates the post-contract shed tiers below re-derive from `why`
+    // (`callerNamedSurface` / `explicitlyProvenanced`). They cannot use the
+    // boolean mark above — it is deliberately NARROWER than either of them
+    // (see its own comment) — so carry the string itself and let each keep its
+    // own reviewed matching rule. See `SURFACE_PROVENANCE_KEY`.
+    if (surface.why !== undefined) markSurfaceProvenance(surface, surface.why);
   }
   // WP-S7 (2026-09-20, TL_FOLD_SMALL_REMAINDER): widen a surface whose only
   // unserved lines are a small file-boundary remainder to the whole file.
@@ -40353,6 +49900,16 @@ function dedupeTrimAndPersist(
   // changed this body" from "trimToCap left it exactly as constructed" and
   // touch only the former.
   const callerRangePreTrim = snapshotCallerRangeSurfaces(result);
+  // Surfaces added AFTER the early residency pass above (the readiness-
+  // falsification counterexample, closure retries) get the same residency
+  // check BEFORE the trim ladder spends the byte budget on them: a resident
+  // counterexample that is only demoted by the late pass further down has
+  // already crowded a caller-requested window out of the pack by then
+  // (servedRangeBookingHonesty, VS Code config, 2026-09-28). Idempotent over
+  // surfaces the early pass already handled (no `code` left to strip).
+  if (!forceServePack) {
+    applyResidentFileDedup(workspace, result, tokenizeForEpoch(effectiveQuery), { allowRequiredDedup: profile === "answer", ...(dedupExempt ? { exempt: dedupExempt } : {}) });
+  }
   const trimmed = trimToCap(
     result,
     opts?.protectedSurfaces,
@@ -40362,6 +49919,14 @@ function dedupeTrimAndPersist(
   // shipped — see reconcileCallerRangeRemaining's own doc comment above for
   // the pinned defect this closes.
   reconcileCallerRangeRemaining(trimmed, workspace, callerRangePreTrim, opts?.cache);
+  // TL-01 (2026-09-21): and then state `U = R − S` against the bodies
+  // themselves, not against the snapshot. `reconcileCallerRangeRemaining` above
+  // deliberately touches ONLY surfaces trimToCap changed; a caller-ranged
+  // surface whose body was already short of the caller's window when it was
+  // CONSTRUCTED is therefore settled by nobody. Widening-only and idempotent
+  // (see its own doc comment), and re-run after the post-contract shed tiers
+  // below, which are the only later stage that can shrink a body.
+  settleCallerRangeDelivery(trimmed, workspace, opts?.cache);
   // DESIGN-v0.9 §4.3 post-trim recompute: a whole-surface drop that FLIPS
   // coverage invalidates the next/route computed against the fuller pre-trim
   // pack (the classic stale "you're done" next on a now-partial pack).
@@ -40382,7 +49947,7 @@ function dedupeTrimAndPersist(
   // never shed).
   stampRollupContentCompleteness(trimmed);
   reconcileTaskChangeContract(trimmed);
-  reconcileContentSufficiency(trimmed);
+  reconcileContentSufficiency(trimmed, workspace);
   if (
     profile === "answer"
     && (
@@ -40529,6 +50094,11 @@ function dedupeTrimAndPersist(
   // exhausted-budget deletion above) — an earlier annotate call read
   // continuation state that no longer reached the wire.
   annotateUnsweptWiringEndpoints(trimmed);
+  // TL-01: set by `shedSurface` below whenever it actually reduces or removes a
+  // body, so the post-shed re-derivation runs exactly when a surface changed
+  // after the contract was first built — and never on a pack the tiers left
+  // byte-identical (which stays byte-identical on the wire too).
+  let shedMutatedSurfaces = false;
   if (!fitsInCap(trimmed) && trimmed.execution_contract) {
     // Preserve authoritative typestate when the rich proof payload is the
     // only thing pushing an otherwise valid pack over its byte cap. Dropping
@@ -40553,7 +50123,15 @@ function dedupeTrimAndPersist(
     ].filter((handle): handle is string => handle !== undefined));
     const codeBytesOf = (surface: TaskPackSurface): number =>
       Buffer.byteLength(surface.code ?? surface.code_unchanged ?? "", "utf8");
-    /** The three markers that make a surface's presence the CALLER's own doing. */
+    /**
+     * The three markers that make a surface's presence the CALLER's own doing.
+     *
+     * TL-01 (2026-09-21): callers pass `surfaceProvenance(surface)`, never
+     * `surface.why` — `trimToCap`'s Phase B has already run by the time this
+     * tier does and clears `why` from EVERY surface, so a raw `why` read here
+     * was unconditionally `undefined` and this predicate (and
+     * `callerNamedSurface` below) silently matched nothing.
+     */
     const explicitlyProvenanced = (why: string | undefined): boolean =>
       why !== undefined
       && (why.includes("caller-supplied")
@@ -40646,12 +50224,16 @@ function dedupeTrimAndPersist(
       // Take only the bytes the overflow actually needs, from the body, and
       // leave the addressable row behind. A caller-named path with nothing
       // left to give falls through to the removal below, exactly as before.
-      if (callerNamedSurface(surface.why)) {
+      if (callerNamedSurface(surfaceProvenance(surface))) {
         const overflow = packWireBytes(trimmed) - capForResult(trimmed);
-        if (overflow > 0 && reduceCallerNamedBody(surface, overflow + SHED_REDUCTION_SLACK_BYTES)) return;
+        if (overflow > 0 && reduceCallerNamedBody(surface, overflow + SHED_REDUCTION_SLACK_BYTES)) {
+          shedMutatedSurfaces = true;
+          return;
+        }
       }
       trimmed.surfaces.splice(index, 1);
-      if (discloseAlways || explicitlyProvenanced(surface.why)) {
+      shedMutatedSurfaces = true;
+      if (discloseAlways || explicitlyProvenanced(surfaceProvenance(surface))) {
         // Never silently drop an explicitly requested file (or a query-named /
         // pair-contract enrichment surface): the caller cannot tell "trimmed
         // for byte budget" apart from "does not exist", and the observed
@@ -40718,14 +50300,62 @@ function dedupeTrimAndPersist(
     if (!fitsInCap(trimmed)) {
       const requiredTier = [false, true].flatMap((explicit) =>
         codeTaskPackSurfaces(trimmed.surfaces)
+          // TL-01 (2026-09-21): `surfaceProvenance`, for the same reason the
+          // two predicates' own doc comments now give — Phase B has cleared
+          // `why` by the time this tier runs, so the `[false, true]` split
+          // silently put EVERY surface in the first bucket and this tier's
+          // stated "surfaces the CALLER did not name go before ones it did"
+          // order never happened. Measured on `cumulativeReissueReceipt.spec.ts`'s
+          // aeroctl fixture (6 surfaces, 2 shed): restoring it selects the
+          // same two surfaces there, so no pinned shed set moves on the
+          // evidence available; it only makes the documented tie-break real
+          // for a pack whose provenance classes actually differ in size order.
           .filter((surface) =>
             !protectedHandles.has(surface.handle)
-            && explicitlyProvenanced(surface.why) === explicit)
+            && explicitlyProvenanced(surfaceProvenance(surface)) === explicit)
           .sort((a, b) => codeBytesOf(a) - codeBytesOf(b)));
       for (const surface of requiredTier) {
         if (fitsInCap(trimmed) || trimmed.surfaces.length <= 2) break;
         shedSurface(surface, true);
       }
+    }
+  }
+  // -------------------------------------------------------------------------
+  // TL-01 (2026-09-21) — THE ONE POST-MUTATION DERIVATION.
+  //
+  // The shed tiers above are the LAST stage of this function that can shrink or
+  // remove a served body, and they run AFTER `buildTaskExecutionContract`
+  // (whose `partialFallback`/`firstUnservedPartialRange` chain mints
+  // `next_call` straight out of `remaining_ranges`). Before this block nothing
+  // re-derived either, so a pack that reached them shipped a `next` computed
+  // against bodies that no longer existed — measured on the plan-0143 §4 repro:
+  // two caller-ranged targets, one of them shed here entirely, `missing[]`
+  // saying it was 0 % served and `decision.next` asking only for its TAIL.
+  //
+  // So: settle `remaining_ranges` against the bodies that ACTUALLY SHIP, then
+  // rebuild the contract from that settled state. Bounded by construction —
+  // exactly one rebuild, then the same two contract-compaction rungs the first
+  // build already gets, and then the proof-preserving fallback below, which is
+  // itself cap-asserted. No pass here can shed another body, so the fixpoint
+  // cannot oscillate.
+  // -------------------------------------------------------------------------
+  if (shedMutatedSurfaces) {
+    settleCallerRangeDelivery(trimmed, workspace, opts?.cache);
+    trimmed.execution_contract = buildTaskExecutionContract(
+      trimmed,
+      cumulativeComplete && trimmed.coverage_basis === "cumulative" ? "generic" : profile,
+      effectiveQuery,
+      buildTaskWorkspaceState(trimmed, workspace, workspaceInventory),
+      workspace,
+      false,
+      servedZoomScope,
+    );
+    reconcileTaskPackExecutionContract(trimmed);
+    if (!fitsInCap(trimmed) && trimmed.execution_contract) {
+      trimmed.execution_contract = contractForTrim(trimmed.execution_contract);
+    }
+    if (!fitsInCap(trimmed) && trimmed.execution_contract) {
+      trimmed.execution_contract = contractForEvidenceRetention(trimmed.execution_contract);
     }
   }
   if (!fitsInCap(trimmed)) {
@@ -40876,7 +50506,7 @@ function dedupeTrimAndPersist(
   // an explicit STOP signal on its route, so a pack whose coverage just flipped
   // complete reads as "edit now", never as license to issue more discovery packs
   // (the iter-1 loss cell issued 4 more; the win cell issued 0). Guidance only.
-  applyCompleteStopRouteToResult(trimmed);
+  applyCompleteStopRouteToResult(trimmed, workspace);
   // iter-2 W5: name the functional-validation obligation for an artifact-sourced
   // runnable target — an honest verify line + a session-recorded OPEN item, never
   // a block. Runs before the guidance cap so its verify line is accounted for.
@@ -41292,6 +50922,28 @@ function dedupeTrimAndPersist(
   if (returned !== trimmed || returned.execution_contract?.typestate.phase !== "prepared") {
     delete returned.fast_path;
   }
+  // FIX-FC (eval-0927 review finding 15, 2026-09-27): a LATE producer — the
+  // facet/closure chain's own re-added "anchor" surface (a
+  // `runInternalReadinessFalsification` counterexample, re-selected on a
+  // later hop of the same task) — can add a surface with a fresh `code` body
+  // AFTER this same request's EARLY `applyResidentFileDedup` call above
+  // already ran, so it never gets the residency check every other surface in
+  // this response already passed; only the booking pass a few lines below
+  // had seen every instance of it. This second, idempotent pass runs the
+  // SAME dedup over whatever `returned.surfaces` ends up holding — including
+  // anything added between the early pass and here — so a repeat is caught
+  // regardless of which producer re-added it. `allowRequiredDedup` matches
+  // the early call for the same reason (see `applyResidentFileDedup`'s own
+  // doc comment, fix (1) — the counterexample surface above is exactly the
+  // `required:true`, answer-profile case that fix targets). Gated on the
+  // SAME `forceServePack` the early pass observes (declared once, above, and
+  // still in scope): `force_serve` denies every residency claim in this
+  // response, and a surface it would otherwise demote here must stay exactly
+  // as fresh as `force_serve` promises. A no-op for every response where
+  // nothing was added after the early pass (nothing left for it to find).
+  if (!forceServePack) {
+    applyResidentFileDedup(workspace, returned, tokenizeForEpoch(effectiveQuery), { allowRequiredDedup: profile === "answer", ...(dedupExempt ? { exempt: dedupExempt } : {}) });
+  }
   // FX-J: THE SINGLE BOOKING PASS. Every producer that asserts what this
   // response served runs inside it, downstream of the seam, off one
   // `shippedSurfaces` projection over the pack that ships.
@@ -41343,6 +50995,17 @@ function calleesOf(code: string, own: readonly string[]): string[] {
   for (let m = CALL_RE.exec(code); m !== null; m = CALL_RE.exec(code)) {
     const name = m[1]!;
     if (CALL_STOPWORDS.has(name.toLowerCase())) continue;
+    // P2-16 (round-4 fable finding, 2026-09-28): a runtime/standard-library
+    // global (`encodeURIComponent`, `fetch`, `setTimeout`, ...) can never be
+    // an in-workspace dependency DEFINITION, so counting it here only ever
+    // manufactures a dependency-definitions obligation that can never be
+    // discharged — confirmed live (manyCallers: every one of 30 handler
+    // bodies calls `encodeURIComponent(id)`, so the final `act.answer`
+    // disclosed `explicit-gap:dependency-definitions:encodeURIComponent`
+    // forever). Reuses evidenceClosure.ts's own builtin-callee list (its
+    // `calleeNamesIn` guards the identical concern for the facet-closure
+    // callee walk) rather than a second, drifting copy.
+    if (COMMON_BUILTIN_CALLEES.has(name)) continue;
     if (ownLower.has(name.toLowerCase())) continue;
     if (isReceiverQualified(code, m.index)) continue;
     if (!out.includes(name)) out.push(name);
@@ -41938,6 +51601,29 @@ export function trimToCap(
   // target retains a useful prefix (and an honest remainder) while there is
   // budget for any body at all. Only once equal rounds cannot make the result
   // fit does the ordinary body-removal ladder take over.
+  //
+  // FIX-FC (eval-0927 review finding 7, 2026-09-27): the halving loop below
+  // used to run only `if (callerRangeBodySurfaces.size >= 2)` — a SOLE
+  // caller-ranged target (`size === 1`) skipped straight to the whole-body
+  // drop loop a few lines down, which always ships `code:undefined` +
+  // `remaining_ranges:[surf.range]` (the ENTIRE originally-requested range,
+  // never a fitted prefix) the moment the surface does not already fit.
+  // Live repro: `targets:[{path,range:"300-900"}]` (601 lines) against a 6200
+  // B budget shipped NO body at all — `evidence[0]` was bodyless with
+  // `remaining:["300-900"]`, and the response's own `decision.next` named
+  // that SAME `range:"300-900"` verbatim, so running it — exactly what
+  // AGENTS.md tells a caller to do with an executable `next` — reproduced
+  // the identical bodyless response forever. `protocol/budget/shedders/
+  // readText.ts`'s `truncateLargestBody` (a `read.text`/`read.batch` request
+  // with no `query`) already halves geometrically down to one line before
+  // giving up; a task-pack build with exactly one caller-ranged target owes
+  // the identical courtesy — "ship the head that fits, like every other
+  // budget cut" — instead of an all-or-nothing drop. `size >= 1` below is the
+  // fix: the loop's own body already generalizes to one surface with no
+  // change (it filters by SET MEMBERSHIP, never by count), so widening the
+  // gate is the whole change. `applyFairTrimWaterFilling`'s own multi-target
+  // BALANCING has no single-target question to answer, so it stays scoped to
+  // `size >= 2` — unaffected by this fix.
   if (callerRangeBodySurfaces.size >= 2) {
     // FX-M Change B (TL_PACK_FAIR_TRIM): try the water-filling pass BEFORE the
     // legacy halving loop. On success it already left `result` in its final,
@@ -41949,6 +51635,8 @@ export function trimToCap(
     if (packFairTrimEnabled() && applyFairTrimWaterFilling(result, callerRangeBodySurfaces)) {
       return result;
     }
+  }
+  if (callerRangeBodySurfaces.size >= 1) {
     for (;;) {
       if (fitsInCap(result)) return result;
       let changed = false;

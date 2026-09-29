@@ -76,6 +76,43 @@ export type ShedContext = {
 };
 
 /**
+ * FIX-A3 (TL-05 follow-up, 2026-09-21) — the marker `server.ts`'s
+ * `normalizeCanonicalRequest` stamps on `args` (`Object.defineProperty(args,
+ * RANGE_CONTENT_FULL_MARKER, {value:true,...})`) when the ORIGINAL canonical
+ * request named an explicit `range`/`ranges`/`symbol` selector together with
+ * `content:"full"` — before `content` itself is deleted from `args` a few
+ * lines later in that same function. A shed rung that mints a ranged
+ * continuation (`readText.ts`'s rung 4, `readBatch.ts`'s rungs 4/6) needs this
+ * fact to keep echoing "unelided" across the hop the way §7.1's contract
+ * requires, but `ShedContext.args` (above) is that SAME mutated `args` object
+ * by reference, past the point `content` was read and removed.
+ *
+ * DECLARED HERE, NOT IN `server.ts`, so both `server.ts` (the writer) and a
+ * shedder module (a reader, several `import` hops below `server.ts` in the
+ * dependency graph — see `readBatch.ts`'s header) can import the SAME symbol
+ * without `server.ts` importing back down into `protocol/budget/shedders/`
+ * for anything but this constant. `server.ts` already depends on this file
+ * transitively (`envelope.ts` -> `emit.ts` -> `ladder.ts` -> `shedders/
+ * index.ts` -> every shedder, this one included), so a direct import of one
+ * constant from here is a shortcut along an edge that already exists in this
+ * direction, not a new cycle.
+ *
+ * A plain `Symbol` (not a string key) for the same reason `server.ts` uses
+ * one for its sibling markers on this object (`HANDLE_OVERRIDES_INPUT`,
+ * `CANONICAL_ALLOWFULL_INPUT`): unforgeable from the wire, and untouched by
+ * an ordinary `{...args}` spread's string-keyed view of the object while
+ * still surviving that same spread (`Object.keys`/JSON never see it; a
+ * symbol-keyed own property is preserved by object spread regardless).
+ */
+export const RANGE_CONTENT_FULL_MARKER = Symbol("tokenlighten.read-file-range-content-full");
+
+/** True iff `context.args` carries the marker above. */
+export function requestedRangeContentFull(context: ShedContext): boolean {
+  const args = context.args as Readonly<Record<PropertyKey, unknown>> | undefined;
+  return args?.[RANGE_CONTENT_FULL_MARKER] === true;
+}
+
+/**
  * What a step BOOKS about its own cut — everything except the byte count.
  *
  * `bytes` is absent BY CONSTRUCTION, not by omission: it is `before - after`

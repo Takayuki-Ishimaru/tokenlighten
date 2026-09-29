@@ -1,6 +1,6 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.14.3.
+This directory contains the public documentation for TokenLighten v0.14.4.
 
 ## Start here
 
@@ -13,7 +13,10 @@ This directory contains the public documentation for TokenLighten v0.14.3.
 - [Language support](language-support.md) — languages, formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
-- [GitHub Release v0.14.3](github-release-v0.14.3.md) — extension-free
+- [GitHub Release v0.14.4](github-release-v0.14.4.md) — more reliable
+  ranged reads, task continuation, and answer evidence in English and
+  Japanese, with less repeated work in large workspaces.
+- [Historical GitHub Release v0.14.3](github-release-v0.14.3.md) — extension-free
   archive install with a bundled runtime, broader host registration, VS Code
   coexistence, improved Copilot integration and task continuation, and Windows support.
 - [Historical GitHub Release v0.14.2](github-release-v0.14.2.md) — task
@@ -35,7 +38,7 @@ This directory contains the public documentation for TokenLighten v0.14.3.
 
 ## Release scope
 
-The v0.14.3 public release includes four platform install archives (CLI,
+The v0.14.4 public release includes four platform install archives (CLI,
 MCP server and a bundled Node.js runtime), the CLI and MCP server as source
 with selected developer tests, and the VS Code extension. The desktop
 application is not included.

@@ -22,7 +22,7 @@
  * rc/readFileScopePathDirectory.rc.spec.ts.
  */
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { applyAnswerLineGutter } from "../../protocol/lineGutter.js";
+import { killServerGroup } from "../helpers/killServerGroup.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const TSX_CLI = nodeRequire.resolve("tsx/cli");
@@ -88,9 +89,9 @@ const tmpDirs: string[] = [];
 const spawnedServers: ServerHandle[] = [];
 
 function startServer(ws: string, env: Record<string, string>): ServerHandle {
-  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, BIN_TS, ws], {
+  const child: ChildProcess = spawn(process.execPath, [TSX_CLI, "--liftoff-only", BIN_TS, ws], {
     cwd: ws,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
     env: { ...process.env, ...env },
   });
   let stdoutBuf = "";
@@ -137,7 +138,7 @@ function startServer(ws: string, env: Record<string, string>): ServerHandle {
   const handle: ServerHandle = {
     initialize,
     rpc,
-    kill: () => { try { child.kill("SIGKILL"); } catch { /* ok */ } },
+    kill: () => { try { killServerGroup(child); } catch { /* ok */ } },
     alive: () => child.exitCode === null && child.signalCode === null,
   };
   spawnedServers.push(handle);
@@ -160,6 +161,12 @@ function exactBody(ws: string, relPath: string, start: number, end: number): str
   const text = fs.readFileSync(path.join(ws, relPath), "utf8");
   return text.split("\n").slice(start - 1, end).join("\n");
 }
+
+// Every server is started inside one test (never reused across the file's
+// 5 `it`s); stop it now rather than letting it ride the file-level afterAll.
+afterEach(() => {
+  for (const s of spawnedServers.splice(0)) s.kill();
+});
 
 afterAll(() => {
   for (const s of spawnedServers.splice(0)) s.kill();

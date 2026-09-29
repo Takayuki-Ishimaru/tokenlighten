@@ -103,6 +103,33 @@ import { batchHintsEnabled, leanCallsEnabled, sfDemoteEnabled } from "../util/fl
 // clientAdvertisement.ts uses (see that module's own header on why it is
 // safe to import here: no dependency on server.ts either way).
 import { resolveClientProfile } from "./codec/clientProfile.js";
+// GATE-A (2026-09-21, item 3): the SAME token->byte estimate the wire ladder
+// resolves an inbound `budget.tokens` through (its own header: "promoted to
+// the shared, wire-facing module so emit.ts's funnel ... can use it too").
+// Nothing under protocol/budget/ imports this file (verified), so this is a
+// leaf dependency, not a cycle, unlike `tools/readCodeModes.ts`'s
+// `resolveCallerByteCeiling` (that module imports `canonicalToolCall` FROM
+// here, so the reverse import would be circular).
+import { estimateBytesFromTokens } from "./budget/wireBudget.js";
+// GATE-A2 (2026-09-21, v0.14.4 candidate item 2's own follow-up): recording a
+// minted continuation window (see `recordMintedRangedContinuationWindows`
+// below) needs the dispatcher's handle table, to resolve a `{handle, range}`
+// target to the path `state/session.ts` keys its registry by. `util/handles.ts`
+// imports only `node:async_hooks`, `node:crypto` and `./laneKey.js` (verified)
+// — a leaf module, not a cycle.
+import { handleTable } from "../util/handles.js";
+// `state/session.ts` imports only `node:crypto`, `@tokenlighten/types` (type
+// only), `../util/laneKey.js`, `../util/flags.js`, `./stateHandles.js` and
+// `../util/packServeLog.js` (verified) — NONE of which import this module, so
+// this is a one-directional edge, same shape as the `handleTable` import just
+// above. The DANGEROUS direction is the reverse: session.ts's own comment
+// beside `guardExecutionDiscovery`'s `next_call` construction records a real,
+// confirmed-live cycle for `state/session.ts -> protocol/envelope.ts ->
+// protocol/emit.ts -> state/session.ts`. This import adds
+// `protocol/envelope.ts -> state/session.ts` only — the same direction this
+// file already reaches session.ts through transitively (via `./emit.js` and
+// `./readFamily.js`, both imported above), never the reverse edge that broke.
+import { mintRangedContinuationWindow } from "../state/session.js";
 
 /** §1.1, D1. One integer, one value, one server process. */
 export const PROTOCOL_VERSION = 1 as const;
@@ -1329,11 +1356,85 @@ function applyToolSurface(tool: string, args: Record<string, unknown>): Surfaced
   return { tool, arguments: args };
 }
 
+/**
+ * GATE-A2 (plan-0143 §4/§8.1, R04, 2026-09-21): every `read_file`
+ * continuation this module mints for a caller-ranged target IS, by
+ * construction, a promise this server itself made — "the next window to ask
+ * for is exactly this". Recording it HERE (rather than at each of the
+ * ranged-continuation producers — canonicalDecision.ts's
+ * `unservedCallerRangedTargetsNext`/`callerRangedAddress`, the read.text
+ * remaining-range `next`, `readFamily.ts`'s `deriveNext`, `readBatch.ts`'s
+ * shedders) needs no second instrumentation site: this is the one place
+ * every one of them funnels through before reaching the wire, directly or
+ * via `canonicalizeEmittedToolCalls`'s re-canonicalization of an
+ * already-built raw `next`/`next_call` literal (see the module doc block
+ * above). `state/session.ts`'s `mintedRangedContinuationWindows` doc
+ * comment has the full reasoning for why this fact — recorded nowhere else
+ * — is what `admitCallerRangedContinuation` (server.ts) needs.
+ *
+ * Two shapes carry a caller-ranged window on the wire (empirically confirmed
+ * live, both configs): `targets:[{path|handle, range|ranges:[...]}, ...]`
+ * (the multi-target bundle `unservedCallerRangedTargetsNext` mints, AND the
+ * per-entry `next` a `read.batch` entry carries — the same shape) and the
+ * bare `{path|handle, range|ranges:[...]}` directly on `args`, no
+ * `targets[]` wrapper (`readFamily.ts`'s `deriveNext`/`resolveSlice`'s own
+ * mode=slice shape, reachable wherever the sha-bound read cursor does not
+ * supersede it first). A whole-file target (no `range`/`ranges` at all), an
+ * `edit_file`/`search_files` call, or a target missing both `path` and
+ * `handle` is never a caller-ranged window and is left unrecorded. A
+ * `handle`-only address resolves to its path through the dispatcher's own
+ * handle table, so a window minted by handle and later re-asked by path (or
+ * vice versa) is still recognised as the same window.
+ *
+ * No-op when the ambient call context carries no workspace (e.g. a unit
+ * test that calls `canonicalToolCall` directly, outside a dispatched
+ * request) — the safe direction: an unrecorded window can only make a
+ * LATER request look MORE independent (served fresh) than it truly is,
+ * never the reverse.
+ */
+function recordMintedRangedContinuationWindows(tool: string, args: Record<string, unknown>): void {
+  if (tool !== "read_file") return;
+  const context = protocolCallContext();
+  const workspace = context?.workspace ?? context?.codecTraceWorkspace;
+  if (typeof workspace !== "string" || workspace === "") return;
+
+  const recordOne = (path: string | undefined, handle: string | undefined, range: string): void => {
+    if (range === "") return;
+    const resolvedPath = path ?? (handle !== undefined ? handleTable.get(handle)?.path : undefined);
+    if (resolvedPath === undefined || resolvedPath === "") return;
+    mintRangedContinuationWindow(workspace, resolvedPath, range);
+  };
+  const recordAddress = (path: string | undefined, handle: string | undefined, range: unknown, ranges: unknown): void => {
+    if (path === undefined && handle === undefined) return;
+    if (typeof range === "string") recordOne(path, handle, range);
+    if (Array.isArray(ranges)) for (const r of ranges) if (typeof r === "string") recordOne(path, handle, r);
+  };
+
+  const targets = args["targets"];
+  if (Array.isArray(targets)) {
+    for (const raw of targets) {
+      const target = recordOf(raw);
+      if (target === undefined) continue;
+      const path = typeof target["path"] === "string" && target["path"] !== "" ? target["path"] : undefined;
+      const handle = typeof target["handle"] === "string" && target["handle"] !== "" ? target["handle"] : undefined;
+      recordAddress(path, handle, target["range"], target["ranges"]);
+    }
+  }
+  // Bare mode=slice shape: `{path|handle, range|ranges}` directly on `args`.
+  recordAddress(
+    typeof args["path"] === "string" && args["path"] !== "" ? args["path"] : undefined,
+    typeof args["handle"] === "string" && args["handle"] !== "" ? args["handle"] : undefined,
+    args["range"],
+    args["ranges"],
+  );
+}
+
 /** Construct an executable wire continuation through the one canonicalizer. */
 export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_files", args: Record<string, unknown>): ToolCall {
-  const attributed = attributedContinuationArguments(canonicalToolArguments(tool, args));
+  const attributed = attributedContinuationArguments(tool, canonicalToolArguments(tool, args));
   const leaned = leanContinuationForVsCode(tool, attributed);
   const surfaced = applyToolSurface(tool, leaned);
+  recordMintedRangedContinuationWindows(surfaced.tool, surfaced.arguments);
   return { tool: surfaced.tool, arguments: surfaced.arguments } as ToolCall;
 }
 
@@ -1398,8 +1499,7 @@ function leanContinuationForVsCode(tool: string, args: Record<string, unknown>):
  * read (no `query`, for read_file) or a plain search needs no task
  * continuity at all.
  */
-function continuationNeedsTaskHandle(
-  tool: string,
+function continuationNeedsTaskHandle(  tool: string,
   args: Record<string, unknown>,
   task: Record<string, unknown>,
 ): boolean {
@@ -1420,12 +1520,12 @@ function continuationNeedsTaskHandle(
  * workspace/task. This is deliberately narrow: lane is copied only when the
  * caller supplied it, and state-version/qref are never manufactured.
  */
-function attributedContinuationArguments(args: Record<string, unknown>): Record<string, unknown> {
+function attributedContinuationArguments(tool: string, args: Record<string, unknown>): Record<string, unknown> {
   const context = protocolCallContext();
-  if (context === undefined) return args;
-  const inbound = context.args;
+  if (context === undefined) return args;  const inbound = context.args;
 
   const attributed = { ...args };
+  inheritCallerResponseBudget(tool, attributed, inbound, context);
   const resolvedCwd = context.continuationWorkspace ?? context.workspace;
   if (attributed["cwd"] === undefined) {
     if (typeof resolvedCwd === "string" && resolvedCwd !== "") attributed["cwd"] = resolvedCwd;
@@ -1472,6 +1572,144 @@ function attributedContinuationArguments(args: Record<string, unknown>): Record<
     }
   }
   return attributed;
+}
+
+/**
+ * TL-05 §7.2 / TL-01 R4 (2026-09-21) — A PER-RESPONSE CAP THAT SURVIVES THE
+ * CONTINUATION IT MINTS.
+ *
+ * `budget.bytes`/`budget.tokens` is a cap on ONE MCP text result. A follower
+ * runs a server-written `next` VERBATIM (AGENTS.md), so a `next` that carries
+ * no budget silently re-opens the response to the calibrated server ceiling.
+ * Measured on the plan-0143 §4 payload: hop 0 respected `budget.bytes:6500`,
+ * hop 1 came back at 14,589 B (default config) / 15,687 B (VS Code config)
+ * — 2.2×/2.4× the cap the caller had just declared, in the same request chain.
+ *
+ * Deliberately narrow, in four ways:
+ *  1. ONLY a budget the CALLER supplied. `maxBytes`/`maxTokens` are the legacy
+ *     slots `server.ts`'s `mapCanonicalBudget` fills from a declared canonical
+ *     `budget`, and the ONLY other writer of them is the cursor-state
+ *     inheritance below, which is itself a caller-declared value carried
+ *     forward. A server default is never in `args`, so a default-config wire
+ *     with no declared budget stays byte-identical.
+ *  2. ONLY `bytes`/`tokens`. `items`/`rows`/`cells`/`allowFull` select WHAT is
+ *     returned, not how much of the response fits, and inheriting them would
+ *     change the continuation's meaning rather than its size.
+ *  3. NEVER over a budget the minted call already declares — a producer that
+ *     has chosen its own ceiling for the next hop keeps it, and a caller may
+ *     change it explicitly on any hop.
+ *  4. NOT onto a `cursor` continuation, and NOT onto `edit_file`. The cursor
+ *     chain already inherits the caller's budget through the persisted request
+ *     state (`server.ts`'s "DESIGN-v0.15 §5.2 原要求のbudgetは状態で継承する"
+ *     block, whose reviewed comment states that a minted cursor call carries no
+ *     `budget` precisely because of that), so stamping one here would restate
+ *     the same number in a second place and change pinned wire bytes for no
+ *     behavioural gain. `edit_file` has no `budget` input at all.
+ *  5. NOT onto a continuation this call's OWN staged read/search request will
+ *     replace with that same zero-cost cursor before the response ships
+ *     (FIX-A3, 2026-09-21 — the regression `hasStagedRequestContinuation`
+ *     closes). `readRequestContinuation.ts`'s `applyReadRequestContinuation`
+ *     and `searchRequestContinuation.ts`'s `applySearchRequestContinuation`
+ *     run at the `emit.ts` tail, AFTER the ladder, and overwrite ANY non-cursor
+ *     `next`/`limit.next` a producer or shed rung minted — for a read, whenever
+ *     `staged.mode !== "open"` OR the caller declared a budget OR the ladder
+ *     shed anything, which a call reaching this point with a positive
+ *     `bytes`/`tokens` always satisfies (`declaredMaxBytes` in `emit.ts` reads
+ *     the identical `context.args` this function does); for a search, whenever
+ *     the response carries any `limit` at all. So whenever rule 5 applies, the
+ *     stamped bytes below would never reach the wire — they would only be
+ *     measured, deep inside `budget/ladder.ts`'s per-step candidate. THAT
+ *     measurement is the regression: `fxoServeCoordinateSettlement.spec.ts`'s
+ *     "MULTI-window slice" case mints a `read_file
+ *     {targets:[{path,ranges:["1-20","250-260"]}],budget:{bytes:620}}` whose
+ *     FIRST rung-4 truncation pass narrows a 940 B unshed payload to 924 B of
+ *     real content — genuine progress — but publishes a candidate carrying
+ *     this function's stamped `,"budget":{"bytes":620}` (23 B, measured) on
+ *     its minted `next`, landing at 947 B >= 940 B. `ladder.ts`'s "a step that
+ *     recovered nothing is not progress" rule (correctly) refuses a candidate
+ *     that got BIGGER, so the ladder accepts ZERO shed steps and the response
+ *     fails closed at `refusal{cap-exceeded}` on a budget clean HEAD (with no
+ *     stamping at all) serves at 617 B. The 23 B were always going to be
+ *     discarded by the cursor swap a few lines later in `emit.ts` — this rule
+ *     stops paying for them where they are actively harmful and gains nothing
+ *     where they would have been thrown away regardless. `next`-shape
+ *     candidates that are NOT superseded (a `read.task_pack` `decision.next`,
+ *     `read.batch`'s own recovery `next`, an ordinary producer courtesy hint
+ *     with no staged request behind it) never set `readRequest`/`searchRequest`
+ *     on the context, so rule 5 is a no-op for them and they keep inheriting
+ *     the budget exactly as ruling R4 (`rangedDeliveryCompleteness.spec.ts`)
+ *     requires.
+ *
+ * Runs INSIDE `canonicalToolCall`, so `leanContinuationForVsCode` — which only
+ * ever removes `cwd`/`task.handle` — cannot strip it, and `applyToolSurface`'s
+ * `code`-surface pass only removes the artifact-shaped `budget.rows`/`.cells`.
+ */
+function inheritCallerResponseBudget(
+  tool: string,
+  attributed: Record<string, unknown>,
+  inbound: Readonly<Record<string, unknown>> | undefined,
+  context: ProtocolCallContext | undefined,
+): void {
+  if (inbound === undefined) return;
+  if (tool !== "read_file" && tool !== "search_files") return;
+  if (attributed["cursor"] !== undefined) return;
+  const positive = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+  const inboundBudget = recordOf(inbound["budget"]);
+  const bytes = positive(inbound["maxBytes"]) ?? positive(inboundBudget?.["bytes"]);
+  const tokens = positive(inbound["maxTokens"]) ?? positive(inboundBudget?.["tokens"]);
+  if (bytes === undefined && tokens === undefined) return;
+  // Rule 5 above: a staged read/search request on THIS call already carries
+  // the same budget forward at zero wire cost, and will overwrite whatever
+  // this function would stamp here before the response ships.
+  if (context !== undefined && hasStagedRequestContinuation(context)) return;
+  // The minted call's own declaration wins, in EITHER dialect: `canonicalToolArguments`
+  // has already run, so a canonical `budget` is present, but a producer that
+  // spelled `maxBytes` still reaches here through that same projection.
+  const declared = recordOf(attributed["budget"]);
+  const next: Record<string, unknown> = { ...(declared ?? {}) };
+  // GATE-A (2026-09-21, item 3, rule 6): stamp the EFFECTIVE ceiling in ONE
+  // canonical spelling (`bytes`), not the caller's own. Before this, a
+  // caller-declared `budget.tokens` and an equivalent `budget.bytes` echoed
+  // in their OWN spelling, so two calls with the identical effective ceiling
+  // minted byte-DIFFERENT `next.arguments.budget` (`wireBudgetTokens.spec.ts`
+  // FX-R3, `sizeGovernance.spec.ts` T1). `estimateBytesFromTokens` is the
+  // SAME `tokens*4` conversion `tools/readCodeModes.ts`'s
+  // `resolveCallerByteCeiling` already resolves an inbound pair through (the
+  // MIN of both halves when both are declared, matching that function's own
+  // `Math.min(...candidates)`), and `bytes` is the SAME spelling clean HEAD
+  // already used for a search_files refusal `next` regardless of which
+  // dialect the caller declared. Only when NEITHER half is already declared
+  // by the minted call itself (`next.bytes`/`next.tokens` both undefined, the
+  // check just below): a producer's OWN partial/full budget declaration is
+  // never touched, exactly as before.
+  if (next["bytes"] === undefined && next["tokens"] === undefined) {
+    const fromTokens = estimateBytesFromTokens(tokens);
+    const effectiveBytes = bytes !== undefined && fromTokens !== undefined
+      ? Math.min(bytes, fromTokens)
+      : bytes ?? fromTokens;
+    if (effectiveBytes !== undefined) next["bytes"] = effectiveBytes;
+  }
+  if (Object.keys(next).length > 0) attributed["budget"] = next;}
+
+/**
+ * True iff THIS call staged a read or search request whose emit-tail
+ * continuation (`readRequestContinuation.ts` / `searchRequestContinuation.ts`)
+ * will install the request's own persisted-state cursor as the canonical
+ * `next`/`limit.next` — see rule 5 above for why that makes stamping the
+ * budget onto any OTHER continuation minted during this call pure overhead.
+ *
+ * `readRequest`/`searchRequest` are declared on `ProtocolCallContext` by
+ * those two modules via `declare module "./envelope.js"` (the same
+ * cross-file augmentation `budget/ladder.ts` uses for `shedRecords`), so this
+ * reads them structurally rather than importing either module's types —
+ * `readRequestContinuation.ts` already imports `canonicalToolCall` FROM this
+ * file, and a type import back would be circular for no benefit, since all
+ * this needs is "was one staged at all".
+ */
+function hasStagedRequestContinuation(context: ProtocolCallContext): boolean {
+  const loose = context as { readRequest?: unknown; searchRequest?: unknown };
+  return loose.readRequest !== undefined || loose.searchRequest !== undefined;
 }
 
 function canonicalToolArguments(tool: string, args: Record<string, unknown>): Record<string, unknown> {
