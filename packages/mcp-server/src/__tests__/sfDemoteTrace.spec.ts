@@ -127,11 +127,11 @@ function emitFinal(
   evidence: Record<string, unknown>[],
   marks: { demoted?: Record<string, unknown>[]; named?: Record<string, unknown>[] } = {},
 ): void {
-  runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root }, () => {
+  runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root }, () => {
     noteSemanticFrontierTraceSeed(traceSeed(seedTag));
     for (const row of marks.demoted ?? []) noteSemanticFrontierWithholding("demoted", row);
     for (const row of marks.named ?? []) noteSemanticFrontierWithholding("named", row);
-    finalizeProtocolResponse("read_file", { content: [{ type: "text", text: taskPackText(evidence) }] });
+    finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: taskPackText(evidence) }] });
   });
 }
 

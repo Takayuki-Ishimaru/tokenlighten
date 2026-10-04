@@ -151,7 +151,7 @@ function shedFieldsTail(payload: ShedPayload): ShedOutcome | undefined {
  *
  * RULING 8's shed rule is conditional, not absolute: "never shed while the
  * refusal's `next` references them". The predicate is decided on the `next`
- * this refusal actually carries — a `read_file` call with a `sections` argument
+ * this refusal actually carries — a `tl_read_file` call with a `sections` argument
  * IS the markdown-navigation recovery, and `headings` is the only wire source
  * of a valid value for it. A refusal whose `next` is anything else (or which
  * carries no `next` at all, e.g. `retry:"none"`) has an index no transition
@@ -172,7 +172,7 @@ function shedRecoveryIndex(payload: ShedPayload): ShedOutcome | undefined {
 function nextNeedsRecoveryIndex(payload: ShedPayload): boolean {
   const next = payload["next"];
   if (!isRecord(next)) return false;
-  if (next["tool"] !== "read_file") return false;
+  if (next["tool"] !== "tl_read_file") return false;
   const args = next["arguments"];
   return isRecord(args) && args["sections"] !== undefined;
 }

@@ -1,12 +1,12 @@
 /**
- * closureTracking.ts — DESIGN-v0.8 edit_file closure tracking.
+ * closureTracking.ts — DESIGN-v0.8 tl_edit_file closure tracking.
  *
  * Bench 2026-07-03a exposed false_solved cases: an agent declares the task
  * "solved" while a required cross-surface edit is still missing (two live cells:
  * a CSS design token that a task_pack check demanded was never added, so the
  * verifier fails). read_code mode=task_pack now stores structured,
  * machine-verifiable checks in the workspace session (`PackCheckRecord`). After
- * a successful edit_file write, `attachClosure` cheaply re-verifies those checks
+ * a successful tl_edit_file write, `attachClosure` cheaply re-verifies those checks
  * against the files edited so far and attaches a compact reminder of the checks
  * that are still open — so the solver self-corrects in the SAME turn, before it
  * declares done.
@@ -20,7 +20,7 @@
  *    repo. Reads stay inside the workspace via the same safe-path discipline used
  *    elsewhere (safeResolve + realpath containment).
  *  - Any internal error returns the edit result unchanged. Closure tracking must
- *    never break an edit_file response.
+ *    never break an tl_edit_file response.
  *
  * Synchronous fs is used deliberately (matches locateTaskContext / createFile
  * style) so the whole pass stays a single synchronous step; an injectable
@@ -74,7 +74,7 @@ function isScannableTextPath(rel: string): boolean {
 }
 
 /**
- * Extracts the workspace-relative paths a successful edit_file result reports
+ * Extracts the workspace-relative paths a successful tl_edit_file result reports
  * writing. Covers the three success shapes:
  *  - batch (applyEditsMulti): `{ ok:true, files:[{path,...}], checkpoint }` —
  *    only entries whose own `ok` is not explicitly false (EditFileResult has no
@@ -197,7 +197,7 @@ function workspacePrefixWithin(toplevel: string, workspace: string): string | un
 
 /**
  * Git-detected workspace modifications, so closure sees files an agent edited
- * with NATIVE tools (not only through edit_file). Runs at most one git
+ * with NATIVE tools (not only through tl_edit_file). Runs at most one git
  * invocation per call — `git status --porcelain` reports BOTH tracked
  * modifications AND untracked (new, non-ignored) files in a single command, so
  * one spawn covers what would otherwise be `git diff --name-only HEAD` +
@@ -1093,7 +1093,7 @@ export interface ClosureCapabilityGap {
   kind: "missing-evidence";
   recoverable: true;
   reason: string;
-  next_call: { tool: "search_files" | "read_file"; arguments: Record<string, unknown> };
+  next_call: { tool: "tl_search_files" | "tl_read_file"; arguments: Record<string, unknown> };
 }
 
 /**
@@ -1116,8 +1116,8 @@ function closureCapabilityGaps(open: PackCheckRecord[]): ClosureCapabilityGap[] 
       recoverable: true,
       reason,
       next_call: probe !== undefined
-        ? { tool: "search_files", arguments: { action: "find", query: probe } }
-        : { tool: "read_file", arguments: { mode: "task_pack", query: reason } },
+        ? { tool: "tl_search_files", arguments: { action: "find", query: probe } }
+        : { tool: "tl_read_file", arguments: { mode: "task_pack", query: reason } },
     };
   });
 }
@@ -1125,7 +1125,7 @@ function closureCapabilityGaps(open: PackCheckRecord[]): ClosureCapabilityGap[] 
 /**
  * Verifies the workspace's token-bearing pack checks against the files edited so
  * far and, when a pack is active, attaches a compact `closure` reminder to a
- * successful edit_file result. Returns the result unchanged when there is no
+ * successful tl_edit_file result. Returns the result unchanged when there is no
  * pack, no token-bearing check, the result is a failure, or on any internal
  * error. Never mutates the input.
  *

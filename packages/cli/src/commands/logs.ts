@@ -200,9 +200,9 @@ export async function runLogs(args: string[]): Promise<void> {
         + `TL response measurement method: ${summary.method}\n`
         + `Context avoided: ${summary.measurementDisplay.contextAvoided.tokens === null ? "unavailable" : `${summary.measurementDisplay.contextAvoided.tokens} tokens`} (${summary.measurementDisplay.contextAvoided.status}; basis: ${summary.measurementDisplay.contextAvoided.basis})\n`
         + `Session net: ${summary.measurementDisplay.session.net.tokens === null ? "unavailable" : `${summary.measurementDisplay.session.net.tokens} tokens`} (${summary.measurementDisplay.session.net.status}; basis: ${summary.measurementDisplay.session.net.basis})\n`
-        + `By tool: read_file ${summary.byTool.read_file}, `
-        + `search_files ${summary.byTool.search_files}, `
-        + `edit_file ${summary.byTool.edit_file}\n`
+        + `By tool: tl_read_file ${summary.byTool.tl_read_file}, `
+        + `tl_search_files ${summary.byTool.tl_search_files}, `
+        + `tl_edit_file ${summary.byTool.tl_edit_file}\n`
         + `Matched AI sessions: ${session.matchedSessions}\n`
         + `Observed full-session tokens: ${session.actualTotalTokens ?? "unavailable"}\n`
         + `Predicted no-TL tokens: ${session.predictedWithoutTlTokens ?? "unavailable"}\n`

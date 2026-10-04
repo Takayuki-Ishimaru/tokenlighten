@@ -27,7 +27,7 @@ import { detectDisposition, type SfDisposition } from "./sfDisposition.js";
 import type { SfExplicitTarget } from "./sfConcerns.js";
 
 /**
- * One caller-declared address, in the shapes `read_file` accepts. Structural
+ * One caller-declared address, in the shapes `tl_read_file` accepts. Structural
  * duplicate of `sfConcerns.ts`'s `SfExplicitTarget` (imported as a type only,
  * so this leaf module and `sfConcerns.ts` — a consumer of this module — never
  * form a runtime import cycle, only a type-level one the compiler erases).
@@ -53,7 +53,7 @@ export interface IntentEvidence {
   /** §4.1. `ALLOW_WRITE` (server.ts:452) — the CLI's `--allow-write` flag. */
   readonly writeAllowed: boolean;
   /**
-   * §4.2 (W2). True once the same task's first `edit_file` has passed
+   * §4.2 (W2). True once the same task's first `tl_edit_file` has passed
    * `guardExecutionEdit` (state/session.ts, exported wrapper around
    * `guardExecutionEditCore`). Threaded from `WorkspaceSession.
    * intentEditObserved` via `getIntentEditObserved(workspaceRoot)`;
@@ -130,7 +130,7 @@ export function resolveIntent(evidence: IntentEvidence): IntentDecision {
     (evidence.referencesObserved || evidence.qualifiedAnchorResolved || verb?.relational === true);
   const lexicalDisposition = verb?.disposition;
 
-  // §4.2 (W2) — OBSERVED layer: an edit_file call already passed
+  // §4.2 (W2) — OBSERVED layer: an tl_edit_file call already passed
   // `guardExecutionEdit` THIS task epoch (`editObserved`, threaded from
   // `state/session.ts`'s `WorkspaceSession.intentEditObserved` /
   // `getIntentEditObserved`). This is a structural fact the server recorded
@@ -148,7 +148,7 @@ export function resolveIntent(evidence: IntentEvidence): IntentDecision {
       relational,
       writeFrontier: "open",
       source: "observed",
-      reason: "an edit_file call already passed guardExecutionEdit this task epoch (§4.2); the write frontier stays open and an edit disposition is admissible for the rest of the task",
+      reason: "an tl_edit_file call already passed guardExecutionEdit this task epoch (§4.2); the write frontier stays open and an edit disposition is admissible for the rest of the task",
     };
   }
 

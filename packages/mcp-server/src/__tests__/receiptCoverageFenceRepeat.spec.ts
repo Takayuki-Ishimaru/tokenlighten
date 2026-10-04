@@ -211,7 +211,7 @@ async function runFenceRepeatSequence(srv: ServerHandle, cwd: string): Promise<{
   // (1) task_pack, explicit targets — mints an act.edit prepared certificate
   // whose frontier is exactly these three files (verbatim from
   // sfV2CombinedPin.spec.ts's own `taskPackEdit` call).
-  const taskPackEdit = await call(srv, "read_file", {
+  const taskPackEdit = await call(srv, "tl_read_file", {
     targets: [{ path: "src/sensor.hpp" }, { path: "src/sensor.cpp" }, { path: "src/monitor.cpp" }],
     query: "Add extra validation logic inside Sensor::isHealthy.",
     task: { epoch: "new" },
@@ -225,7 +225,7 @@ async function runFenceRepeatSequence(srv: ServerHandle, cwd: string): Promise<{
   // reaches `heldSelfMaterialReceipt` via `guardExecutionDiscovery`'s main
   // prepared-fence branch (`brakeTargetPath` matches on `fence.evidencePaths`
   // directly from the plain `path`, so no handle threading is needed).
-  const repeat = await call(srv, "read_file", {
+  const repeat = await call(srv, "tl_read_file", {
     targets: [{ path: "src/sensor.cpp" }],
     cwd,
   });

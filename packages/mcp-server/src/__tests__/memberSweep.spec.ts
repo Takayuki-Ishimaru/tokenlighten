@@ -1,5 +1,5 @@
 // memberSweep.spec.ts — L1: member-usage sweep affordance on type/class
-// references (search_files action=references / action=find on a single
+// references (tl_search_files action=references / action=find on a single
 // identifier).
 //
 // Evidence (2026-07-30 bench T11, repo-rename alignment task): a live A/B
@@ -92,7 +92,7 @@ describe("computeMemberSweep — resolution and shape", () => {
     // after every public-looking one, not left in source order.
     expect(sweep?.members).toEqual(["constructor", "getUser", "saveUser", "_validateInternal"]);
     expect(sweep?.next).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "find", queries: ["constructor", "getUser", "saveUser", "_validateInternal"] },
     });
   });
@@ -185,7 +185,7 @@ describe("computeMemberSweep — resolution and shape", () => {
       symbol: "Oversized",
       members: untrimmedNames,
       next: {
-        tool: "search_files",
+        tool: "tl_search_files",
         arguments: { action: "find", queries: untrimmedNames.slice(0, 5) },
       },
     }), "utf8");
@@ -240,7 +240,7 @@ describe("findReferences — member_sweep attachment", () => {
     expect(result.member_sweep?.symbol).toBe("Widget");
     expect(result.member_sweep?.members).toEqual(["render", "destroy", "_cleanup"]);
     expect(result.member_sweep?.next).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "find", queries: ["render", "destroy", "_cleanup"] },
     });
     expect(result.hint).toBe(MEMBER_SWEEP_HINT_TEXT);

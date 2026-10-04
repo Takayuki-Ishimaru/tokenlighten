@@ -7,11 +7,11 @@
 // ONE raw ancestor walk (server.ts's since-removed nearestExistingAncestorPath)
 // fed the `did_you_mean` string surfaced by protocol/refusal.ts's mapping —
 // with NO shared validation step. `checkCwdWithCorrection` (server.ts, the
-// read_file/search_files-only auto-correction) already re-validated a
+// tl_read_file/tl_search_files-only auto-correction) already re-validated a
 // candidate through `checkCwdOrRefuse` before silently adopting it; nothing
 // else did. Concretely: a symlink whose realpath escapes every allowed
 // parent could be walked to by the raw ancestor walk (`statSync` follows
-// symlinks) and offered as `did_you_mean` on a WRITE-path (edit_file)
+// symlinks) and offered as `did_you_mean` on a WRITE-path (tl_edit_file)
 // refusal — the caller's retry would draw the identical refusal again
 // (a refusal loop, not a silent escape, but a caller that trusts the
 // suggestion without re-checking gets nothing from the retry).
@@ -111,14 +111,14 @@ function isHomeDirItself(p: string): boolean {
  * found, then gates it. An earlier version of this function walked past an
  * invalid ancestor, and that was empirically wrong, not merely
  * over-cautious: `checkCwdWithCorrection` (server.ts, the
- * read_file/search_files-only auto-correction) re-validates this exact
+ * tl_read_file/tl_search_files-only auto-correction) re-validates this exact
  * return value before silently adopting it, and in a test environment where
  * `TOKENLIGHTEN_ALLOWED_PARENTS` grants $HOME (F-A1-8's vitest-harness-wide
  * injection), every direct child of $HOME independently validates on its
  * own — so walking past an invalid symlink landed on the container
  * directory immediately ABOVE it (a technically-valid override, but not
  * what anyone typo'd toward, and not the value under test) and got silently
- * adopted, changing which file a read_file call served. Gating only the
+ * adopted, changing which file a tl_read_file call served. Gating only the
  * SAME single candidate the old function found, and omitting when IT fails,
  * can only ever turn a previously-offered-but-invalid value into an
  * omission — it can never promote a DIFFERENT value into existence — so it
@@ -129,7 +129,7 @@ function isHomeDirItself(p: string): boolean {
  * nearest existing ancestor unconditionally — `statSync` follows symlinks,
  * so a symlink whose realpath escapes every allowed parent counted as
  * "existing" and was returned verbatim, with no re-validation on the write
- * path (`checkCwdWithCorrection` never runs for edit_file, by design).
+ * path (`checkCwdWithCorrection` never runs for tl_edit_file, by design).
  */
 export function nearestValidWorkspaceAncestor(
   requestedPath: string,

@@ -7,7 +7,7 @@
  * error (e.g. the search+content shape that used to wipe a file — now
  * guarded by SEARCH_CONTENT_CONFLICT_MSG in server.ts). This file
  * systematically walks the parameter surface of the 3 advertised tools
- * (read_file, edit_file, search_files) for PAIRS/triples of arguments the
+ * (tl_read_file, tl_edit_file, tl_search_files) for PAIRS/triples of arguments the
  * dispatch does not explicitly route together, and pins the actual observed
  * behavior for each:
  *
@@ -202,7 +202,7 @@ async function buildTestXlsxBytes(): Promise<Buffer> {
 // (search===undefined || search==="")); defense-in-depth mirror in
 // applyEditsMulti.ts's applyEditStep for direct (non-server.ts) callers.
 // =============================================================================
-describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shape", () => {
+describe("argMatrix — tl_edit_file — FIXED: edits[] range-handle ambiguous shape", () => {
   const ORIG = [
     "export function greetUser(name: string): string {",
     '  return "Hello, " + name;',
@@ -216,7 +216,7 @@ describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shap
 
   async function mintRangeHandle(ws: string, srv: ServerHandle): Promise<string> {
     writeFile(ws, "f.ts", ORIG);
-    const slice = await srv.call("read_file", { path: "f.ts", mode: "slice", range: "1-3" });
+    const slice = await srv.call("tl_read_file", { path: "f.ts", mode: "slice", range: "1-3" });
     expect(typeof slice["handle"]).toBe("string");
     return slice["handle"] as string;
   }
@@ -226,7 +226,7 @@ describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shap
     const handle = await mintRangeHandle(ws, srv);
     const before = readFile(ws, "f.ts");
 
-    const res = await srv.call("edit_file", { edits: [{ handle }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ handle }] });
     expect(res["kind"]).toBe("refusal");
     expect(String(res["detail"])).toContain("content");
 
@@ -239,7 +239,7 @@ describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shap
     const handle = await mintRangeHandle(ws, srv);
     const before = readFile(ws, "f.ts");
 
-    const res = await srv.call("edit_file", { edits: [{ handle, replace: "export function greetUser(name: string): string {\n  return `Hi, ${name}!`;\n}" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ handle, replace: "export function greetUser(name: string): string {\n  return `Hi, ${name}!`;\n}" }] });
     expect(res["kind"]).toBe("refusal");
     expect(String(res["detail"])).toMatch(/content|ambiguous/i);
 
@@ -252,7 +252,7 @@ describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shap
     const handle = await mintRangeHandle(ws, srv);
     const before = readFile(ws, "f.ts");
 
-    const res = await srv.call("edit_file", { edits: [{ handle, search: "", replace: "WIPED?" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ handle, search: "", replace: "WIPED?" }] });
     expect(res["kind"]).toBe("refusal");
 
     expect(readFile(ws, "f.ts")).toBe(before);
@@ -262,7 +262,7 @@ describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shap
     const { ws, srv } = await newServer("wipe-sanity-content");
     const handle = await mintRangeHandle(ws, srv);
 
-    const res = await srv.call("edit_file", { edits: [{ handle, content: "export function greetUser(name: string): string {\n  return `Hi, ${name}!`;\n}" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ handle, content: "export function greetUser(name: string): string {\n  return `Hi, ${name}!`;\n}" }] });
     expect(res["kind"]).not.toBe("refusal");
     expect(readFile(ws, "f.ts")).toContain("Hi, ${name}!");
     expect(readFile(ws, "f.ts")).toContain("farewellUser"); // untouched tail survives
@@ -272,7 +272,7 @@ describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shap
     const { ws, srv } = await newServer("wipe-sanity-searchreplace");
     const handle = await mintRangeHandle(ws, srv);
 
-    const res = await srv.call("edit_file", { edits: [{ handle, search: "Hello", replace: "Howdy" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ handle, search: "Hello", replace: "Howdy" }] });
     expect(res["kind"]).not.toBe("refusal");
     expect(readFile(ws, "f.ts")).toContain("Howdy");
   }, 30000);
@@ -305,11 +305,11 @@ describe("argMatrix — edit_file — FIXED: edits[] range-handle ambiguous shap
 // "ok:true with an ignored argument" instance. Both are now a single loud
 // refusal up front.
 // =============================================================================
-describe("argMatrix — edit_file — FIXED: create + edits[] conflict", () => {
+describe("argMatrix — tl_edit_file — FIXED: create + edits[] conflict", () => {
   it("create:true + edits[] targeting a file that does NOT exist yet: refuses instead of a misleading 'File not found'", async () => {
     const { ws, srv } = await newServer("create-edits-missing");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       create: true,
       path: "brandnew.ts",
       content: "export const y = 2;\n",
@@ -324,7 +324,7 @@ describe("argMatrix — edit_file — FIXED: create + edits[] conflict", () => {
     const { ws, srv } = await newServer("create-edits-existing");
     writeFile(ws, "existing.ts", "export const x = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       create: true,
       path: "should-not-be-created.ts",
       content: "ignored content",
@@ -339,7 +339,7 @@ describe("argMatrix — edit_file — FIXED: create + edits[] conflict", () => {
 
   it("sanity (no regression): create:true WITHOUT edits[] still creates the file", async () => {
     const { ws, srv } = await newServer("create-alone");
-    const res = await srv.call("edit_file", { create: true, path: "solo.ts", content: "export const S = 1;\n", cwd: ws });
+    const res = await srv.call("tl_edit_file", { create: true, path: "solo.ts", content: "export const S = 1;\n", cwd: ws });
     expect(res["kind"]).not.toBe("refusal");
     expect(readFile(ws, "solo.ts")).toBe("export const S = 1;\n");
   }, 30000);
@@ -347,7 +347,7 @@ describe("argMatrix — edit_file — FIXED: create + edits[] conflict", () => {
   it("sanity (no regression): edits[] WITHOUT create:true still works on existing files", async () => {
     const { ws, srv } = await newServer("edits-alone");
     writeFile(ws, "e.ts", "export const E = 1;\n");
-    const res = await srv.call("edit_file", { edits: [{ path: "e.ts", search: "E = 1", replace: "E = 2" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ path: "e.ts", search: "E = 1", replace: "E = 2" }] });
     expect(res["kind"]).not.toBe("refusal");
     expect(readFile(ws, "e.ts")).toBe("export const E = 2;\n");
   }, 30000);
@@ -370,7 +370,7 @@ describe("argMatrix — edit_file — FIXED: create + edits[] conflict", () => {
 // that was NEVER created and refused the WHOLE batch "File not found:
 // <create target>" — with no indication create:true was ever relevant.
 // =============================================================================
-describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi-item edits[] batch", () => {
+describe("argMatrix — tl_edit_file — FIXED: create:true item mixed into a multi-item edits[] batch", () => {
   it("4 existing-file edits + 1 create:true item in ONE edits[] batch: all 5 land in one call", async () => {
     const { ws, srv } = await newServer("batch-create-mix");
     writeFile(ws, "a.ts", "const A = 1;\n");
@@ -378,7 +378,7 @@ describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi
     writeFile(ws, "c.ts", "const C = 1;\n");
     writeFile(ws, "d.ts", "const D = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [
         { path: "a.ts", search: "A = 1", replace: "A = 2" },
         { path: "b.ts", search: "B = 1", replace: "B = 2" },
@@ -402,7 +402,7 @@ describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi
     writeFile(ws, "src.ts", "export const SRC = 1;\n");
     writeFile(ws, "existing.ts", "export const E = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [
         { path: "existing.ts", search: "E = 1", replace: "E = 2" },
         { path: "copy.ts", create: true, from: "src.ts" },
@@ -422,7 +422,7 @@ describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi
     // The refusal fires on PRESENCE of directoryHandle, before any lookup —
     // an unresolvable id proves the guard runs ahead of handle resolution,
     // not just ahead of a successful one.
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [
         { path: "existing.ts", search: "E = 1", replace: "E = 2" },
         { path: "sub.ts", create: true, content: "export const N = 1;\n", directoryHandle: "not-a-real-handle" },
@@ -440,7 +440,7 @@ describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi
   it("a create:true item sharing its path with another edits[] item in the SAME batch is an explicit refusal, not a create+edit chain", async () => {
     const { ws, srv } = await newServer("batch-create-same-path-refused");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [
         { path: "chained.ts", create: true, content: "export const N = 1;\n" },
         { path: "chained.ts", search: "N = 1", replace: "N = 2" },
@@ -459,12 +459,12 @@ describe("argMatrix — edit_file — FIXED: create:true item mixed into a multi
 // primitive as the established range-handle route. Small edits apply directly;
 // a near-whole-file fan-out requires the existing expected-hash acknowledgement.
 // =============================================================================
-describe("argMatrix — edit_file — M1: target=\"all\" without a range handle", () => {
+describe("argMatrix — tl_edit_file — M1: target=\"all\" without a range handle", () => {
   it("path+search target='all' replaces every match and reports the actual count", async () => {
     const { ws, srv } = await newServer("target-all-ambiguous");
     writeFile(ws, "dup.ts", "const val = 1;\nconst val2 = 1;\nconst val3 = 1;\n");
 
-    const res = await srv.call("edit_file", { path: "dup.ts", search: "= 1", replace: "= 99", target: "all" });
+    const res = await srv.call("tl_edit_file", { path: "dup.ts", search: "= 1", replace: "= 99", target: "all" });
     expect(res["kind"], JSON.stringify(res)).toBe("edit.applied");
     expect(res["replacements"]).toBe(3);
     expect(readFile(ws, "dup.ts")).toBe("const val = 99;\nconst val2 = 99;\nconst val3 = 99;\n");
@@ -475,14 +475,14 @@ describe("argMatrix — edit_file — M1: target=\"all\" without a range handle"
     const before = Array.from({ length: 300 }, (_, i) => `const value${i} = \"old\";`).join("\n") + "\n";
     writeFile(ws, "broad.ts", before);
 
-    const refused = await srv.call("edit_file", { path: "broad.ts", search: "old", replace: "new", target: "all" });
+    const refused = await srv.call("tl_edit_file", { path: "broad.ts", search: "old", replace: "new", target: "all" });
     expect(refused["kind"], JSON.stringify(refused)).toBe("refusal");
     expect(refused["code"]).toBe("blast-radius-precondition-required");
     expect(refused["replaced_percent"]).toBe(100);
     expect(typeof refused["current_sha"]).toBe("string");
     expect(readFile(ws, "broad.ts")).toBe(before);
 
-    const applied = await srv.call("edit_file", {
+    const applied = await srv.call("tl_edit_file", {
       path: "broad.ts", search: "old", replace: "new", target: "all",
       precondition: "expected-hash", expectedSha: shaOfText(before),
     });
@@ -495,7 +495,7 @@ describe("argMatrix — edit_file — M1: target=\"all\" without a range handle"
     const { ws, srv } = await newServer("target-all-single");
     writeFile(ws, "one.ts", "const solo = 1;\n");
 
-    const res = await srv.call("edit_file", { path: "one.ts", search: "solo = 1", replace: "solo = 2", target: "all" });
+    const res = await srv.call("tl_edit_file", { path: "one.ts", search: "solo = 1", replace: "solo = 2", target: "all" });
     expect(res["kind"]).not.toBe("refusal");
     expect(res["hint"]).toBeUndefined(); // hint only fires on the ambiguous case
     expect(readFile(ws, "one.ts")).toBe("const solo = 2;\n");
@@ -512,8 +512,8 @@ describe("argMatrix — edit_file — M1: target=\"all\" without a range handle"
     ].join("\n") + "\n";
     writeFile(ws, "items.ts", content);
 
-    const slice = await srv.call("read_file", { mode: "slice", path: "items.ts", range: "2-5" });
-    const res = await srv.call("edit_file", { handle: slice["handle"], target: "all", search: "old-", replace: "new-" });
+    const slice = await srv.call("tl_read_file", { mode: "slice", path: "items.ts", range: "2-5" });
+    const res = await srv.call("tl_edit_file", { handle: slice["handle"], target: "all", search: "old-", replace: "new-" });
     expect(res["kind"]).not.toBe("refusal");
     expect(res["replacements"]).toBe(2);
     const updated = readFile(ws, "items.ts");
@@ -531,16 +531,16 @@ describe("argMatrix — edit_file — M1: target=\"all\" without a range handle"
 // mutation. These regressions pin the old bypass shape, item override, inherited
 // failure, and all-or-nothing behavior.
 // =============================================================================
-describe("argMatrix — edit_file — FIXED: per-item precondition enforcement and inheritance", () => {
+describe("argMatrix — tl_edit_file — FIXED: per-item precondition enforcement and inheritance", () => {
   it("PARAMOUNT repro: expected-hash on an unrelated top-level handle no longer green-lights an edits[] batch that mutates a DIFFERENT, hash-unchecked file", async () => {
     const { ws, srv } = await newServer("precond-bypass-paramount");
     writeFile(ws, "a.ts", "const a = 1;\n");
     writeFile(ws, "c.ts", "const c = 1;\n");
 
-    const readA = await srv.call("read_file", { path: "a.ts", mode: "full" });
-    const readC = await srv.call("read_file", { path: "c.ts", mode: "full" });
+    const readA = await srv.call("tl_read_file", { path: "a.ts", mode: "full" });
+    const readC = await srv.call("tl_read_file", { path: "c.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       handle: readC["handle"], // top-level handle names file C
       precondition: "expected-hash",
       expectedSha: readC["sha"], // the CORRECT, current hash of C
@@ -559,7 +559,7 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
     writeFile(ws, "a.ts", "const a = 1;\n");
     writeFile(ws, "b.ts", "const b = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       precondition: "expected-hash",
       expectedSha: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       edits: [
@@ -578,12 +578,12 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
     writeFile(ws, "src/inside.ts", 'export const A = "old";\n');
     writeFile(ws, "outside.ts", 'export const B = "old";\n');
 
-    // Mint a scope handle confined to src/ via a scoped search_files locate
+    // Mint a scope handle confined to src/ via a scoped tl_search_files locate
     // is heavier than needed here — precondition=scope-handle with an
     // UNKNOWN scopeHandle already exercises the same dispatch line (the
     // combo under test is precondition/edits[] routing, not scope-handle's
     // own minting path, which editCodeHandle.spec.ts already covers).
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       path: "src/inside.ts",
       precondition: "scope-handle",
       scopeHandle: "h9999",
@@ -598,7 +598,7 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
     const { ws, srv } = await newServer("precond-item-override");
     writeFile(ws, "a.ts", "const a = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       precondition: "expected-hash",
       expectedSha: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       edits: [
@@ -614,7 +614,7 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
     writeFile(ws, "a.ts", "const a = 1;\n");
     writeFile(ws, "b.ts", "const b = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       precondition: "expected-hash",
       expectedSha: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       edits: [
@@ -633,10 +633,10 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
     writeFile(ws, "a.ts", "const a = 1;\n");
     writeFile(ws, "b.ts", "const b = 1;\n");
 
-    const readA = await srv.call("read_file", { path: "a.ts", mode: "full" });
-    const readB = await srv.call("read_file", { path: "b.ts", mode: "full" });
+    const readA = await srv.call("tl_read_file", { path: "a.ts", mode: "full" });
+    const readB = await srv.call("tl_read_file", { path: "b.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       precondition: "expected-hash",
       expectedSha: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       edits: [
@@ -665,7 +665,7 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
   it("unique-match + edits[] applies when every batch item has exactly one scoped match", async () => {
     const { ws, srv } = await newServer("precond-unique-match-batch-supported");
     writeFile(ws, "whatever.ts", "const x = 1;\n");
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       precondition: "unique-match",
       edits: [{ path: "whatever.ts", search: "x = 1", replace: "x = 2" }],
     });
@@ -676,9 +676,9 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
   it("sanity (no regression): expected-hash on a SINGLE (non-batch) edit still works normally", async () => {
     const { ws, srv } = await newServer("precond-expected-hash-single-ok");
     writeFile(ws, "s.ts", "const s = 1;\n");
-    const read = await srv.call("read_file", { path: "s.ts", mode: "full" });
+    const read = await srv.call("tl_read_file", { path: "s.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       path: "s.ts",
       precondition: "expected-hash",
       expectedSha: read["sha"],
@@ -691,18 +691,18 @@ describe("argMatrix — edit_file — FIXED: per-item precondition enforcement a
 });
 
 // =============================================================================
-// GROUP 5 (already sane / documented — edit_file): tested and confirmed to
+// GROUP 5 (already sane / documented — tl_edit_file): tested and confirmed to
 // already produce a helpful refusal or a truthful, sensible interpretation.
 // No server change; pinned so a future regression is caught.
 // =============================================================================
-describe("argMatrix — edit_file — already sane / documented (no change)", () => {
+describe("argMatrix — tl_edit_file — already sane / documented (no change)", () => {
   it("handle + path pointing at a DIFFERENT file: the handle wins (documented — 'a handle IS the canonical reference'), and the response's own path field tells the truth", async () => {
     const { ws, srv } = await newServer("handle-path-conflict");
     writeFile(ws, "one.ts", "export const ONE = 1;\n");
     writeFile(ws, "two.ts", "export const TWO = 2;\n");
-    const h = await srv.call("read_file", { path: "one.ts", mode: "full" });
+    const h = await srv.call("tl_read_file", { path: "one.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", { handle: h["handle"], path: "two.ts", search: "ONE = 1", replace: "ONE = 100" });
+    const res = await srv.call("tl_edit_file", { handle: h["handle"], path: "two.ts", search: "ONE = 1", replace: "ONE = 100" });
     expect(res["kind"]).not.toBe("refusal");
     expect(res["path"]).toBe("one.ts"); // truthful: reflects what actually got edited
     expect(readFile(ws, "one.ts")).toBe("export const ONE = 100;\n");
@@ -712,9 +712,9 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
   it("handle (existing file) + create:true: refuses 'file_exists' rather than silently overwriting the handle's file", async () => {
     const { ws, srv } = await newServer("handle-create-conflict");
     writeFile(ws, "existing.ts", "export const E = 1;\n");
-    const h = await srv.call("read_file", { path: "existing.ts", mode: "full" });
+    const h = await srv.call("tl_read_file", { path: "existing.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", { handle: h["handle"], create: true, content: "export const OVERWRITTEN = true;\n" });
+    const res = await srv.call("tl_edit_file", { handle: h["handle"], create: true, content: "export const OVERWRITTEN = true;\n" });
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("create-target-exists"); // A.9.2 row 6: the `file_exists` machine token is now `code`; the prose is `detail`.
     expect(readFile(ws, "existing.ts")).toBe("export const E = 1;\n");
@@ -724,7 +724,7 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
     const { ws, srv } = await newServer("create-from-content");
     writeFile(ws, "src.ts", "export const SRC = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [{ create: true, path: "out.ts", from: "src.ts", content: "export const EXPLICIT = 99;\n" }],
       cwd: ws,
     });
@@ -736,7 +736,7 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
     const { ws, srv } = await newServer("raw-create-from-refusal");
     writeFile(ws, "src.ts", "export const SRC = 1;\n");
 
-    const res = await srv.call("edit_file", { create: true, path: "out.ts", from: "src.ts", cwd: ws });
+    const res = await srv.call("tl_edit_file", { create: true, path: "out.ts", from: "src.ts", cwd: ws });
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("invalid-input");
     expect(res["field"]).toBe("from");
@@ -747,7 +747,7 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
     const { ws, srv } = await newServer("rename-extra-fields");
     writeFile(ws, "r.ts", "export function oldName() { return 1; }\nexport function caller() { return oldName(); }\n");
 
-    const res = await srv.call("edit_file", { mode: "rename", from: "oldName", to: "newName", path: "r.ts", search: "SHOULD BE IGNORED", replace: "IGNORED TOO" });
+    const res = await srv.call("tl_edit_file", { mode: "rename", from: "oldName", to: "newName", path: "r.ts", search: "SHOULD BE IGNORED", replace: "IGNORED TOO" });
     expect(res["kind"]).not.toBe("refusal");
     const updated = readFile(ws, "r.ts");
     expect(updated).toContain("newName");
@@ -758,9 +758,9 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
   it("intent + edits[] together is an explicit mutual-exclusion error and writes nothing", async () => {
     const { ws, srv } = await newServer("intent-edits-conflict");
     writeFile(ws, "i.ts", "export function foo() { return 1; }\n");
-    const h = await srv.call("read_file", { path: "i.ts", mode: "full" });
+    const h = await srv.call("tl_read_file", { path: "i.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       handle: h["handle"],
       intent: "definitely-not-a-real-intent",
       edits: [{ path: "i.ts", search: "foo", replace: "bar" }],
@@ -773,7 +773,7 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
 
   it("review:true + create:true: produces a coherent review object instead of crashing on the create result's missing lines/delta fields", async () => {
     const { ws, srv } = await newServer("review-create");
-    const res = await srv.call("edit_file", { create: true, path: "new.ts", content: "export const N = 1;\n", review: true, cwd: ws });
+    const res = await srv.call("tl_edit_file", { create: true, path: "new.ts", content: "export const N = 1;\n", review: true, cwd: ws });
     expect(res["kind"]).not.toBe("refusal");
     const review = res["review"] as Record<string, unknown>;
     expect(review).toBeTruthy();
@@ -786,7 +786,7 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
     writeFile(ws, "a.ts", "export const A = 1;\n");
     writeFile(ws, "b.ts", "export const B = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       review: true,
       edits: [
         { path: "a.ts", search: "A = 1", replace: "A = 2" },
@@ -811,10 +811,10 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
     // projector now understands both dialects, so the original 2026-07-11a
     // expectation is restored: the caller's WIDER range wins over the handle's
     // narrower symbol span.
-    const symH = await srv.call("read_file", { path: "w.ts", mode: "symbol", symbol: "beta" });
+    const symH = await srv.call("tl_read_file", { path: "w.ts", mode: "symbol", symbol: "beta" });
     const symHandle = (symH["evidence"] as Array<Record<string, unknown>>)[0]?.["handle"];
     expect(String(symHandle)).toMatch(/^h[0-9a-z]+$/);
-    const widened = await srv.call("read_file", { handle: symHandle, range: "1-9" });
+    const widened = await srv.call("tl_read_file", { handle: symHandle, range: "1-9" });
     expect(widened["kind"]).toBe("read.text");
     const widenedEvidence = (widened["evidence"] as Array<Record<string, unknown>>)[0]!;
     expect(widenedEvidence["range"]).toBe("1-9");
@@ -824,18 +824,18 @@ describe("argMatrix — edit_file — already sane / documented (no change)", ()
 });
 
 // =============================================================================
-// GROUP 6 (already sane / documented — read_file): read-only, so the worst
+// GROUP 6 (already sane / documented — tl_read_file): read-only, so the worst
 // outcome is a wrong/incomplete ANSWER rather than data loss. Each combo
 // below was tested and already resolves to a truthful, self-documenting
 // response or a pre-existing explicit refusal.
 // =============================================================================
-describe("argMatrix — read_file — already sane / documented (no change)", () => {
+describe("argMatrix — tl_read_file — already sane / documented (no change)", () => {
   it("reuses a long task_pack query through a workspace-bound qref and rejects a stale ref", async () => {
     const { ws, srv } = await newServer("read-task-pack-qref");
     writeFile(ws, "src/order.ts", "export function priceOrder() {\n  return 42;\n}\n");
     const query = `Explain priceOrder and its contract. ${"Include exact evidence. ".repeat(40)}`;
 
-    const first = await srv.call("read_file", {
+    const first = await srv.call("tl_read_file", {
       mode: "task_pack",
       query,
       taskProfile: "answer",
@@ -844,13 +844,13 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     const qref = String(first["qref"]);
     expect(qref).toMatch(/^q-[a-f0-9]{16}$/);
 
-    await srv.call("read_file", {
+    await srv.call("tl_read_file", {
       mode: "full",
       path: "src/order.ts",
       query: "Unrelated hint for a non-task-pack read.",
     });
 
-    const repeated = await srv.call("read_file", {
+    const repeated = await srv.call("tl_read_file", {
       mode: "task_pack",
       qref,
       taskProfile: "answer",
@@ -903,7 +903,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
       );
     }
 
-    const replacement = await srv.call("read_file", {
+    const replacement = await srv.call("tl_read_file", {
       mode: "task_pack",
       query: "Explain a different task.",
       taskProfile: "answer",
@@ -915,7 +915,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     // taskEpoch:new clears the previous task's qrefs. Repeat it here so this
     // assertion exercises qref expiry rather than the replacement task's own
     // prepared fence.
-    const stale = await srv.call("read_file", { mode: "task_pack", qref, taskEpoch: "new" });
+    const stale = await srv.call("tl_read_file", { mode: "task_pack", qref, taskEpoch: "new" });
     expect(String(stale["detail"])).toContain("unknown-or-stale-qref");
   }, 30000);
 
@@ -928,7 +928,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     const { ws, srv } = await newServer("read-task-pack-server-build");
     writeFile(ws, "src/greet.ts", "export function greet() {\n  return 'hi';\n}\n");
 
-    const first = await srv.call("read_file", {
+    const first = await srv.call("tl_read_file", {
       mode: "task_pack",
       query: "Explain greet and its contract.",
       taskProfile: "answer",
@@ -938,7 +938,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     expect(typeof first["server_build"]).toBe("string");
     expect(String(first["server_build"]).length).toBeGreaterThan(0);
 
-    const second = await srv.call("read_file", {
+    const second = await srv.call("tl_read_file", {
       mode: "task_pack",
       query: "A completely different question about the same file.",
       taskProfile: "answer",
@@ -953,8 +953,8 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     writeFile(ws, "one.ts", "export function alpha() {\n  return 1;\n}\n");
     writeFile(ws, "two.ts", "export function beta() {\n  return 2;\n}\n");
 
-    const h1 = await srv.call("read_file", { path: "one.ts", mode: "full" });
-    const res = await srv.call("read_file", { handle: h1["handle"], path: "two.ts", mode: "auto" });
+    const h1 = await srv.call("tl_read_file", { path: "one.ts", mode: "full" });
+    const res = await srv.call("tl_read_file", { handle: h1["handle"], path: "two.ts", mode: "auto" });
     const conflictEvidence = res["evidence"] as Array<Record<string, unknown>> | undefined;
     expect(conflictEvidence?.[0]?.["path"]).toBe("one.ts");
     expect(String(conflictEvidence?.[0]?.["body"])).toContain("alpha");
@@ -976,9 +976,9 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     // together); use range handles for both so the combo under test —
     // whether the top-level singular `handle` leaks into the batch — is
     // isolated from it.
-    const h1 = await srv.call("read_file", { path: "one.ts", mode: "slice", range: "1-3" });
-    const h2 = await srv.call("read_file", { path: "two.ts", mode: "slice", range: "1-3" });
-    const res = await srv.call("read_file", { handle: h1["handle"], handles: [h2["handle"]] });
+    const h1 = await srv.call("tl_read_file", { path: "one.ts", mode: "slice", range: "1-3" });
+    const h2 = await srv.call("tl_read_file", { path: "two.ts", mode: "slice", range: "1-3" });
+    const res = await srv.call("tl_read_file", { handle: h1["handle"], handles: [h2["handle"]] });
     // v1: "handles" is a READ_BATCH_MODES member -> kind read.batch;
     // `items[]` folds into `entries[]` (A.5.4).
     expect(res["kind"]).toBe("read.batch");
@@ -991,7 +991,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     writeFile(ws, "one.ts", "export function alpha() {\n  return 1;\n}\n");
     writeFile(ws, "two.ts", "export function beta() {\n  return 2;\n}\n");
 
-    const res = await srv.call("read_file", { path: "one.ts", mode: "full", paths: ["two.ts"] });
+    const res = await srv.call("tl_read_file", { path: "one.ts", mode: "full", paths: ["two.ts"] });
     // v1: a paths[]-triggered batch body classifies as read.batch regardless
     // of the REQUESTED `mode` string; `items[]` folds into `entries[]` (A.5.4).
     expect(res["kind"]).toBe("read.batch");
@@ -1003,7 +1003,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     const { ws, srv } = await newServer("read-slice-symbol-and-range");
     writeFile(ws, "one.ts", "export function alpha() {\n  return 1;\n}\n");
 
-    const res = await srv.call("read_file", { path: "one.ts", mode: "slice", symbol: "alpha", range: "1-1" });
+    const res = await srv.call("tl_read_file", { path: "one.ts", mode: "slice", symbol: "alpha", range: "1-1" });
     const symbolPriorityEvidence = res["evidence"] as Array<Record<string, unknown>> | undefined;
     expect(symbolPriorityEvidence?.[0]?.["range"]).not.toBe("1-1"); // truthful: not the caller's (wrong) numeric guess
     expect(String(symbolPriorityEvidence?.[0]?.["body"])).toContain("alpha");
@@ -1013,7 +1013,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     const { ws, srv } = await newServer("read-pack-paths-and-query");
     writeFile(ws, "one.ts", "export function alpha() { return 1; }\n");
 
-    const res = await srv.call("read_file", { mode: "pack", paths: ["one.ts"], query: "alpha", includeClosure: false });
+    const res = await srv.call("tl_read_file", { mode: "pack", paths: ["one.ts"], query: "alpha", includeClosure: false });
     expect(res["kind"]).toBe("refusal");
     expect(String(res["detail"])).toContain("mutually exclusive");
   }, 30000);
@@ -1021,7 +1021,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
   it("comments='bogus' (not in the elide|keep enum): pre-existing explicit refusal, unaffected", async () => {
     const { ws, srv } = await newServer("read-comments-bogus");
     writeFile(ws, "one.ts", "export const A = 1;\n");
-    const res = await srv.call("read_file", { path: "one.ts", mode: "full", comments: "bogus" });
+    const res = await srv.call("tl_read_file", { path: "one.ts", mode: "full", comments: "bogus" });
     expect(res["kind"]).toBe("refusal");
     expect(String(res["detail"])).toContain("comments");
   }, 30000);
@@ -1031,7 +1031,7 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
     const xlsxBytes = await buildTestXlsxBytes();
     fs.writeFileSync(path.join(ws, "real.xlsx"), xlsxBytes);
 
-    const res = await srv.call("read_file", { path: "real.xlsx", mode: "artifact", kind: "docx" });
+    const res = await srv.call("tl_read_file", { path: "real.xlsx", mode: "artifact", kind: "docx" });
     expect(res["kind"]).toBe("refusal");
     // Confirmed live: exceljs' docx section reader correctly detects this
     // isn't a docx body rather than silently returning empty/garbage sections.
@@ -1040,21 +1040,21 @@ describe("argMatrix — read_file — already sane / documented (no change)", ()
 });
 
 // =============================================================================
-// GROUP 7 (already sane / documented — search_files): read-only, no data-loss
+// GROUP 7 (already sane / documented — tl_search_files): read-only, no data-loss
 // surface. Each combo below was tested and confirmed already-guarded or a
 // documented, truthful fallback chain.
 // =============================================================================
-describe("argMatrix — search_files — already sane / documented (no change)", () => {
+describe("argMatrix — tl_search_files — already sane / documented (no change)", () => {
   it("queries[] + query together: pre-existing explicit mutual-exclusion error", async () => {
     const { srv } = await newServer("search-queries-and-query");
-    const res = await srv.call("search_files", { action: "find", query: "alpha", queries: ["alpha", "beta"] });
+    const res = await srv.call("tl_search_files", { action: "find", query: "alpha", queries: ["alpha", "beta"] });
     expect(res["kind"]).toBe("refusal");
     expect(String(res["detail"])).toContain("not both");
   }, 30000);
 
   it("legacy action=symbols plus queries[] normalizes to the canonical symbol-find route", async () => {
     const { srv } = await newServer("search-queries-non-find");
-    const res = await srv.call("search_files", { action: "symbols", query: "alpha", queries: ["alpha"] });
+    const res = await srv.call("tl_search_files", { action: "symbols", query: "alpha", queries: ["alpha"] });
     expect(res["kind"]).toBe("search.matches");
     expect(res["matches"]).toMatchObject({ form: "symbols", total: 0 });
   }, 30000);
@@ -1064,7 +1064,7 @@ describe("argMatrix — search_files — already sane / documented (no change)",
     writeFile(ws, "one.ts", "export function alphaFn() { return 1; }\nalphaFn();\n");
     writeFile(ws, "two.ts", "// betaFn is mentioned only here, never called\n");
 
-    const res = await srv.call("search_files", { action: "references", symbol: "alphaFn", query: "betaFn" });
+    const res = await srv.call("tl_search_files", { action: "references", symbol: "alphaFn", query: "betaFn" });
     expect(res["ok"]).not.toBe(false); // findReferences ran using symbol, not query
     // Sanity: the response is scoped to alphaFn, not betaFn (best-effort —
     // exact shape is findReferences.ts's own concern, not this audit's).
@@ -1083,12 +1083,12 @@ describe("argMatrix — search_files — already sane / documented (no change)",
 // Fix: resolveTaskPackQueryArg (server.ts) branches the hint on whether
 // paths[] is present.
 // =============================================================================
-describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion recovery hint", () => {
+describe("argMatrix -- tl_read_file -- FIXED: task_pack query+qref mutual-exclusion recovery hint", () => {
   it("(a) query+qref+paths: hint drops query, keeps qref+paths, embeds the real values (not the old drop-qref hint)", async () => {
     const { ws, srv } = await newServer("read-task-pack-query-qref-paths");
     writeFile(ws, "src/order.ts", "export function priceOrder() {\n  return 42;\n}\n");
 
-    const res = await srv.call("read_file", {
+    const res = await srv.call("tl_read_file", {
       mode: "task_pack",
       query: "Explain priceOrder and its contract.",
       qref: "q-0123456789abcdef",
@@ -1099,7 +1099,7 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     // R-5 (v0.13-3 F-2): a structured continuation survives the refusal
     // funnel and is canonicalized once, rather than prose folding into detail.
     expect(res["next"], JSON.stringify(res)).toEqual({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         cwd: ws,
         qref: "q-0123456789abcdef",
@@ -1112,7 +1112,7 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
   it("(b) query+qref, no paths: echoes the caller's OWN query as a real re-pack instead of a placeholder", async () => {
     const { ws, srv } = await newServer("read-task-pack-query-qref-no-paths");
 
-    const res = await srv.call("read_file", {
+    const res = await srv.call("tl_read_file", {
       mode: "task_pack",
       query: "Explain something.",
       qref: "q-0123456789abcdef",
@@ -1127,7 +1127,7 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     // never a fabricated value, since the caller supplied this exact text.
     expect(res["retry"], JSON.stringify(res)).toBe("new-task");
     expect(res["next"], JSON.stringify(res)).toEqual({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { cwd: ws, query: "Explain something.", task: { epoch: "new" } },
     });
   }, 30000);
@@ -1136,7 +1136,7 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     const { ws, srv } = await newServer("read-task-pack-qref-paths-no-query");
     writeFile(ws, "src/order.ts", "export function priceOrder() {\n  return 42;\n}\n");
 
-    const seed = await srv.call("read_file", {
+    const seed = await srv.call("tl_read_file", {
       mode: "task_pack",
       query: "Explain priceOrder and its contract.",
       taskProfile: "answer",
@@ -1145,7 +1145,7 @@ describe("argMatrix -- read_file -- FIXED: task_pack query+qref mutual-exclusion
     const qref = String(seed["qref"]);
     expect(qref).toMatch(/^q-[a-f0-9]{16}$/);
 
-    const res = await srv.call("read_file", {
+    const res = await srv.call("tl_read_file", {
       mode: "task_pack",
       qref,
       paths: ["src/order.ts"],
@@ -1182,14 +1182,14 @@ describe("argMatrix — field-eval T1: mode=slice + paths[] guides instead of a 
   it("paths=[one path]: refusal names the single path as an executable next, preserving range", async () => {
     const { ws, srv } = await newServer("t1-slice-paths-one");
     writeFile(ws, "src/one.ts", "export const ONE = 1;\nexport const TWO = 2;\n");
-    const res = await srv.call("read_file", { mode: "slice", paths: ["src/one.ts"], range: "1-1" });
+    const res = await srv.call("tl_read_file", { mode: "slice", paths: ["src/one.ts"], range: "1-1" });
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("invalid-input");
     // `next` is a structured ToolCall ({tool, arguments}), like every other
     // refusal `next` in this protocol (§2.6) — parsed from the prose call the
     // fix emits, not shipped as raw prose itself.
     const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
-    expect(next?.tool).toBe("read_file");
+    expect(next?.tool).toBe("tl_read_file");
     expect(next?.arguments?.["content"]).toBe("auto");
     const targets = next?.arguments?.["targets"] as Array<Record<string, unknown>> | undefined;
     expect(targets?.[0]?.["path"]).toBe("src/one.ts");
@@ -1202,7 +1202,7 @@ describe("argMatrix — field-eval T1: mode=slice + paths[] guides instead of a 
     const { ws, srv } = await newServer("t1-slice-paths-two");
     writeFile(ws, "src/a.ts", "export const A = 1;\n");
     writeFile(ws, "src/b.ts", "export const B = 1;\n");
-    const res = await srv.call("read_file", { mode: "slice", paths: ["src/a.ts", "src/b.ts"] });
+    const res = await srv.call("tl_read_file", { mode: "slice", paths: ["src/a.ts", "src/b.ts"] });
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("invalid-input");
     // This exact shape is actually caught by `normalizeWireArgs` EARLIER than
@@ -1210,37 +1210,37 @@ describe("argMatrix — field-eval T1: mode=slice + paths[] guides instead of a 
     // producers agree on mode=task_pack, so the caller sees one consistent
     // recovery regardless of which one fired.
     const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
-    expect(next?.tool).toBe("read_file");
+    expect(next?.tool).toBe("tl_read_file");
     expect(next?.arguments?.["targets"]).toEqual([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
   }, 30000);
 
   it("a genuinely pathless slice (no path, no paths[], no handle) keeps the original bare refusal", async () => {
     const { srv } = await newServer("t1-slice-truly-pathless");
-    const res = await srv.call("read_file", { mode: "slice" });
+    const res = await srv.call("tl_read_file", { mode: "slice" });
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("invalid-input");
     expect(String(res["detail"])).toContain("path (or handle) is required for mode=slice");
   }, 30000);
 });
 
-describe("argMatrix — field-eval T2: search_files queries[] > 5 names the remaining tokens structurally", () => {
+describe("argMatrix — field-eval T2: tl_search_files queries[] > 5 names the remaining tokens structurally", () => {
   it("queries=6: next carries the first 5, remaining_queries carries the 6th verbatim", async () => {
     const { srv } = await newServer("t2-queries-six");
-    const res = await srv.call("search_files", {
+    const res = await srv.call("tl_search_files", {
       action: "find",
       queries: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"],
     });
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("invalid-input");
     const next = res["next"] as { tool?: string; arguments?: Record<string, unknown> } | undefined;
-    expect(next?.tool).toBe("search_files");
+    expect(next?.tool).toBe("tl_search_files");
     expect(next?.arguments?.["queries"]).toEqual(["alpha", "beta", "gamma", "delta", "epsilon"]);
     expect(res["remaining_queries"]).toEqual(["zeta"]);
   }, 30000);
 
   it("queries=7: remaining_queries carries both tail tokens, in order, without hand-slicing", async () => {
     const { srv } = await newServer("t2-queries-seven");
-    const res = await srv.call("search_files", {
+    const res = await srv.call("tl_search_files", {
       action: "find",
       queries: ["a1", "a2", "a3", "a4", "a5", "a6", "a7"],
     });
@@ -1253,11 +1253,11 @@ describe("argMatrix — field-eval T3: mode=handles labels a bare file-handle's 
   it("a bare file-kind handle (minted by mode=full) forwards its server-computed synthesized_range onto the wire", async () => {
     const { ws, srv } = await newServer("t3-handles-bare-file");
     writeFile(ws, "src/whole.ts", "export const WHOLE = 1;\nexport const SECOND = 2;\n");
-    const full = await srv.call("read_file", { mode: "full", path: "src/whole.ts" });
+    const full = await srv.call("tl_read_file", { mode: "full", path: "src/whole.ts" });
     const bareHandle = String(full["handle"]);
     expect(bareHandle).toMatch(/^h/);
 
-    const res = await srv.call("read_file", { mode: "handles", handles: [bareHandle] });
+    const res = await srv.call("tl_read_file", { mode: "handles", handles: [bareHandle] });
     expect(res["kind"]).toBe("read.batch");
     // readFamily.ts's projectBatch renames the internal `items[]` to the v1
     // wire field `entries[]` (Rule K) — assert the WIRE shape, not the
@@ -1275,10 +1275,10 @@ describe("argMatrix — field-eval T3: mode=handles labels a bare file-handle's 
   it("a real ranged handle (minted by mode=slice range=...) carries NO synthesized_range marker", async () => {
     const { ws, srv } = await newServer("t3-handles-real-range");
     writeFile(ws, "src/ranged.ts", "line one\nline two\nline three\n");
-    const sliced = await srv.call("read_file", { mode: "slice", path: "src/ranged.ts", range: "1-2" });
+    const sliced = await srv.call("tl_read_file", { mode: "slice", path: "src/ranged.ts", range: "1-2" });
     const rangedHandle = String(sliced["handle"]);
 
-    const res = await srv.call("read_file", { mode: "handles", handles: [rangedHandle] });
+    const res = await srv.call("tl_read_file", { mode: "handles", handles: [rangedHandle] });
     const entries = res["entries"] as Array<Record<string, unknown>>;
     expect(entries).toHaveLength(1);
     expect(entries[0]!["range"]).toBe("1-2");
@@ -1316,11 +1316,11 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
     expect(Buffer.byteLength(body, "utf8")).toBeLessThan(81920);
     writeFile(ws, "src/wide.ts", body);
 
-    const full = await srv.call("read_file", { mode: "full", path: "src/wide.ts" });
+    const full = await srv.call("tl_read_file", { mode: "full", path: "src/wide.ts" });
     const bareHandle = String(full["handle"]);
     expect(bareHandle).toMatch(/^h/);
 
-    const res = await srv.call("read_file", { mode: "handles", handles: [bareHandle] });
+    const res = await srv.call("tl_read_file", { mode: "handles", handles: [bareHandle] });
     expect(res["kind"]).toBe("read.batch");
     const entries = res["entries"] as Array<Record<string, unknown>>;
     expect(entries).toHaveLength(1);
@@ -1339,7 +1339,7 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
     // rides a handle whose range/sha agree with each other.
     const remaining = (entry["remaining_ranges"] as string[])[0]!;
     const next = entry["next"] as { tool: string; arguments: Record<string, unknown> };
-    expect(next.tool).toBe("read_file");
+    expect(next.tool).toBe("tl_read_file");
     expect(next.arguments["content"]).toBe("auto");
     const nextTarget = (next.arguments["targets"] as Array<Record<string, unknown>>)[0]!;
     expect(nextTarget["range"]).toBe(remaining);
@@ -1360,8 +1360,8 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
   it("an UNtruncated batch entry pays nothing for the two added keys (E-1)", async () => {
     const { ws, srv } = await newServer("t2-handles-small");
     writeFile(ws, "src/small.ts", "export const SMALL = 1;\n");
-    const full = await srv.call("read_file", { mode: "full", path: "src/small.ts" });
-    const res = await srv.call("read_file", { mode: "handles", handles: [String(full["handle"])] });
+    const full = await srv.call("tl_read_file", { mode: "full", path: "src/small.ts" });
+    const res = await srv.call("tl_read_file", { mode: "handles", handles: [String(full["handle"])] });
     const entry = (res["entries"] as Array<Record<string, unknown>>)[0]!;
     expect(entry["truncated"]).toBe(false);
     expect(entry["remaining_ranges"]).toBeUndefined();
@@ -1375,8 +1375,8 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
 // legacy client produces when it does not know `paths` is array-typed and
 // serializes the structured value itself before handing it to the transport.
 // Confirmed live pre-fix:
-//   read_file {mode:"pack", paths:"[{\"path\":\"src/one.ts\",\"range\":\"1-1\"}]", maxTokens:300}
-//   -> {"kind":"read.batch","entries":[],"limit":{"next":{"tool":"read_file",
+//   tl_read_file {mode:"pack", paths:"[{\"path\":\"src/one.ts\",\"range\":\"1-1\"}]", maxTokens:300}
+//   -> {"kind":"read.batch","entries":[],"limit":{"next":{"tool":"tl_read_file",
 //        "arguments":{"targets":[{"path":"[{\"path\":\"src/one.ts\",\"range\":\"1-1\"}]"}]}}}}
 //   i.e. the WHOLE JSON-encoded array collapsed into ONE bogus bare path
 //   (mode=pack's own per-entry coercion did `path: String(p)` on the raw
@@ -1384,7 +1384,7 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
 //   that can never exist. mode=task_pack silently lost the same seed path
 //   the same way (abstained with `no-grounded-call-remains` instead of
 //   grounding the real path+range).
-// Guard: server.ts's normalizeWireArgs (canonical==="read_file" branch) now
+// Guard: server.ts's normalizeWireArgs (canonical==="tl_read_file" branch) now
 // attempts JSON.parse on a string-typed `paths` that looks like a JSON array
 // (starts with "[") before falling back to the single-bare-path wrap, so a
 // legacy caller's JSON-encoded paths[] parses to the SAME array a
@@ -1393,11 +1393,11 @@ describe("argMatrix — field-eval integration T2: a truncated handles-batch ent
 // case below.
 // =============================================================================
 
-describe("argMatrix — read_file legacy paths[] sent as a JSON-text string (schema-blind client wire shape)", () => {
+describe("argMatrix — tl_read_file legacy paths[] sent as a JSON-text string (schema-blind client wire shape)", () => {
   it("mode=pack, paths='[{path,range}]' (object-entry array, JSON-encoded as a string): serves the file, not a bogus path", async () => {
     const { ws, srv } = await newServer("compat-pack-paths-json-string-object");
     writeFile(ws, "src/one.ts", "line one\nline two\nline three\nline four\nline five\n");
-    const res = await srv.call("read_file", {
+    const res = await srv.call("tl_read_file", {
       mode: "pack",
       paths: JSON.stringify([{ path: "src/one.ts", range: "1-2" }]),
       maxTokens: 300,
@@ -1418,7 +1418,7 @@ describe("argMatrix — read_file legacy paths[] sent as a JSON-text string (sch
     const { ws, srv } = await newServer("compat-pack-paths-json-string-array");
     writeFile(ws, "src/a.ts", "export const A = 1;\n");
     writeFile(ws, "src/b.ts", "export const B = 1;\n");
-    const res = await srv.call("read_file", {
+    const res = await srv.call("tl_read_file", {
       mode: "pack",
       paths: JSON.stringify(["src/a.ts", "src/b.ts"]),
       maxTokens: 300,
@@ -1432,7 +1432,7 @@ describe("argMatrix — read_file legacy paths[] sent as a JSON-text string (sch
   it("mode=task_pack, paths='[{path,range}]' (JSON-encoded as a string) + query: the seed path grounds a real act.edit, not an abstention", async () => {
     const { ws, srv } = await newServer("compat-taskpack-paths-json-string");
     writeFile(ws, "src/seed.ts", "line one\nline two\nline three\nline four\nline five\n");
-    const res = await srv.call("read_file", {
+    const res = await srv.call("tl_read_file", {
       mode: "task_pack",
       paths: JSON.stringify([{ path: "src/seed.ts", range: "1-2" }]),
       query: "x",
@@ -1450,7 +1450,7 @@ describe("argMatrix — read_file legacy paths[] sent as a JSON-text string (sch
   it("mode=pack, paths='src/solo.ts' (a genuine bare-path string): unaffected by the JSON.parse attempt", async () => {
     const { ws, srv } = await newServer("compat-pack-paths-bare-string-sanity");
     writeFile(ws, "src/solo.ts", "export const SOLO = 1;\n");
-    const res = await srv.call("read_file", { mode: "pack", paths: "src/solo.ts", maxTokens: 300 });
+    const res = await srv.call("tl_read_file", { mode: "pack", paths: "src/solo.ts", maxTokens: 300 });
     expect(res["kind"]).toBe("read.batch");
     const entries = res["entries"] as Array<Record<string, unknown>>;
     expect(entries).toHaveLength(1);

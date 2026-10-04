@@ -259,12 +259,12 @@ function prescribeFind(root: string, lane: string, taskHandle: string, queries: 
     concernTokens: queries,
   }, { lane });
   const scope = bindTaskContractHandle(root, { lane }, taskHandle);
-  registerExecutableNextScope(root, scope, { tool: "search_files", arguments: { action: "find", queries } });
+  registerExecutableNextScope(root, scope, { tool: "tl_search_files", arguments: { action: "find", queries } });
   return scope;
 }
 
 async function find(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const result = await callTool("search_files", { action: "find", ...args });
+  const result = await callTool("tl_search_files", { action: "find", ...args });
   expect("isError" in result && result.isError === true, JSON.stringify(result)).toBe(false);
   const text = (result.content[0] as { text?: string } | undefined)?.text ?? "{}";
   const parsed = JSON.parse(text) as { matches?: Record<string, unknown> };
@@ -399,7 +399,7 @@ describe("review round: ledger honesty", () => {
 
   it("R1-S10a: probing the fence never poisons a next a pack registers later", () => {
     const root = honestyWorkspace("poison", { "package.json": '{"name":"eslh-poison","version":"0.0.0"}\n' });
-    const next = { tool: "search_files", arguments: { action: "find", query: "computeTotal" } };
+    const next = { tool: "tl_search_files", arguments: { action: "find", query: "computeTotal" } };
     // The read-only probe the fence makes, BEFORE any registration...
     expect(hasPendingExecutableNext(root, "eslh", next)).toBe(false);
     // ...must not make the later registration unresolvable. `resolveExecutableNextScope`

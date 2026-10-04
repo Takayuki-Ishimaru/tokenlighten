@@ -357,7 +357,7 @@ describe("FX-Y2 — demoted_count / re_suppression_count stay consistent", () =>
     write(ws, "src/foo.cpp", "#include \"foo.h\"\nvoid Foo::bar() {\n  int x = 1;\n}\n");
     write(ws, ".git/HEAD", "ref: refs/heads/main\n");
 
-    const res = await callTool("read_file", {
+    const res = await callTool("tl_read_file", {
       query: "explain the callers of Foo::bar",
       task: { profile: "generic", epoch: "new" },
       cwd: ws,
@@ -400,7 +400,7 @@ describe("FX-Y2 production-shape controls (real callTool, C++ header/impl fixtur
     write(ws, "src/foo.cpp", "#include \"foo.h\"\nvoid Foo::bar() {\n  int x = 1;\n}\nvoid Foo::baz() {\n  int y = 2;\n}\n");
     write(ws, ".git/HEAD", "ref: refs/heads/main\n");
 
-    const res = await callTool("read_file", {
+    const res = await callTool("tl_read_file", {
       query: "explain the callers of Foo::bar",
       task: { profile: "generic", epoch: "new" },
       cwd: ws,
@@ -431,7 +431,7 @@ describe("FX-Y2 production-shape controls (real callTool, C++ header/impl fixtur
     write(ws, "src/isolated.h", "class Widget {\n public:\n  void spin();\n};\n");
     write(ws, ".git/HEAD", "ref: refs/heads/main\n");
 
-    const res = await callTool("read_file", {
+    const res = await callTool("tl_read_file", {
       query: "explain the callers of Widget::spin",
       task: { profile: "answer", epoch: "new" },
       cwd: ws,

@@ -19,7 +19,10 @@
  * existing behaviour never changes (wave1-contract.md §3.4).
  */
 
-import { isNegatedInstructionClause } from "./requestFacets.js";
+import { isNegatedInstructionClause, isFacetDescriptorTerm, callShapedNamesIn } from "./requestFacets.js";
+import { isProseAcronym } from "./concernRecovery.js";
+import { JA_GLOSSARY } from "../retrieval/jaGlossary.js";
+import { KATAKANA_RUN_RE } from "../../util/cjkSpans.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -48,6 +51,26 @@ export interface RequestItem {
   relation?: RequestItemRelation;
   /** Has at least one term or alias that can be searched literally. */
   bindable: boolean;
+  /**
+   * R2-T2 (2026-09-30, review-0929 P0-5): set on every item one clause's
+   * coordinated noun-phrase split produced ("Explain X and the health probe"
+   * → "Explain X" + "the health probe") — each is its own point, which a
+   * caller must locate or disclose, never leave silently open
+   * (readCodeTaskPack.ts `buildRequestItemReadiness`).
+   */
+  coordinated?: true;
+  /**
+   * R2-T2 follow-up (2026-09-30, orchestrator ruling on the round-2 combined
+   * run): the identifiers a facet clause claiming this point INHERITS from
+   * the query's lead, when the point names no subject of its own — "Who
+   * calls sendInvoice?\n- callers passing a weight above 5", "For the
+   * grace_table …:\n- when is a customer refused a refund", "Does chargeCard
+   * …, and what is the default duration?". Such a point is about that
+   * identifier (brief-wp-c3 rule 2(c)/(d), "a facet-owned clause → never"):
+   * none of its plain words may be certified absent. Set by
+   * readCodeTaskPack.ts `buildRequestItemReadiness`, never by extraction.
+   */
+  facetSubject?: readonly string[];
 }
 
 /**
@@ -441,7 +464,7 @@ export function salientWords(text: string): string[] {
    * identifier tokenizer and stopped there, so this function still handed the
    * bare VERB to the topic-item literal find: `Increase it to 5.` produced
    * `salientWords` `["Increase"]` and the pack answered `discover` with
-   * `search_files{queries:["increase"]}` — sending the caller to grep the
+   * `tl_search_files{queries:["increase"]}` — sending the caller to grep the
    * workspace for the word they used to ask for the change. Same leak, same
    * predicate, one consumer over.
    *
@@ -584,6 +607,11 @@ const GENERIC_JA_ABSENCE_WORDS = new Set([
   "コード", // "code" (katakana loanword) — generic artifact-kind noun
   "システム", // "system" (katakana loanword) — generic scope noun
   "データ", // "data" (katakana loanword) — generic content noun
+  // WP-C (2026-09-29) listed the JA facet-DESCRIPTOR nouns here by hand
+  // (条件/呼び出し元/既定値/ステータスコード). WP-C3 (orchestrator ruling rule
+  // 2(a): ONE shared source, no second hand-maintained list) moved them out:
+  // `isGenericJapaneseAbsenceTerm` below now asks requestFacets.ts's exported
+  // `isFacetDescriptorTerm` — the facet detectors' own nouns — instead.
 ]);
 
 /**
@@ -619,9 +647,21 @@ function genericJaRequestVerbs(): ReadonlySet<string> {
   return genericJaAbsenceRequestVerbs;
 }
 
-/** True when `word` (a `salientWords`/`isCjkRun` CJK candidate) is on the short generic-Japanese absence-disclosure exclusion list above, or is a bare JA request verb. */
+/**
+ * True when `word` (a `salientWords`/`isCjkRun` CJK candidate) is on the short generic-Japanese absence-disclosure exclusion list above, or is a bare JA request verb.
+ *
+ * WP-C3 (2026-09-29, eval-0929 §6, rule 2(a)): or is, as a whole, a facet
+ * DESCRIPTOR noun (条件, 呼び出し元, 既定値, ステータスコード, 一覧, 処理経路, …)
+ * — read from requestFacets.ts's `isFacetDescriptorTerm`, the one shared
+ * vocabulary, so the kind of answer a JA request names is never its own
+ * absence candidate (WP-C's intent for its four hand-listed words, now for
+ * the whole vocabulary those four were drawn from). CJK words only: an ASCII
+ * word never reaches this list's callers as a JA term.
+ */
 export function isGenericJapaneseAbsenceTerm(word: string): boolean {
-  return GENERIC_JA_ABSENCE_WORDS.has(word) || genericJaRequestVerbs().has(word);
+  return GENERIC_JA_ABSENCE_WORDS.has(word)
+    || genericJaRequestVerbs().has(word)
+    || (/[぀-ヿ一-鿿]/u.test(word) && isFacetDescriptorTerm(word));
 }
 
 /**
@@ -655,10 +695,38 @@ function isGenericJapaneseAbsenceRun(run: string): boolean {
  */
 const FILE_EXTENSIONS_ALT = "json|ts|tsx|js|jsx|mjs|cjs|md|mdx|py|java|go|rs|rb|toml|ya?ml|c|h|cpp|hpp|cs|kt|swift";
 const FILE_EXT_RE = new RegExp(`\\b[A-Za-z0-9_.-]+\\.(?:${FILE_EXTENSIONS_ALT})\\b`, "gu");
-const DOTTED_KEY_RE = /\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b/gu;
+// WP-C (2026-09-29, eval-0929 §6): `::` (Rust module paths / C++ scope
+// resolution, "std::io", "OrderService::cancel") joins a QUALIFIED name the
+// same way `.` already does — added as an alternative separator rather than
+// a second regex, so "A.b" and "A::b" both extract as ONE dotted/qualified
+// term (mirrors requestFacets.ts's own `QUALIFIED_MEMBER_RE`, which already
+// treats `.`/`#`/`::` as the same kind of separator for a class/method pair).
+const DOTTED_KEY_RE = /\b[A-Za-z_][A-Za-z0-9_]*(?:(?:\.|::)[A-Za-z_][A-Za-z0-9_]*)+\b/gu;
 const LOWER_CAMEL_RE = /\b[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/gu;
 const UPPER_CAMEL_RE = /\b[A-Z][a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b/gu;
 const CONST_CASE_RE = /\b[A-Z][A-Z0-9_]{2,}\b/gu;
+/**
+ * WP-C (2026-09-29, eval-0929 §6) — snake_case/SCREAMING_SNAKE identifiers
+ * with a LOWERCASE (or mixed-case) leading letter: `get_timeout`,
+ * `should_retry`, `send_request`. `CONST_CASE_RE` above already recognizes
+ * the ALL-CAPS spelling (`MAX_RETRY_COUNT`); this is its lowercase/mixed
+ * sibling — the one common identifier shape (Python/Rust/Ruby/C naming
+ * convention) this file's identifier regexes had NO alternative for at all.
+ * Measured root cause: such a term matched none of the regexes above (no
+ * dot, no camelCase hump, not all-caps), so it fell out of `item.terms`
+ * ENTIRELY rather than being merely misclassified — which starved
+ * `distinctiveSalientAbsence`'s Tier A (readCodeTaskPack.ts) and forced a
+ * fallback to a lowercase DESCRIPTIVE word instead (a Python fixture whose
+ * `should_retry`/`send_request` are real, present functions was certified
+ * `request-item-absent:conditions`/`:callers` — the descriptive words, never
+ * the identifiers actually named). Any run of ASCII letters/digits
+ * containing at least one `_` and starting with a letter, mirroring
+ * requestFacets.ts's own `explicitIdentifiersIn`'s `token.includes("_")`
+ * rule so the two modules recognize the same identifiers from the same
+ * query text (that function's own module-boundary contract keeps it
+ * fs-free/import-free from this file, so the RULE is shared, not the code).
+ */
+const SNAKE_CASE_RE = /\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*\b/gu;
 const QUOTED_RE = /[`"']([^`"']{2,})[`"']/gu;
 /** Any quoted-literal span this file's own extraction recognizes — used
  *  ONLY as a presence check (never captures/extracts), so ONE alternation
@@ -687,7 +755,7 @@ interface ExtractedTerms {
   all: string[];
   /** Terms that look like a file name (has a recognized extension). */
   files: string[];
-  /** Terms that look like a code identifier (camelCase/PascalCase/CONST_CASE/backticked). */
+  /** Terms that look like a code identifier (camelCase/PascalCase/CONST_CASE/snake_case/dotted-or-`::`-qualified/backticked). */
   identifiers: string[];
 }
 
@@ -730,12 +798,1350 @@ function extractTerms(segment: string): ExtractedTerms {
   for (const m of segment.matchAll(LOWER_CAMEL_RE)) { identifiers.add(m[0]); all.add(m[0]); }
   for (const m of segment.matchAll(UPPER_CAMEL_RE)) { identifiers.add(m[0]); all.add(m[0]); }
   for (const m of segment.matchAll(CONST_CASE_RE)) { identifiers.add(m[0]); all.add(m[0]); }
+  // WP-C (eval-0929 §6): same "don't re-split an already-recognized file
+  // term" guard as DOTTED_KEY_RE above — a snake_case FILE STEM
+  // ("get_timeout" inside "get_timeout.py") is consumed whole by FILE_EXT_RE
+  // already; only a span that does not overlap a recognized file is a
+  // separate identifier.
+  for (const m of segment.matchAll(SNAKE_CASE_RE)) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    if (files.has(m[0]) || fileSpans.some((span) => start < span.end && end > span.start)) continue;
+    identifiers.add(m[0]);
+    all.add(m[0]);
+  }
 
   return { all: [...all], files: [...files], identifiers: [...identifiers] };
 }
 
 export function looksLikeFileTerm(term: string): boolean {
   return /\.[A-Za-z0-9]{1,6}$/u.test(term);
+}
+
+// ---------------------------------------------------------------------------
+// WP-C2 (2026-09-29, eval-0929 §6/§8) — structural literal-absence
+// eligibility. WP-C's own fix (GENERIC_SOFTWARE_ABSENCE_WORDS/
+// GENERIC_JA_ABSENCE_WORDS above and in readCodeTaskPack.ts) suppressed the
+// SPECIFIC descriptive words the first evaluation named by adding them to a
+// hand-reviewed list; the orchestrator's blind held-out set then found the
+// same failure mode on words the list never named — a verb ("give"), an
+// adjective ("missing"), a whole unsegmented JA clause, and a multi-word
+// disclosed term joining several ordinary words. A list can only ever catch
+// what someone already thought to add to it; this predicate instead decides
+// STRUCTURALLY, from the candidate's own shape and its clause's grammatical
+// construction, so it holds for a word nobody has seen yet.
+//
+// A term may be certified `request-item-absent:<term>` (a verified "no
+// occurrence in scanned workspace files" claim) only when it is:
+//   (a) an explicitly QUOTED string in the item's own text — backtick,
+//       double or single quote, or JA 「…」/『…』 (`quotedOccurrenceInText`);
+//   (b) CODE-SHAPED — camelCase, PascalCase, snake_case, SCREAMING_SNAKE,
+//       dotted/`::`/`#`-qualified, `$`/`@`-prefixed, or a file-path-shaped
+//       token (`isCodeShapedTerm`), the same shapes `extractTerms`'s own
+//       identifier regexes above already recognize;
+//   (c) the term's own clause is an EXPLICIT existence/definition/use check
+//       — "whether X is defined", "is there a X", "does X exist", "X is
+//       used anywhere", 「Xが定義されているか/あるか/使われているか」、「Xという
+//       名前」(`clauseAsksExistence`) — a CLOSED set of grammatical
+//       constructions (the same status as `PREDICATE_AUXILIARY_RE`/
+//       `LIGHT_VERB_WORDS` in readCodeTaskPack.ts), never a topic-vocabulary
+//       list: this only widens what an explicit existence-check clause's
+//       OWN residual wording may disclose, never any other clause's.
+// Every other shape — an ordinary verb, adjective or common noun, or a whole
+// unsegmented CJK run with no quote/existence marker — is never eligible,
+// however "distinctive" the tiering heuristics upstream judge it to be:
+// those heuristics decide WHICH word is the candidate; this decides whether
+// a candidate may ever be the DISCLOSED term. A caller that also wants the
+// hand-reviewed generic-vocabulary lists as an ADDITIONAL, narrower filter
+// on the (b)/(c) branches (never on an explicit quote — Decision 6, TL142-
+// 04: quoting is the strongest possible signal of caller intent and already
+// overrides "merely descriptive" everywhere else in this pipeline) composes
+// `isCodeShapedTerm`/`clauseAsksExistence`/`quotedOccurrenceInText`
+// directly rather than calling `isLiteralEligibleTerm`, which never
+// consults those lists at all (readCodeTaskPack.ts's
+// `distinctiveSalientAbsence`/`proveUnbindableRequestItem`/
+// `reconcileRequestItemsWithFacets` are exactly such callers).
+//
+// WP-C3 (2026-09-29, eval-0929 §6, orchestrator RULING — "subject absence is
+// kept, descriptor absence is never certified"): the three categories above
+// made literal absence impossible for EVERY non-code-shaped word, which also
+// retired the deliberate 2026-09-08 "Tier C" behaviour (DESIGN-v0.15 R1 §4.2):
+// a compound question whose one part asks about a concept the workspace does
+// not contain must say so ("…, and how does the flux capacitor work?" → the
+// flux capacitor is absent). The ruling keeps (a)-(c) and adds (d): in a
+// clause that names NO code-shaped identifier and NO quoted string, the
+// words of the clause's topic noun phrase(s) — its SUBJECT — are eligible
+// too; its DESCRIPTORS never are: (1) the facet vocabulary (requestFacets.ts
+// `isFacetDescriptorTerm`, the one shared source), (2) predicates — verbs,
+// auxiliaries, participles, adjectives — decided by POSITION, never by a verb
+// list (`topicNounPhraseWords`), and (3) every plain word of a clause that
+// names a code-shaped identifier or a quoted string (that identifier/quote IS
+// the clause's subject). A bare capitalized word ("Redis") is therefore no
+// longer CODE-shaped (it is the ruling's "capitalised proper noun", eligible
+// through (d)): counting it as an identifier would make every sentence-cased
+// clause ("Default timeout value", "Walk me through…") identifier-bearing and
+// so strip (d) from it. The JA-parity "Redis" disclosure that motivated the
+// wider draft below is kept — through (d), from the SAME union fallback.
+// ---------------------------------------------------------------------------
+const CODE_SHAPE_LOWER_CAMEL_RE = /^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$/u;
+// WP-C2 first accepted a bare capitalized ASCII word ("Redis") here to keep
+// requestItemCompletion.spec.ts's JA-parity "Redis" disclosure alive through
+// `proveUnbindableRequestItem`'s union fallback. WP-C3: that disclosure now
+// rides rule (d) (a capitalised proper noun in an identifier-free clause), so
+// this is the real PascalCase shape again — at least one internal hump
+// ("HttpClient", "OrderService"), the same shape `extractTerms`'s own
+// UPPER_CAMEL_RE recognizes.
+const CODE_SHAPE_UPPER_CAMEL_RE = /^[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+$/u;
+const CODE_SHAPE_CONST_CASE_RE = /^[A-Z][A-Z0-9_]{2,}$/u;
+const CODE_SHAPE_SNAKE_CASE_RE = /^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*$/u;
+// WP-C3: the first segment needs two characters, so the prose abbreviations
+// "e.g"/"i.e" (a DOTTED_KEY_RE hit inside "e.g.") never make a clause
+// identifier-bearing.
+const CODE_SHAPE_QUALIFIED_RE = /^[A-Za-z_][A-Za-z0-9_]+(?:(?:\.|::|#)[A-Za-z_][A-Za-z0-9_]*)+$/u;
+const CODE_SHAPE_SIGIL_RE = /^[$@][A-Za-z_][\w.$-]*$/u;
+
+/**
+ * True when `term` — a single already-extracted token, never a whole clause
+ * — has one of rule 1(b)'s code shapes. Anchored (`^…$`): `term` is a
+ * candidate already isolated by its own extraction/tokenization, so this
+ * asks whether the WHOLE token is code-shaped, never whether some
+ * code-shaped substring merely sits inside a longer prose word.
+ *
+ * WP-C3: an ALL-CAPS word that is ordinary prose vocabulary ("HTTP", "API",
+ * "JSON" — concernRecovery.ts's reviewed `isProseAcronym`) is not a name, the
+ * same exclusion requestFacets.ts's `isCodeShapedWord` already applies.
+ */
+export function isCodeShapedTerm(term: string): boolean {
+  return (
+    CODE_SHAPE_LOWER_CAMEL_RE.test(term)
+    || CODE_SHAPE_UPPER_CAMEL_RE.test(term)
+    || (CODE_SHAPE_CONST_CASE_RE.test(term) && !isProseAcronym(term))
+    || CODE_SHAPE_SNAKE_CASE_RE.test(term)
+    || CODE_SHAPE_QUALIFIED_RE.test(term)
+    || CODE_SHAPE_SIGIL_RE.test(term)
+    || looksLikeFileTerm(term)
+  );
+}
+
+/**
+ * True when `term` occurs, case-insensitively, inside one of `text`'s own
+ * explicitly quoted spans (`quotedSpans`'s five styles: backtick, double,
+ * single, 「…」, 『…』). A quoted span `term` merely overlaps (rather than
+ * exactly spans) still counts — the caller singled out that exact run of
+ * text, and `term` is one of `salientWords`' own tokenizations of it.
+ *
+ * WP-C3: an ASCII quote pair counts only when it opens and closes at word
+ * EDGES — two possessive apostrophes ("the validator's role and the parser's
+ * output") are not a quotation of the words between them.
+ */
+export function quotedOccurrenceInText(term: string, text: string): boolean {
+  const spans = quotedSpans(text).filter((span) => {
+    const open = text[span.start];
+    if (open === "「" || open === "『") return true;
+    const before = span.start > 0 ? text[span.start - 1]! : " ";
+    const after = span.end < text.length ? text[span.end]! : " ";
+    return /[\s([{぀-ヿ一-鿿、。]/u.test(before) && /[\s)\]},.;:!?぀-ヿ一-鿿、。]/u.test(after);
+  });
+  if (spans.length === 0 || term.length === 0) return false;
+  const lowerText = text.toLowerCase();
+  const lowerTerm = term.toLowerCase();
+  let from = 0;
+  for (;;) {
+    const at = lowerText.indexOf(lowerTerm, from);
+    if (at === -1) return false;
+    const end = at + lowerTerm.length;
+    if (spans.some((span) => at >= span.start && end <= span.end)) return true;
+    from = at + 1;
+  }
+}
+
+// WP-C2 (rule 1(c)) — the closed set of EN existence/definition/use
+// CONSTRUCTIONS the brief names verbatim: "whether X is defined", "is there
+// a X", "does X exist", "X is used anywhere". Matched against the WHOLE
+// clause, never any one candidate word, so it says nothing about which word
+// is distinctive — only whether the clause's OWN construction is an
+// explicit existence check at all.
+const EXISTENCE_CHECK_EN_RE =
+  /\b(?:whether|if)\b[^.?!]{0,80}?\b(?:exists?|is\s+defined|are\s+defined|is\s+used|are\s+used)\b|\bdoes\b[^.?!]{0,80}?\bexist(?:s)?\b|\bis\s+there\s+(?:a|an|any)\b|\bexists?\s+anywhere\b|\bused\s+anywhere\b/iu;
+// JA mirror: 「Xが定義されているか/あるか/使われているか」「Xという名前」.
+const EXISTENCE_CHECK_JA_RE =
+  /定義され(?:て)?(?:いる|います)?か|が(?:ある|あります)か|使われ(?:て)?(?:いる|います)?か|という名前/u;
+
+/** True when `text` — one request item's own clause — is phrased as an explicit existence/definition/use check (rule 1(c)'s closed construction set, EN and JA). */
+export function clauseAsksExistence(text: string): boolean {
+  return EXISTENCE_CHECK_EN_RE.test(text) || EXISTENCE_CHECK_JA_RE.test(text);
+}
+
+// ---------------------------------------------------------------------------
+// WP-C3 (2026-09-29, eval-0929 §6, orchestrator RULING rules 1(d)/2(b)/2(c))
+// — the clause's SUBJECT, decided by grammatical POSITION.
+//
+// Closed grammatical classes only (the same status as STOPWORDS above or
+// readCodeTaskPack.ts's PREDICATE_AUXILIARY_RE): determiners, wh-words,
+// subordinators, auxiliaries, prepositions, conjunctions, pronouns and a
+// handful of adverbs. No topic vocabulary and no verb list: a word is a
+// PREDICATE because of where it sits (after an auxiliary or a subject
+// pronoun, after a wh-noun, as the -s/-ed/bare word that follows the subject
+// of a wh/subordinate clause, as a clause-initial request verb, or as an
+// -ed/-ing modifier in front of the head noun), and a SUBJECT noun because of
+// where IT sits (after a determiner or a possessive, before an auxiliary,
+// between an inverted question auxiliary and the verb, as the object of a
+// request verb or of "of/about/regarding/concerning", as a verbless list
+// fragment, as a multi-word noun compound, or as a capitalised proper noun).
+// A word the analysis cannot place in a noun phrase is simply NOT eligible —
+// the undetermined disclosure the callers fall back to is the honest outcome
+// for it, never a certified absence.
+// ---------------------------------------------------------------------------
+type NpTokenClass = "content" | "det" | "demo" | "wh-det" | "wh" | "sub" | "aux" | "prep" | "conj" | "pron" | "adv" | "num";
+
+interface NpToken {
+  readonly lower: string;
+  cls: NpTokenClass;
+  readonly possessive: boolean;
+  readonly capitalized: boolean;
+  /** The token as written (possessive/contraction stripped) — R2-T2 reads its code shape. */
+  readonly raw: string;
+}
+
+const NP_DETERMINERS: ReadonlySet<string> = new Set([
+  "the", "a", "an", "its", "their", "his", "her", "our", "your", "my",
+  "each", "every", "any", "some", "all", "no", "both", "either", "neither", "another", "other",
+  "such", "same", "many", "much", "few", "several", "multiple", "various", "certain",
+]);
+/**
+ * Orchestrator addition (2026-09-29, eval-0929 §8, WP-C3 ruling rule 2(a)/
+ * (b) extension) — a small, closed set of SCOPE/COMPLETENESS adjectives that
+ * carry no domain content of their own when they pre-modify a facet
+ * descriptor head noun ("direct callers", "indirect callers", "the possible
+ * values", "the main condition") — the same closed-function-word status
+ * "all"/"other" already have in NP_DETERMINERS above (a determiner is never
+ * a content word regardless of what follows it), but gated POSITIONALLY
+ * here instead: `addNounPhrase` below only excludes one of these words when
+ * the SAME run's own head is a facet descriptor
+ * (`requestFacets.ts` `isFacetDescriptorTerm`), never as a blanket
+ * reclassification. A run whose head is an ordinary domain noun ("the
+ * direct database connection") is entirely unaffected — "direct" stays a
+ * normal, eligible content word there, exactly as WP-C3's own "the redis
+ * cache invalidation IMPLEMENTATION" case requires "redis"/"invalidation" to
+ * stay eligible despite sitting right before the descriptor head
+ * "implementation". Blind-set leak this closes: a bullet "- direct callers"
+ * (under "…enqueue_message. Who calls it?") certified
+ * `request-item-absent:direct` — "direct" is a pre-modifier of the
+ * descriptor "callers", never a subject of its own.
+ */
+const NP_DESCRIPTOR_SCOPE_ADJECTIVES_EN: ReadonlySet<string> = new Set([
+  "direct", "indirect", "possible", "main", "primary", "secondary",
+]);
+const NP_DEMONSTRATIVES: ReadonlySet<string> = new Set(["this", "that", "these", "those"]);
+const NP_WH_DETERMINERS: ReadonlySet<string> = new Set(["which", "what", "whose"]);
+const NP_WH_ADVERBS: ReadonlySet<string> = new Set(["how", "when", "where", "why", "who", "whom"]);
+const NP_SUBORDINATORS: ReadonlySet<string> = new Set([
+  "whether", "if", "because", "unless", "until", "while", "once", "whenever", "wherever", "although", "though", "whereas",
+]);
+const NP_AUXILIARIES: ReadonlySet<string> = new Set([
+  "is", "are", "was", "were", "be", "been", "being", "am",
+  "do", "does", "did", "has", "have", "had",
+  "will", "would", "can", "could", "should", "shall", "may", "might", "must", "cannot",
+  "get", "gets", "got",
+]);
+/** Auxiliaries whose inverted question takes a BARE main verb after the subject ("how does X work"). */
+const NP_DO_OR_MODAL: ReadonlySet<string> = new Set([
+  "do", "does", "did", "will", "would", "can", "could", "should", "shall", "may", "might", "must", "cannot",
+]);
+const NP_PREPOSITIONS: ReadonlySet<string> = new Set([
+  "of", "in", "on", "at", "by", "for", "from", "to", "with", "without", "into", "onto", "about",
+  "over", "under", "through", "during", "between", "across", "per", "via", "within", "upon",
+  "against", "among", "around", "behind", "beyond", "inside", "outside", "toward", "towards",
+  "throughout", "than", "as", "like", "after", "before", "since", "regarding", "concerning",
+  "including", "except", "beside", "besides", "near", "along", "unlike", "despite",
+]);
+/** A preposition whose object IS the topic ("the callers OF X", "tell me ABOUT X"). */
+const NP_TOPIC_PREPOSITIONS: ReadonlySet<string> = new Set(["of", "about", "regarding", "concerning"]);
+/**
+ * R2-T2 follow-up: the preposition of a phrasal request verb — "walk me
+ * THROUGH …", "look INTO …", "look AT …" — whose object is the request's own
+ * topic (the verb's complement), unlike a locative/temporal adjunct.
+ */
+const NP_COMPLEMENT_PREPOSITIONS: ReadonlySet<string> = new Set(["through", "into", "over", "at", "on", "for", "with"]);
+/** R2-T2 follow-up: request verbs that take their topic only through such a preposition ("go over …", "dig into …"). */
+const NP_PHRASAL_REQUEST_VERBS: ReadonlySet<string> = new Set([
+  "go", "dig", "dive", "drill", "step", "run", "read", "talk", "focus", "elaborate", "expand", "report", "zoom",
+]);
+/** R2-T2 follow-up: a relative pronoun right after a noun opens a relative clause ("the handler which retries"). */
+const NP_RELATIVE_PRONOUNS: ReadonlySet<string> = new Set(["which", "who", "whom", "whose"]);
+/** R2-T2 follow-up: determiners that point back at something already named ("that period", "the same window"). */
+const NP_ANAPHORIC_DETERMINERS: ReadonlySet<string> = new Set(["this", "that", "these", "those", "same", "such"]);
+const NP_CONJUNCTIONS: ReadonlySet<string> = new Set(["and", "or", "but", "nor", "plus", "then", "also", "so", "yet", "vs", "versus", "please"]);
+const NP_PRONOUNS: ReadonlySet<string> = new Set([
+  "it", "they", "them", "he", "she", "we", "you", "i", "me", "us", "him",
+  "itself", "themselves", "yourself", "ourselves", "one", "ones",
+  "something", "anything", "everything", "nothing", "someone", "anyone", "everyone",
+]);
+const NP_ADVERBS: ReadonlySet<string> = new Set([
+  "not", "never", "ever", "always", "only", "just", "still", "already", "even", "often",
+  "too", "very", "again", "anywhere", "somewhere", "everywhere", "nowhere", "instead",
+  "otherwise", "now", "later", "else", "further", "more", "most", "less", "least", "well",
+  "back", "away", "together", "first", "next", "up", "down", "out", "off", "there", "here",
+  "e.g", "i.e", "etc",
+]);
+const NP_NUMBER_WORDS: ReadonlySet<string> = new Set([
+  "zero", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "twice", "half",
+]);
+/** Common -ly words that are nouns/verbs, not adverbs. */
+const NP_LY_NON_ADVERBS: ReadonlySet<string> = new Set(["supply", "assembly", "apply", "reply", "comply", "imply", "multiply", "rely", "ally", "family", "anomaly", "monopoly"]);
+/** Irregular past participles (the regular ones are recognized by their -ed ending). */
+const NP_IRREGULAR_PARTICIPLES: ReadonlySet<string> = new Set([
+  "broken", "taken", "given", "written", "chosen", "hidden", "driven", "shown", "known", "done", "made",
+  "sent", "built", "kept", "held", "found", "thrown", "drawn", "seen", "gone", "spent", "lost", "left",
+  "paid", "bound", "sold", "told", "brought", "bought", "caught", "thought", "fed", "led", "met",
+  "stuck", "won", "worn", "frozen", "stolen", "spoken", "fallen", "shaken", "proven", "begun",
+  // R2-T2 follow-up: more irregular participles a predicate takes ("which
+  // are rethrown", "when is it overridden") — see `isParticipleShaped`.
+  "ridden", "grown", "blown", "flown", "torn", "sworn", "hung", "swung", "dug", "bent", "lent", "dealt",
+  "meant", "heard", "laid", "struck", "forgotten", "gotten", "risen", "arisen", "withdrawn", "shrunk",
+  "sunk", "spun", "woken", "beaten", "bitten", "eaten", "sought", "taught", "fought",
+]);
+/** R2-T2 follow-up: verb prefixes an irregular participle keeps ("RE-thrown", "OVER-ridden", "UN-done"). */
+const NP_PARTICIPLE_PREFIX_RE = /^(?:re|un|over|under|mis|out|pre|up|with)(?=[a-z]{4,}$)/u;
+
+// ---------------------------------------------------------------------------
+// R2-T2 (2026-09-30, review-0929 P1-2 → P0, orchestrator RULING extending
+// brief-wp-c3.md rule 2(b)) — ADJECTIVES are descriptors, never the subject.
+//
+// Measured leak: in an identifier-free topic clause every pre-head word of a
+// noun phrase except an -ed/-ing participle was a subject word, so an
+// ordinary adjective was certified `request-item-absent` — "…, and why
+// intermittent failures are retried." → `absent:intermittent`, "I'm
+// debugging slow requests. …" → `absent:slow`. The ruling: in such a clause
+// only the noun phrase's NOUNS (its head, and the nouns of a noun compound —
+// "the audit trail", "the rate limiter", "the circuit breaker") are
+// absence-eligible; adjectives, adverbs, participles and determiners are
+// descriptors, the same status WP-C4's scope adjectives before a descriptor
+// head already had (`NP_DESCRIPTOR_SCOPE_ADJECTIVES_EN`, now one member of
+// the general rule below instead of a head-gated special case).
+//
+// Attributive position cannot tell an adjective from a noun modifier by
+// itself ("rate limiter" vs "slow requests"), so the word's own shape
+// decides, from two CLOSED resources of general English (no domain or
+// codebase vocabulary — the same status as `NP_IRREGULAR_PARTICIPLES`/
+// `NP_ADVERBS` above):
+//   (1) the adjective-forming derivational suffixes (-ous, -ful, -less, -ive,
+//       -able/-ible, -ical, -ional, -ernal, -ual, -ent, -ic), each with a
+//       minimum stem so the short nouns that merely end the same way stay
+//       nouns ("drive", "table", "client", "agent", "event", "logic",
+//       "topic", "metric"), and the noun-only endings excluded (-ment,
+//       "traffic"'s -ffic, "graphic"'s -phic). -ant is NOT one of them: it
+//       names as many code nouns as adjectives ("constant", "variant",
+//       "invariant", "tenant"), so its common adjectives are listed instead;
+//   (2) the small class of BASIC adjectives with no such suffix (size, speed,
+//       age, frequency, quality, validity, locality, colour, and their
+//       comparative/superlative forms) plus un-/in-/im-/non- negations of an
+//       adjective.
+// Only a PRE-HEAD word is ever judged: the head noun of a noun phrase is
+// eligible by position whatever its shape ("the cache constant value" →
+// "constant", head once the descriptor "value" is removed). A noun the
+// suffix rule misreads as an adjective ("the component tree") only loses its
+// OWN absence eligibility as a modifier — the safe direction: the point is
+// then disclosed undetermined or through its head, never certified absent
+// through a word that may be a descriptor.
+// ---------------------------------------------------------------------------
+const NP_BASIC_ADJECTIVES_EN: ReadonlySet<string> = new Set([
+  // size / extent / quantity
+  "big", "small", "large", "huge", "tiny", "little", "long", "short", "tall", "wide", "narrow", "deep", "shallow",
+  "high", "low", "full", "empty", "heavy", "light", "thick", "thin", "vast", "extra", "whole", "entire", "partial",
+  "overall", "dense", "sparse", "compact", "flat", "nested", "bulky", "lengthy",
+  // speed / time / frequency / order
+  "slow", "fast", "quick", "rapid", "early", "late", "old", "new", "recent", "young", "stale", "fresh", "next", "last",
+  "prior", "past", "future", "final", "initial", "rare", "occasional", "regular", "irregular", "steady", "urgent",
+  "temporary", "immediate", "eventual", "latent", "sequential", "concurrent", "parallel", "async", "sync",
+  // quality / state / validity
+  "good", "bad", "poor", "great", "fine", "nice", "ugly", "clean", "dirty", "valid", "wrong", "right", "correct",
+  "proper", "true", "false", "real", "fake", "raw", "live", "dead", "idle", "busy", "free", "open", "safe", "secure",
+  "strict", "loose", "tight", "hard", "soft", "easy", "simple", "complex", "weird", "odd", "strange", "random",
+  "common", "normal", "usual", "special", "general", "particular", "similar", "unique", "duplicate", "spare",
+  "noisy", "quiet", "silent", "loud", "flaky", "stable", "shaky", "robust", "fragile", "brittle", "healthy", "sick",
+  "hot", "cold", "warm", "cool", "dark", "bright", "sluggish", "laggy", "leaky", "sticky", "lazy", "eager", "greedy",
+  "ready", "alive", "awake", "aware", "able", "equal", "dual", "bursty", "spiky", "chatty", "sloppy", "messy",
+  "tricky", "risky", "buggy", "hacky", "janky", "wonky", "glitchy", "fuzzy", "verbose", "terse", "concise", "naive",
+  "smart", "dumb", "silly", "crazy", "wild", "blank", "bare", "plain", "corrupt", "complete", "incomplete",
+  "obsolete", "absent", "missing", "severe", "extreme", "fatal", "minor", "major", "cheap", "costly", "own",
+  "separate", "single", "double", "triple", "total", "absolute", "exact", "precise", "average", "readonly",
+  // locality / visibility / role
+  "local", "remote", "global", "public", "private", "basic", "custom", "legacy", "foreign", "native", "mandatory",
+  "static", "atomic", "cyclic", "toxic", "exotic", "redundant", "relevant", "irrelevant", "important",
+  "significant", "compliant", "dominant", "instant", "distant", "elegant", "abundant", "vacant", "stagnant",
+  "main", "primary", "secondary", "direct", "indirect", "possible", "inner", "outer", "upper", "lower", "top",
+  "bottom", "left", "front", "back", "middle",
+  // comparative / superlative forms of the above
+  "better", "worse", "best", "worst", "latest", "earliest", "newest", "oldest", "higher", "larger", "smaller",
+  "faster", "slower", "longer", "shorter", "bigger", "greater", "lesser",
+  // colours
+  "black", "white", "red", "green", "blue", "yellow", "gray", "grey",
+]);
+// Minimum stems keep the short nouns that share an ending out: drive/olive
+// (-ive needs 3), table/cable (-able needs 2), client/agent/event/parent/
+// extent/intent (-ent needs 4), logic/topic/music/metric/fabric (-ic needs 5;
+// the short adjectives static/atomic/basic/public are listed), usual/equal/
+// dual (-ual needs 3; the list carries them).
+const NP_ADJECTIVE_SUFFIX_RE = /^(?:[a-z]{3,}(?:ous|ful|less)|[a-z]{3,}ive|[a-z]{2,}(?:able|ible|ical|ional)|[a-z]*ernal|[a-z]{3,}ual|[a-z]{4,}ent|[a-z]{5,}ic)$/u;
+/** Noun-only endings the suffix classes above would otherwise capture. */
+const NP_NOUN_ONLY_ENDING_RE = /(?:ment|ffic|phic)$/u;
+const NP_NEGATING_PREFIX_RE = /^(?:un|in|im|non-?)(?=[a-z]{3,}$)/u;
+
+/**
+ * R2-T2 — true when `lower` (one lowercased token) has the shape of an
+ * ADJECTIVE: an adjective-forming suffix, a basic adjective, a negated
+ * adjective, a participle, or a hyphenated compound modifier any of whose
+ * parts is one ("long-running", "thread-safe", "read-only", "real-time").
+ * Asked only about a word in front of a noun phrase's head (see the section
+ * comment above).
+ */
+function isAdjectiveShaped(lower: string): boolean {
+  if (lower.includes("-")) {
+    return lower.split("-").some((part) => part.length > 0
+      && (isAdjectiveShaped(part) || NP_ADVERBS.has(part) || isParticipleShaped(part)));
+  }
+  if (!/^[a-z]+$/u.test(lower)) return false;
+  if (NP_BASIC_ADJECTIVES_EN.has(lower)) return true;
+  if (NP_ADJECTIVE_SUFFIX_RE.test(lower) && !NP_NOUN_ONLY_ENDING_RE.test(lower)) return true;
+  const negated = lower.replace(NP_NEGATING_PREFIX_RE, "");
+  return negated !== lower && (NP_BASIC_ADJECTIVES_EN.has(negated) || isParticipleShaped(negated)
+    || (NP_ADJECTIVE_SUFFIX_RE.test(negated) && !NP_NOUN_ONLY_ENDING_RE.test(negated)));
+}
+
+let topicLeadVerbsEn: ReadonlySet<string> | undefined;
+/**
+ * The request verbs a clause LEADS with ("Explain …", "update the changelog",
+ * "Walk me through …") — the read-lead vocabulary this file already reviews
+ * (`READ_VERB_LEAD_EN_RE`, `COLON_INTRODUCES_READ_LEAD`) plus the shared
+ * `MUTATION_VERBS_EN`. Built on first use: `MUTATION_VERBS_EN` is declared
+ * further down this file (same temporal-dead-zone reason as
+ * `genericJaRequestVerbs` above).
+ */
+function topicLeadVerbs(): ReadonlySet<string> {
+  topicLeadVerbsEn ??= new Set([
+    "explain", "describe", "tell", "show", "clarify", "summarize", "summarise", "walk", "trace",
+    "outline", "document", "give", "list", "find", "check", "compare", "identify", "determine",
+    "locate", "review", "analyze", "analyse", "verify", "confirm", "cover", "account", "discuss",
+    "enumerate", "look", "investigate", "inspect", "examine", "provide", "detail", "mention", "name",
+    // Copilot standard-setup evaluation (2026-10-02): the elliptical request
+    // "Need discount ordering, gift card behavior, ..." ("[I] need ...")
+    // leads with "need" exactly like "List ..."; read as a noun it was
+    // certified `request-item-absent:Need`.
+    "need",
+    // Copilot retest r4 (2026-10-02): the verbs of a citation clause ("cite
+    // file names", "quote the source lines", "read the relevant files",
+    // "include line numbers", "point to exact locations") lead the clause
+    // like "show"/"list"; read as a noun, "cite" was certified
+    // `request-item-absent:cite`.
+    "cite", "quote", "read", "include", "point",
+    ...MUTATION_VERBS_EN.split("|"),
+  ]);
+  return topicLeadVerbsEn;
+}
+
+function npTokenClass(lower: string): NpTokenClass {
+  if (/^\d/u.test(lower) || NP_NUMBER_WORDS.has(lower)) return "num";
+  if (NP_DETERMINERS.has(lower)) return "det";
+  if (NP_DEMONSTRATIVES.has(lower)) return "demo";
+  if (NP_WH_DETERMINERS.has(lower)) return "wh-det";
+  if (NP_WH_ADVERBS.has(lower)) return "wh";
+  if (NP_SUBORDINATORS.has(lower)) return "sub";
+  if (NP_AUXILIARIES.has(lower) || /n['’]t$/u.test(lower)) return "aux";
+  if (NP_PREPOSITIONS.has(lower)) return "prep";
+  if (NP_CONJUNCTIONS.has(lower)) return "conj";
+  if (NP_PRONOUNS.has(lower)) return "pron";
+  if (NP_ADVERBS.has(lower)) return "adv";
+  if (lower.length >= 5 && /[^aeiou]ly$/u.test(lower) && !NP_LY_NON_ADVERBS.has(lower)) return "adv";
+  return "content";
+}
+
+const NP_TOKEN_RE = /[A-Za-z0-9_$@][A-Za-z0-9_$@.:#/'’-]*/gu;
+
+function npTokens(segment: string): NpToken[] {
+  const out: NpToken[] = [];
+  for (const m of segment.matchAll(NP_TOKEN_RE)) {
+    // Trailing . : # / - stripped by a backward scan: the equivalent regex
+    // (/[.:#/-]+$/) is quadratic on a token with a long inner run of dots, and
+    // the question readers below tokenize whole sentences (review, 2026-10-02).
+    let end = m[0].length;
+    while (end > 0 && ".:#/-".includes(m[0][end - 1]!)) end -= 1;
+    let raw = m[0].slice(0, end);
+    let possessive = false;
+    if (/['’]s$/iu.test(raw)) {
+      raw = raw.slice(0, -2);
+      possessive = true;
+    } else if (/s['’]$/u.test(raw)) {
+      raw = raw.slice(0, -1);
+      possessive = true;
+    } else if (/^[A-Za-z]+['’](?:m|re|ve|ll|d)$/iu.test(raw)) {
+      // R2-T2: a contracted pronoun + auxiliary ("I'm", "we're", "they've")
+      // is its pronoun — a subject, never a content word of a noun phrase.
+      raw = raw.replace(/['’](?:m|re|ve|ll|d)$/iu, "");
+    }
+    if (raw.length === 0) continue;
+    const lower = raw.toLowerCase();
+    out.push({ lower, cls: npTokenClass(lower), possessive, capitalized: /^[A-Z]/u.test(raw), raw });
+  }
+  // A demonstrative is a determiner in front of a noun ("this module") and a
+  // pronoun otherwise ("how this works"); "that" after a noun opens a
+  // relative clause ("the handler that retries").
+  out.forEach((token, i) => {
+    if (token.cls !== "demo") return;
+    const prev = out[i - 1];
+    const next = out[i + 1];
+    if (token.lower === "that" && prev?.cls === "content") token.cls = "sub";
+    else token.cls = next?.cls === "content" ? "det" : "pron";
+  });
+  return out;
+}
+
+function isParticipleShaped(lower: string): boolean {
+  return (lower.length >= 5 && /[^e]ed$/u.test(lower))
+    || (lower.length >= 6 && /ing$/u.test(lower))
+    || NP_IRREGULAR_PARTICIPLES.has(lower)
+    || NP_IRREGULAR_PARTICIPLES.has(lower.replace(NP_PARTICIPLE_PREFIX_RE, ""));
+}
+
+/** A 3rd-person -s / past -ed form — the shape a finite verb takes after its subject. */
+function isFiniteVerbShaped(lower: string): boolean {
+  return /(?:[^su]s|es|ed)$/u.test(lower);
+}
+
+const NP_SEGMENT_SPLIT_RE = /[,;:.?!()[\]{}\n、。，！？；：]+|\s[-–—]+\s/u;
+
+/**
+ * Copilot retest r3 (2026-10-02, rule (c)) — the collector `topicHeadModifiers`
+ * fills while `enSegmentTopicWords` walks a clause. `heads` maps a topic word to
+ * the modifier words (lowercase) of every noun phrase in which it is the phrase's
+ * LAST word and has at least one noun modifier in front of it; `other` holds every
+ * topic word that also sits anywhere ELSE (a bare noun, a modifier, a capitalised
+ * noun) — such a word is a subject in its own right and is never a suppressible head.
+ */
+interface HeadCollector {
+  readonly heads: Map<string, Set<string>>;
+  readonly other: Set<string>;
+}
+
+/** An -ed or irregular past participle (`isParticipleShaped` minus the -ing form, which is as often a gerund noun: "shipping", "pricing"). */
+function isPastParticipleShaped(lower: string): boolean {
+  return (lower.length >= 5 && /[^e]ed$/u.test(lower))
+    || NP_IRREGULAR_PARTICIPLES.has(lower)
+    || NP_IRREGULAR_PARTICIPLES.has(lower.replace(NP_PARTICIPLE_PREFIX_RE, ""));
+}
+
+/**
+ * The words of `modifiers` (a noun phrase's tokens in front of its head) that
+ * name a THING: nouns and gerunds, with a slash/hyphen compound ("points/free-
+ * shipping") split into its parts. An adjective ("free", "relevant"), an -ed
+ * participle ("expired") or a function word names no thing the head could be
+ * ABOUT, so it is never one.
+ */
+function headModifierWords(modifiers: readonly NpToken[]): string[] {
+  const out = new Set<string>();
+  for (const token of modifiers) {
+    for (const part of token.lower.split(/[/-]+/u)) {
+      if (!/^[a-z]{3,}$/u.test(part) || npTokenClass(part) !== "content") continue;
+      if (isAdjectiveShaped(part) || isPastParticipleShaped(part)) continue;
+      out.add(part);
+    }
+  }
+  return [...out];
+}
+
+function noteTopicWord(collector: HeadCollector, run: readonly NpToken[], headAt: number, index: number): void {
+  const word = run[index]!.lower;
+  // The phrase's HEAD is its LAST word. A phrase that ENDS in a facet descriptor
+  // ("the cache entryway PATH") has the descriptor as its head, so the noun in
+  // front of it is the subject of that descriptor, not a head of its own.
+  if (index === headAt && headAt === run.length - 1 && headAt > 0) {
+    const modifiers = headModifierWords(run.slice(0, headAt));
+    if (modifiers.length > 0) {
+      const known = collector.heads.get(word) ?? new Set<string>();
+      for (const modifier of modifiers) known.add(modifier);
+      collector.heads.set(word, known);
+      return;
+    }
+  }
+  collector.other.add(word);
+}
+
+/** Every word of `segment` (one clause piece) that sits in a topic noun phrase, lowercased — EN positional rules. */
+function enSegmentTopicWords(segment: string, out: Set<string>, heads?: HeadCollector): void {
+  const tokens = npTokens(segment);
+  if (tokens.length === 0) return;
+  let start = 0;
+  while (start < tokens.length && (tokens[start]!.cls === "conj" || tokens[start]!.cls === "adv")) start += 1;
+  // A clause-initial request verb, unless it heads an "X of Y" noun ("List of …").
+  const leadVerbAt = start < tokens.length
+    && tokens[start]!.cls === "content"
+    && topicLeadVerbs().has(tokens[start]!.lower)
+    && tokens[start + 1]?.lower !== "of"
+    ? start
+    : -1;
+  const hasClauseSignal = tokens.some((token) => token.cls === "aux" || token.cls === "wh" || token.cls === "wh-det" || token.cls === "sub");
+  const prevIndex = (from: number, skip: ReadonlySet<NpTokenClass>): number => {
+    let p = from;
+    while (p >= 0 && skip.has(tokens[p]!.cls)) p -= 1;
+    return p;
+  };
+  const SKIP_ADV: ReadonlySet<NpTokenClass> = new Set(["adv"]);
+  const SKIP_ADV_DET: ReadonlySet<NpTokenClass> = new Set(["adv", "det", "num"]);
+  /** The last wh/wh-det/subordinator strictly before `index`, or -1. */
+  const clauseOpenerBefore = (index: number): number => {
+    for (let p = index - 1; p >= start; p -= 1) {
+      const cls = tokens[p]!.cls;
+      if (cls === "wh" || cls === "wh-det" || cls === "sub") return p;
+    }
+    return -1;
+  };
+  const addNounPhrase = (run: readonly NpToken[]): void => {
+    // Orchestrator addition (eval-0929 §8): the run's own HEAD (last token)
+    // decides whether a pre-modifying scope adjective is part of the
+    // descriptor — see NP_DESCRIPTOR_SCOPE_ADJECTIVES_EN's own doc comment.
+    const headIsDescriptor = run.length > 1 && isFacetDescriptorTerm(run[run.length - 1]!.lower);
+    // R2-T2 (review-0929 P1-2): the HEAD noun is the last word that is not a
+    // trailing facet descriptor (rule 1(d) "after removing descriptors": in
+    // "the cache constant value" the head is "constant"); every word in front
+    // of it is a modifier, kept only when it is a NOUN of a noun compound —
+    // an adjective is a descriptor (see `isAdjectiveShaped`'s section).
+    let headAt = run.length - 1;
+    while (headAt > 0 && isFacetDescriptorTerm(run[headAt]!.lower)) headAt -= 1;
+    // An adjective or participle right in front of the trailing descriptor
+    // modifies THAT descriptor ("direct callers", "transient errors", "the
+    // allowed values"): the phrase names only a kind of information, and has
+    // no subject head of its own.
+    if (headAt < run.length - 1 && (isAdjectiveShaped(run[headAt]!.lower) || isParticipleShaped(run[headAt]!.lower))) {
+      headAt = run.length;
+    }
+    run.forEach((token, i) => {
+      const isHead = i >= headAt;
+      // An -ed/-ing word in front of the head noun is an adjective
+      // ("the missing token", "expired entries") — a predicate, never the subject.
+      if (!isHead && isParticipleShaped(token.lower)) return;
+      if (!isHead && headIsDescriptor && NP_DESCRIPTOR_SCOPE_ADJECTIVES_EN.has(token.lower)) return;
+      if (!isHead && isAdjectiveShaped(token.lower)) return;
+      out.add(token.lower);
+      if (heads !== undefined) noteTopicWord(heads, run, headAt, i);
+    });
+  };
+  const addIfCompound = (run: readonly NpToken[]): void => {
+    // R2-T2: an adjective + noun object ("handles flaky upstreams") is not a
+    // multi-word NOUN compound — only nouns count toward the two.
+    const nouns = run.filter((token) => !isParticipleShaped(token.lower) && !isAdjectiveShaped(token.lower));
+    if (nouns.length >= 2) addNounPhrase(nouns);
+  };
+  const addCapitalized = (run: readonly NpToken[], firstIndex: number, predicateIndexes: ReadonlySet<number>): void => {
+    run.forEach((token, i) => {
+      if (token.capitalized && firstIndex + i !== start && !predicateIndexes.has(i)) {
+        out.add(token.lower);
+        heads?.other.add(token.lower);
+      }
+    });
+  };
+
+  // R2-T2 follow-up (2026-09-30, orchestrator ruling on the round-2 combined
+  // run): subject eligibility — the head noun and the nouns of a compound —
+  // applies ONLY to the topic noun phrase of an identifier-free clause that
+  // no facet owns (brief-wp-c3.md rule 1(d)); never to a word inside a
+  // modifier phrase, an anaphoric reference, a facet-framed clause's other
+  // participants, or a predicate. Decided structurally, per segment:
+  //   - a RELATIVE clause ("callers THAT go through a retry scheduler", "the
+  //     handler WHICH retries …") modifies the noun before it — to the next
+  //     coordinator, nothing inside it is the clause's topic;
+  //   - an ANAPHORIC noun phrase ("that period", "this module", "the same
+  //     window") refers back to something already named — never a new subject;
+  //   - a FACET-FRAMED clause OPENS with a noun phrase made only of facet
+  //     descriptors and modifiers ("which conditions …", "callers passing …",
+  //     "what error codes …", "List the callers …") and asks for that kind of
+  //     information about a subject the facet owns; its other noun phrases are
+  //     participants ("is a customer refused a refund"), and only the object
+  //     of a topic preposition ("the conditions OF the vault"), the
+  //     descriptor's own "for" complement ("the default values FOR the rate
+  //     limiter") or a possessive owner ("the retry constant's configured
+  //     value") names that subject. A descriptor noun phrase anywhere later —
+  //     an adjunct or an object ("why does the circuit breaker open after
+  //     repeated errors") — frames nothing.
+  // The preposition right after the clause's request verb (and its "me"/"us")
+  // is the verb's COMPLEMENT: "walk me through the rate limiter", "look into
+  // the circuit breaker" name the request's topic, not a modifier phrase. An
+  // imperative outside the lead-verb list shows itself by that "me"/"us"
+  // ("take me through the audit trail") or is a phrasal request verb ("go
+  // over the retry policy"). Such a complement keeps what every prepositional
+  // object had before this follow-up: the nouns of a multi-word compound.
+  const isMeOrUs = (token: NpToken | undefined): boolean => token?.lower === "me" || token?.lower === "us";
+  const imperativeAt = leadVerbAt >= 0
+    ? leadVerbAt
+    : tokens[start]?.cls === "content" && (isMeOrUs(tokens[start + 1]) || NP_PHRASAL_REQUEST_VERBS.has(tokens[start]!.lower))
+      ? start
+      : -1;
+  const complementPrepAt = ((): number => {
+    // "What happens TO the audit trail", "who writes TO the audit log": a
+    // wh-subject's own verb takes the question's topic through its preposition.
+    if (imperativeAt < 0 && (tokens[start]?.lower === "what" || tokens[start]?.lower === "who")
+      && tokens[start + 1]?.cls === "content" && isFiniteVerbShaped(tokens[start + 1]!.lower)
+      && tokens[start + 2]?.cls === "prep" && !NP_TOPIC_PREPOSITIONS.has(tokens[start + 2]!.lower)) {
+      return start + 2;
+    }
+    if (imperativeAt < 0) return -1;
+    let p = imperativeAt + 1;
+    if (isMeOrUs(tokens[p])) p += 1;
+    while (p < tokens.length && tokens[p]!.cls === "adv") p += 1;
+    return p < tokens.length && tokens[p]!.cls === "prep" && NP_COMPLEMENT_PREPOSITIONS.has(tokens[p]!.lower) ? p : -1;
+  })();
+  const facetOnly = (run: readonly NpToken[]): boolean => run.some((token) => isFacetDescriptorTerm(token.lower))
+    && run.every((token) => isFacetDescriptorTerm(token.lower) || isAdjectiveShaped(token.lower) || isParticipleShaped(token.lower));
+  const facetFramed = ((): boolean => {
+    let i = start;
+    while (i < tokens.length && (tokens[i]!.cls !== "content" || i === imperativeAt)) i += 1;
+    if (i >= tokens.length) return false;
+    let j = i;
+    while (j + 1 < tokens.length && tokens[j + 1]!.cls === "content" && !tokens[j]!.possessive && j + 1 !== leadVerbAt) j += 1;
+    let kind = tokens.slice(i, j + 1);
+    // "which conditions trigger …": after a wh-determiner the run's last word
+    // is the clause's verb (the same reading as the wh-det branch below).
+    const opener = prevIndex(i - 1, SKIP_ADV);
+    let next = j + 1;
+    while (next < tokens.length && tokens[next]!.cls === "adv") next += 1;
+    if (opener >= 0 && tokens[opener]!.cls === "wh-det" && kind.length >= 2 && next < tokens.length && tokens[next]!.cls !== "aux") {
+      kind = kind.slice(0, -1);
+    }
+    return facetOnly(kind);
+  })();
+  const relativeAt = tokens.findIndex((token, i) => i > start && i - 1 !== leadVerbAt && tokens[i - 1]!.cls === "content"
+    && ((token.cls === "sub" && token.lower === "that") || NP_RELATIVE_PRONOUNS.has(token.lower)));
+  const relativeEnd = relativeAt < 0 ? -1 : (() => {
+    for (let i = relativeAt + 1; i < tokens.length; i += 1) if (tokens[i]!.cls === "conj") return i;
+    return tokens.length;
+  })();
+
+  let k = start;
+  while (k < tokens.length) {
+    if (tokens[k]!.cls !== "content" || k === leadVerbAt) {
+      k += 1;
+      continue;
+    }
+    const s = k;
+    let e = k;
+    while (e + 1 < tokens.length && tokens[e + 1]!.cls === "content" && !tokens[e]!.possessive && e + 1 !== leadVerbAt) e += 1;
+    k = e + 1;
+    const run = tokens.slice(s, e + 1);
+    const before = prevIndex(s - 1, SKIP_ADV);
+    const beforeCore = prevIndex(s - 1, SKIP_ADV_DET);
+    const detLed = before >= 0 && (tokens[before]!.cls === "det" || tokens[before]!.cls === "num"
+      || (tokens[before]!.cls === "content" && tokens[before]!.possessive));
+    const after = (() => {
+      let n = e + 1;
+      while (n < tokens.length && tokens[n]!.cls === "adv") n += 1;
+      return n < tokens.length ? tokens[n]! : undefined;
+    })();
+    const core = beforeCore >= 0 ? tokens[beforeCore]! : undefined;
+    // "including" introduces a requested point ("…, including the queue depth
+    // value"), not a locative adjunct: like a complement, its object keeps the
+    // prepositional object's pre-existing (compound) eligibility.
+    const atComplement = beforeCore >= 0 && (beforeCore === complementPrepAt || tokens[beforeCore]!.lower === "including");
+    const predicates = new Set<number>();
+
+    // R2-T2 follow-up guards (see the comment above the loop).
+    if (relativeAt >= 0 && s > relativeAt && s < relativeEnd) continue;
+    // A lone adjective right after "how" is the question's degree word ("how
+    // LONG is that window", "how BIG is the buffer") — a predicate.
+    if (run.length === 1 && before >= 0 && before === s - 1 && tokens[before]!.lower === "how" && isAdjectiveShaped(run[0]!.lower)) continue;
+    if (before >= 0 && tokens[before]!.cls === "det" && NP_ANAPHORIC_DETERMINERS.has(tokens[before]!.lower)) continue;
+    // …and a noun phrase whose own of-complement is anaphoric ("the default
+    // length OF THAT period") names an attribute of that referent, not a new
+    // subject either.
+    if (tokens[e + 1]?.lower === "of" && tokens[e + 2]?.cls === "det" && NP_ANAPHORIC_DETERMINERS.has(tokens[e + 2]!.lower)) continue;
+    // A possessive owner ("the retry constant's configured value") is the
+    // facet's subject, exactly like an of-complement — and so is the definite
+    // object of "for" right after a descriptor ("the default values FOR the
+    // rate limiter").
+    const descriptorComplement = core?.lower === "for" && beforeCore > 0
+      && isFacetDescriptorTerm(tokens[beforeCore - 1]!.lower)
+      && before >= 0 && tokens[before]!.lower === "the";
+    if (facetFramed && !facetOnly(run) && !(core?.cls === "prep" && NP_TOPIC_PREPOSITIONS.has(core.lower))
+      && !atComplement && !descriptorComplement && !run[run.length - 1]!.possessive) continue;
+
+    if (core?.cls === "aux") {
+      const opener = clauseOpenerBefore(beforeCore);
+      const contentBetween = tokens.slice(opener + 1 < start ? start : opener + 1, beforeCore).filter((token) => token.cls === "content");
+      // R2-T2 follow-up: a wh-determiner noun phrase in front of a be/have/get
+      // auxiliary IS the subject ("which error codes ARE recorded", "which
+      // files HAVE changed") — what follows the auxiliary is its predicate or
+      // complement, never an inverted subject. Only do-support/modal questions
+      // put the subject after the auxiliary ("which file DOES the parser read").
+      // A wh-phrase that is a preposition's object ("IN what cases is an
+      // invoice voided", "UNDER which conditions …") is no subject: the
+      // subject follows the auxiliary there.
+      const whSubjectBeforeBe = opener >= 0 && tokens[opener]!.cls === "wh-det" && contentBetween.length > 0
+        && !NP_DO_OR_MODAL.has(core.lower) && !(opener > start && tokens[opener - 1]!.cls === "prep");
+      const inverted = !whSubjectBeforeBe && (contentBetween.length === 0
+        || (opener >= 0 && tokens[opener]!.cls === "wh-det" && contentBetween.length === tokens.slice(opener + 1, beforeCore).length));
+      if (inverted) {
+        // Question word order: subject, then (for do/modal, or a participle
+        // after be/have) the main verb.
+        if (run.length === 1 && after?.cls !== "aux" && !NP_DO_OR_MODAL.has(core.lower) && isParticipleShaped(run[0]!.lower)) {
+          // R2-T2 follow-up: "what is recorded", "is it retried": a lone
+          // participle after be/get is the predicate, never the subject.
+          predicates.add(0);
+        } else if (after?.cls === "aux" || run.length === 1) {
+          addNounPhrase(run);
+        } else if (NP_DO_OR_MODAL.has(core.lower)) {
+          // The bare main verb: the last token, or — when a plural object
+          // follows it ("assign jobs") — the last bare token before that.
+          let verbAt = run.length - 1;
+          if (/s$/u.test(run[verbAt]!.lower)) {
+            for (let v = run.length - 2; v >= 1; v -= 1) {
+              if (!/s$/u.test(run[v]!.lower)) { verbAt = v; break; }
+            }
+          }
+          predicates.add(verbAt);
+          addNounPhrase(run.slice(0, verbAt));
+          addIfCompound(run.slice(verbAt + 1));
+        } else if (isParticipleShaped(run[run.length - 1]!.lower)) {
+          predicates.add(run.length - 1);
+          addNounPhrase(run.slice(0, -1));
+        } else {
+          addNounPhrase(run);
+        }
+      } else if (detLed) {
+        // "… is the default" — a complement noun phrase.
+        addNounPhrase(run);
+      } else {
+        // "inventory is replenished", "a user is denied access": the
+        // predicate follows its subject's auxiliary.
+        predicates.add(0);
+        addIfCompound(run.slice(1));
+      }
+    } else if (!detLed && before >= 0 && tokens[before]!.cls === "wh-det") {
+      // "which inputs cause …", "what errors are thrown": the wh-noun is the
+      // KIND asked about; a verb that follows it is a predicate.
+      if (after !== undefined && after.cls !== "aux" && run.length >= 2) predicates.add(run.length - 1);
+    } else if (!detLed && before >= 0 && tokens[before]!.cls === "pron"
+      && !(["me", "us"].includes(tokens[before]!.lower) && prevIndex(before - 1, SKIP_ADV) === leadVerbAt && leadVerbAt >= 0)) {
+      // "does it give up", "how it works": the verb follows its pronoun subject.
+      predicates.add(0);
+      addIfCompound(run.slice(1));
+    } else if (after?.cls === "aux") {
+      // Subject position: "how inventory is …", "database migrations are …".
+      addNounPhrase(run);
+    } else if (clauseOpenerBefore(s) >= 0 && (core === undefined || core.cls === "wh" || core.cls === "sub" || core.cls === "wh-det")
+      && run.length >= 2) {
+      // The first noun run of a wh/subordinate clause with no auxiliary:
+      // subject, then its finite verb ("when the payment fails", "how the
+      // scheduler assigns jobs", "how retries work"). The FIRST -s/-ed word
+      // after the subject's first word is taken as the verb; only a run with
+      // none ends in its bare verb. Where a plural noun and a 3rd-person verb
+      // look alike ("how session tokens expire") this errs toward reading the
+      // noun as the verb — a subject word left ineligible, never a verb
+      // made eligible.
+      const last = run.length - 1;
+      let verbAt = -1;
+      for (let v = 1; v <= last; v += 1) {
+        if (isFiniteVerbShaped(run[v]!.lower)) { verbAt = v; break; }
+      }
+      if (verbAt < 1) verbAt = last;
+      predicates.add(verbAt);
+      addNounPhrase(run.slice(0, verbAt));
+      addIfCompound(run.slice(verbAt + 1));
+    } else if (core?.cls === "prep" && !NP_TOPIC_PREPOSITIONS.has(core.lower) && !descriptorComplement) {
+      // The object of a locative/temporal preposition ("in this codebase",
+      // "during the shutdown sequence", "through a retry scheduler") is an
+      // adjunct, not the clause's topic. R2-T2 follow-up (orchestrator ruling):
+      // not even a noun compound there — a modifier phrase never names the
+      // subject (WP-C3 used to admit "a compound names a topic of its own").
+      // The complement of a phrasal request verb ("walk me through the rate
+      // limiter") is no modifier: it keeps what every prepositional object had
+      // before — the nouns of a multi-word noun compound.
+      if (atComplement) addIfCompound(run);
+    } else if (detLed) {
+      addNounPhrase(run);
+    } else if (before >= 0 && (before === leadVerbAt
+      || (["me", "us"].includes(tokens[before]!.lower) && prevIndex(before - 1, SKIP_ADV) === leadVerbAt && leadVerbAt >= 0))) {
+      // The direct object of the request verb: "update changelog", "explain caching behaviour".
+      addNounPhrase(run);
+    } else if (core?.cls === "prep" && NP_TOPIC_PREPOSITIONS.has(core.lower)) {
+      addNounPhrase(run);
+    } else if (s === start && !hasClauseSignal && leadVerbAt < 0) {
+      if (after === undefined || after.cls === "prep" || after.cls === "conj" || after.cls === "num") {
+        // A verbless list fragment ("Redis cache invalidation", "Callers of X").
+        addNounPhrase(run);
+      } else {
+        // A clause-initial word followed by its own object ("Compute the
+        // refund total"): an imperative verb, never the subject.
+        run.forEach((_, i) => predicates.add(i));
+      }
+    } else {
+      // A bare object or prepositional object: only a multi-word noun
+      // compound names a topic of its own ("handles session renewal").
+      addIfCompound(run);
+    }
+    addCapitalized(run, s, predicates);
+  }
+}
+
+/**
+ * WP-C3 — every word of `clause` that sits in one of its topic noun phrases,
+ * lowercased (rule 1(d)); a predicate or wh-noun position never contributes.
+ * An ASCII word inside Japanese text is a noun there (Japanese carries its
+ * own predicates), so a JA-bearing segment contributes its ASCII words
+ * whole. Descriptors are NOT removed here — `isLiteralEligibleTerm` does.
+ */
+export function topicNounPhraseWords(clause: string): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const segment of clause.split(NP_SEGMENT_SPLIT_RE)) {
+    if (/[぀-ヿ一-鿿]/u.test(segment)) {
+      for (const token of npTokens(segment)) if (token.cls === "content") out.add(token.lower);
+      continue;
+    }
+    enSegmentTopicWords(segment, out);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Copilot retest r3 (2026-10-02, rule (c) refinement) — a QUESTION asks about
+// its subject. "How does the shipping webhook retry failed deliveries?" and "Does
+// the payment gateway retry on 503?" are where people really ask about something
+// the workspace may not have, so a head noun there IS that subject, never an
+// aspect of a present thing: rule (c) does not apply to a noun phrase of a
+// question ("subject absence is kept, descriptor absence is never certified").
+// A sentence is a question when it ends in "?" or opens — after a coordinator —
+// with a wh-word (what/which/where/when/why/how/who/whose) or an auxiliary/modal
+// (does/do/did/is/are/was/were/has/have/had/can/could/should/would/will).
+// Imperatives, verbless list fragments and the objects of a lead verb ("explain
+// discount order", "Trace the shipping webhook") are not questions and keep (c).
+// Three openers that are imperatives by position, not questions: "Can/Could/Would/Will
+// you explain ...?" is addressed to the reader, "Do not ..." prohibits, and "Have a
+// look at ..." is a request ("Have the retries failed ..." is a question).
+// ---------------------------------------------------------------------------
+const QUESTION_OPENING_AUXILIARIES: ReadonlySet<string> = new Set([
+  "does", "do", "did", "is", "are", "was", "were", "has", "have", "had", "can", "could", "should", "would", "will",
+]);
+/** The modals that, followed by "you", make a polite request ("Can you explain ...?") rather than a question about the workspace. */
+const REQUEST_MODALS: ReadonlySet<string> = new Set(["can", "could", "would", "will"]);
+
+/**
+ * The clauses of `text` a question can open or end: split after a terminator (. ? !
+ * ; or the colon that introduces an answer: "Read the files and answer: What does
+ * retrySchedule() return") that is followed by whitespace or the end, and at line
+ * breaks — never at a period glued into a token ("src/backoff.ts", "res.json()") or
+ * ending an abbreviation ("e.g.").
+ */
+function sentencesOf(text: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  // Only from the START of a terminator run: retrying inside a long run of dots made this quadratic (review, 2026-10-02).
+  for (const m of text.matchAll(/(?<![.?!;:。！？])[.?!;:。！？]+(?=\s|$)|\n+/gu)) {
+    const end = (m.index ?? 0) + m[0].length;
+    if (m[0].startsWith(".") && ABBREVIATION_PERIOD_RE.test(text.slice(0, end))) continue;
+    out.push(text.slice(from, end));
+    from = end;
+  }
+  out.push(text.slice(from));
+  return out.filter((sentence) => sentence.trim().length > 0);
+}
+
+/** True when `sentence` is a question (see the section comment above). */
+function isInterrogativeSentence(sentence: string): boolean {
+  const tokens = npTokens(sentence);
+  let i = 0;
+  while (i < tokens.length && (tokens[i]!.cls === "conj" || tokens[i]!.cls === "adv")) i += 1;
+  const first = tokens[i];
+  if (first === undefined) return false;
+  const next = tokens[i + 1]?.lower;
+  if (REQUEST_MODALS.has(first.lower) && next === "you") return false;
+  if ((first.lower === "do" || first.lower === "does" || first.lower === "did") && next === "not") return false;
+  if (/[?？]["'’”)\]\s]*$/u.test(sentence)) return true;
+  if (first.cls === "wh" || first.cls === "wh-det") return true;
+  if (first.lower === "have" && (next === "a" || next === "an")) return false;
+  return QUESTION_OPENING_AUXILIARIES.has(first.lower);
+}
+
+/** Verbs of telling and knowing that take an embedded question ("explain HOW ...", "check WHETHER ...", "I want to know IF ..."). */
+const EMBEDDED_QUESTION_LEAD_WORDS: ReadonlySet<string> = new Set([
+  "explain", "describe", "tell", "show", "know", "check", "see", "wonder", "ask", "understand",
+  "clarify", "determine", "trace", "confirm", "verify", "learn", "find", "figure", "work",
+]);
+/** What opens an embedded question after such a verb. */
+const EMBEDDED_QUESTION_OPENERS: ReadonlySet<string> = new Set([
+  "how", "whether", "if", "what", "which", "where", "when", "why", "who", "whose",
+]);
+/** An existence check ("check whether the shipping webhook exists", "the existence of ..."): every word of it is asked about. */
+const EXISTENCE_WORD_RE = /\bexist(?:s|ed|ing|ence)?\b/iu;
+/** A subject longer than this many content words is no subject this reader can trust. */
+const MAX_QUESTION_SUBJECT_WORDS = 4;
+
+/**
+ * Review of the Copilot retest r3 wave (2026-10-02) — the SUBJECT words of every
+ * question clause of `sentence`, which rule (c) never suppresses ("subject absence is
+ * kept"): the main clause when the sentence is a question (`isInterrogativeSentence`),
+ * and every embedded question a verb of telling or knowing opens ("Explain how the
+ * shipping webhook retries", "Tell me whether the payment gateway retries on 503",
+ * "I want to know if ..."). A subject runs from after its opener (the wh-word, the
+ * opening auxiliary, "whether"/"if"; one auxiliary and "there" right after it are
+ * skipped, determiners too) to the first word that is not a content word or is shaped
+ * like a finite verb ("retries", "exists") with no other verb-shaped word right after
+ * it (that makes it a plural noun: "webhooks retried"), at most
+ * MAX_QUESTION_SUBJECT_WORDS words.
+ * An existence check makes every content word of its sentence a subject. Objects keep
+ * rule (c): "whether points affect free shipping eligibility" asks about points, not
+ * about the eligibility it names.
+ */
+function questionSubjectWords(sentence: string): Set<string> {
+  const out = new Set<string>();
+  const tokens = npTokens(sentence);
+  if (EXISTENCE_WORD_RE.test(sentence)) {
+    for (const token of tokens) if (token.cls === "content") out.add(token.lower);
+    return out;
+  }
+  const starts: number[] = [];
+  if (isInterrogativeSentence(sentence)) {
+    let opener = 0;
+    while (opener < tokens.length && (tokens[opener]!.cls === "conj" || tokens[opener]!.cls === "adv")) opener += 1;
+    starts.push(opener + 1);
+  }
+  tokens.forEach((token, i) => {
+    if (!EMBEDDED_QUESTION_OPENERS.has(token.lower)) return;
+    if (tokens.slice(0, i).some((previous) => EMBEDDED_QUESTION_LEAD_WORDS.has(previous.lower))) starts.push(i + 1);
+  });
+  for (const start of starts) {
+    let i = start;
+    if (tokens[i]?.cls === "aux") i += 1;
+    if (tokens[i]?.lower === "there") i += 1;
+    let taken = 0;
+    for (; i < tokens.length && taken < MAX_QUESTION_SUBJECT_WORDS; i += 1) {
+      const token = tokens[i]!;
+      if (token.cls === "det" || token.cls === "num") continue;
+      if (token.cls !== "content") break;
+      // A verb-shaped word ends the subject unless another verb-shaped word follows
+      // it: then it is a plural noun ("the shipping WEBHOOKS retried").
+      const next = tokens[i + 1];
+      if (isFiniteVerbShaped(token.lower) && !(next?.cls === "content" && isFiniteVerbShaped(next.lower))) break;
+      out.add(token.lower);
+      taken += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Copilot retest r3 (2026-10-02, rule (c)) — for every topic word of `clause` that
+ * is the HEAD of a noun phrase carrying noun modifiers ("discount ORDER",
+ * "giftcard discount ELIGIBILITY", "quote CALCULATION", "points/free-shipping
+ * INTERACTION"), the modifier words (lowercase) in front of it. A head like that
+ * names an ASPECT of the things its modifiers name (the order of discounts, the
+ * eligibility of gift cards), so when one of those things is present in the
+ * workspace the head relates present things and its own absence says nothing
+ * about the workspace: the caller (readCodeTaskPack.ts `headRelatesPresentThings`)
+ * decides that against the workspace, because only it can look. It is only ever
+ * asked for a word `topicNounPhraseWords` already admits — this never ADMITS a
+ * word, it only reports what a word sits behind.
+ *
+ * What is NOT a suppressible head, by construction: a phrase that ENDS in a facet
+ * descriptor ("the cache entryway PATH": the descriptor is the head, "entryway"
+ * is its subject); a bare single-word phrase ("product"); a word that sits
+ * anywhere else in the clause as a bare noun, a modifier or a capitalised noun; a
+ * modifier-less head ("refund" in "refund flow"); a word whose modifiers are
+ * adjectives, -ed participles or function words only; and ANY noun phrase of a
+ * QUESTION sentence (`isInterrogativeSentence`): there the head is the subject asked
+ * about, so its words go to the "other" side exactly like a bare noun. EN only: a
+ * Japanese segment contributes its words to the "other" side.
+ */
+export function topicHeadModifiers(clause: string): ReadonlyMap<string, readonly string[]> {
+  const collector: HeadCollector = { heads: new Map(), other: new Set() };
+  const scratch = new Set<string>();
+  for (const sentence of sentencesOf(clause)) {
+    // The SUBJECT of every question clause is what that question asks about: its
+    // words go to `other`, so no head among them is suppressed. The rest of the
+    // sentence (a question's object included) is read like any other clause.
+    for (const word of questionSubjectWords(sentence)) collector.other.add(word);
+    for (const segment of sentence.split(NP_SEGMENT_SPLIT_RE)) {
+      if (/[぀-ヿ一-鿿]/u.test(segment)) {
+        for (const token of npTokens(segment)) if (token.cls === "content") collector.other.add(token.lower);
+        continue;
+      }
+      enSegmentTopicWords(segment, scratch, collector);
+    }
+  }
+  const result = new Map<string, readonly string[]>();
+  for (const [word, modifiers] of collector.heads) {
+    if (!collector.other.has(word)) result.set(word, [...modifiers]);
+  }
+  return result;
+}
+
+// Japanese: a noun phrase is a run with no clause-internal particle and no
+// predicate ending; its の-segments that are descriptors are trimmed from
+// either edge (rule 1(d) "after removing descriptors").
+const JA_TOPIC_SUFFIX_RE = /(?:について|に関して|に関する|とは|という名前|という)$/u;
+const JA_LEADING_DEMONSTRATIVE_RE = /^(?:その|この|あの|どの|各|全)/u;
+const JA_NOUN_CHAR = "ァ-ヶー一-鿿々";
+/** A particle other than の between two noun characters: the run is a clause, not a noun phrase. */
+const JA_CLAUSE_PARTICLE_INSIDE_RE = new RegExp(`[${JA_NOUN_CHAR}](?:が|を|は|に|で|へ|と|や|も|から|まで|より)(?=.)`, "u");
+/** A verb/adjective ending directly in front of a noun: a relative clause or an adjective. */
+const JA_ATTRIBUTIVE_PREDICATE_RE = new RegExp(`(?:する|される|させる|している|されている|した|された|できる|れる|られる|せる|ている|ていた|てる|ない|なかった|る|う|く|ぐ|す|つ|ぬ|ぶ|む|た|だ|い|な)(?=[${JA_NOUN_CHAR}])`, "u");
+/** A run that ENDS in a verb/adjective/copula form. */
+const JA_TRAILING_PREDICATE_RE = /(?:する|される|させる|している|されている|した|された|して|できる|れる|られる|せる|ている|ていた|てる|ない|なかった|たい|ます|ました|です|でした|る|う|く|ぐ|す|つ|ぬ|ぶ|む|た|だ|い|て)$/u;
+
+/**
+ * WP-C3 — the topic noun phrase of a Japanese `run` (one `salientWords` CJK
+ * candidate), with its descriptor の-segments removed from either edge
+ * (「マイグレーションの仕組み」→「マイグレーション」, 「バックオフ戦略の種類」→
+ * 「バックオフ戦略」); `run` itself when nothing needs removing
+ * (「キャッシュの有効期限」); undefined when the run is a clause (a particle
+ * other than の inside it, or a verb/adjective ending — 「各ロールが返す
+ * ステータスコードの一覧」, 「無効化する処理」) or nothing but descriptors.
+ */
+export function jaTopicNounPhrase(run: string): string | undefined {
+  let core = run.replace(JA_TOPIC_SUFFIX_RE, "");
+  core = core.replace(JA_LEADING_DEMONSTRATIVE_RE, "");
+  if (core.length < 2 || !new RegExp(`[${JA_NOUN_CHAR}]`, "u").test(core)) return undefined;
+  if (JA_CLAUSE_PARTICLE_INSIDE_RE.test(core) || JA_ATTRIBUTIVE_PREDICATE_RE.test(core) || JA_TRAILING_PREDICATE_RE.test(core)) {
+    return undefined;
+  }
+  const segments = core.split("の");
+  if (segments.some((segment) => segment.length === 0 || !new RegExp(`[${JA_NOUN_CHAR}]`, "u").test(segment))) return undefined;
+  let from = 0;
+  let to = segments.length;
+  while (from < to && isFacetDescriptorTerm(segments[from]!)) from += 1;
+  while (to > from && isFacetDescriptorTerm(segments[to - 1]!)) to -= 1;
+  if (from >= to) return undefined;
+  const kept = segments.slice(from, to);
+  if (kept.some((segment) => isFacetDescriptorTerm(segment))) return undefined;
+  const form = kept.join("の");
+  return from === 0 && to === segments.length && core === run ? run : form;
+}
+
+// ---------------------------------------------------------------------------
+// R2-T2 (2026-09-30, orchestrator RULING on the katakana false absence) — a
+// katakana LOANWORD names a concept the workspace would spell in English, so
+// a literal miss of the katakana proves nothing unless some English spelling
+// of it was checked too. The JA bridge (retrieval/jaQueryBridge.ts) maps a
+// katakana run to English only through words the workspace already uses —
+// so a concept the workspace lacks is never "mapped" there, and a concept it
+// spells only in prose the vocabulary does not index (a README's "health
+// probe") is not either. The bridge's own glossary (retrieval/jaGlossary.ts,
+// general IT/business vocabulary) is the one workspace-INDEPENDENT source of
+// an English spelling: a run it covers completely has a KNOWN spelling that
+// an absence scan can check, whether or not the workspace uses it.
+// ---------------------------------------------------------------------------
+const JA_GLOSSARY_KATAKANA: ReadonlyMap<string, readonly string[]> = new Map(
+  JA_GLOSSARY.filter(([term]) => /^[゠-ヿｦ-ﾟ]+$/u.test(term)),
+);
+const JA_GLOSSARY_KATAKANA_MAX_CHARS = Math.max(0, ...[...JA_GLOSSARY_KATAKANA.keys()].map((term) => term.length));
+
+/** The katakana runs (two characters or more) of `text` — the same runs the JA bridge maps. */
+export function katakanaRunsOf(text: string): string[] {
+  return [...text.matchAll(new RegExp(KATAKANA_RUN_RE.source, "gu"))].map((m) => m[0]).filter((run) => run.length >= 2);
+}
+
+/**
+ * R2-T2 — the English spellings the JA glossary knows for the katakana run
+ * `run`: the stems of a complete cover of `run` by the glossary's katakana
+ * entries (segments of two characters or more, fewest segments), or
+ * undefined when no complete cover exists ("レディスキャッシュ": レディス has
+ * no entry). Workspace-independent by design — see the section comment.
+ */
+export function katakanaGlossarySpellings(run: string): string[] | undefined {
+  const n = run.length;
+  if (n < 2) return undefined;
+  const best: Array<number> = new Array(n + 1).fill(Number.POSITIVE_INFINITY);
+  const back: Array<number> = new Array(n + 1).fill(-1);
+  best[0] = 0;
+  for (let end = 2; end <= n; end += 1) {
+    for (let start = Math.max(0, end - JA_GLOSSARY_KATAKANA_MAX_CHARS); start <= end - 2; start += 1) {
+      if (best[start] === Number.POSITIVE_INFINITY || !JA_GLOSSARY_KATAKANA.has(run.slice(start, end))) continue;
+      if (best[start]! + 1 < best[end]!) {
+        best[end] = best[start]! + 1;
+        back[end] = start;
+      }
+    }
+  }
+  if (best[n] === Number.POSITIVE_INFINITY) return undefined;
+  const spellings: string[] = [];
+  for (let end = n; end > 0; end = back[end]!) {
+    for (const stem of JA_GLOSSARY_KATAKANA.get(run.slice(back[end]!, end)) ?? []) {
+      if (!spellings.includes(stem)) spellings.unshift(stem);
+    }
+  }
+  return spellings;
+}
+
+/** Quote marks that open/close at word edges (an apostrophe inside "user's" never opens a span). */
+const EDGE_QUOTED_SPAN_RE = /(?:^|[\s(\[{぀-ヿ一-鿿、。])([`"'])[^`"'\n]{2,}?\1(?=$|[\s)\]},.;:!?぀-ヿ一-鿿、。])|「[^」]{2,}」|『[^』]{2,}』/u;
+
+/**
+ * R2-T2 follow-up — true when a facet descriptor of `text` takes a subject of
+ * its OWN: the object of a topic preposition after it ("the default values OF
+ * the flux capacitor", "the callers FOR the rate limiter") or a possessive
+ * owner in front of it ("the retry constant's configured value"). Such a
+ * clause is about that subject even when its facet inherits the lead's
+ * identifiers (readCodeTaskPack.ts `RequestItem.facetSubject`). EN only — a
+ * Japanese clause answers false (the point then stays with the lead's
+ * identifier: never certified absent, the safe direction).
+ */
+export function clauseNamesOwnFacetSubject(text: string): boolean {
+  if (/[぀-ヿ一-鿿]/u.test(text)) return false;
+  const tokens = npTokens(text);
+  return tokens.some((token, i) => {
+    if (token.cls === "content" && token.possessive && tokens.slice(i + 1).some((next) => next.cls === "content" && isFacetDescriptorTerm(next.lower))) {
+      return true;
+    }
+    if (token.cls !== "content" || !isFacetDescriptorTerm(token.lower)) return false;
+    const prep = tokens[i + 1];
+    if (prep === undefined || !(NP_TOPIC_PREPOSITIONS.has(prep.lower) || prep.lower === "for")) return false;
+    let j = i + 2;
+    while (j < tokens.length && (tokens[j]!.cls === "det" || tokens[j]!.cls === "adv")) j += 1;
+    const object = tokens[j];
+    return object !== undefined && object.cls === "content" && !isFacetDescriptorTerm(object.lower)
+      && !NP_ANAPHORIC_DETERMINERS.has(tokens[j - 1]?.lower ?? "");
+  });
+}
+
+/**
+ * WP-C3 (rule 2(c)) — true when `text` names a code-shaped identifier (the
+ * shapes `extractTerms` recognizes, minus prose acronyms and prose
+ * abbreviations like "e.g."), a file path, a `$`/`@` sigil name, or an
+ * explicitly quoted string. Such a clause's subject IS that identifier or
+ * quote; none of its plain words may be certified absent.
+ */
+export function clauseNamesCodeShapedOrQuotedTerm(text: string): boolean {
+  if (EDGE_QUOTED_SPAN_RE.test(text)) return true;
+  const terms = extractTerms(text);
+  if (terms.files.length > 0) return true;
+  if (terms.identifiers.some((id) => !/^[A-Za-z](?:\.[A-Za-z])+$/u.test(id) && isCodeShapedTerm(id))) return true;
+  // Copilot retest r3 (2026-10-02, rule (b)): a name written in CALL syntax —
+  // `quote()`, `estimate(cart)` — is code even though a bare lowercase word is
+  // never code-SHAPED (the same syntactic signal requestFacets.ts's
+  // `callShapedNamesIn` already accepts as a facet subject). Without this
+  // "Inspect src/checkout and calculate exact quote() results" named no
+  // identifier of its own, so its plain words ("calculate") were subject nouns
+  // and `request-item-absent:calculate` was certified.
+  if (callShapedNamesIn(text).length > 0) return true;
+  return /(?:^|[\s(])[$@][A-Za-z_][\w$]*/u.test(text);
+}
+
+/** True when `word` is one of the names `text` writes in call syntax (`quote()` -> "quote"), case-insensitively. */
+function isCallShapedNameIn(word: string, text: string): boolean {
+  const lower = word.toLowerCase();
+  return callShapedNamesIn(text).some((name) => name.toLowerCase() === lower);
+}
+
+// ---------------------------------------------------------------------------
+// Copilot retest r3 (2026-10-02, rule (a)) — a capitalised word that OPENS a
+// sentence or clause is capitalised by its position, so its capital is no
+// evidence of a proper noun: "Read only", "Report subtotal", "Cite file names"
+// begin with an imperative verb (a predicate, by position). The same capital in
+// the MIDDLE of a clause ("... uses Redis ...") still is evidence.
+//
+// Measured leak: a request item is a comma-delimited piece of the request, so it
+// routinely holds the tail of one sentence and the head of the next ("... mainland.
+// Report subtotal", "... rounding rules. Read only", "... determine it? Cite file
+// names"). The absence engine's Tier A takes a capitalised word as a proper-noun
+// candidate unless it is the item's own FIRST word, which left the next
+// sentence's imperative to certify `request-item-absent:Report` / `:Read` /
+// `:Cite`. Decided by POSITION alone (a sentence/line boundary in front of the
+// word), never by a verb list.
+// ---------------------------------------------------------------------------
+type ClauseOpening = "start" | "boundary" | "mid";
+
+/** "e.g.", "i.e.", "U.S." and the usual dotted abbreviations: their period ends no sentence. */
+const ABBREVIATION_PERIOD_RE = /(?:^|[\s(])(?:[A-Za-z]\.){1,3}$|(?:^|[\s(])(?:etc|vs|cf|approx|incl|resp|fig|eg|ie)\.$/iu;
+
+/** Where `text[at]` sits: the text's own first word, the first word of a sentence or line that begins INSIDE the text, or anywhere else. */
+function clauseOpeningAt(text: string, at: number): ClauseOpening {
+  const before = text.slice(0, at).replace(/[("'`[{“‘]+$/u, "");
+  if (before.trim().length === 0 || /^[ \t]*(?:[-*•]|\d+[.)])[ \t]*$/u.test(before)) return "start";
+  if (/\n[ \t]*(?:[-*•]|\d+[.)])?[ \t]*$/u.test(before)) return "boundary";
+  // Glued to the previous token ("Cache.Get", "subtotal.Report"): no sentence starts there.
+  if (!/\s$/u.test(before)) return "mid";
+  const lead = before.trimEnd();
+  const last = lead.slice(-1);
+  if (last === "?" || last === "!" || last === ";") return "boundary";
+  if (last === "." && !ABBREVIATION_PERIOD_RE.test(lead)) return "boundary";
+  return "mid";
+}
+
+/**
+ * A word followed by a finite-verb-shaped word and then that verb's object ("Redis
+ * HANDLES IT", "Stripe SENDS THE event"): a subject and its verb, so a sentence it
+ * opens is a statement, never an imperative ("Read files and ...", "Report errors in
+ * ..." have no such object right after the second word). Review, 2026-10-02.
+ */
+const SUBJECT_VERB_OBJECT_AFTER_RE = /^\s+([A-Za-z]+)\s+(?:the|a|an|it|its|them|their|this|that|these|those|our|all|every|each|his|her|my|your)\b/iu;
+
+/** Every whole-word, case-sensitive occurrence of `word` in `text`, classified by where it sits. */
+function occurrenceOpenings(word: string, text: string): ClauseOpening[] {
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/u.test(word)) return [];
+  const out: ClauseOpening[] = [];
+  for (const m of text.matchAll(new RegExp(`(?<![\\w$])${word}(?![\\w$])`, "gu"))) {
+    const at = m.index ?? 0;
+    const opening = clauseOpeningAt(text, at);
+    const after = SUBJECT_VERB_OBJECT_AFTER_RE.exec(text.slice(at + word.length));
+    out.push(opening === "boundary" && after !== null && isFiniteVerbShaped(after[1]!.toLowerCase()) ? "mid" : opening);
+  }
+  return out;
+}
+
+/**
+ * Rule (a), Tier A's test — may the CAPITAL of `word` (as written in `text`) be
+ * taken as evidence that it names a proper noun? Yes for a code-shaped or quoted
+ * word, and for a capital that sits in the middle of a clause; no when every
+ * occurrence opens a sentence, a line or the item itself. A word with no
+ * occurrence found (a normalised spelling) keeps its capital as evidence — the
+ * pre-existing behaviour.
+ */
+export function capitalizationNamesSubject(word: string, text: string): boolean {
+  if (!/^[A-Z]/u.test(word)) return false;
+  if (isCodeShapedTerm(word) || quotedOccurrenceInText(word, text)) return true;
+  const openings = occurrenceOpenings(word, text);
+  return openings.length === 0 || openings.some((opening) => opening === "mid");
+}
+
+/**
+ * Rule (a), the disclosure gate's test — true when `word` is a plain capitalised
+ * word EVERY occurrence of which opens a sentence or line that begins INSIDE
+ * `text` (the tail of one sentence glued to the head of the next, "mainland.
+ * Report subtotal"): an imperative lead, never a subject. The text's own FIRST word
+ * is deliberately not covered (an item such as "Quorblex retry failed batches" is a
+ * verbless list fragment whose first word may be a proper noun — the pinned
+ * `isLiteralEligibleTerm` reading); a code-shaped or quoted word never is one.
+ */
+export function isInnerSentenceLead(word: string, text: string): boolean {
+  if (!/^[A-Z]/u.test(word) || isCodeShapedTerm(word) || quotedOccurrenceInText(word, text)) return false;
+  const openings = occurrenceOpenings(word, text);
+  return openings.length > 0 && openings.every((opening) => opening === "boundary");
+}
+
+/**
+ * WP-C3 (eval-0929 §6, orchestrator RULING) — THE structural literal-absence
+ * eligibility predicate: may `word` (one candidate, already isolated by
+ * `salientWords`/`item.terms`) be certified `request-item-absent` for the
+ * request item whose own clause text is `itemText`?
+ *   1(a)/(b) a code-shaped identifier, a name written in call syntax
+ *            (`quote()`, rule (b) of the Copilot retest r3), or an explicitly
+ *            quoted string — yes;
+ *   2(c)     any other word of a clause that names such an identifier or a
+ *            quoted string — no (the identifier/quote is the subject);
+ *   2(a)     a facet descriptor (requestFacets.ts `isFacetDescriptorTerm`) — no;
+ *   1(c)/(d) otherwise, a word of the clause's topic noun phrase — its
+ *            subject, the checked term of an existence question
+ *            (`topicNounPhraseWords`, EN) or a Japanese noun phrase with no
+ *            descriptor left in it (`jaTopicNounPhrase`) — yes; a predicate,
+ *            a wh-noun or anything else the analysis cannot place — no (2(b)).
+ * Never consults the generic-vocabulary lists — readCodeTaskPack.ts's
+ * `disclosableAbsenceTerm` adds those as a second, narrower filter.
+ */
+export function isLiteralEligibleTerm(word: string, itemText: string): boolean {
+  if (quotedOccurrenceInText(word, itemText)) return true;
+  if (isCodeShapedTerm(word)) return !isFacetDescriptorTerm(word);
+  // Rule (b): the callable of a `name()` clause IS that clause's identifier.
+  if (isCallShapedNameIn(word, itemText)) return !isFacetDescriptorTerm(word);
+  if (clauseNamesCodeShapedOrQuotedTerm(itemText)) return false;
+  if (isFacetDescriptorTerm(word)) return false;
+  if (isCjkRun(word)) return jaTopicNounPhrase(word) === word;
+  return topicNounPhraseWords(itemText).has(word.toLowerCase());
 }
 
 /**
@@ -2771,7 +4177,7 @@ export function headIsWhAfterReadLead(text: string): boolean {
  * "I want to understand", "Give me an overview of") only say HOW to answer.
  * Left in, they became salient words — a topic term that is never evidenced,
  * a Tier C absence candidate, and (confirmed live, R-B1's matrix) the whole
- * query of a `search_files find "walk"` when the first pack served nothing.
+ * query of a `tl_search_files find "walk"` when the first pack served nothing.
  *
  * The span is identified by `headIsWhAfterReadLead`'s OWN rule (a)-(c), never
  * a word list: the words between the stripped lead prefixes and the embedded
@@ -2904,6 +4310,261 @@ function splitBareAndAtQuestionBoundary(segment: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// R2-T2 (2026-09-30, review-0929 P0-5, orchestrator RULING extending
+// brief-wp-c3.md) — a COORDINATED NOUN-PHRASE CONJUNCT is its own point.
+//
+// "Explain shouldRetry and the health probe." (and its JA mirror 「shouldRetry
+// とヘルスプローブについて説明してください。」) extracted to ONE item: there is
+// no comma before its "and" (`splitEnumerated` splits only an Oxford-comma
+// coordinator), no fresh wh-head after it (H-3's two-sided question test
+// above), and a bare 「と」 is deliberately never a boundary (`splitEnumerated`'s
+// own reverted-split note). The whole sentence stayed one point, the
+// identifier's own evidence then covered it, and the second subject was never
+// served, never disclosed, never named on the wire.
+//
+// The ruling: a conjunct that is its OWN determiner-led noun phrase — "X and
+// the NP", "X, the NP and the NP2", "the NP and the NP2", JA 「X と NP について/
+// を」, 「X と NP の…」 — is its own topic point (then located or disclosed per
+// the absence ruling); a head noun SHARED across the conjunction keeps ONE
+// point ("the retry and backoff logic", 「リトライとバックオフの処理」).
+//
+// EN, decided structurally at a bare coordinator (`BARE_AND_RE`'s own class):
+//   (A) the text after it opens with an article or a first/second-person
+//       possessive (the/a/an/our/your/my) and a noun phrase that names a
+//       subject noun of its own — a word that is not a facet descriptor, an
+//       adjective or a participle. "…and the callers", "…and the settings in
+//       src/x.ts" name only a KIND of information (facet-owned, rule 2(d)),
+//       and "…and backoff logic" (no determiner) is the shared-head shape;
+//   (B) or the text BEFORE it ends in such a determiner-led noun phrase and
+//       the text after it opens with a code-shaped identifier ("Explain the
+//       health probe and shouldRetry.").
+// Never split: a conjunct holding an anaphoric pronoun ("…and the reason it
+// fails", "…and the endpoint that reaches it" are about the other
+// conjunct), a conjunct that is a CLAUSE — its noun run followed by an
+// auxiliary ("…and the id is stale"), or a run ending in a -s/-ed word that
+// could be its verb ("…and the client gives up", "…and the edit lands")
+// unless the text before the coordinator is a plain request-verb imperative
+// or a verbless noun phrase whose list these continue ("Explain X and the
+// health checks", "X, the health probe and the retry codes") — a
+// coordinator inside quotes/brackets (B3's guard), and a clause that reads as
+// an edit/mutation lead (change-task routing and its write authority stay
+// exactly as before — the same rule (c) `headIsWhAfterReadLead` applies),
+// and the two arguments of "between X and Y" ("the drift between the
+// architecture deck and the roadmap deck"): one relational head shared by
+// both, the shared-head shape again.
+//
+// JA: a chain 「N と N (と N)*」 of noun runs (katakana/kanji, or a code-shaped
+// ASCII identifier) followed directly by について/に関して/に関する/を — the
+// particle marks every member of the chain, no noun follows to be shared — or
+// by の + a facet descriptor when the chain's first member is a code-shaped
+// identifier (「shouldRetry とヘルスプローブの実装」: an identifier is never a
+// co-modifier of a shared compound head). 「リトライとバックオフの処理」 (plain
+// nouns, の + a content noun) stays one point. A と inside こと/とき/として/
+// という/とは… never qualifies: both of its neighbours must be noun runs.
+// ---------------------------------------------------------------------------
+const NP_CONJUNCT_DETERMINERS: ReadonlySet<string> = new Set(["the", "a", "an", "our", "your", "my"]);
+const NP_ANAPHORIC_PRONOUNS: ReadonlySet<string> = new Set(["it", "its", "itself", "they", "them", "their", "theirs", "themselves"]);
+const NP_CONJUNCT_COORDINATOR_RE = new RegExp(BARE_AND_RE.source, "giu");
+
+/** True when `run` (one noun phrase's content words) names a subject noun of its own. */
+function nounRunNamesSubject(run: readonly NpToken[]): boolean {
+  return run.some((token) => !isFacetDescriptorTerm(token.lower) && !isAdjectiveShaped(token.lower) && !isParticipleShaped(token.lower));
+}
+
+/** The tokens of one conjunct: up to the next coordinator (a relative clause stays in it). */
+function conjunctTokens(tokens: readonly NpToken[]): NpToken[] {
+  const out: NpToken[] = [];
+  for (const token of tokens) {
+    if (out.length > 0 && token.cls === "conj") break;
+    out.push(token);
+  }
+  return out;
+}
+
+/**
+ * True when `beforeTokens` can only be followed by a NOUN-PHRASE conjunct: a
+ * plain request-verb imperative ("Explain X") or a verbless noun phrase (a
+ * list member such as "the health probe" in "X, the health probe and the
+ * retry codes") — no wh/subordinate/auxiliary/pronoun clause, and no
+ * -s/-ed word before its last word.
+ */
+function beforeTakesNounPhraseConjunct(beforeTokens: readonly NpToken[]): boolean {
+  if (beforeTokens.some((token) => token.cls === "wh" || token.cls === "wh-det" || token.cls === "sub" || token.cls === "aux" || token.cls === "pron")) {
+    return false;
+  }
+  const first = beforeTokens.find((token) => token.cls !== "adv" && token.cls !== "conj");
+  if (first === undefined) return false;
+  if (first.cls === "content" && topicLeadVerbs().has(first.lower)) return true;
+  const content = beforeTokens.filter((token) => token.cls === "content");
+  return content.length > 0 && content.slice(0, -1).every((token) => !isFiniteVerbShaped(token.lower));
+}
+
+/** Rule (A): `after` opens with a determiner-led noun phrase naming its own subject. */
+function opensWithNounPhraseConjunct(after: string, beforeTokens: readonly NpToken[]): boolean {
+  const tokens = conjunctTokens(npTokens(after));
+  if (tokens.length < 2 || !NP_CONJUNCT_DETERMINERS.has(tokens[0]!.lower)) return false;
+  if (tokens.some((token) => NP_ANAPHORIC_PRONOUNS.has(token.lower))) return false;
+  let end = 1;
+  while (end < tokens.length && tokens[end]!.cls === "content") end += 1;
+  const run = tokens.slice(1, end);
+  if (run.length === 0 || !nounRunNamesSubject(run)) return false;
+  // A clause, not a noun phrase: its subject's auxiliary follows it.
+  if (tokens[end]?.cls === "aux") return false;
+  // A final -s/-ed word may be the clause's verb; only an imperative's object
+  // list or a list of noun phrases reads it as a plural noun.
+  if (run.length >= 2 && isFiniteVerbShaped(run[run.length - 1]!.lower)) return beforeTakesNounPhraseConjunct(beforeTokens);
+  return true;
+}
+
+/**
+ * Rule (B): `beforeTokens` end in a determiner-led noun phrase naming its own
+ * subject — a short run of plain words: an identifier inside it makes the
+ * identifier the conjunct ("…exposes createWidget and disposeWidget"), and a
+ * -s/-ed word before its last word is a verb ("the module exposes X").
+ */
+function endsWithNounPhraseConjunct(beforeTokens: readonly NpToken[]): boolean {
+  let i = beforeTokens.length - 1;
+  const run: NpToken[] = [];
+  while (i >= 0 && beforeTokens[i]!.cls === "content") {
+    run.unshift(beforeTokens[i]!);
+    i -= 1;
+  }
+  if (run.length === 0 || run.length > 4 || i < 0 || !NP_CONJUNCT_DETERMINERS.has(beforeTokens[i]!.lower)) return false;
+  if (run.some((token) => isCodeShapedTerm(token.raw))) return false;
+  if (run.slice(0, -1).some((token) => isFiniteVerbShaped(token.lower))) return false;
+  return nounRunNamesSubject(run);
+}
+
+/** True when `text` opens with a code-shaped identifier (possibly quoted/bracketed, possibly possessive). */
+function opensWithCodeShapedIdentifier(text: string): boolean {
+  const m = /^[\s"'`(]*([A-Za-z_$@][\w$@]*(?:(?:\.|::|#)[A-Za-z_$][\w$]*)*)/u.exec(text);
+  return m !== null && isCodeShapedTerm(m[1]!);
+}
+
+/** "between X and Y": the coordinator joins the two arguments of one relation (a shared relational head). */
+function coordinatesBetweenArguments(beforeTokens: readonly NpToken[]): boolean {
+  for (let i = beforeTokens.length - 1; i >= 0; i -= 1) {
+    const token = beforeTokens[i]!;
+    if (token.cls === "prep") return token.lower === "between";
+    if (token.cls !== "content" && token.cls !== "det" && token.cls !== "num" && token.cls !== "adv") return false;
+  }
+  return false;
+}
+
+function readsAsMutationLead(segment: string): boolean {
+  const trimmed = segment.trim();
+  return MUTATION_VERB_LEAD_RE.test(stripLeadPrefixes(trimmed)) || endsWithJaEditImperative(trimmed);
+}
+
+const JA_CONJUNCT_NOUN_CHARS = "ァ-ヶー一-鿿々";
+const JA_CONJUNCT_NOUN_SRC = `(?:[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*|[${JA_CONJUNCT_NOUN_CHARS}]{2,})`;
+/** A chain of noun runs joined by と, followed by the particle that marks every member of it. */
+const JA_NP_COORDINATION_RE = new RegExp(
+  `${JA_CONJUNCT_NOUN_SRC}(?:\\s*と\\s*${JA_CONJUNCT_NOUN_SRC})+(?=\\s*(について|に関して|に関する|を|の))`,
+  "gu",
+);
+
+/** True when `rest` (the text right after an の) opens with a facet descriptor noun (実装/仕組み/条件/呼び出し元/…). */
+function jaOpensWithFacetDescriptor(rest: string): boolean {
+  for (let length = Math.min(6, rest.length); length >= 1; length -= 1) {
+    if (isFacetDescriptorTerm(rest.slice(0, length))) return true;
+  }
+  return false;
+}
+
+function splitJaCoordinatedNounPhrases(segment: string): string[] {
+  const quoted = quotedSpans(segment);
+  JA_NP_COORDINATION_RE.lastIndex = 0;
+  for (const m of segment.matchAll(JA_NP_COORDINATION_RE)) {
+    const start = m.index ?? 0;
+    const chain = m[0];
+    const end = start + chain.length;
+    if (quoted.some((span) => start < span.end && end > span.start)) continue;
+    const members = chain.split(/\s*と\s*/u);
+    // An ASCII member counts only as a code-shaped identifier: a plain
+    // English word inside Japanese prose ("wiring と imports をたどり") is a
+    // loan noun whose own coordination this rule does not judge.
+    if (members.some((member) => /^[A-Za-z_$]/u.test(member) && !isCodeShapedTerm(member))) continue;
+    if (m[1] === "の") {
+      const afterNo = segment.slice(end).replace(/^\s*の/u, "");
+      if (!isCodeShapedTerm(members[0]!) || !jaOpensWithFacetDescriptor(afterNo)) continue;
+    }
+    // Cut at every と of the chain: each member but the last becomes its own
+    // point; the last keeps the particle and everything after it.
+    const pieces: string[] = [];
+    let cursor = 0;
+    let offset = start;
+    for (const member of members.slice(0, -1)) {
+      const memberAt = segment.indexOf(member, offset);
+      const toAt = segment.indexOf("と", memberAt + member.length);
+      pieces.push(segment.slice(cursor, toAt).trim());
+      cursor = toAt + 1;
+      offset = cursor;
+    }
+    const tail = segment.slice(cursor).trim();
+    return [...pieces.filter((piece) => piece.length > 0), ...splitJaCoordinatedNounPhrases(tail)];
+  }
+  return [segment];
+}
+
+/**
+ * R2-T2 — splits `segment` at every coordinator whose conjunct is its own
+ * determiner-led noun phrase (see this section's header); returns `[segment]`
+ * unchanged when none qualifies.
+ */
+/**
+ * R2-T2 — the index of the first coordinator at or after `minIndex` in the EN
+ * `text` whose conjunct is its own determiner-led noun phrase (rules (A)/(B)
+ * of this section's header), with the coordinator's own length; undefined
+ * when none qualifies.
+ */
+function firstNounPhraseConjunctCut(text: string, minIndex: number): { index: number; length: number } | undefined {
+  for (const m of text.matchAll(NP_CONJUNCT_COORDINATOR_RE)) {
+    const index = m.index ?? 0;
+    if (index < minIndex || bareAndSitsInsideProtectedSpan(text, index)) continue;
+    const before = text.slice(0, index).trim();
+    const after = text.slice(index + m[0].length).trim();
+    if (before.length === 0 || after.length === 0) continue;
+    const beforeTokens = npTokens(before);
+    if (coordinatesBetweenArguments(beforeTokens)) continue;
+    if (opensWithNounPhraseConjunct(after, beforeTokens)
+      || (endsWithNounPhraseConjunct(beforeTokens) && opensWithCodeShapedIdentifier(after))) {
+      return { index, length: m[0].length };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * R2-T2 — where a Pass-1 relation clause ("how X decides …", "how X uses Y
+ * …") must END so a coordinated noun-phrase conjunct in its OBJECT ("…
+ * decides and the health probe") is left to Pass 2 as its own point:
+ * `clause.length` when nothing is cut. Only the object — the text after the
+ * relation verb — is searched: a coordination inside the ACTOR ("how the
+ * status bar and the update checker reflect …") is the relation's own actor
+ * list, which Pass 1 already splits into one relation item per noun.
+ */
+function relationClauseEnd(clause: string, actor: string, sentence: string): number {
+  if (readsAsMutationLead(sentence) || /[぀-ヿ一-鿿]/u.test(clause)) return clause.length;
+  const actorAt = clause.indexOf(actor);
+  if (actorAt < 0) return clause.length;
+  const verb = new RegExp(`^\\s+(?:${RELATION_VERBS_EN})\\b`, "iu").exec(clause.slice(actorAt + actor.length));
+  if (verb === null) return clause.length;
+  const cut = firstNounPhraseConjunctCut(clause, actorAt + actor.length + verb[0].length);
+  return cut === undefined ? clause.length : cut.index;
+}
+
+function splitCoordinatedNounPhrases(segment: string): string[] {
+  if (readsAsMutationLead(segment)) return [segment];
+  if (/[぀-ヿ一-鿿]/u.test(segment)) return splitJaCoordinatedNounPhrases(segment);
+  const cut = firstNounPhraseConjunctCut(segment, 0);
+  if (cut === undefined) return [segment];
+  const before = segment.slice(0, cut.index).trim();
+  const after = segment.slice(cut.index + cut.length).trim();
+  return [before, ...splitCoordinatedNounPhrases(after)];
+}
+
+// ---------------------------------------------------------------------------
 // extractRequestItems
 // ---------------------------------------------------------------------------
 
@@ -3032,16 +4693,22 @@ export function extractRequestItems(rawQuery: string, index?: RequestItemIndexVi
   // bar / update checker rows).
   for (const m of itemSource.matchAll(RELATION_CLAUSE_EN_RE)) {
     const start = m.index ?? 0;
-    const end = start + m[0].length;
-    relationSpans.push({ start, end });
     const actorText = m[1] ?? "";
+    // R2-T2 (review-0929 P0-5): a coordinated noun-phrase conjunct in the
+    // clause's OBJECT ("how X decides and the health probe") is not part of
+    // this relation — the span stops before it, so Pass 2 sees the conjunct
+    // and makes it its own point (`relationClauseEnd`).
+    const sentenceStart = Math.max(...[".", "!", "?", ";", "\n", "。", "？", "！"].map((mark) => itemSource.lastIndexOf(mark, start - 1))) + 1;
+    const clause = m[0].slice(0, relationClauseEnd(m[0], actorText, itemSource.slice(sentenceStart, start + m[0].length))).trimEnd();
+    const end = start + clause.length;
+    relationSpans.push({ start, end });
     const actorIdentifiers = extractTerms(actorText).identifiers;
     if (actorIdentifiers.length > 0) {
-      pushDecision(m[0], actorIdentifiers);
+      pushDecision(clause, actorIdentifiers);
       continue;
     }
     for (const noun of splitNounList(actorText)) {
-      if (isUsableNoun(noun)) pushRelation(m[0], noun);
+      if (isUsableNoun(noun)) pushRelation(clause, noun);
     }
   }
   for (const m of itemSource.matchAll(RELATION_CLAUSE_JA_RE)) {
@@ -3067,7 +4734,17 @@ export function extractRequestItems(rawQuery: string, index?: RequestItemIndexVi
   // OXFORD-comma-only rule above (no preceding comma). See
   // `splitBareAndAtQuestionBoundary`'s own doc comment for the two-sided
   // test that keeps this from over-splitting an ordinary compound object.
-  for (const segment of splitEnumerated(masked).flatMap(splitBareAndAtQuestionBoundary)) {
+  // R2-T2 (review-0929 P0-5): a coordinated noun-phrase conjunct is its own
+  // point — see `splitCoordinatedNounPhrases`'s section comment. The pieces
+  // of one split carry `coordinated` (set on whatever item each one pushes).
+  const coordinatedSegments = new Set<string>();
+  const pass2Segments = splitEnumerated(masked).flatMap(splitBareAndAtQuestionBoundary).flatMap((clause) => {
+    const conjuncts = splitCoordinatedNounPhrases(clause);
+    if (conjuncts.length > 1) for (const conjunct of conjuncts) coordinatedSegments.add(conjunct);
+    return conjuncts;
+  });
+  const pass2Start = items.length;
+  for (const segment of pass2Segments) {
     if (isGenericClosing(segment)) continue;
     // A negated instruction ("please do not modify anything", 「変更しないで
     // ください」) constrains a future edit; it asks for nothing, so it is no
@@ -3113,6 +4790,9 @@ export function extractRequestItems(rawQuery: string, index?: RequestItemIndexVi
       continue;
     }
     pushTopic(segment, terms);
+  }
+  for (const item of items.slice(pass2Start)) {
+    if (coordinatedSegments.has(item.text)) item.coordinated = true;
   }
 
   return items;

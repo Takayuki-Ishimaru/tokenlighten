@@ -6,15 +6,18 @@
 // X", "which files", "how does X work") to TL from turn 0, rather than
 // letting an Explore-style subagent win first-tool selection by default.
 //
-// THREE LEGS, ONE STRING. `SERVER_INSTRUCTIONS` (protocol/serverInstructions.ts)
-// is threaded into all three `initialize` sites:
-//   - the hand-rolled JSON-RPC leg (server.ts's `handleRequest`) — pinned
-//     directly, in-process, here (the `clientIdCapture.spec.ts` style).
-//   - the legacy SDK v1 leg (mcp/transport/legacyStdio.ts) and the modern SDK
-//     v2 leg (mcp/transport/modernServerFactory.ts) — both pinned via a REAL
-//     spawned server + real client handshake in modernEraTransport.spec.ts
-//     (extended alongside this file in the same commit), since that spec
-//     already owns the SDK-leg spawn harnesses.
+// TWO LEGS, ONE STRING. `SERVER_INSTRUCTIONS` (protocol/serverInstructions.ts)
+// is threaded into both `initialize` sites:
+//   - the hand-rolled JSON-RPC leg (server.ts's `handleRequest`, served over
+//     stdio by mcp/transport/legacyStdio.ts) — pinned directly, in-process,
+//     here (the `clientIdCapture.spec.ts` style), and over a REAL spawned
+//     server in modernEraTransport.spec.ts.
+//   - the modern SDK v2 leg (mcp/transport/modernServerFactory.ts) — pinned
+//     via a REAL spawned server + real client handshake in
+//     modernEraTransport.spec.ts, since that spec already owns the SDK-leg
+//     spawn harness.
+// (An @modelcontextprotocol/sdk v1 leg was once counted as a third; it never
+// ran and is deleted — see mcp/transport/legacyStdio.ts's header.)
 //
 // This file covers only the hand-rolled leg plus the pure
 // `buildInitializeInstructions` helper — the `degraded` array `handleRequest`
@@ -34,14 +37,12 @@ import { PROTOCOL_META } from "../protocol/envelope.js";
 import { SERVER_INSTRUCTIONS } from "../protocol/serverInstructions.js";
 
 describe("issue #4: SERVER_INSTRUCTIONS content", () => {
-  it("names the compact v79 canonical discovery call and every shared input home", () => {
-    expect(SERVER_INSTRUCTIONS).toContain("TL first for code/doc/config.");
-    expect(SERVER_INSTRUCTIONS).toContain("Unknown-location/multi-file=>read_file {query:\"<request>\"}.");
-    expect(SERVER_INSTRUCTIONS).toContain("task.force_serve/task.pull");
-    expect(SERVER_INSTRUCTIONS).toContain("scope.includeClosure/scope.surfaceRoles/scope.kind");
-    expect(SERVER_INSTRUCTIONS).toContain("budget; read targets/content; search action+queries; edit edits.");
-    expect(SERVER_INSTRUCTIONS).toContain("Native only after incomplete scope or verified absence.");
-    expect(SERVER_INSTRUCTIONS).toContain("Full protocol: AGENTS.md/CLAUDE.md.");
+  it("routes an unknown-location request verbatim before native discovery", () => {
+    expect(SERVER_INSTRUCTIONS).toContain('tl_read_file {query:"<entire user request, verbatim>",task:{epoch:"new"}}');
+    expect(SERVER_INSTRUCTIONS).toContain("Unknown paths: omit targets");
+    expect(SERVER_INSTRUCTIONS).toContain("never keyword-shorten or drop constraints");
+    expect(SERVER_INSTRUCTIONS).toContain("Native if TL unavailable, user asks, incomplete scope or verified absence");
+    expect(SERVER_INSTRUCTIONS).toContain("Protocol: in your instructions.");
   });
 
   // B-F4 (2026-08-28): SERVER_INSTRUCTIONS is a fixed cost paid on every
@@ -56,7 +57,7 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // serverInstructions.ts's own doc comment for the full correction. The
   // ceiling has headroom for minor future wording fixes without becoming a
   // silent budget for creep back toward 592 B.
-  it("stays at or under its post-B-F4 byte ceiling (457 B measured; 520 B ceiling)", () => {
+  it("stays at or under its post-B-F4 byte ceiling (r12: 490 B measured; 520 B ceiling)", () => {
     const bytes = Buffer.byteLength(SERVER_INSTRUCTIONS, "utf8");
     expect(bytes, `SERVER_INSTRUCTIONS grew to ${bytes} B — update this ceiling deliberately, with a reason, not by accident`).toBeLessThanOrEqual(520);
   });
@@ -68,25 +69,21 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
   // behavior, so each is pinned by name rather than folded into the sweep
   // above.
   it("closes discovery and requires batching independent edits into one edits[] call", () => {
-    // B-F4 (2026-08-28): the three post-act clauses (reuse receipt/prior
-    // evidence; batch edits in one edits[] call; stop after a passing
-    // verification) moved from two sentences to one, comma-joined, to save
-    // bytes — the T13/Probe-2-grounded CONTENT is unchanged, only the
-    // punctuation. Pinned as one string, verbatim, for exactly that reason.
     expect(SERVER_INSTRUCTIONS).toContain(
-      "Act on act.answer/act.edit: use served evidence, batch edits in one edits[] call, stop after passing verification.",
+      "act.answer/act.edit: use exact evidence[].body with its paths/lines; no re-read.",
     );
+    expect(SERVER_INSTRUCTIONS).toContain("Batch independent targets/edits[].");
   });
 
   it("tells a caller never to re-fetch bytes a receipt or a prior-tagged evidence item already served", () => {
     expect(SERVER_INSTRUCTIONS).toContain(
-      "use served evidence",
+      "use exact evidence[].body",
     );
   });
 
   it("tells a caller a not-a-direct-proof gap is not closed by that entry passing", () => {
     expect(SERVER_INSTRUCTIONS).toContain(
-      "Full protocol: AGENTS.md/CLAUDE.md.",
+      "Protocol: in your instructions.",
     );
   });
 
@@ -98,7 +95,7 @@ describe("issue #4: SERVER_INSTRUCTIONS content", () => {
     // redundant word here (the guide carries the narrow-verification-floor
     // nuance in full); the STOP instruction itself is unchanged.
     expect(SERVER_INSTRUCTIONS).toContain(
-      "stop after passing verification.",
+      "Stop after passing verification.",
     );
   });
 });

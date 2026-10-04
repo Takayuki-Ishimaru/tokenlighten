@@ -281,7 +281,12 @@ export function runLadder(input: {
       // the E3 `limit` is re-merged afterwards over the rewritten decision and
       // the response that gets measured is again the one that would ship.
       let demotedThisStep = false;
-      if (!actFloorHolds(candidate, kind)) {
+      // WP-H (eval-0929 §5/§8): `payload` — this emission's UNSHED starting
+      // point, unchanged across every rung of this loop — is what
+      // `actFloorHolds`'s wire-level citation check diffs the candidate
+      // against (its own doc comment). Passing it is what lets that check see
+      // a body THIS emission shed, never one an earlier call already lacked.
+      if (!actFloorHolds(candidate, kind, payload)) {
         // Plan §6 constraint 3 (P13). Structurally unreachable — after a
         // demotion the decision is `discover` and no floor applies to it — so
         // reaching this is a defect in the floor predicate or in a shedder that

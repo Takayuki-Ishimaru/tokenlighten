@@ -58,7 +58,7 @@
 //    relative layout.
 //
 //  - exceljs, mammoth, unpdf, pptx2json, officecrypto-tool, jszip,
-//    @zip.js/zip.js, @libpdf/core, @modelcontextprotocol/sdk, smol-toml: all
+//    @zip.js/zip.js, @libpdf/core, smol-toml: all
 //    pure JS (no native .node bindings anywhere in this dependency set —
 //    verified), reached via literal dynamic `import("pkg")` calls in
 //    mcp-server's office/* wrappers, so esbuild inlines them into the
@@ -230,7 +230,7 @@ export async function bundleCli({ outDir = DEFAULT_DIST } = {}) {
 
   // 2. @tokenlighten/mcp-server — resolved+spawned as a child process by
   //    `tl mcp start` (commands/mcp.ts's resolveMcpBin). This is the actual
-  //    MCP stdio server backing read_file/edit_file/search_files.
+  //    MCP stdio server backing tl_read_file/tl_edit_file/tl_search_files.
   const { pkgDist: mcpServerDist } = await bundleSiblingPackage({
     name: "@tokenlighten/mcp-server",
     srcEntry: join(REPO_ROOT, "packages/mcp-server/src/bin.ts"),

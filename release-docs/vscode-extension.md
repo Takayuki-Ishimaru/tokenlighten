@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.14.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.4/tokenlighten-vscode-extension-0.14.4.vsix)** from the v0.14.4 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.15.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.0/tokenlighten-vscode-extension-0.15.0.vsix)** from the v0.15.0 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,10 +14,10 @@ Download **[tokenlighten-vscode-extension-0.14.4.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.14.4.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.0.vsix
 ~~~
 
-To build from source:
+To package the VSIX from source, use Node.js 22 or later:
 
 ~~~bash
 npm install
@@ -34,11 +34,32 @@ The workspace switch enables or disables TokenLighten. Re-running setup enables 
 
 v0.13.0 includes a schema stamp in the MCP provider version. When the advertised tool schema changes, VS Code refreshes its cached definition automatically; no manual provider rename or cache reset should be needed.
 
-The `tokenlighten.toolSurface` setting (default `full`) selects the advertised tool schema: `full` includes every capability, `code` advertises code/plain-text/config `read_file`/`edit_file`/`search_files` only — a smaller schema, with Office/archive/credential inputs removed rather than merely refused. See [MCP tools](mcp-tools.md#tool-surface) for details. Changing it is a schema-affecting change like the one above, so VS Code refreshes automatically the same way.
+The `tokenlighten.toolSurface` setting (default `full`) selects the advertised tool schema: `full` includes every capability, `code` advertises code/plain-text/config `tl_read_file`/`tl_edit_file`/`tl_search_files` only — a smaller schema, with Office/archive/credential inputs removed rather than merely refused. See [MCP tools](mcp-tools.md#tool-surface) for details. Changing it is a schema-affecting change like the one above, so VS Code refreshes automatically the same way.
 
 The `tokenlighten.guideProfile` setting selects the size of guide written into AGENTS.md/CLAUDE.md during setup: `full`, `medium`, or `compact`. When it is unset and the tool surface is `full`, setup offers a choice of the full guide or a compact guide for Copilot-only workspaces. Dismissing the choice keeps the full guide. With `tokenlighten.toolSurface: code`, the default is compact without a prompt. The guide is shared with Codex and Claude Code in the same folder. Set `tokenlighten.guideProfile` explicitly to override this default in either direction.
 
-After upgrading to v0.14.3, re-run **Set up this workspace** and reconnect the MCP client to refresh the managed instructions and Copilot configuration. See [Refresh an existing workspace](getting-started.md#refresh-an-existing-workspace-after-upgrading) for inline-result settings and the CLI opt-out.
+Use normal Copilot **Agent** chats for source questions or changes.
+**tokenlighten-explore** remains an optional mode for read-only questions;
+it exposes only the TokenLighten read and search tools.
+
+Setup writes a short, self-contained Copilot guide and avoids duplicate
+TokenLighten-only attachments when safe, preserving your instructions and
+settings. The `tokenlighten.copilotGuide` setting selects `standalone`
+(the default) or `agents-md`; the CLI also supports preserving the existing
+configuration with `--copilot-guide keep`.
+
+VS Code setup also installs a SessionStart hint for new local Agent chats.
+It requires a trusted workspace, enabled `chat.useHooks`, and `node` on PATH.
+Setup preserves existing hooks and user edits and does not change tool
+permissions. Use `tl workspace setup --clients vscode --copilot-session-context keep`
+to leave the hook configuration unchanged. Disable/native controls turn off
+TokenLighten's managed Copilot guidance too.
+
+After upgrading to v0.15.0, re-run **Set up this workspace**, then start a
+new agent session or reconnect the MCP client. This refreshes the managed
+guides, Copilot configuration, and prefixed tool names. See
+[Refresh an existing workspace](getting-started.md#refresh-an-existing-workspace-after-upgrading)
+for inline-result settings and CLI opt-outs.
 
 ## Uninstall
 
@@ -73,6 +94,7 @@ Repository indexing and context selection run locally. The extension does not ad
 | `tokenlighten.updateCheck.enabled` | `true` | Checks published GitHub Releases for a newer VSIX at startup; installation always requires user action. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically or selects English/Japanese explicitly. |
 | `tokenlighten.toolSurface` | `full` | Advertised MCP tool surface: `full` (every capability) or `code` (code/plain-text/config only, a smaller tool schema). Changing this requires reconnecting. |
+| `tokenlighten.copilotGuide` | `standalone` | Copilot guide mode: short self-contained instructions, shared AGENTS.md instructions, or keep existing configuration. |
 | `tokenlighten.guideProfile` | `full` | Guide size written during setup: `full`, `medium`, or `compact`. Left unset, setup writes `compact` instead of `full` when `tokenlighten.toolSurface` is `code`; an explicit value here always wins over that default. |
 
-The desktop application is not included in the public v0.14.4 release.
+The desktop application is not included in the public v0.15.0 release.

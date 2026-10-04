@@ -167,7 +167,7 @@ async function openAnswerTask(ws: string, env: Record<string, string>): Promise<
   const server = startServer(ws, env);
   await server.initialize("Visual Studio Code");
   const opened = bodyOf(await server.rpc(2, "tools/call", {
-    name: "read_file",
+    name: "tl_read_file",
     arguments: {
       query: "how does reserveInventory reserve stock",
       targets: [{ path: "src/OrderOperationsService.java" }],
@@ -191,7 +191,7 @@ function evidenceContentOf(body: Record<string, unknown>): unknown {
   });
 }
 
-describe("WP-V1 — leaned read_file/search_files continuations replay identically to the un-leaned shape", () => {
+describe("WP-V1 — leaned tl_read_file/tl_search_files continuations replay identically to the un-leaned shape", () => {
   it("a plain targets zoom read (no cwd, no task) returns the same kind+evidence content as the explicit cwd+task.handle shape", async () => {
     const wsA = scopeWorkspace();
     const wsB = scopeWorkspace();
@@ -201,7 +201,7 @@ describe("WP-V1 — leaned read_file/search_files continuations replay identical
 
     // The un-leaned shape a caller would send today: explicit cwd + task.handle.
     const unleaned = bodyOf(await serverA.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         targets: [{ path: "src/OrderOperationsService.java", range: "1-9" }],
         cwd: wsA,
@@ -213,7 +213,7 @@ describe("WP-V1 — leaned read_file/search_files continuations replay identical
     // (single-root workspace; the server was launched bound to its own ws),
     // no task at all (a plain targets read needs no task continuity).
     const leaned = bodyOf(await serverB.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         targets: [{ path: "src/OrderOperationsService.java", range: "1-9" }],
       },
@@ -225,7 +225,7 @@ describe("WP-V1 — leaned read_file/search_files continuations replay identical
     expect(serverB.alive()).toBe(true);
   }, SPAWN_TIMEOUT_MS);
 
-  it("a plain search_files find (no cwd, no task) returns the same kind+matches as the explicit cwd+task.handle shape", async () => {
+  it("a plain tl_search_files find (no cwd, no task) returns the same kind+matches as the explicit cwd+task.handle shape", async () => {
     const wsA = scopeWorkspace();
     const wsB = scopeWorkspace();
     tmpDirs.push(wsA, wsB);
@@ -233,11 +233,11 @@ describe("WP-V1 — leaned read_file/search_files continuations replay identical
     const { server: serverB } = await openAnswerTask(wsB, VSCODE_LEAN_ENV);
 
     const unleaned = bodyOf(await serverA.rpc(3, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", queries: ["cancelReservation"], cwd: wsA, task: { handle: taskId } },
     }));
     const leaned = bodyOf(await serverB.rpc(3, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", queries: ["cancelReservation"] },
     }));
 
@@ -254,11 +254,11 @@ describe("WP-V1 — leaned read_file/search_files continuations replay identical
       const server = startServer(ws, env);
       await server.initialize(clientName);
       const body = bodyOf(await server.rpc(2, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           // Naming TWO identifiers (one served, one not) is what reliably
           // leaves this pack mid-investigation with a real `decision.next`
-          // (a `search_files` symbol lookup for the unserved one) instead of
+          // (a `tl_search_files` symbol lookup for the unserved one) instead of
           // closing outright — verified empirically; a single-identifier
           // query against this same fixture closes as `act.answer`.
           query: "how does reserveInventory reserve stock and what happens on cancelReservation",
@@ -296,14 +296,14 @@ describe("WP-V1 — leaned read_file/search_files continuations replay identical
 });
 
 describe("WP-V1 — the lean schema diet never narrows what dispatchTool accepts", () => {
-  it("a read_file call using targets[].purpose is served under the vscode+lean schema, not refused", async () => {
+  it("a tl_read_file call using targets[].purpose is served under the vscode+lean schema, not refused", async () => {
     const ws = scopeWorkspace();
     tmpDirs.push(ws);
     const server = startServer(ws, VSCODE_LEAN_ENV);
     await server.initialize("Visual Studio Code");
 
     const body = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does reserveInventory reserve stock",
         targets: [{ path: "src/OrderOperationsService.java", purpose: "confirm the reservation guard clause" }],
@@ -315,14 +315,14 @@ describe("WP-V1 — the lean schema diet never narrows what dispatchTool accepts
     expect(server.alive()).toBe(true);
   }, SPAWN_TIMEOUT_MS);
 
-  it("a read_file call using budget.bytes (dropped from the advertised vscode+lean read_file schema) is still honoured, not refused", async () => {
+  it("a tl_read_file call using budget.bytes (dropped from the advertised vscode+lean tl_read_file schema) is still honoured, not refused", async () => {
     const ws = scopeWorkspace();
     tmpDirs.push(ws);
     const server = startServer(ws, VSCODE_LEAN_ENV);
     await server.initialize("Visual Studio Code");
 
     const body = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         // A specific range (not the whole ~24 KB file) so this is purely a
         // "does dispatch still read budget.bytes at all" check, not a

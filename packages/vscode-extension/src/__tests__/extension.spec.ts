@@ -7,11 +7,15 @@ const {
   mockRegisterCommands,
   mockRegisterSetup,
   mockRegisterMcp,
+  mockRegisterHostActivation,
+  mockRemoveOwnOverrides,
   mockRegisterSidebar,
   mockCheckForUpdate,
   mockWatcher,
   mockBar,
 } = vi.hoisted(() => ({
+  mockRegisterHostActivation: vi.fn(),
+  mockRemoveOwnOverrides: vi.fn(),
   mockActivationState: vi.fn(),
   mockCachedState: vi.fn(),
   mockInvalidate: vi.fn(),
@@ -56,6 +60,12 @@ vi.mock("../commands.js", () => ({
 
 vi.mock("../cli.js", () => ({ spawnTl: vi.fn() }));
 vi.mock("../mcpProvider.js", () => ({ registerMcpProvider: mockRegisterMcp }));
+// The window-scoped off switch for a managed `.vscode/mcp.json` server
+// (hostActivation.spec.ts covers what it writes); here only WHEN it is wired.
+vi.mock("../hostActivation.js", () => ({
+  registerHostActivation: mockRegisterHostActivation,
+  removeOwnHostActivationOverrides: mockRemoveOwnOverrides,
+}));
 vi.mock("../sidebar.js", () => ({ registerControlCenter: mockRegisterSidebar }));
 vi.mock("../updateChecker.js", () => ({ checkForExtensionUpdate: mockCheckForUpdate }));
 vi.mock("../workspaceState.js", () => ({
@@ -83,6 +93,8 @@ describe("extension activation", () => {
     expect(mockRegisterSetup).toHaveBeenCalledOnce();
     expect(mockRegisterCommands).toHaveBeenCalledOnce();
     expect(mockRegisterMcp).toHaveBeenCalledOnce();
+    expect(mockRegisterHostActivation).toHaveBeenCalledOnce();
+    expect(mockRegisterHostActivation).toHaveBeenCalledWith(context);
     expect(mockCheckForUpdate).toHaveBeenCalledOnce();
     expect(mockBar.setActivationState).toHaveBeenCalledWith("not-configured");
     expect(mockWatcher).not.toHaveBeenCalled();
@@ -97,4 +109,20 @@ describe("extension activation", () => {
     expect(mockBar.setActivationState).toHaveBeenCalledWith("ready");
     expect(mockWatcher).toHaveBeenCalledOnce();
   });
+
+  it("wires the host-activation override sync even when the workspace is not ready, and removes this window's overrides on deactivate", async () => {
+    mockActivationState.mockResolvedValue("disabled");
+    const context = { subscriptions: [] as unknown[] };
+
+    await activate(context as never);
+
+    // `tokenlighten.enabled = false` makes the state "disabled" and activation returns early —
+    // the sync is wired before that, because the override file is exactly what a disabled window needs.
+    expect(mockRegisterHostActivation).toHaveBeenCalledOnce();
+    expect(mockRemoveOwnOverrides).not.toHaveBeenCalled();
+
+    deactivate();
+
+    expect(mockRemoveOwnOverrides).toHaveBeenCalledOnce();
+  }, 20_000);
 });

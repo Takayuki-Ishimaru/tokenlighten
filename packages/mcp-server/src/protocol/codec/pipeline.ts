@@ -145,11 +145,11 @@ export function applyResponseCodec(
     const jsonBytes = measureResponseBytes(text);
     const candidates = eligible ? evaluateCandidates(kind, payload) : [];
 
-    // D1 (F-C2a): the workspace to trace against. `workspace` is edit_file's
+    // D1 (F-C2a): the workspace to trace against. `workspace` is tl_edit_file's
     // own late, authoritative note (finishEdit) -- moot for this module in
     // practice, since edit.applied is HARD_JSON_FIXED and never eligible
     // here. `codecTraceWorkspace` is the dedicated, trace-only note
-    // read_file/search_files dispatch takes at entry (server.ts's
+    // tl_read_file/tl_search_files dispatch takes at entry (server.ts's
     // `dispatchWithWorkspaceNotes`) -- see ProtocolCallContext's own doc
     // comment for why this is a SEPARATE field from `workspace` (which
     // other, wire-affecting projectors also read).

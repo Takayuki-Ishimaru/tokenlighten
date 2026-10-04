@@ -52,7 +52,7 @@ describe("why hygiene: no repeated ;-separated segment", () => {
       fs.mkdirSync(path.join(root, "src"), { recursive: true });
       fs.writeFileSync(path.join(root, "src/worker.ts"), "export function worker() { return false; }\n");
 
-      const response = await callTool("read_file", {
+      const response = await callTool("tl_read_file", {
         mode: "task_pack",
         query: "worker behavior update",
         taskProfile: "generic",

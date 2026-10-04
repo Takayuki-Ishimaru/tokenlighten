@@ -21,15 +21,23 @@ function fixture(name: string): unknown[] {
 
 describe("normalizeToolCallName", () => {
   it("maps recognized TL tool-call names to their short form", () => {
-    expect(normalizeToolCallName("mcp__tokenlighten__read_file")).toBe("read_file");
-    expect(normalizeToolCallName("tokenlighten:search_files")).toBe("search_files");
-    expect(normalizeToolCallName("tokenlighten__edit_file")).toBe("edit_file");
+    expect(normalizeToolCallName("mcp__tokenlighten__tl_read_file")).toBe("tl_read_file");
+    expect(normalizeToolCallName("tokenlighten:tl_search_files")).toBe("tl_search_files");
+    expect(normalizeToolCallName("tokenlighten__tl_edit_file")).toBe("tl_edit_file");
+  });
+
+  it("maps a log recorded before the tl_ rename (2026-10-02) to the same short form", () => {
+    expect(normalizeToolCallName("mcp__tokenlighten__read_file")).toBe("tl_read_file");
+    expect(normalizeToolCallName("tokenlighten:search_files")).toBe("tl_search_files");
+    expect(normalizeToolCallName("tokenlighten__edit_file")).toBe("tl_edit_file");
   });
 
   it("returns null for anything that is not a TL tool-call name", () => {
     expect(normalizeToolCallName("some_other_tool")).toBeNull();
     expect(normalizeToolCallName("mcp__tokenlighten__unknown_tool")).toBeNull();
     expect(normalizeToolCallName("mcp__othertool__read_file")).toBeNull();
+    expect(normalizeToolCallName("mcp__othertool__tl_read_file")).toBeNull();
+    expect(normalizeToolCallName("mcp__tokenlighten__tl_tl_read_file")).toBeNull();
   });
 });
 
@@ -41,8 +49,8 @@ describe("matchSession — confident match", () => {
       workspaceId: "ws-1",
       client: "claude-code",
       events: [
-        { tool: "read_file", occurredAt: "2026-08-15T10:00:00.000Z" },
-        { tool: "edit_file", occurredAt: "2026-08-15T10:02:00.000Z" },
+        { tool: "tl_read_file", occurredAt: "2026-08-15T10:00:00.000Z" },
+        { tool: "tl_edit_file", occurredAt: "2026-08-15T10:02:00.000Z" },
       ],
     };
     const result = matchSession(target, candidates);
@@ -61,7 +69,7 @@ describe("matchSession — the four unmatched reasons, each fixture-reachable", 
     const target: TlSessionGroup = {
       workspaceId: "ws-1",
       client: "codex",
-      events: [{ tool: "read_file", occurredAt: "2026-08-15T10:00:00.000Z" }],
+      events: [{ tool: "tl_read_file", occurredAt: "2026-08-15T10:00:00.000Z" }],
     };
     const result = matchSession(target, []);
     expect(result).toEqual({
@@ -77,7 +85,7 @@ describe("matchSession — the four unmatched reasons, each fixture-reachable", 
     const target: TlSessionGroup = {
       workspaceId: "ws-DIFFERENT",
       client: "claude-code",
-      events: [{ tool: "read_file", occurredAt: "2026-08-15T10:00:00.000Z" }],
+      events: [{ tool: "tl_read_file", occurredAt: "2026-08-15T10:00:00.000Z" }],
     };
     const result = matchSession(target, candidates);
     expect(result.status).toBe("unavailable");
@@ -100,8 +108,8 @@ describe("matchSession — the four unmatched reasons, each fixture-reachable", 
       workspaceId: "ws-amb",
       client: "claude-code",
       events: [
-        { tool: "read_file", occurredAt: "2026-08-16T09:00:15.000Z" },
-        { tool: "edit_file", occurredAt: "2026-08-16T09:01:15.000Z" },
+        { tool: "tl_read_file", occurredAt: "2026-08-16T09:00:15.000Z" },
+        { tool: "tl_edit_file", occurredAt: "2026-08-16T09:01:15.000Z" },
       ],
     };
     const result = matchSession(target, candidates);
@@ -119,7 +127,7 @@ describe("matchSession — the four unmatched reasons, each fixture-reachable", 
     const target: TlSessionGroup = {
       workspaceId: "ws-unknown-model",
       client: "codex",
-      events: [{ tool: "read_file", occurredAt: "2026-08-19T11:00:05.000Z" }],
+      events: [{ tool: "tl_read_file", occurredAt: "2026-08-19T11:00:05.000Z" }],
     };
     const result = matchSession(target, candidates);
     expect(result).toEqual({
@@ -140,7 +148,7 @@ describe("matchSession — the four unmatched reasons, each fixture-reachable", 
           turnIndex: 0,
           model: "claude-sonnet-5-20260810",
           timestamp: "2026-08-20T00:00:00.000Z",
-          toolCallFingerprint: ["mcp__tokenlighten__read_file", "mcp__tokenlighten__edit_file"],
+          toolCallFingerprint: ["mcp__tokenlighten__tl_read_file", "mcp__tokenlighten__tl_edit_file"],
           counts: {
             input: knownTokenCount(100),
             output: knownTokenCount(20),
@@ -167,7 +175,7 @@ describe("matchSession — the four unmatched reasons, each fixture-reachable", 
       // Only a partial fingerprint overlap (1 of 2 tool calls), and far
       // enough in time (30 min, beyond the 5-min slack) that time overlap
       // contributes 0 -- plausible but not solid.
-      events: [{ tool: "read_file", occurredAt: "2026-08-20T00:30:00.000Z" }],
+      events: [{ tool: "tl_read_file", occurredAt: "2026-08-20T00:30:00.000Z" }],
     };
     const result = matchSession(target, candidates);
     expect(result.status).toBe("unavailable");
@@ -180,12 +188,12 @@ describe("matchSession — the four unmatched reasons, each fixture-reachable", 
 describe("groupUsageEventsBySession", () => {
   it("groups by (workspaceId, client, sessionId) and sorts events ascending by time", () => {
     const groups = groupUsageEventsBySession([
-      { sessionId: "s1", workspaceId: "w1", client: "claude-code", tool: "edit_file", occurredAt: "2026-08-15T10:02:00.000Z" },
-      { sessionId: "s1", workspaceId: "w1", client: "claude-code", tool: "read_file", occurredAt: "2026-08-15T10:00:00.000Z" },
-      { sessionId: "s2", workspaceId: "w1", client: "claude-code", tool: "search_files", occurredAt: "2026-08-15T11:00:00.000Z" },
+      { sessionId: "s1", workspaceId: "w1", client: "claude-code", tool: "tl_edit_file", occurredAt: "2026-08-15T10:02:00.000Z" },
+      { sessionId: "s1", workspaceId: "w1", client: "claude-code", tool: "tl_read_file", occurredAt: "2026-08-15T10:00:00.000Z" },
+      { sessionId: "s2", workspaceId: "w1", client: "claude-code", tool: "tl_search_files", occurredAt: "2026-08-15T11:00:00.000Z" },
     ]);
     expect(groups).toHaveLength(2);
     const s1 = groups.find((g) => g.events.length === 2)!;
-    expect(s1.events.map((e) => e.tool)).toEqual(["read_file", "edit_file"]);
+    expect(s1.events.map((e) => e.tool)).toEqual(["tl_read_file", "tl_edit_file"]);
   });
 });

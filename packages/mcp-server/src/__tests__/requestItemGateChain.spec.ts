@@ -8,7 +8,7 @@
  *
  *  - WINDOW (B2): an open concern whose body sits in the UNSERVED part of a
  *    partly served file is continued by a query-bearing read of the window
- *    where its wording occurs — never a bare `search_files tree`/`find`, and
+ *    where its wording occurs — never a bare `tl_search_files tree`/`find`, and
  *    never the hull of every unserved line.
  *  - SLIVER (held 1/2): a concern is never certified off a served slice (an
  *    interface line) while the function that answers it is unserved, and it
@@ -121,7 +121,7 @@ function strandedHops(chain: ChainResult): string[] {
     .map((hop) => `${hop.call.tool} -> ${String(hop.response?.kind)}`);
 }
 function treeHops(chain: ChainResult): number {
-  return chain.hops.filter((hop) => hop.call.tool === "search_files" && hop.call.arguments["action"] === "tree").length;
+  return chain.hops.filter((hop) => hop.call.tool === "tl_search_files" && hop.call.arguments["action"] === "tree").length;
 }
 
 const tmpDirs: string[] = [];
@@ -158,10 +158,10 @@ async function withWorkspace(
 }
 
 async function chainWithRepack(server: ServerHandle, ws: string, first: Record<string, unknown>): Promise<{ follow: ChainResult; repack?: ChainResult }> {
-  const follow = await followNextToEnd(server, { tool: "read_file", arguments: { ...first, cwd: ws } }, { cwd: ws, hopCap: 8, maxQrefRepacks: 0 });
+  const follow = await followNextToEnd(server, { tool: "tl_read_file", arguments: { ...first, cwd: ws } }, { cwd: ws, hopCap: 8, maxQrefRepacks: 0 });
   const qref = [...follow.hops].reverse().map((hop) => hop.response?.qref).find((value) => typeof value === "string");
   const repack = typeof qref === "string"
-    ? await followNextToEnd(server, { tool: "read_file", arguments: { qref, cwd: ws } }, { cwd: ws, hopCap: 8, maxQrefRepacks: 0 })
+    ? await followNextToEnd(server, { tool: "tl_read_file", arguments: { qref, cwd: ws } }, { cwd: ws, hopCap: 8, maxQrefRepacks: 0 })
     : undefined;
   return { follow, ...(repack !== undefined ? { repack } : {}) };
 }
@@ -248,7 +248,7 @@ for (const config of CONFIG_NAMES) {
     it("RECALL: a whole small file served through an explicit full-length range covers both concerns in one call", async () => {
       await withWorkspace(config, "rec", (ws) => write(ws, "src/store.ts", REFUNDS + INVENTORY), async (server, ws) => {
         const total = (REFUNDS + INVENTORY).split("\n").length - 1;
-        const { body } = await server.callTool("read_file", {
+        const { body } = await server.callTool("tl_read_file", {
           query: EN_QUERY,
           targets: [{ path: "src/store.ts", range: `1-${total}` }],
           task: { epoch: "new", profile: "answer" },

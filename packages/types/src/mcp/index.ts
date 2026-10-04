@@ -29,11 +29,13 @@ export type * from "./search-result.js";
 export type * from "./edit-result.js";
 export type * from "./request-shape.js";
 // DESIGN-v0.15 R2/R3: the fetch-request continuation state model (server-side;
-// the only wire surface it grows is the opaque `read_file.cursor` argument).
+// the only wire surface it grows is the opaque `tl_read_file.cursor` argument).
 export type * from "./continuation.js";
 // DESIGN-v0.15 §8.2 (R7 Part B): the startup-selected code/full tool surface.
 export type { ToolSurface } from "./tool-surface.js";
 export { TOOL_SURFACE_VALUES, isToolSurface } from "./tool-surface.js";
+// The advertised tool names and their pre-`tl_` spellings (2026-10-02).
+export { TOOL_NAMES, LEGACY_TOOL_NAMES, renamedToolName } from "./tool-names.js";
 
 // pre-v1, still live
 export type * from "./locate-impact.js";

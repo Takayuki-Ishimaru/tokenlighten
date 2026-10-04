@@ -59,7 +59,7 @@ describe("task_pack generic-text fallback", () => {
 
     const nextCall = result.execution_contract?.next_call;
     expect(
-      nextCall?.tool === "read_file"
+      nextCall?.tool === "tl_read_file"
         && nextCall.arguments?.["mode"] === "task_pack"
         && nextCall.arguments?.["query"] === "opaqueGenericNeedle",
     ).toBe(false);
@@ -116,7 +116,7 @@ describe("task_pack generic-text fallback", () => {
 
     expect(result.surfaces.some((surface) => surface.path === "notes.disabledext")).toBe(false);
     expect(result.next).toMatchObject({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: expect.objectContaining({ action: "locate" }),
     });
   }, 30000);

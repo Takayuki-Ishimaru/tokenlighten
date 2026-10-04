@@ -100,7 +100,7 @@ export interface BatchEditHandleContentItem {
 export type BatchEditItem = BatchEditPathItem | BatchEditHandleSearchItem | BatchEditHandleContentItem;
 
 // ---------------------------------------------------------------------------
-// Structured binary artifact edits (edit_file artifact={...})
+// Structured binary artifact edits (tl_edit_file artifact={...})
 // ---------------------------------------------------------------------------
 
 export interface XlsxCellEdit {

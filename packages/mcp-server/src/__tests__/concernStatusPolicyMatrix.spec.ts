@@ -444,7 +444,7 @@ async function runCell(server: ServerHandle, ws: string, cell: Cell, phrasing: P
 
   const followed = await followNextToEnd(
     server,
-    { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
+    { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
     { cwd: ws, hopCap: 12 },
   );
   recordServed(followed);
@@ -454,7 +454,7 @@ async function runCell(server: ServerHandle, ws: string, cell: Cell, phrasing: P
   const followedKind = finalKindOf(followed);
 
   if (typeof qref === "string") {
-    const repacked = await followNextToEnd(server, { tool: "read_file", arguments: { qref, cwd: ws } }, { cwd: ws, hopCap: 8, maxQrefRepacks: 0 });
+    const repacked = await followNextToEnd(server, { tool: "tl_read_file", arguments: { qref, cwd: ws } }, { cwd: ws, hopCap: 8, maxQrefRepacks: 0 });
     recordServed(repacked);
     failures.push(...auditChain(cell, repacked, "repack", served, blocksOnConcerns));
     const repackedKind = finalKindOf(repacked);
@@ -466,7 +466,7 @@ async function runCell(server: ServerHandle, ws: string, cell: Cell, phrasing: P
 
   const restated = await followNextToEnd(
     server,
-    { tool: "read_file", arguments: { query, cwd: ws } },
+    { tool: "tl_read_file", arguments: { query, cwd: ws } },
     { cwd: ws, hopCap: 8, maxQrefRepacks: 0 },
   );
   recordServed(restated);

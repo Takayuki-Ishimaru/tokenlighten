@@ -3,7 +3,7 @@
  * phase (2026-07-25 harness-desertion forensics, v2 facts-first redesign).
  *
  * Evidence from live agent transcripts: on fix tasks agents hand-build
- * verification harnesses AFTER their last successful edit_file call, and the
+ * verification harnesses AFTER their last successful tl_edit_file call, and the
  * expensive misses were DIAGNOSES, not bodies — (i) an edited file that does
  * not compile standalone because it uses a type whose header it never
  * includes, (ii) the link set (paired sources of included
@@ -26,7 +26,7 @@ import type { TaskVerificationRecipe } from "@tokenlighten/types";
 /**
  * Body state for a kit entry that carries no `code` in THIS response.
  * `"omitted"` = never served — fetch it (`verification.next_call` batches every
- * omitted body into one read_file call). `"served-earlier"` = the body already
+ * omitted body into one tl_read_file call). `"served-earlier"` = the body already
  * rode an earlier response this session, so your context is current and a
  * re-fetch buys nothing. ONE marker for both meanings read as "never served"
  * and drove native re-reads (2026-07-31 verify-kit-gap forensics).
@@ -1064,9 +1064,33 @@ export function surfaceToolchainDomain(paths: readonly string[]): ToolchainDomai
   return "go";
 }
 
-/** Nearest CMakeLists.txt/Makefile/meson.build walking up from `fromDir` to the workspace root ("" = root). */
+/**
+ * Nearest CMakeLists.txt/Makefile/meson.build walking up from `fromDir` to the workspace root ("" = root).
+ *
+ * Copilot standard-setup evaluation (2026-10-02): `fromDir` can be ABSOLUTE — a caller-supplied absolute
+ * `targets[].path` reaches the pack's native verdict unnormalized — and `dirname("/")` is "/" forever, so
+ * the walk never reached its "" stop: `tl_read_file {query:"Report RETRY_LIMIT constant value.",
+ * targets:[{path:<absolute .cpp>}]}` spun at 100% CPU (an existsSync per build-entry name per turn) until the
+ * host gave up. An absolute dir inside the workspace is walked as its workspace-relative form, one outside it
+ * has no build entry this workspace owns, and a dir that is its own parent ends the walk. A spelling that
+ * only reaches the workspace through a symlink (macOS /var vs /private/var, a linked checkout) is compared
+ * by real path (review 2026-10-02).
+ */
 export function findBuildEntry(workspace: string, fromDir: string): string | undefined {
   let dir = fromDir;
+  if (path.isAbsolute(dir)) {
+    const escapes = (rel: string): boolean => rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+    let rel = path.relative(workspace, dir);
+    if (escapes(rel)) {
+      try {
+        rel = path.relative(fs.realpathSync.native(workspace), fs.realpathSync.native(dir));
+      } catch {
+        return undefined;
+      }
+      if (escapes(rel)) return undefined;
+    }
+    dir = rel.split(path.sep).join("/");
+  }
   for (;;) {
     for (const name of BUILD_ENTRY_NAMES) {
       const rel = dir === "" ? name : `${dir}/${name}`;
@@ -1074,6 +1098,7 @@ export function findBuildEntry(workspace: string, fromDir: string): string | und
     }
     if (dir === "") return undefined;
     const parent = path.posix.dirname(dir);
+    if (parent === dir) return undefined;
     dir = parent === "." ? "" : parent;
   }
 }
@@ -1505,11 +1530,11 @@ const BUILD_ENTRY_ABSENT_NOTE_GENERIC =
  * harness.create_note. One 2026-08-01 measured run authored THREE standalone
  * C++ harness files with native Write/Edit while making zero native reads:
  * the kit had served every ingredient but never stated that new files are an
- * edit_file call. Naming the tool is the whole fix — the alternative is a
+ * tl_edit_file call. Naming the tool is the whole fix — the alternative is a
  * native write.
  */
 const HARNESS_CREATE_NOTE =
-  "author new files with edit_file {path, create:true, cwd, content} — never native Write/Edit; no build-system registration needed";
+  "author new files with tl_edit_file {path, create:true, cwd, content} — never native Write/Edit; no build-system registration needed";
 
 /** toolchain.verify_note when the detected test entry cannot actually run yet. */
 const VERIFY_NO_DEPS_NOTE =

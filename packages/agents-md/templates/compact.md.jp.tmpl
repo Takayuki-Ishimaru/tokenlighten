@@ -3,14 +3,14 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (compact)
 
-Root `AGENTS.md`をactive designs/planの正典とする。正準templateからAI rulesを再生成し、生成済みblockを直接編集しない。
+`AGENTS.md`がdesigns/planの正典。templateからAI rules再生成、生成blockは直接編集禁止。
 
-3ツール: `read_file`, `edit_file`, `search_files`. 全file作業をTLから開始; 所在不明/複数file=>native readやExplore系subagentより先に`read_file {query:"<依頼全文>",task:{epoch:"new"}}`; 切詰め禁止. TL非提供またはhostがnative-bypassを報告した時だけnativeを使い、task途中でTLを有効化しない. 同taskの絞ったre-packはincomplete足り得る. Search: `action:"find",queries:["<識別子1語>"]`; 複数は一回の`queries=[…]`; 既知subtreeは`scope.path`、不明時のみrepo全体.
+3ツール: `tl_read_file`, `tl_edit_file`, `tl_search_files`. FIRST file lookup/read、native/Explore系subagentより先に`tl_read_file {query:"<依頼全文を逐語で>",task:{epoch:"new"}}`; 所在不明なら`targets`省略. queryのキーワード化・引用/制約文の省略禁止. nativeはuserのnative明示指定/TL非提供/hostのnative-bypass/非complete scope/確実な不在時のみ; task途中でTLを有効化しない. 同taskの絞ったre-packはincomplete足り得る. Search: `action:"find",queries:["<識別子1語>"]`; `queries=[…]`一括; `scope.path`=既知subtree、不明時のみrepo全体.
 <!-- tl-legacy-compat:start -->
 旧入力のみ: `mode`/`paths`/`handles`/`maxBytes`/`maxTokens`/`taskProfile`/`taskEpoch`はTL_LEGACY_INPUT=accept時だけ受理; RCはrefuse. 発行禁止; 返却`next`は正準形。
 <!-- tl-legacy-compat:end -->
-全callに自分の`cwd`(`cwd-required-for-edit`回避); 共有workspaceは固定`lane`. 既知単一editはfast-close可; 他は一回の`edit_file` `edits[]`で各itemが対象を持つ.
-未知の`kind`=SAFE-STOP: 報告のみでeditを発行せず、fieldからの推測禁止.
-`read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`でdiscovery閉鎖、配信済み証拠で行動しready editを一括. `refusal`は`retry`だけが遷移. `next`は実行可能なcall全体なので逐語実行; hintは助言でcallではない. `read.receipt`はre-pack合図でない: `next`があれば従い、無ければ再掲証拠/certificateで行動または停止. 関連check合格後は停止. 読みは`budget.bytes`/`budget.tokens`でも上限可.
-それ以外 — artifact/archive詳細、verification-kit詳細、kind別詳細規則 — は必要な応答内でon-demand配信; 配信されるまでがこの完全ルール.
+全callに自分の`cwd`(なければ`cwd-required-for-edit`); 共有workspaceは固定`lane`. 既知単一editはfast-close可; 他は`tl_edit_file` `edits[]`一括、item毎に対象指定.
+未知の`kind`=SAFE-STOP: 報告のみ、edit発行・fieldからの推測禁止.
+`read.task_pack`の`decision.kind`に従う: `act.answer`/`act.edit`でdiscovery閉鎖、`evidence[].body`は読込済みの正確なsource: そのpath/行範囲で再読せず行動し、独立readを一回の`targets:[...]`、ready editも一括. `refusal`は`retry`だけが遷移. `next`は実行可能なcall全体=逐語実行; hintはcallでない. context消失時は同callに`task.force_serve:true`. `read.receipt`はre-pack合図でない: `next`があれば従い、無ければ再掲証拠/certificateで行動または停止. check合格で停止. 読みの上限は`budget.bytes`/`budget.tokens`.
+詳細規則/verification kitはon-demand配信.
 <!-- tokenlighten:mcp-instructions:end -->

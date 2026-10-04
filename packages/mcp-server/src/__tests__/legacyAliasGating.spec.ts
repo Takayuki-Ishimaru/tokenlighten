@@ -185,7 +185,7 @@ describe("D11 — the 12 legacy alias names are DELETED, not gated", () => {
 
     const list = await srv.rpc(2, "tools/list", {});
     const names = (list.result.tools as Array<{ name: string }>).map((t) => t.name).sort();
-    expect(names).toEqual(["edit_file", "read_file", "search_files"]);
+    expect(names).toEqual(["tl_edit_file", "tl_read_file", "tl_search_files"]);
 
     let id = 3;
     for (const name of ALL_DELETED_ALIASES) {
@@ -223,9 +223,9 @@ describe("D11 — the 12 legacy alias names are DELETED, not gated", () => {
     expect(fs.readFileSync(path.join(wsDir, "target.txt"), "utf8")).toBe("OLD\n");
   }, 60000);
 
-  it("the 3 per-alias kill switches are INERT — read_file stays advertised and mode=skeleton still serves", async () => {
+  it("the 3 per-alias kill switches are INERT — tl_read_file stays advertised and mode=skeleton still serves", async () => {
     // TL_DISABLE_GET_FILE_SKELETON + TL_DISABLE_GET_SYMBOL_WITH_CONTEXT used to
-    // disable the ADVERTISED read_file entry itself when both were set
+    // disable the ADVERTISED tl_read_file entry itself when both were set
     // (`enabled: !KILL_SWITCH && (!DISABLE_SKELETON || !DISABLE_SYMBOL)`), and
     // TL_DISABLE_EXTRACT_OFFICE_TEXT gated the office alias. All three are
     // deleted; setting them must now change nothing at all.
@@ -246,10 +246,10 @@ describe("D11 — the 12 legacy alias names are DELETED, not gated", () => {
 
     const list = await srv.rpc(2, "tools/list", {});
     const names = (list.result.tools as Array<{ name: string }>).map((t) => t.name).sort();
-    expect(names).toEqual(["edit_file", "read_file", "search_files"]);
+    expect(names).toEqual(["tl_edit_file", "tl_read_file", "tl_search_files"]);
 
     const skel = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { path: "target.ts", mode: "skeleton" },
     });
     expect(skel.error).toBeUndefined();

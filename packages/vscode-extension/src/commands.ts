@@ -32,6 +32,13 @@ import type { GuideProfile } from "@tokenlighten/agents-md";
 // index.js re-exports render.ts, which throws at module load under the
 // esbuild CJS bundle; see guideProfileDefault.ts's own header comment).
 import { defaultGuideProfileForSurface } from "@tokenlighten/agents-md/guideProfileDefault";
+import {
+  agentsMdHoldsOnlyTokenLighten,
+  agentsMdPresent,
+  copilotGuideIsStandalone,
+  predictStandaloneCopilotGuide,
+  predictStandaloneInWorkspaceFile,
+} from "./copilotGuide.js";
 import type { DisplayTier, MeasurementDisplayTiers } from "@tokenlighten/usage";
 
 const firstLine = (s: string) => s.split("\n")[0] ?? s;
@@ -62,6 +69,10 @@ export function workspaceSetupArgs(
   // default invocation stays byte-for-byte what the existing exact-array
   // test expects. Only "keep" (the modal's second button) ever appends it.
   copilotInlineResults?: "raise" | "keep",
+  // Copilot standard-setup evaluation (2026-10-02): undefined is `tl
+  // install`'s own default ("standalone") and appends nothing, for the same
+  // byte-for-byte reason as `copilotInlineResults` above.
+  copilotGuide?: "agents-md" | "keep",
 ): string[] {
   return [
     "install",
@@ -80,6 +91,7 @@ export function workspaceSetupArgs(
     // (and its existing exact-array test) byte-for-byte unchanged.
     ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : []),
     ...(copilotInlineResults === "keep" ? ["--copilot-inline-results", "keep"] : []),
+    ...(copilotGuide !== undefined ? ["--copilot-guide", copilotGuide] : []),
   ];
 }
 
@@ -97,6 +109,10 @@ interface TlInstallJsonResult {
     writePosture?: unknown;
     workspaces?: Array<{
       copilotInlineResults?: {
+        status?: unknown;
+        reason?: unknown;
+      };
+      copilotGuide?: {
         status?: unknown;
         reason?: unknown;
       };
@@ -121,7 +137,7 @@ export function registerSetupCommand(
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("tokenlighten.setup", () => {
-      void setupWorkspace(bar);
+      void setupWorkspace(bar, context);
     }),
   );
 }
@@ -165,7 +181,169 @@ export function registerCommands(
   });
   reg("tokenlighten.usage.show", () => { void showUsageDashboard(context); });
   reg("tokenlighten.logs.export", () => { void exportUsageLogs(); });
-  reg("tokenlighten.uninstallMachine", () => { void uninstallMachine(); });
+  reg("tokenlighten.uninstallMachine", () => { void uninstallMachine(context); });
+  reg("tokenlighten.copilotGuide.applyToWorkspaceFile", () => { void applyCopilotGuideToWorkspaceFile(context); });
+}
+
+// ---------------------------------------------------------------------------
+// Copilot guide in a window opened through a `.code-workspace` file (Copilot
+// standard-setup retest, 2026-10-02). VS Code registers `chat.useAgentsMdFile`
+// window-scoped (and restricted): the `false` `tl install` writes to the
+// folder's own .vscode/settings.json is IGNORED there — only the workspace
+// file's `settings` (or the user's) apply — so Copilot would keep attaching
+// AGENTS.md (the full guide) next to the compact one in
+// .github/copilot-instructions.md. The CLI therefore only names such files
+// (it never edits one); this extension writes the workspace-level value, after
+// the user confirms, through the settings API (`ConfigurationTarget.Workspace`,
+// which VS Code routes to the workspace file's `settings`). The value applies to
+// EVERY folder of the workspace, so it is written only while each folder's
+// AGENTS.md is absent or holds nothing but TokenLighten's block, and every
+// folder that has an AGENTS.md reads the compact standalone guide (otherwise its
+// Copilot file is only the pointer to the AGENTS.md the value would hide). The
+// file it was written to is recorded in `context.workspaceState` so exactly that
+// value — never one the user wrote — can be withdrawn.
+// ---------------------------------------------------------------------------
+
+/** `context.workspaceState` key: the `.code-workspace` file whose `chat.useAgentsMdFile` this extension set (removed with the value). */
+export const WORKSPACE_FILE_SETTING_KEY = "tokenlighten.copilotGuide.workspaceFileSetting";
+
+/** What `applyCopilotGuideToWorkspaceFile` did, for the callers and tests. */
+export type WorkspaceFileApplyOutcome =
+  | "not-applicable"
+  | "refused"
+  | "kept"
+  | "already-applied"
+  | "declined"
+  | "applied"
+  | "failed";
+
+/** The window's `.code-workspace` file when it is a local file; an untitled or remote workspace has none this extension can write. */
+function localWorkspaceFile(): vscode.Uri | undefined {
+  const file = vscode.workspace.workspaceFile;
+  return file?.scheme === "file" ? file : undefined;
+}
+
+/** `chat.useAgentsMdFile` as the workspace (the workspace file's `settings`) holds it. */
+function workspaceFileAgentsMdValue(): boolean | undefined {
+  return vscode.workspace.getConfiguration("chat").inspect<boolean>("useAgentsMdFile")?.workspaceValue;
+}
+
+/**
+ * Removes the workspace-level `chat.useAgentsMdFile` this extension set, when
+ * the record names THIS window's workspace file and the value is still the
+ * `false` it wrote; a value the user has changed since is theirs, and only the
+ * record goes. Returns whether a value was removed.
+ */
+export async function withdrawCopilotGuideFromWorkspaceFile(context: vscode.ExtensionContext): Promise<boolean> {
+  const file = localWorkspaceFile();
+  if (file === undefined) return false;
+  const recorded = context.workspaceState.get<string>(WORKSPACE_FILE_SETTING_KEY);
+  if (recorded === undefined || recorded !== file.fsPath) return false;
+  const stillOurs = workspaceFileAgentsMdValue() === false;
+  try {
+    if (stillOurs) {
+      await vscode.workspace.getConfiguration("chat").update("useAgentsMdFile", undefined, vscode.ConfigurationTarget.Workspace);
+    }
+  } finally {
+    await context.workspaceState.update(WORKSPACE_FILE_SETTING_KEY, undefined);
+  }
+  return stillOurs;
+}
+
+/**
+ * `tokenlighten.copilotGuide.applyToWorkspaceFile`: sets `chat.useAgentsMdFile`
+ * to `false` in the window's `.code-workspace` file (see the section comment
+ * above), after a modal confirmation naming that file. Refuses, writing
+ * nothing and naming the folder, when a workspace folder's AGENTS.md holds the
+ * user's own content, or when a folder that has an AGENTS.md does not read the
+ * standalone guide (`copilotGuideModeForWorkspace`: its Copilot file is the
+ * pointer to the AGENTS.md the setting would hide) — and then withdraws a value
+ * this extension set earlier; a folder with no AGENTS.md is not checked. Leaves
+ * a value the user wrote (`true`) alone; reports "already applied" for a `false`.
+ */
+export async function applyCopilotGuideToWorkspaceFile(
+  context: vscode.ExtensionContext,
+): Promise<WorkspaceFileApplyOutcome> {
+  const file = localWorkspaceFile();
+  if (file === undefined) {
+    void vscode.window.showInformationMessage(localized(
+      "TokenLighten: this window was not opened through a .code-workspace file, so there is no workspace file to update. A single-folder window uses its own .vscode/settings.json, which \"Set Up This Workspace\" writes.",
+      "TokenLighten: このウィンドウは.code-workspaceファイルから開かれていないため、更新するワークスペースファイルがありません。単一フォルダーのウィンドウは自身の.vscode/settings.jsonを使い、「このワークスペースをセットアップ」がそれを書き込みます。",
+    ));
+    return "not-applicable";
+  }
+  const folders = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+  // Refuses without writing. A value this extension set earlier no longer
+  // applies either (the workspace-level value covers every folder), so it goes.
+  const refuse = async (en: string, ja: string): Promise<WorkspaceFileApplyOutcome> => {
+    const withdrawn = await withdrawCopilotGuideFromWorkspaceFile(context).catch(() => false);
+    void vscode.window.showWarningMessage(localized(
+      en + (withdrawn ? " TokenLighten also removed the chat.useAgentsMdFile it had set there earlier." : ""),
+      ja + (withdrawn ? "以前そこに設定したchat.useAgentsMdFileも削除しました。" : ""),
+    ));
+    return "refused";
+  };
+  // The workspace-level value would hide this folder's own AGENTS.md from Copilot.
+  const userOwned = folders.find((folder) => !agentsMdHoldsOnlyTokenLighten(folder));
+  if (userOwned !== undefined) {
+    return refuse(
+      `TokenLighten: not applied. ${userOwned} has an AGENTS.md with your own content, and the setting in ${file.fsPath} would hide it from GitHub Copilot in every folder of this workspace.`,
+      `TokenLighten: 適用しませんでした。${userOwned}のAGENTS.mdにはユーザー自身の内容があり、${file.fsPath}に設定すると、このワークスペースのすべてのフォルダーでGitHub Copilotからそれが見えなくなります。`,
+    );
+  }
+  // ...and it would hide the TokenLighten guide from a folder whose Copilot
+  // file is only the pointer to that AGENTS.md. A folder with no AGENTS.md hides nothing.
+  const readsPointer = folders.find((folder) => agentsMdPresent(folder) && !copilotGuideIsStandalone(folder));
+  if (readsPointer !== undefined) {
+    return refuse(
+      `TokenLighten: not applied. ${readsPointer} has an AGENTS.md but its Copilot guide is not the compact one (its .vscode/settings.json does not set chat.useAgentsMdFile to false), so the setting in ${file.fsPath} would leave GitHub Copilot without TokenLighten's guide there. Set that folder up with the standalone guide first.`,
+      `TokenLighten: 適用しませんでした。${readsPointer}にはAGENTS.mdがありますが、そのフォルダーのCopilotガイドはコンパクト版ではなく（.vscode/settings.jsonでchat.useAgentsMdFileがfalseになっていません）、${file.fsPath}に設定するとそこではGitHub CopilotがTokenLightenのガイドを読めなくなります。先にそのフォルダーをstandaloneガイドでセットアップしてください。`,
+    );
+  }
+  const current = workspaceFileAgentsMdValue();
+  if (current === false) {
+    void vscode.window.showInformationMessage(localized(
+      `TokenLighten: chat.useAgentsMdFile is already false in ${file.fsPath}; nothing to apply.`,
+      `TokenLighten: ${file.fsPath}ではchat.useAgentsMdFileがすでにfalseです。適用するものはありません。`,
+    ));
+    return "already-applied";
+  }
+  if (current === true) {
+    // A value the user wrote is never overridden (the CLI's rule for the folder file too).
+    void vscode.window.showInformationMessage(localized(
+      `TokenLighten: ${file.fsPath} sets chat.useAgentsMdFile to true, so GitHub Copilot attaches AGENTS.md in this window; TokenLighten does not override your value.`,
+      `TokenLighten: ${file.fsPath}ではchat.useAgentsMdFileがtrueに設定されているため、このウィンドウではGitHub CopilotがAGENTS.mdを添付します。TokenLightenはユーザーの設定値を上書きしません。`,
+    ));
+    return "kept";
+  }
+  const confirm = localized("Apply to workspace file", "ワークスペースファイルに適用");
+  const choice = await vscode.window.showInformationMessage(
+    localized(
+      `Set chat.useAgentsMdFile to false in ${file.fsPath}? VS Code ignores a folder's own .vscode/settings.json for this setting when the folder is opened through a .code-workspace file, so without it GitHub Copilot keeps attaching AGENTS.md (the full TokenLighten guide) next to the compact guide in .github/copilot-instructions.md. It applies to every folder of this workspace (none has an AGENTS.md of your own, and each folder with an AGENTS.md reads the compact guide) and is removed again if that stops being true, when you set up with the agents-md guide, and when TokenLighten is uninstalled.`,
+      `${file.fsPath}のchat.useAgentsMdFileをfalseにしますか？.code-workspaceファイルからフォルダーを開いている場合、VS Codeはこの設定についてフォルダー自身の.vscode/settings.jsonを無視するため、設定しないとGitHub Copilotは.github/copilot-instructions.mdのコンパクトなガイドに加えてAGENTS.md（TokenLightenの完全版ガイド）も添付し続けます。この設定はワークスペースのすべてのフォルダーに適用されます（どのフォルダーにもユーザー自身のAGENTS.mdはなく、AGENTS.mdのあるフォルダーはすべてコンパクト版ガイドを読みます）。これが成り立たなくなったとき、agents-mdガイドでセットアップしたとき、TokenLightenをアンインストールしたときに、あらためて削除されます。`,
+    ),
+    { modal: true },
+    confirm,
+  );
+  if (choice !== confirm) return "declined";
+  try {
+    await vscode.workspace.getConfiguration("chat").update("useAgentsMdFile", false, vscode.ConfigurationTarget.Workspace);
+    // Recorded only once the value is written: a record that outlived a failed
+    // write could later withdraw a `false` the user wrote.
+    await context.workspaceState.update(WORKSPACE_FILE_SETTING_KEY, file.fsPath);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    void vscode.window.showErrorMessage(localized(
+      `TokenLighten could not update ${file.fsPath}: ${detail}`,
+      `TokenLightenは${file.fsPath}を更新できませんでした: ${detail}`,
+    ));
+    return "failed";
+  }
+  void vscode.window.showInformationMessage(localized(
+    `TokenLighten: chat.useAgentsMdFile is now false in ${file.fsPath}; GitHub Copilot no longer attaches AGENTS.md in this window.`,
+    `TokenLighten: ${file.fsPath}のchat.useAgentsMdFileをfalseにしました。このウィンドウではGitHub CopilotがAGENTS.mdを添付しなくなります。`,
+  ));
+  return "applied";
 }
 
 /**
@@ -175,9 +353,11 @@ export function registerCommands(
  * this is spawned without a `cwd` — unlike setupWorkspace's `--workspace`
  * flow. Modal confirmation because uninstalling is destructive and affects
  * every workspace/host this machine's `tl install` reaches, not just the
- * current one.
+ * current one. With the extension `context`, a successful uninstall also
+ * withdraws the workspace-file `chat.useAgentsMdFile` this extension set for
+ * the window that is open (best effort; see the `.code-workspace` section above).
  */
-export async function uninstallMachine(): Promise<void> {
+export async function uninstallMachine(context?: vscode.ExtensionContext): Promise<void> {
   const confirmLabel = localized("Uninstall TokenLighten", "TokenLightenをアンインストール");
   const choice = await vscode.window.showWarningMessage(
     localized(
@@ -202,6 +382,16 @@ export async function uninstallMachine(): Promise<void> {
       `TokenLightenのアンインストールに失敗しました: ${summary}`,
     ));
     return;
+  }
+  // The uninstall removes the managed files and settings of every workspace it
+  // set up, but VS Code's own workspace file is not among them: take back the
+  // value this extension wrote there for the window that is open now.
+  if (context !== undefined) {
+    try {
+      await withdrawCopilotGuideFromWorkspaceFile(context);
+    } catch {
+      // Best effort: a value left behind only keeps Copilot from attaching AGENTS.md.
+    }
   }
   // G2: the status bar / sidebar / provider cached "this workspace is set
   // up" from the last probe — without this they kept saying so until the
@@ -300,7 +490,7 @@ export async function showStatusMenu(
       showDiagnosticsPanel(context);
       return;
     case "uninstallMachine":
-      await uninstallMachine();
+      await uninstallMachine(context);
       return;
     case "enable":
       await enableWorkspace();
@@ -311,7 +501,7 @@ export async function showStatusMenu(
       bar?.setActivationState(await workspaceActivationState());
       return;
     case "setup":
-      if (bar) await setupWorkspace(bar);
+      if (bar) await setupWorkspace(bar, context);
       return;
     case "sidebar":
       await vscode.commands.executeCommand("workbench.view.extension.tokenlighten-sidebar");
@@ -326,7 +516,14 @@ interface GuideProfileQuickPickItem extends vscode.QuickPickItem {
   profile: Extract<GuideProfile, "full" | "compact">;
 }
 
-export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
+/**
+ * Sets up the first workspace folder through `tl install`. The extension
+ * `context` is only needed in a window opened through a `.code-workspace`
+ * file, where the Copilot guide's workspace-level setting is applied and
+ * withdrawn (see the `.code-workspace` section above); without it that step is
+ * skipped.
+ */
+export async function setupWorkspace(bar: StatusBarManager, context?: vscode.ExtensionContext): Promise<void> {
   if (!vscode.workspace.isTrusted) {
     vscode.window.showWarningMessage(localized(
       "TokenLighten: trust this workspace before running setup",
@@ -344,16 +541,17 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   }
   const confirm = localized("Set up TokenLighten", "TokenLightenをセットアップ");
   // Second button: the user's consent to skip ONLY the Copilot setting
-  // change below — everything else about setup (rules, MCP entries, usage
-  // measurement) proceeds exactly as the first button.
+  // changes below (the inline-result limit, and the Copilot guide's
+  // attachment settings) — everything else about setup (rules, MCP entries,
+  // usage measurement) proceeds exactly as the first button.
   const keepCopilotSettings = localized(
     "Set up without changing Copilot settings",
     "Copilotの設定を変更せずにセットアップ",
   );
   const choice = await vscode.window.showInformationMessage(
     localized(
-      "Set up or repair TokenLighten for VS Code, Copilot, Codex, and Claude Code in this workspace? Write tools and local privacy-safe usage measurement are enabled only for this workspace. Setup will also raise GitHub Copilot's inline tool-result limit for this workspace (written to .vscode/settings.json) so Copilot can read TokenLighten's answers.",
-      "このワークスペースでVS Code、Copilot、Codex、Claude Code向けのTokenLighten設定をセットアップまたは修復しますか？書き込みツールとローカルのプライバシー保護使用量計測は、このワークスペースだけで有効になります。また、CopilotがTokenLightenの応答を読み取れるように、このワークスペースのGitHub Copilotのインライン結果表示の上限も引き上げます（.vscode/settings.jsonに書き込みます）。",
+      "Set up or repair TokenLighten for VS Code, Copilot, Codex, and Claude Code in this workspace? Write tools and local privacy-safe usage measurement are enabled only for this workspace. Setup will also raise GitHub Copilot's inline tool-result limit for this workspace so Copilot can read TokenLighten's answers, and give Copilot a compact TokenLighten guide (.github/copilot-instructions.md) instead of attaching AGENTS.md while it holds only TokenLighten's block (both written to .vscode/settings.json).",
+      "このワークスペースでVS Code、Copilot、Codex、Claude Code向けのTokenLighten設定をセットアップまたは修復しますか？書き込みツールとローカルのプライバシー保護使用量計測は、このワークスペースだけで有効になります。また、CopilotがTokenLightenの応答を読み取れるようにこのワークスペースのGitHub Copilotのインライン結果表示の上限を引き上げ、AGENTS.mdがTokenLightenのブロックだけのときは、それを添付する代わりにCopilot向けのコンパクトなTokenLightenガイド（.github/copilot-instructions.md）を使うようにします（どちらも.vscode/settings.jsonに書き込みます）。",
     ),
     { modal: true },
     confirm,
@@ -363,6 +561,33 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   const copilotInlineResults: "raise" | "keep" = choice === keepCopilotSettings ? "keep" : "raise";
   bar.setStale();
   const workspaceConfig = vscode.workspace.getConfiguration("tokenlighten", vscode.Uri.file(root));
+  // Copilot standard-setup evaluation (2026-10-02): which TokenLighten guide
+  // Copilot reads (packages/cli workspace.ts's Copilot guide section). The
+  // second modal button changes no Copilot setting at all (`keep`); otherwise
+  // the `tokenlighten.copilotGuide` setting decides, and its default
+  // ("standalone") is also `tl install`'s, so nothing is appended for it.
+  const copilotGuide: "agents-md" | "keep" | undefined = choice === keepCopilotSettings
+    ? "keep"
+    : workspaceConfig.get<string>("copilotGuide", "standalone") === "agents-md" ? "agents-md" : undefined;
+  // Whether Copilot will read the standalone guide — and so never attach
+  // AGENTS.md, whatever its profile — predicted from this folder's own
+  // `chat.useAgentsMdFile` the way `tl install` will decide it
+  // (copilotGuide.ts). In a window opened through a `.code-workspace` file VS
+  // Code ignores the folder's value (see the `.code-workspace` section above),
+  // so only a workspace-file value that is already `false` counts there.
+  const chatAgentsMd = vscode.workspace.getConfiguration("chat", vscode.Uri.file(root)).inspect<boolean>("useAgentsMdFile");
+  const workspaceFile = localWorkspaceFile();
+  const copilotReadsStandaloneGuide = workspaceFile === undefined
+    ? predictStandaloneCopilotGuide(
+      root,
+      copilotGuide ?? "standalone",
+      chatAgentsMd?.workspaceFolderValue ?? chatAgentsMd?.workspaceValue,
+    )
+    : predictStandaloneInWorkspaceFile(
+      copilotGuide ?? "standalone",
+      chatAgentsMd?.workspaceValue,
+      context?.workspaceState.get<string>(WORKSPACE_FILE_SETTING_KEY) === workspaceFile.fsPath,
+    );
   // DESIGN-v0.15 §8.2 (R7 Part B): keeps the generated .vscode/mcp.json /
   // .mcp.json / .codex/config.toml in sync with the SAME setting
   // mcpProvider.ts's direct-registration path reads — a Codex/Claude Code
@@ -399,8 +624,12 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
   // only when nothing has already decided the profile: an explicit
   // guideProfile setting at any scope (handled above) or the `code` tool
   // surface (which already defaults to compact on its own — see
-  // defaultGuideProfileForSurface) both skip the question entirely.
-  if (explicitGuideProfile === undefined && toolSurface === "full") {
+  // defaultGuideProfileForSurface) both skip the question entirely — and so
+  // does a workspace whose Copilot will read the standalone guide (Copilot
+  // standard-setup evaluation, 2026-10-02): Copilot then never attaches
+  // AGENTS.md, so the only readers left are Codex and Claude Code, which keep
+  // the full guide (the profile's default).
+  if (explicitGuideProfile === undefined && toolSurface === "full" && !copilotReadsStandaloneGuide) {
     const picked = await vscode.window.showQuickPick<GuideProfileQuickPickItem>(
       [
         {
@@ -451,6 +680,7 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
       profile,
       toolSurface === "code" ? "code" : undefined,
       copilotInlineResults === "keep" ? "keep" : undefined,
+      copilotGuide,
     ),
     { cwd: root },
   );
@@ -515,6 +745,30 @@ export async function setupWorkspace(bar: StatusBarManager): Promise<void> {
       `TokenLighten could not automatically raise GitHub Copilot's inline tool-result limit. ${reason}`,
       `TokenLightenはGitHub Copilotのインライン結果表示の上限を自動的には引き上げられませんでした。${reason}`,
     ));
+  }
+  // Same for the Copilot guide: `manual` means settings.json could not be
+  // safely edited, so Copilot keeps attaching AGENTS.md — name the fix.
+  const copilotGuideStatus = installJson?.report?.workspaces?.[0]?.copilotGuide;
+  if (copilotGuideStatus?.status === "manual") {
+    const reason = typeof copilotGuideStatus.reason === "string" ? copilotGuideStatus.reason : "";
+    await vscode.window.showWarningMessage(localized(
+      `TokenLighten could not automatically give GitHub Copilot its compact guide. ${reason}`,
+      `TokenLightenはGitHub Copilot向けのコンパクトなガイドを自動的には設定できませんでした。${reason}`,
+    ));
+  }
+  // A window opened through a `.code-workspace` file ignores the folder-level
+  // `chat.useAgentsMdFile` the install just wrote (see the `.code-workspace`
+  // section above): once the compact guide is in place, ask to set it in the
+  // workspace file too — before the reload below, so it takes effect with the
+  // rest. Every other outcome gives back a value this extension set earlier
+  // (`agents-md`, or a guide that did not end standalone); `keep` touches
+  // nothing, as everywhere.
+  if (context !== undefined && copilotGuide !== "keep" && localWorkspaceFile() !== undefined) {
+    if (copilotGuide === undefined && copilotGuideStatus?.status === "standalone") {
+      if (workspaceFileAgentsMdValue() !== false) await applyCopilotGuideToWorkspaceFile(context);
+    } else {
+      await withdrawCopilotGuideFromWorkspaceFile(context).catch(() => false);
+    }
   }
   await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }

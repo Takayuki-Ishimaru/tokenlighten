@@ -16,7 +16,7 @@
 // `PriorEvidence` and `../mcp/receipts.ts`'s `Receipt` freeze; nothing here is
 // emitted in their place, and a future codec/projection layer that maps these
 // types onto the wire MUST NOT import mutation rights (`EditToolCall`, or a
-// `ToolCall` bound to `edit_file`) — only the read-side vocabulary a
+// `ToolCall` bound to `tl_edit_file`) — only the read-side vocabulary a
 // projection legitimately needs. This module imports nothing from `../mcp/*`:
 // the internal model and the wire model are two separate type graphs, joined
 // only by a future projector, never by a shared base type.

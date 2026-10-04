@@ -1,7 +1,7 @@
 // searchLedgerRecording.spec.ts — P1-d (2026-08-28 review-fix wave) fixtures
-// for search_files dispatch ledger-recording.
+// for tl_search_files dispatch ledger-recording.
 //
-// Pre-wave, server.ts's search_files dispatch recorded ONLY find's authoritative
+// Pre-wave, server.ts's tl_search_files dispatch recorded ONLY find's authoritative
 // absence into the task-contract ledger. references and tree executed with no
 // ledger write at all, and a find HIT (as opposed to an absence) was likewise
 // never consumed as a proof transition. This file exercises the REAL dispatch
@@ -50,7 +50,7 @@ function writeFile(root: string, rel: string, content: string): void {
 }
 
 async function dispatch(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const result = await callTool("search_files", args);
+  const result = await callTool("tl_search_files", args);
   expect("isError" in result && result.isError === true, JSON.stringify(result)).toBe(false);
   const text = (result.content[0] as { text?: string } | undefined)?.text ?? "{}";
   return JSON.parse(text) as Record<string, unknown>;
@@ -83,13 +83,13 @@ afterEach(() => {
   }
 });
 
-describe("search_files dispatch ledger recording (P1-d)", () => {
+describe("tl_search_files dispatch ledger recording (P1-d)", () => {
   it("find: a HIT proves the scoped concern-token obligation as served", async () => {
     const root = mkWorkspace("find-hit");
     writeFile(root, "src/util.ts", "export function computeTotal() { return 1; }\n");
     const lane = "p1d-find-hit";
     const scope = seedConcern(root, lane, "task-find-hit", "computeTotal");
-    registerExecutableNextScope(root, scope, { tool: "search_files", arguments: { action: "find", query: "computeTotal" } });
+    registerExecutableNextScope(root, scope, { tool: "tl_search_files", arguments: { action: "find", query: "computeTotal" } });
     expect(concernObligation(root, scope, "computeTotal")?.proof).toBeUndefined();
 
     const body = await dispatch({ action: "find", query: "computeTotal", cwd: root, lane });
@@ -108,7 +108,7 @@ describe("search_files dispatch ledger recording (P1-d)", () => {
     const terms = ["computeBatchTotal", "missingBatchTerm"];
     const scope = seedConcerns(root, lane, "task-find-batch", terms);
     registerExecutableNextScope(root, scope, {
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "find", queries: terms },
     });
 
@@ -126,7 +126,7 @@ describe("search_files dispatch ledger recording (P1-d)", () => {
     const terms = ["computeBatchTotal", "missingBatchTerm"];
     const scope = seedConcerns(root, lane, "task-find-batch-absent", terms);
     registerExecutableNextScope(root, scope, {
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "find", queries: terms },
     });
 
@@ -145,13 +145,13 @@ describe("search_files dispatch ledger recording (P1-d)", () => {
 
     const hitLane = "p1d-refs-hit";
     const hitScope = seedConcern(root, hitLane, "task-refs-hit", "computeTotal");
-    registerExecutableNextScope(root, hitScope, { tool: "search_files", arguments: { action: "references", query: "computeTotal" } });
+    registerExecutableNextScope(root, hitScope, { tool: "tl_search_files", arguments: { action: "references", query: "computeTotal" } });
     await dispatch({ action: "references", query: "computeTotal", cwd: root, lane: hitLane });
     expect(concernObligation(root, hitScope, "computeTotal")?.proof).toEqual({ type: "served", witness: "computeTotal" });
 
     const absentLane = "p1d-refs-absent";
     const absentScope = seedConcern(root, absentLane, "task-refs-absent", "totallyMissingSymbolXYZ");
-    registerExecutableNextScope(root, absentScope, { tool: "search_files", arguments: { action: "references", query: "totallyMissingSymbolXYZ" } });
+    registerExecutableNextScope(root, absentScope, { tool: "tl_search_files", arguments: { action: "references", query: "totallyMissingSymbolXYZ" } });
     await dispatch({ action: "references", query: "totallyMissingSymbolXYZ", cwd: root, lane: absentLane });
     expect(concernObligation(root, absentScope, "totallyMissingSymbolXYZ")?.proof)
       .toEqual({ type: "authoritative-absent", witness: "totallyMissingSymbolXYZ" });
@@ -180,7 +180,7 @@ describe("search_files dispatch ledger recording (P1-d)", () => {
     // restart" unit test already establishes.
     recordTaskContract(root, ["tree", "src"], { query: "tree src" }, { lane });
     const scope = bindTaskContractHandle(root, { lane }, "task-tree");
-    const next = { tool: "search_files", arguments: { action: "tree", path: "src" } };
+    const next = { tool: "tl_search_files", arguments: { action: "tree", path: "src" } };
     registerExecutableNextScope(root, scope, next);
     expect(executableNextScope(root, lane, next)).toEqual(scope);
 

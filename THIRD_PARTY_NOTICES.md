@@ -45,8 +45,8 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | bl@4.1.0 | MIT |  | https://github.com/rvagg/bl |
 | bluebird@3.4.7 | MIT | Petka Antonov | https://github.com/petkaantonov/bluebird |
 | body-parser@2.3.0 | MIT |  | https://github.com/expressjs/body-parser |
-| brace-expansion@1.1.18 | MIT | Julian Gruber | https://github.com/juliangruber/brace-expansion |
-| brace-expansion@2.1.4 | MIT | Julian Gruber | https://github.com/juliangruber/brace-expansion |
+| brace-expansion@1.1.21 | MIT | Julian Gruber | https://github.com/juliangruber/brace-expansion |
+| brace-expansion@2.1.7 | MIT | Julian Gruber | https://github.com/juliangruber/brace-expansion |
 | buffer-crc32@0.2.13 | MIT | Brian J. Brennan | https://github.com/brianloveswords/buffer-crc32 |
 | buffer-indexof-polyfill@1.0.2 | MIT | https://github.com/sarosia | https://github.com/sarosia/buffer-indexof-polyfill |
 | buffer@5.7.1 | MIT | Feross Aboukhadijeh | https://github.com/feross/buffer |
@@ -93,7 +93,7 @@ For a dual-licensed dependency, the selected option below is the license TokenLi
 | express@5.2.1 | MIT | TJ Holowaychuk | https://github.com/expressjs/express |
 | fast-csv@4.3.6 | MIT | Doug Martin | https://github.com/C2FO/fast-csv |
 | fast-deep-equal@3.1.3 | MIT | Evgeny Poberezkin | https://github.com/epoberezkin/fast-deep-equal |
-| fast-uri@3.1.7 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
+| fast-uri@3.1.8 | BSD-3-Clause | Vincent Le Goff | https://github.com/fastify/fast-uri |
 | finalhandler@2.1.1 | MIT | Douglas Christopher Wilson | https://github.com/pillarjs/finalhandler |
 | forwarded@0.2.0 | MIT |  | https://github.com/jshttp/forwarded |
 | fresh@2.0.0 | MIT | TJ Holowaychuk | https://github.com/jshttp/fresh |
@@ -3135,7 +3135,7 @@ SOFTWARE.
 
 ### MIT — SHA-256 68f12f6e2c33688699249c01d8f9623c534da20aa71989c57b061b7bc1676d14
 
-Applies to: `brace-expansion@1.1.18`, `brace-expansion@2.1.4`
+Applies to: `brace-expansion@1.1.21`, `brace-expansion@2.1.7`
 
 ```text
 MIT License
@@ -6434,7 +6434,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### BSD-3-Clause — SHA-256 df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
 
-Applies to: `fast-uri@3.1.7`
+Applies to: `fast-uri@3.1.8`
 
 ```text
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae

@@ -41,6 +41,47 @@ function pick(obj: unknown, keyPath: string): any {
   return keyPath.split(".").reduce((acc: any, key) => (acc == null ? undefined : acc[key]), obj);
 }
 
+/**
+ * WP-L item 2 (eval-0929 §9, 2026-09-29): follows `limit.next`/top-level
+ * `next` (the same two spots this file's own tests already check) from an
+ * already-fetched `firstBody`, accumulating every hop's stringified body,
+ * until no further `next` exists or `hopCap` is reached.
+ *
+ * `protocol/budget/wireLimit.ts`'s `unionBatchContinuations` used to hand
+ * back a hand-built continuation that never carried the caller's declared
+ * `budget.bytes` forward — so a construction-time-dropped handle's recovery
+ * silently re-opened to the calibrated server ceiling, and this file's own
+ * single-hop `server.callTool(next.tool, next.arguments)` calls happened to
+ * get everything back in one shot. Once the fix makes that recovery honestly
+ * restate the ORIGINAL small `budget.bytes:8_000` fixture below, delivering
+ * a 200-line/~24 KB dropped window can legitimately take more than one hop —
+ * this helper lets those tests keep pinning "never widens to whole-file, and
+ * the window arrives intact" without also pinning a hop count the fix
+ * changed. Mirrors the "target-count cap" test further down in this same
+ * file, which already chases its own chain to exhaustion for the identical
+ * reason.
+ */
+async function chaseFrom(server: ServerHandle, firstBody: unknown, hopCap: number): Promise<string> {
+  let text = JSON.stringify(firstBody);
+  let body: unknown = firstBody;
+  let hops = 0;
+  while (hops < hopCap) {
+    const limitNext = pick(body, "limit.next") as { tool?: unknown; arguments?: unknown } | undefined;
+    const topNext = (body as Record<string, unknown> | undefined)?.["next"] as
+      | { tool?: unknown; arguments?: unknown }
+      | undefined;
+    const n = limitNext && typeof limitNext.tool === "string"
+      ? limitNext
+      : topNext && typeof topNext.tool === "string" ? topNext : undefined;
+    if (n === undefined) break;
+    const res = await server.callTool(n.tool as string, (n.arguments as Record<string, unknown>) ?? {});
+    body = res.body;
+    text += JSON.stringify(body);
+    hops += 1;
+  }
+  return text;
+}
+
 /** `count` self-identifying lines, each padded to `width` bytes, for `label`. */
 function selfIdLines(label: string, count: number, width: number): string {
   const lines: string[] = [];
@@ -92,11 +133,11 @@ describe("held item 7: a construction-time handles=[] cap-exceeded drop recovers
     // — sizable but each individually well under any per-item cap), one per
     // file — this is the "handle addressed a range" precondition.
     const REQUESTED_RANGE = "1-200";
-    const alphaRead = await server.callTool("read_file", {
+    const alphaRead = await server.callTool("tl_read_file", {
       targets: [{ path: "alpha.txt", range: REQUESTED_RANGE }],
       cwd: ws,
     });
-    const betaRead = await server.callTool("read_file", {
+    const betaRead = await server.callTool("tl_read_file", {
       targets: [{ path: "beta.txt", range: REQUESTED_RANGE }],
       cwd: ws,
     });
@@ -115,7 +156,7 @@ describe("held item 7: a construction-time handles=[] cap-exceeded drop recovers
     // already exceeds it, so BETA sees `handlesBatchCapHit` and is dropped
     // at CONSTRUCTION TIME (never even resolved) rather than truncated by
     // the later wire-level shed ladder.
-    const batch = await server.callTool("read_file", {
+    const batch = await server.callTool("tl_read_file", {
       targets: [{ handle: alphaHandle }, { handle: betaHandle }],
       budget: { bytes: 8_000 },
       cwd: ws,
@@ -150,9 +191,12 @@ describe("held item 7: a construction-time handles=[] cap-exceeded drop recovers
     ).toBe(true);
 
     // Follow the recovery verbatim and verify it delivers EXACTLY the
-    // requested window — no line outside 1-200.
+    // requested window — no line outside 1-200. WP-L item 2: the recovery
+    // now correctly restates the caller's declared budget (8_000 B here), so
+    // delivering the full 200-line window can take more than the first hop
+    // — chase to completion (`chaseFrom`, this file's own helper) rather
+    // than assuming one hop already carries everything.
     const recovered = await server.callTool(next.tool, next.arguments);
-    const recoveredText = JSON.stringify(recovered.body);
     if (recovered.body?.kind === "read.receipt") {
       // beta's 1-200 slice was already served once (minting the handle
       // above), so the server's own sha-based dedup recognizes this
@@ -161,12 +205,14 @@ describe("held item 7: a construction-time handles=[] cap-exceeded drop recovers
       // authoritative proof the recovery targeted the SAME window (a
       // whole-file widening would name a DIFFERENT range/handle and could
       // never dedup-match here). `served_by` states the exact slice.
+      const recoveredText = JSON.stringify(recovered.body);
       const servedBy = String(recovered.body?.receipt?.served_by ?? "");
       expect(
         servedBy.includes(REQUESTED_RANGE),
         `held item 7 regression: receipt's served_by does not name the requested window — recovery widened to something else: ${recoveredText}`,
       ).toBe(true);
     } else {
+      const recoveredText = await chaseFrom(server, recovered.body, 20);
       // The window's own first/last self-identifying lines must be present...
       expect(recoveredText.includes("-line-00001 "), `recovered body: ${recoveredText.slice(0, 2000)}`).toBe(true);
       expect(recoveredText.includes("-line-00200 "), `recovered body: ${recoveredText.slice(0, 2000)}`).toBe(true);
@@ -226,8 +272,8 @@ describe.each(["default", "vscode"] as const)(
       const BIG_RANGE = "1-200";
       const MINT_RANGE = "1-1";
       const OVERRIDE_RANGE = "1-12";
-      const bigRead = await server.callTool("read_file", { targets: [{ path: "big.txt", range: BIG_RANGE }], cwd: ws });
-      const narrowRead = await server.callTool("read_file", { targets: [{ path: "narrow.txt", range: MINT_RANGE }], cwd: ws });
+      const bigRead = await server.callTool("tl_read_file", { targets: [{ path: "big.txt", range: BIG_RANGE }], cwd: ws });
+      const narrowRead = await server.callTool("tl_read_file", { targets: [{ path: "narrow.txt", range: MINT_RANGE }], cwd: ws });
       const bigHandle: string | undefined = pick(bigRead.body, "evidence.0.handle") ?? bigRead.body?.entries?.[0]?.handle;
       const narrowHandle: string | undefined = pick(narrowRead.body, "evidence.0.handle") ?? narrowRead.body?.entries?.[0]?.handle;
       expect(typeof bigHandle, `no handle minted for big.txt: ${JSON.stringify(bigRead.body).slice(0, 800)}`).toBe("string");
@@ -238,7 +284,7 @@ describe.each(["default", "vscode"] as const)(
       // narrowHandle SECOND with an EXPLICIT override range ("1-12") WIDER
       // than its own mint window ("1-1") — forcing the aggregate ceiling
       // (T2) to construction-time-drop narrowHandle.
-      const batch = await server.callTool("read_file", {
+      const batch = await server.callTool("tl_read_file", {
         targets: [{ handle: bigHandle }, { handle: narrowHandle, range: OVERRIDE_RANGE }],
         budget: { bytes: 8_000 },
         cwd: ws,
@@ -271,17 +317,24 @@ describe.each(["default", "vscode"] as const)(
       expect(recovered?.range).not.toBe(MINT_RANGE);
 
       // Follow the recovery verbatim: it must deliver exactly lines 1-12 of
-      // narrow.txt — no line outside that window.
+      // narrow.txt — no line outside that window. WP-L item 2: this SAME
+      // recovery also carries bigHandle's own (much larger) remainder in the
+      // union, and now correctly restates the caller's declared budget, so
+      // narrowHandle's tiny window is not guaranteed to land on the very
+      // first hop — chase to completion (`chaseFrom`) rather than assuming
+      // one hop suffices; absence of line 13 is checked across every hop
+      // chased, which is a STRONGER form of the original single-hop check.
       const recoveredCall = await server.callTool(next.tool, next.arguments);
-      const recoveredText = JSON.stringify(recoveredCall.body);
       if (recoveredCall.body?.kind === "read.receipt") {
         // Only reachable if the recovery's own range happens to dedup-match
         // bytes already on the wire (line 1, from minting) — the assertion
         // above already pinned the recovery's OWN range to "1-12", so this
         // arm is a defensive fallback, not the expected shape.
+        const recoveredText = JSON.stringify(recoveredCall.body);
         const servedBy = String(recoveredCall.body?.receipt?.served_by ?? "");
         expect(servedBy.includes(OVERRIDE_RANGE) || servedBy.includes(MINT_RANGE), recoveredText).toBe(true);
       } else {
+        const recoveredText = await chaseFrom(server, recoveredCall.body, 20);
         expect(recoveredText.includes("narrow-line-00001 "), recoveredText.slice(0, 1500)).toBe(true);
         expect(recoveredText.includes("narrow-line-00012 "), recoveredText.slice(0, 1500)).toBe(true);
         expect(
@@ -300,7 +353,7 @@ describe.each(["default", "vscode"] as const)(
 // for a verbatim follower, with no OTHER field ever re-addressing them (an
 // omitted-at-construction-time entry never reaches `entries[]`, so it has no
 // per-entry fallback the way a wire-level narrowed-but-present entry does).
-// The advertised `read_file` schema declares no `maxItems` on `targets`, so
+// The advertised `tl_read_file` schema declares no `maxItems` on `targets`, so
 // the fix is to name EVERY undelivered window and let the response budget
 // decide how much of the recovery hop's own body fits (plan §4's rule, per
 // this file's own R-A3 banner further up). This test proves it with MORE
@@ -332,13 +385,13 @@ describe.each(["default", "vscode"] as const)(
       // whole (tiny) window — same range it will be re-requested with, so
       // the construction-time drop's recovery is proven complete rather than
       // (also, separately, R-A3 Item 2's own concern) correctly re-targeted.
-      const bigRead = await server.callTool("read_file", { targets: [{ path: "big.txt", range: `1-${BIG_LINES}` }], cwd: ws });
+      const bigRead = await server.callTool("tl_read_file", { targets: [{ path: "big.txt", range: `1-${BIG_LINES}` }], cwd: ws });
       const bigHandle: string | undefined = pick(bigRead.body, "evidence.0.handle") ?? bigRead.body?.entries?.[0]?.handle;
       expect(typeof bigHandle, `no handle minted for big.txt: ${JSON.stringify(bigRead.body).slice(0, 800)}`).toBe("string");
 
       const smallHandles: string[] = [];
       for (let i = 0; i < SMALL_COUNT; i += 1) {
-        const read = await server.callTool("read_file", { targets: [{ path: `small${i}.txt`, range: `1-${SMALL_LINES}` }], cwd: ws });
+        const read = await server.callTool("tl_read_file", { targets: [{ path: `small${i}.txt`, range: `1-${SMALL_LINES}` }], cwd: ws });
         const handle: string | undefined = pick(read.body, "evidence.0.handle") ?? read.body?.entries?.[0]?.handle;
         expect(typeof handle, `no handle minted for small${i}.txt: ${JSON.stringify(read.body).slice(0, 800)}`).toBe("string");
         smallHandles.push(handle!);
@@ -347,7 +400,7 @@ describe.each(["default", "vscode"] as const)(
       // A 12-target handles=[] batch: bigHandle FIRST (crosses the ceiling
       // alone), then all 11 smallN handles — every one of them dropped at
       // CONSTRUCTION TIME, before the wire ladder ever runs.
-      const batch = await server.callTool("read_file", {
+      const batch = await server.callTool("tl_read_file", {
         targets: [{ handle: bigHandle }, ...smallHandles.map((handle) => ({ handle }))],
         budget: { bytes: 8_000 },
         cwd: ws,

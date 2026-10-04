@@ -39,15 +39,19 @@
 import type { TokenLightenClient, TokenLightenTool } from "@tokenlighten/types";
 import type { NormalizedSessionUsage } from "./parsers/types.js";
 
+// A client log written before the `tl_` rename (2026-10-02) records
+// "mcp__tokenlighten__read_file"; one written after it records
+// "mcp__tokenlighten__tl_read_file". Both are the same tool.
 const TOKENLIGHTEN_TOOL_NAME =
-  /^(?:mcp__)?tokenlighten(?:__|:)(read_file|search_files|edit_file)$/i;
+  /^(?:mcp__)?tokenlighten(?:__|:)(?:tl_)?(read_file|search_files|edit_file)$/i;
 
 /** Maps a raw tool-call name (as recorded in a client log, e.g.
+ *  "mcp__tokenlighten__tl_read_file", or the pre-rename
  *  "mcp__tokenlighten__read_file") to TL's short tool name, or null when the
  *  name does not identify a TokenLighten tool call at all. */
 export function normalizeToolCallName(name: string): TokenLightenTool | null {
   const match = TOKENLIGHTEN_TOOL_NAME.exec(name.trim());
-  return match ? (match[1].toLowerCase() as TokenLightenTool) : null;
+  return match ? (`tl_${match[1].toLowerCase()}` as TokenLightenTool) : null;
 }
 
 // ---------------------------------------------------------------------------

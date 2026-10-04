@@ -13,7 +13,7 @@
  *
  * ITEM 2, ROOT CAUSE (FIX-A2's own report, fixed here). `readBatch.ts`'s rung
  * 4 (`truncateRangedEntries`) and rung 6 (`shedBatchEntry`) each mint a
- * `read_file` continuation for a "handle"-form entry, but `ShedContext.args`
+ * `tl_read_file` continuation for a "handle"-form entry, but `ShedContext.args`
  * is the SAME `args` object `server.ts`'s `normalizeCanonicalRequest` already
  * deleted `content` from before dispatch — by the time a rung runs, there is
  * no way left to tell "this call originally said content:full" from "it did
@@ -96,7 +96,7 @@ function commentedFile(codeLines: number, commentLines: number): string {
 const ELISION_MARKER_RE = /\/\* doc elided L\d+-\d+ \*\/|#\s?doc elided L\d+-\d+/;
 
 async function call(args: Record<string, unknown>, ws: string): Promise<Record<string, unknown>> {
-  const raw = await callTool("read_file", { ...args, cwd: ws });
+  const raw = await callTool("tl_read_file", { ...args, cwd: ws });
   return JSON.parse(raw.content[0]!.text) as Record<string, unknown>;
 }
 
@@ -202,7 +202,7 @@ describe("FIX-A3 item 2: readBatch.ts's shed-ladder continuation echoes content:
       // Every minted continuation this call ever follows must itself still
       // declare content:"full" (not merely the very first one) — a later hop
       // that silently dropped it would re-elide the remainder.
-      if (next.tool === "read_file" && next.arguments["cursor"] === undefined) {
+      if (next.tool === "tl_read_file" && next.arguments["cursor"] === undefined) {
         expect(next.arguments["content"], `hop's own next lost content:"full": ${JSON.stringify(next)}`).toBe("full");
       }
       res = await call(next.arguments, ws);

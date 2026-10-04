@@ -88,22 +88,22 @@ describe("v0.10 lean execution contract", () => {
       readiness_risk: { policy: "selective-reject", estimated_false_ready_risk: 1, max_false_ready_risk: 0.05, decision: "reject", factors: ["uncovered-required-obligation"] },
       typestate: { phase: "discovery", allowed_actions: ["read", "search"], challenge_required_for: [] },
       call_budget: { version: 2, policy: "expected-decision-change", normalized_turn_cost: 0.18, expected_decision_change: 0.72, expected_value: 0.972, decision_threshold: 0.18, discovery_allowed: true, terminal_action: "edit", reason: "valuable" },
-      next_call: { tool: "read_file", arguments: { handle: "h4" } },
+      next_call: { tool: "tl_read_file", arguments: { handle: "h4" } },
     } as TaskExecutionContract;
 
     expect(projectLeanExecutionContract(discovery)).toEqual({
       phase: "discovery",
       unresolved: ["surface-content"],
       allowed: ["read", "search"],
-      next_call: { tool: "read_file", arguments: { handle: "h4" } },
+      next_call: { tool: "tl_read_file", arguments: { handle: "h4" } },
     });
 
     const invalidWriteContinuation = {
       ...discovery,
-      next_call: { tool: "edit_file", arguments: { handle: "h5" } },
+      next_call: { tool: "tl_edit_file", arguments: { handle: "h5" } },
     } as TaskExecutionContract;
     expect(() => projectLeanExecutionContract(invalidWriteContinuation)).toThrow(
-      "discovery execution contract has a non-read-only next_call: edit_file",
+      "discovery execution contract has a non-read-only next_call: tl_edit_file",
     );
 
     const awaiting = {
@@ -163,7 +163,7 @@ describe("v0.10 lean execution contract", () => {
     // lean-vs-rich BYTE ratio is asserted against the in-process projection
     // input instead, which is where both shapes still coexist.
     process.env["TL_LEAN_CONTRACT"] = "0";
-    const lean = body(await callTool("read_file", {
+    const lean = body(await callTool("tl_read_file", {
       mode: "task_pack",
       query: "Explain QuoteOrchestrator transition behavior",
       symbol: "QuoteOrchestrator",

@@ -126,7 +126,7 @@ function sanitize(id: EncodingId): string {
   return id.replace(/[^a-zA-Z0-9]/g, "_");
 }
 
-/** The one code identifier embedded (decodably, where the encoding allows it) in each fixture — the "needle" the `symbol` / `literal-first` / `search_files find` routes target. */
+/** The one code identifier embedded (decodably, where the encoding allows it) in each fixture — the "needle" the `symbol` / `literal-first` / `tl_search_files find` routes target. */
 export function matrixIdentifier(id: EncodingId): string {
   return `servedMatrixSymbol_${sanitize(id)}`;
 }

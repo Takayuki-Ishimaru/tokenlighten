@@ -402,9 +402,9 @@ describe("languageForPathWithContent — .h content sniff", () => {
 // Reproduces the reviewer-proven bug: a `class Widget {...}` .h enumerated
 // with the static extension-only "c" answer indexes as {"lang":"c",
 // "symbols":[]} because LANG_PATTERNS.c has no class/struct pattern — so
-// search_files action=symbols (backed by indexStore.ts's persisted index,
+// tl_search_files action=symbols (backed by indexStore.ts's persisted index,
 // which applies the SAME sniff via languageForPathWithContent) was losing
-// C++ classes that direct read_file skeletons (mcp-server's own
+// C++ classes that direct tl_read_file skeletons (mcp-server's own
 // per-request sniff) already saw correctly.
 
 describe("buildFileInputs — .h C++ sniff end-to-end", () => {

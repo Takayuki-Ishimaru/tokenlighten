@@ -44,7 +44,7 @@
  *   - `repeated_query`  — a call's resolved task_ref was ALREADY this
  *     workspace session's active qref (a same-qref re-pack, or a verified
  *     qref-replay). Emitted generically off `args.query`/`args.qref` at the
- *     server.ts dispatch boundary, so read_file and search_files are both
+ *     server.ts dispatch boundary, so tl_read_file and tl_search_files are both
  *     covered without their own deep dispatch logic changing.
  *   - `repeated_range`  — a served-range ledger hit answered with a receipt
  *     ("code-unchanged"/prior) instead of fresh bytes. Emitted from the THREE

@@ -95,7 +95,7 @@ async function runChain(config: ConfigName, query: string): Promise<ChainResult>
   try {
     return await followNextToEnd(
       server,
-      { tool: "read_file", arguments: { query, cwd: ws, task: { epoch: "new", profile: "answer" } } },
+      { tool: "tl_read_file", arguments: { query, cwd: ws, task: { epoch: "new", profile: "answer" } } },
       { cwd: ws, hopCap: 10, maxQrefRepacks: 1 },
     );
   } finally {
@@ -112,11 +112,11 @@ function finalAnswer(chain: ChainResult): any {
   return answers[answers.length - 1];
 }
 
-/** No hop's `next` is a bare `search_files` tree / symbol-scoped find — the dead ends this gate replaces. */
+/** No hop's `next` is a bare `tl_search_files` tree / symbol-scoped find — the dead ends this gate replaces. */
 function expectNoBareSearchNext(chain: ChainResult): void {
   for (const hop of chain.hops) {
     const next = decisionOf(hop.response).next;
-    if (next?.tool !== "search_files") continue;
+    if (next?.tool !== "tl_search_files") continue;
     expect(next.arguments?.action).not.toBe("tree");
     expect(next.arguments?.scope?.kind).not.toBe("symbol");
   }
@@ -157,7 +157,7 @@ describe.each(CONFIG_NAMES)("facet completion gate — honesty controls [%s]", (
     const first = decisionOf(chain.hops[0]!.response);
     expect(first.kind).toBe("discover");
     expect((first.gaps ?? []).some((g: any) => (g.refs ?? []).includes("request-item:facet-1:value"))).toBe(true);
-    expect(first.next?.tool).toBe("read_file");
+    expect(first.next?.tool).toBe("tl_read_file");
     for (const target of first.next.arguments.targets) {
       expect(target.path).toBe("src/levels.ts");
       expect(target.range).toMatch(/^\d+-\d+$/u);
@@ -203,7 +203,7 @@ describe.each(CONFIG_NAMES)("facet completion gate — honesty controls [%s]", (
       chain = await followNextToEnd(
         server,
         {
-          tool: "read_file",
+          tool: "tl_read_file",
           arguments: {
             query: "Which values does resolveLevel read by default?",
             targets: [{ path: "src/levels.ts", range: `${focalLine}-${focalLine + 2}` }],
@@ -250,7 +250,7 @@ describe("a facet chain under a caller budget: partial deliveries continue under
       chain = await followNextToEnd(
         server,
         {
-          tool: "read_file",
+          tool: "tl_read_file",
           arguments: { query: "Which values does resolveLevel read by default?", cwd: ws, task: { epoch: "new", profile: "answer" }, budget: { bytes: 7000 } },
         },
         { cwd: ws, hopCap: 14, maxQrefRepacks: 0 },
@@ -261,7 +261,7 @@ describe("a facet chain under a caller budget: partial deliveries continue under
     expect(chain.capped).toBe(false);
     chain.hops.forEach((hop, index) => {
       const decision = decisionOf(hop.response);
-      if (decision.next?.tool === "read_file" && Array.isArray(decision.next.arguments?.targets)) {
+      if (decision.next?.tool === "tl_read_file" && Array.isArray(decision.next.arguments?.targets)) {
         // A continuation of this query-bearing task never drops the task.
         const args = decision.next.arguments;
         expect(typeof args.query === "string" || typeof args.qref === "string", JSON.stringify(args)).toBe(true);
@@ -309,7 +309,7 @@ describe("G3 — an uncovered identifier nothing declares is recovered by a rang
       ?? (contract.falsification?.unresolved ?? []).includes("identifier:SERVICE_TIMEOUT_KEY");
     expect(identifier).toBeTruthy();
     const next = contract.next_call;
-    expect(next?.tool).toBe("read_file");
+    expect(next?.tool).toBe("tl_read_file");
     const targets = (next?.arguments as { targets?: Array<{ path: string; range?: string }>; query?: string }).targets ?? [];
     expect(targets).toHaveLength(1);
     expect(targets[0]!.path).toBe("src/settings.ts");
@@ -324,7 +324,7 @@ describe("G3 — an uncovered identifier nothing declares is recovered by a rang
     const ws = workspaceWithEnvKey();
     const contract = buildTaskExecutionContract(answerResult(), "answer", "Explain how declaredButUnserved works.", undefined, ws);
     const next = contract.next_call;
-    expect(next?.tool).toBe("search_files");
+    expect(next?.tool).toBe("tl_search_files");
     expect((next?.arguments as { action?: string }).action).toBe("symbols");
   });
 });

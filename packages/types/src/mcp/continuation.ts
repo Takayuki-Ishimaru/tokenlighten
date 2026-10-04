@@ -14,7 +14,7 @@
 //   2. ONE FETCH REQUEST's remainder -> **this file**
 //   3. what the caller已 holds     -> the settled served-range ledger
 //
-// (2) had no representation at all before v0.15. A `read_file` whose body was
+// (2) had no representation at all before v0.15. A `tl_read_file` whose body was
 // cut by the wire budget shipped a `limit.next` naming only the LAST shed
 // pass's window, so a follower that executes `next` verbatim — which AGENTS.md
 // requires it to do — silently lost every line the earlier passes had cut. The
@@ -34,7 +34,7 @@
 // ------------------------------ NOT THE WIRE --------------------------------
 //
 // Nothing here is a wire shape. The wire carries exactly ONE additive field —
-// `read_file.cursor`, an opaque token — and `packages/types/src/domain/
+// `tl_read_file.cursor`, an opaque token — and `packages/types/src/domain/
 // state-handle.ts`'s F5 rule still holds: a cursor rides only inside
 // `next.arguments`, never as a standalone top-level response field. These
 // interfaces describe the SERVER-SIDE record that token addresses, and they
@@ -130,7 +130,7 @@ export interface ReadRequestPage {
   cursor_state_version: number;
 }
 
-/** The persisted state ONE `read_file` fetch request owns. */
+/** The persisted state ONE `tl_read_file` fetch request owns. */
 export interface ReadRequestState {
   v: 1;
   family: "read";
@@ -228,7 +228,7 @@ export interface SearchRequestPage {
 }
 
 /**
- * The persisted state ONE `search_files` `find` fetch request owns (R3).
+ * The persisted state ONE `tl_search_files` `find` fetch request owns (R3).
  *
  * The model deliberately stays a plain PREFIX counter (`delivered: number`)
  * rather than a scattered delivered-set: every page — including the first,
@@ -242,7 +242,7 @@ export interface SearchRequestState {
   v: 1;
   family: "search";
   /**
-   * Which `search_files` action opened this request.
+   * Which `tl_search_files` action opened this request.
    *
    * DESIGN-v0.15 validation appendix §1's "検索cursor" bullet: "既存position
    * handleは再利用候補だが、要求・lane・epoch・source revisionの結合を追加する"

@@ -74,8 +74,8 @@ function normalizedDecisionValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizedDecisionValue);
   if (value === null || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
-  if (record["tool"] === "read_file" && record["arguments"] !== null && typeof record["arguments"] === "object" && !Array.isArray(record["arguments"])) {
-    return { tool: "read_file", arguments: normalizedReadArguments(record["arguments"] as Record<string, unknown>) };
+  if (record["tool"] === "tl_read_file" && record["arguments"] !== null && typeof record["arguments"] === "object" && !Array.isArray(record["arguments"])) {
+    return { tool: "tl_read_file", arguments: normalizedReadArguments(record["arguments"] as Record<string, unknown>) };
   }
   const inferredSliceMode = record["mode"] === "slice"
     && (typeof record["handle"] === "string" || typeof record["range"] === "string");

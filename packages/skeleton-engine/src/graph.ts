@@ -76,11 +76,11 @@ export function languageForPath(filePath: string): string | undefined {
 // exactly the failure mode this sniff exists to avoid.
 //
 // mcp-server's copy sniffs per-request, for callers that already hold the
-// file's text (read_file, findText, locateTaskContext). This copy sniffs
+// file's text (tl_read_file, findText, locateTaskContext). This copy sniffs
 // once at INDEX-BUILD time — buildFileInputs below, and indexStore.ts's
 // loadOrBuildSourceIndex slow path, both already read the file's content
 // off disk, so the sniff is free there. Skipping it here would let the
-// PERSISTED symbol index that search_files action=symbols reads from lock
+// PERSISTED symbol index that tl_search_files action=symbols reads from lock
 // in the extension-only "c" answer (and LANG_PATTERNS.c's function-only
 // patterns) for every genuinely-C++ `.h` file in the repo, until that
 // file's content next changes.

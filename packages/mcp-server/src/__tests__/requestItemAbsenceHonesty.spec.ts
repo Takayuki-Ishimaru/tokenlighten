@@ -175,14 +175,23 @@ describe("2. JA matrix: glossary/katakana terms, implemented vs missing, bridge 
     expect(absentTerms(result).some((t) => t.includes("認証")), JSON.stringify(result.request_item_absences)).toBe(false);
   });
 
-  it("katakana loanword (マイグレーション), missing: absent, with honest scope", async () => {
+  // R2-T2 (2026-09-30, orchestrator RULING — supersedes R-B3 ruling 3's "a
+  // phonetic miss is as checkable as an English word's", which this case used
+  // to pin as `absent`, scope complete): a katakana loanword the workspace
+  // bridge cannot map and the glossary cannot spell names a concept the
+  // workspace would spell in ENGLISH, so its literal miss proves nothing — it
+  // is disclosed undetermined (still named, never silently dropped), never a
+  // verified absence. A katakana term the glossary DOES spell is checked by
+  // that spelling and can still be certified absent
+  // (evaluation0929.compoundTopicPoints.spec.ts).
+  it("katakana loanword (マイグレーション) with no known English spelling, missing: disclosed undetermined, never a verified absence", async () => {
     const ws = mkTmpDir("tl-ah-ja-katakana-missing-");
     writeCacheModule(ws);
     const result = await runQuery("キャッシュの期限切れの処理と、マイグレーションの仕組みを説明してください", ws);
     const migration = (result.request_item_absences ?? []).find((a) => a.term.includes("マイグレーション"));
     expect(migration, JSON.stringify(result.request_item_absences)).toBeDefined();
-    expect(migration?.scope_complete).toBe(true);
-    expect(migration?.omitted_count).toBe(0);
+    expect(migration?.undetermined, JSON.stringify(migration)).toBe(true);
+    expect(migration?.undetermined_reason ?? "").toMatch(/katakana term with no known English spelling/u);
   });
 
   it("katakana loanword (キャッシュ), implemented: never absent", async () => {

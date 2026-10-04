@@ -46,7 +46,7 @@
 //    `compileRelationPacket()` produced (whose sites/edge-lines may lack a
 //    `.handle`, since minting one is an I/O side effect this compiler is
 //    deliberately kept pure of), read each referenced file once, mint a REAL
-//    `handleTable` handle (`util/handles.ts` — the same table `read_file`
+//    `handleTable` handle (`util/handles.ts` — the same table `tl_read_file`
 //    resolves handles against) scoped to the exact known range (or the whole
 //    file when no line is known), and return an updated packet with every
 //    site/edge-line's `.handle` populated. A site whose handle cannot be
@@ -710,7 +710,7 @@ function mintOneHandle(
   // so an inflated bound here is the same wire-visible N+1 class fixed
   // elsewhere this wave, just reached through the relation-packet path
   // (TL_SF_RELATION_PACKETS) instead of a task-pack surface producer.
-  // countLines() matches edit_file's own bounds check.
+  // countLines() matches tl_edit_file's own bounds check.
   const totalLines = Math.max(1, countLines(text));
   const [startRaw, endRaw] = range.split("-", 2);
   const start = Number(startRaw);

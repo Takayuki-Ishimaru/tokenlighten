@@ -17,7 +17,7 @@
 //            may treat it as proof.
 //   strong — a REJECTION. It may only be built from a scope-COMPLETE search
 //            plus DIRECT absence evidence, in the exact shape this repository
-//            already uses for `search_files` absence (0 matches over a scope
+//            already uses for `tl_search_files` absence (0 matches over a scope
 //            the provider itself reported as complete). A strong tombstone
 //            without that pair is UNCONSTRUCTIBLE: `DirectAbsenceProof`'s
 //            literal `true`/`0` refuse it at the type level, and

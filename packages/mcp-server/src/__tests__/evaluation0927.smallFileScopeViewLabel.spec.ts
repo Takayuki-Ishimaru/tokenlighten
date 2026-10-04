@@ -4,7 +4,7 @@
  * (getSymbolWithContext.ts, files under 2 KiB) dropped the
  * `// tokenlighten:scope …` header on the premise that "the body stands
  * alone", but a METHOD's view still carried the enclosing-scope line and the
- * sibling signatures. A `read_file {targets:[{path, symbol}]}` batch entry then
+ * sibling signatures. A `tl_read_file {targets:[{path, symbol}]}` batch entry then
  * shipped `form:"handle"`, `range:"25-30"` over ~20 assembled lines with no
  * label at all — neither verbatim source of the range nor marked as derived.
  *
@@ -80,7 +80,7 @@ describe("Trim A keeps the label on an assembled view", () => {
 });
 
 describe("a symbol batch entry over a small file is labelled on the wire", () => {
-  it("read_file {targets:[{path, symbol}]}: the entry content opens with the scope sentinel", async () => {
+  it("tl_read_file {targets:[{path, symbol}]}: the entry content opens with the scope sentinel", async () => {
     const ws = fs.realpathSync(shortTmpDir(HOME, ".tl-scopelabel-"));
     tmpDirs.push(ws);
     fs.mkdirSync(path.join(ws, "src"), { recursive: true });
@@ -89,7 +89,7 @@ describe("a symbol batch entry over a small file is labelled on the wire", () =>
     const s = startDevServer(ws, "default");
     servers.push(s);
     await s.initialize();
-    const body = (await s.callTool("read_file", {
+    const body = (await s.callTool("tl_read_file", {
       targets: [{ path: "src/OrderFlow.ts", symbol: "paymentStep0" }, { path: "src/OrderFlow.ts", symbol: "paymentStep1" }],
       cwd: ws,
     })).body;

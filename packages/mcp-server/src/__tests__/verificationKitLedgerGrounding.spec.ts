@@ -6,11 +6,11 @@
  * body-inlining pass `attachVerification`/`withVerificationSection` run on
  * every `edit.applied`/`mode=closure` response) shipped a referencing test's
  * whole-file `code` body and recorded the fact ONLY in
- * `verificationSurfacesServed` (ledger 5) — a namespace `edit_file`'s
+ * `verificationSurfacesServed` (ledger 5) — a namespace `tl_edit_file`'s
  * admissible union / byte residency (`admissibleEditPaths`/
  * `editPathResidency`, ledgers 2/3) never consult. A file a kit had JUST
- * shipped whole therefore still refused `edit_file` `execution-typestate`
- * unless some OTHER call had separately `read_file`'d it — union/residency
+ * shipped whole therefore still refused `tl_edit_file` `execution-typestate`
+ * unless some OTHER call had separately `tl_read_file`'d it — union/residency
  * never heard about a kit-inlined body at all, even though real, non-partial
  * bytes of that exact file had genuinely gone out on the wire.
  *
@@ -28,8 +28,8 @@
  *
  * This spec proves the fix end to end through the REAL dispatch (`callTool`),
  * not a hand-built session state: edit a source file with a real referencing
- * test, then attempt an `edit_file` search/replace on that test file WITHOUT
- * ever separately `read_file`-ing it. Pre-fix this refuses
+ * test, then attempt an `tl_edit_file` search/replace on that test file WITHOUT
+ * ever separately `tl_read_file`-ing it. Pre-fix this refuses
  * `execution-typestate`; post-fix it applies, grounded purely on the bytes
  * the verification kit inlined.
  */
@@ -51,16 +51,22 @@ function write(root: string, rel: string, body: string): void {
 }
 
 async function edit(args: Body): Promise<Body> {
-  const result = await callTool("edit_file", args);
+  const result = await callTool("tl_edit_file", args);
   return JSON.parse(result.content[0]?.text ?? "{}") as Body;
 }
 
 async function read(args: Body): Promise<Body> {
-  const result = await callTool("read_file", args);
+  const result = await callTool("tl_read_file", args);
   return JSON.parse(result.content[0]?.text ?? "{}") as Body;
 }
 
+// Edit authority grounded by an inline kit body needs the bodies
+// TL_EFF_SLIM_EDIT=0 restores (the default since 2026-10-01 ships none, so a
+// kit-named file is then read through the kit's next_call before an edit).
+const previousSlimEdit = process.env["TL_EFF_SLIM_EDIT"];
+
 beforeAll(async () => {
+  process.env["TL_EFF_SLIM_EDIT"] = "0";
   ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "tl-vkit-ground-")));
   if (!process.argv.includes("--allow-write")) process.argv.push("--allow-write");
   process.env["TOKENLIGHTEN_ROOT"] = ws;
@@ -82,6 +88,8 @@ afterEach(async () => {
 
 afterAll(() => {
   delete process.env["TOKENLIGHTEN_ROOT"];
+  if (previousSlimEdit === undefined) delete process.env["TL_EFF_SLIM_EDIT"];
+  else process.env["TL_EFF_SLIM_EDIT"] = previousSlimEdit;
   try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
@@ -101,7 +109,7 @@ function makeFixture(root: string): void {
  * fence ever installed) applies to any file unconditionally, so a naive
  * "edit a never-read file" probe would pass both before and after the fix
  * for the wrong reason. Establishing a fence first — exactly the shape
- * `r17_g.mts` used — makes `edit_file`'s `execution-typestate` gate actually
+ * `r17_g.mts` used — makes `tl_edit_file`'s `execution-typestate` gate actually
  * consult `session.admissibleEditPaths` (`state/session.ts`'s
  * `outsidePaths = paths.filter(p => !fence.actionPaths.includes(p) &&
  * !session.admissibleEditPaths.includes(p))`), which is precisely the ledger
@@ -116,7 +124,7 @@ async function establishFence(root: string): Promise<void> {
 }
 
 describe("FX-O2 finding 7b — verification-kit code bodies ground edit authority", () => {
-  it("edit_file on a referencing test file the kit JUST shipped applies, with no separate read_file ever issued for it", async () => {
+  it("tl_edit_file on a referencing test file the kit JUST shipped applies, with no separate tl_read_file ever issued for it", async () => {
     const root = "case1";
     makeFixture(path.join(ws, root));
     await establishFence(root);
@@ -136,7 +144,7 @@ describe("FX-O2 finding 7b — verification-kit code bodies ground edit authorit
     expect(testSurface, JSON.stringify(surfaces)).toBeDefined();
     expect(String(testSurface!["code"]), "the kit must inline this small referencing test's real body").toContain("request()");
 
-    // No `read_file` of test/test_mode_manager.cpp has EVER been issued in
+    // No `tl_read_file` of test/test_mode_manager.cpp has EVER been issued in
     // this session, and the fence's own frontier only ever named
     // src/mode_manager.cpp — the ONLY bytes of the test file this server
     // ever shipped are the kit's own `code` field above. Pre-fix this

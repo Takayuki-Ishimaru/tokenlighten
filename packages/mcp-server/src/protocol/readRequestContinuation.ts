@@ -38,15 +38,17 @@
 import type { Kind, LineWindow, ToolCall } from "@tokenlighten/types";
 
 import { demoteToDiscover } from "./budget/actFloor.js";
-import type { ShedPayload } from "./budget/shedders/registry.js";
+import { carriesStripDisclosure, type ShedPayload } from "./budget/shedders/registry.js";
 import { canonicalToolCall } from "./envelope.js";
 import {
   markReadRequestOpenness,
   mintReadCursor,
   parseWindow,
+  previewSettledRemaining,
   readRequestComplete,
   settleReadRequest,
   windowStrings,
+  wireLineCostBytes,
   type StagedReadRequest,
 } from "../state/readRequestStore.js";
 
@@ -146,7 +148,7 @@ export function demoteActAfterShed(input: {
  */
 export function cursorCall(staged: StagedReadRequest, cursor: string): ToolCall {
   const echo = staged.echo;
-  return canonicalToolCall("read_file", {
+  return canonicalToolCall("tl_read_file", {
     cursor,
     ...(echo.cwd !== undefined && echo.cwd !== "" ? { cwd: echo.cwd } : {}),
     ...(echo.lane !== undefined && echo.lane !== "" ? { lane: echo.lane } : {}),
@@ -158,7 +160,7 @@ export function cursorCall(staged: StagedReadRequest, cursor: string): ToolCall 
 
 /** True iff this `next` is one of the read-family continuations we may replace. */
 function replaceableNext(value: unknown): boolean {
-  return isRecord(value) && value["tool"] === "read_file";
+  return isRecord(value) && value["tool"] === "tl_read_file";
 }
 
 /**
@@ -257,6 +259,111 @@ export function shrinkLargestEvidenceByOneLine(payload: ShedPayload): ShedPayloa
 }
 
 /**
+ * The `start-end` string naming the SINGLE line `droppedLine`, merged onto
+ * the front of `priorRemaining` (a `read.batch` entry's own `remaining_ranges`,
+ * already recording what an EARLIER truncation — `readCodeModes.ts`'s
+ * `resolveSlice`, or server.ts's `truncateResolvedItemToFit` — deferred).
+ * Extends the first prior span left by one line when it is immediately
+ * adjacent (`droppedLine + 1 === priorStart`, the ordinary case: this shrink
+ * always narrows the entry's OWN still-being-served tail, which sits right
+ * before whatever was already deferred); otherwise prepends a new one-line
+ * span, never dropping a prior span or merging two that are not adjacent.
+ */
+function withDroppedLineMerged(droppedLine: number, priorRemaining: readonly string[]): string[] {
+  const first = priorRemaining[0];
+  const firstWindow = first !== undefined ? parseWindow(first) : undefined;
+  if (firstWindow !== undefined && firstWindow.start === droppedLine + 1) {
+    return [`${droppedLine}-${firstWindow.end}`, ...priorRemaining.slice(1)];
+  }
+  return [`${droppedLine}-${droppedLine}`, ...priorRemaining];
+}
+
+/**
+ * BCF2 (eval-0929 §9): the `read.batch` sibling of `shrinkLargestEvidenceByOneLine`
+ * above — same contract (SMALLEST possible correction, tried exactly once,
+ * for `emit.ts`'s post-rewrite budget check ONLY), extended to the shape
+ * `read.batch` uses instead of `read.text`'s `evidence[]`: `entries[]`, each
+ * addressed by `content`+`range` rather than `body`+`range`.
+ *
+ * THE GAP THIS CLOSES (V15-BCF's own reported residual, this package's
+ * item 2): a force-admitted, byte-fitted batch entry whose resolution ALSO
+ * staged a read request can have `applyReadRequestContinuation`'s rewrite
+ * (replacing a short per-entry `next`/top-level `next` with the unified
+ * cursor call) grow the response past budget — `shrinkLargestEvidenceByOneLine`
+ * returns `undefined` for a `read.batch` (no top-level `evidence[]`), so
+ * there was no fallback and the call refused `budget-below-minimum` outright,
+ * discarding an already-correctly-sized batch.
+ *
+ * ONLY an entry that carries BOTH a `content` string and a parseable `range`
+ * is eligible — a `form:"file"`/`form:"file-downgraded"` entry has no range
+ * to narrow, and WP-G's standing rule ("never drop an entry" —
+ * `readRequestContinuation.ts`'s `clearContinuation`/`addressesForeignPath`
+ * doc comments) means shrinking one entry's own content by a line is the one
+ * correction this function may make; removing an entry from `entries[]`
+ * entirely is not among its options. Among eligible entries, picks the
+ * WIDEST by `content.length` — the same single well-defined choice the
+ * evidence-shaped sibling makes.
+ *
+ * UNLIKE the evidence-shaped sibling, this ALSO updates the shrunk entry's
+ * own `remaining_ranges` (`withDroppedLineMerged`, above) and sets
+ * `truncated: true`: `rewriteContinuation`'s `entries[]` branch (this file)
+ * only ever replaces an entry's OWN `next`, never derives or writes
+ * `remaining_ranges` for it the way it derives `evidence[].remaining` from
+ * the settled read-request state — `read.batch` has no top-level `evidence`
+ * array for `shippedWindowsByPath` to settle against, so nothing downstream
+ * would otherwise record that this line was held back. Recording it here is
+ * what keeps the dropped line disclosed rather than silently lost.
+ *
+ * Returns `undefined` when there is no eligible entry to shrink (no
+ * `entries[]` array, no entry has both `content` and a parseable `range`, or
+ * the widest eligible entry's content is already down to one line) — the
+ * caller fails closed exactly as it already does for the evidence-shaped case.
+ */
+export function shrinkLargestBatchEntryByOneLine(payload: ShedPayload): ShedPayload | undefined {
+  const entries = payload["entries"];
+  if (!Array.isArray(entries)) return undefined;
+  let index = -1;
+  let widest = -1;
+  entries.forEach((raw, i) => {
+    if (!isRecord(raw)) return;
+    const content = raw["content"];
+    const range = raw["range"];
+    if (typeof content !== "string" || typeof range !== "string") return;
+    if (parseWindow(range) === undefined) return;
+    if (content.length > widest) {
+      widest = content.length;
+      index = i;
+    }
+  });
+  if (index === -1) return undefined;
+  const entry = entries[index] as Record<string, unknown>;
+  const content = entry["content"];
+  const range = entry["range"];
+  if (typeof content !== "string" || typeof range !== "string") return undefined;
+  const window = parseWindow(range);
+  if (window === undefined || window.end <= window.start) return undefined;
+  const trailingNewline = content.endsWith("\n");
+  const lines = (trailingNewline ? content.slice(0, -1) : content).split("\n");
+  if (lines.length < 2) return undefined;
+  lines.pop();
+  const shrunkContent = lines.join("\n") + (trailingNewline ? "\n" : "");
+  const shrunkRange = `${window.start}-${window.end - 1}`;
+  const priorRemaining = Array.isArray(entry["remaining_ranges"])
+    ? (entry["remaining_ranges"] as unknown[]).filter((value): value is string => typeof value === "string")
+    : [];
+  const remainingRanges = withDroppedLineMerged(window.end, priorRemaining);
+  const shrunkEntry = {
+    ...entry,
+    content: shrunkContent,
+    range: shrunkRange,
+    truncated: true as const,
+    remaining_ranges: remainingRanges,
+  };
+  const shrunkEntries = entries.map((raw, i) => (i === index ? shrunkEntry : raw));
+  return { ...payload, entries: shrunkEntries };
+}
+
+/**
  * Rewrite every `next` position to the ONE cursor call, and every
  * `evidence[].remaining` to that target's D.
  */
@@ -326,6 +433,72 @@ function rewriteContinuation(
 }
 
 /**
+ * Every `path` a `tl_read_file` continuation call names directly — `path`,
+ * `targets[].path`, or a `paths[]` entry (object or bare string). Mirrors
+ * `readFamily.ts`'s own `toolCallAddresses`, kept local rather than shared:
+ * this module has no other dependency on the read-family projector.
+ *
+ * A `handle`-only entry is deliberately left unresolved (this module has no
+ * handle table to resolve it against) — see `addressesForeignPath`'s own
+ * doc comment for why that is safe for every call this function is asked
+ * about today.
+ */
+function toolCallNamedPaths(value: unknown): Set<string> {
+  const paths = new Set<string>();
+  if (!isRecord(value)) return paths;
+  const args = value["arguments"];
+  if (!isRecord(args)) return paths;
+  const addPath = (candidate: unknown): void => {
+    if (typeof candidate === "string" && candidate !== "") paths.add(candidate);
+  };
+  addPath(args["path"]);
+  for (const entry of Array.isArray(args["targets"]) ? args["targets"] : []) {
+    if (isRecord(entry)) addPath(entry["path"]);
+  }
+  for (const entry of Array.isArray(args["paths"]) ? args["paths"] : []) {
+    if (isRecord(entry)) addPath(entry["path"]);
+    else addPath(entry);
+  }
+  return paths;
+}
+
+/**
+ * eval-0929 §8 (WP-G): true iff `next` NAMES a path outside this staged
+ * request's own `paths` (its Q) — i.e. this continuation is not the one
+ * `clearContinuation`'s caller is settling, and dropping it would lose a
+ * DIFFERENT target's own disclosure.
+ *
+ * THE DEFECT THIS CLOSES. A mixed `targets:[]` batch — one entry the caller
+ * ranged, one it left bare — stages a read-request Q from ONLY the bare
+ * entry: the ranged one is served through `resolveRangedPathsBatchEntry`,
+ * which never calls `stageFullReadRequest`/`appendReadRequestTarget` (see
+ * `server.ts`'s R2 comment on that helper, mode=full paths[] batch). When
+ * the bare entry is small enough to admit and the ranged one alone exceeds
+ * the caller's budget, THIS path's own Q reaches D=∅ on this call —
+ * legitimately — but the response ALSO carries the OTHER entry's
+ * `limit.next` (server.ts's own `deferredForNext`, reason `cap-exceeded`),
+ * naming a path this Q never staged. The pre-fix `dropLimit` fired on ANY
+ * `wire`-caused `limit.next` bound for `tl_read_file`, with no check for WHICH
+ * path it named — deleting the one remaining trace of a target the caller
+ * explicitly asked for and the server explicitly deferred: no entry, no
+ * `next`, no `limit`, no disclosure at all (confirmed live — a
+ * `large.ts`+`small.ts` batch under a byte budget shipped `small.ts` only,
+ * with `large.ts` neither entried, nor omitted, nor continued).
+ *
+ * FAILS CLOSED TOWARD THE PRE-FIX BEHAVIOUR, NOT TOWARD KEEPING EVERYTHING:
+ * a `next` that names NO path at all (a handle-only rung, or a bare cursor)
+ * returns `false` here — "no foreign path found" — so the existing,
+ * legitimate single-target continuation-clearing this function was written
+ * for is unaffected byte-for-byte.
+ */
+function addressesForeignPath(value: unknown, paths: ReadonlySet<string>): boolean {
+  for (const path of toolCallNamedPaths(value)) {
+    if (!paths.has(path)) return true;
+  }
+  return false;
+}
+
+/**
  * Drop the continuation this request no longer owes (§3.3's terminal rule).
  *
  * RETURNS BY IDENTITY WHEN THERE IS NOTHING TO CLEAR, which is the ordinary
@@ -333,17 +506,25 @@ function rewriteContinuation(
  * and no `remaining` in the first place. The identity return is what keeps
  * `emit.ts` from re-serializing — and therefore what keeps the §0.3 byte
  * invariant structural rather than arithmetic — on every complete read.
+ *
+ * eval-0929 §8 (WP-G): a `wire` `limit`/`next`/`receipt.next` that names a
+ * path OUTSIDE `paths` is a DIFFERENT target's own disclosure riding the
+ * same response (a mixed batch's still-deferred sibling) — this request's
+ * own terminal rule does not own it and must not delete it
+ * (`addressesForeignPath`).
  */
 function clearContinuation(payload: ShedPayload, paths: ReadonlySet<string>): ShedPayload {
   const limit = payload["limit"];
-  const dropLimit = isRecord(limit) && limit["cause"] === "wire" && replaceableNext(limit["next"]);
-  const dropNext = replaceableNext(payload["next"]);
+  const dropLimit = isRecord(limit) && limit["cause"] === "wire" && replaceableNext(limit["next"])
+    && !addressesForeignPath(limit["next"], paths);
+  const dropNext = replaceableNext(payload["next"]) && !addressesForeignPath(payload["next"], paths);
   // finding 7's other half: a stale receipt-side cursor (minted at dispatch
   // time, before this settle found D empty) must not survive past the point
   // §3.3's terminal rule fires — an empty-D response owes no continuation in
   // ANY position, `receipt.next` included.
   const receipt = payload["receipt"];
-  const dropReceiptNext = isRecord(receipt) && replaceableNext(receipt["next"]);
+  const dropReceiptNext = isRecord(receipt) && replaceableNext(receipt["next"])
+    && !addressesForeignPath(receipt["next"], paths);
   const evidence = payload["evidence"];
   const clearable = Array.isArray(evidence)
     && evidence.some((entry) => {
@@ -388,7 +569,26 @@ function clearContinuation(payload: ShedPayload, paths: ReadonlySet<string>): Sh
 export function applyReadRequestContinuation(
   payload: ShedPayload,
   staged: StagedReadRequest | undefined,
-  claim: { budgetDeclared: boolean; shed: boolean },
+  claim: {
+    budgetDeclared: boolean;
+    shed: boolean;
+    /**
+     * R2-R1: the exact size of the smallest response this request can be served
+     * in, measured by the funnel when the ladder failed closed to a `cap-exceeded`
+     * refusal (which names no floor of its own). See `budgetFloorOf`.
+     */
+    refusalFloorBytes?: number;
+    /**
+     * R2-R1: the refused response was a multi-target `read.batch`. Its floor is the
+     * smallest whole-ENTRY batch (`readBatchRequiredMinBytes`), not the smallest
+     * response the request can be served in: the cursor pages the same request file
+     * by file INSIDE the budget the caller declared (v0.14.4's recovery — a batch
+     * declared at 700 B is served in ~600 B pages), where a restart at that floor
+     * would answer a 700 B budget with a ~5.5 KB batch. Such a refusal keeps the
+     * plain cursor.
+     */
+    refusalOfBatch?: boolean;
+  },
 ): ShedPayload {
   if (staged === undefined) return payload;
   // WHICH RESPONSES THIS OWNS, AND WHY IT IS NOT ALL OF THEM.
@@ -407,6 +607,27 @@ export function applyReadRequestContinuation(
   // (replay corpus svc1/svc2/tsl1) forbid. R2's defect is the ladder's
   // continuation, and this is the boundary of the fix.
   if (staged.mode === "open" && !claim.budgetDeclared && !claim.shed) return payload;
+  // R2-R1 (FX1 chip 3 + P0-2): A BUDGET REFUSAL CARRIES ONE EXECUTABLE `next` —
+  // THE CALL THAT FITS. A plain cursor on a refusal (what this tail installed
+  // before) re-runs the very page that just did not fit at the very budget
+  // that just refused it: the reviewer's markdown range at 600 B answered
+  // `cap-exceeded` forty times in a row, every `next` re-issuing the same call.
+  // With a floor in hand — the refusal's own `required_min_bytes`, or the one
+  // the funnel measured for a `cap-exceeded` — the `next` changes the ONE
+  // thing that makes it fit: the budget.
+  //   - `open`: nothing was served, so nothing is settled, persisted or
+  //     indexed (a refused call must not leave an "open parent request" for a
+  //     later plain read to attach a `next` to), and the retry is the ORIGINAL
+  //     request, fresh, at the floor — whose own first-call floor is exactly
+  //     the one measured, so it works on the first retry.
+  //   - `resume`: the same cursor, budget raised (the cursor call's sanctioned
+  //     override) — below.
+  const refusalFloor = payload["kind"] === "refusal" && claim.refusalOfBatch !== true
+    ? budgetFloorOf(payload, claim.refusalFloorBytes)
+    : undefined;
+  if (refusalFloor !== undefined && staged.mode === "open") {
+    return rewriteContinuation(payload, restartCall(staged, refusalFloor), new Map<string, string[]>(), []);
+  }
   const settled = settleReadRequest(staged, shippedWindowsByPath(payload));
   if (settled === undefined) return payload;
 
@@ -430,5 +651,273 @@ export function applyReadRequestContinuation(
   const sole = settled.targets.length === 1
     ? windowStrings(settled.targets[0]!.remaining)
     : [];
-  return rewriteContinuation(payload, cursorCall(staged, cursor), remainingByPath, sole);
+  return rewriteContinuation(
+    payload,
+    refusalFloor !== undefined ? budgetedCursorCall(staged, cursor, refusalFloor) : cursorCall(staged, cursor),
+    remainingByPath,
+    sole,
+  );
+}
+
+/** The call-scoping members every continuation this module mints echoes (`cursorCall`'s own rule). */
+function echoedIdentity(staged: StagedReadRequest): Record<string, unknown> {
+  const echo = staged.echo;
+  return {
+    ...(echo.cwd !== undefined && echo.cwd !== "" ? { cwd: echo.cwd } : {}),
+    ...(echo.lane !== undefined && echo.lane !== "" ? { lane: echo.lane } : {}),
+    ...(echo.taskHandle !== undefined && echo.taskHandle !== "" ? { task: { handle: echo.taskHandle } } : {}),
+  };
+}
+
+/** The ORIGINAL request, fresh, at `budgetBytes` — the shape the stale-cursor restart already uses. */
+function restartCall(staged: StagedReadRequest, budgetBytes: number): ToolCall {
+  return canonicalToolCall("tl_read_file", {
+    ...staged.state.original_input,
+    budget: { bytes: budgetBytes },
+    ...echoedIdentity(staged),
+  }) as ToolCall;
+}
+
+/** The same cursor with its budget raised (a cursor call's sanctioned override). */
+function budgetedCursorCall(staged: StagedReadRequest, cursor: string, budgetBytes: number): ToolCall {
+  return canonicalToolCall("tl_read_file", {
+    cursor,
+    budget: { bytes: budgetBytes },
+    ...echoedIdentity(staged),
+  }) as ToolCall;
+}
+
+/**
+ * The byte floor a budget refusal names: its own `required_min_bytes`
+ * (`budget-below-minimum`), or — for a `cap-exceeded`, which names none — the
+ * floor the funnel measured (`claimFloor`). `undefined` when the refusal is not
+ * a budget refusal or no floor is known: such a refusal keeps the plain cursor
+ * it always had rather than a guess.
+ */
+function budgetFloorOf(payload: ShedPayload, claimFloor: number | undefined): number | undefined {
+  const code = payload["code"];
+  if (code !== "budget-below-minimum" && code !== "cap-exceeded") return undefined;
+  const named = payload["required_min_bytes"];
+  if (typeof named === "number" && Number.isFinite(named) && named > 0) return Math.ceil(named);
+  return claimFloor !== undefined && Number.isFinite(claimFloor) && claimFloor > 0 ? Math.ceil(claimFloor) : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// R2-R1 (P0-2, review 2026-09-30) — DECIDE THE FINAL PAYLOAD BEFORE ANYTHING
+// IS BOOKED.
+//
+// `emit.ts` settles the served-range LEDGER (`settleServedCallBookings`) and
+// the read REQUEST (`applyReadRequestContinuation`) against the payload the
+// ladder produced, and only THEN measures what the cursor swap made of it. When
+// that measurement found the page over budget, the post-rewrite safety net
+// dropped a line (or replaced the whole page by a `budget-below-minimum`
+// refusal) — but the ledger had already booked every line of the pre-shrink
+// payload, and `D = Q - (C u S)` reads `C` from that ledger, so the dropped
+// lines were never owed again. Measured on the reviewer's own fixture: a
+// refused first call booked lines 1-126 that never shipped; the re-issued call
+// served 1-75 and its cursor resumed at 127 — lines 76-126 were skipped for
+// good, silently, while `limit.next` claimed the chain was on track. The same
+// mechanism lost the last line of a multi-window page (FX1 chip 2).
+//
+// The ledger cannot be un-booked from here, so the order changes instead:
+// `fitStagedReadToBudget` runs a DRY RUN of the continuation
+// (`previewSettledRemaining`, the real cursor, D for what would ship), sheds
+// prose and whole lines until the response fits, or reports the exact floor;
+// the funnel then settles the ledger and the request ONCE, on what ships.
+// ---------------------------------------------------------------------------
+
+/**
+ * What `applyReadRequestContinuation` WOULD return for `payload`, computed
+ * WITHOUT booking, persisting or minting anything (`previewSettledRemaining`
+ * is the pure half of the settle; `call` is the cursor call the tail would
+ * install, minted once by the caller because it is loop-invariant). The bytes
+ * are the real ones: same D per target, same collapsed `next` positions, same
+ * cursor call.
+ */
+function previewContinuation(
+  payload: ShedPayload,
+  staged: StagedReadRequest,
+  call: ToolCall,
+): { payload: ShedPayload; continued: boolean } {
+  const remaining = previewSettledRemaining(staged, shippedWindowsByPath(payload));
+  const targets = staged.state.targets;
+  const paths = new Set(targets.map((target) => target.path));
+  const complete = targets.every((target) => (remaining.get(target.path) ?? []).length === 0);
+  if (complete) return { payload: clearContinuation(payload, paths), continued: false };
+  const remainingByPath = new Map<string, string[]>();
+  for (const target of targets) remainingByPath.set(target.path, windowStrings(remaining.get(target.path) ?? []));
+  const sole = targets.length === 1 ? windowStrings(remaining.get(targets[0]!.path) ?? []) : [];
+  return { payload: rewriteContinuation(payload, call, remainingByPath, sole), continued: true };
+}
+
+/**
+ * The decorative prose the ladder's first `read.text` rung sheds
+ * (`shedders/readText.ts`'s `TEXT_PROSE`), cheapest-loss-first. Peeled here
+ * BEFORE any line is dropped, exactly as the ladder orders it: a note costs the
+ * caller bytes it declared it could not spare, a line costs it content.
+ */
+const READ_PROSE_KEYS: readonly string[] = ["note", "focus", "hint", "headings_note", "concern_note"];
+
+/** The payload without its cheapest prose member, or `undefined` when none is left. A NUL-strip disclosure is never prose. */
+function peelReadProse(payload: ShedPayload): ShedPayload | undefined {
+  for (const key of READ_PROSE_KEYS) {
+    if (payload[key] === undefined || carriesStripDisclosure(payload[key])) continue;
+    const peeled: ShedPayload = { ...payload };
+    delete peeled[key];
+    return peeled;
+  }
+  return undefined;
+}
+
+/**
+ * Drop trailing whole lines from the WIDEST evidence body that still has more
+ * than one line — as many as it takes to save `excessBytes` of wire (at least
+ * one, never the last) — narrowing its `range` the way the ladder's own rung
+ * does (`start + keptLines - 1`: a body whose lines were collapsed or elided
+ * can only be UNDER-claimed, so nothing is ever claimed that did not ship).
+ * `remaining` is not touched here: the continuation preview and the real tail
+ * both derive D from what the evidence carries.
+ */
+function shrinkEvidenceBySavedBytes(payload: ShedPayload, excessBytes: number): ShedPayload | undefined {
+  const evidence = payload["evidence"];
+  if (!Array.isArray(evidence)) return undefined;
+  let index = -1;
+  let widest = -1;
+  evidence.forEach((raw, i) => {
+    if (!isRecord(raw)) return;
+    const body = raw["body"];
+    const range = raw["range"];
+    if (typeof body !== "string" || typeof range !== "string" || parseWindow(range) === undefined) return;
+    const lineCount = (body.endsWith("\n") ? body.slice(0, -1) : body).split("\n").length;
+    if (lineCount < 2) return;
+    if (body.length > widest) {
+      widest = body.length;
+      index = i;
+    }
+  });
+  if (index === -1) return undefined;
+  const entry = evidence[index] as Record<string, unknown>;
+  const body = entry["body"] as string;
+  const window = parseWindow(entry["range"] as string)!;
+  const trailingNewline = body.endsWith("\n");
+  const lines = (trailingNewline ? body.slice(0, -1) : body).split("\n");
+  let saved = 0;
+  let drop = 0;
+  while (drop < lines.length - 1 && (drop === 0 || saved < excessBytes)) {
+    saved += wireLineCostBytes(lines[lines.length - 1 - drop]!);
+    drop += 1;
+  }
+  const kept = lines.length - drop;
+  const shrunkEntry = {
+    ...entry,
+    body: lines.slice(0, kept).join("\n") + (trailingNewline ? "\n" : ""),
+    range: `${window.start}-${window.start + kept - 1}`,
+  };
+  return { ...payload, evidence: evidence.map((raw, i) => (i === index ? shrunkEntry : raw)) };
+}
+
+/** What `fitStagedReadToBudget` decided. */
+export type StagedReadFit =
+  | { ok: true; payload: ShedPayload; shrunk: boolean }
+  | { ok: false; requiredMinBytes: number };
+
+/** Hard stop for the shrink loop: a bulk step removes at least the measured excess, so a handful of passes always suffice. */
+const MAX_PRESETTLE_STEPS = 256;
+
+/**
+ * Bytes kept in reserve beneath `limit` — but ONLY for a payload some line was
+ * cut from (by the ladder before the fit, or by the fit itself). The preview's
+ * D is `Q - (C_baseline u S)` (`previewSettledRemaining`); the real D, derived
+ * after the funnel confirmed or narrowed this call's provisional spans, reads
+ * the live ledger, which can differ from the preview's by a few characters of
+ * `remaining` (a digit, or one more window when a corroborated span is narrowed
+ * in the middle of a window, or coverage another read added meanwhile). For a
+ * payload nothing was cut from, the producer booked exactly what ships and the
+ * two agree — reserving anything there would refuse a response that fits (FX1's
+ * floor: a budget one byte above the smallest one-line page must serve it). For
+ * a payload lines were cut from, sizing to `limit - 16` makes that difference
+ * unable to push the REAL response over the limit — the one outcome that would
+ * re-open the hole this closes, because the post-rewrite net that would then
+ * fire cannot un-book a ledger. The refusal's floor carries the same 16 B in
+ * that case, so it works on the first retry.
+ */
+const PRESETTLE_SAFETY_BYTES = 16;
+
+/**
+ * Size a staged read's response — AFTER the cursor swap, the real bytes — and
+ * shed until it fits `limit`, BEFORE the ledger or the request is settled.
+ *
+ * Order, exactly the ladder's: decorative prose first, then whole lines from
+ * the widest body (`shrinkEvidenceBySavedBytes`; a `read.batch` entry one line
+ * at a time, `shrinkLargestBatchEntryByOneLine`). `shrunk` is true iff a LINE
+ * was dropped: the funnel must then treat the response as shed (`wasShed`) so
+ * the ledger's settlement can never widen a corroborated window back over the
+ * lines that were cut.
+ *
+ * `{ok:false}` means nothing more can be shed (every body is down to one line,
+ * no prose is left) and the response STILL does not fit: `requiredMinBytes` is
+ * the exact size of that smallest response — a budget of that many bytes
+ * serves it, so the refusal's floor works on its FIRST retry (the previous
+ * floor was the size of the unshrunk page, a moving target that grew with the
+ * budget it had just been sized for). The caller builds the refusal BEFORE
+ * booking anything, so a refused call books nothing.
+ *
+ * A no-op (`ok:true`, payload by identity) for a refusal, for an `open` request
+ * the tail would leave alone (no declared budget, nothing shed), and when no
+ * cursor can be minted — exactly the cases `applyReadRequestContinuation`
+ * itself leaves alone.
+ */
+export function fitStagedReadToBudget(input: {
+  payload: ShedPayload;
+  staged: StagedReadRequest;
+  claim: { budgetDeclared: boolean; shed: boolean };
+  limit: number;
+  /** The ONE sanctioned wire-byte counter, passed in so this module never imports the budget layer. */
+  measure: (payload: ShedPayload) => number;
+}): StagedReadFit {
+  const { staged, claim, limit, measure } = input;
+  let candidate = input.payload;
+  if (candidate["kind"] === "refusal") return { ok: true, payload: candidate, shrunk: false };
+  if (staged.mode === "open" && !claim.budgetDeclared && !claim.shed) return { ok: true, payload: candidate, shrunk: false };
+  const cursor = mintReadCursor(staged);
+  if (cursor === undefined) return { ok: true, payload: candidate, shrunk: false };
+  const call = cursorCall(staged, cursor);
+  // The reserve exists only for a response that WILL carry a continuation (a
+  // complete one, D empty, is exactly what the real tail ships) and whose
+  // lines were cut somewhere (see `PRESETTLE_SAFETY_BYTES`).
+  const sized = (payload: ShedPayload, linesCut: boolean): number => {
+    const preview = previewContinuation(payload, staged, call);
+    return measure(preview.payload) + (preview.continued && linesCut ? PRESETTLE_SAFETY_BYTES : 0);
+  };
+  let shrunk = false;
+  let bytes = sized(candidate, claim.shed);
+  for (let step = 0; step < MAX_PRESETTLE_STEPS; step += 1) {
+    if (bytes <= limit) return { ok: true, payload: candidate, shrunk };
+    const peeled = peelReadProse(candidate);
+    const smaller = peeled
+      ?? shrinkEvidenceBySavedBytes(candidate, bytes - limit)
+      ?? shrinkLargestBatchEntryByOneLine(candidate);
+    if (smaller === undefined) return { ok: false, requiredMinBytes: bytes };
+    if (peeled === undefined) shrunk = true;
+    candidate = smaller;
+    bytes = sized(candidate, claim.shed || shrunk);
+  }
+  return bytes <= limit ? { ok: true, payload: candidate, shrunk } : { ok: false, requiredMinBytes: bytes };
+}
+
+/**
+ * The exact size of the SMALLEST response a staged read can be served in —
+ * every body down to one line, prose gone, continuation and cursor included —
+ * or `undefined` when nothing is staged/sizeable. This is the floor a
+ * `cap-exceeded` refusal (which names none) hands to `applyReadRequestContinuation`
+ * so its `next` can raise the budget to a value that works on the first retry.
+ */
+export function stagedReadFloorBytes(input: {
+  payload: ShedPayload;
+  staged: StagedReadRequest;
+  claim: { budgetDeclared: boolean; shed: boolean };
+  measure: (payload: ShedPayload) => number;
+}): number | undefined {
+  const fit = fitStagedReadToBudget({ ...input, limit: 0 });
+  return fit.ok ? undefined : fit.requiredMinBytes;
 }

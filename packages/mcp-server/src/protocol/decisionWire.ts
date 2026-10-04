@@ -89,7 +89,7 @@ export const SANCTIONED_ZOOM_CAP = 4;
  * KEPT AS A DISCLOSED DEVIATION — four fields, each because deleting it would
  * lose a capability with no other carrier in v1 (Revision-5 rows):
  *   `sha`          the hash an edit pins to (`precondition:"expected-hash"`,
- *                  `edit_file`'s `expectedSha`). `Evidence` declares no sha and
+ *                  `tl_edit_file`'s `expectedSha`). `Evidence` declares no sha and
  *                  no other v1 field carries one per surface.
  *   `symbol`       the NAMED selector this window came from. `range` cannot
  *                  express "this is `foo`" — the 2026-08-08 ND-1 finding was
@@ -155,8 +155,8 @@ export function packUnchangedPriorLabel(result: Record<string, unknown>): string
   if (result["receipt"] !== "pack-unchanged" && result["pack_unchanged"] !== true) return undefined;
   const replay = result["qref"];
   return typeof replay === "string" && replay !== ""
-    ? `read_file mode=task_pack qref=${replay}`
-    : "read_file mode=task_pack (earlier in this session)";
+    ? `tl_read_file mode=task_pack qref=${replay}`
+    : "tl_read_file mode=task_pack (earlier in this session)";
 }
 
 /**
@@ -749,7 +749,7 @@ function projectCertificate(
   // `RequestItemProof.absentScopeComplete`). `entry.scope_complete` (carried
   // on every `TaskPackResult.request_item_absences` entry) is now the SOLE
   // source of truth for which qualifier applies; the false-claiming branch
-  // is gone. Mirrors `search_files`' own `absence.caveat` phrasing ("N paths
+  // is gone. Mirrors `tl_search_files`' own `absence.caveat` phrasing ("N paths
   // were excluded from the scan") so both surfaces read the same way.
   const requestItemAbsenceGaps = Array.isArray(result["request_item_absences"])
     ? result["request_item_absences"]
@@ -917,6 +917,10 @@ const GAP_CODES: ReadonlySet<string> = new Set<CapabilityGap["code"]>([
   // by verified absence — `features/task-pack/readCodeTaskPack.ts`'s
   // `buildCapabilityGaps`, fed by `TaskPackResult.request_item_absences`.
   "request-item-absent",
+  // R2-T2 (2026-09-30, review-0929, orchestrator ruling): a request item the
+  // pack could not settle either way — the undetermined entries of the same
+  // `request_item_absences` array; a disclosure, never blocking.
+  "request-item-undetermined",
 ]);
 
 /**
@@ -1000,7 +1004,7 @@ function discoverNext(
  * Zooming into it prescribes a call whose only possible answer is
  * `read.receipt {receipt:"code-unchanged"}` with NO `next` — the dead end
  * measured at `What does MAX_RETRIES do in src/retry.ts? Update the changelog.`
- * (round 11): `next: read_file targets:[{handle:<1-1 surface>, range:"2-2"}]`,
+ * (round 11): `next: tl_read_file targets:[{handle:<1-1 surface>, range:"2-2"}]`,
  * answered `served_by:"task_pack 1-2 (call #1)"`.
  *
  * So the candidate window is checked against what THIS RESPONSE actually put in
@@ -1037,7 +1041,7 @@ function servedEvidenceZoom(evidence: readonly Evidence[]): ToolCall | undefined
       if (typeof range !== "string" || range === "") continue;
       const span = parseSpan(range);
       if (span !== undefined && alreadyHeld(entry.path, span)) continue;
-      return { tool: "read_file", arguments: { handle: entry.handle, range } };
+      return { tool: "tl_read_file", arguments: { handle: entry.handle, range } };
     }
   }
   return undefined;
@@ -1206,7 +1210,7 @@ function nonEmptyStrings(value: unknown): string[] {
  * THE ONE LIVE CASE WHERE `await_input` CAN NAME THE CALL THAT UNBLOCKS IT
  * (reviewer note 5, 2026-09-08).
  *
- * `read_file {query:"Create src/answer.ts with …", task:{epoch:"new",
+ * `tl_read_file {query:"Create src/answer.ts with …", task:{epoch:"new",
  * profile:"answer"}}` resolves a `create_target` — the path is explicit and its
  * parent directory is proved — and then cannot act on it, because the CALLER
  * declared a read-only profile and DESIGN-v0.15 §3 makes that declaration
@@ -1251,7 +1255,7 @@ function declaredProfileCreateConflict(
 function declaredProfileConflictNext(result: Record<string, unknown>): ToolCall | undefined {
   const qref = result["qref"];
   if (typeof qref !== "string" || qref === "") return undefined;
-  return { tool: "read_file", arguments: { qref, task: { profile: "generic" } } };
+  return { tool: "tl_read_file", arguments: { qref, task: { profile: "generic" } } };
 }
 
 /**
@@ -1286,7 +1290,7 @@ function profileConflictAppliesTo(code: AwaitInputCode): boolean {
  * ("what class of thing is open") no longer matches prose that describes an
  * action, and `reason` ("non-empty prose naming the specific residual") names
  * an instruction instead. This builds a declarative sentence from the gap's
- * own CLOSED six-member kind vocabulary (`TaskCapabilityGap["kind"]`) and its
+ * own CLOSED seven-member kind vocabulary (`TaskCapabilityGap["kind"]`) and its
  * `obligation_ids` instead — never from `gap.reason`.
  */
 function projectedCapabilityGapReason(gap: TaskCapabilityGap, ambiguousTargetCandidateCount?: number): string {
@@ -1317,6 +1321,10 @@ function projectedCapabilityGapReason(gap: TaskCapabilityGap, ambiguousTargetCan
       return idList !== undefined
         ? `a requested item could not be located: ${idList}`
         : "a requested item could not be located";
+    case "request-item-undetermined":
+      return idList !== undefined
+        ? `a requested item could not be determined either way: ${idList}`
+        : "a requested item could not be determined either way";
     case "workspace-changed":
       return "the workspace changed since this pack was built; the affected surfaces must be re-served";
     case "unsupported-operation":
@@ -1921,7 +1929,7 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
         // [R5-23] / ruling 6: the create target is the SECOND arm of the floor,
         // so it is read before the guard, not after it. Before this, a pack
         // that had resolved a new-file target produced an empty frontier, fell
-        // through to `discover`, and shipped beside an `edit_file create:true`
+        // through to `discover`, and shipped beside an `tl_edit_file create:true`
         // instruction the decision itself could not express.
         const createTarget = projectCreateTarget(result);
         if (editFloorHolds(frontier, createTarget)) {

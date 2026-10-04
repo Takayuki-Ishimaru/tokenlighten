@@ -2,7 +2,7 @@
 // nudge, Fix B, sibling of editBatchingHint.spec.ts's edits[] hint).
 //
 // Evidence (bench run 2026-07-12c): an agent made 14 SINGLE-TOKEN
-// search_files find calls in one session — several trivially batchable into
+// tl_search_files find calls in one session — several trivially batchable into
 // ONE queries:[...] call — even though it used queries:[...] successfully
 // TWICE earlier in the same session (so it knew the form). This is the
 // server-side nudge: attach a bounded `hint` field on the response of the
@@ -126,6 +126,7 @@ function startServer(opts: { cwd: string; args: string[] }): ServerHandle {
 }
 
 afterEach(() => {
+  delete process.env["TL_FIND_WIDE_PAGE"];
   for (const s of servers.splice(0)) s.kill();
   for (const d of tmpDirs.splice(0)) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ok */ }
@@ -171,7 +172,7 @@ describe("findBatchingHint — fires exactly once on the 2nd successful single-q
     const responses: Array<{ text: string; data: Record<string, unknown> }> = [];
     for (let i = 1; i <= 5; i++) {
       const res = await srv.rpc(i + 1, "tools/call", {
-        name: "search_files",
+        name: "tl_search_files",
         arguments: { action: "find", query: `NEEDLE_${i}` },
       });
       responses.push(parseFind(res));
@@ -215,7 +216,7 @@ describe("findBatchingHint — queries:[...] calls do not increment the counter"
     // the doc comment above, that must NOT suppress or advance the counter.
     for (let b = 0; b < 2; b++) {
       const res = await srv.rpc(id++, "tools/call", {
-        name: "search_files",
+        name: "tl_search_files",
         arguments: { action: "find", queries: ["ALPHA", "BETA"] },
       });
       const { data } = parseFind(res);
@@ -224,7 +225,7 @@ describe("findBatchingHint — queries:[...] calls do not increment the counter"
 
     // 1 single-query call — still no hint (counter at 1).
     const first = await srv.rpc(id++, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "SOLO_1" },
     });
     expect(parseFind(first).data["hint"]).toBeUndefined();
@@ -232,7 +233,7 @@ describe("findBatchingHint — queries:[...] calls do not increment the counter"
     // 2nd single-query call — the counter was still at 1 (queries[] calls
     // correctly excluded above), so THIS call brings it to 2 and fires.
     const res = await srv.rpc(id++, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "SOLO_2" },
     });
     const { data } = parseFind(res);
@@ -242,6 +243,16 @@ describe("findBatchingHint — queries:[...] calls do not increment the counter"
 
 describe("findBatchingHint — baked into the cap, not appended after trimming", () => {
   it("the 2nd single-query find, even when fitFilesToCap must trim matches, still carries the hint within the response cap", async () => {
+    // SPC (2026-09-29): this fixture's 80-file spread is calibrated to
+    // exceed the LEGACY 4096-byte snippet cap specifically (see the comment
+    // below) — TL_FIND_WIDE_PAGE is now (S) supported, DEFAULT ON for every
+    // client (util/flags.ts's "SPC addendum"), which would let this same
+    // fixture fit in one response and never exercise the trimming this test
+    // targets. Pinned to the explicit rollback value so the ORIGINAL
+    // calibration (and what it proves — the hint survives trimming, baked in
+    // rather than appended after) is unchanged; findWidePage.spec.ts/
+    // findWidePageEconomy.spec.ts own the default-ON behavior itself.
+    process.env["TL_FIND_WIDE_PAGE"] = "0";
     const ws = mkDir("cap-bake");
     writeFile(ws, "src/warm1.ts", "export const WARM_1 = 1;\n");
     // Enough matching files that the UN-trimmed response would blow well
@@ -261,13 +272,13 @@ describe("findBatchingHint — baked into the cap, not appended after trimming",
 
     let id = 2;
     const warm = await srv.rpc(id++, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "WARM_1" },
     });
     expect(parseFind(warm).data["hint"]).toBeUndefined();
 
     const second = await srv.rpc(id++, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "BIGNEEDLE" },
     });
     const { text, data, body } = parseFind(second);

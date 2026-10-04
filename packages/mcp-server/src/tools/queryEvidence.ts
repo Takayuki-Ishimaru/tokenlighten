@@ -34,9 +34,9 @@ const QUERY_STOP_WORDS = new Set([
  * camelCase symbol lookups produces generic helpers such as readFile.
  */
 const PROTOCOL_SYMBOL_SEARCH_TOKENS = new Set([
-  "read_file",
-  "edit_file",
-  "search_files",
+  "tl_read_file",
+  "tl_edit_file",
+  "tl_search_files",
   "task_pack",
   "execution_contract",
   "next_call",
@@ -46,9 +46,9 @@ const PROTOCOL_SYMBOL_SEARCH_TOKENS = new Set([
 ]);
 
 const GENERIC_TOOL_SYMBOL_TOKENS = new Set([
-  "read_file",
-  "edit_file",
-  "search_files",
+  "tl_read_file",
+  "tl_edit_file",
+  "tl_search_files",
   "task_pack",
 ]);
 

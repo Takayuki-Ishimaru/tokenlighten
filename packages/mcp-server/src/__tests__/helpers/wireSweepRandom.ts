@@ -8,7 +8,7 @@
 // largest configured budget. Seeded, so a failure reproduces.").
 //
 // WHY HAND-ROLLED, NOT A DEPENDENCY. No property-testing library exists
-// anywhere in this repo today — `search_files find query:"mulberry32"` over
+// anywhere in this repo today — `tl_search_files find query:"mulberry32"` over
 // packages/mcp-server/src is 0/357 files, and neither `package.json` (root or
 // this package) nor `node_modules` carries fast-check/chance/faker/seedrandom.
 // AGENTS.md requires `npm run licenses` to keep passing with no new

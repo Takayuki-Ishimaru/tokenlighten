@@ -6,7 +6,7 @@
  * RC = refuse): top-level `mode`, `path`/`paths`, `handles`, `maxBytes`,
  * `taskProfile`, `taskEpoch`, `task_handle`, `action=… path=…` call spellings.
  * Recorded GitHub Copilot sessions showed models copying server-authored text
- * into their next call and being refused for it (4 of 34 `edit_file` calls in
+ * into their next call and being refused for it (4 of 34 `tl_edit_file` calls in
  * one session came from a `profile_binding.reason` that said "declare
  * taskProfile"; an `is-a-directory` refusal advised `paths=[…]`). Every such
  * refusal costs a whole model turn.
@@ -27,7 +27,7 @@
  *    `skeleton` strings are masked before the sweep — except the skeleton of an
  *    unrecognized-extension file, whose truncation note IS server prose and is
  *    checked separately.
- *  - `evidence[].prior` ("read_file mode=task_pack qref=…") is PROVENANCE, not
+ *  - `evidence[].prior` ("tl_read_file mode=task_pack qref=…") is PROVENANCE, not
  *    an instruction ("already in context — skip"), and its spelling is part of
  *    the frozen protocol-v1 snapshot; it is out of this sweep's scope and no
  *    case below produces one.
@@ -54,7 +54,7 @@ const SPAWN_TIMEOUT_MS = 120_000;
 /** A call spelled in the legacy dialect, or a bare legacy key name. */
 const LEGACY_SPELLING = new RegExp(
   [
-    String.raw`\b(?:read_file|search_files|edit_file|read_code|edit_code|explore) (?:mode|path|paths|handle|handles|action|query|range)=`,
+    String.raw`\b(?:tl_read_file|tl_search_files|tl_edit_file|read_code|edit_code|explore) (?:mode|path|paths|handle|handles|action|query|range)=`,
     String.raw`\bmode=(?:slice|full|map|symbol|closure|task_pack|digest|artifact|overview)\b`,
     String.raw`\bpaths=\[`,
     String.raw`\bhandles=\[`,
@@ -196,7 +196,7 @@ describe("caller-facing wire text never spells a call in the refused legacy dial
     await server.initialize();
 
     const pack = bodyOf(await server.rpc(10, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how is an order cancelled",
         targets: [{ path: "src/service/OrderService.ts" }, { path: "src/nope/Missing.ts" }],
@@ -208,18 +208,18 @@ describe("caller-facing wire text never spells a call in the refused legacy dial
     const qref = pack["qref"];
 
     const calls: Array<{ label: string; name: string; arguments: Record<string, unknown> }> = [
-      { label: "directory as a file target", name: "read_file", arguments: { targets: [{ path: "src" }] } },
-      { label: "unknown symbol", name: "read_file", arguments: { targets: [{ path: "src/service/OrderService.ts", symbol: "noSuchMethod" }] } },
-      { label: "unrecognized extension outline", name: "read_file", arguments: { targets: [{ path: "data.weirdext" }], content: "outline" } },
-      { label: "missing file", name: "read_file", arguments: { targets: [{ path: "src/NoSuch.ts" }] } },
-      { label: "single-line doc (whole-file hint)", name: "read_file", arguments: { targets: [{ path: "notes_single_line.txt" }] } },
-      { label: "create over an existing file", name: "edit_file", arguments: { edits: [{ path: "README.md", create: true, content: "x\n" }] } },
-      { label: "qref re-pack", name: "read_file", arguments: { qref, task: { handle: taskId } } },
-      { label: "inferred profile pack", name: "read_file", arguments: { query: "where is the order cancel logic", task: { epoch: "new" } } },
-      { label: "find nothing", name: "search_files", arguments: { action: "find", queries: ["zzzNoSuchThingzzz"] } },
-      { label: "references", name: "search_files", arguments: { action: "references", queries: ["cancel"], scope: { path: "src" } } },
-      { label: "unknown handle", name: "read_file", arguments: { targets: [{ handle: "hdoesnotexist" }] } },
-      { label: "unknown argument on a write tool", name: "edit_file", arguments: { edits: [{ path: "README.md", search: "Sweep", replace: "Swept" }], bogusArgument: true } },
+      { label: "directory as a file target", name: "tl_read_file", arguments: { targets: [{ path: "src" }] } },
+      { label: "unknown symbol", name: "tl_read_file", arguments: { targets: [{ path: "src/service/OrderService.ts", symbol: "noSuchMethod" }] } },
+      { label: "unrecognized extension outline", name: "tl_read_file", arguments: { targets: [{ path: "data.weirdext" }], content: "outline" } },
+      { label: "missing file", name: "tl_read_file", arguments: { targets: [{ path: "src/NoSuch.ts" }] } },
+      { label: "single-line doc (whole-file hint)", name: "tl_read_file", arguments: { targets: [{ path: "notes_single_line.txt" }] } },
+      { label: "create over an existing file", name: "tl_edit_file", arguments: { edits: [{ path: "README.md", create: true, content: "x\n" }] } },
+      { label: "qref re-pack", name: "tl_read_file", arguments: { qref, task: { handle: taskId } } },
+      { label: "inferred profile pack", name: "tl_read_file", arguments: { query: "where is the order cancel logic", task: { epoch: "new" } } },
+      { label: "find nothing", name: "tl_search_files", arguments: { action: "find", queries: ["zzzNoSuchThingzzz"] } },
+      { label: "references", name: "tl_search_files", arguments: { action: "references", queries: ["cancel"], scope: { path: "src" } } },
+      { label: "unknown handle", name: "tl_read_file", arguments: { targets: [{ handle: "hdoesnotexist" }] } },
+      { label: "unknown argument on a write tool", name: "tl_edit_file", arguments: { edits: [{ path: "README.md", search: "Sweep", replace: "Swept" }], bogusArgument: true } },
     ];
 
     const offenders: string[] = [];

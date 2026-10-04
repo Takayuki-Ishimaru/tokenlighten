@@ -1,12 +1,12 @@
 // Guard 1 (root-mismatch note) and Guard 2 (out-of-slice concern-hit note) —
 // 2026-07-12b, bench 2026-07-12a2 forensics.
 //
-// Guard 1: a cwd-less, handle-less read_file/search_files call silently
+// Guard 1: a cwd-less, handle-less tl_read_file/tl_search_files call silently
 // resolves against the server's DEFAULT root. When another workspace also
 // holds an active session, that silent resolution is a live hazard — see
 // server.ts callTool and util/session.ts otherActiveRoots.
 //
-// Guard 2: a PARTIAL read_file mode=slice serve can miss the exact region a
+// Guard 2: a PARTIAL tl_read_file mode=slice serve can miss the exact region a
 // task's own query is about. When the session has harvested concern-anchor
 // tokens from a prior task_pack/locate query (see readCodeTaskPack.ts
 // concernAnchorTokens / util/session.ts recordConcernTokens) and the served
@@ -130,7 +130,7 @@ function parseToolResult(rpcResult: any): Record<string, unknown> {
 // Guard 1 — root-mismatch note on cwd-less path-based calls
 // ---------------------------------------------------------------------------
 
-describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files calls", () => {
+describe("Guard 1 — root_note on cwd-less, handle-less tl_read_file/tl_search_files calls", () => {
   it("only the default root active -> no root_note", async () => {
     const defaultDir = mkDir("g1-solo-default");
     writeFile(defaultDir, "src/a.ts", "export const A = 1;\nexport const B = 2;\nexport const C = 3;\n");
@@ -140,7 +140,7 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "src/a.ts" },
     });
     const data = parseToolResult(res);
@@ -162,7 +162,7 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     // fires unconditionally at the top of mode=task_pack, before any
     // locate branching — see server.ts).
     const primeRes = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "warm session", cwd: worktreeDir },
     });
     expect(primeRes.result.isError).toBeFalsy();
@@ -170,7 +170,7 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     // Now a cwd-less call resolves against defaultDir (the server's own
     // positional root) while worktreeDir also holds a session.
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "src/a.ts" },
     });
     const data = parseToolResult(res);
@@ -196,7 +196,7 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
 
     // Prime worktreeDir's session.
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "warm session", cwd: worktreeDir },
     });
 
@@ -204,7 +204,7 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     // HERE (confirms the hazard condition is genuinely live for this call
     // shape) but capture the handle for step 3.
     const mintRes = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/a.ts", range: "1-1" },
     });
     const mintData = parseToolResult(mintRes);
@@ -217,7 +217,7 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     // Re-slice via the handle, still cwd-less: no root_note, since a handle
     // carries its own mint root.
     const res = await srv.rpc(4, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { handle, mode: "slice", range: "1-1" },
     });
     const data = parseToolResult(res);
@@ -236,14 +236,14 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "warm session", cwd: worktreeDir },
     });
 
     // Explicit cwd, even though it names the SAME default root — presence of
     // the field is what matters, not its value.
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "src/a.ts", cwd: defaultDir },
     });
     const data = parseToolResult(res);
@@ -251,7 +251,7 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     expect(data["root_note"]).toBeUndefined();
   });
 
-  it("search_files find: cwd-less call carries root_note when another root is active", async () => {
+  it("tl_search_files find: cwd-less call carries root_note when another root is active", async () => {
     const defaultDir = mkDir("g1-search-default");
     const worktreeDir = mkDir("g1-search-worktree");
     writeFile(defaultDir, "src/a.ts", "export const A = 1;\nexport const B = 2;\nexport const C = 3;\n");
@@ -262,12 +262,12 @@ describe("Guard 1 — root_note on cwd-less, handle-less read_file/search_files 
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "warm session", cwd: worktreeDir },
     });
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "export" },
     });
     const data = parseToolResult(res);
@@ -302,7 +302,7 @@ function buildConcernFixture(): string {
   return lines.join("\n") + "\n";
 }
 
-describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file mode=slice", () => {
+describe("Guard 2 — concern_note on out-of-slice hits for a partial tl_read_file mode=slice", () => {
   it("partial slice missing the query's concern tokens -> concern_note names the hit range", async () => {
     const wsDir = mkDir("g2-miss");
     writeFile(wsDir, "src/gain_controller.ts", buildConcernFixture());
@@ -311,7 +311,7 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     servers.push(srv);
     await srv.initialize();
 
-    // Harvest concern tokens via search_files find (recordConcernTokens also
+    // Harvest concern tokens via tl_search_files find (recordConcernTokens also
     // fires from find's concernAnchorTokens harvest — see
     // localizationGuards.spec.ts Feature 2). NOT task_pack: this fixture is
     // small enough that a task_pack priming call now serves it in full
@@ -322,14 +322,14 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     // file's body, so there is no prior full-file serve for the slice to
     // collide with.
     const findRes = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "integral clamp" },
     });
     expect(findRes.result.isError).toBeFalsy();
 
     // Slice 1-70: the planted-bug region (L145-148) is entirely outside.
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
     });
     const data = parseToolResult(res);
@@ -351,12 +351,12 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/gain_controller.ts" },
     });
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "140-170" },
     });
     const data = parseToolResult(res);
@@ -376,13 +376,13 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     // priming (not task_pack) so the mode=slice calls below stay real slice
     // serves rather than short-circuiting to a code-unchanged receipt.
     const findRes = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "integral clamp" },
     });
     expect(findRes.result.isError).toBeFalsy();
 
     const first = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
     });
     const firstData = parseToolResult(first);
@@ -392,7 +392,7 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     // qualify (0 served hits, unserved still has hits), but the note has
     // already fired once for this (session, path).
     const second = await srv.rpc(4, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "71-100" },
     });
     const secondData = parseToolResult(second);
@@ -408,12 +408,12 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/gain_controller.ts" },
     });
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-183" },
     });
     const data = parseToolResult(res);
@@ -431,7 +431,7 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
 
     // No task_pack/locate call at all this session — concernTokens stays empty.
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
     });
     const data = parseToolResult(res);
@@ -487,13 +487,13 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     servers.push(srv);
     await srv.initialize();
 
-    // Prime via search_files find (not task_pack — see the "g2-miss" test
+    // Prime via tl_search_files find (not task_pack — see the "g2-miss" test
     // above: a task_pack priming call can serve a small fixture in full,
     // short-circuiting the follow-up slice to a code-unchanged receipt
     // before it ever reaches buildConcernNote). This free-text query names
     // the workspace's own folder — exactly the reported repro.
     const findRes = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: {
         action: "find",
         query: "Fix the m365-drive-mount project TransferBuffer.Allocate bounds check",
@@ -503,7 +503,7 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
 
     // Range 1-70 excludes the mount-point identifiers (lines 156-160).
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "NativeMethods.cs", range: "1-70" },
     });
     const data = parseToolResult(res);
@@ -520,13 +520,13 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     await srv.initialize();
 
     const findRes2 = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "Investigate why the mount keeps failing under load" },
     });
     expect(findRes2.result.isError).toBeFalsy();
 
     const res2 = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "NativeMethods.cs", range: "1-70" },
     });
     const data2 = parseToolResult(res2);
@@ -543,13 +543,13 @@ describe("Guard 2 — concern_note on out-of-slice hits for a partial read_file 
     await srv.initialize();
 
     const findRes = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "Check NetResourceMountPoint release semantics" },
     });
     expect(findRes.result.isError).toBeFalsy();
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "NativeMethods.cs", range: "1-70" },
     });
     const data = parseToolResult(res);

@@ -29,6 +29,7 @@ import { basename, dirname, join, resolve as resolvePathAbs } from "node:path";
 import { fileURLToPath } from "node:url";
 import { removeAll } from "@tokenlighten/agents-md";
 import type {
+  CopilotGuideReport,
   CopilotInlineResultsReport,
   InstallHostEntry,
   InstallHostMechanism,
@@ -79,17 +80,25 @@ import {
 } from "./clients.js";
 import { evaluateDoctorAsync as defaultEvaluateDoctor, type DoctorResult } from "./doctor.js";
 import {
+  COPILOT_AGENTS_MD_KEY,
+  COPILOT_GUIDE_VALUES,
   COPILOT_INLINE_RESULTS_VALUES,
   COPILOT_RAISED_THRESHOLD_BYTES,
   COPILOT_SETTINGS_KEY,
+  defaultCopilotGuideRequest,
+  formatCopilotGuideLine,
   formatCopilotInlineResultsLine,
+  isCopilotGuideRequest,
   isCopilotInlineResultsMode,
   recordWorkspaceSetup as defaultRecordWorkspaceSetup,
+  removeCopilotGuideSettingsIfManaged,
   removeCopilotThresholdIfManaged,
   setupWorkspace as defaultSetupWorkspace,
   workspacePathsEqual,
+  type CopilotGuideRequest,
   type CopilotInlineResultsMode,
 } from "./workspace.js";
+import { removeCopilotSessionHook } from "../copilotSessionHooks.js";
 
 const INSTALL_USAGE = `\
 Usage:
@@ -111,6 +120,13 @@ Options:
                              Raise (default) GitHub Copilot's inline tool-result
                              limit in each workspace's .vscode/settings.json, or
                              keep it untouched
+  --copilot-guide standalone|agents-md|keep
+                             standalone (default): GitHub Copilot reads a compact
+                             TokenLighten guide from .github/copilot-instructions.md
+                             and stops attaching AGENTS.md where it holds only
+                             TokenLighten's block; agents-md: Copilot reads
+                             AGENTS.md; keep: leave that Copilot setting untouched
+                             (the default under --copilot-inline-results keep)
   --home <dir>              Override the machine-install home
   --use <version>           Re-point bin/tl.js at an already-staged version
   --prune                   Remove staged app/<version> directories other than current
@@ -149,6 +165,9 @@ export interface ParsedInstallArgs {
    * `isCopilotInlineResultsMode`) and exits 1 on an unrecognized value
    * before this is ever read downstream. Undefined defaults to "raise". */
   copilotInlineResults?: CopilotInlineResultsMode;
+  /** Unchecked cast at parse time, validated by `runInstall` like
+   * `copilotInlineResults` above. Undefined defaults to "standalone". */
+  copilotGuide?: CopilotGuideRequest;
   home?: string;
   use?: string;
   prune: boolean;
@@ -170,6 +189,7 @@ export function parseInstallArgs(args: readonly string[]): ParsedInstallArgs {
   let toolSurface: ToolSurface | undefined;
   let guideProfile: "full" | "medium" | "compact" | undefined;
   let copilotInlineResults: CopilotInlineResultsMode | undefined;
+  let copilotGuide: CopilotGuideRequest | undefined;
   let home: string | undefined;
   let use: string | undefined;
   let prune = false;
@@ -210,6 +230,9 @@ export function parseInstallArgs(args: readonly string[]): ParsedInstallArgs {
       case "--copilot-inline-results":
         copilotInlineResults = args[++i] as CopilotInlineResultsMode;
         break;
+      case "--copilot-guide":
+        copilotGuide = args[++i] as CopilotGuideRequest;
+        break;
       case "--home":
         home = args[++i];
         break;
@@ -249,7 +272,7 @@ export function parseInstallArgs(args: readonly string[]): ParsedInstallArgs {
     }
   }
   return {
-    workspaces, source, clientsMode, readOnly, toolSurface, guideProfile, copilotInlineResults,
+    workspaces, source, clientsMode, readOnly, toolSurface, guideProfile, copilotInlineResults, copilotGuide,
     home, use, prune, uninstall, dryRun, json, yes, force, fromExtension, dev, allowRoot,
   };
 }
@@ -840,6 +863,8 @@ export interface InstallPlan {
    * so this alone (with `workspaces.length > 0`) decides whether
    * `formatPlan` discloses the pending `.vscode/settings.json` write. */
   copilotInlineResultsMode: CopilotInlineResultsMode;
+  /** Resolved from `--copilot-guide` (default "standalone"; "keep" under `--copilot-inline-results keep`). */
+  copilotGuideRequest: CopilotGuideRequest;
 }
 
 function resolveInstalledBy(args: ParsedInstallArgs): InstallSource {
@@ -970,6 +995,7 @@ async function computePlan(
       : {}),
     ...(extensionDeferred ? { extensionDeferred } : {}),
     copilotInlineResultsMode: args.copilotInlineResults ?? "raise",
+    copilotGuideRequest: args.copilotGuide ?? defaultCopilotGuideRequest(args.copilotInlineResults),
   };
 }
 
@@ -1017,6 +1043,18 @@ function formatPlan(plan: InstallPlan): string {
           + "(pass --copilot-inline-results keep to skip)",
       ]
       : []),
+    // Copilot standard-setup evaluation (2026-10-02): the same consent line
+    // for the Copilot guide's settings write.
+    ...(plan.workspaces.length > 0 && plan.copilotGuideRequest !== "keep"
+      ? [
+        plan.copilotGuideRequest === "standalone"
+          ? "Copilot guide:  compact, in .github/copilot-instructions.md; will set "
+            + `${COPILOT_AGENTS_MD_KEY} to false in each workspace's .vscode/settings.json `
+            + "where AGENTS.md holds only TokenLighten's block (pass --copilot-guide keep to skip)"
+          : "Copilot guide:  AGENTS.md; will remove only the Copilot attachment setting TokenLighten turned off "
+            + "(pass --copilot-guide keep to skip)",
+      ]
+      : []),
   ];
   return lines.join("\n") + "\n";
 }
@@ -1044,6 +1082,7 @@ export interface InstallWorkspaceReport {
   files: string[];
   guideBlock: boolean;
   copilotInlineResults?: CopilotInlineResultsReport;
+  copilotGuide?: CopilotGuideReport;
 }
 
 export interface InstallVerifyReport {
@@ -1116,6 +1155,8 @@ function writeReportHuman(report: InstallReport, write: (s: string) => void): vo
     write(`  workspace ${workspace.root}: ${workspace.files.length} file(s), guide_block=${workspace.guideBlock}\n`);
     const copilotLine = formatCopilotInlineResultsLine(workspace.root, workspace.copilotInlineResults);
     if (copilotLine !== undefined) write(`    ${copilotLine}\n`);
+    const copilotGuideLine = formatCopilotGuideLine(workspace.root, workspace.copilotGuide);
+    if (copilotGuideLine !== undefined) write(`    ${copilotGuideLine}\n`);
   }
   if (report.verify) {
     write(`  verify: doctor=${report.verify.doctorOk ? "ok" : "FAIL"} handshake=${report.verify.handshakeOk ? "ok" : "FAIL"}${report.verify.error ? ` (${report.verify.error})` : ""}\n`);
@@ -1438,6 +1479,10 @@ async function performUninstall(
     // file itself is never deleted). Best-effort and silent, like the
     // legacy-forwarder removal below.
     removeCopilotThresholdIfManaged(workspace.root);
+    // ...and for the Copilot guide's attachment settings: only those
+    // TokenLighten's own record names, only while still `false`.
+    removeCopilotGuideSettingsIfManaged(workspace.root);
+    workspaceWarnings.push(...removeCopilotSessionHook(workspace.root).warnings);
   }
 
   // The dangling legacy forwarder goes first: it is identified by the managed
@@ -1549,10 +1594,11 @@ async function performInstall(
   // DESIGN-v0.14-mcp-only-install.md R3: "one stable identity for hosts
   // AND allowlists" carries env TOKENLIGHTEN_MANAGED=1 — this identity
   // feeds both host registration (clients.ts adds its own MANAGED_ENV
-  // independently) and the per-workspace launcher below, so the marker
-  // must originate here to reach `.vscode/mcp.json`/`.mcp.json`/
-  // `.codex/config.toml` (workspace.ts only spreads `launcher.env`, it
-  // never stamps this marker itself).
+  // independently) and the per-workspace launcher below. workspace.ts
+  // stamps the same marker on every entry it writes (2026-10-02: an entry
+  // written through a launcher with no install identity used to lack it),
+  // so carrying it here as well only fixes its key position in
+  // `.vscode/mcp.json`/`.mcp.json`/`.codex/config.toml`.
   let runtimeEnv: Record<string, string> = { TOKENLIGHTEN_MANAGED: "1" };
   let runtimeSource: InstallRuntimeSource;
   let appDirForIdentity: string;
@@ -1712,6 +1758,7 @@ async function performInstall(
       ...(args.toolSurface !== undefined ? { toolSurface: args.toolSurface } : {}),
       ...(args.guideProfile !== undefined ? { guideProfile: args.guideProfile } : {}),
       copilotInlineResults: plan.copilotInlineResultsMode,
+      copilotGuide: plan.copilotGuideRequest,
     });
     const entry: InstallWorkspaceEntry = {
       root: setupResult.workspaceRoot,
@@ -1724,6 +1771,7 @@ async function performInstall(
       files: [...entry.files],
       guideBlock: entry.guide_block,
       ...(setupResult.copilotInlineResults ? { copilotInlineResults: setupResult.copilotInlineResults } : {}),
+      ...(setupResult.copilotGuide ? { copilotGuide: setupResult.copilotGuide } : {}),
     });
     // B5 fix: install.json's workspaces[] (just upserted above) is a
     // different store from the workspace REGISTRY (config.toml
@@ -1864,6 +1912,13 @@ export async function runInstall(argv: string[], injectedDeps: InstallDeps = {})
   ) {
     process.stderr.write(
       `tl install: unrecognized --copilot-inline-results value '${String(args.copilotInlineResults)}' (expected ${COPILOT_INLINE_RESULTS_VALUES.join(" | ")})\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (args.copilotGuide !== undefined && !isCopilotGuideRequest(args.copilotGuide)) {
+    process.stderr.write(
+      `tl install: unrecognized --copilot-guide value '${String(args.copilotGuide)}' (expected ${COPILOT_GUIDE_VALUES.join(" | ")})\n`,
     );
     process.exitCode = 1;
     return;

@@ -447,9 +447,9 @@ function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
       child.stdin!.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
     },
     call: async (args: Record<string, unknown>) => {
-      const res = await rpc(toolCallId++, "tools/call", { name: "read_file", arguments: args });
+      const res = await rpc(toolCallId++, "tools/call", { name: "tl_read_file", arguments: args });
       const text: string = res?.result?.content?.[0]?.text;
-      expect(typeof text, `read_file returned no text content: ${JSON.stringify(res)}`).toBe("string");
+      expect(typeof text, `tl_read_file returned no text content: ${JSON.stringify(res)}`).toBe("string");
       return JSON.parse(text) as Record<string, unknown>;
     },
     kill: async () => {
@@ -530,12 +530,21 @@ function extractNext(body: Record<string, unknown>): ToolCallShape | undefined {
   return undefined;
 }
 
-// Generous: the dropped 40-line file pages back at 2 lines/hop once the
-// per-response budget forces a cursor continuation (measured: ~20 hops for
-// BETA alone) plus a couple more for ALPHA's own remainder and beta's first
-// non-cursor hop — comfortably above the longest legitimate chain this
-// fixture produces, so hitting the cap still means a loop, not a big request.
-const HOP_CAP = 40;
+// WP-L item 2 (eval-0929 §9, 2026-09-29): raised from 40. `wireLimit.ts`'s
+// `unionBatchContinuations` used to hand back a hand-built `{tool,arguments:
+// {targets,content}}` literal that never passed through `canonicalToolCall`,
+// so every hop AFTER the first one silently dropped the caller's declared
+// `budget.bytes` and re-opened to the calibrated server ceiling — this is
+// exactly what let the chain converge in far fewer hops than the caller's own
+// 700 B budget actually allows (710 B since the tl_ rename). Once the fix makes every hop honor it
+// (server.ts's A7 handles=[] batch, `protocol/budget/wireLimit.ts`), BOTH
+// configs need close to the old cap to page through 8+40=48 lines 1-2 at a
+// time: measured live (this fixture, unchanged otherwise) 40 calls for the
+// default config and 44 for vscode — right at, and then past, the old
+// number. Generous rather than exact, same as before: comfortably above both
+// measurements, so hitting the cap still means a loop, not merely a slow (but
+// honest) chain.
+const HOP_CAP = 80;
 
 describe.each([
   ["default", serverEnv()],
@@ -568,7 +577,10 @@ describe.each([
 
     const first = await server.call({
       targets: [{ handle: hAlpha, range: `1-${ALPHA_LINES}` }, { handle: hBeta, range: `1-${BETA_LINES}` }],
-      budget: { bytes: 700 },
+      // 710, not 700: since the tools took the `tl_` prefix (2026-10-02) the
+      // first hop's smallest batch is 701 B, so 700 B is refused
+      // budget-below-minimum before any rung runs.
+      budget: { bytes: 710 },
     });
     expect(first["kind"], JSON.stringify(first).slice(0, 400)).toBe("read.batch");
 

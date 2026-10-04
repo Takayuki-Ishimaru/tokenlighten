@@ -147,7 +147,7 @@ export function projectLeanExecutionContract(contract: TaskExecutionContract): L
     return { phase, unresolved, allowed, ...signals };
   }
   const nextCall = contract.next_call;
-  if (nextCall !== undefined && nextCall.tool !== "read_file" && nextCall.tool !== "search_files") {
+  if (nextCall !== undefined && nextCall.tool !== "tl_read_file" && nextCall.tool !== "tl_search_files") {
     throw new Error(`discovery execution contract has a non-read-only next_call: ${nextCall.tool}`);
   }
   return {

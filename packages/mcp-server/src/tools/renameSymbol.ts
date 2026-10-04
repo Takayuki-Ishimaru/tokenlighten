@@ -34,6 +34,7 @@ import {
 } from "./applyEditsMulti.js";
 import { nestedWorkspaceCrossing } from "../write/workspaceBoundary.js";
 import { detectWriteEncodingRisk } from "../util/textDecode.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -256,6 +257,15 @@ export async function renameSymbol(
       checkpoint: null,
     };
   }
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the one
+  // place a cancelled rename is abandoned. Phase 1 scanned the workspace
+  // (async: lexical segments per file) and built every new text in memory; no
+  // byte has reached the disk. Past this line the rename is all-or-nothing as
+  // ever — never cut off between files, its rollback never interrupted — and
+  // the check sits outside Phase 2's try/catch because a cancel is not a write
+  // failure.
+  throwIfRequestCancelled();
 
   // Phase 2: write each file atomically. On mid-batch failure, roll back the
   // already-written files and REPORT the outcome of that rollback. Mirrors

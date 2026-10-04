@@ -43,14 +43,15 @@
         "lines": [
           1,
           2,
-          3
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_11_0 = 0;",
           "const hotSym_11_1 = 1;",
-          "const hotSym_11_2 = 2;"
-        ],
-        "more_lines": 1
+          "const hotSym_11_2 = 2;",
+          "const hotSym_11_3 = 3;"
+        ]
       },
       {
         "path": "src/m12/f.ts",
@@ -90,14 +91,15 @@
         "lines": [
           1,
           2,
-          3
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_15_0 = 0;",
           "const hotSym_15_1 = 1;",
-          "const hotSym_15_2 = 2;"
-        ],
-        "more_lines": 1
+          "const hotSym_15_2 = 2;",
+          "const hotSym_15_3 = 3;"
+        ]
       },
       {
         "path": "src/m16/f.ts",
@@ -137,14 +139,15 @@
         "lines": [
           1,
           2,
-          3
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_19_0 = 0;",
           "const hotSym_19_1 = 1;",
-          "const hotSym_19_2 = 2;"
-        ],
-        "more_lines": 1
+          "const hotSym_19_2 = 2;",
+          "const hotSym_19_3 = 3;"
+        ]
       },
       {
         "path": "src/m2/f.ts",
@@ -197,14 +200,15 @@
         "lines": [
           1,
           2,
-          3
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_23_0 = 0;",
           "const hotSym_23_1 = 1;",
-          "const hotSym_23_2 = 2;"
-        ],
-        "more_lines": 1
+          "const hotSym_23_2 = 2;",
+          "const hotSym_23_3 = 3;"
+        ]
       },
       {
         "path": "src/m24/f.ts",
@@ -230,25 +234,29 @@
         "path": "src/m26/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3
         ],
         "snippets": [
           "const hotSym_26_0 = 0;",
-          "const hotSym_26_1 = 1;"
-        ],
-        "more_lines": 1
+          "const hotSym_26_1 = 1;",
+          "const hotSym_26_2 = 2;"
+        ]
       },
       {
         "path": "src/m27/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_27_0 = 0;",
-          "const hotSym_27_1 = 1;"
-        ],
-        "more_lines": 2
+          "const hotSym_27_1 = 1;",
+          "const hotSym_27_2 = 2;",
+          "const hotSym_27_3 = 3;"
+        ]
       },
       {
         "path": "src/m28/f.ts",
@@ -274,37 +282,44 @@
         "path": "src/m3/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_3_0 = 0;",
-          "const hotSym_3_1 = 1;"
-        ],
-        "more_lines": 2
+          "const hotSym_3_1 = 1;",
+          "const hotSym_3_2 = 2;",
+          "const hotSym_3_3 = 3;"
+        ]
       },
       {
         "path": "src/m30/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3
         ],
         "snippets": [
           "const hotSym_30_0 = 0;",
-          "const hotSym_30_1 = 1;"
-        ],
-        "more_lines": 1
+          "const hotSym_30_1 = 1;",
+          "const hotSym_30_2 = 2;"
+        ]
       },
       {
         "path": "src/m31/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_31_0 = 0;",
-          "const hotSym_31_1 = 1;"
-        ],
-        "more_lines": 2
+          "const hotSym_31_1 = 1;",
+          "const hotSym_31_2 = 2;",
+          "const hotSym_31_3 = 3;"
+        ]
       },
       {
         "path": "src/m32/f.ts",
@@ -330,25 +345,29 @@
         "path": "src/m34/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3
         ],
         "snippets": [
           "const hotSym_34_0 = 0;",
-          "const hotSym_34_1 = 1;"
-        ],
-        "more_lines": 1
+          "const hotSym_34_1 = 1;",
+          "const hotSym_34_2 = 2;"
+        ]
       },
       {
         "path": "src/m35/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_35_0 = 0;",
-          "const hotSym_35_1 = 1;"
-        ],
-        "more_lines": 2
+          "const hotSym_35_1 = 1;",
+          "const hotSym_35_2 = 2;",
+          "const hotSym_35_3 = 3;"
+        ]
       },
       {
         "path": "src/m36/f.ts",
@@ -374,25 +393,29 @@
         "path": "src/m38/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3
         ],
         "snippets": [
           "const hotSym_38_0 = 0;",
-          "const hotSym_38_1 = 1;"
-        ],
-        "more_lines": 1
+          "const hotSym_38_1 = 1;",
+          "const hotSym_38_2 = 2;"
+        ]
       },
       {
         "path": "src/m39/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_39_0 = 0;",
-          "const hotSym_39_1 = 1;"
-        ],
-        "more_lines": 2
+          "const hotSym_39_1 = 1;",
+          "const hotSym_39_2 = 2;",
+          "const hotSym_39_3 = 3;"
+        ]
       },
       {
         "path": "src/m4/f.ts",
@@ -418,25 +441,29 @@
         "path": "src/m6/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3
         ],
         "snippets": [
           "const hotSym_6_0 = 0;",
-          "const hotSym_6_1 = 1;"
-        ],
-        "more_lines": 1
+          "const hotSym_6_1 = 1;",
+          "const hotSym_6_2 = 2;"
+        ]
       },
       {
         "path": "src/m7/f.ts",
         "lines": [
           1,
-          2
+          2,
+          3,
+          4
         ],
         "snippets": [
           "const hotSym_7_0 = 0;",
-          "const hotSym_7_1 = 1;"
-        ],
-        "more_lines": 2
+          "const hotSym_7_1 = 1;",
+          "const hotSym_7_2 = 2;",
+          "const hotSym_7_3 = 3;"
+        ]
       },
       {
         "path": "src/m8/f.ts",
@@ -463,172 +490,9 @@
     "total_matches": 100,
     "literal": true,
     "inventory_complete": true,
-    "note": "inventory[] plus total_files/total_matches are exhaustive (100% of matches); only the per-file snippets in files[] were capped — re-searching this exact query will not surface additional files",
-    "inventory": [
-      {
-        "path": "src/m11/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m15/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m19/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m23/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m27/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m3/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m31/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m35/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m39/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m7/f.ts",
-        "matches": 4
-      },
-      {
-        "path": "src/m10/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m14/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m18/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m2/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m22/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m26/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m30/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m34/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m38/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m6/f.ts",
-        "matches": 3
-      },
-      {
-        "path": "src/m1/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m13/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m17/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m21/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m25/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m29/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m33/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m37/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m5/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m9/f.ts",
-        "matches": 2
-      },
-      {
-        "path": "src/m0/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m12/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m16/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m20/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m24/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m28/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m32/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m36/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m4/f.ts",
-        "matches": 1
-      },
-      {
-        "path": "src/m8/f.ts",
-        "matches": 1
-      }
-    ],
     "related_lookups": {
       "definition": {
-        "tool": "search_files",
+        "tool": "tl_search_files",
         "arguments": {
           "action": "find",
           "queries": [
@@ -641,7 +505,7 @@
         }
       },
       "callers": {
-        "tool": "search_files",
+        "tool": "tl_search_files",
         "arguments": {
           "action": "references",
           "queries": [
@@ -651,24 +515,5 @@
         }
       }
     }
-  },
-  "limit": {
-    "cause": "wire",
-    "next": {
-      "tool": "search_files",
-      "arguments": {
-        "cwd": "$WS",
-        "action": "find",
-        "queries": [
-          "hotSym"
-        ],
-        "scope": {
-          "path": "src/m11/f.ts"
-        }
-      }
-    },
-    "omitted": [
-      "results"
-    ]
   }
 }

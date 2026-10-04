@@ -108,7 +108,7 @@ function semanticSummary(body: Record<string, any>): Record<string, unknown> {
 
 async function firstPack(client: Client, root: string, query: string, lane: string): Promise<Record<string, any>> {
   const result = await client.callTool({
-    name: "read_file",
+    name: "tl_read_file",
     arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: root, lane },
   });
   const body = packet(result);

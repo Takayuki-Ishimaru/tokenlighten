@@ -48,7 +48,8 @@ export interface RewriteResult {
  * surface is exactly three tools; the alias names this list used to call "new
  * TL tools" were DELETED with D11 and are no longer anything a caller can
  * invoke:
- *   - current: read_file, edit_file, search_files
+ *   - current: tl_read_file, tl_edit_file, tl_search_files, and their
+ *     pre-rename names read_file, edit_file, search_files
  *   - deleted aliases / proto-era names, kept ONLY as historical markers —
  *     hand-written guidance predating v1 still mentions them, and clobbering
  *     it is the exact failure this predicate exists to prevent.
@@ -63,10 +64,12 @@ export function hasManualGuidance(text: string): boolean {
   const lower = text.toLowerCase();
   if (!lower.includes("tokenlighten")) return false;
   return (
-    // The three advertised tools (D11: the only names that exist).
-    text.includes("read_file") ||
-    text.includes("edit_file") ||
-    text.includes("search_files") ||
+    // The three advertised tools (D11: the only names that exist), and their
+    // pre-2026-10-02 names (`read_file`, ...): hand-written guidance from
+    // before the tl_ rename is still guidance (r5 review — the renamed
+    // keyword list alone made it look absent, and setup appended a managed
+    // block beside it).
+    /(?:tl_)?(?:read_file|edit_file|search_files)/u.test(text) ||
     // Deleted aliases and proto-era tools: still valid evidence that someone
     // hand-wrote TL guidance here, even though nothing answers to them now.
     text.includes("search_replace_edit") ||
@@ -76,6 +79,15 @@ export function hasManualGuidance(text: string): boolean {
     text.includes("get_changed_context") ||
     text.includes("build_optimized_context")
   );
+}
+
+/** True when `blockText` (a managed range, LF) equals the managed range of one of `renderings`. */
+function blockMatchesRendering(blockText: string, renderings: Iterable<string>): boolean {
+  for (const rendering of renderings) {
+    const range = findManagedRange(rendering);
+    if (range !== undefined && rendering.slice(range.start, range.end) === blockText) return true;
+  }
+  return false;
 }
 
 /**
@@ -102,7 +114,10 @@ export function rewrite(
   canonical: string,
   version: string,
   sha: string,
-  driftMode: DriftMode = "diff-warn"
+  driftMode: DriftMode = "diff-warn",
+  // Other renderings TokenLighten makes of this block at `version` (another
+  // guide profile, tool surface, locale or Copilot guide); see (B-2).
+  alternates?: () => Iterable<string>,
 ): RewriteResult {
   // Pre-flight: detect malformed multiple sentinels before any processing.
   const { starts, ends } = countSentinels(text.replace(/\r\n/g, "\n"));
@@ -210,8 +225,14 @@ export function rewrite(
     return { text: ensureTrailingNewline(normalised), action: "no-op" };
   }
 
-  // (B-2) Drift: version old or sha mismatch
-  const manualEditDetected = blockSha !== undefined && !shaMatch && versionMatch;
+  // (B-2) Drift: version old or sha mismatch. A same-version block whose sha
+  // differs is a manual edit only when it is not, byte for byte, another
+  // rendering TokenLighten itself makes at this version (a settings switch:
+  // guide profile, tool surface, locale or Copilot guide) — that one can
+  // always be made again, so it needs no backup and no warning.
+  const settingsSwitch = blockSha !== undefined && !shaMatch && versionMatch
+    && alternates !== undefined && blockMatchesRendering(blockText, alternates());
+  const manualEditDetected = blockSha !== undefined && !shaMatch && versionMatch && !settingsSwitch;
   const wrapperMismatch = versionMatch && shaMatch && !prefixMatch;
 
   if (driftMode === "fail-build") {
@@ -220,7 +241,9 @@ export function rewrite(
       action: "fail",
       diagnostic: wrapperMismatch
         ? "Target-specific instruction metadata is missing or outdated. Re-run `tl-agents update`."
-        : `AGENTS.md sentinel is ${blockVersion ?? "(unknown)"}, generator wants ${version}. Re-run \`tl-agents update\`.`,
+        : settingsSwitch
+          ? "Managed block was generated for other settings (guide profile, tool surface, locale or Copilot guide). Re-run `tl-agents update --force` or `tl workspace setup`."
+          : `AGENTS.md sentinel is ${blockVersion ?? "(unknown)"}, generator wants ${version}. Re-run \`tl-agents update\`.`,
       manualEditDetected,
     };
   }
@@ -230,7 +253,9 @@ export function rewrite(
       ? "Target-specific instruction metadata is missing or outdated; re-run `tl-agents update`"
       : manualEditDetected
         ? `AGENTS.md managed block contains manual edits (sha mismatch); not overwriting. Move edits outside the sentinel block or run with --force.`
-        : `AGENTS.md outdated (${blockVersion ?? "?"} → ${version}); re-run \`tl-agents update\``;
+        : settingsSwitch
+          ? "AGENTS.md managed block was generated for other settings (guide profile, tool surface, locale or Copilot guide); not overwriting. Re-run with --force or `tl workspace setup`."
+          : `AGENTS.md outdated (${blockVersion ?? "?"} → ${version}); re-run \`tl-agents update\``;
     process.stderr.write(`[tl-agents] WARN: ${msg}\n`);
     return { text: normalised, action: "no-op", diagnostic: msg, manualEditDetected };
   }

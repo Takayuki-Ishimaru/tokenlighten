@@ -8,14 +8,14 @@
  * already-served range with a body-less receipt (`read.receipt`,
  * `code-unchanged`/`decision-unchanged`), the model then repeats the SAME
  * call with `task.force_serve:true`, and gets the bytes. Recorded:
- * `read_file {qref, targets:[{handle,range:"30-50"},{handle,range:"299-310"}],
+ * `tl_read_file {qref, targets:[{handle,range:"30-50"},{handle,range:"299-310"}],
  * task:{handle,profile:"answer"}}` -> receipt (487 B, one wasted turn) ->
  * identical call + `force_serve:true` -> ~1.2 KB of code. One model turn
  * costs as much as ~9-14 KB of served bytes on every host, so refusing to
  * re-send 1.2 KB is the expensive choice.
  *
  * FIX (`util/flags.ts`'s `reserveSmallWindowsEnabled`, DEFAULT OFF, a
- * TL_TURN_ECONOMY umbrella member): `server.ts`'s read_file dispatch, right
+ * TL_TURN_ECONOMY umbrella member): `server.ts`'s tl_read_file dispatch, right
  * before the S1-A1 qref-repack reprojection, measures the TOTAL live size of
  * every explicit line window the call addresses (a single target's
  * range/ranges/symbol, or a paths[]/handles[] batch whose every entry does),
@@ -175,7 +175,7 @@ interface Seeded {
 /** Reaches `act.answer` with calc.ts served WHOLE (the "already served" baseline every later window is a subset of). */
 async function seedCalcPack(server: ServerHandle, ws: string): Promise<Seeded> {
   const seed = bodyOf(await server.rpc(2, "tools/call", {
-    name: "read_file",
+    name: "tl_read_file",
     arguments: {
       query: SEED_QUERY,
       targets: [{ path: "calc.ts" }],
@@ -267,7 +267,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       // 1. UNSET: a single already-served small range (11 lines, well under
       // both caps) still receipts -- today's exact behaviour.
       const singleOff = bodyOf(await serverOff.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededOff.qref,
           targets: [{ handle: seededOff.handle, range: "5-15" }],
@@ -280,7 +280,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       // 2. THE RECORDED SHAPE: two already-served small ranges in one call.
       // Unset, this also receipts.
       const twoOff = bodyOf(await serverOff.rpc(4, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededOff.qref,
           targets: [
@@ -295,7 +295,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
 
       // 3. ON: the IDENTICAL single-range call serves real bytes.
       const singleOn = bodyOf(await serverOn.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededOn.qref,
           targets: [{ handle: seededOn.handle, range: "5-15" }],
@@ -315,7 +315,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
 
       // 4. ON: the two-small-ranges recorded shape also serves real bytes.
       const twoOn = bodyOf(await serverOn.rpc(4, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededOn.qref,
           targets: [
@@ -341,7 +341,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       // baseline this flag's auto-forced call must match, byte-identical
       // modulo identity tokens.
       const singleForced = bodyOf(await serverForced.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededForced.qref,
           targets: [{ handle: seededForced.handle, range: "5-15" }],
@@ -359,7 +359,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       // 6. SIZE GATE: a >120-line already-served window still receipts even
       // with the flag on -- the total-size cap is not merely a byte cap.
       const largeOn = bodyOf(await serverOn.rpc(5, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededOn.qref,
           targets: [{ handle: seededOn.handle, range: "1-135" }],
@@ -394,11 +394,11 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       const seededOn = await seedCalcPack(serverOn, wsOn);
 
       const bareOff = bodyOf(await serverOff.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: { qref: seededOff.qref, task: { handle: seededOff.taskId, profile: "answer" }, cwd: wsOff },
       }));
       const bareOn = bodyOf(await serverOn.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: { qref: seededOn.qref, task: { handle: seededOn.taskId, profile: "answer" }, cwd: wsOn },
       }));
 
@@ -428,7 +428,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       // the first `it`, reasserted here as the control this test's own
       // change must diverge from).
       const before = bodyOf(await server.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seeded.qref,
           targets: [{ handle: seeded.handle, range: "5-15" }],
@@ -452,7 +452,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       fs.writeFileSync(filePath, mutated, "utf8");
 
       const after = bodyOf(await server.rpc(4, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seeded.qref,
           targets: [{ handle: seeded.handle, range: "5-15" }],
@@ -493,7 +493,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       const seededOverride = await seedCalcPack(serverOverride, wsOverride);
 
       const umbrella = bodyOf(await serverUmbrella.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededUmbrella.qref,
           targets: [{ handle: seededUmbrella.handle, range: "5-15" }],
@@ -507,7 +507,7 @@ describe("WP-S10 — TL_RESERVE_SMALL_WINDOWS reserves a small already-served wi
       ).not.toBe("read.receipt");
 
       const overridden = bodyOf(await serverOverride.rpc(3, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: {
           qref: seededOverride.qref,
           targets: [{ handle: seededOverride.handle, range: "5-15" }],

@@ -98,7 +98,7 @@ export async function applyIntent(
       return {
         ok: false,
         reason: "intent-unknown",
-        detail: "Use edit_file with an exact search/replace edit instead.",
+        detail: "Use tl_edit_file with an exact search/replace edit instead.",
       };
   }
 }

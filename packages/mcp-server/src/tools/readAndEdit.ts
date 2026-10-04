@@ -15,6 +15,7 @@ import { getSymbolWithContext } from "./getSymbolWithContext.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import { compressFormat } from "../util/formatCompress.js";
 import { shortSha } from "../util/handles.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import { fastPathV2Enabled } from "../util/flags.js";
 import { trace } from "../util/trace.js";
 import { attemptGraphImpactProbe, evaluateImpactGuard, isFastPathEligible } from "../write/impactGuard.js";
@@ -220,6 +221,12 @@ export async function readAndEdit(
       code: editResult.code ?? "edit-error",
     };
   }
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the symbol
+  // context was read (an async step, so a cancel can land during it) and the
+  // edit applied in memory; the write below is the first byte this call puts
+  // on the disk.
+  throwIfRequestCancelled();
 
   // Atomic write — preserves the original file's mode (see
   // writeExistingFileAtomic's doc comment; 2026-08-07 chmod-reset incident).

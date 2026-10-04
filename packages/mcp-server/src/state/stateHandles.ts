@@ -220,6 +220,24 @@ export function resolveTaskHandle(token: string, workspaceRoot: string): TaskHan
   return { ok: true, state, stateVersion: record.version };
 }
 
+/**
+ * TL_TASK_HANDLE_RECOVERY route (c) (server.ts `dropDeadTaskHandleForNewEpoch`):
+ * the `resolveTaskHandle` outcomes that mean the token names no task this
+ * server could continue — never issued here or garbled (`invalid`), from
+ * another installation (`wrong-subject`), past its lifetime (`expired`), from
+ * a reset store (`stale`), or no longer stored (`unknown`). Not
+ * `wrong-purpose` (a real token of another kind, whose refusal names the
+ * mix-up), `wrong-workspace` (a cwd mix-up) or `store-unavailable` (the task
+ * may well be live; review 2026-10-02).
+ */
+export function isDeadTaskHandleOutcome(outcome: string): boolean {
+  return outcome === "invalid"
+    || outcome === "wrong-subject"
+    || outcome === "expired"
+    || outcome === "stale"
+    || outcome === "unknown";
+}
+
 function asTaskState(record: StoredRecord): TaskHandleState | undefined {
   const data = record.data;
   if (typeof data["taskFingerprint"] !== "string" || data["taskFingerprint"] === "") return undefined;
@@ -576,7 +594,7 @@ function qrefQueryHash(workspaceRoot: string, query: string): string {
  * partitions on (`util/packServeLog.ts`'s `executedNextLedgerKey`), never
  * natural-language text, so it is exempt from the R27 M1 minimization this
  * function's header argues for. Storing it here is what lets a later,
- * handleless `read_file {qref}` re-pack recover the SAME partition a
+ * handleless `tl_read_file {qref}` re-pack recover the SAME partition a
  * `task.handle`-carrying execution of this task's own `next` was recorded
  * under — see `state/session.ts`'s `resolveTaskQueryRefBinding`. Omitted
  * (not even an empty string) when the caller has none to give, so an old

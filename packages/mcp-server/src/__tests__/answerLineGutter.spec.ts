@@ -7,7 +7,7 @@
 // (util/formatCompress.ts) into a single marker line naming the elided span,
 // so a statement's true source line cannot be counted off the wire — a method
 // starting at file line 274 is unreachable by counting from a body that opens
-// at line 256. The model issued serial `search_files find` calls on exact
+// at line 256. The model issued serial `tl_search_files find` calls on exact
 // code text purely to learn line numbers. This flag numbers each line of an
 // eligible served body with its true source line instead.
 //
@@ -230,7 +230,7 @@ async function taskPackCall(
   const server = startServer(root, env);
   spawnedServers.push(server);
   await server.initialize();
-  return server.call("read_file", {
+  return server.call("tl_read_file", {
     cwd: root,
     query: QUERY,
     targets,
@@ -275,7 +275,7 @@ describe("TL_ANSWER_LINE_GUTTER — answer-profile task_pack", () => {
     expect(stripAnswerLineGutter(served)).toBe(textOf(offRow!));
   }, 60000);
 
-  it("ON + generic profile: un-numbered (bodies must stay copy-exact for edit_file)", async () => {
+  it("ON + generic profile: un-numbered (bodies must stay copy-exact for tl_edit_file)", async () => {
     const root = makeWorkspace();
     const { body } = await taskPackCall(root, { [FLAG]: "1" }, "generic", [{ path: "src/OrderService.java" }]);
     const row = findRow(body, "src/OrderService.java");
@@ -312,7 +312,7 @@ describe("TL_ANSWER_LINE_GUTTER — answer-profile task_pack", () => {
     const server = startServer(root, { [FLAG]: "1" });
     spawnedServers.push(server);
     await server.initialize();
-    const { body } = await server.call("read_file", {
+    const { body } = await server.call("tl_read_file", {
       cwd: root,
       targets: [{ path: "src/OrderService.java", range: "18-22" }],
       task: { epoch: "new", profile: "answer" },
@@ -330,7 +330,7 @@ describe("TL_ANSWER_LINE_GUTTER — answer-profile task_pack", () => {
     const server = startServer(root, { [FLAG]: "1" });
     spawnedServers.push(server);
     await server.initialize();
-    const { body } = await server.call("read_file", {
+    const { body } = await server.call("tl_read_file", {
       cwd: root,
       targets: [{ path: "src/OrderService.java", range: "18-22" }],
       task: { epoch: "new", profile: "generic" },
@@ -342,7 +342,7 @@ describe("TL_ANSWER_LINE_GUTTER — answer-profile task_pack", () => {
 
   // No wire-facing toggle reproduces a served body that DIFFERS from
   // `elideDocCommentsWithWindows`'s own rendering of the same path+range
-  // (searched: `comments:"keep"` is a real read_file argument, but it governs
+  // (searched: `comments:"keep"` is a real tl_read_file argument, but it governs
   // Office/artifact comments, not code doc-comment elision, and left this
   // Java render byte-identical to the default). The safety property itself
   // ("comments kept / a trimmed middle / a stale file never gets numbered")
@@ -372,4 +372,150 @@ describe("TL_ANSWER_LINE_GUTTER — answer-profile task_pack", () => {
     expect(row["body"]).toBe(mismatchedBody);
     expect(String(row["body"])).not.toMatch(/^\d+\|/m);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Copilot retest r2 (2026-10-02): whole-file read.batch entries.
+//
+// A whole-file batch entry (`form:"file"`, `fullFileExpansion:true`) carries
+// no `range`, so it shipped un-numbered. In the live large-task session
+// (GPT-6 Luna) the model then re-read the same nine files with explicit
+// ranges just to learn their line numbers -- one whole extra round, 18 % of
+// that session's credits. The fixtures below are not part of QUERY's answer,
+// so the first pack never serves them and the follow-up gets their bodies.
+// ---------------------------------------------------------------------------
+
+const GAUGE_LINES = [
+  /* 1  */ "package com.example.metrics;",
+  /* 2  */ "",
+  /* 3  */ "public class Gauge {",
+  /* 4  */ "  private long value;",
+  /* 5  */ "",
+  /* 6  */ "  /**",
+  /* 7  */ "   * Records a sample. This doc comment is long on purpose so the",
+  /* 8  */ "   * renderer elides it into one marker line, exactly like the",
+  /* 9  */ "   * evaluated fixture's own comments were.",
+  /* 10 */ "   * @param sample the new reading",
+  /* 11 */ "   */",
+  /* 12 */ "  public void record(long sample) {",
+  /* 13 */ "    value = Math.max(value, sample);",
+  /* 14 */ "  }",
+  /* 15 */ "}",
+];
+const WINDOW_LINES = [
+  /* 1 */ "/**",
+  /* 2 */ " * Sliding-window helper. A JSDoc block long enough to be",
+  /* 3 */ " * elided by the renderer, so the numbering must jump from",
+  /* 4 */ " * its marker straight to line 6.",
+  /* 5 */ " */",
+  /* 6 */ "export function windowSum(values: number[], size: number): number {",
+  /* 7 */ "  return values.slice(-size).reduce((a, b) => a + b, 0);",
+  /* 8 */ "}",
+];
+const WHOLE_FILE_PATHS = ["src/metrics/Gauge.java", "src/metrics/window.ts"] as const;
+
+function makeWholeFileWorkspace(): string {
+  const root = makeWorkspace();
+  fs.mkdirSync(path.join(root, "src", "metrics"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src", "metrics", "Gauge.java"), GAUGE_LINES.join("\n") + "\n", "utf8");
+  fs.writeFileSync(path.join(root, "src", "metrics", "window.ts"), WINDOW_LINES.join("\n") + "\n", "utf8");
+  return root;
+}
+
+/** The live follow-up's own shape: a task pack first, then `qref` + whole-file targets + `content:"full"`. */
+async function wholeFileFollowUp(
+  env: Record<string, string>,
+  profile: "answer" | "generic",
+  withQref: boolean,
+): Promise<Record<string, unknown>> {
+  const root = makeWholeFileWorkspace();
+  const server = startServer(root, env);
+  spawnedServers.push(server);
+  await server.initialize();
+  const pack = await server.call("tl_read_file", { cwd: root, query: QUERY, task: { epoch: "new", profile } });
+  const qref = pack.body["qref"];
+  const { body } = await server.call("tl_read_file", {
+    cwd: root,
+    ...(withQref && typeof qref === "string" ? { qref } : {}),
+    targets: WHOLE_FILE_PATHS.map((p) => ({ path: p })),
+    content: "full",
+  });
+  return body;
+}
+
+function nonEmptyLines(text: string): string[] {
+  return text.split("\n").filter((line) => line !== "");
+}
+
+describe("TL_ANSWER_LINE_GUTTER — whole-file read.batch entries (Copilot retest r2)", () => {
+  it("ON + answer lane, the live qref follow-up: rangeless whole-file entries are numbered from line 1, across each elided doc comment", async () => {
+    const body = await wholeFileFollowUp({ [FLAG]: "1" }, "answer", true);
+    expect(body["kind"], JSON.stringify(body).slice(0, 400)).toBe("read.batch");
+    const gauge = findRow(body, "src/metrics/Gauge.java");
+    const window = findRow(body, "src/metrics/window.ts");
+    expect(gauge, JSON.stringify(body).slice(0, 400)).toBeDefined();
+    expect(window, JSON.stringify(body).slice(0, 400)).toBeDefined();
+    // The shape under test: no `range` on the entry at all.
+    expect(gauge!["range"]).toBeUndefined();
+    const gaugeLines = nonEmptyLines(textOf(gauge!));
+    expect(gaugeLines[0]).toBe("1|package com.example.metrics;");
+    expect(gaugeLines.filter((line) => !/^\d+\|/.test(line)), textOf(gauge!)).toEqual([]);
+    expect(gaugeLines.find((line) => line.includes("doc elided")), textOf(gauge!)).toMatch(/^6\|/);
+    expect(gaugeLines.find((line) => line.includes("public void record(long sample) {")), textOf(gauge!)).toMatch(/^12\|/);
+    expect(gaugeLines[gaugeLines.length - 1]).toBe("15|}");
+    const windowLines = nonEmptyLines(textOf(window!));
+    expect(windowLines.find((line) => line.includes("export function windowSum")), textOf(window!)).toMatch(/^6\|/);
+    expect(windowLines[windowLines.length - 1]).toBe("8|}");
+
+    // Stripping the gutter recovers exactly the flag-off bytes.
+    const offBody = await wholeFileFollowUp({}, "answer", true);
+    for (const p of WHOLE_FILE_PATHS) {
+      expect(stripAnswerLineGutter(textOf(findRow(body, p)!))).toBe(textOf(findRow(offBody, p)!));
+    }
+  }, 90000);
+
+  it("ON + answer lane without the qref (lane-inherited answer profile): numbered too", async () => {
+    const body = await wholeFileFollowUp({ [FLAG]: "1" }, "answer", false);
+    const gauge = findRow(body, "src/metrics/Gauge.java");
+    expect(gauge, JSON.stringify(body).slice(0, 400)).toBeDefined();
+    expect(nonEmptyLines(textOf(gauge!))[0]).toBe("1|package com.example.metrics;");
+  }, 60000);
+
+  it("ON + generic lane: the same follow-up stays un-numbered (bodies stay copy-exact for tl_edit_file)", async () => {
+    const body = await wholeFileFollowUp({ [FLAG]: "1" }, "generic", false);
+    for (const p of WHOLE_FILE_PATHS) {
+      const row = findRow(body, p);
+      expect(row, JSON.stringify(body).slice(0, 400)).toBeDefined();
+      expect(textOf(row!)).not.toMatch(/^\d+\|/m);
+    }
+  }, 60000);
+
+  it("ON: the renderer's exact whole-file bytes are numbered only on a whole-file entry, never on another rangeless shape (direct seam check)", async () => {
+    // The flag-off server's own rendering, so only the entry's shape differs between the two calls below.
+    const offBody = await wholeFileFollowUp({}, "answer", false);
+    const rendered = textOf(findRow(offBody, "src/metrics/Gauge.java")!);
+    expect(rendered).not.toMatch(/^\d+\|/m);
+    process.env[FLAG] = "1";
+    const root = makeWholeFileWorkspace();
+    const context = { codecTraceWorkspace: root, args: { taskProfile: "answer" } };
+    const whole = applyAnswerLineGutter(
+      { entries: [{ form: "file", path: "src/metrics/Gauge.java", truncated: false, handle: "h1", content: rendered, fullFileExpansion: true }] },
+      "read.batch",
+      context,
+    );
+    expect(String((whole["entries"] as Array<Record<string, unknown>>)[0]!["content"]).split("\n")[0]).toBe("1|package com.example.metrics;");
+    const other = applyAnswerLineGutter(
+      { entries: [{ form: "handle", path: "src/metrics/Gauge.java", handle: "h2", content: rendered }] },
+      "read.batch",
+      context,
+    );
+    expect((other["entries"] as Array<Record<string, unknown>>)[0]!["content"]).toBe(rendered);
+    const mismatched = rendered.replace("record(long sample)", "record(long sampleKEPT)");
+    const stale = applyAnswerLineGutter(
+      { entries: [{ form: "file", path: "src/metrics/Gauge.java", truncated: false, handle: "h3", content: mismatched, fullFileExpansion: true }] },
+      "read.batch",
+      context,
+    );
+    expect((stale["entries"] as Array<Record<string, unknown>>)[0]!["content"]).toBe(mismatched);
+  }, 60000);
 });

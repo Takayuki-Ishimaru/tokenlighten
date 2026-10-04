@@ -52,13 +52,13 @@ const serverSource = fs.readFileSync(SERVER_TS, "utf8");
  *
  * "write" means the case can reach a write-capable entry point
  * (WRITE_ENTRY_POINTS below) on some argument shape — not that every call
- * writes. edit_file's read-ish sub-dispatches still count: they share the one
+ * writes. tl_edit_file's read-ish sub-dispatches still count: they share the one
  * guard preamble, which is exactly why the preamble has to be complete.
  */
 const CASE_CLASSIFICATION: Readonly<Record<string, "read" | "write">> = {
-  read_file: "read",
-  edit_file: "write",
-  search_files: "read",
+  tl_read_file: "read",
+  tl_edit_file: "write",
+  tl_search_files: "read",
   // D11: the 9 deprecated-alias cases that used to be listed here
   // (get_file_skeleton, get_symbol_with_context, extract_office_text,
   // search_replace_edit, apply_edits_multi, search_symbols, get_current_diff,
@@ -185,7 +185,7 @@ describe("dispatch guard conformance — case inventory", () => {
     expect(
       CASE_NAMES,
       "dispatchTool's top-level cases are no longer exactly the three advertised tools",
-    ).toEqual(["edit_file", "read_file", "search_files"]);
+    ).toEqual(["tl_edit_file", "tl_read_file", "tl_search_files"]);
   });
 
   it("classifies EVERY dispatch case — an unclassified case fails by name", () => {

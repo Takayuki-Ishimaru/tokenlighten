@@ -9,7 +9,7 @@
 //
 // A 37-case exact-bytes probe driven straight at the spawned server's stdio
 // (hand-written JSON-RPC lines, so exactly one escape layer exists by
-// construction) cleared this package on every edit_file payload channel, and
+// construction) cleared this package on every tl_edit_file payload channel, and
 // the same collapse reproduced through a NATIVE write tool with no TL server
 // in the path — locating the real second layer in the calling harness's
 // tool-argument decoder, outside this repo. These tests are the standing
@@ -177,7 +177,7 @@ describe("escape-layer honesty — applySingleEdit is byte-transparent", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Every edit_file payload channel, end to end through the write engines
+// 3. Every tl_edit_file payload channel, end to end through the write engines
 // ---------------------------------------------------------------------------
 
 describe("escape-layer honesty — payload channels write the bytes JSON delivered", () => {

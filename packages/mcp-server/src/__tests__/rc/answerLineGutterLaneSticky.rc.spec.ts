@@ -11,12 +11,12 @@
  * later pack in the same lane is generic.
  *
  * REPLAY-FORENSICS FOLLOW-UP (same day): a query-less multi-target ranged
- * read (`read_file {targets:[{path,range},...]}`, no query/qref/task) is
+ * read (`tl_read_file {targets:[{path,range},...]}`, no query/qref/task) is
  * PROMOTED by the dispatcher to `read.task_pack` with an INFERRED "generic"
  * profile (`profile_binding.source:"inferred"`) — verified live against this
  * file's own fixture below. The lane rule must ALSO cover that shape, while
  * NEVER numbering a pack whose `decision.kind` is `"act.edit"` (an
- * edit-directed body must stay copy-exact for `edit_file`'s search/replace
+ * edit-directed body must stay copy-exact for `tl_edit_file`'s search/replace
  * matching — the same reasoning the flag's own "generic profile => never
  * numbered" rule already applies). Harness copied from
  * rc/readFileScopePathDirectory.rc.spec.ts.
@@ -186,7 +186,7 @@ describe("WP-V1 — lane-sticky answer profile covers a task-less read.text", ()
     await server.initialize("vitest-gutter-lane");
 
     const opened = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does reserveInventory reserve stock",
         targets: [{ path: "src/OrderOperations.java" }],
@@ -203,7 +203,7 @@ describe("WP-V1 — lane-sticky answer profile covers a task-less read.text", ()
     // A DIFFERENT file (never touched by the opening query) so this is a
     // fresh serve, not an already-served-this-session receipt.
     const followUp = bodyOf(await server.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { targets: [{ path: "src/Shipping.java", range: "1-3" }], lane: LANE, cwd: ws },
     }));
     expect(followUp["kind"]).toBe("read.text");
@@ -220,7 +220,7 @@ describe("WP-V1 — lane-sticky answer profile covers a task-less read.text", ()
     await server.initialize("vitest-gutter-lane");
 
     await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does reserveInventory reserve stock",
         targets: [{ path: "src/OrderOperations.java" }],
@@ -231,7 +231,7 @@ describe("WP-V1 — lane-sticky answer profile covers a task-less read.text", ()
     });
     // A later, DECLARED-generic pack in the SAME lane.
     const genericPack = bodyOf(await server.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "where is refundOrder implemented",
         targets: [{ path: "src/OrderOperations.java" }],
@@ -243,7 +243,7 @@ describe("WP-V1 — lane-sticky answer profile covers a task-less read.text", ()
     expect(genericPack["profile"]).toBe("generic");
 
     const followUp = bodyOf(await server.rpc(4, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { targets: [{ path: "src/Shipping.java", range: "1-3" }], lane: LANE, cwd: ws },
     }));
     expect(followUp["kind"]).toBe("read.text");
@@ -259,7 +259,7 @@ describe("WP-V1 — lane-sticky answer profile covers a task-less read.text", ()
     await server.initialize("vitest-gutter-lane");
 
     await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does reserveInventory reserve stock",
         targets: [{ path: "src/OrderOperations.java" }],
@@ -269,7 +269,7 @@ describe("WP-V1 — lane-sticky answer profile covers a task-less read.text", ()
       },
     });
     const otherLaneFollowUp = bodyOf(await server.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { targets: [{ path: "src/Shipping.java", range: "1-3" }], lane: "lane-b", cwd: ws },
     }));
     expect(otherLaneFollowUp["kind"]).toBe("read.text");
@@ -287,7 +287,7 @@ describe("WP-V1 — lane-sticky answer profile covers the promoted (query-less, 
     await server.initialize("vitest-gutter-lane");
 
     const body = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         targets: [
           { path: "src/OrderOperations.java", range: "1-6" },
@@ -310,7 +310,7 @@ describe("WP-V1 — lane-sticky answer profile covers the promoted (query-less, 
     await server.initialize("vitest-gutter-lane");
 
     await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does reserveInventory reserve stock",
         targets: [{ path: "src/OrderOperations.java" }],
@@ -320,7 +320,7 @@ describe("WP-V1 — lane-sticky answer profile covers the promoted (query-less, 
       },
     });
     const promoted = bodyOf(await server.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         targets: [
           { path: "src/OrderOperations.java", range: "1-6" },

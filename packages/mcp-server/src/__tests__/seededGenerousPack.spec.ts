@@ -2,7 +2,7 @@
 // (WP-S2, 2026-09-20).
 //
 // DEFECT UNDER TEST (measured 2026-09-20 on live GitHub Copilot sessions): a
-// SEEDED pack — `read_file {query, targets:[{path},…]}`, i.e. the caller named
+// SEEDED pack — `tl_read_file {query, targets:[{path},…]}`, i.e. the caller named
 // the exact files — re-pointed any named file whose RAW size exceeded
 // MAX_SURFACE_CODE_BYTES at ONE anchor-focus symbol. On an 18 KB service class
 // that shipped the 15-line CONSTRUCTOR (the class and its constructor share the
@@ -464,7 +464,7 @@ describe("a seeded answer pack naming four or more files", () => {
 //
 // The policy is default OFF, so every committed wire pin keeps measuring the
 // stock shape. This is the opted-in counterpart — a real spawned server given
-// TL_SEEDED_GENEROUS=1, a real `read_file` over stdio, measuring the bytes the
+// TL_SEEDED_GENEROUS=1, a real `tl_read_file` over stdio, measuring the bytes the
 // caller is actually charged for.
 // ---------------------------------------------------------------------------
 
@@ -559,7 +559,7 @@ describe("the default's wire shape (spawned server)", () => {
     const server = startServer(root, { TL_SEEDED_GENEROUS: "1" });
     spawnedServers.push(server);
     await server.initialize();
-    const { body, bytes } = await server.call("read_file", {
+    const { body, bytes } = await server.call("tl_read_file", {
       cwd: root,
       query: "Explain the cancellation flow: MidSizeLedger cancel, DocHeavyStore refund, HugeLedger cancellation and the TinyId id",
       targets: [

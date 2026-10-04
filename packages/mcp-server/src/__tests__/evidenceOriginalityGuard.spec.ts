@@ -217,11 +217,11 @@ describe("evidence originality guard (decisionWire.ts projectEvidence, C4)", () 
     it("still applies `priorForBodyless` for a codeless row with no remaining (compact receipt fallback)", () => {
       const evidence = projectEvidence(
         [{ path: "src/a.ts", handle: "h10", range: "1-5" }],
-        "read_file mode=task_pack qref=q-known",
+        "tl_read_file mode=task_pack qref=q-known",
       );
       expect(evidence).toEqual([{
         path: "src/a.ts", handle: "h10", range: "1-5",
-        prior: "read_file mode=task_pack qref=q-known",
+        prior: "tl_read_file mode=task_pack qref=q-known",
       }]);
     });
   });

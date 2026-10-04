@@ -453,7 +453,7 @@ function mintFileTarget(workspace: string, rel: string, why: string): OverviewRe
     handle: h.id,
     why,
     ...lineInfo(workspace, rel),
-    target: `read_file mode=digest handle=${h.id}`,
+    target: `tl_read_file mode=digest handle=${h.id}`,
   };
 }
 
@@ -869,8 +869,8 @@ export function buildOverview(
       packages: [],
       recommended_reading_order: [],
       truncated: false,
-      hint: "no package.json found at or above this path; retry read_file with content=outline at a shallower package or repo root",
-      next: { tool: "read_file", arguments: { content: "outline" } },
+      hint: "no package.json found at or above this path; retry tl_read_file with content=outline at a shallower package or repo root",
+      next: { tool: "tl_read_file", arguments: { content: "outline" } },
     };
   }
 

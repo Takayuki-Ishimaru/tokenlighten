@@ -306,7 +306,7 @@ function stripCoverageReason(loc: SymbolLocationInternal): SymbolLocation {
  * from a genuine non-match, for every language whose collector has this same
  * class of gap. An earlier revision of this function DROPPED a non-match as
  * a "confirmed false positive" and silently deleted that exact real
- * declaration from `search_files action=symbols` results — caught by
+ * declaration from `tl_search_files action=symbols` results — caught by
  * `readCodeTaskPack.spec.ts`'s "stays complete when at least one
  * implementation-body surface is embedded" (the header's dropped
  * `widgetClamp` was the anchor `locateTaskContext.ts` used to discover the

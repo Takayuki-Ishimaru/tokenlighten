@@ -138,7 +138,7 @@ async function readRange(
   handle?: string,
 ): Promise<Record<string, any>> {
   return parseResult(await server.rpc(id, "tools/call", {
-    name: "read_file",
+    name: "tl_read_file",
     arguments: {
       mode: "slice",
       path: "src/hub.ts",
@@ -229,7 +229,7 @@ describe("batch edit failure diagnostics", () => {
     await server.initialize();
 
     const response = parseResult(await server.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         cwd: workspace,
         edits: [

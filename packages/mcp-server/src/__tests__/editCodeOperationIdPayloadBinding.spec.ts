@@ -157,11 +157,11 @@ describe("FX-M1/B1: operation_id replay is bound to the request payload", () => 
     await srv.initialize();
 
     const edits = [{ path: "src/a.ts", search: "A = 1", replace: "A = 999" }];
-    const first = await srv.call("edit_file", { cwd: workspace, operation_id: "SAME-PAYLOAD", edits });
+    const first = await srv.call("tl_edit_file", { cwd: workspace, operation_id: "SAME-PAYLOAD", edits });
     expect(first["kind"], JSON.stringify(first)).toBe("edit.applied");
     expect(fs.readFileSync(path.join(workspace, "src/a.ts"), "utf8")).toBe("export const A = 999;\n");
 
-    const second = await srv.call("edit_file", { cwd: workspace, operation_id: "SAME-PAYLOAD", edits });
+    const second = await srv.call("tl_edit_file", { cwd: workspace, operation_id: "SAME-PAYLOAD", edits });
     expect(second["kind"], JSON.stringify(second)).toBe("edit.applied");
     expect(second["replayed"]).toBe(true);
     // No double apply — file is untouched by a second real write.
@@ -177,7 +177,7 @@ describe("FX-M1/B1: operation_id replay is bound to the request payload", () => 
     spawnedServers.push(srv);
     await srv.initialize();
 
-    const first = await srv.call("edit_file", {
+    const first = await srv.call("tl_edit_file", {
       cwd: workspace, operation_id: "SHARED-KEY",
       edits: [{ path: "src/a.ts", search: "A = 1", replace: "A = 999" }],
     });
@@ -185,7 +185,7 @@ describe("FX-M1/B1: operation_id replay is bound to the request payload", () => 
     expect(fs.readFileSync(path.join(workspace, "src/a.ts"), "utf8")).toBe("export const A = 999;\n");
 
     // A completely different file and content, same reused key.
-    const second = await srv.call("edit_file", {
+    const second = await srv.call("tl_edit_file", {
       cwd: workspace, operation_id: "SHARED-KEY",
       edits: [{ path: "src/b.ts", search: "B = 1", replace: "B = 777" }],
     });
@@ -203,7 +203,7 @@ describe("FX-M1/B1: operation_id replay is bound to the request payload", () => 
 
     // The original operation is still intact and independently replayable
     // by re-issuing the EXACT original call.
-    const replayOriginal = await srv.call("edit_file", {
+    const replayOriginal = await srv.call("tl_edit_file", {
       cwd: workspace, operation_id: "SHARED-KEY",
       edits: [{ path: "src/a.ts", search: "A = 1", replace: "A = 999" }],
     });
@@ -222,14 +222,14 @@ describe("FX-M1/B2: operation_id dedup is lane-scoped", () => {
     spawnedServers.push(srv);
     await srv.initialize();
 
-    const laneA = await srv.call("edit_file", {
+    const laneA = await srv.call("tl_edit_file", {
       cwd: workspace, lane: "agent-1", operation_id: "SHARED-OPID",
       edits: [{ path: "src/a.ts", search: "A = 1", replace: "A = 999" }],
     });
     expect(laneA["kind"], JSON.stringify(laneA)).toBe("edit.applied");
     expect(laneA["replayed"]).not.toBe(true);
 
-    const laneB = await srv.call("edit_file", {
+    const laneB = await srv.call("tl_edit_file", {
       cwd: workspace, lane: "agent-2", operation_id: "SHARED-OPID",
       edits: [{ path: "src/b.ts", search: "B = 1", replace: "B = 777" }],
     });
@@ -253,14 +253,14 @@ describe("FX-M1/B2: operation_id dedup is lane-scoped", () => {
     const editsA = [{ path: "src/a.ts", search: "A = 1", replace: "A = 42" }];
     const editsB = [{ path: "src/b.ts", search: "B = 1", replace: "B = 42" }];
 
-    await srv.call("edit_file", { cwd: workspace, lane: "agent-1", operation_id: "OP", edits: editsA });
-    await srv.call("edit_file", { cwd: workspace, lane: "agent-2", operation_id: "OP", edits: editsB });
+    await srv.call("tl_edit_file", { cwd: workspace, lane: "agent-1", operation_id: "OP", edits: editsA });
+    await srv.call("tl_edit_file", { cwd: workspace, lane: "agent-2", operation_id: "OP", edits: editsB });
 
-    const replayA = await srv.call("edit_file", { cwd: workspace, lane: "agent-1", operation_id: "OP", edits: editsA });
+    const replayA = await srv.call("tl_edit_file", { cwd: workspace, lane: "agent-1", operation_id: "OP", edits: editsA });
     expect(replayA["kind"], JSON.stringify(replayA)).toBe("edit.applied");
     expect(replayA["replayed"]).toBe(true);
 
-    const replayB = await srv.call("edit_file", { cwd: workspace, lane: "agent-2", operation_id: "OP", edits: editsB });
+    const replayB = await srv.call("tl_edit_file", { cwd: workspace, lane: "agent-2", operation_id: "OP", edits: editsB });
     expect(replayB["kind"], JSON.stringify(replayB)).toBe("edit.applied");
     expect(replayB["replayed"]).toBe(true);
 

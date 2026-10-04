@@ -152,7 +152,7 @@ describe("adaptiveLockdown — lockdown fires after handle + repeated path edits
 
     // Step 1: do a read to get a handle for config.ts (auto-mint via unique edit).
     const handleEdit = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/config.ts",
         search: `VERSION = "1.0.0"`,
@@ -172,7 +172,7 @@ describe("adaptiveLockdown — lockdown fires after handle + repeated path edits
     writeFile(wsDir, "src/a.ts", `export const A1 = 1;\nexport const A2 = 2;\nexport const A3 = 3;\n`);
     for (let i = 1; i <= 3; i++) {
       const r = await srv.rpc(id++, "tools/call", {
-        name: "edit_file",
+        name: "tl_edit_file",
         arguments: {
           path: "src/a.ts",
           search: `A${i} = ${i}`,
@@ -249,7 +249,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
 
     // Handle-backed edit via auto-mint: recordHandleEdit → handleBackedEdits = 1.
     const he = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/config.ts", search: `"v1"`, replace: `"v2"` },
     });
     expect(parseToolResult(he)["kind"]).not.toBe("refusal");
@@ -261,7 +261,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
 
     // Edit 1 (with expectedSha, unique search → edit succeeds but skips auto-mint).
     const e1 = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/values.ts", search: "A = 1", replace: "A = 10", expectedSha: sha1 },
     });
     expect(parseToolResult(e1)["kind"]).not.toBe("refusal");
@@ -270,7 +270,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
     const v2 = fs.readFileSync(wsDir + "/src/values.ts", "utf8");
     const sha2 = "sha256:" + crypto.createHash("sha256").update(v2).digest("hex");
     const e2 = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/values.ts", search: "B = 2", replace: "B = 20", expectedSha: sha2 },
     });
     expect(parseToolResult(e2)["kind"]).not.toBe("refusal");
@@ -278,7 +278,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
     const v3 = fs.readFileSync(wsDir + "/src/values.ts", "utf8");
     const sha3 = "sha256:" + crypto.createHash("sha256").update(v3).digest("hex");
     const e3 = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/values.ts", search: "C = 3", replace: "C = 30", expectedSha: sha3 },
     });
     expect(parseToolResult(e3)["kind"]).not.toBe("refusal");
@@ -289,7 +289,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
     const v4 = fs.readFileSync(wsDir + "/src/values.ts", "utf8");
     const sha4 = "sha256:" + crypto.createHash("sha256").update(v4).digest("hex");
     const e4 = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/values.ts", search: "D = 4", replace: "D = 40", expectedSha: sha4 },
     });
     expect(parseToolResult(e4)["kind"]).not.toBe("refusal"); // D6: body `ok` is deleted; `kind` is the outcome (§2.5).
@@ -302,7 +302,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
     ].join("\n") + "\n");
 
     const lockdownResult = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/dup.ts",
         search: `"dup"`,
@@ -341,7 +341,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
 
     // 1 handle-backed edit.
     const he = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/config.ts", search: `"v1"`, replace: `"v2"` },
     });
     expect(parseToolResult(he)["kind"]).not.toBe("refusal");
@@ -356,7 +356,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
       const content = fs.readFileSync(wsDir + "/src/pad.ts", "utf8");
       const sha = "sha256:" + crypto.createHash("sha256").update(content).digest("hex");
       const r = await srv.rpc(id++, "tools/call", {
-        name: "edit_file",
+        name: "tl_edit_file",
         arguments: { path: "src/pad.ts", ...ed, expectedSha: sha },
       });
       expect(parseToolResult(r)["kind"]).not.toBe("refusal");
@@ -367,7 +367,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
     const content4 = fs.readFileSync(wsDir + "/src/pad.ts", "utf8");
     const sha4 = "sha256:" + crypto.createHash("sha256").update(content4).digest("hex");
     const r4 = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/pad.ts", search: "W = 4", replace: "W = 40", expectedSha: sha4 },
     });
     expect(parseToolResult(r4)["kind"]).not.toBe("refusal");
@@ -380,7 +380,7 @@ describe("adaptiveLockdown — lockdown via expectedSha path edits", () => {
 
     // allowPathFallback=true → lockdown bypassed; falls through to searchReplaceEdit.
     const bypass = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/dup.ts",
         search: `"dup"`,

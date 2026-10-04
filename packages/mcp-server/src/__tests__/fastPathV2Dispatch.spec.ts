@@ -215,8 +215,8 @@ describe("searchReplaceEdit — TL_FAST_PATH_V2 on, target fingerprint drift", (
 // exactly ONE same-process fs.readFileSync (the pre-apply fingerprint
 // re-verify) even on the minimal single-line-literal path. That one extra
 // read is a local disk read inside a single searchReplaceEdit() call, never
-// an extra MCP round trip — the caller still gets exactly one edit_file
-// response for one edit_file call, byte-identical in shape to flag-off.
+// an extra MCP round trip — the caller still gets exactly one tl_edit_file
+// response for one tl_edit_file call, byte-identical in shape to flag-off.
 // ---------------------------------------------------------------------------
 
 describe("searchReplaceEdit — TL_FAST_PATH_V2 read call-count accounting", () => {
@@ -270,35 +270,35 @@ describe("classifyRoute — V11-06 advisory guard field", () => {
 
   it("flag off ⇒ no guard field at all", () => {
     setFlag(undefined);
-    const decision = classifyRoute("edit_file", { path: "src/a.ts", search: "export function foo() {}", replace: "x" });
+    const decision = classifyRoute("tl_edit_file", { path: "src/a.ts", search: "export function foo() {}", replace: "x" });
     expect(decision.guard).toBeUndefined();
   });
 
   it("flag on, explicit path + search/replace ⇒ guard present, reflecting the cheap signals", () => {
     setFlag("1");
-    const decision = classifyRoute("edit_file", { path: "src/a.ts", search: "export function foo() {}", replace: "x" });
+    const decision = classifyRoute("tl_edit_file", { path: "src/a.ts", search: "export function foo() {}", replace: "x" });
     expect(decision.guard).toBeDefined();
     expect(decision.guard?.verdict).toBe("not-local");
   });
 
   it("flag on, a CLEAN edit ⇒ guard present with verdict local", () => {
     setFlag("1");
-    const decision = classifyRoute("edit_file", { path: "src/internal/helper.ts", search: "  x", replace: "  y" });
+    const decision = classifyRoute("tl_edit_file", { path: "src/internal/helper.ts", search: "  x", replace: "  y" });
     expect(decision.guard).toEqual({ verdict: "local", reasons: [] });
   });
 
   it("flag on, handle-anchored edit with NO explicit path ⇒ guard is undefined, never guessed", () => {
     setFlag("1");
-    const decision = classifyRoute("edit_file", { handle: "h_abc123", search: "x", replace: "y" });
+    const decision = classifyRoute("tl_edit_file", { handle: "h_abc123", search: "x", replace: "y" });
     expect(decision.guard).toBeUndefined();
   });
 
   it("guard is PURELY ADDITIVE: route/reason are identical with the flag on vs off for the same call", () => {
     const args = { path: "src/a.ts", search: "export function foo() {}", replace: "x" };
     setFlag(undefined);
-    const off = classifyRoute("edit_file", args);
+    const off = classifyRoute("tl_edit_file", args);
     setFlag("1");
-    const on = classifyRoute("edit_file", args);
+    const on = classifyRoute("tl_edit_file", args);
     expect(on.route).toBe(off.route);
     expect(on.reason).toBe(off.reason);
   });

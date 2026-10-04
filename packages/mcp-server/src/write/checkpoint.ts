@@ -1,5 +1,5 @@
 /**
- * checkpoint.ts — batch staging + commit shared by the write tools (edit_file's
+ * checkpoint.ts — batch staging + commit shared by the write tools (tl_edit_file's
  * range/artifact paths, create_file, rename_symbol, apply_edits_multi).
  *
  * Wraps shadowGit.createCheckpoint with batch-level concerns:

@@ -207,7 +207,7 @@ function referencesScopedTo(
   if (cwd !== undefined) call["cwd"] = cwd;
   const lang = str(args["lang"]);
   if (lang !== undefined) call["lang"] = lang;
-  return emittableToolCall({ tool: "search_files", arguments: call });
+  return emittableToolCall({ tool: "tl_search_files", arguments: call });
 }
 
 export const SEARCH_REFERENCES_SHEDDER: Shedder = {

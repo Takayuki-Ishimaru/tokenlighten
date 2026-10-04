@@ -1,7 +1,7 @@
 // closureFunctionalObligation.spec.ts — W5 wiring (2026-07-25 iteration 2):
 // an artifact-backed executable create/edit records a functional-validation
 // obligation in packServeLog; mode=closure DISCLOSES it as an open item (never
-// a refusal) and a diff review (search_files action=diff) discharges it.
+// a refusal) and a diff review (tl_search_files action=diff) discharges it.
 //
 // Bench forensics behind this: T10 rep1-A closed a compute-producing edit
 // after environment probes only — never validating against the served rate
@@ -62,7 +62,7 @@ describe("W5 — functional-validation obligation in mode=closure", () => {
       targetPath: "pricing/rating_engine.py",
     });
 
-    const res = await callTool("read_file", { mode: "closure", cwd: ws });
+    const res = await callTool("tl_read_file", { mode: "closure", cwd: ws });
     const body = parse(res as { content: Array<{ text: string }> });
     // v1 deletes `complete:false` (A.5.7): a still-open closure just stays
     // kind:"read.closure" — a fully-closed one degrades to the
@@ -85,11 +85,11 @@ describe("W5 — functional-validation obligation in mode=closure", () => {
       targetPath: "pricing/rating_engine.py",
     });
 
-    const diffRes = await callTool("search_files", { action: "diff", cwd: ws });
+    const diffRes = await callTool("tl_search_files", { action: "diff", cwd: ws });
     expect((diffRes as { isError?: boolean }).isError).not.toBe(true);
     expect(getFunctionalValidationObligation(ws, [])).toBeUndefined();
 
-    const res = await callTool("read_file", { mode: "closure", cwd: ws });
+    const res = await callTool("tl_read_file", { mode: "closure", cwd: ws });
     const body = parse(res as { content: Array<{ text: string }> });
     expect((body["open"] as string[]).length).toBe(0);
   });
@@ -97,7 +97,7 @@ describe("W5 — functional-validation obligation in mode=closure", () => {
   it("without an obligation the closure shape carries no W5 fields", async () => {
     const ws = mkWs("plain");
     write(ws, "a.ts", "export const a = 1;\n");
-    const res = await callTool("read_file", { mode: "closure", cwd: ws });
+    const res = await callTool("tl_read_file", { mode: "closure", cwd: ws });
     const body = parse(res as { content: Array<{ text: string }> });
     expect(body["open"]).toEqual([]);
     // v1 deletes `complete:false` (A.5.7) — the zero-total path stays

@@ -31,7 +31,7 @@ describe("B-6 served-bytes novelty ledger", () => {
 
   it("connects receipt, budget-shed, replay, and verification-kit sources at the real emission funnel", () => {
     const context = (qref?: string): ProtocolCallContext => ({
-      tool: "read_file",
+      tool: "tl_read_file",
       workspace: "/runtime-workspace",
       args: { taskEpoch: "runtime-epoch", lane: "track-b-luna", ...(qref ? { qref } : {}) },
     });
@@ -68,7 +68,7 @@ describe("B-6 served-bytes novelty ledger", () => {
 
   it("records explicit trim and dedup producer provenance at the emission funnel", () => {
     const context: ProtocolCallContext = {
-      tool: "read_file",
+      tool: "tl_read_file",
       workspace: "/runtime-source",
       args: { taskEpoch: "source-epoch", lane: "track-e" },
     };

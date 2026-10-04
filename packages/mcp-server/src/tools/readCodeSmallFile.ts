@@ -315,7 +315,7 @@ function pathOutsideWorkspaceRefusal(
       ? {
           did_you_mean: didYouMean,
           next: {
-            tool: "read_file",
+            tool: "tl_read_file",
             arguments: {
               mode: "small_file",
               path: didYouMean,
@@ -433,7 +433,7 @@ export async function buildSmallFile(
     });
     const rangeEnd = Math.max(1, Math.min(lineCount, 50));
     const nextCall: ToolCall = {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         targets: [{ handle: notTinyHandle.id, range: `1-${rangeEnd}` }],
         content: "auto",
@@ -561,7 +561,7 @@ export async function buildSmallFile(
   // unrelated capped task_pack naming this same path as a bodyless/withheld
   // row could flip it to "withheld" from a cold `undefined` start
   // (`_markEditResidency`'s "shipped always wins" protection never arms),
-  // producing a false, but recoverable, `edit_file` refusal for a file whose
+  // producing a false, but recoverable, `tl_edit_file` refusal for a file whose
   // full body the caller is holding right now.
   //
   // FX-X3 (round-22B review, ruling (aa)): books from `elided` — the exact
@@ -646,7 +646,7 @@ function buildOutlineResult(
     bytes: byteSize,
     lines: lineCount,
     next: {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         targets: [{ handle: handleId, range: `1-${rangeEnd}` }],
         content: "auto",

@@ -21,8 +21,8 @@ describe("discovery bundle next", () => {
     // lack of a surface array is not proof of an optional lexical carrier.
     expect(semanticFrontierNextAllowed({})).toBe(true);
     expect(sanitizeSemanticFrontierNext({}, {
-      tool: "search_files", arguments: { action: "find", query: "missing-capability" },
-    } as any)).toEqual({ tool: "search_files", arguments: { action: "find", query: "missing-capability" } });
+      tool: "tl_search_files", arguments: { action: "find", query: "missing-capability" },
+    } as any)).toEqual({ tool: "tl_search_files", arguments: { action: "find", query: "missing-capability" } });
   });
 
   it("emits the exact bounded qref task-pack bundle for known candidates", () => {
@@ -32,7 +32,7 @@ describe("discovery bundle next", () => {
     } as any;
     markOptional(result, "src/lexical-only.ts");
     expect(discoveryBundleNext(result)).toEqual({
-      tool: "read_file", arguments: { mode: "task_pack", qref: "q-known", paths: ["src/a.ts", "src/b.ts"] },
+      tool: "tl_read_file", arguments: { mode: "task_pack", qref: "q-known", paths: ["src/a.ts", "src/b.ts"] },
     });
     expect(discoveryBundleAdvisory(result)).toBe(
       "advisory: bundled paths are limited to files already related by served candidates or evidence edges",
@@ -102,16 +102,16 @@ describe("discovery bundle next", () => {
       ] } as any;
       markOptional(result, "src/optional.ts");
       for (const call of [
-        { tool: "read_file", arguments: { paths: ["src/required.ts", "src/optional.ts", "src/shared.ts"] } },
-        { tool: "read_file", arguments: { handles: ["h-required", "h-optional", "h-shared"] } },
-        { tool: "read_file", arguments: { targets: [{ path: "src/optional.ts" }, { handle: "h-required" }, { handle: "h-shared" }] } },
+        { tool: "tl_read_file", arguments: { paths: ["src/required.ts", "src/optional.ts", "src/shared.ts"] } },
+        { tool: "tl_read_file", arguments: { handles: ["h-required", "h-optional", "h-shared"] } },
+        { tool: "tl_read_file", arguments: { targets: [{ path: "src/optional.ts" }, { handle: "h-required" }, { handle: "h-shared" }] } },
       ] as any[]) {
         expect(sanitizeSemanticFrontierNext(result, call)?.arguments).not.toMatchObject({ path: "src/optional.ts" });
         expect(JSON.stringify(sanitizeSemanticFrontierNext(result, call))).not.toContain("h-optional");
         expect(JSON.stringify(sanitizeSemanticFrontierNext(result, call))).toContain("shared");
       }
-      expect(sanitizeSemanticFrontierNext(result, { tool: "read_file", arguments: { path: "src/optional.ts" } } as any)).toBeUndefined();
-      expect(sanitizeSemanticFrontierNext(result, { tool: "search_files", arguments: { action: "find", query: "only-query" } } as any)).toBeDefined();
+      expect(sanitizeSemanticFrontierNext(result, { tool: "tl_read_file", arguments: { path: "src/optional.ts" } } as any)).toBeUndefined();
+      expect(sanitizeSemanticFrontierNext(result, { tool: "tl_search_files", arguments: { action: "find", query: "only-query" } } as any)).toBeDefined();
     } finally {
       if (previousGuard === undefined) delete process.env["TL_SEMANTIC_FRONTIER_GUARD"];
       else process.env["TL_SEMANTIC_FRONTIER_GUARD"] = previousGuard;
@@ -184,7 +184,7 @@ const candidateListPack = (selected: string, contractOverrides: Record<string, u
 }) as never;
 
 const EXPECTED_BUNDLE = {
-  tool: "read_file",
+  tool: "tl_read_file",
   arguments: {
     mode: "task_pack",
     qref: "q-w9",

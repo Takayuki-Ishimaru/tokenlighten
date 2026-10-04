@@ -103,7 +103,7 @@ function scoreTokenDistinctiveness(token: string): number {
 // (BM25's own IDF already suppresses a term common across most documents —
 // see cjkSpans.ts's own module comment) and changing that shared behavior
 // is out of scope here. A free-text QUERY has different requirements: a
-// tokenizeQuery caller can turn its output directly into a `search_files
+// tokenizeQuery caller can turn its output directly into a `tl_search_files
 // find` `queries` item (see readCodeTaskPack.ts's generic no-named-subject
 // discovery fallback), where a single bad token — a hiragana fragment made
 // of verb inflection and particles, with no dictionary meaning of its own —
@@ -286,7 +286,7 @@ export function tokenizeQuery(query: string, options: TokenizeQueryOptions): str
 // identifiers: the task pack already resolves real paths structurally
 // elsewhere (paths[]/basename matching), so a path span mentioned in prose
 // carries no free-text concern of its own and should contribute NOTHING to
-// (a) `explicit-identifier`/wiring obligations, or (b) a `search_files
+// (a) `explicit-identifier`/wiring obligations, or (b) a `tl_search_files
 // action=find` `next`/`next_call` suggestion built from query tokens. Left
 // unfixed, a `discover` decision could hand back a `find` over pure path
 // segments — wasted at best, and if a segment coincidentally became an

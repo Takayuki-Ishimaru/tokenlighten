@@ -384,14 +384,17 @@ export interface TaskPackResult {
    * mentioned-in-passing absence (the term DOES occur); both readers word it
    * as such, never as "no occurrence".
    *
-   * R-D2 (2026-09-21, item B, plan §5): `undetermined` marks an entry that is
+   * R-D2 (2026-09-21, item B): `undetermined` marks an entry that is
    * NOT a verified absence at all — a could-not-determine verdict
    * (`RequestItemProof.undeterminedTerm`; e.g. a Japanese term with no
-   * confirmed normalisation to search against) minted only by the ALL-TOPIC,
-   * non-blocking request-item pass, which used to disclose nothing for this
-   * case. `scope_complete`/`omitted_count` do not apply to it (a
-   * could-not-determine verdict makes no scope claim) and are always `false`/
-   * `0` on such an entry; `undetermined_reason` is the short, already-capped
+   * confirmed normalisation to search against) minted by a non-blocking
+   * request-item pass, which used to disclose nothing for this case. WP-C4
+   * (2026-09-29, eval-0929 §8 item 3): minted by the ALL-TOPIC/H-2 loops AND
+   * the mixed-kind loop alike — a could-not-determine proof with no
+   * literal-eligible term (`RequestItemProof.undeterminedNonBlocking`) is
+   * never a dead end in either shape. `scope_complete`/`omitted_count` do not
+   * apply to it (a could-not-determine verdict makes no scope claim) and are
+   * always `false`/`0` on such an entry; `undetermined_reason` is the short, already-capped
    * reason text to disclose instead. Both wire readers must render this
    * shape with the DIFFERENT `explicit-gap:request-item-undetermined:<term>`
    * code word, never `request-item-absent`.
@@ -432,7 +435,7 @@ export interface TaskPackResult {
    *
    * `canonicalDecision.ts` reads it to suppress every discovery `next`, so the
    * pack reaches `await_input` with `unresolved[]` naming the missing target
-   * instead of `discover` + `search_files{queries:["increase"]}`.
+   * instead of `discover` + `tl_search_files{queries:["increase"]}`.
    */
   request_names_no_target?: true;
   /**
@@ -585,7 +588,7 @@ export interface TaskPackResult {
   };
   /**
    * DESIGN-v0.9 §4.6b: internal-execution manifest. When a complete/focused
-   * pack would have emitted `read_file handles=[...]` as a next for >=2
+   * pack would have emitted `tl_read_file handles=[...]` as a next for >=2
    * code-less surfaces, the pack builder instead INLINES those surfaces'
    * bodies (up to the must-fetch budget, §4.8) and stamps one
    * "surface-body:<handle>" entry per body actually embedded. Present ONLY
@@ -656,6 +659,54 @@ export interface TaskPackResult {
   fast_path?: TaskPackSingleSiteUniqueMatchFastPath;
   /** Additive provenance for a successful pathless locator scope retry. */
   scope_inferred?: { path: string; reason: "pathless-locator-abstain" };
+  /**
+   * V15-NBR (`TL_NEIGHBOUR_INDEX`, default OFF, features/task-pack/
+   * frontierNeighbours.ts): up to 8 BODYLESS rows, ranked best-first against
+   * the request, for workspace files the served surfaces' files
+   * import/include and this response has not already served (nor
+   * `frontier_index`/`served_earlier` named) — the file's own imports, not
+   * only the served slice's. `why` is short provenance ("imported by
+   * <path>:<line>", "included by …", "referenced by …", "counterpart of
+   * <path>", optionally ` (matches "<term>")`), never a claim this pack covers
+   * the file. Distinct from `frontier_index` (the SF complete-working-set
+   * claim): never evidence, never cited by a certificate or obligation, never
+   * booked as served. Projected onto the wire under `plan.neighbours`
+   * (readFamily.ts PLAN_MEMBERS, A.6.1). Absent with the flag off, when no
+   * candidate resolves, or when the request has terms and no candidate
+   * matches or is used.
+   */
+  neighbours?: Array<{ path: string; handle: string; why: string }>;
+  /**
+   * V15-FUI (`TL_USAGE_INVENTORY`, default OFF, features/task-pack/
+   * usageInventory.ts): a lexical (never "callers") match inventory for up
+   * to 8 identifiers the served code is about — the ones the request names or
+   * matches, constants/enum members/types the slices reference, then the
+   * first surface's declarations — ranked in that order (inside a tier the
+   * identifiers the served code references but no served slice declares come
+   * before the served declarations), from the same word-bounded scanner
+   * `tl_search_files find` uses. A symbol whose every match
+   * lies inside the slices this response served is left out. Entries are
+   * compact — at most 4 files of 3 lines each, the file whose matched line
+   * DECLARES the symbol first, then files with a match the reader does not
+   * hold — and `total` is always the exact number of matching lines.
+   * `inventory_complete` is honest per symbol: false when this response
+   * withheld files/lines the real match count (within `scope`) exceeded, or
+   * when a file of the scope was skipped unread (over the walk's size ceiling,
+   * an unlistable directory, an unreadable or undecodable file, a scope of
+   * over 6,000 files).
+   * `scope` is the workspace-relative directory the scan covered — the served
+   * file's project (or its whole build when a workspace/module manifest lists
+   * it) — and is omitted when the whole workspace was scanned. Projected onto
+   * the wire under `plan.usages` (readFamily.ts PLAN_MEMBERS, A.6.1). Absent
+   * with the flag off or when no candidate symbol survives.
+   */
+  usages?: Array<{
+    symbol: string;
+    files: Array<{ path: string; lines: number[] }>;
+    total: number;
+    inventory_complete: boolean;
+    scope?: string;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +788,20 @@ export interface TaskPackArgs {
    */
   autoDiscoveredLocation?: boolean;
   /**
+   * Set only by buildTaskPackCore's named-project-scope rewrite, which replaces
+   * a pathless or directory-guess request's paths with the project the query
+   * names: `args` is the request as the caller sent it, `signature` the
+   * rewritten request's fingerprint plus extra-args key. The dispatcher's
+   * receipt preflight (`canServeCachedTaskPackReceipt`, legacy
+   * mode:"task_pack" calls) fingerprints only the caller's request, so
+   * `captureServedPack` records a capture of the rewritten request under the
+   * caller's one too -- what the literal-first, identity and M3 seeding sites
+   * do by hand after their own builds. A sub-build that spreads these args
+   * with paths of its own has another signature and is not rebound.
+   * Server-derived; internal only, never serialized or fingerprinted.
+   */
+  namedScopeRequest?: { readonly args: TaskPackArgs; readonly signature: string };
+  /**
    * R1-B2 (2026-09-13 review round): of the `paths` entries above, the ones an
    * EXECUTED SEARCH located for a term this query names (readCodeTaskPack.ts's
    * `executedSearchHitSeeds`).
@@ -786,7 +851,7 @@ export interface TaskPackArgs {
   surfaceRoles?: string[];
   /**
    * T1 (2026-08-27 field-eval): explicit caller byte ceiling for this pack --
-   * forwarded from read_file's advertised maxBytes argument. Effective
+   * forwarded from tl_read_file's advertised maxBytes argument. Effective
    * target = min(type-specific default, maxBytes, maxTokens*4), floored at
    * DEFAULT_RESPONSE_BYTE_FLOOR -- see readCodeTaskPack.ts's capForResult and
    * readCodeModes.ts's resolveCallerByteCeiling. Absent for ordinary calls,

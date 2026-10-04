@@ -2,18 +2,18 @@
  * sfCapOverflowBookings.spec.ts — FX-K (round-15 finding 1).
  *
  * THE DEFECT, on the SHIPPED DEFAULT PATH. `budget.bytes` is an advertised
- * `read_file` input, so `trimToCap` is reachable in ONE ordinary production
+ * `tl_read_file` input, so `trimToCap` is reachable in ONE ordinary production
  * call. Until FX-K the admissible union, the cumulative served-surface log and
  * the certified working set were all booked BEFORE that trim, from the
  * pre-trim surface list — so a surface whose body Phase E stripped, or whose
  * whole row Phase F spliced out, was booked as "served". Round-15 drove it end
  * to end with every SF flag off:
  *
- *   read_file  { query: <generic pricing change>, budget: { bytes: 6144 } }
+ *   tl_read_file  { query: <generic pricing change>, budget: { bytes: 6144 } }
  *              → read.task_pack, limit { cause: "capped" }, every row bodyless
- *   read_file  { query: <same epoch>, targets: [src/anchor.ts] }   ← prepared fence
- *   edit_file  { path: "src/pricing_1.ts", … }   → edit.applied     ← BLIND EDIT
- *   edit_file  { path: "src/plain.ts", … }       → refusal          ← control: the gate IS live
+ *   tl_read_file  { query: <same epoch>, targets: [src/anchor.ts] }   ← prepared fence
+ *   tl_edit_file  { path: "src/pricing_1.ts", … }   → edit.applied     ← BLIND EDIT
+ *   tl_edit_file  { path: "src/plain.ts", … }       → refusal          ← control: the gate IS live
  *
  * DESIGN gap (o) had deferred the repair partly on "Phase-E-on-survivor は
  * 本番入口から到達不能" (unreachable from the production entrance). That was
@@ -141,7 +141,7 @@ async function readPack(
   ws: string,
   args: Record<string, unknown>,
 ): Promise<{ kind?: string; limit?: { cause?: string }; evidence?: WireRow[] }> {
-  const res = await callTool("read_file", { ...args, cwd: ws });
+  const res = await callTool("tl_read_file", { ...args, cwd: ws });
   return JSON.parse(res.content[0]?.text ?? "{}") as {
     kind?: string; limit?: { cause?: string }; evidence?: WireRow[];
   };
@@ -310,7 +310,7 @@ describe("FX-K: the cap-overflow sweep — the default path books only what it s
 });
 
 // ---------------------------------------------------------------------------
-// (2) The production shape — spawned stdio server, real `edit_file`.
+// (2) The production shape — spawned stdio server, real `tl_edit_file`.
 // ---------------------------------------------------------------------------
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -433,7 +433,7 @@ describe("FX-K: a bodyless-shipped file is not editable, in the production call 
     const srv = startServer(ws, spawnEnv());
     try {
       await srv.initialize();
-      const first = await srv.call("read_file", {
+      const first = await srv.call("tl_read_file", {
         query: QUERY,
         task: { profile: "generic", epoch: "new" },
         budget: { bytes: 6144 },
@@ -449,14 +449,14 @@ describe("FX-K: a bodyless-shipped file is not editable, in the production call 
       expect(bodyless?.path, "precondition: the cap must ship a pricing row with no body").toBeDefined();
 
       // Same epoch, a prepared fence over an unrelated anchor file.
-      await srv.call("read_file", {
+      await srv.call("tl_read_file", {
         query: ANCHOR_QUERY,
         targets: [{ path: ANCHOR }],
         task: { profile: "generic" },
         cwd: ws,
       });
 
-      const blind = await srv.call("edit_file", { ...editArgs({ path: bodyless!.path! }, EDIT_ANCHOR), cwd: ws });
+      const blind = await srv.call("tl_edit_file", { ...editArgs({ path: bodyless!.path! }, EDIT_ANCHOR), cwd: ws });
       expect(
         blind.body["kind"],
         `editing ${bodyless!.path} — a file this session sent NO bytes for — must refuse`,
@@ -464,11 +464,11 @@ describe("FX-K: a bodyless-shipped file is not editable, in the production call 
       expect(blind.body["code"]).toBe("execution-typestate");
       // The row is still ADDRESSABLE for reads: FX-K withdraws write authority,
       // not the handle.
-      const zoom = await srv.call("read_file", { handle: bodyless!.handle, cwd: ws });
+      const zoom = await srv.call("tl_read_file", { handle: bodyless!.handle, cwd: ws });
       expect(zoom.body["kind"], "a bodyless-shipped row must still be readable by handle")
         .not.toBe("refusal");
 
-      const control = await srv.call("edit_file", {
+      const control = await srv.call("tl_edit_file", {
         ...editArgs({ path: CONTROL }, "export const L1 = 1;"), cwd: ws,
       });
       expect(control.body["kind"], "control: a never-packed file refuses at the same fence")
@@ -489,7 +489,7 @@ describe("FX-K: a bodyless-shipped file is not editable, in the production call 
     const srv = startServer(ws, spawnEnv());
     try {
       await srv.initialize();
-      const first = await srv.call("read_file", {
+      const first = await srv.call("tl_read_file", {
         query: QUERY,
         targets: [{ path: "src/pricing_1.ts" }],
         task: { profile: "generic", epoch: "new" },
@@ -500,14 +500,14 @@ describe("FX-K: a bodyless-shipped file is not editable, in the production call 
         .find((row) => row.path === "src/pricing_1.ts" && typeof row.body === "string" && row.body.length > 0);
       expect(served, "precondition: pricing_1 must ship a body here").toBeDefined();
 
-      await srv.call("read_file", {
+      await srv.call("tl_read_file", {
         query: ANCHOR_QUERY,
         targets: [{ path: ANCHOR }],
         task: { profile: "generic" },
         cwd: ws,
       });
 
-      const applied = await srv.call("edit_file", {
+      const applied = await srv.call("tl_edit_file", {
         ...editArgs({ path: "src/pricing_1.ts" }, EDIT_ANCHOR), cwd: ws,
       });
       expect(
@@ -558,7 +558,7 @@ describe("FX-K: a SAME-CALL demoted surface refuses by handle and by path", () =
     const srv = startServer(ws, spawnEnv(SF_FLAG_KEYS.filter((k) => k !== "TL_SEMANTIC_FRONTIER_GUARD")));
     try {
       await srv.initialize();
-      const pack = await srv.call("read_file", {
+      const pack = await srv.call("tl_read_file", {
         query: "Update Sensor::isHealthy and the continuation relation supporting context notes.",
         task: { profile: "generic", epoch: "new" },
         cwd: ws,
@@ -571,14 +571,14 @@ describe("FX-K: a SAME-CALL demoted surface refuses by handle and by path", () =
         .toBeGreaterThan(0);
       for (const row of bodyless) {
         const search = row.path!.endsWith(".cpp") ? "return true;" : "bool isHealthy() const;";
-        const byHandle = await srv.call("edit_file", { ...editArgs({ handle: row.handle }, search), cwd: ws });
+        const byHandle = await srv.call("tl_edit_file", { ...editArgs({ handle: row.handle }, search), cwd: ws });
         expect(byHandle.body["kind"], `same-call demoted ${row.path} must refuse by handle`).toBe("refusal");
         expect(byHandle.body["code"]).toBe("execution-typestate");
-        const byPath = await srv.call("edit_file", { ...editArgs({ path: row.path }, search), cwd: ws });
+        const byPath = await srv.call("tl_edit_file", { ...editArgs({ path: row.path }, search), cwd: ws });
         expect(byPath.body["kind"], `same-call demoted ${row.path} must refuse by path`).toBe("refusal");
         expect(byPath.body["code"]).toBe("execution-typestate");
       }
-      const control = await srv.call("edit_file", {
+      const control = await srv.call("tl_edit_file", {
         ...editArgs({ path: CONTROL }, "export const L1 = 1;"), cwd: ws,
       });
       expect(control.body["kind"], "control: a never-packed file refuses too").toBe("refusal");

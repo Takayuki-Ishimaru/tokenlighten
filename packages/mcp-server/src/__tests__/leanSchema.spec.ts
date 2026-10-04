@@ -13,6 +13,16 @@
  * `targets[].purpose` are still SERVED exactly as today lives in
  * rc/leanVsCodeCalls.rc.spec.ts (a real server, since that claim is about
  * `dispatchTool`, not about `advertisedTools`'s return value).
+ *
+ * v0.15.0 (2026-09-30): the ALL-CLIENT diet `TL_LEAN_SCHEMA` (leanSchemaAllClients
+ * .spec.ts) became DEFAULT ON, and it sheds a strict subset of what this
+ * file's `TL_LEAN_CALLS` diet sheds. Every claim here is about WP-V1's diet IN
+ * ISOLATION, measured against the pre-v0.15.0 vscode default, so each
+ * baseline/lean side below pins `TL_LEAN_SCHEMA=0` (`FULL_SCHEMA`) explicitly:
+ * the unset env is no longer the un-leaned schema, and without the pin the
+ * "shrinks by at least 40%" claims would be measured against an already-shrunk
+ * baseline (a weaker claim, not the one this file makes). No expectation
+ * below changed.
  */
 
 import { describe, expect, it } from "vitest";
@@ -21,6 +31,11 @@ type SchemaNode = Record<string, unknown>;
 type ToolDef = { name: string; description: string; inputSchema: SchemaNode };
 
 const VSCODE = "Visual Studio Code";
+
+/** Pre-v0.15.0 full schema: the all-client diet (TL_LEAN_SCHEMA, default ON since v0.15.0) off, so this file measures TL_LEAN_CALLS's own diet in isolation. */
+const FULL_SCHEMA = { TL_LEAN_SCHEMA: "0" } as const;
+/** The shipped default since v0.15.0 (env unset). */
+const DEFAULT_SCHEMA = { TL_LEAN_SCHEMA: undefined } as const;
 
 async function toolsFor(clientId: string | undefined): Promise<ToolDef[]> {
   const { advertisedTools } = await import("../server.js");
@@ -75,22 +90,27 @@ function propertyNamePaths(node: unknown, prefix = ""): Set<string> {
 
 describe("WP-V1: leanSchema — gating", () => {
   it("vscode + TL_LEAN_CALLS=1 changes the schema; every other combination is byte-identical to the true default", async () => {
-    const trueDefault = await toolsFor(undefined);
-    const vscodeNoFlag = await withEnv({ TL_LEAN_CALLS: undefined, TL_TURN_ECONOMY: undefined }, () => toolsFor(VSCODE));
-    const nonVscodeWithFlag = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor("claude-code"));
-    // Descriptions differ by client (clientAdvertisement.ts) even without the
-    // lean flag, so compare inputSchema only here.
-    const schemasOf = (tools: ToolDef[]) => tools.map((t) => t.inputSchema);
-    expect(schemasOf(vscodeNoFlag)).toEqual(schemasOf(trueDefault));
-    expect(schemasOf(nonVscodeWithFlag)).toEqual(schemasOf(trueDefault));
+    // Under BOTH schema baselines: the pre-v0.15.0 full schema (the original
+    // claim) and the shipped default (the all-client diet on) -- TL_LEAN_CALLS's
+    // client scoping must hold on either.
+    for (const diet of [FULL_SCHEMA, DEFAULT_SCHEMA]) {
+      const trueDefault = await withEnv(diet, () => toolsFor(undefined));
+      const vscodeNoFlag = await withEnv({ ...diet, TL_LEAN_CALLS: undefined, TL_TURN_ECONOMY: undefined }, () => toolsFor(VSCODE));
+      const nonVscodeWithFlag = await withEnv({ ...diet, TL_LEAN_CALLS: "1" }, () => toolsFor("claude-code"));
+      // Descriptions differ by client (clientAdvertisement.ts) even without the
+      // lean flag, so compare inputSchema only here.
+      const schemasOf = (tools: ToolDef[]) => tools.map((t) => t.inputSchema);
+      expect(schemasOf(vscodeNoFlag)).toEqual(schemasOf(trueDefault));
+      expect(schemasOf(nonVscodeWithFlag)).toEqual(schemasOf(trueDefault));
+    }
   });
 });
 
-describe("WP-V1: leanSchema — read_file", () => {
+describe("WP-V1: leanSchema — tl_read_file", () => {
   it("drops top-level oneOf, task.dependentRequired and budget.bytes/budget.tokens, and KEEPS targets[].purpose (steered onto directory targets)", async () => {
-    const [lean] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE));
+    const [lean] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE));
     const readFile = lean!;
-    expect(readFile.name).toBe("read_file");
+    expect(readFile.name).toBe("tl_read_file");
     expect(readFile.inputSchema["oneOf"]).toBeUndefined();
     const properties = readFile.inputSchema["properties"] as Record<string, SchemaNode>;
     const targetProps = (properties["targets"]!["items"] as SchemaNode)["properties"] as Record<string, unknown>;
@@ -115,36 +135,43 @@ describe("WP-V1: leanSchema — read_file", () => {
     expect(Object.keys(budgetProps).length).toBeGreaterThan(0);
   });
 
-  it("keeps every property NAME the default schema advertises except budget.bytes/budget.tokens", async () => {
-    const [defaultReadFile] = await toolsFor(VSCODE);
-    const [leanReadFile] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE));
+  it("keeps every property NAME the default schema advertises except budget.bytes/budget.tokens and the Copilot retest r4 cut", async () => {
+    const [defaultReadFile] = await withEnv(FULL_SCHEMA, () => toolsFor(VSCODE));
+    const [leanReadFile] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE));
     const before = propertyNamePaths(defaultReadFile!.inputSchema);
     const after = propertyNamePaths(leanReadFile!.inputSchema);
     const removed = [...before].filter((p) => !after.has(p));
     const added = [...after].filter((p) => !before.has(p));
     expect(added).toEqual([]);
-    expect(removed.sort()).toEqual(["budget.bytes", "budget.tokens"].sort());
+    // Copilot retest r4 (2026-10-02): fields a Copilot model never authors
+    // itself, or that only a server-issued call carries (server.ts
+    // LEAN_SCHEMA_PROPERTY_PATHS); dispatch still accepts every one.
+    expect(removed.sort()).toEqual([
+      "budget.bytes", "budget.tokens",
+      "lane", "scope.includeScores", "scope.surfaceRoles", "scope.includeClosure",
+      "targets.profile", "task.expected_state_version", "task.pull",
+    ].sort());
   });
 
-  it("describes cwd as edit_file-only / omit on read-search", async () => {
-    const [lean] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE));
+  it("describes cwd as tl_edit_file-only / omit on read-search", async () => {
+    const [lean] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE));
     const properties = lean!.inputSchema["properties"] as Record<string, SchemaNode>;
-    expect(properties["cwd"]!["description"]).toBe("edit_file only; omit on read/search in a single-root workspace.");
+    expect(properties["cwd"]!["description"]).toBe("tl_edit_file only; omit on read/search in a single-root workspace.");
   });
 
   it("shrinks the advertised bytes by at least 40% versus the vscode default (same rich tool description both sides)", async () => {
-    const [defaultReadFile] = await toolsFor(VSCODE);
-    const [leanReadFile] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE));
+    const [defaultReadFile] = await withEnv(FULL_SCHEMA, () => toolsFor(VSCODE));
+    const [leanReadFile] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE));
     const before = Buffer.byteLength(JSON.stringify(defaultReadFile), "utf8");
     const after = Buffer.byteLength(JSON.stringify(leanReadFile), "utf8");
-    expect(after, `read_file: ${before} B -> ${after} B`).toBeLessThanOrEqual(before * 0.6);
+    expect(after, `tl_read_file: ${before} B -> ${after} B`).toBeLessThanOrEqual(before * 0.6);
   });
 });
 
-describe("WP-V1: leanSchema — edit_file", () => {
+describe("WP-V1: leanSchema — tl_edit_file", () => {
   it("drops top-level anyOf and task.dependentRequired; keeps every edits[]/artifact property name", async () => {
-    const [defaultEditFile] = await toolsFor(VSCODE).then((t) => [t.find((x) => x.name === "edit_file")]);
-    const [leanEditFile] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "edit_file")]);
+    const [defaultEditFile] = await withEnv(FULL_SCHEMA, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_edit_file")]);
+    const [leanEditFile] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_edit_file")]);
     expect(leanEditFile!.inputSchema["anyOf"]).toBeUndefined();
     const properties = leanEditFile!.inputSchema["properties"] as Record<string, SchemaNode>;
     const task = properties["task"] as SchemaNode;
@@ -152,22 +179,24 @@ describe("WP-V1: leanSchema — edit_file", () => {
     const before = propertyNamePaths(defaultEditFile!.inputSchema);
     const after = propertyNamePaths(leanEditFile!.inputSchema);
     const removed = [...before].filter((p) => !after.has(p));
-    expect(removed).toEqual([]);
+    // Copilot retest r4 (2026-10-02): every edits[]/artifact name stays; only
+    // `lane` and the server-issued task fields go.
+    expect(removed.sort()).toEqual(["lane", "task.expected_state_version", "task.pull"].sort());
   });
 
   it("shrinks the advertised bytes by at least 40% versus the vscode default", async () => {
-    const [defaultEditFile] = await toolsFor(VSCODE).then((t) => [t.find((x) => x.name === "edit_file")]);
-    const [leanEditFile] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "edit_file")]);
+    const [defaultEditFile] = await withEnv(FULL_SCHEMA, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_edit_file")]);
+    const [leanEditFile] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_edit_file")]);
     const before = Buffer.byteLength(JSON.stringify(defaultEditFile), "utf8");
     const after = Buffer.byteLength(JSON.stringify(leanEditFile), "utf8");
-    expect(after, `edit_file: ${before} B -> ${after} B`).toBeLessThanOrEqual(before * 0.6);
+    expect(after, `tl_edit_file: ${before} B -> ${after} B`).toBeLessThanOrEqual(before * 0.6);
   });
 });
 
-describe("WP-V1: leanSchema — search_files", () => {
+describe("WP-V1: leanSchema — tl_search_files", () => {
   it("drops top-level oneOf and task.dependentRequired; leaves budget (bytes/tokens/items) untouched", async () => {
-    const [defaultSearch] = await toolsFor(VSCODE).then((t) => [t.find((x) => x.name === "search_files")]);
-    const [leanSearch] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "search_files")]);
+    const [defaultSearch] = await withEnv(FULL_SCHEMA, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_search_files")]);
+    const [leanSearch] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_search_files")]);
     expect(leanSearch!.inputSchema["oneOf"]).toBeUndefined();
     const properties = leanSearch!.inputSchema["properties"] as Record<string, SchemaNode>;
     const task = properties["task"] as SchemaNode;
@@ -178,22 +207,26 @@ describe("WP-V1: leanSchema — search_files", () => {
     expect(budgetProps["items"]).toBeDefined();
     const before = propertyNamePaths(defaultSearch!.inputSchema);
     const after = propertyNamePaths(leanSearch!.inputSchema);
-    expect([...before].filter((p) => !after.has(p))).toEqual([]);
+    // Copilot retest r4 (2026-10-02): the budget object stays whole; only the
+    // fields a Copilot model never authors go.
+    expect([...before].filter((p) => !after.has(p)).sort()).toEqual([
+      "lane", "scope.includeScores", "scope.surfaceRoles", "scope.includeClosure", "task.expected_state_version", "task.pull",
+    ].sort());
   });
 
-  it("shrinks the advertised bytes measurably (search_files starts smallest and keeps its whole budget object, so its OWN ratio is lower than read_file/edit_file -- the brief's >=40% target is over the three schemas TOGETHER, pinned in the combined report below)", async () => {
-    const [defaultSearch] = await toolsFor(VSCODE).then((t) => [t.find((x) => x.name === "search_files")]);
-    const [leanSearch] = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "search_files")]);
+  it("shrinks the advertised bytes measurably (tl_search_files starts smallest and keeps its whole budget object, so its OWN ratio is lower than tl_read_file/tl_edit_file -- the brief's >=40% target is over the three schemas TOGETHER, pinned in the combined report below)", async () => {
+    const [defaultSearch] = await withEnv(FULL_SCHEMA, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_search_files")]);
+    const [leanSearch] = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE)).then((t) => [t.find((x) => x.name === "tl_search_files")]);
     const before = Buffer.byteLength(JSON.stringify(defaultSearch), "utf8");
     const after = Buffer.byteLength(JSON.stringify(leanSearch), "utf8");
-    expect(after, `search_files: ${before} B -> ${after} B`).toBeLessThanOrEqual(before * 0.65);
+    expect(after, `tl_search_files: ${before} B -> ${after} B`).toBeLessThanOrEqual(before * 0.65);
   });
 });
 
 describe("WP-V1: leanSchema — combined byte report", () => {
   it("prints the measured before/after per tool (informational; the >=40% claims are pinned per-tool above)", async () => {
-    const before = await toolsFor(VSCODE);
-    const after = await withEnv({ TL_LEAN_CALLS: "1" }, () => toolsFor(VSCODE));
+    const before = await withEnv(FULL_SCHEMA, () => toolsFor(VSCODE));
+    const after = await withEnv({ TL_LEAN_CALLS: "1", ...FULL_SCHEMA }, () => toolsFor(VSCODE));
     let totalBefore = 0;
     let totalAfter = 0;
     for (const tool of before) {

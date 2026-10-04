@@ -254,7 +254,7 @@ export const ELISION_MARKER_RE = /\/\* doc elided L\d+-\d+ \*\/|#\s?doc elided L
 export const TL_SYNTHETIC_MARKER_RE = new RegExp(
   [
     "…\\[truncated:\\s+\\d+\\s+bytes\\s+elided\\]",
-    "\\[truncated:\\s+(?:unrecognized extension served verbatim up to the byte budget; use mode=slice \\(range\\) or search_files action=find for the rest|file too large even for symbol-map; use mode=symbol for a specific function body)\\]",
+    "\\[truncated:\\s+(?:unrecognized extension served verbatim up to the byte budget; use mode=slice \\(range\\) or tl_search_files action=find for the rest|file too large even for symbol-map; use mode=symbol for a specific function body)\\]",
   ].join("|"),
   "u",
 );
@@ -408,7 +408,7 @@ export function servedSpansOfDisplayedText(
 /**
  * Whole-file/whole-slice "display content" resolver — wraps the
  * `keepComments ? text : elideDocComments(text, lang, startLine)` ternary
- * every content-bearing read_file success path used, adding one guard.
+ * every content-bearing tl_read_file success path used, adding one guard.
  *
  * 2026-07-16a bench forensics: a doc-only file (e.g. a 13-line docstring-only
  * python stub) can have elideDocComments strip its ENTIRE body down to a

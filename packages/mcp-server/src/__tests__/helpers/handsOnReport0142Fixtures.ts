@@ -569,7 +569,7 @@ export function buildCommentBytePrimarySymbolWorkspace(): { dir: string } {
  * workspace" repro for the SEEDED-TARGETS door — `buildLenientDecodeWorkspace
  * ("rare-nul-stripped")`'s own two-file shape (`src/theme.css` +
  * `src/locked.ts`) does NOT reproduce this: a query naming an absent
- * identifier there degrades to a bare `search_files find` `next` (measured),
+ * identifier there degrades to a bare `tl_search_files find` `next` (measured),
  * never a `qref`+`targets` read re-pack, so it never re-enters
  * `buildSeededTaskPack`'s explicit-`targets` read loop a second time. THIS
  * workspace adds two well-formed siblings (`src/panel.ts`, matching the
@@ -774,7 +774,7 @@ export function add(a: number, b: number): number {
  * — `act.answer`, no `next`, nothing to continue (wave 0 recorded 01A as
  * "could-not-reproduce" for exactly this reason). The report's sequence needs a
  * first pack that CANNOT place one of the two named identifiers and therefore
- * prescribes `search_files` for it; only then does the continuation the report
+ * prescribes `tl_search_files` for it; only then does the continuation the report
  * complains about exist at all. Three properties produce that state, and each
  * is load-bearing:
  *
@@ -796,7 +796,7 @@ export function add(a: number, b: number): number {
  * Measured against a real spawned server before being written (see
  * `scratchpad/fix-notes-1.md`): the first pack serves one identifier's owner
  * plus handler evidence, gaps the OTHER identifier, and prescribes a
- * `search_files` `next` for it — the report's step 1/2 exactly. On HEAD before
+ * `tl_search_files` `next` for it — the report's step 1/2 exactly. On HEAD before
  * this wave the following resumes then rotated through an already-served
  * window (answering `read.receipt`) and a redundant re-search, never reaching
  * `act.answer`.
@@ -915,7 +915,7 @@ export function buildVsixEraExtensionWorkspace(): { dir: string } {
  * that shares a token with a mutation VERB. Round 11 measured `Explain how
  * MAX_RETRIES works in src/retry.ts, and then set it to 5.` marking
  * `src/http.ts` writable (`why:"symbol hit for unknown"`) and a same-lane
- * `edit_file` REWRITING IT ON DISK; in the `remove` register `src/gc.ts` was the
+ * `tl_edit_file` REWRITING IT ON DISK; in the `remove` register `src/gc.ts` was the
  * ONLY writable entry, so an agent following the frontier literally edited the
  * wrong file.
  */
@@ -942,7 +942,7 @@ export function buildWriteAuthorityLeakWorkspace(): { dir: string } {
  * `"stripped"`: the file IS served (NUL-free, with the strip stated) while
  * `detectWriteEncodingRisk` refuses to write it — any NUL in the first 4096
  * bytes. Round 11 measured `In src/retry.ts, set MAX_RETRIES to 5.` certifying
- * `act.edit` with that file writable and the only sanctioned `edit_file`
+ * `act.edit` with that file writable and the only sanctioned `tl_edit_file`
  * transition refusing with `retry:"call"`, which no `edits[]` shape can satisfy.
  *
  * The padding is a comment line, so the file stays a parseable TS module and the

@@ -110,7 +110,7 @@ describe("tokenizeQuery mode:\"simple\" — CJK-aware", () => {
 
 // field-report fix, 2026-09-08: a discovery-fallback task_pack fed a
 // mangled hiragana fragment ("きたときの", out of "エラーが起きたときの
-// リトライ処理を説明してください") straight into a `search_files find`
+// リトライ処理を説明してください") straight into a `tl_search_files find`
 // `queries` item — a token that can never match anything, wasting the
 // whole call. Root cause: extractCjkTokens's whole-hiragana-run token
 // (correct for cjkSpans.ts's OTHER consumer, BM25F content indexing, where

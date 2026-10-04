@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 
 /** One of the 3 advertised tools. */
-export type ContinuationTool = "read_file" | "edit_file" | "search_files";
+export type ContinuationTool = "tl_read_file" | "tl_edit_file" | "tl_search_files";
 
 export interface ContinuationCall {
   /** The tool to call — one of the 3 advertised tools. */
@@ -109,12 +109,12 @@ function parseQuotedList(inner: string): string[] {
  */
 export function callToNextString(call: ContinuationCall): string | undefined {
   const a = call.arguments;
-  if (call.tool === "read_file") {
+  if (call.tool === "tl_read_file") {
     if (Array.isArray(a["handles"])) {
-      return `read_file handles=[${quoteList((a["handles"] as unknown[]).map(String))}]`;
+      return `tl_read_file handles=[${quoteList((a["handles"] as unknown[]).map(String))}]`;
     }
     if (a["mode"] === "task_pack" && typeof a["query"] === "string" && Array.isArray(a["surfaceRoles"])) {
-      return `read_file mode=task_pack query="${a["query"]}" surfaceRoles=[${quoteList((a["surfaceRoles"] as unknown[]).map(String))}]`;
+      return `tl_read_file mode=task_pack query="${a["query"]}" surfaceRoles=[${quoteList((a["surfaceRoles"] as unknown[]).map(String))}]`;
     }
     if (a["mode"] === "task_pack" && typeof a["query"] === "string" && Array.isArray(a["paths"])) {
       // paths[] also accepts {path,symbol} objects; only the plain-string form
@@ -123,38 +123,38 @@ export function callToNextString(call: ContinuationCall): string | undefined {
       const entries = a["paths"] as unknown[];
       const plain = entries.filter((item): item is string => typeof item === "string");
       if (plain.length === entries.length && plain.length > 0) {
-        return `read_file mode=task_pack query="${a["query"]}" paths=[${quoteList(plain)}]`;
+        return `tl_read_file mode=task_pack query="${a["query"]}" paths=[${quoteList(plain)}]`;
       }
     }
     if (a["mode"] === "slice" && typeof a["handle"] === "string") {
-      let s = `read_file mode=slice handle=${a["handle"]}`;
+      let s = `tl_read_file mode=slice handle=${a["handle"]}`;
       if (typeof a["range"] === "string") s += ` range=${a["range"]}`;
       if (a["comments"] === "keep") s += ` comments=keep`;
       return s;
     }
     return undefined;
   }
-  if (call.tool === "edit_file") {
-    if (typeof a["handle"] === "string") return `edit_file handle=${a["handle"]}`;
+  if (call.tool === "tl_edit_file") {
+    if (typeof a["handle"] === "string") return `tl_edit_file handle=${a["handle"]}`;
     return undefined;
   }
-  // search_files
+  // tl_search_files
   if (a["action"] === "find" && typeof a["query"] === "string") {
-    return `search_files action=find query=${a["query"]}`;
+    return `tl_search_files action=find query=${a["query"]}`;
   }
   if (a["action"] === "locate" && typeof a["query"] === "string") {
-    return `search_files action=locate query="${a["query"]}"`;
+    return `tl_search_files action=locate query="${a["query"]}"`;
   }
   if (a["action"] === "references" && typeof a["query"] === "string") {
-    return `search_files action=references query=${a["query"]}`;
+    return `tl_search_files action=references query=${a["query"]}`;
   }
   if (a["action"] === "tree") {
     return typeof a["path"] === "string"
-      ? `search_files action=tree path=${a["path"]}`
-      : "search_files action=tree";
+      ? `tl_search_files action=tree path=${a["path"]}`
+      : "tl_search_files action=tree";
   }
   if (Array.isArray(a["queries"])) {
-    return `search_files queries=[${quoteList((a["queries"] as unknown[]).map(String))}]`;
+    return `tl_search_files queries=[${quoteList((a["queries"] as unknown[]).map(String))}]`;
   }
   return undefined;
 }
@@ -168,44 +168,44 @@ export function nextStringToCall(source: string): ContinuationCall | undefined {
   const s = source.trim();
   let m: RegExpMatchArray | null;
 
-  if ((m = s.match(/^read_file handles=\[(.*)\]$/)) !== null) {
-    return { tool: "read_file", arguments: { handles: parseQuotedList(m[1]!) } };
+  if ((m = s.match(/^tl_read_file handles=\[(.*)\]$/)) !== null) {
+    return { tool: "tl_read_file", arguments: { handles: parseQuotedList(m[1]!) } };
   }
-  if ((m = s.match(/^read_file mode=task_pack query="(.*)" surfaceRoles=\[(.*)\]$/)) !== null) {
-    return { tool: "read_file", arguments: { mode: "task_pack", query: m[1]!, surfaceRoles: parseQuotedList(m[2]!) } };
+  if ((m = s.match(/^tl_read_file mode=task_pack query="(.*)" surfaceRoles=\[(.*)\]$/)) !== null) {
+    return { tool: "tl_read_file", arguments: { mode: "task_pack", query: m[1]!, surfaceRoles: parseQuotedList(m[2]!) } };
   }
   // Path-scoped re-seed. A caller-supplied directory that yielded no surface is
   // a PATH gap; the surfaceRoles form above cannot express it, and leaving this
   // form unparsed would drop the one follow-up that actually closes the gap.
-  if ((m = s.match(/^read_file mode=task_pack query="(.*)" paths=\[(.*)\]$/)) !== null) {
-    return { tool: "read_file", arguments: { mode: "task_pack", query: m[1]!, paths: parseQuotedList(m[2]!) } };
+  if ((m = s.match(/^tl_read_file mode=task_pack query="(.*)" paths=\[(.*)\]$/)) !== null) {
+    return { tool: "tl_read_file", arguments: { mode: "task_pack", query: m[1]!, paths: parseQuotedList(m[2]!) } };
   }
-  if ((m = s.match(/^read_file mode=slice handle=(\S+?)(?: range=(\S+))?(?: comments=keep)?$/)) !== null) {
+  if ((m = s.match(/^tl_read_file mode=slice handle=(\S+?)(?: range=(\S+))?(?: comments=keep)?$/)) !== null) {
     const args: Record<string, unknown> = { mode: "slice", handle: m[1]! };
     if (m[2]) args["range"] = m[2];
     if (s.endsWith(" comments=keep")) args["comments"] = "keep";
-    return { tool: "read_file", arguments: args };
+    return { tool: "tl_read_file", arguments: args };
   }
-  if ((m = s.match(/^edit_file handle=(\S+)$/)) !== null) {
-    return { tool: "edit_file", arguments: { handle: m[1]! } };
+  if ((m = s.match(/^tl_edit_file handle=(\S+)$/)) !== null) {
+    return { tool: "tl_edit_file", arguments: { handle: m[1]! } };
   }
-  if ((m = s.match(/^search_files action=find query=(\S+)$/)) !== null) {
-    return { tool: "search_files", arguments: { action: "find", query: m[1]! } };
+  if ((m = s.match(/^tl_search_files action=find query=(\S+)$/)) !== null) {
+    return { tool: "tl_search_files", arguments: { action: "find", query: m[1]! } };
   }
-  if ((m = s.match(/^search_files action=locate query="(.*)"$/)) !== null) {
-    return { tool: "search_files", arguments: { action: "locate", query: m[1]! } };
+  if ((m = s.match(/^tl_search_files action=locate query="(.*)"$/)) !== null) {
+    return { tool: "tl_search_files", arguments: { action: "locate", query: m[1]! } };
   }
-  if ((m = s.match(/^search_files action=references query=(\S+)$/)) !== null) {
-    return { tool: "search_files", arguments: { action: "references", query: m[1]! } };
+  if ((m = s.match(/^tl_search_files action=references query=(\S+)$/)) !== null) {
+    return { tool: "tl_search_files", arguments: { action: "references", query: m[1]! } };
   }
-  if ((m = s.match(/^search_files action=tree(?: path=(\S+))?$/)) !== null) {
+  if ((m = s.match(/^tl_search_files action=tree(?: path=(\S+))?$/)) !== null) {
     return {
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "tree", ...(m[1] ? { path: m[1] } : {}) },
     };
   }
-  if ((m = s.match(/^search_files queries=\[(.*)\]$/)) !== null) {
-    return { tool: "search_files", arguments: { queries: parseQuotedList(m[1]!) } };
+  if ((m = s.match(/^tl_search_files queries=\[(.*)\]$/)) !== null) {
+    return { tool: "tl_search_files", arguments: { queries: parseQuotedList(m[1]!) } };
   }
   return undefined;
 }
@@ -298,7 +298,7 @@ function codelessHandles(src: ContinuationSource): string[] {
  * Build a ContinuationPlan from a task_pack result, or undefined when `next`
  * alone suffices. Emission (Wave-1 site (i)): a PARTIAL pack whose residual
  * genuinely implies >=2 independent follow-up reads — a concern search that
- * did NOT cover everything (the existing `search_files action=find` next) AND
+ * did NOT cover everything (the existing `tl_search_files action=find` next) AND
  * a batch read of the surfaces the pack DID identify but left code-less. Both
  * are known at emission time with no intra-stage dependency, so they ship as
  * ONE parallel stage. `stages[0].calls[0]` reproduces the existing `next`
@@ -323,11 +323,11 @@ export function buildContinuation(src: ContinuationSource): ContinuationPlan | u
   // two independent reads the agent would otherwise serialize. A re-pack
   // (surfaceRoles) first step is excluded: it re-fetches everything, so a
   // parallel current-handles read would be redundant.
-  const firstIsSearch = first.tool === "search_files" && first.arguments["action"] === "find";
+  const firstIsSearch = first.tool === "tl_search_files" && first.arguments["action"] === "find";
   if (firstIsSearch) {
     const handles = codelessHandles(src);
     if (handles.length >= 1) {
-      const readCall: ContinuationCall = { tool: "read_file", arguments: { handles } };
+      const readCall: ContinuationCall = { tool: "tl_read_file", arguments: { handles } };
       const readStr = callToNextString(readCall);
       // Never duplicate the first call (defensive — a find and a handles read
       // can't collide, but the dedup keeps the >=2-distinct-calls invariant honest).

@@ -19,11 +19,13 @@ Run the narrowest relevant workspace test first while developing, then run the f
 
 The complete package suite is a CI gate on Ubuntu and macOS. Windows CI verifies the build, bundled CLI, dependency licenses and notices, runtime dependency audit, and diagnostics. Some test fixtures are not yet portable to Windows, so the complete package suite is not a Windows release gate for v0.14.1. Windows developers can still build the source and run targeted tests; please identify the operating system in pull-request test notes.
 
+VSIX packaging from source requires Node.js 22 or later.
+
 ## Pull requests
 
 Keep each pull request focused, describe the user-visible behavior, add regression coverage for behavior changes, and note the commands you ran. Do not include credentials, private repositories, customer data, benchmark corpora, local usage logs, or generated build output.
 
-TokenLighten intentionally advertises exactly three MCP tools: `read_file`, `edit_file`, and `search_files`. Changes to shared contracts belong in `packages/types/src/`.
+TokenLighten intentionally advertises exactly three MCP tools: `tl_read_file`, `tl_edit_file`, and `tl_search_files`. Changes to shared contracts belong in `packages/types/src/`.
 
 Dependencies using GPL, AGPL, SSPL, BSL, or Elastic License 2.0 are not accepted. Run `npm run licenses` after dependency changes.
 

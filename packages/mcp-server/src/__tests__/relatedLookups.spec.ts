@@ -25,6 +25,14 @@ import {
   buildFindResponse,
   MAX_RESPONSE_BYTES,
   MAX_INVENTORY_RESPONSE_BYTES,
+  // SPC (2026-09-29): the "drops the attachment when near cap" gate below
+  // pads relative to the CURRENT effective cap `maybeAttachRelatedLookups`
+  // itself reads (findResponseCapBytes(), see relatedLookups.ts) rather than
+  // the bare MAX_RESPONSE_BYTES constant, which is only the OFF/rollback
+  // value now that TL_FIND_WIDE_PAGE is (S) supported, DEFAULT ON for every
+  // client (util/flags.ts's "SPC addendum") — this keeps the gate's own
+  // "no room left" test meaningful at whichever cap is actually active.
+  findResponseCapBytes,
   type FindResponse,
 } from "../features/search/find/findText.js";
 import { maybeAttachRelatedLookups } from "../features/search/find/relatedLookups.js";
@@ -74,11 +82,11 @@ describe("maybeAttachRelatedLookups — gate behavior", () => {
 
     expect(result.related_lookups).toBeDefined();
     expect(result.related_lookups?.definition).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "symbols", query: "computeWidgetPriceRl" },
     });
     expect(result.related_lookups?.callers).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "references", query: "computeWidgetPriceRl" },
     });
   });
@@ -152,20 +160,21 @@ describe("maybeAttachRelatedLookups — gate behavior", () => {
     expect(result.related_lookups).toBeUndefined();
   });
 
-  it("drops the attachment when it would push an already-near-cap response over MAX_RESPONSE_BYTES", () => {
+  it("drops the attachment when it would push an already-near-cap response over the effective cap", () => {
+    const cap = findResponseCapBytes();
     const base = baseHitResponse("computeWidgetPriceRl");
     const baseBytes = Buffer.byteLength(JSON.stringify(base), "utf8");
     // Pad to leave less headroom than related_lookups needs (~150-220B for
     // this query length) — 20B of slack is not enough room.
-    const filler = "x".repeat(Math.max(0, MAX_RESPONSE_BYTES - baseBytes - 20));
+    const filler = "x".repeat(Math.max(0, cap - baseBytes - 20));
     const padded: FindResponse = { ...base, note: filler };
-    expect(Buffer.byteLength(JSON.stringify(padded), "utf8")).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(padded), "utf8")).toBeLessThanOrEqual(cap);
 
     const result = maybeAttachRelatedLookups(padded, { query: "computeWidgetPriceRl", isRegex: false });
 
     expect(result.related_lookups).toBeUndefined();
     expect(result).toBe(padded); // dropped, not force-fitted — same object back, diet stays intact.
-    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(MAX_RESPONSE_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(cap);
   });
 
   it("keeps the attachment when the response has ordinary headroom under MAX_RESPONSE_BYTES", () => {

@@ -137,10 +137,24 @@ export interface FacetPlanEntry {
   readonly unresolvedConstructedValues?: Readonly<Record<string, string>>;
   /** value / condition (P1-4, round-7 fable finding, item 4): `unresolvedConstants` entries (a qualified `Owner.member` name) for which SEVERAL workspace files declare `Owner` and neither the focal's own file nor its own imports proved which one -- name -> the candidate file paths, so the disclosure can name them instead of the generic "could not be resolved" wording (never silently picks one, P1). Absent/entry-missing = not an ambiguous-owner case (the generic or package wording still applies to it). */
   readonly unresolvedConstantCandidates?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * value / condition (FIX-ALIAS, eval-0929 §4, root cause 2): name -> a
+   * short attribution ("read by CLIENT_DEFAULTS in src/defaults.ts") for a
+   * name a SERVED window's own text reads (depth >= 1 — a dependency of that
+   * window's OWN value, e.g. an aliased import the window's file could not
+   * chase to its real declaration) that this scan could not resolve. Distinct
+   * from `unresolvedConstants` (the focal's OWN depth-0 reads — this never
+   * duplicates a name already there) so a disclosure never says "read by
+   * ${focal.name}" for a name the focal itself never mentions, mislabeling
+   * whose read it is. Absent/entry-missing = no such dependency miss.
+   */
+  readonly unresolvedDependencies?: Readonly<Record<string, string>>;
   /** value / condition: false when the constant scan stopped at its time budget. */
   readonly constantsComplete?: boolean;
   /** flow, non-callable focal only (FIX-FAB2): false when more of the focal's own members matched the clause than MAX_CALLEES_PER_REQUIREMENT allowed to be served — the member list itself was cut, never silently. */
   readonly flowMembersComplete?: boolean;
+  /** flow / value / condition, callable focal (Copilot retest 2026-10-02): false when the focal's direct callee list was cut at MAX_SCANNED_CALLEE_NAMES / MAX_REQUIRED_CALLEE_WINDOWS (readCodeTaskPack.ts `calleeDefinitionsForFocal`) -- the facet is then undetermined, never covered by the callees that did fit. Absent = taken whole. */
+  readonly calleesComplete?: boolean;
   /** flow, non-callable focal only (FIX-FAB2): clause subject terms (length >= 3, excluding the focal's own name) that matched NO member of the focal at all — a non-empty list means the clause names something no served member accounts for, so the facet is never "covered" (P1/P3). */
   readonly ungroundedFlowTerms?: readonly string[];
   /**
@@ -174,6 +188,23 @@ export interface FacetPlanEntry {
    * export, or the facet is not `callers`.
    */
   readonly focalDefaultExported?: boolean;
+  /**
+   * value / condition (WP-F, eval-0929 §7 bullet 3 / §8 row 4,
+   * `same_name_distractor` / readLimit chip task_b5ca96e5 / the
+   * `condvals_path` addition): set instead of `focal` when >= 2 files
+   * declared this requirement's own subject identifier and neither an
+   * explicit file path the question named nor an import relation from a
+   * file the pack already anchors on could tell which one it means
+   * (readCodeTaskPack.ts's `findDeclaredCallableAmong` /
+   * `ResolvedFacetFocal.ambiguousWith`). `name` is the shared identifier
+   * every listed path declares; `paths` are the candidate files themselves
+   * (bounded, ≤ MAX_SAME_NAME_CANDIDATES), so the disclosure can name them
+   * instead of certifying an arbitrary pick as `covered`/`empty` (a same-
+   * named DECOY's own empty body must never stand in for the real
+   * declaration's actual values/conditions). Absent/undefined = not an
+   * ambiguous-focal case.
+   */
+  readonly ambiguousFocal?: { readonly name: string; readonly paths: readonly string[] };
 }
 
 export interface FacetPlan {
@@ -296,7 +327,27 @@ function clearUndeliveredFacetLines(workspaceKey: string, query: string): void {
 // Bounds
 // ---------------------------------------------------------------------------
 
-/** A focal callable longer than this is not itself a required window (its constants / sites / callees still are) — requiring a 300-line body to answer "the default X" would read far more than the question needs. */
+/**
+ * A focal callable longer than this is not itself a required window for a
+ * VALUE facet (its constants / callees still are) — requiring a 300-line body
+ * to answer "the default X" would read far more than the question needs. It is
+ * also the bound of the window the closure hook serves on its own
+ * (`focalRequiredSpan`).
+ *
+ * R2-T1 (eval-0929 review P0-3, orchestrator ruling 2026-09-30): the waiver is
+ * a VALUE rule only. A CONDITION or FLOW question about a callable is answered
+ * from the body itself — its branches, its steps — and no constant stands in
+ * for them: measured, "mayRetry の条件と RETRY_CODES の実際の値を説明して" over a
+ * 300-line function certified `act.answer` with the constants and the
+ * signature line and not one of its 300 branches (budget 8192), and the
+ * no-ceiling pack certified "all conditions" over 142 of 304 lines. So for
+ * those two facets a long callable focal is required WHOLE
+ * (`focalRequiredWindow`): the part the pack could not ship is `open` (the
+ * gate's ordinary exact, ranged read of the rest), and a part already asked
+ * for and never delivered is disclosed `undetermined` by that range — never
+ * covered from constants or a signature alone. A focal of at most this many
+ * lines is unchanged, and so is every value / callers facet.
+ */
 export const MAX_FACET_FOCAL_LINES = 80;
 /**
  * Call sites embedded in ONE hop's serving pass (readCodeTaskPack.ts's own
@@ -425,10 +476,28 @@ function lineServed(line: number, served: readonly FacetLineSpan[]): boolean {
 // Literal probe (value / condition emptiness wording only)
 // ---------------------------------------------------------------------------
 
-/** A numeric or quoted literal on a line once a trailing `//` / `#` comment is dropped — decides only whether an EMPTY value facet is disclosed, never a status. */
+/** A maximal identifier-shaped run (mirrors evidenceClosure.ts's own `IDENTIFIER_RE`, kept as a local duplicate for the same reason `lineHasLiteral` itself is duplicated -- see its doc comment). Every SUCH run starts with a letter/`_`/`$`, so stripping every match from a line leaves a numeric literal's own leading digit untouched (no mainstream language lets an identifier start with a digit) while removing a digit-suffixed type/const name whole. */
+const IDENTIFIER_TOKEN_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
+
+/**
+ * A numeric or quoted literal on a line once a trailing `//` / `#` comment
+ * is dropped — decides only whether an EMPTY value facet is disclosed,
+ * never a status.
+ *
+ * eval-0929 §4/§8 fix: a digit run counts as a literal only when it OPENS
+ * the token it sits in (`64`, `0x40`, `1_000`, `1e3`, `64u64`); a digit run
+ * inside a digit-suffixed type/const name (`u64`, `i32`, `int8_t`,
+ * `Float64`, `uint16` in Rust/C/C++/Go/Julia/Kotlin/…) never opens its
+ * token and must not be read as one — see `IDENTIFIER_TOKEN_RE`'s own doc
+ * comment and evidenceClosure.ts's `lineHasLiteralText` (kept in sync on
+ * purpose) for the full mechanism. The prior one-character
+ * lookbehind/lookahead missed this: for a 2+ digit suffix it could
+ * retry-match on the run's own trailing digit (preceded by another digit,
+ * not a letter) and misread the type name as carrying a literal.
+ */
 function lineHasLiteral(line: string): boolean {
   const code = line.replace(/\s(?:\/\/|#).*$/u, "").replace(/^\s*(?:\/\/|#|\*|\/\*).*$/u, "");
-  return /(?<![A-Za-z_$])\d+(?:\.\d+)?(?![A-Za-z_$])/u.test(code) || /["'`]/u.test(code);
+  return /\d/u.test(code.replace(IDENTIFIER_TOKEN_RE, "")) || /["'`]/u.test(code);
 }
 
 // ---------------------------------------------------------------------------
@@ -461,20 +530,48 @@ export interface FacetFacts {
   readonly disclosure?: { readonly word: "request-item-empty" | "request-item-undetermined"; readonly reason: string };
 }
 
-function focalRequiredWindow(entry: FacetPlanEntry, ctx: FacetEvaluationContext): FacetPlanWindow | undefined {
+/**
+ * The focal lines `facet` requires: the whole (noise-trimmed) declaration of a
+ * focal of at most MAX_FACET_FOCAL_LINES lines for every facet but `callers`
+ * (the caller skips this for `callers`), and — R2-T1, see
+ * MAX_FACET_FOCAL_LINES — the whole declaration of a LONGER callable focal for
+ * a `condition` / `flow` facet. A long TYPE focal (`callable:false`) keeps the
+ * waiver: its flow is judged by the member windows the recorder required.
+ */
+function focalRequiredWindow(entry: FacetPlanEntry, ctx: FacetEvaluationContext, facet: RequestFacet): FacetPlanWindow | undefined {
   const focal = entry.focal;
   if (focal === undefined) return undefined;
-  const span = focalRequiredSpan(focal.start, focal.end, ctx.fileLines(focal.path));
+  const lines = ctx.fileLines(focal.path);
+  const span = focalRequiredSpan(focal.start, focal.end, lines)
+    ?? ((facet === "condition" || facet === "flow") && focal.callable !== false
+      ? trimmedFocalSpan(focal.start, focal.end, lines)
+      : undefined);
   return span === undefined ? undefined : { kind: "focal", path: focal.path, start: span.start, end: span.end, name: focal.name };
 }
 
 /**
  * The lines of a focal declared at `[start, end]` that every facet but
- * `callers` requires (see `focalRequiredWindow`), or `undefined` when none are
- * required. Exported for the closure hook (readCodeTaskPack.ts), which serves
- * this window itself when the pack did not select it.
+ * `callers` requires when the focal is at most MAX_FACET_FOCAL_LINES long, or
+ * `undefined` (a longer focal — see `focalRequiredWindow` for the condition /
+ * flow facets that still require it). Exported for the closure hook
+ * (readCodeTaskPack.ts), which serves this window itself when the pack did not
+ * select it — which is why it stays bounded: a long condition / flow focal is
+ * REQUIRED (`focalRequiredWindow`) but reaches the client through the pack's
+ * own budgeted serving and the gate's ranged `next`, never as one unbounded
+ * closure window.
  */
 export function focalRequiredSpan(
+  start: number,
+  end: number,
+  lines: readonly string[] | undefined,
+): { readonly start: number; readonly end: number } | undefined {
+  const span = trimmedFocalSpan(start, end, lines);
+  if (span === undefined || span.end - span.start + 1 > MAX_FACET_FOCAL_LINES) return undefined;
+  return span;
+}
+
+/** `[start, end]` with leading/trailing blank and comment-only lines trimmed, whatever its length; `undefined` when nothing is left or the file is unreadable. */
+function trimmedFocalSpan(
   start: number,
   end: number,
   lines: readonly string[] | undefined,
@@ -492,7 +589,6 @@ export function focalRequiredSpan(
   while (first < last && isNoise(first)) first += 1;
   while (last > first && isNoise(last)) last -= 1;
   if (last < first) return undefined;
-  if (last - first + 1 > MAX_FACET_FOCAL_LINES) return undefined;
   return { start: first, end: last };
 }
 
@@ -539,6 +635,17 @@ export function evaluateFacetRequirement(
   if (entry === undefined) {
     return undetermined("the evidence closure for this clause was not computed for this request in this session");
   }
+  // WP-F (eval-0929 §7 bullet 3 / §8 row 4): checked BEFORE `no-focal` and
+  // BEFORE `focal` is read for anything else -- an ambiguous entry's own
+  // `focal` (if present at all) is a placeholder, never a decided subject,
+  // so it must never reach `conceptGrounded`/the required-windows loop below
+  // and be certified `covered`/`empty` on an arbitrary same-named pick.
+  if (entry.ambiguousFocal !== undefined && entry.ambiguousFocal.paths.length > 0) {
+    const { name, paths } = entry.ambiguousFocal;
+    return undetermined(
+      `${name} is declared in ${paths.length} files (${paths.join(", ")}) and this pack could not tell which one the question means`,
+    );
+  }
   if (entry.resolution === "no-focal") {
     return undetermined("no callable or declaration in the workspace could be resolved as this clause's subject");
   }
@@ -554,7 +661,7 @@ export function evaluateFacetRequirement(
   // -- required windows -----------------------------------------------------
   const required: FacetPlanWindow[] = [];
   if (requirement.facet !== "callers") {
-    const focalWindow = focalRequiredWindow(entry, ctx);
+    const focalWindow = focalRequiredWindow(entry, ctx, requirement.facet);
     if (focalWindow !== undefined) required.push(focalWindow);
   }
   for (const window of entry.windows) {
@@ -664,6 +771,15 @@ export function evaluateFacetRequirement(
     for (const piece of unservedSubSpans(window, served)) open.push({ path: mentionLine.path, ...piece });
   }
 
+  // Copilot retest (2026-10-02, moved ahead of `open` by its review): a cut
+  // callee list is disclosed at once -- the callees that fit are never proof
+  // that the ones past the cut agree with them, and fetching every window
+  // that fits over several round trips only to disclose the cut afterwards
+  // costs those round trips for nothing (see `calleesComplete`).
+  if (requirement.facet !== "callers" && entry.calleesComplete === false) {
+    return undetermined(`${focal.name} calls more in-workspace functions than this pack can require in one pass`, true, servedWindows);
+  }
+
   if (open.length > 0) {
     // Merge per path, keeping first-appearance path order (requirement order).
     const order: string[] = [];
@@ -750,6 +866,17 @@ export function evaluateFacetRequirement(
     const reason = constructedEntries
       .map(([name, expr]) => `${name} is built by ${expr}, whose value this pack did not follow`)
       .join("; ");
+    return undetermined(reason, true, servedWindows);
+  }
+  // FIX-ALIAS (eval-0929 §4, root cause 2): a dependency of a SERVED window's
+  // own value (not the focal's direct read -- see `unresolvedDependencies`'s
+  // own doc) that this pack could not resolve either -- never `covered`
+  // merely because the window ABOVE it in the chain was found (P3): the
+  // window's own text is a reference, and the value behind that reference
+  // never reached the client.
+  const dependencyEntries = Object.entries(entry.unresolvedDependencies ?? {}).slice(0, 4);
+  if ((requirement.facet === "value" || requirement.facet === "condition") && dependencyEntries.length > 0) {
+    const reason = dependencyEntries.map(([name, readBy]) => `${name} (${readBy}) could not be resolved`).join("; ");
     return undetermined(reason, true, servedWindows);
   }
   if ((requirement.facet === "value" || requirement.facet === "condition") && entry.constantsComplete === false) {

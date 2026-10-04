@@ -8,7 +8,7 @@
  * "". Any caller that treats that split length as "how many lines does this
  * file have" mints an off-by-one-too-large value. When that value becomes a
  * RANGE end (e.g. a task_pack handle minted as "1-51" for a 50-line file),
- * edit_file's own bounds check — which correctly counts LOGICAL lines via
+ * tl_edit_file's own bounds check — which correctly counts LOGICAL lines via
  * countLogicalLinesEntry() in tools/applyEditsMulti.ts (strip one trailing
  * newline, then split) — rejects that handle's own range as out of bounds:
  * "range 1-51 is out of bounds (file has 50 lines)". The mint and the check
@@ -64,7 +64,7 @@ export function countLines(content: string): number {
  * `three_way_consistent` in the utf16 3-way read-parity check
  * (run_release_rehearsal.mjs's utf16 scenario / utf16ReadParity.spec.ts): a
  * "whole file" served via a synthesized/explicit line range (task_pack
- * evidence, or a bare-file handle resolved through read_file's `handles[]`
+ * evidence, or a bare-file handle resolved through tl_read_file's `handles[]`
  * batch) came back one trailing newline short of the SAME file served via
  * `mode=full path=`/`handle=`. Only fires when the served range's last line
  * IS the file's actual last line — a genuine partial/mid-file range is

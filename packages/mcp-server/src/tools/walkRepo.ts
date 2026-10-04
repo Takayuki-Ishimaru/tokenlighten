@@ -98,7 +98,7 @@ const MAX_FILE_SIZE_BYTES = 1_000_000;
 const GENERIC_TEXT_PROBE_BYTES = 8 * 1024;
 
 /**
- * Discovery ceiling for plain text/identifier scan consumers (search_files
+ * Discovery ceiling for plain text/identifier scan consumers (tl_search_files
  * find/references) that pass `sizeCapBytes` explicitly. `walkCodeFiles` is
  * shared by every product surface — task-pack candidate enumeration, role
  * derivation, rename, tree, AND find/references — but only the last two do a
@@ -347,7 +347,7 @@ export interface WalkOmissions {
    * a caller that reaches `walkCodeFiles` directly (no prior boundary check
    * of its own) still gets an honest `omitted` disclosure instead of a
    * confidence-shaped 0-match indistinguishable from a real exhaustive scan.
-   * `search_files action=find` additionally hard-refuses this case before
+   * `tl_search_files action=find` additionally hard-refuses this case before
    * ever reaching this function (`findText.ts`'s `findScopeBoundaryRefusal`),
    * so this counter fires for find's escape only via defense-in-depth (e.g.
    * a future call site that bypasses that guard); it is the FIRST and ONLY
@@ -915,7 +915,7 @@ function walkCodeFilesCore(workspace: string, opts: WalkOptions): FoundFile[] {
 // ---------------------------------------------------------------------------
 // Perf (2026-09-27, large-workspace task_pack cost, item C) — per-REQUEST
 // walk memoization. Measured ~16 real walkCodeFilesCore calls for ONE
-// read_file task_pack on an 11.6k-file workspace (locateTaskContext.ts's own
+// tl_read_file task_pack on an 11.6k-file workspace (locateTaskContext.ts's own
 // per-call WalkCache already dedupes ITS OWN helpers, but findText.ts and
 // findReferences.ts each walk independently of it and of each other, and
 // several readCodeTaskPack.ts candidate-enumeration helpers do too), each
@@ -924,8 +924,8 @@ function walkCodeFilesCore(workspace: string, opts: WalkOptions): FoundFile[] {
 //
 // requestWalkScope holds one memo per REQUEST (never across requests — "no
 // cross-request walk cache in this round" per this wave's brief). It is
-// opened by server.ts around read_file/search_files dispatch ONLY, via
-// runWithWalkRequestScope — NEVER around edit_file: a write can change what
+// opened by server.ts around tl_read_file/tl_search_files dispatch ONLY, via
+// runWithWalkRequestScope — NEVER around tl_edit_file: a write can change what
 // the very next walk in the SAME request would see, so a write-spanning
 // cache would go stale within its own request. walkCodeFiles below checks
 // the scope transparently; with no scope open (every existing caller that
@@ -950,9 +950,9 @@ const requestWalkScope = new AsyncLocalStorage<Map<string, WalkRequestCacheEntry
 
 /**
  * Open a per-request walkCodeFiles memo for the duration of `fn`. Call this
- * around one read_file/search_files dispatch ONLY (see the doc comment
+ * around one tl_read_file/tl_search_files dispatch ONLY (see the doc comment
  * above) — never spanning more than one dispatch, and never around
- * edit_file.
+ * tl_edit_file.
  */
 export function runWithWalkRequestScope<T>(fn: () => T): T {
   return requestWalkScope.run(new Map(), fn);

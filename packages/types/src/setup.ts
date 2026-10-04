@@ -30,6 +30,42 @@ export interface CopilotInlineResultsReport {
   reason?: string;
 }
 
+// Copilot standard-setup evaluation (2026-10-02): which TokenLighten guide
+// GitHub Copilot reads in this workspace (@tokenlighten/agents-md's
+// copilotGuide.ts). `standalone` means Copilot does not attach AGENTS.md
+// (the workspace's `chat.useAgentsMdFile` is false — written by this run, by
+// an earlier one, or by the user) and `.github/copilot-instructions.md`
+// carries the compact, self-contained guide; `agents-md` means Copilot reads
+// AGENTS.md and the Copilot file is a pointer to it; `manual` means
+// `.vscode/settings.json` could not be safely read or edited (JSONC, a
+// symlink, ...) and `reason` says what to add by hand; `not-applicable`
+// means this run did not configure the vscode client.
+export type CopilotGuideStatus = "standalone" | "agents-md" | "manual" | "not-applicable";
+
+export interface CopilotGuideReport {
+  status: CopilotGuideStatus;
+  /** Absolute path to the workspace's `.vscode/settings.json`, when relevant. */
+  settingsFile?: string;
+  /** Attachment settings this run set to `false` (only ever `chat.useAgentsMdFile`). */
+  settingsWritten?: readonly string[];
+  /**
+   * Attachment settings this run removed: TokenLighten had set them, and they
+   * no longer apply (`chat.useAgentsMdFile`), or it no longer writes them (the
+   * legacy `chat.useClaudeMdFile` an earlier build wrote).
+   */
+  settingsRemoved?: readonly string[];
+  /**
+   * Absolute paths of the `.code-workspace` files (in the workspace root or its
+   * parent) that list this folder, set only when `status` is `standalone`.
+   * VS Code ignores the folder's `chat.useAgentsMdFile` while the folder is
+   * opened through such a file: the value has to be in the workspace file.
+   * Setup never edits those files.
+   */
+  workspaceFiles?: readonly string[];
+  /** Why the requested guide did not result, or what to do by hand for `manual`. */
+  reason?: string;
+}
+
 export interface TokenLightenWorkspaceSetupResult {
   schemaVersion: 1;
   workspaceRoot: string;
@@ -42,6 +78,8 @@ export interface TokenLightenWorkspaceSetupResult {
   /* DESIGN copilot-inline-results: absent only for a schema that predates
    * this field — a real setup run always populates it (see workspace.ts). */
   copilotInlineResults?: CopilotInlineResultsReport;
+  /** Copilot standard-setup evaluation (2026-10-02); absent only for a schema that predates it. */
+  copilotGuide?: CopilotGuideReport;
 }
 
 export interface TokenLightenWorkspaceSummary {

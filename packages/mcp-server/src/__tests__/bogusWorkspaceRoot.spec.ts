@@ -14,12 +14,12 @@
  * materialized the entire missing chain, including the workspace root
  * itself, wherever the process's own OS cwd happened to be at launch.
  *
- * A SEPARATE, narrower gap: `checkCwdWithCorrection` (the read_file/
- * search_files-only cwd auto-correction) treated ANY nonexistent DIRECT
+ * A SEPARATE, narrower gap: `checkCwdWithCorrection` (the tl_read_file/
+ * tl_search_files-only cwd auto-correction) treated ANY nonexistent DIRECT
  * CHILD of an already-accepted root as a "typo" and silently substituted the
  * whole root for it instead of refusing — confirmed live via
- * `read_file {cwd:"<pinned>/no-such-dir", query}` and
- * `read_file {cwd:"<pinned>/nope2", targets:[...]}`, both answering instead
+ * `tl_read_file {cwd:"<pinned>/no-such-dir", query}` and
+ * `tl_read_file {cwd:"<pinned>/nope2", targets:[...]}`, both answering instead
  * of refusing with `invalid-cwd`. The genuinely useful case this correction
  * exists for (a typo one segment below an otherwise real, SPECIFIC
  * directory) is unaffected and stays pinned by
@@ -137,7 +137,7 @@ describe("server startup refuses a nonexistent workspace root", () => {
     const srv = startDevServer(ws, "default", { toolSurface: "code" });
     servers.push(srv);
     await srv.initialize();
-    const result = await srv.callTool("read_file", { cwd: ws, targets: [{ path: "package.json" }] });
+    const result = await srv.callTool("tl_read_file", { cwd: ws, targets: [{ path: "package.json" }] });
     const rec = result.body as Record<string, unknown>;
     expect(rec["kind"]).not.toBe("refusal");
   }, 30000);
@@ -155,7 +155,7 @@ describe("a nonexistent per-call cwd override is corrected with disclosure (FIX 
   // bogus-root defect was never this correction: it was a state store
   // materializing a missing root (see the first describe above), so these
   // cases pin the disclosure AND that nothing is created on disk.
-  it("read_file with a query and a nonexistent child cwd answers against the pinned root, discloses cwd_corrected, and creates nothing", async () => {
+  it("tl_read_file with a query and a nonexistent child cwd answers against the pinned root, discloses cwd_corrected, and creates nothing", async () => {
     const ws = mkDir("query-correct");
     fs.mkdirSync(path.join(ws, "src"), { recursive: true });
     fs.writeFileSync(path.join(ws, "src", "a.ts"), "export const A = 1;\n");
@@ -166,7 +166,7 @@ describe("a nonexistent per-call cwd override is corrected with disclosure (FIX 
     servers.push(srv);
     await srv.initialize();
 
-    const { body } = await srv.callTool("read_file", { cwd: bogusCwd, query: "What does src/a.ts export?" });
+    const { body } = await srv.callTool("tl_read_file", { cwd: bogusCwd, query: "What does src/a.ts export?" });
     const rec = body as Record<string, unknown>;
     expect(rec["kind"]).not.toBe("refusal");
     const corrected = rec["cwd_corrected"] as { from: string; to: string } | undefined;
@@ -176,7 +176,7 @@ describe("a nonexistent per-call cwd override is corrected with disclosure (FIX 
     expect(fs.existsSync(bogusCwd)).toBe(false);
   }, 30000);
 
-  it("read_file with targets and a nonexistent child cwd is served from the corrected root with the same disclosure, creating nothing", async () => {
+  it("tl_read_file with targets and a nonexistent child cwd is served from the corrected root with the same disclosure, creating nothing", async () => {
     const ws = mkDir("targets-correct");
     fs.mkdirSync(path.join(ws, "src"), { recursive: true });
     fs.writeFileSync(path.join(ws, "src", "a.ts"), "export const A = 1;\n");
@@ -186,7 +186,7 @@ describe("a nonexistent per-call cwd override is corrected with disclosure (FIX 
     servers.push(srv);
     await srv.initialize();
 
-    const { body } = await srv.callTool("read_file", { cwd: bogusCwd, targets: [{ path: "src/a.ts" }] });
+    const { body } = await srv.callTool("tl_read_file", { cwd: bogusCwd, targets: [{ path: "src/a.ts" }] });
     const rec = body as Record<string, unknown>;
     expect(rec["kind"]).not.toBe("refusal");
     const corrected = rec["cwd_corrected"] as { from: string; to: string } | undefined;

@@ -33,7 +33,7 @@ afterEach(() => {
 });
 
 describe("MCP diagnostics ring file (last-call mirror)", () => {
-  it("appears under HOME/.tokenlighten/diag after a real read_file call, with kind/mode/ok and no query/path leakage", async () => {
+  it("appears under HOME/.tokenlighten/diag after a real tl_read_file call, with kind/mode/ok and no query/path leakage", async () => {
     const root = join(tmpdir(), `tokenlighten-mcp-diag-${randomUUID()}`);
     const logs = join(root, "logs");
     const home = join(root, "home");
@@ -48,7 +48,7 @@ describe("MCP diagnostics ring file (last-call mirror)", () => {
     vi.resetModules();
 
     const { callTool } = await import("../server.js");
-    const result = await callTool("read_file", {
+    const result = await callTool("tl_read_file", {
       mode: "task_pack",
       query: "does diagRingMarkerXYZ exist in this workspace",
       cwd: root,
@@ -79,7 +79,7 @@ describe("MCP diagnostics ring file (last-call mirror)", () => {
     expect(typeof ring.pid).toBe("number");
     expect(ring.calls.length).toBeGreaterThan(0);
     const last = ring.calls[ring.calls.length - 1]!;
-    expect(last.tool).toBe("read_file");
+    expect(last.tool).toBe("tl_read_file");
     expect(last.mode).toBe("task_pack");
     expect(last.ok).toBe(true);
     expect(typeof last.ms).toBe("number");
@@ -110,7 +110,7 @@ describe("MCP diagnostics ring file (last-call mirror)", () => {
     // A path that does not exist under the workspace is refused rather than
     // thrown — this is the JSON-envelope refusal path (kind:"refusal",
     // code:<short RefusalCode>), distinct from the thrown-exception path.
-    const result = await callTool("read_file", {
+    const result = await callTool("tl_read_file", {
       mode: "full",
       path: "does/not/exist.ts",
       cwd: root,
@@ -123,7 +123,7 @@ describe("MCP diagnostics ring file (last-call mirror)", () => {
       calls: Array<{ tool: string; kind?: string; ok: boolean; error_code?: string }>;
     };
     const last = ring.calls[ring.calls.length - 1]!;
-    expect(last.tool).toBe("read_file");
+    expect(last.tool).toBe("tl_read_file");
     expect(last.ok).toBe(false);
     expect(last.kind).toBe("refusal");
     expect(typeof last.error_code).toBe("string");

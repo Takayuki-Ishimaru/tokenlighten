@@ -13,7 +13,7 @@
  * is itself range-restricted, target line span) lies within it.
  *
  * These tests spawn a real `bin.ts <cwd> --allow-write` server and mint
- * handles through the ordinary public `read_file`/`edit_file` surface —
+ * handles through the ordinary public `tl_read_file`/`tl_edit_file` surface —
  * never anything internal-only — because that is exactly the gap INV-I-4
  * found: no PUBLIC path ever produced a handle the precondition would
  * accept.
@@ -36,14 +36,14 @@
  *
  * Two shapes below: a `kind:"repo"` handle is RESOLVABLE — path-less is its
  * genuine, documented meaning (whole workspace), reached through the same
- * public surface as every other case in this file (`read_file
+ * public surface as every other case in this file (`tl_read_file
  * {mode:"overview"}`, `readCodeOverview.ts:860`) — and still authorizes an
  * edit anywhere in the workspace after the fix. A `kind:"scope"` handle is
  * UNRESOLVABLE — the file's own header above already establishes that no
  * production surface ever mints one, so (uniquely in this file) that one case
  * mints it directly through the real, shared `handleTable` (`util/handles.ts`)
  * the production dispatcher itself uses, and calls the real
- * `enforcePreconditions` — the same function `edit_file` calls — rather than
+ * `enforcePreconditions` — the same function `tl_edit_file` calls — rather than
  * going through a spawned server, which has no way to produce this shape.
  */
 
@@ -178,7 +178,7 @@ describe("scopeHandlePrecondition — any handle kind, path containment", () => 
     await srv.initialize();
 
     const createRes = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/a.ts", create: true, content: 'export const A = "old";\n' },
     });
     const createData = parseToolResult(createRes);
@@ -187,7 +187,7 @@ describe("scopeHandlePrecondition — any handle kind, path containment", () => 
     expect(typeof scopeHandle).toBe("string");
 
     const editRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/a.ts",
         search: '"old"',
@@ -208,14 +208,14 @@ describe("scopeHandlePrecondition — any handle kind, path containment", () => 
     await srv.initialize();
 
     const createRes = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/a.ts", create: true, content: 'export const A = "old";\n' },
     });
     const scopeHandle = parseToolResult(createRes)["handle"] as string;
 
     writeFile(wsDir, "src/b.ts", 'export const B = "old";\n');
     const editRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/b.ts",
         search: '"old"',
@@ -238,7 +238,7 @@ describe("scopeHandlePrecondition — any handle kind, path containment", () => 
     await srv.initialize();
 
     const editRes = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/a.ts",
         search: '"old"',
@@ -273,7 +273,7 @@ describe("scopeHandlePrecondition — range containment on a range-restricted ha
     await srv.initialize();
 
     const sliceRes = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/greeting.ts", symbol: "greetUser" },
     });
     const sliceData = parseToolResult(sliceRes);
@@ -283,7 +283,7 @@ describe("scopeHandlePrecondition — range containment on a range-restricted ha
 
     // Inside the greetUser range: succeeds.
     const insideRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/greeting.ts",
         search: '"Hello, " + name',
@@ -299,7 +299,7 @@ describe("scopeHandlePrecondition — range containment on a range-restricted ha
     // Outside the greetUser range (inside farewellUser): refuses, disk
     // unchanged for that text.
     const outsideRes = await srv.rpc(4, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/greeting.ts",
         search: '"Goodbye, " + name',
@@ -327,14 +327,14 @@ describe("scopeHandlePrecondition — round-18A finding 5: a path-less handle is
     // `mode:"overview"` (`readCodeOverview.ts:860`) is the only PUBLIC surface
     // that mints a `kind:"repo"` handle with no `path` at all — a whole-
     // workspace scope by its own documented design, not a data anomaly.
-    const overviewRes = await srv.rpc(2, "tools/call", { name: "read_file", arguments: { mode: "overview" } });
+    const overviewRes = await srv.rpc(2, "tools/call", { name: "tl_read_file", arguments: { mode: "overview" } });
     const overviewData = parseToolResult(overviewRes);
     expect(overviewData["kind"]).toBe("read.map");
     const scopeHandle = (overviewData["outline"] as { repo?: { handle?: string } } | undefined)?.repo?.handle;
     expect(typeof scopeHandle, "precondition: the overview must mint a path-less repo handle").toBe("string");
 
     const editRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/a.ts", search: '"old"', replace: '"new"', precondition: "scope-handle", scopeHandle },
     });
     const editData = parseToolResult(editRes);
@@ -350,7 +350,7 @@ describe("scopeHandlePrecondition — round-18A finding 5: a path-less handle is
     // INV-I-4's exhaustive grep) — so unlike every other case in this file,
     // this one mints the handle directly through the real, shared
     // `handleTable` the production dispatcher itself uses, and calls the
-    // real `enforcePreconditions` (the same function `edit_file` calls)
+    // real `enforcePreconditions` (the same function `tl_edit_file` calls)
     // rather than going through a spawned server.
     const workspace = fs.realpathSync(fs.mkdtempSync(path.join(HOME, ".tl-scopehandle-unresolvable-")));
     tmpDirs.push(workspace);

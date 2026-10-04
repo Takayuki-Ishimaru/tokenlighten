@@ -5,7 +5,7 @@
 // "full" (the default) advertises every capability this server has ever
 // advertised, unchanged. "code" advertises code/plain-text/config read/edit/
 // search only: every Office/archive-member/credential-ref input (the whole
-// `edit_file.artifact`/`credentials` blocks, `select`'s artifact-addressing
+// `tl_edit_file.artifact`/`credentials` blocks, `select`'s artifact-addressing
 // keys, `budget.rows`/`cells`, `scope.archive`/`credentialRef`,
 // `targets[].archive`/`credentialRef`) is removed from the advertised schema
 // AND from the validator that accepts inbound calls — a code-surface caller

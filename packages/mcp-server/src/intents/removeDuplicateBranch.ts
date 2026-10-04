@@ -15,6 +15,7 @@ import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import { safeResolveForWrite, resolveReal, isWithin, statReadTargetSync } from "../util/safePath.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 export type RemoveDuplicateBranchResult =
@@ -153,7 +154,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -187,7 +188,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: scopeStart !== undefined ? "intent-no-duplicate-in-scope" : "intent-unsupported",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -197,7 +198,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: scopeStart !== undefined ? "intent-no-duplicate-in-scope" : "intent-unsupported",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -223,7 +224,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: scopeStart !== undefined ? "intent-no-duplicate-in-scope" : "intent-unsupported",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -231,7 +232,7 @@ export async function applyRemoveDuplicateBranch(
     return {
       ok: false,
       reason: "intent-ambiguous",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -257,6 +258,11 @@ export async function applyRemoveDuplicateBranch(
 
   const removedLines = lines.slice(curr.headerLine, curr.endLine + 1);
   const removedText = removedLines.join("\n");
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the new
+  // text is built and every guard above has passed; the write below is the
+  // first byte this intent puts on the disk.
+  throwIfRequestCancelled();
 
   // Mode preservation: see writeExistingFileAtomic's doc comment
   // (2026-08-07 chmod-reset incident).

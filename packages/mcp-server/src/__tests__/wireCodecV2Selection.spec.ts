@@ -336,7 +336,7 @@ describe("applyResponseCodec -- v2 integration", () => {
     const payload = rowsPayload(12);
     const jsonText = JSON.stringify(payload);
     const jsonBytes = Buffer.byteLength(jsonText, "utf8");
-    const context: ProtocolCallContext = { tool: "search_files", workspace: WS_ROOT, clientId: "tl-reference-client" };
+    const context: ProtocolCallContext = { tool: "tl_search_files", workspace: WS_ROOT, clientId: "tl-reference-client" };
 
     const result = applyResponseCodec(jsonText, payload, "search.matches", context, 999999);
 
@@ -349,7 +349,7 @@ describe("applyResponseCodec -- v2 integration", () => {
     process.env["TL_WIRE_BREAKEVEN"] = "1";
     const payload = rowsPayload(12);
     const jsonText = JSON.stringify(payload);
-    const context: ProtocolCallContext = { tool: "search_files", workspace: WS_ROOT };
+    const context: ProtocolCallContext = { tool: "tl_search_files", workspace: WS_ROOT };
     const result = applyResponseCodec(jsonText, payload, "search.matches", context, 999999);
     expect(result).toBe(jsonText);
   });
@@ -366,11 +366,11 @@ describe("applyResponseCodec -- v2 integration", () => {
     const payload: CodecPayload = { v: 1, kind: "read.text", text: longBody, path: "some/file.ts" };
     const jsonText = JSON.stringify(payload);
 
-    const unknownContext: ProtocolCallContext = { tool: "read_file", workspace: WS_ROOT }; // no clientId
+    const unknownContext: ProtocolCallContext = { tool: "tl_read_file", workspace: WS_ROOT }; // no clientId
     const unknownResult = applyResponseCodec(jsonText, payload, "read.text", unknownContext, 999999);
     expect(unknownResult).toBe(jsonText); // stays fully json -- E-3's conservative default for an unresolved client
 
-    const knownContext: ProtocolCallContext = { tool: "read_file", workspace: WS_ROOT, clientId: "tl-reference-client" };
+    const knownContext: ProtocolCallContext = { tool: "tl_read_file", workspace: WS_ROOT, clientId: "tl-reference-client" };
     const knownResult = applyResponseCodec(jsonText, payload, "read.text", knownContext, 999999, { now: FRESH_NOW });
     expect(knownResult).not.toBe(jsonText);
     expect(tlRaw1Codec.decode(knownResult)).toEqual(payload); // still round-trip-correct
@@ -381,7 +381,7 @@ describe("applyResponseCodec -- v2 integration", () => {
     process.env["TL_WIRE_BREAKEVEN"] = "1";
     const payload = rowsPayload(12);
     const jsonText = JSON.stringify(payload);
-    const context: ProtocolCallContext = { tool: "search_files", workspace: WS_ROOT };
+    const context: ProtocolCallContext = { tool: "tl_search_files", workspace: WS_ROOT };
     const alwaysTiedCounter: TokenCounter = { id: "always-tied", count: () => 1_000_000 };
 
     const result = applyResponseCodec(jsonText, payload, "search.matches", context, 999999, {
@@ -396,7 +396,7 @@ describe("applyResponseCodec -- v2 integration", () => {
     process.env["TL_WIRE_BREAKEVEN"] = "1";
     const payload = rowsPayload(12);
     const jsonText = JSON.stringify(payload);
-    const context: ProtocolCallContext = { tool: "search_files", workspace: WS_ROOT };
+    const context: ProtocolCallContext = { tool: "tl_search_files", workspace: WS_ROOT };
 
     applyResponseCodec(jsonText, payload, "search.matches", context, 999999);
 
@@ -425,7 +425,7 @@ describe("applyResponseCodec -- v2 integration", () => {
     process.env["TL_WIRE_SHADOW"] = "1";
     const payload = rowsPayload(12);
     const jsonText = JSON.stringify(payload);
-    const context: ProtocolCallContext = { tool: "search_files", workspace: WS_ROOT };
+    const context: ProtocolCallContext = { tool: "tl_search_files", workspace: WS_ROOT };
 
     applyResponseCodec(jsonText, payload, "search.matches", context, 999999);
 
@@ -444,7 +444,7 @@ describe("applyResponseCodec -- v2 integration", () => {
   it("no wire_codec_v2_cell record at all when v2 never runs (flags off)", () => {
     const payload = rowsPayload(12);
     const jsonText = JSON.stringify(payload);
-    const context: ProtocolCallContext = { tool: "search_files", workspace: WS_ROOT };
+    const context: ProtocolCallContext = { tool: "tl_search_files", workspace: WS_ROOT };
     applyResponseCodec(jsonText, payload, "search.matches", context, 999999);
     expect(fs.existsSync(getTracePath(WS_ROOT))).toBe(false);
   });

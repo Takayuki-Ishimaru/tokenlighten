@@ -77,7 +77,7 @@ function newTreeDirNode(relPath: string): TreeDirNode {
  * itself — silently resolved to a path that does not exist
  * (`<workspace>/<workspace-without-its-leading-slash>`) and was refused
  * `not-found`, for a directory the very same session could freely
- * `find`/`references` a moment earlier (measured: `search_files
+ * `find`/`references` a moment earlier (measured: `tl_search_files
  * {action:"tree", path:"<ws>"}` on the workspace's own absolute path).
  *
  * An absolute `subPath` that resolves OUTSIDE `workspace` entirely yields a
@@ -225,7 +225,7 @@ export interface CompactTree {
    * toolOk by the caller), not a transport error.
    */
   ok?: false;
-  /** "not-found": nothing at subPath. "not-a-directory": subPath exists but is a file — read_file is the right tool for it, not tree. */
+  /** "not-found": nothing at subPath. "not-a-directory": subPath exists but is a file — tl_read_file is the right tool for it, not tree. */
   reason?: "not-found" | "not-a-directory";
   /**
    * Present alongside ok:false/reason:"not-found" or "not-a-directory": the
@@ -234,7 +234,7 @@ export interface CompactTree {
    * name is recoverable in one more call instead of a blind retry.
    */
   did_you_mean?: { path: string; children: string[] };
-  /** Present only alongside reason:"not-a-directory": the read_file call that actually serves subPath. */
+  /** Present only alongside reason:"not-a-directory": the tl_read_file call that actually serves subPath. */
   next?: ToolCall;
   /**
    * Present only when the requested path exists and IS a directory but is
@@ -508,7 +508,7 @@ export function buildCompactTree(
     }
     // 2026-08-01: subPath exists but isn't a directory (a real file, most
     // often) — distinct from not-found so the caller isn't told to guess a
-    // different name when the fix is simply the right tool (read_file).
+    // different name when the fix is simply the right tool (tl_read_file).
     if (!stat.isDirectory()) {
       return {
         root: normalizedSub,
@@ -518,7 +518,7 @@ export function buildCompactTree(
         ok: false,
         reason: "not-a-directory",
         did_you_mean: buildDidYouMean(workspace, requestedAbs),
-        next: { tool: "read_file", arguments: { targets: [{ path: normalizedSub }], content: "auto" } },
+        next: { tool: "tl_read_file", arguments: { targets: [{ path: normalizedSub }], content: "auto" } },
       };
     }
   }
@@ -570,7 +570,7 @@ export function buildCompactTree(
   // item 4.
   if (tree === "") {
     const note = directoryHasAnyEntry(containedAbs)
-      ? "empty after walk filters (.tokenlightenignore, built-in defaults, or unsupported file types); read_file({path}) on a known path still works"
+      ? "empty after walk filters (.tokenlightenignore, built-in defaults, or unsupported file types); tl_read_file({path}) on a known path still works"
       : "empty directory";
     return { root: normalizedSub || ".", depth: effectiveDepth, tree, truncated, note, scope_report };
   }

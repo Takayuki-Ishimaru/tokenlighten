@@ -162,13 +162,13 @@ describe("FIX-FC2 residual 1: VS Code config never claims prior for bytes this t
     const ws = makeWorkspace("r1-vscode");
     const server = await spawnedServer(ws, "vscode");
 
-    const hop0 = await server.callTool("read_file", { query: QUERY, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    const hop0 = await server.callTool("tl_read_file", { query: QUERY, cwd: ws, task: { epoch: "new", profile: "answer" } });
     const qref = hop0.body?.qref;
     expect(typeof qref, `hop0 carried no qref: ${JSON.stringify(hop0.body)}`).toBe("string");
 
     const hops: Record<string, unknown>[] = [hop0.body];
     for (let i = 0; i < 6; i++) {
-      const hop = await server.callTool("read_file", { qref, cwd: ws });
+      const hop = await server.callTool("tl_read_file", { qref, cwd: ws });
       hops.push(hop.body);
     }
 
@@ -195,13 +195,13 @@ describe("recall control: default config stays honest (FIX-FC's own fix, unaffec
     const ws = makeWorkspace("r1-default");
     const server = await spawnedServer(ws, "default");
 
-    const hop0 = await server.callTool("read_file", { query: QUERY, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    const hop0 = await server.callTool("tl_read_file", { query: QUERY, cwd: ws, task: { epoch: "new", profile: "answer" } });
     const qref = hop0.body?.qref;
     expect(typeof qref, `hop0 carried no qref: ${JSON.stringify(hop0.body)}`).toBe("string");
 
     const hops: Record<string, unknown>[] = [hop0.body];
     for (let i = 0; i < 4; i++) {
-      const hop = await server.callTool("read_file", { qref, cwd: ws });
+      const hop = await server.callTool("tl_read_file", { qref, cwd: ws });
       hops.push(hop.body);
     }
 
@@ -222,7 +222,7 @@ describe("FIX-FC2 residual 2 (investigated): VS Code replay settles to a stable 
     const ws = makeWorkspace("r2-vscode-answer");
     const server = await spawnedServer(ws, "vscode");
 
-    const hop0 = await server.callTool("read_file", { query: QUERY, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    const hop0 = await server.callTool("tl_read_file", { query: QUERY, cwd: ws, task: { epoch: "new", profile: "answer" } });
     const qref = hop0.body?.qref;
     expect(typeof qref, `hop0 carried no qref: ${JSON.stringify(hop0.body)}`).toBe("string");
     expect(hop0.body?.decision?.kind).toBe("act.answer");
@@ -230,7 +230,7 @@ describe("FIX-FC2 residual 2 (investigated): VS Code replay settles to a stable 
     const kinds: unknown[] = [hop0.body?.decision?.kind];
     const certIds: unknown[] = [hop0.body?.decision?.certificate?.id];
     for (let i = 0; i < 8; i++) {
-      const hop = await server.callTool("read_file", { qref, cwd: ws });
+      const hop = await server.callTool("tl_read_file", { qref, cwd: ws });
       kinds.push(hop.body?.decision?.kind);
       certIds.push(hop.body?.decision?.certificate?.id);
     }
@@ -256,13 +256,13 @@ describe("FIX-FC2 residual 2 (investigated): VS Code replay settles to a stable 
     const ws = makeWorkspace("r2-vscode-noprofile");
     const server = await spawnedServer(ws, "vscode", ["--allow-write"]);
 
-    const hop0 = await server.callTool("read_file", { query: QUERY, cwd: ws, task: { epoch: "new" } });
+    const hop0 = await server.callTool("tl_read_file", { query: QUERY, cwd: ws, task: { epoch: "new" } });
     const qref = hop0.body?.qref;
     expect(typeof qref, `hop0 carried no qref: ${JSON.stringify(hop0.body)}`).toBe("string");
 
     const kinds: unknown[] = [hop0.body?.decision?.kind];
     for (let i = 0; i < 6; i++) {
-      const hop = await server.callTool("read_file", { qref, cwd: ws });
+      const hop = await server.callTool("tl_read_file", { qref, cwd: ws });
       kinds.push(hop.body?.decision?.kind);
     }
     // The first hop may be `discover` (turn-economy still routes through a

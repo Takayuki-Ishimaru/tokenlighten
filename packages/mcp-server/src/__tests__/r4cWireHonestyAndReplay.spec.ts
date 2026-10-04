@@ -119,7 +119,7 @@ describe("P1-6: a {qref} re-pack after a certified act.answer restates it, never
     const chain = await followNextToEnd(
       server,
       {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           query: "How does OrderFlow handle payment and shipping, step by step?",
           cwd: ws,
@@ -157,7 +157,7 @@ describe("P1-6: a {qref} re-pack after a certified act.answer restates it, never
     const chain = await followNextToEnd(
       server,
       {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           query: "How does OrderFlow handle payment and shipping, step by step?",
           cwd: ws,
@@ -194,7 +194,7 @@ describe("P1-6: a {qref} re-pack after a certified act.answer restates it, never
     const chain = await followNextToEnd(
       server,
       {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           query: "Where is größe used and what does it return?",
           cwd: ws,
@@ -249,7 +249,7 @@ describe("P2-11: a bare-handle read.batch entry under content:\"full\" is verbat
     writeBigWidget(ws);
     const server = await spawnedServer(ws);
 
-    const symRes = await server.callTool("read_file", { targets: [{ path: "src/widget.ts", symbol: "paint" }], cwd: ws });
+    const symRes = await server.callTool("tl_read_file", { targets: [{ path: "src/widget.ts", symbol: "paint" }], cwd: ws });
     const evidence = symRes.body?.evidence?.[0];
     const symHandle = evidence?.handle;
     const symRange = evidence?.range;
@@ -258,11 +258,11 @@ describe("P2-11: a bare-handle read.batch entry under content:\"full\" is verbat
 
     // A second handle so the batch has 2 targets (>1 triggers the A7
     // handles=[] loop rather than the single-target mode=symbol door).
-    const resizeRes = await server.callTool("read_file", { targets: [{ path: "src/widget.ts", symbol: "resize" }], cwd: ws });
+    const resizeRes = await server.callTool("tl_read_file", { targets: [{ path: "src/widget.ts", symbol: "resize" }], cwd: ws });
     const resizeHandle = resizeRes.body?.evidence?.[0]?.handle;
     expect(typeof resizeHandle, `no resize handle minted: ${JSON.stringify(resizeRes.body)}`).toBe("string");
 
-    const batch = await server.callTool("read_file", {
+    const batch = await server.callTool("tl_read_file", {
       targets: [{ handle: symHandle }, { handle: resizeHandle }],
       content: "full",
       cwd: ws,
@@ -287,7 +287,7 @@ describe("P2-11: a bare-handle read.batch entry under content:\"full\" is verbat
     writeBigWidget(ws);
     const server = await spawnedServer(ws);
 
-    const resizeRes = await server.callTool("read_file", { targets: [{ path: "src/widget.ts", symbol: "resize" }], cwd: ws });
+    const resizeRes = await server.callTool("tl_read_file", { targets: [{ path: "src/widget.ts", symbol: "resize" }], cwd: ws });
     const resizeHandle = resizeRes.body?.evidence?.[0]?.handle;
     const resizeRange = resizeRes.body?.evidence?.[0]?.range;
     expect(typeof resizeHandle).toBe("string");
@@ -296,7 +296,7 @@ describe("P2-11: a bare-handle read.batch entry under content:\"full\" is verbat
     // S6 branch); target 1 is a bare {handle} with no override of its own —
     // the same implicit-stored-symbol-fallback shape as the A7 case above,
     // now inside resolvePathsBatchEntry's own hEntryForOverride path.
-    const mixed = await server.callTool("read_file", {
+    const mixed = await server.callTool("tl_read_file", {
       targets: [{ path: "src/widget.ts", symbol: "paint" }, { handle: resizeHandle }],
       content: "full",
       cwd: ws,
@@ -321,13 +321,13 @@ describe("P2-11: a bare-handle read.batch entry under content:\"full\" is verbat
     writeBigWidget(ws);
     const server = await spawnedServer(ws);
 
-    const resizeRes = await server.callTool("read_file", { targets: [{ path: "src/widget.ts", symbol: "resize" }], cwd: ws });
+    const resizeRes = await server.callTool("tl_read_file", { targets: [{ path: "src/widget.ts", symbol: "resize" }], cwd: ws });
     const resizeHandle = resizeRes.body?.evidence?.[0]?.handle;
 
     // Two explicit-symbol targets in one batch -- both should get the
     // assembled view, since both symbols are DELIBERATELY named on this call
     // (not a passive fallback to a handle's own stored tag).
-    const batch = await server.callTool("read_file", {
+    const batch = await server.callTool("tl_read_file", {
       targets: [{ path: "src/widget.ts", symbol: "paint" }, { handle: resizeHandle, symbol: "resize" }],
       content: "full",
       cwd: ws,
@@ -367,10 +367,10 @@ describe("P2-15: a code-unchanged receipt never claims a request whose last requ
     writeFile(ws, "src/config.ts", CONFIG_TS);
     const server = await spawnedServer(ws);
 
-    const first = await server.callTool("read_file", { targets: [{ path: "src/config.ts", range: "1-5" }], content: "full", cwd: ws });
+    const first = await server.callTool("tl_read_file", { targets: [{ path: "src/config.ts", range: "1-5" }], content: "full", cwd: ws });
     expect(first.body?.evidence?.[0]?.body ?? first.body?.content, `first call served no body: ${JSON.stringify(first.body)}`).toBeTruthy();
 
-    const second = await server.callTool("read_file", { targets: [{ path: "src/config.ts", range: "3-6" }], content: "full", cwd: ws });
+    const second = await server.callTool("tl_read_file", { targets: [{ path: "src/config.ts", range: "3-6" }], content: "full", cwd: ws });
     const body = second.body;
 
     if (body?.kind === "read.receipt" || body?.receipt !== undefined) {
@@ -400,13 +400,13 @@ describe("P2-15: a code-unchanged receipt never claims a request whose last requ
     writeFile(ws, "src/config.ts", CONFIG_TS);
     const server = await spawnedServer(ws);
 
-    const first = await server.callTool("read_file", { targets: [{ path: "src/config.ts", range: "1-5" }], content: "full", cwd: ws });
+    const first = await server.callTool("tl_read_file", { targets: [{ path: "src/config.ts", range: "1-5" }], content: "full", cwd: ws });
     expect(first.body?.evidence?.[0]?.body, `first call served no body: ${JSON.stringify(first.body)}`).toBeTruthy();
 
     // The IDENTICAL window again -- this must still be eligible for a
     // code-unchanged receipt (the fix must not have made the whole mechanism
     // over-conservative; only the blank-tail miscount was the bug).
-    const second = await server.callTool("read_file", { targets: [{ path: "src/config.ts", range: "1-5" }], content: "full", cwd: ws });
+    const second = await server.callTool("tl_read_file", { targets: [{ path: "src/config.ts", range: "1-5" }], content: "full", cwd: ws });
     const body = second.body;
     const isReceipt = body?.kind === "read.receipt" || body?.receipt !== undefined || body?.code_unchanged === true;
     expect(isReceipt, `exact re-request of an already-served window did not get a code-unchanged receipt: ${JSON.stringify(body)}`).toBe(true);

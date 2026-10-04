@@ -4,7 +4,7 @@
 // real (a literal, non-regex, >=1-file hit on the exact query token).
 //
 // Evidence (2026-08-04 signal5-1 run): across one session, solvers issued
-// search_files action=find 27 times against only 3 action=symbols and 2
+// tl_search_files action=find 27 times against only 3 action=symbols and 2
 // action=references calls — definitions and call sites were repeatedly
 // re-discovered by re-running find (or escaping to native grep) instead of
 // the ONE action=symbols / action=references call that already resolves
@@ -63,16 +63,16 @@ import { isIdentifierToken } from "./memberSweep.js";
 import { findResponseCapBytes, findInventoryCapBytes } from "./findText.js";
 import type { FindResponse } from "./findText.js";
 
-/** One ready-to-run search_files call: pass `.arguments` to the tool named `.tool` verbatim (cwd/lane etc. deferred to caller context, same convention as findReferences.ts's own continuationNextCall). */
+/** One ready-to-run tl_search_files call: pass `.arguments` to the tool named `.tool` verbatim (cwd/lane etc. deferred to caller context, same convention as findReferences.ts's own continuationNextCall). */
 export interface RelatedLookupCall {
-  tool: "search_files";
+  tool: "tl_search_files";
   arguments: { action: "symbols" | "references"; query: string };
 }
 
 /**
  * Companion lookups for the identifier `related_lookups` was attached to:
- * its own definition (search_files action=symbols) and its call sites
- * (search_files action=references) — both entries share the SAME query the
+ * its own definition (tl_search_files action=symbols) and its call sites
+ * (tl_search_files action=references) — both entries share the SAME query the
  * find call just confirmed a real hit for.
  */
 export interface RelatedLookups {
@@ -84,8 +84,8 @@ export interface RelatedLookups {
 
 function buildRelatedLookups(query: string): RelatedLookups {
   return {
-    definition: { tool: "search_files", arguments: { action: "symbols", query } },
-    callers: { tool: "search_files", arguments: { action: "references", query } },
+    definition: { tool: "tl_search_files", arguments: { action: "symbols", query } },
+    callers: { tool: "tl_search_files", arguments: { action: "references", query } },
   };
 }
 

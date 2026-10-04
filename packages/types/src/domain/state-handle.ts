@@ -59,7 +59,7 @@ export type StateHandlePurpose =
   | "context"
   | "continuation"
   /**
-   * DESIGN-v0.15 §5.1/§5.2 (R2): ONE `read_file` fetch request's remainder.
+   * DESIGN-v0.15 §5.1/§5.2 (R2): ONE `tl_read_file` fetch request's remainder.
    *
    * A FOURTH purpose rather than a reuse of `continuation`: §5.2 is explicit
    * that the new cursor must not borrow the existing reference-continuation
@@ -71,7 +71,7 @@ export type StateHandlePurpose =
    * instead of being reinterpreted as a new payload (§9's rollback rule).
    */
   | "read-request"
-  /** The same, for `search_files` match paging (R3, Wave 2). */
+  /** The same, for `tl_search_files` match paging (R3, Wave 2). */
   | "search-request";
 
 /**

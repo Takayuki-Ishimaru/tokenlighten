@@ -221,7 +221,7 @@ describe("B-2/B-F1 structured replay compatibility and downgrade safety", () => 
     const legacyKey = `op:${opId}`;
     const v2Key = `${__testOnlyOperationV2KeyPrefix}${opId}`;
 
-    const first = await srv.call("edit_file", {
+    const first = await srv.call("tl_edit_file", {
       path: "src/counter.ts",
       search: "COUNT = 1",
       replace: "COUNT = 2",
@@ -261,7 +261,7 @@ describe("B-2/B-F1 structured replay compatibility and downgrade safety", () => 
 
     // The current (fixed) server still replays correctly on its own re-read,
     // via the v2 sibling key (existing B-2 behavior, preserved by the fix).
-    const second = await srv.call("edit_file", {
+    const second = await srv.call("tl_edit_file", {
       path: "src/counter.ts",
       search: "COUNT = 1",
       replace: "COUNT = 2",

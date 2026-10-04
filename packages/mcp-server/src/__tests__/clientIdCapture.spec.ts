@@ -9,12 +9,12 @@
 // Why resolveClientProfile is spied rather than observed via the
 // wire_codec_v2_cell trace event or a byte-differential codec win: at the
 // time this spec was written, that trace only fired when `context.workspace`
-// was set (only `edit_file`'s finishEdit() populated it, and `edit.applied`
+// was set (only `tl_edit_file`'s finishEdit() populated it, and `edit.applied`
 // is itself HARD_JSON_FIXED — protocol/codec/policy.ts — so it was moot
-// either way), and a real read_file `read.text` response wraps its body
+// either way), and a real tl_read_file `read.text` response wraps its body
 // inside `evidence[].body`, which tl-raw-1's bodyFieldOf() never selected.
 // D1 (F-C2, 2026-08-21) fixed BOTH: server.ts now threads a dedicated
-// codecTraceWorkspace note for read_file/search_files (envelope.ts's
+// codecTraceWorkspace note for tl_read_file/tl_search_files (envelope.ts's
 // noteCodecTraceWorkspace — deliberately NOT `context.workspace`, which
 // other wire-affecting projectors also read), and tlRaw1.ts's
 // locateDominantBody() now also considers evidence[i].body — see
@@ -139,7 +139,7 @@ describe("F-A7: captured clientId reaches resolveClientProfile via a real callTo
 
     const ws = mkWorkspace();
     fs.writeFileSync(path.join(ws, "sample.ts"), "export const alpha = 1;\n", "utf8");
-    await fresh.callTool("read_file", { path: "sample.ts", cwd: ws });
+    await fresh.callTool("tl_read_file", { path: "sample.ts", cwd: ws });
 
     expect(seen.length).toBeGreaterThan(0);
     expect(seen).toContain("tl-reference-client");
@@ -184,7 +184,7 @@ describe("F-A7: captured clientId reaches resolveClientProfile via a real callTo
 
     const ws = mkWorkspace();
     fs.writeFileSync(path.join(ws, "sample.ts"), "export const alpha = 1;\n", "utf8");
-    await fresh.callTool("read_file", { path: "sample.ts", cwd: ws });
+    await fresh.callTool("tl_read_file", { path: "sample.ts", cwd: ws });
 
     expect(seen).toContain("tl-reference-client");
     expect(seen).not.toContain("some-unregistered-client");
@@ -209,7 +209,7 @@ describe("F-A7: captured clientId reaches resolveClientProfile via a real callTo
     const fresh = await import("../server.js");
     const ws = mkWorkspace();
     fs.writeFileSync(path.join(ws, "sample.ts"), "export const alpha = 1;\n", "utf8");
-    await fresh.callTool("read_file", { path: "sample.ts", cwd: ws });
+    await fresh.callTool("tl_read_file", { path: "sample.ts", cwd: ws });
 
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((id) => id === undefined)).toBe(true);

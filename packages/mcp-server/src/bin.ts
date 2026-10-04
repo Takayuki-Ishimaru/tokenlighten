@@ -3,10 +3,10 @@
 // Invokes run() which starts the MCP stdio server.
 //
 // Flags:
-//   --allow-write   Enable edit_file's write capability (including structured
-//                   artifact rewrites). edit_file is one of the exactly 3
-//                   advertised tools (read_file, edit_file, search_files) —
-//                   see server.ts. Default: edit_file is registered
+//   --allow-write   Enable tl_edit_file's write capability (including structured
+//                   artifact rewrites). tl_edit_file is one of the exactly 3
+//                   advertised tools (tl_read_file, tl_edit_file, tl_search_files) —
+//                   see server.ts. Default: tl_edit_file is registered
 //                   (advertised) but write calls return error
 //                   'write-not-enabled' with a restart hint.
 //   --allowed-parent <path>
@@ -21,7 +21,7 @@
 //   --print-schema-stamp
 //                   Print the 16-lowercase-hex deterministic content stamp of
 //                   this build's advertised tools/list surface (util/
-//                   schemaStamp.ts computeSchemaStamp(advertisedTools())) to
+//                   schemaStamp.ts computeSchemaStamp(stampedToolSurfaces())) to
 //                   stdout, then exit 0. Does not start the MCP server. Used
 //                   by packages/vscode-extension's build (bundled-server
 //                   provenance for the generated schema stamp) and by
@@ -34,7 +34,7 @@ import * as path from "node:path";
 
 import { computedConfigSha256 } from "./util/trace.js";
 import { computeSchemaStamp } from "./util/schemaStamp.js";
-import { advertisedTools, run } from "./server.js";
+import { run, stampedToolSurfaces } from "./server.js";
 
 /** Exported for unit testing without spawning the CLI or the MCP server. */
 export function printConfigDigestRequested(argv: readonly string[]): boolean {
@@ -60,7 +60,7 @@ if (IS_MAIN) {
     process.stdout.write(`${computedConfigSha256()}\n`);
     process.exit(0);
   } else if (printSchemaStampRequested(process.argv.slice(2))) {
-    process.stdout.write(`${computeSchemaStamp(advertisedTools())}\n`);
+    process.stdout.write(`${computeSchemaStamp(stampedToolSurfaces())}\n`);
     process.exit(0);
   } else {
     run().catch((err: unknown) => {

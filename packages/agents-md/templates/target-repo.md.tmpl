@@ -19,10 +19,10 @@ Root designs/plan rule; regenerate AI rules from templates.
 docs, config, logs;Office/archives/code.
 
 - Aliases: TL_LEGACY_INPUT=accept; TL_LEGACY_INPUT=refuse rejects; never emit.
-- Unknown: `read_file {query:<complete verbatim request>,task:{epoch:"new"}}`; never truncate; `task.profile` only when user-declared, otherwise omit. Known: `read_file {targets:[{path:<p>}]}` (+`symbol`/`content:"outline"`/batch several).
+- Unknown: `tl_read_file {query:<complete verbatim request>,task:{epoch:"new"}}`; never truncate; `task.profile` only if user-declared, else omit. Known: `tl_read_file {targets:[{path:<p>}]}` (+`symbol`/`content:"outline"`/batch several).
 - `decision.kind`: `act.answer`/`act.edit`=>`prepared`, act via `evidence_model`; `discover`=>run its `next`; `await_input`=>run carried `next`, else safe `candidate`, else ask. `read.receipt`(`pack-unchanged`) revalidates. Open=>`gaps` (semantic, no call closes it).
-- Search: `search_files {action:"find",queries:["<token>"]}`.
-- Archives: `read_file {targets:[{archive:{path,member}}]}`; members immutable, non-ZIP read-only.
+- Search: `tl_search_files {action:"find",queries:["<token>"]}`.
+- Archives: `tl_read_file {targets:[{archive:{path,member}}]}`; members immutable, non-ZIP read-only.
 - Edit: `edits:[{handle:<id>,allowPathFallback:false}]`; batch `edits[]`; tests ≤3 candidates; create `edits:[{create:true,content:...}]`; repeat `target:"all"`.
 
 ## Validation receipts
@@ -30,7 +30,7 @@ docs, config, logs;Office/archives/code.
 - Credentials: opaque refs only, never passwords — `scope.credentialRef`/`targets[].credentialRef` for read/search, `credentials:{in,out}` for edit; refs resolve from server `TOKENLIGHTEN_PASSWORD_<REF>`.
 - `challenge` re-authorizes a certified decision, authored from its schema; no replay; `answer_resolution` beats decoys.
 - Artifact paths need matching `artifact_sections`; create only `create_target.path`.
-- With `--allow-write`, edit outer ZIP only via `edit_file artifact={kind:"zip",members:[...]}`; tar/tar.gz/7z/rar remain read-only.
+- With `--allow-write`, edit outer ZIP only via `tl_edit_file artifact={kind:"zip",members:[...]}`; tar/tar.gz/7z/rar stay read-only.
 - Edits validate identity, match/range/overlap, syntax, and scope. `edit.applied` needs no confirmation read; `edit.rolled_back` means no write; inspect `edit.state_unknown` before retry.
 - Re-slice handles, never paths. Candidate packs: no broad/full reads; use served bodies or one `next`. `downgraded_from` was served.
 - Use `closure` only if an edit opened checks; otherwise diff/tests.

@@ -27,13 +27,13 @@ import {
 // ---------------------------------------------------------------------------
 // D8: `ExtractOfficeTextInput` / `ExtractOfficeTextOutput` used to live in
 // `@tokenlighten/types`' `mcp/legacy-read.ts`, which is DELETED. This module
-// serves the ADVERTISED office paths of `read_file`, so the request shape moves
+// serves the ADVERTISED office paths of `tl_read_file`, so the request shape moves
 // here next to its one emitter and the output shape is renamed to what it
 // actually is: the payload the funnel projects onto the v1 `read.artifact`
 // family (types `mcp/read-result.ts`).
 // ---------------------------------------------------------------------------
 
-/** Request shape of `read_file`'s office-extraction paths. */
+/** Request shape of `tl_read_file`'s office-extraction paths. */
 export interface ExtractOfficeTextInput {
   /** Workspace-relative path to a .docx, .xlsx, or .pptx file. */
   path: string;
@@ -81,7 +81,7 @@ export const MAX_RESPONSE_BYTES = 12288;
 // §6.6-2 item 3, shipped 2026-08-13): maxBytes/maxTokens used to pass
 // straight through from the caller (`input.maxBytes ?? DEFAULT_MAX_BYTES`)
 // with NO ceiling — every external server.ts dispatch site (extract_office_text,
-// read_file mode=full/mode=auto, search_files action=office) forwards
+// tl_read_file mode=full/mode=auto, tl_search_files action=office) forwards
 // `args["maxBytes"]`/`args["maxTokens"]` verbatim (some via `Number(...)`
 // coercion of arbitrary caller JSON, so a non-numeric string becomes NaN, and
 // a JSON literal like 1e999 parses to Infinity), and there is no schema layer

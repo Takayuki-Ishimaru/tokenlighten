@@ -150,7 +150,7 @@ function parseToolResult(rpcResult: any): Record<string, unknown> {
 // ---------------------------------------------------------------------------
 async function getFileHandle(srv: ServerHandle, rpcId: number, relPath: string): Promise<string> {
   const res = await srv.rpc(rpcId, "tools/call", {
-    name: "read_file",
+    name: "tl_read_file",
     arguments: { mode: "auto", path: relPath },
   });
   const data = parseToolResult(res);
@@ -162,7 +162,7 @@ async function getFileHandle(srv: ServerHandle, rpcId: number, relPath: string):
 // Helper: get a symbol handle via read_code mode=slice
 async function getSymbolHandle(srv: ServerHandle, rpcId: number, relPath: string, symbol: string): Promise<string> {
   const res = await srv.rpc(rpcId, "tools/call", {
-    name: "read_file",
+    name: "tl_read_file",
     arguments: { mode: "slice", path: relPath, symbol },
   });
   const data = parseToolResult(res);
@@ -203,7 +203,7 @@ describe("intent: remove-duplicate-branch", () => {
     const handle = await getFileHandle(srv, 2, "src/classify.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "remove-duplicate-branch" },
     });
     const data = parseToolResult(res);
@@ -244,7 +244,7 @@ describe("intent: remove-duplicate-branch", () => {
     const handle = await getFileHandle(srv, 2, "src/classify.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "remove-duplicate-branch" },
     });
     const data = parseToolResult(res);
@@ -286,7 +286,7 @@ describe("intent: remove-duplicate-branch", () => {
     const handle = await getFileHandle(srv, 2, "src/classify.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "remove-duplicate-branch" },
     });
     const data = parseToolResult(res);
@@ -301,7 +301,7 @@ describe("intent: remove-duplicate-branch", () => {
     // on the real structure instead: it points the caller back at the exact
     // handle they submitted.
     const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
-    expect(next?.tool, JSON.stringify(data)).toBe("read_file");
+    expect(next?.tool, JSON.stringify(data)).toBe("tl_read_file");
     const target = (next?.arguments?.["targets"] as Array<Record<string, unknown>> | undefined)?.[0];
     expect(target?.["handle"], JSON.stringify(data)).toBe(handle);
 
@@ -332,7 +332,7 @@ describe("intent: remove-duplicate-branch", () => {
     const handle = await getFileHandle(srv, 2, "src/fn.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "remove-duplicate-branch" },
     });
     const data = parseToolResult(res);
@@ -379,7 +379,7 @@ describe("intent: remove-duplicate-branch — range scope", () => {
 
     // Mint a range handle scoping lines 10-17 (bottom chain only).
     const readRes = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/dual.ts", range: "10-17" },
     });
     const readData = parseToolResult(readRes);
@@ -388,7 +388,7 @@ describe("intent: remove-duplicate-branch — range scope", () => {
 
     // Apply intent with the range handle.
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "remove-duplicate-branch" },
     });
     const data = parseToolResult(res);
@@ -446,14 +446,14 @@ describe("intent: remove-duplicate-branch — range scope", () => {
 
     // Range 1-3: no if-chain at all.
     const readRes = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/nodup.ts", range: "1-3" },
     });
     const readData = parseToolResult(readRes);
     const handle = readData["handle"] as string;
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "remove-duplicate-branch" },
     });
     const data = parseToolResult(res);
@@ -485,7 +485,7 @@ describe("intent: append-union-member", () => {
     const handle = await getFileHandle(srv, 2, "src/status.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "append-union-member", symbol: "Status", target: "STALLED" },
     });
     const data = parseToolResult(res);
@@ -514,7 +514,7 @@ describe("intent: append-union-member", () => {
     const handle = await getFileHandle(srv, 2, "src/status.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "append-union-member", symbol: "Status", target: "CLOSED" },
     });
     const data = parseToolResult(res);
@@ -540,7 +540,7 @@ describe("intent: append-union-member", () => {
     const handle = await getFileHandle(srv, 2, "src/status.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "append-union-member", target: "STALLED" },
     });
     const data = parseToolResult(res);
@@ -594,7 +594,7 @@ describe("intent: append-enum-member", () => {
 
     const handle = await getFileHandle(srv, 2, relPath);
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "append-enum-member", symbol: "Status", target: "STALLED", lang },
     });
     const data = parseToolResult(res);
@@ -614,7 +614,7 @@ describe("intent: append-enum-member", () => {
 
     const handle = await getFileHandle(srv, 2, "src/Status.java");
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "append-enum-member", symbol: "Status", target: "CLOSED", lang: "java" },
     });
     const data = parseToolResult(res);
@@ -655,7 +655,7 @@ describe("intent: rename-symbol-references", () => {
     const handle = await getSymbolHandle(srv, 2, "src/greeting.ts", "greetUser");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle,
         intent: "rename-symbol-references",
@@ -693,7 +693,7 @@ describe("intent: rename-symbol-references", () => {
 
     // No precondition supplied.
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "rename-symbol-references", target: "newName" },
     });
     const data = parseToolResult(res);
@@ -702,7 +702,7 @@ describe("intent: rename-symbol-references", () => {
     expect(data["code"]).toBe("intent-unsupported");
     // Missing proof is recoverable by running the exact reference search.
     const next = data["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
-    expect(next?.tool, JSON.stringify(data)).toBe("search_files");
+    expect(next?.tool, JSON.stringify(data)).toBe("tl_search_files");
     expect(next?.arguments?.["action"], JSON.stringify(data)).toBe("references");
     expect(next?.arguments?.["queries"], JSON.stringify(data)).toEqual(["oldName"]);
     expect(data["detail"], JSON.stringify(data)).toContain("set precondition=references-reviewed");
@@ -725,7 +725,7 @@ describe("intent: rename-symbol-references", () => {
     const handle = await getFileHandle(srv, 2, "src/fn.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle,
         intent: "rename-symbol-references",
@@ -755,7 +755,7 @@ describe("intent: rename-symbol-references", () => {
     const handle = await getSymbolHandle(srv, 2, "src/fn.ts", "someFunc");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle,
         intent: "rename-symbol-references",
@@ -786,7 +786,7 @@ describe("intent dispatch: special intents are mutually exclusive with edits[]",
     const handle = await getFileHandle(srv, 2, "src/status.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         intent: "append-union-member",
         edits: [{ handle, search: '"OPEN"', replace: '"READY"' }],
@@ -832,7 +832,7 @@ describe("intent dispatch: D10 — TL_EDIT_INTENTS is inert", () => {
     const handle = await getFileHandle(srv, 2, "src/status.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "append-union-member", symbol: "Status", target: "STALLED" },
     });
     const data = parseToolResult(res);
@@ -863,7 +863,7 @@ describe("intent dispatch: unknown intent name returns intent-unknown", () => {
     const handle = await getFileHandle(srv, 2, "src/x.ts");
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { handle, intent: "frobnicate-everything" },
     });
     const data = parseToolResult(res);
@@ -873,7 +873,7 @@ describe("intent dispatch: unknown intent name returns intent-unknown", () => {
     // An illustrative prose suggestion is advisory, not an executable call.
     expect(data["next"], JSON.stringify(data)).toBeUndefined();
     expect(data["detail"], JSON.stringify(data)).toContain(
-      "Use edit_file with an exact search/replace edit instead.",
+      "Use tl_edit_file with an exact search/replace edit instead.",
     );
   }, 35000);
 });

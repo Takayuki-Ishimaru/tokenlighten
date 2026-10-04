@@ -217,7 +217,7 @@ describe("task-contract ledger architecture", () => {
    * expansion capability limit proves the open-universe obligation as an
    * explicit gap, and the prescribed absence then proves the SAME obligation
    * as `authoritative-absent`. Under the pre-A-F4 ledger the second call threw
-   * "obligation proof is immutable once recorded" out of a live search_files
+   * "obligation proof is immutable once recorded" out of a live tl_search_files
    * dispatch. Proof immutability is still enforced — the first witness stands.
    */
   it("survives the repair flow's conflicting re-prove without throwing", () => {

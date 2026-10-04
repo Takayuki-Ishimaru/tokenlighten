@@ -187,7 +187,7 @@ async function readFileByHandle(handle: string, cwd: string): Promise<Record<str
   const { callTool } = (await import("../server.js")) as unknown as {
     callTool: (name: string, args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
   };
-  const response = await callTool("read_file", { targets: [{ handle }], cwd, content: "full" });
+  const response = await callTool("tl_read_file", { targets: [{ handle }], cwd, content: "full" });
   return JSON.parse(response.content[0]!.text) as Record<string, unknown>;
 }
 
@@ -745,7 +745,7 @@ describe("FX-V2 — hasCallEdges capability gate (round 20B finding 1, HIGH)", (
 // ---------------------------------------------------------------------------
 
 describe("mintRelationHandles", () => {
-  it("mints a real handle for the definition site that read_file can serve", async () => {
+  it("mints a real handle for the definition site that tl_read_file can serve", async () => {
     const root = mkWorkspace("mint");
     writeTsAmbiguityWorkspace(root);
     const port = await createWorkspaceRelationGraphPort({ workspaceRoot: root });

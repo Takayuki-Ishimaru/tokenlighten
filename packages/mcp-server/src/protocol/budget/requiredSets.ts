@@ -99,7 +99,7 @@
 //
 //   - `read.artifact`, content resolved to the plain-`text` fallback for a
 //     document form (`extractOfficeText`'s flat dialect, reached via
-//     `mode=full allowFull:true` or the `search_files action=office` compat
+//     `mode=full allowFull:true` or the `tl_search_files action=office` compat
 //     redirect — never handle-backed): `path`/`handle`/`sha` are OPTIONAL
 //     below (`isArtifactTextOnly`). Re-tighten to REQUIRED once this arm
 //     gets its own resolution (whether folded into the R5-8 wave or a
@@ -636,7 +636,7 @@ export const REQUIRED_SETS: Readonly<Record<Kind, ShapeEntry>> = {
    * `projectArtifact()` (`readFamily.ts:1119-1132`) copies all three with
    * `keep()` — present iff the raw body carries them — and the office-
    * extraction arm (`extractOfficeText`'s flat dialect via `mode=full
-   * allowFull:true` or the `search_files action=office` compat redirect)
+   * allowFull:true` or the `tl_search_files action=office` compat redirect)
    * never mints a handle, so it never does. See `isArtifactTextOnly` above
    * and the re-tighten list at the top of this file (DESIGN A.13 ruling 9,
    * [R5-8] — same "redirect vs. extract" feature area, though ruling 9's own

@@ -3,14 +3,14 @@
 <!-- tl-instructions-sha256: {{SHA256}} -->
 ## TokenLighten MCP (compact)
 
-Root `AGENTS.md` owns active designs/plan. Edit canonical templates and regenerate AI rules; never edit generated blocks.
+`AGENTS.md`: designs/plan. Generate AI rules from templates; never edit generated blocks.
 
-Three tools: `read_file`, `edit_file`, `search_files`. Start EVERY file task with TL; unknown-location/multi-file=>`read_file {query:"<verbatim request>",task:{epoch:"new"}}` before native reads or Explore-style subagents; never truncate. If TL is unavailable or the host reports native-bypass, use native and never activate TL mid-task. Same-task narrow re-packs may be incomplete. Search: `action:"find",queries:["<one identifier>"]`; batch several in one `queries=[…]`; use known-subtree `scope.path`, else repo-wide.
+Three tools: `tl_read_file`, `tl_edit_file`, `tl_search_files`. FIRST file lookup/read: `tl_read_file {query:"<entire user request, verbatim>",task:{epoch:"new"}}` before native/Explore subagents. Unknown paths: omit `targets`. Never shorten query to keywords or drop citation/constraint sentences. Native if the user requests native, TL is unavailable/host reports native-bypass, or incomplete scope/verified absence; never activate TL mid-task. Same-task narrow re-packs may be incomplete. Search: `action:"find",queries:["<one identifier>"]`; batch `queries=[…]`; `scope.path`=known subtree, else repo-wide.
 <!-- tl-legacy-compat:start -->
 Legacy only: `mode`/`paths`/`handles`/`maxBytes`/`maxTokens`/`taskProfile`/`taskEpoch` require TL_LEGACY_INPUT=accept; RC uses refuse. Never emit them; returned `next` is canonical.
 <!-- tl-legacy-compat:end -->
-Every call: own `cwd` (or `cwd-required-for-edit`); shared workspace: fixed `lane`. A known single edit may fast-close; otherwise use one `edit_file` `edits[]` batch, each item owning its target.
+Every call: own `cwd` (else `cwd-required-for-edit`); shared workspace: fixed `lane`. Known single edit: fast-close; else ONE `tl_edit_file` `edits[]` batch, own target/item.
 An unrecognized `kind`=SAFE-STOP: report it, issue no edit, never infer from its fields.
-Act on `read.task_pack`'s `decision.kind`: `act.answer`/`act.edit` closes discovery; use served evidence and batch ready edits once. A `refusal`'s `retry` is the only transition. Every `next` is a whole executable call — run verbatim; hints are advisory, never execute them as calls. A `read.receipt` is never a re-pack cue: follow `next` when present, otherwise act or stop on restated evidence/certificate. Stop after a passing relevant check. Reads accept `budget.bytes`/`budget.tokens`.
-Everything else — artifact/archive specifics, verification-kit detail, per-kind deep rules — arrives on-demand inside the response that needs it; complete only until one does.
+Act on `read.task_pack`'s `decision.kind`: `act.answer`/`act.edit` closes discovery; `evidence[].body` is exact source already read: use its paths/line ranges, no re-read; batch ready independent reads in ONE `targets:[...]` call and edits once. A `refusal`'s `retry` is the only transition. Every `next` is a whole executable call — run verbatim; hints are advisory, not calls. Lost context => same call with `task.force_serve:true`. A `read.receipt` is never a re-pack cue: follow `next` when present, otherwise act or stop on restated evidence/certificate. Stop after a passing relevant check. Reads accept `budget.bytes`/`budget.tokens`.
+Deep rules/verification arrive on-demand.
 <!-- tokenlighten:mcp-instructions:end -->

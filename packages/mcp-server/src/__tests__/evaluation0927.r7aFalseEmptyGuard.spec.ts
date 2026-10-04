@@ -377,7 +377,7 @@ async function ask(ws: string, query: string, hopCap = 20): Promise<ChainResult>
   const s = await spawnedServer(ws);
   return followNextToEnd(
     s,
-    { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
+    { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
     { cwd: ws, hopCap },
   );
 }

@@ -2,18 +2,32 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve, win32 } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import crossSpawn from "cross-spawn";
-import { defaultGuideProfileForSurface, injectAll, parseSentinelBlock, VALID_PROFILES } from "@tokenlighten/agents-md";
-import type { GuideProfile } from "@tokenlighten/agents-md";
+import {
+  copilotGuideModeFromSettings,
+  defaultGuideProfileForSurface,
+  holdsOnlyManagedBlock,
+  injectAll,
+  parseJsonc,
+  parseSentinelBlock,
+  readWorkspaceSettings,
+  STUB_TARGET_BY_ID,
+  VALID_PROFILES,
+} from "@tokenlighten/agents-md";
+import type { CopilotGuideMode, GuideProfile } from "@tokenlighten/agents-md";
 import type {
+  CopilotGuideReport,
   CopilotInlineResultsReport,
   TokenLightenSetupClient,
   TokenLightenWorkspaceListResult,
@@ -41,6 +55,7 @@ import {
 import { configFilePath } from "../paths.js";
 import { wantsHelp } from "../util/helpFlag.js";
 import { resolveMcpBin } from "./mcp.js";
+import { installCopilotSessionHook } from "../copilotSessionHooks.js";
 
 const CLIENTS = new Set<TokenLightenSetupClient>([
   "vscode",
@@ -50,7 +65,7 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--rules-only] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
@@ -60,14 +75,26 @@ workspace registered by setup on this machine for desktop-wide management.
 TokenLighten write tools and local privacy-preserving usage logging are enabled
 by default. With --tool-surface code and no explicit --guide-profile, the
 guide profile defaults to compact instead of full (an explicit
---guide-profile always wins). GitHub Copilot attaches AGENTS.md in full to
-every request (~3k tokens for the full TokenLighten block); a Copilot-only
-workspace may pass --guide-profile compact (VS Code setting
-tokenlighten.guideProfile); Codex and Claude Code users should keep full.
-With --clients including vscode,
+--guide-profile always wins). With --clients including vscode,
 --copilot-inline-results raise (default) raises GitHub Copilot's inline
 tool-result limit in the workspace's .vscode/settings.json so Copilot can
 read TokenLighten's answers; pass keep to leave that file untouched.
+GitHub Copilot attaches AGENTS.md in full to every request:
+--copilot-guide standalone (default) gives Copilot a compact, self-contained
+TokenLighten guide in .github/copilot-instructions.md instead and, in
+.vscode/settings.json, turns off chat.useAgentsMdFile while AGENTS.md holds
+nothing but TokenLighten's block (a file with your own content stays
+attached); AGENTS.md keeps the full guide for Codex and Claude Code. agents-md
+has Copilot read AGENTS.md again (removing only the setting TokenLighten turned
+off); keep touches no setting, and is the default under
+--copilot-inline-results keep (that file stays untouched). A folder opened
+through a .code-workspace file ignores that folder setting: setup names such a
+file (it never edits one); set chat.useAgentsMdFile in the workspace file (the
+VS Code extension does) or open the folder directly.
+VS Code setup also installs a context-only SessionStart hook for ordinary
+Agent sessions. It keeps every tool enabled and leaves hook permissions and
+chat.useHooks unchanged. --copilot-session-context keep leaves these hook
+files untouched. Existing or modified user hooks are always preserved.
 `;
 
 function assertInsideRoot(root: string, target: string): void {
@@ -325,6 +352,492 @@ export function formatCopilotInlineResultsLine(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Copilot guide (VS Code Copilot standard-setup evaluation, 2026-10-02) — the
+// two guide shapes are @tokenlighten/agents-md's copilotGuide.ts. GitHub
+// Copilot Chat attaches AGENTS.md in full to EVERY request, and paying for the
+// full TokenLighten guide at the cold start of each conversation was the
+// dominant TokenLighten cost the evaluation measured. `standalone` (the
+// default) turns that attachment off — in this workspace's own
+// .vscode/settings.json, `chat.useAgentsMdFile` — ONLY while AGENTS.md holds
+// nothing but TokenLighten's own block, and gives Copilot a compact,
+// self-contained guide in .github/copilot-instructions.md, while AGENTS.md
+// keeps the full guide for Codex and Claude Code (so the WP-C1 §3 constraint
+// below still holds: what those clients read never changes). AGENTS.md with
+// any content of the user's stays attached, a value the user wrote is never
+// overridden, and the setting TokenLighten turned off is recorded in
+// .tokenlighten/copilot-guide.json, so a later run (or the uninstall) removes
+// exactly that — never a `false` the user wrote. `agents-md` restores the
+// pointer shape (removing only TokenLighten's own setting); `keep` touches no
+// setting and renders whichever guide the current settings imply.
+//
+// CLAUDE.md is never switched off (`chat.useClaudeMdFile`; verified
+// 2026-10-02, VS Code 1.139.1): Copilot attaches it verbatim without
+// expanding its `@AGENTS.md` import, the block TokenLighten writes there is
+// ~280 B (about 70 tokens, not worth a switch), and `false` would also hide the
+// user's own global ~/.claude/CLAUDE.md. An earlier build did write that key;
+// the first non-`keep` run withdraws the `false` it recorded (see
+// `ensureCopilotGuide`).
+//
+// VS Code registers `chat.useAgentsMdFile` window-scoped: when a folder is
+// opened through a `.code-workspace` file, its own .vscode/settings.json value
+// is ignored and only the workspace file's `settings` (or the user's) apply.
+// Setup therefore NAMES the `.code-workspace` files that list this folder
+// (`CopilotGuideReport.workspaceFiles`, `findCodeWorkspaceFiles`) and never
+// edits one; the VS Code extension's "Apply Copilot guide to workspace file"
+// command is what writes the workspace-level value.
+// ---------------------------------------------------------------------------
+export const COPILOT_GUIDE_VALUES = ["standalone", "agents-md", "keep"] as const;
+export type CopilotGuideRequest = typeof COPILOT_GUIDE_VALUES[number];
+
+export function isCopilotGuideRequest(value: string): value is CopilotGuideRequest {
+  return (COPILOT_GUIDE_VALUES as readonly string[]).includes(value);
+}
+
+/** The Copilot guide request when none was given: "standalone", or "keep" when the caller asked to keep settings.json untouched (`--copilot-inline-results keep`). */
+export function defaultCopilotGuideRequest(copilotInlineResults: CopilotInlineResultsMode | undefined): CopilotGuideRequest {
+  return copilotInlineResults === "keep" ? "keep" : "standalone";
+}
+
+/** Copilot's switch for attaching AGENTS.md: the one attachment setting TokenLighten writes. */
+export const COPILOT_AGENTS_MD_KEY = "chat.useAgentsMdFile";
+/**
+ * Legacy key an earlier build wrote beside the one above and TokenLighten no
+ * longer writes: a record that still lists it is withdrawn on the next
+ * non-`keep` run (`ensureCopilotGuide`) and by the uninstall.
+ */
+export const COPILOT_CLAUDE_MD_KEY = "chat.useClaudeMdFile";
+/** The keys the record may list: the current one, and the legacy one an old record can still hold. */
+const COPILOT_RECORDED_KEYS: ReadonlySet<string> = new Set([COPILOT_AGENTS_MD_KEY, COPILOT_CLAUDE_MD_KEY]);
+
+function copilotGuideRecordPath(root: string): string {
+  return join(root, ".tokenlighten", "copilot-guide.json");
+}
+
+/** The attachment settings TokenLighten itself turned off in this workspace (its own record); empty when unknown. */
+function readOwnedCopilotSettings(root: string): Set<string> {
+  const target = copilotGuideRecordPath(root);
+  try {
+    if (!existsSync(target) || lstatSync(target).isSymbolicLink()) return new Set();
+    const parsed: unknown = JSON.parse(readFileSync(target, "utf8"));
+    const listed = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)["settings"]
+      : undefined;
+    return new Set(Array.isArray(listed)
+      ? listed.filter((key): key is string => typeof key === "string" && COPILOT_RECORDED_KEYS.has(key))
+      : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeOwnedCopilotSettings(root: string, owned: ReadonlySet<string>): void {
+  const target = copilotGuideRecordPath(root);
+  if (owned.size > 0) {
+    writeJsonAtomic(root, target, { schemaVersion: 1, settings: [...owned].sort() });
+    return;
+  }
+  if (existsSync(target) && !lstatSync(target).isSymbolicLink()) unlinkSync(target);
+}
+
+/**
+ * True when `file` (workspace-relative) is absent or holds nothing but
+ * TokenLighten's managed block; false when unreadable. A symlink is judged by
+ * the regular file it resolves to inside the workspace (review 2026-10-02: an
+ * `AGENTS.md -> CLAUDE.md` link is common, and Copilot attaches whatever it
+ * points at), and is false when it leaves the workspace.
+ */
+function holdsOnlyTokenLightenGuide(root: string, file: string): boolean {
+  const target = join(root, file);
+  try {
+    if (!existsSync(target)) return true;
+    let source = target;
+    if (lstatSync(target).isSymbolicLink()) {
+      source = realpathSync(target);
+      const rel = relative(realpathSync(root), source);
+      if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
+    }
+    if (!statSync(source).isFile()) return false;
+    return holdsOnlyManagedBlock(readFileSync(source, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/** Why the guide Copilot reads differs from the one requested, when it does. */
+function copilotGuideReason(
+  request: CopilotGuideRequest,
+  mode: CopilotGuideMode,
+  finalAgentsMd: unknown,
+  target: string,
+): string | undefined {
+  if (request === "standalone" && mode === "agents-md") {
+    return finalAgentsMd === undefined
+      ? "AGENTS.md has content outside TokenLighten's block, so Copilot keeps attaching it (with the full TokenLighten guide)"
+      : `${COPILOT_AGENTS_MD_KEY} is ${JSON.stringify(finalAgentsMd)} in ${target}, so Copilot keeps attaching AGENTS.md`;
+  }
+  if (request === "agents-md" && mode === "standalone") {
+    return `${COPILOT_AGENTS_MD_KEY} is false in ${target} and TokenLighten did not set it, so Copilot still does not attach AGENTS.md`;
+  }
+  return undefined;
+}
+
+/**
+ * A settings.json in VS Code's own dialect (comments, trailing commas). The
+ * safe merge never rewrites it, but the guide still follows what Copilot
+ * reads from it (review 2026-10-02): the `"chat.useAgentsMdFile": false` the
+ * manual advice asks for takes effect on the next run, instead of the run
+ * reporting manual — and rendering the pointer — forever.
+ */
+function jsoncCopilotGuideResult(
+  root: string,
+  target: string,
+  raw: string,
+  request: CopilotGuideRequest,
+): { report: CopilotGuideReport; mode: CopilotGuideMode } {
+  let document: Record<string, unknown>;
+  try {
+    const parsed = parseJsonc(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    document = parsed as Record<string, unknown>;
+  } catch {
+    return manualCopilotGuideResult(target, `${target} is neither strict JSON nor VS Code's JSON with comments`);
+  }
+  const mode: CopilotGuideMode = document[COPILOT_AGENTS_MD_KEY] === false ? "standalone" : "agents-md";
+  if (request !== "keep") {
+    const owned = readOwnedCopilotSettings(root);
+    const pending: string[] = [];
+    if (request === "standalone" && holdsOnlyTokenLightenGuide(root, "AGENTS.md")) {
+      if (document[COPILOT_AGENTS_MD_KEY] === undefined) pending.push(`add "${COPILOT_AGENTS_MD_KEY}": false`);
+    } else if (document[COPILOT_AGENTS_MD_KEY] === false && owned.has(COPILOT_AGENTS_MD_KEY)) {
+      pending.push(`remove "${COPILOT_AGENTS_MD_KEY}" (TokenLighten set it)`);
+    }
+    // The legacy key is only ever REMOVED, never added: the advice must not
+    // send the user to turn CLAUDE.md off.
+    if (document[COPILOT_CLAUDE_MD_KEY] === false && owned.has(COPILOT_CLAUDE_MD_KEY)) {
+      pending.push(`remove "${COPILOT_CLAUDE_MD_KEY}" (an earlier TokenLighten set it)`);
+    }
+    // A recorded setting the user has since removed or changed is theirs now
+    // (as in the strict-JSON path): drop it from the record, which is
+    // TokenLighten's own strict-JSON file, though the settings file stays as is.
+    const changed = [...owned].filter((key) => document[key] !== false);
+    if (changed.length > 0) {
+      for (const key of changed) owned.delete(key);
+      try {
+        writeOwnedCopilotSettings(root, owned);
+      } catch {
+        // Best-effort, as in the strict-JSON path.
+      }
+    }
+    if (pending.length > 0) {
+      return {
+        report: {
+          status: "manual",
+          settingsFile: target,
+          reason: `${target} has comments or trailing commas, which this safe merge never rewrites; ${pending.join(" and ")} by hand, then rerun setup`,
+        },
+        mode,
+      };
+    }
+  }
+  const reason = copilotGuideReason(request, mode, document[COPILOT_AGENTS_MD_KEY], target);
+  return { report: { status: mode, settingsFile: target, ...(reason !== undefined ? { reason } : {}) }, mode };
+}
+
+function manualCopilotGuideResult(target: string, reason: string): { report: CopilotGuideReport; mode: CopilotGuideMode } {
+  return {
+    report: {
+      status: "manual",
+      settingsFile: target,
+      reason: `${reason}; to give Copilot TokenLighten's compact guide instead of AGENTS.md, add "${COPILOT_AGENTS_MD_KEY}": false `
+        + `to ${target} by hand while AGENTS.md holds only TokenLighten's block, then rerun setup`,
+    },
+    mode: "agents-md",
+  };
+}
+
+/**
+ * Applies `request` to this workspace's `.vscode/settings.json` (see the
+ * section comment above) and returns the report plus the guide the Copilot
+ * files must be rendered for: `standalone` exactly when Copilot ends up NOT
+ * attaching AGENTS.md (the final `chat.useAgentsMdFile` is `false`, whoever
+ * wrote it). Runs before the rules are written — their content depends on it.
+ */
+function ensureCopilotGuide(root: string, request: CopilotGuideRequest): { report: CopilotGuideReport; mode: CopilotGuideMode } {
+  const target = copilotSettingsPath(root);
+  try {
+    assertInsideRoot(root, target);
+    assertNotSymlink(target);
+    assertNotSymlink(dirname(target));
+  } catch (error) {
+    return manualCopilotGuideResult(target, error instanceof Error ? error.message : String(error));
+  }
+  let raw = "";
+  let document: Record<string, unknown> = {};
+  const settingsExist = existsSync(target);
+  if (settingsExist) {
+    try {
+      raw = readFileSync(target, "utf8");
+    } catch (error) {
+      return manualCopilotGuideResult(target, `could not read ${target}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return jsoncCopilotGuideResult(root, target, raw, request);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return manualCopilotGuideResult(target, `${target} does not contain a JSON object`);
+    }
+    document = parsed as Record<string, unknown>;
+  }
+
+  const written: string[] = [];
+  const removed: string[] = [];
+  if (request !== "keep") {
+    const owned = readOwnedCopilotSettings(root);
+    if (request === "standalone" && holdsOnlyTokenLightenGuide(root, "AGENTS.md")) {
+      // Only ever ADDS the setting: a value the user wrote (an explicit
+      // `true`, or a `false` that already does this) is left as it is.
+      if (document[COPILOT_AGENTS_MD_KEY] === undefined) {
+        document[COPILOT_AGENTS_MD_KEY] = false;
+        owned.add(COPILOT_AGENTS_MD_KEY);
+        written.push(COPILOT_AGENTS_MD_KEY);
+      }
+    } else if (document[COPILOT_AGENTS_MD_KEY] === false && owned.has(COPILOT_AGENTS_MD_KEY)) {
+      // TokenLighten's own setting no longer applies: the file gained
+      // content of the user's, or `agents-md` was asked for.
+      delete document[COPILOT_AGENTS_MD_KEY];
+      removed.push(COPILOT_AGENTS_MD_KEY);
+    }
+    // A recorded setting the user has since changed is theirs now.
+    if (document[COPILOT_AGENTS_MD_KEY] !== false) owned.delete(COPILOT_AGENTS_MD_KEY);
+    // Migration: an earlier build also turned CLAUDE.md's attachment off and
+    // recorded it. None does any more, and the `false` hid the user's global
+    // ~/.claude/CLAUDE.md too, so a recorded `false` is withdrawn now; a value
+    // the user has changed since (or removed) is theirs and only leaves the record.
+    if (owned.has(COPILOT_CLAUDE_MD_KEY)) {
+      owned.delete(COPILOT_CLAUDE_MD_KEY);
+      if (document[COPILOT_CLAUDE_MD_KEY] === false) {
+        delete document[COPILOT_CLAUDE_MD_KEY];
+        removed.push(COPILOT_CLAUDE_MD_KEY);
+      }
+    }
+    if (written.length > 0 || removed.length > 0) {
+      try {
+        writeJsonAtomic(root, target, document, settingsExist
+          ? { indent: detectIndentUnit(raw), trailingNewline: raw.length === 0 || raw.endsWith("\n") }
+          : undefined);
+      } catch (error) {
+        return manualCopilotGuideResult(target, `could not write ${target}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    try {
+      writeOwnedCopilotSettings(root, owned);
+    } catch {
+      // Best-effort: without the record a later run treats these settings as
+      // the user's and never removes them — the safe direction.
+    }
+  }
+
+  const finalAgentsMd = document[COPILOT_AGENTS_MD_KEY];
+  const mode: CopilotGuideMode = finalAgentsMd === false ? "standalone" : "agents-md";
+  const reason = copilotGuideReason(request, mode, finalAgentsMd, target);
+  return {
+    report: {
+      status: mode,
+      settingsFile: target,
+      ...(written.length > 0 ? { settingsWritten: written } : {}),
+      ...(removed.length > 0 ? { settingsRemoved: removed } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+    },
+    mode,
+  };
+}
+
+// Uninstall symmetry for the Copilot guide (called from install.ts's uninstall
+// flow beside removeCopilotThresholdIfManaged): removes only the settings
+// TokenLighten's own record names, and only while they still hold the `false`
+// setup wrote; then the record itself. Best-effort and silent.
+export function removeCopilotGuideSettingsIfManaged(root: string): void {
+  releaseOwnedCopilotSettings(root);
+}
+
+/**
+ * Removes every attachment setting TokenLighten recorded as its own that is
+ * still `false`, then the record, and returns the keys removed. Best-effort
+ * and silent — never blocks or warns (uninstall); a settings file it cannot
+ * parse is left alone and keeps its record for a later run.
+ */
+function releaseOwnedCopilotSettings(root: string): string[] {
+  const removed: string[] = [];
+  try {
+    const owned = readOwnedCopilotSettings(root);
+    const target = copilotSettingsPath(root);
+    if (owned.size > 0 && existsSync(target) && !lstatSync(target).isSymbolicLink()) {
+      const raw = readFileSync(target, "utf8");
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const document = parsed as Record<string, unknown>;
+        const dropped = [...owned].filter((key) => document[key] === false);
+        for (const key of dropped) delete document[key];
+        if (dropped.length > 0) {
+          writeJsonAtomic(root, target, document, {
+            indent: detectIndentUnit(raw),
+            trailingNewline: raw.length === 0 || raw.endsWith("\n"),
+          });
+          removed.push(...dropped);
+        }
+      }
+    }
+    writeOwnedCopilotSettings(root, new Set());
+  } catch {
+    // Best-effort cleanup only.
+  }
+  return removed;
+}
+
+/**
+ * Review 2026-10-02: Copilot's AGENTS.md attachment may stay off only while
+ * Copilot's own file actually holds the compact guide. When injectAll could
+ * not put it there (a hand-written TokenLighten note, a symlink, a case
+ * collision, an oversized or unwritable file), TokenLighten gives its
+ * settings back, so Copilot attaches AGENTS.md and its full guide again, and
+ * reports why.
+ */
+function withdrawCopilotGuide(
+  root: string,
+  report: CopilotGuideReport,
+  skipReason: string,
+): { report: CopilotGuideReport; mode: CopilotGuideMode } {
+  const writtenThisRun = new Set(report.settingsWritten ?? []);
+  const removedEarlier = releaseOwnedCopilotSettings(root).filter((key) => !writtenThisRun.has(key));
+  const mode = copilotGuideModeFromSettings(readWorkspaceSettings(root));
+  const target = copilotSettingsPath(root);
+  const file = STUB_TARGET_BY_ID["copilot"]?.file ?? ".github/copilot-instructions.md";
+  return {
+    mode,
+    report: {
+      status: "manual",
+      settingsFile: target,
+      ...(removedEarlier.length > 0 ? { settingsRemoved: removedEarlier } : {}),
+      reason: mode === "standalone"
+        ? `${file} could not take TokenLighten's compact guide (${skipReason}), and ${COPILOT_AGENTS_MD_KEY} is false in ${target}, so Copilot reads no TokenLighten guide until that file is fixed or the setting removed`
+        : `${file} could not take TokenLighten's compact guide (${skipReason}), so Copilot keeps attaching AGENTS.md (with the full TokenLighten guide)`,
+    },
+  };
+}
+
+/** A `.code-workspace` file is a small JSON document; a larger one is not read. */
+const MAX_CODE_WORKSPACE_FILE_BYTES = 1024 * 1024;
+const CODE_WORKSPACE_SUFFIX = ".code-workspace";
+
+/**
+ * True when the `.code-workspace` file `file` lists the directory whose real
+ * path is `realRoot` among its `folders[].path` entries, each resolved against
+ * the file's own directory (an entry may be absolute, or reach `realRoot`
+ * through a symlink). Read-only: anything unreadable, oversized, invalid or
+ * shaped otherwise is simply not a match, and nothing is ever thrown.
+ */
+function codeWorkspaceListsFolder(file: string, realRoot: string): boolean {
+  try {
+    const stat = statSync(file);
+    if (!stat.isFile() || stat.size > MAX_CODE_WORKSPACE_FILE_BYTES) return false;
+    const parsed = parseJsonc(readFileSync(file, "utf8"));
+    const folders = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)["folders"]
+      : undefined;
+    if (!Array.isArray(folders)) return false;
+    const base = dirname(file);
+    return folders.some((entry: unknown) => {
+      const path = entry !== null && typeof entry === "object" ? (entry as Record<string, unknown>)["path"] : undefined;
+      if (typeof path !== "string") return false;
+      try {
+        return workspacePathsEqual(realpathSync(resolve(base, path)), realRoot);
+      } catch {
+        return false; // a folder entry that does not exist
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Absolute paths of the `.code-workspace` files in `root` and in its parent
+ * directory (neither is searched recursively) that list `root` as a folder —
+ * the files through which VS Code ignores this folder's own
+ * `chat.useAgentsMdFile` (see the section comment above). Never edits one.
+ */
+function findCodeWorkspaceFiles(root: string): string[] {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch {
+    return [];
+  }
+  const parent = dirname(root);
+  const found: string[] = [];
+  for (const directory of parent === root ? [root] : [root, parent]) {
+    let names: string[];
+    try {
+      names = readdirSync(directory);
+    } catch {
+      continue;
+    }
+    for (const name of names.sort()) {
+      if (!name.toLowerCase().endsWith(CODE_WORKSPACE_SUFFIX)) continue;
+      const file = join(directory, name);
+      if (codeWorkspaceListsFolder(file, realRoot)) found.push(file);
+    }
+  }
+  return found;
+}
+
+/** `report` plus the `.code-workspace` files that list `root`, when Copilot ends `standalone` and there are any. */
+function withCodeWorkspaceFiles(root: string, report: CopilotGuideReport): CopilotGuideReport {
+  if (report.status !== "standalone") return report;
+  const workspaceFiles = findCodeWorkspaceFiles(root);
+  return workspaceFiles.length > 0 ? { ...report, workspaceFiles } : report;
+}
+
+/** The note naming the `.code-workspace` files that make VS Code ignore this folder's setting; empty when there are none. */
+function codeWorkspaceNote(workspaceRoot: string, report: CopilotGuideReport): string {
+  const files = (report.workspaceFiles ?? []).map((file) => relative(workspaceRoot, file) || file);
+  if (files.length === 0) return "";
+  return ` — note: VS Code ignores this folder's ${COPILOT_AGENTS_MD_KEY} while the folder is opened through ${files.join(", ")}; `
+    + "set it in that workspace file (the VS Code extension's \"TokenLighten: Apply Copilot guide to workspace file\" command does) "
+    + "or open the folder directly";
+}
+
+export function formatCopilotGuideLine(
+  workspaceRoot: string,
+  report: CopilotGuideReport | undefined,
+): string | undefined {
+  if (!report) return undefined;
+  const displayPath = report.settingsFile
+    ? relative(workspaceRoot, report.settingsFile) || report.settingsFile
+    : ".vscode/settings.json";
+  const changes = [
+    ...(report.settingsWritten ?? []).map((key) => `set "${key}": false`),
+    ...(report.settingsRemoved ?? []).map((key) => `removed "${key}"`),
+  ];
+  const changed = changes.length > 0 ? `; ${changes.join(", ")} in ${displayPath}` : "";
+  switch (report.status) {
+    case "standalone":
+      return `Copilot guide: compact, in .github/copilot-instructions.md (Copilot does not attach AGENTS.md${changed})`
+        + (report.reason !== undefined ? ` — ${report.reason}` : "")
+        + codeWorkspaceNote(workspaceRoot, report);
+    case "agents-md":
+      return `Copilot guide: AGENTS.md${changed}` + (report.reason !== undefined ? ` — ${report.reason}` : "");
+    case "manual":
+      return `Copilot guide: manual: ${report.reason ?? `see ${displayPath}`}`;
+    default:
+      return undefined;
+  }
+}
+
 // GitHub Copilot Chat fixed-overhead reduction (WP-C1 §3): defaultGuideProfileForSurface's
 // default must not change — AGENTS.md is a shared file, and Codex/Claude Code can be
 // registered machine-wide with no per-workspace record, so TL cannot know a workspace is
@@ -332,12 +845,16 @@ export function formatCopilotInlineResultsLine(
 // read too. This only makes the existing explicit opt-in (--guide-profile compact /
 // tokenlighten.guideProfile) discoverable, in the human-readable setup summary alone —
 // never in --json, which has no free-text notes field for it, and never a warning (the
-// full profile is not wrong, just costlier for a Copilot-only workspace).
+// full profile is not wrong, just costlier for a Copilot-only workspace). Copilot
+// standard-setup evaluation (2026-10-02): never printed when Copilot reads the standalone
+// guide — it then never attaches AGENTS.md, whatever its profile.
 export function formatGuideProfileAdviceLine(
   clients: readonly TokenLightenSetupClient[],
   effectiveGuideProfile: GuideProfile,
+  copilotGuide?: CopilotGuideReport,
 ): string | undefined {
   if (!clients.includes("vscode") || effectiveGuideProfile !== "full") return undefined;
+  if (copilotGuide?.status === "standalone") return undefined;
   return "note: GitHub Copilot attaches AGENTS.md in full to every request (~3k tokens for "
     + "the full TokenLighten block); a Copilot-only workspace may pass --guide-profile "
     + "compact (VS Code setting tokenlighten.guideProfile); Codex and Claude Code users "
@@ -412,6 +929,14 @@ function serverConfig(
     ],
     env: {
       ...launcher.env,
+      // The ownership marker (DESIGN-v0.14-mcp-only-install.md R3, §4.6 C5/C6):
+      // this run wrote the entry, so it is TokenLighten-managed whatever
+      // launcher it names. A machine install's identity already carries it in
+      // `launcher.env` (spread first, so its key position is unchanged); the
+      // managed shim, a global `tl` and the bare fallback carry no env at all,
+      // and the VS Code extension then neither withdrew its own provider copy
+      // nor let its off switch reach the server (Copilot retest r3, 2026-10-02).
+      TOKENLIGHTEN_MANAGED: "1",
       TOKENLIGHTEN_CLIENT: client,
       TOKENLIGHTEN_USAGE_LOG: "on",
       ...(schemaStamp !== undefined ? { TOKENLIGHTEN_SCHEMA_STAMP: schemaStamp } : {}),
@@ -547,6 +1072,8 @@ function configureCodex(
     ],
     env: {
       ...launcher.env,
+      // Same ownership marker as `serverConfig` stamps.
+      TOKENLIGHTEN_MANAGED: "1",
       TOKENLIGHTEN_CLIENT: "codex",
       TOKENLIGHTEN_USAGE_LOG: "on",
       ...(schemaStamp !== undefined ? { TOKENLIGHTEN_SCHEMA_STAMP: schemaStamp } : {}),
@@ -603,6 +1130,15 @@ export async function setupWorkspace(options: {
    * link untouched. See `ensureCopilotSettings` below.
    */
   copilotInlineResults?: CopilotInlineResultsMode;
+  /**
+   * Which TokenLighten guide GitHub Copilot reads (the Copilot guide section
+   * above). Default "standalone" — or "keep" under `copilotInlineResults:
+   * "keep"`, whose promise is that settings.json stays untouched. Read only
+   * when this run configures the vscode client.
+   */
+  copilotGuide?: CopilotGuideRequest;
+  /** Ordinary Agent entry hint; keep leaves existing hook files untouched. */
+  copilotSessionContext?: "install" | "keep";
 }): Promise<TokenLightenWorkspaceSetupResult> {
   const requestedRoot = resolve(options.root);
   if (!existsSync(requestedRoot) || !lstatSync(requestedRoot).isDirectory()) {
@@ -626,6 +1162,12 @@ export async function setupWorkspace(options: {
   // in FULL_ONLY markers, matching the surface the generated client
   // configs below advertise.
   const effectiveGuideProfile = options.guideProfile ?? defaultGuideProfileForSurface(options.toolSurface);
+  // Copilot standard-setup evaluation (2026-10-02): resolved BEFORE the rules
+  // are written — the Copilot files' content depends on whether Copilot still
+  // attaches AGENTS.md (see the Copilot guide section above).
+  let copilotGuide = clients.includes("vscode")
+    ? ensureCopilotGuide(root, options.copilotGuide ?? defaultCopilotGuideRequest(options.copilotInlineResults))
+    : undefined;
   // "copilot-agent" (.github/agents/tokenlighten-explore.agent.md) is a VS
   // Code Copilot Chat custom-agent file whose `tools:` list names this
   // workspace's own ".vscode/mcp.json" "tokenlighten" server entry — it is
@@ -640,8 +1182,31 @@ export async function setupWorkspace(options: {
     driftMode: "auto-rewrite",
     profile: effectiveGuideProfile,
     ...(options.toolSurface !== undefined ? { toolSurface: options.toolSurface } : {}),
+    ...(copilotGuide !== undefined ? { copilotGuide: copilotGuide.mode } : {}),
   });
+  let rulesWritten = rules.wrote;
+  const copilotFile = STUB_TARGET_BY_ID["copilot"]?.file;
+  const copilotSkip = copilotGuide?.mode === "standalone"
+    ? rules.skipped.find((item) => item.path === copilotFile && item.reason !== "already-up-to-date")
+    : undefined;
+  if (copilotGuide !== undefined && copilotSkip !== undefined) {
+    copilotGuide = withdrawCopilotGuide(root, copilotGuide.report, copilotSkip.reason);
+    if (copilotGuide.mode === "agents-md") {
+      // The exploration agent was just rendered for the standalone guide;
+      // render it for the AGENTS.md Copilot attaches again.
+      const agent = await injectAll({
+        repoRoot: root,
+        targets: ["copilot-agent"],
+        driftMode: "auto-rewrite",
+        profile: effectiveGuideProfile,
+        ...(options.toolSurface !== undefined ? { toolSurface: options.toolSurface } : {}),
+        copilotGuide: "agents-md",
+      });
+      rulesWritten = [...new Set([...rulesWritten, ...agent.wrote])];
+    }
+  }
   const configFilesWritten: string[] = [];
+  const sessionWarnings: string[] = [];
   const launcher = options.launcher ?? {
     command: "tl",
     argsPrefix: [],
@@ -673,6 +1238,11 @@ export async function setupWorkspace(options: {
   for (const client of clients) {
     if (client === "vscode") {
       configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, linkTaskPackCeiling));
+      if (options.copilotSessionContext !== "keep") {
+        const sessionHook = installCopilotSessionHook(root);
+        configFilesWritten.push(...sessionHook.files);
+        sessionWarnings.push(...sessionHook.warnings.map(warning => `Copilot SessionStart: ${warning}`));
+      }
     }
     if (client === "codex") {
       configFilesWritten.push(configureCodex(root, launcher, schemaStamp, options.toolSurface));
@@ -687,10 +1257,15 @@ export async function setupWorkspace(options: {
     clients,
     writeEnabled: true,
     usageLoggingEnabled: true,
-    rulesWritten: rules.wrote,
+    rulesWritten,
     configFilesWritten,
-    warnings: rules.drifted.map((item) => `Rule drift: ${item.path}`),
+    warnings: [...rules.drifted.map((item) => `Rule drift: ${item.path}`), ...sessionWarnings],
     copilotInlineResults,
+    // `.code-workspace` files are looked up last, from the FINAL status: a
+    // run that gave the settings back (`withdrawCopilotGuide`) ends `manual`.
+    copilotGuide: copilotGuide !== undefined
+      ? withCodeWorkspaceFiles(root, copilotGuide.report)
+      : { status: "not-applicable" },
   };
 }
 
@@ -1202,6 +1777,20 @@ export async function runWorkspace(
     process.exitCode = 1;
     return;
   }
+  const rawCopilotGuide = valueAfter(rest, "--copilot-guide");
+  const copilotGuide: CopilotGuideRequest | undefined =
+    rawCopilotGuide !== undefined && isCopilotGuideRequest(rawCopilotGuide) ? rawCopilotGuide : undefined;
+  if (rawCopilotGuide !== undefined && copilotGuide === undefined) {
+    process.stderr.write(`tl workspace: unrecognized --copilot-guide value '${rawCopilotGuide}' (expected ${COPILOT_GUIDE_VALUES.join(" | ")})\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const copilotSessionContext = valueAfter(rest, "--copilot-session-context");
+  if (copilotSessionContext !== undefined && copilotSessionContext !== "install" && copilotSessionContext !== "keep") {
+    process.stderr.write("tl workspace: --copilot-session-context expects install | keep\n");
+    process.exitCode = 1;
+    return;
+  }
   // P2-3(1): arg parsing — resolve the profile setupWorkspace() will
   // actually write so --json (and the plain-text summary) can report the
   // real outcome instead of silently omitting it whenever --guide-profile
@@ -1222,6 +1811,8 @@ export async function runWorkspace(
     ...(guideProfile !== undefined ? { guideProfile } : {}),
     ...(toolSurface !== undefined ? { toolSurface } : {}),
     ...(copilotInlineResults !== undefined ? { copilotInlineResults } : {}),
+    ...(copilotGuide !== undefined ? { copilotGuide } : {}),
+    ...(copilotSessionContext !== undefined ? { copilotSessionContext } : {}),
   });
   const registryTarget = options.registryPath ?? configFilePath();
   recordWorkspaceInInstall(options.installHome ?? resolveInstallHome(), result);
@@ -1248,7 +1839,8 @@ export async function runWorkspace(
     return;
   }
   const copilotLine = formatCopilotInlineResultsLine(result.workspaceRoot, result.copilotInlineResults);
-  const guideProfileAdviceLine = formatGuideProfileAdviceLine(result.clients, effectiveGuideProfile);
+  const copilotGuideLine = formatCopilotGuideLine(result.workspaceRoot, result.copilotGuide);
+  const guideProfileAdviceLine = formatGuideProfileAdviceLine(result.clients, effectiveGuideProfile, result.copilotGuide);
   process.stdout.write(
     `TokenLighten is ready for ${result.clients.join(", ")}.\n`
       + `AI rules: ${result.rulesWritten.length} file(s)\n`
@@ -1258,6 +1850,7 @@ export async function runWorkspace(
       + `guide_profile: ${effectiveGuideProfile}\n`
       + (serverBuild !== undefined ? "server_build: " + serverBuild + "\n" : "")
       + (copilotLine !== undefined ? copilotLine + "\n" : "")
+      + (copilotGuideLine !== undefined ? copilotGuideLine + "\n" : "")
       + (guideProfileAdviceLine !== undefined ? guideProfileAdviceLine + "\n" : ""),
   );
 }

@@ -31,6 +31,18 @@ import { classifyCommentLines } from "../../../util/lineClassify.js";
 import { handleTable } from "../../../util/handles.js";
 import { isWithin } from "../../../util/safePath.js";
 import { findWidePageEnabled } from "../../../util/flags.js";
+// SPC (2026-09-29): host-ceiling lookup for findResponseCapBytes() below.
+// clientProfile.ts has ZERO internal imports of its own (a pure lookup
+// module over a static registry), so this direction cannot form a cycle —
+// unlike protocol/envelope.ts (whose ProtocolCallContext carries the SAME
+// clientId per-call) or server.ts (whose capturedClientId is the primary
+// source of it): both of THOSE already reach back into this file
+// (envelope.ts -> emit.ts -> searchRequestContinuation.ts ->
+// state/searchRequestStore.ts -> this file; server.ts imports this file
+// directly), which is why neither is imported here — see
+// `hostResponseByteCeiling`'s own doc comment for what this narrower,
+// cycle-safe substitute does and does not cover.
+import { resolveClientProfile } from "../../../protocol/codec/clientProfile.js";
 // L3 (2026-08-08 find-honesty): recovery affordances rank by what the SERVED
 // surface actually contains, and the edit-grade hint is gated on whether the
 // file it names could be an edit target at all. state/session.ts imports
@@ -222,7 +234,7 @@ export function enumerateFindTextUniverse(
  *
  * DESIGN-v0.15 review finding 2(b) (2026-09-08): an absence proof built ONLY
  * over `enumerateFindTextUniverse`'s own narrow extension set can disagree
- * with `search_files find` for the identical term/workspace — the reviewer's
+ * with `tl_search_files find` for the identical term/workspace — the reviewer's
  * counter-example is `Redis` inside `src/notes.adoc` (an unrecognized
  * extension `find` still discovers via this exact fallback, but the base
  * universe silently drops with no omission counted at all, since a file
@@ -315,6 +327,101 @@ export const MAX_INVENTORY_RESPONSE_BYTES = 24 * 1024;
 export const FIND_WIDE_PAGE_RESPONSE_BYTES = 16 * 1024;
 
 /**
+ * SPC (2026-09-29 search-pages-sized-to-the-host-ceiling): an explicit,
+ * per-call override for the effective find response byte ceiling
+ * `findResponseCapBytes()` (below) resolves — the seam a caller that knows
+ * its own effective ceiling (an explicit `budget`, or a known client's
+ * smaller response ceiling, "caller budget > host ceiling > the flat
+ * FIND_WIDE_PAGE_RESPONSE_BYTES default") can use to size the FIRST find
+ * response tighter OR looser than that flat default, without a signature
+ * change at any of `findResponseCapBytes()`/`findInventoryCapBytes()`'s many
+ * existing bare-call call sites in this file (fitFilesToCap/applyRoles,
+ * five call-site pairs) and in relatedLookups.ts's/memberSweep.ts's own
+ * additive checks (see those two files' own doc comments — as those run
+ * as SEPARATE, later passes over an already-returned response, outside
+ * this override's scope, see below).
+ *
+ * Set for the duration of ONE `buildFindResponse()`/
+ * `buildFindResponseForQueries()` call via `withResponseByteCeilingOverride`
+ * (below) — both entry points are fully synchronous top to bottom (no
+ * `await` between their own try and return; server.ts's find dispatch
+ * itself documents this), so a plain module-level variable restored in a
+ * `finally` is sufficient: there is no concurrent/interleaved call this
+ * could leak across, and nested calls (none exist today) would compose
+ * correctly regardless. NOT consulted by relatedLookups.ts's/memberSweep.ts's
+ * own additive byte-cap checks, which server.ts runs AFTER
+ * `buildFindResponse`/`buildFindResponseForQueries` has already returned
+ * (confirmed: `rawFindResponse = buildFindResponse(...)` completes before
+ * `maybeAttachMemberSweepToFindResponse`/`maybeAttachRelatedLookups` run on
+ * the result) — by then this override has already been restored to
+ * whatever it was before this call (`undefined` at top level), so those two
+ * additive passes always see the flag-driven default. This is a documented
+ * scope boundary, not a silent gap.
+ *
+ * server.ts's `tl_search_files` find dispatch (both the single-`query` and the
+ * `queries[]` branches) resolves this from the SAME caller-declared
+ * `budget.bytes`/`budget.tokens` (post-canonical-mapping `args.maxBytes`/
+ * `args.maxTokens`) every other caller-declared-budget consumer in that file
+ * reads, via the shared `resolveCallerByteCeiling` helper — `undefined`
+ * (no caller budget declared, the common case) changes nothing: every
+ * accessor falls through to the host-ceiling tier, then the flat default,
+ * exactly as if this parameter did not exist.
+ */
+let activeFindResponseByteCeilingOverride: number | undefined;
+
+/**
+ * Runs `fn` with `activeFindResponseByteCeilingOverride` set to `ceiling`
+ * (see that variable's own doc comment), always restoring the PREVIOUS value
+ * afterward — including on a thrown error, so a failed find never leaves a
+ * stale override standing for the next call.
+ */
+function withResponseByteCeilingOverride<T>(ceiling: number | undefined, fn: () => T): T {
+  const previous = activeFindResponseByteCeilingOverride;
+  activeFindResponseByteCeilingOverride = ceiling;
+  try {
+    return fn();
+  } finally {
+    activeFindResponseByteCeilingOverride = previous;
+  }
+}
+
+/**
+ * SPC (2026-09-29): the "host ceiling" tier of `findResponseCapBytes()`'s
+ * "caller budget > host ceiling > the flat 16 KB default" precedence — a
+ * known client's own smaller default response ceiling (today: VS Code's
+ * measured 14336-byte spill threshold, protocol/codec/clientProfile.ts's
+ * `VSCODE_CLIENT_PROFILE.responseByteCeiling`), so a find page defaults to
+ * fitting under it INSTEAD of the flat 16384-byte default that would, on its
+ * own, already exceed VS Code's ceiling before `inventory` is even spliced
+ * on. Applies regardless of whether TL_TURN_ECONOMY is set — the wide page
+ * being the default now (SPC) means this host's OWN ceiling is what has to
+ * keep it in check, not a per-host opt-in umbrella.
+ *
+ * COVERAGE LIMIT (documented, not silent): resolves ONLY the explicit
+ * `TOKENLIGHTEN_CLIENT_ID` override half of server.ts's `resolvedClientId()`
+ * (see that function's own doc comment) — this file cannot safely import
+ * server.ts's `capturedClientId` (server.ts already imports this file; that
+ * direction would be a genuine cycle) or protocol/envelope.ts's per-call
+ * `ProtocolCallContext.clientId` (envelope.ts also already reaches this file
+ * transitively — see the `resolveClientProfile` import's own doc comment
+ * above). A real client that identifies itself ONLY through the MCP
+ * `initialize` handshake, never through this env var, is therefore not
+ * detected here; it still reaches a tighter ceiling via
+ * `opts.responseByteCeiling` if a caller resolves and threads the
+ * handshake-captured value through explicitly (a small, separate,
+ * out-of-region server.ts change — see that parameter's own doc comment),
+ * and otherwise falls through to the flat default exactly as before this
+ * tier existed. The test harness's "vscode" config (CONFIG_ENV,
+ * qualityFirstScenarios.ts) sets this same env var, so this tier is
+ * fully exercisable end-to-end today.
+ */
+function hostResponseByteCeiling(): number | undefined {
+  const override = process.env["TOKENLIGHTEN_CLIENT_ID"];
+  const clientId = override !== undefined && override !== "" ? override : undefined;
+  return resolveClientProfile(clientId).responseByteCeiling;
+}
+
+/**
  * F5 (2026-09-19 find-wide-page) — the ONE accessor for the explore
  * action=find snippet-section byte cap. Every `fitFilesToCap()`/
  * `applyRoles()` call site in this file, plus relatedLookups.ts's and
@@ -322,18 +429,33 @@ export const FIND_WIDE_PAGE_RESPONSE_BYTES = 16 * 1024;
  * importing the raw constant, as of this wave), read the cap through here —
  * so TL_FIND_WIDE_PAGE has exactly one place to move the number.
  *
- * OFF (default, TL_FIND_WIDE_PAGE unset/false/"0"/"no"/"off"): returns
+ * Explicit OFF (TL_FIND_WIDE_PAGE="0"/"false"/"no"/"off"): returns
  * MAX_RESPONSE_BYTES (4096) — byte-identical to pre-F5 output;
- * replayCorpus.spec.ts and wireBaselines.spec.ts pass without regeneration.
+ * replayCorpus.spec.ts and wireBaselines.spec.ts pass under that override.
+ * Neither the per-call ceiling override nor the host-ceiling tier below is
+ * consulted in this branch — an operator who explicitly asked for the
+ * legacy narrow page gets it byte-for-byte, regardless of any
+ * caller/host-resolved ceiling.
  *
- * ON: returns FIND_WIDE_PAGE_RESPONSE_BYTES (16384). MOTIVATION: measured
- * live-session forensics (2026-09-19) — a 7-file/50-match result truncated
- * at the 4096-byte cap came back as four separate follow-up calls (3084 B +
- * 1681 B + 1499 B + …), one full priced model turn per ~1.5-3 KB page.
- * Measured host pricing makes one extra turn cost about as much as 10-20 KB
- * of new payload, so a 4 KB page sits far below break-even; a wider first
- * page trades bytes the host was already going to spend across several
- * turns for fewer turns instead.
+ * ON (the default, SPC 2026-09-29 — see util/flags.ts's "SPC addendum"),
+ * "caller budget > host ceiling > the flat default":
+ *   1. The active per-call ceiling override (see
+ *      `activeFindResponseByteCeilingOverride`'s own doc comment), when one
+ *      is set for this call — floored at MAX_RESPONSE_BYTES so a tiny
+ *      caller-declared budget can never shrink a page below the legacy
+ *      floor (fitFilesToCap's own per-file-foothold guarantee needs that
+ *      much room to serve even one match per matched file).
+ *   2. Absent an override, the resolved client's own smaller default
+ *      ceiling (see `hostResponseByteCeiling()`'s own doc comment), when one
+ *      is known for this process — same MAX_RESPONSE_BYTES floor.
+ *   3. Absent both, the flat FIND_WIDE_PAGE_RESPONSE_BYTES (16384) default.
+ * MOTIVATION: measured live-session forensics (2026-09-19) — a
+ * 7-file/50-match result truncated at the 4096-byte cap came back as four
+ * separate follow-up calls (3084 B + 1681 B + 1499 B + …), one full priced
+ * model turn per ~1.5-3 KB page. Measured host pricing makes one extra turn
+ * cost about as much as 10-20 KB of new payload, so a 4 KB page sits far
+ * below break-even; a wider first page trades bytes the host was already
+ * going to spend across several turns for fewer turns instead.
  *
  * Deliberately does NOT touch findText()'s own use of the bare
  * MAX_RESPONSE_BYTES constant further down — that is the low-level
@@ -343,7 +465,16 @@ export const FIND_WIDE_PAGE_RESPONSE_BYTES = 16 * 1024;
  * existing behavior regardless of this flag.
  */
 export function findResponseCapBytes(): number {
-  return findWidePageEnabled() ? FIND_WIDE_PAGE_RESPONSE_BYTES : MAX_RESPONSE_BYTES;
+  if (!findWidePageEnabled()) return MAX_RESPONSE_BYTES;
+  const override = activeFindResponseByteCeilingOverride;
+  if (override !== undefined && Number.isFinite(override)) {
+    return Math.max(MAX_RESPONSE_BYTES, Math.floor(override));
+  }
+  const hostCeiling = hostResponseByteCeiling();
+  if (hostCeiling !== undefined && Number.isFinite(hostCeiling)) {
+    return Math.max(MAX_RESPONSE_BYTES, Math.floor(hostCeiling));
+  }
+  return FIND_WIDE_PAGE_RESPONSE_BYTES;
 }
 
 /**
@@ -354,27 +485,30 @@ export function findResponseCapBytes(): number {
  * bounds more than just the inventory array.
  *
  * DECISION: raise it under the flag, by the SAME delta the snippet cap grows
- * (FIND_WIDE_PAGE_RESPONSE_BYTES - MAX_RESPONSE_BYTES = 12288 bytes), rather
- * than leaving it at 24576. MAX_INVENTORY_RESPONSE_BYTES technically still
- * bounds every response either way — shrinkArrayToFit's one-item floor
- * always fits well inside 24576, even against a 16384-byte files[] section,
- * so nothing breaks if left unraised — but leaving it flat would shrink the
- * inventory's own headroom from ~20480 bytes (24576-4096, today) to ~8192
- * bytes (24576-16384) exactly when a response is large enough to still need
- * truncation under the wider cap, which is disproportionately the case with
- * big match sprawls (100-200+ files) where a same-sized inventory listing is
- * most likely to need every one of those bytes. Raising the ceiling by the
- * identical delta preserves the EXACT same ~20480-byte inventory headroom on
- * both sides of the flag, so "snippets may truncate; the inventory never
- * lies" keeps the same practical margin it has today instead of degrading
- * only for large results. Still far under wireBudget.ts's independent
- * `search.matches` wire ceiling (131072 bytes), so the generic wire-shedding
- * backstop is unaffected by this change either way.
+ * over MAX_RESPONSE_BYTES — now `findResponseCapBytes() - MAX_RESPONSE_BYTES`
+ * (12288 absent a per-call override, the same FIND_WIDE_PAGE_RESPONSE_BYTES
+ * - MAX_RESPONSE_BYTES this returned before SPC), so a caller-resolved
+ * ceiling narrower or wider than the flat default still preserves the exact
+ * same inventory headroom on top of it, rather than leaving it pinned to a
+ * delta computed only for the flat default. MAX_INVENTORY_RESPONSE_BYTES
+ * technically still bounds every response either way — shrinkArrayToFit's
+ * one-item floor always fits well inside 24576, even against a 16384-byte
+ * files[] section, so nothing breaks if left unraised — but leaving it flat
+ * would shrink the inventory's own headroom from ~20480 bytes (24576-4096,
+ * today) to ~8192 bytes (24576-16384) exactly when a response is large
+ * enough to still need truncation under the wider cap, which is
+ * disproportionately the case with big match sprawls (100-200+ files) where
+ * a same-sized inventory listing is most likely to need every one of those
+ * bytes. Raising the ceiling by the identical delta preserves the EXACT same
+ * ~20480-byte inventory headroom either way, so "snippets may truncate; the
+ * inventory never lies" keeps the same practical margin it has today instead
+ * of degrading only for large results. Still far under wireBudget.ts's
+ * independent `search.matches` wire ceiling (131072 bytes), so the generic
+ * wire-shedding backstop is unaffected by this change either way.
  */
 export function findInventoryCapBytes(): number {
-  return findWidePageEnabled()
-    ? MAX_INVENTORY_RESPONSE_BYTES + (FIND_WIDE_PAGE_RESPONSE_BYTES - MAX_RESPONSE_BYTES)
-    : MAX_INVENTORY_RESPONSE_BYTES;
+  if (!findWidePageEnabled()) return MAX_INVENTORY_RESPONSE_BYTES;
+  return MAX_INVENTORY_RESPONSE_BYTES + (findResponseCapBytes() - MAX_RESPONSE_BYTES);
 }
 
 /**
@@ -1011,8 +1145,13 @@ export interface FindFileGroup {
   range?: string;
   /** Range handle paired with `context`. */
   handle?: string;
-  /** Bounded exact source context around a uniquely dominant repeated hit. */
+  /**
+   * Bounded exact source context around a uniquely dominant repeated hit, or
+   * (TL_FIND_SMALL_BODIES) the whole text of a small file — then `whole`.
+   */
   context?: string;
+  /** `context` is the file's entire text (`attachSmallFileContexts`). */
+  whole?: true;
 }
 
 export interface FindResponse {
@@ -1130,7 +1269,7 @@ export interface FindResponse {
   term_results?: FindTermResult[];
   /** L1 (2026-07-30 T11 forensics): present when `query` resolves to a unique class/interface definition with >=2 members — see memberSweep.ts. Attached by server.ts's find dispatch (post-buildFindResponse), not by this function. */
   member_sweep?: MemberSweepAttachment;
-  /** S9 (2026-08-07 native-IO-escape wave): optional, non-required companion calls for the SAME identifier's own definition (search_files action=symbols) and call sites (action=references) — see relatedLookups.ts. Present only for a literal (non-regex) exact single-identifier hit; never on absence, a naming-variant match, or a tokenized fallback. Unlike next_call elsewhere in this server, neither entry is a required continuation. Attached by server.ts's find dispatch (post-buildFindResponse), not by this function. */
+  /** S9 (2026-08-07 native-IO-escape wave): optional, non-required companion calls for the SAME identifier's own definition (tl_search_files action=symbols) and call sites (action=references) — see relatedLookups.ts. Present only for a literal (non-regex) exact single-identifier hit; never on absence, a naming-variant match, or a tokenized fallback. Unlike next_call elsewhere in this server, neither entry is a required continuation. Attached by server.ts's find dispatch (post-buildFindResponse), not by this function. */
   related_lookups?: RelatedLookups;
 }
 
@@ -1362,11 +1501,114 @@ function repeatedHitHint(workspace: string, candidate: FindFileGroup): string {
   return repeatedHitHintText(where, classifyRepeatedHit(isPlausibleEditTarget(workspace, candidate.path)));
 }
 
+/** TL_FIND_SMALL_BODIES limits (see `attachSmallFileContexts`). */
+export const SMALL_FIND_BODY_MAX_FILES = 6;
+export const SMALL_FIND_BODY_MAX_LINES = 80;
+export const SMALL_FIND_BODY_MAX_FILE_BYTES = 2_400;
+export const SMALL_FIND_BODY_MAX_TOTAL_BYTES = 3_200;
+/** A whole file this short drops its `snippets` (Copilot retest r6; see `attachSmallFileContexts`). */
+export const SMALL_FIND_BODY_SNIPPET_DROP_MAX_LINES = 20;
+/** The `hint` a find reply carries once an entry is `whole` (Copilot retest r7; see `attachSmallFileContexts`). */
+export const SMALL_FIND_WHOLE_HINT = "whole:true = context is the entire file - already read, no read needed";
+
+/**
+ * Copilot retest r5 (2026-10-03), TL_FIND_SMALL_BODIES (util/flags.ts
+ * `findSmallBodiesEnabled`): when a finished `find` response lists its WHOLE
+ * result (`total_files` equals `files.length`, nothing truncated) and that
+ * result is at most SMALL_FIND_BODY_MAX_FILES files, every listed file of at
+ * most SMALL_FIND_BODY_MAX_LINES lines and SMALL_FIND_BODY_MAX_FILE_BYTES
+ * bytes gets its full text in `context`, with `range` "1-N" and a range
+ * `handle` — the fields `attachDominantEditContext` already puts on a
+ * `files[]` entry (r7 adds `whole`, below). In result order, until
+ * SMALL_FIND_BODY_MAX_TOTAL_BYTES of text are attached; a file past that
+ * keeps only its snippets, exactly as before.
+ *
+ * Measured motivation: r5's one TokenLighten run on a three-file question
+ * searched, then read the three hits, then answered — three model rounds,
+ * the same as the native grep/read path. The text of those three files was
+ * 340 bytes; carrying it in the search result is the round.
+ *
+ * Left untouched: an entry the session already holds (`served_this_session`,
+ * set by the served-find protocol before this runs) and an entry that
+ * already carries a dominant-edit window. Never applied when the caller
+ * declared a byte/token budget (`declaredBudget`) — that caller asked for
+ * less. Like the dominant-edit context, this text is NOT enrolled in the
+ * served-range ledger: a later read of the same file serves its bytes again
+ * rather than answering with a receipt for bytes this ledger never recorded.
+ * Mutates `body` in place.
+ *
+ * Copilot retest r6 (2026-10-03): an entry whose whole text has at most
+ * SMALL_FIND_BODY_SNIPPET_DROP_MAX_LINES lines drops `snippets`: every snippet
+ * is a line of that text, `lines` still says where the matches are, and a
+ * file that short can be read line by line at a glance. r5's exact search
+ * carried its three files' matched lines twice (~420 of its 1,434 bytes). A
+ * longer file keeps its snippets, which pair each matched line number with
+ * its text so a citation needs no counting through an un-numbered `context`;
+ * `more_lines` always stays (`lines.length + more_lines` is the true count).
+ *
+ * Copilot retest r7 (2026-10-03): MAI flash searched with tl_search_files,
+ * received all three files whole, and still re-read each one with read_file
+ * before answering — three rounds again. Nothing in the reply said the text
+ * was whole: `context` also carries the dominant-edit WINDOW (a slice of a
+ * larger file), and `range` "1-N" does not say N is the last line. So an
+ * entry given its whole text also gets `whole: true`, set before `context`
+ * so that it reads first, and the reply's `hint` gains SMALL_FIND_WHOLE_HINT
+ * after any hint it already had.
+ */
+export function attachSmallFileContexts(
+  body: Record<string, unknown>,
+  workspace: string,
+  declaredBudget: boolean,
+): void {
+  if (declaredBudget) return;
+  const files = body["files"];
+  if (!Array.isArray(files) || files.length === 0 || files.length > SMALL_FIND_BODY_MAX_FILES) return;
+  if (body["total_files"] !== files.length || body["truncated"] === true || body["all_served"] === true) return;
+  let attached = 0;
+  let wholeFiles = 0;
+  for (const entry of files as Array<Record<string, unknown>>) {
+    if (entry === null || typeof entry !== "object") continue;
+    const relPath = entry["path"];
+    if (typeof relPath !== "string" || relPath === "") continue;
+    if (entry["served_this_session"] === true || entry["context"] !== undefined) continue;
+    const base = path.resolve(workspace);
+    const abs = path.resolve(base, relPath);
+    if (!isWithin(abs, base)) continue;
+    let text: string;
+    try {
+      const stat = fs.lstatSync(abs);
+      if (!stat.isFile() || stat.size > SMALL_FIND_BODY_MAX_FILE_BYTES) continue;
+      const decoded = decodeTextBuffer(fs.readFileSync(abs));
+      if (decoded === null) continue;
+      text = decoded;
+    } catch {
+      continue;
+    }
+    const lines = text.split(/\r?\n/);
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    if (lines.length === 0 || lines.length > SMALL_FIND_BODY_MAX_LINES) continue;
+    const context = lines.join("\n");
+    const bytes = Buffer.byteLength(context, "utf8");
+    if (attached + bytes > SMALL_FIND_BODY_MAX_TOTAL_BYTES) continue;
+    attached += bytes;
+    const range = `1-${lines.length}`;
+    entry["range"] = range;
+    entry["handle"] = handleTable.upsert({ kind: "range", path: relPath, range, workspaceRoot: workspace }).id;
+    entry["whole"] = true;
+    entry["context"] = context;
+    if (lines.length <= SMALL_FIND_BODY_SNIPPET_DROP_MAX_LINES) delete entry["snippets"];
+    wholeFiles += 1;
+  }
+  if (wholeFiles === 0) return;
+  const existing = typeof body["hint"] === "string" && body["hint"] !== "" ? body["hint"] : undefined;
+  body["hint"] = decideHint({ primary: existing, secondary: SMALL_FIND_WHOLE_HINT }, { strongAbsence: false }).text;
+}
+
 /**
  * F2 (2026-08-01 find-diet): per-file cap on how many matched lines/snippets
  * a SINGLE file entry shows, applied before any response-wide byte fitting.
  *
- * MOTIVATION (bench forensics, T09): `search_files action=find
+ * MOTIVATION (bench forensics, T09): `tl_search_files action=find
  * query="case IssuePriority.URGENT"` measured a 13.5 KB result, and a
  * 5-identifier OR query measured 12.5 KB, against native-grep equivalents
  * of 79-930 bytes. Without this cap, a single pathologically wide match (one
@@ -1411,9 +1653,31 @@ export const FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE = 64;
  * every reader checked for this change (the wire budget shedder, the
  * search-request continuation ledger) already indexes `snippets[i]`
  * defensively, where out-of-range is `undefined`, not a crash.
+ *
+ * SPC addendum (2026-09-29): the wider per-file allowance additionally
+ * requires `findResponseCapBytes() > MAX_RESPONSE_BYTES` — i.e. the
+ * EFFECTIVE ceiling for THIS call (caller budget, then host ceiling, then
+ * the flat default; see that accessor's own doc comment) must have real
+ * headroom above the legacy floor, not just the flag being on. Bare line
+ * numbers are cheap PER FILE, but not free: a caller that declared a small
+ * `budget.bytes` (clamped no lower than MAX_RESPONSE_BYTES by
+ * findResponseCapBytes() itself) is asking for the legacy-sized page, and
+ * granting a single matched file 64 bare line numbers regardless would
+ * silently spend a large share of even that clamped floor on ONE file
+ * before any cross-file byte fitting runs — the exact "2 KB truncation must
+ * not hide whole directories" failure mode this file's own MAX_LINES_PER_FILE
+ * doc comment (above) already guards against, just for the line-count
+ * dimension instead of the byte dimension. A caller/host with real headroom
+ * (the flat 16384 default, or VS Code's 14336 host tier — both well above
+ * MAX_RESPONSE_BYTES) is unaffected: this only narrows the allowance back to
+ * MAX_LINES_PER_FILE when the effective ceiling is AT the legacy floor
+ * (either explicitly, or because a caller-declared budget was clamped up to
+ * it), matching that floor's own pre-F6 per-file behavior exactly.
  */
 function capFileGroup(group: FindFileGroup): FindFileGroup {
-  const lineCap = findWidePageEnabled() ? FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE : MAX_LINES_PER_FILE;
+  const lineCap = findWidePageEnabled() && findResponseCapBytes() > MAX_RESPONSE_BYTES
+    ? FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE
+    : MAX_LINES_PER_FILE;
   const snippetsOverCap = group.snippets !== undefined && group.snippets.length > MAX_LINES_PER_FILE;
   if (group.lines.length <= lineCap && !snippetsOverCap) return group;
   const capped: FindFileGroup = { ...group, lines: group.lines.slice(0, lineCap) };
@@ -2817,7 +3081,7 @@ function absenceAwareHint(
 const FIND_DID_YOU_MEAN_CHILDREN_CAP = 20;
 
 /**
- * C2 (2026-09-03, INV-C F2): `search_files action=tree` refuses `not-found`
+ * C2 (2026-09-03, INV-C F2): `tl_search_files action=tree` refuses `not-found`
  * (with a `did_you_mean` ancestor listing) when its `path` does not exist
  * under the workspace at all; `find` had no equivalent check, so the SAME
  * typo'd scope silently came back as an ordinary `total_matches:0` response
@@ -2857,7 +3121,7 @@ const FIND_DID_YOU_MEAN_CHILDREN_CAP = 20;
  * back as an ordinary, confidence-shaped `total_matches:0` — indistinguishable
  * from a real, fully-scanned negative search (and never falsely certifying
  * `absence` either, since `buildAbsenceExtra`'s own `scanned_files === 0` gate
- * withholds that separately). `search_files action=tree` already refuses the
+ * withholds that separately). `tl_search_files action=tree` already refuses the
  * identical input (`exploreTree.ts`'s `containedSubPath` -> `refused:true` ->
  * `path-outside-workspace` via `protocol/searchFamily.ts`'s conversion); this
  * function now refuses it too, reusing the SAME `path-outside-workspace` code
@@ -2871,7 +3135,7 @@ const FIND_DID_YOU_MEAN_CHILDREN_CAP = 20;
  * against.
  *
  * FX-R1 (2026-09-03, round-18B review finding 5): exported so
- * `tools/findReferences.ts` can reuse it verbatim — `search_files
+ * `tools/findReferences.ts` can reuse it verbatim — `tl_search_files
  * action=references` had no not-found/outside-workspace refusal at all
  * (a bare `total:0` with no `omitted`/`absence`/refusal for a nonexistent
  * scope, and only a disclosed-but-unrefused `omitted.outside_workspace` for
@@ -2942,11 +3206,28 @@ export function findScopeBoundaryRefusal(workspace: string, requestedPath: strin
  * fitFilesToCap/applyRoles cap trial via responseExtra/buildWithExtra
  * below, exactly like matched_terms/matched_variant, so a hint attached
  * here can never push a response over MAX_RESPONSE_BYTES unaccounted for.
+ *
+ * `opts.responseByteCeiling` (SPC, 2026-09-29): an explicit per-call
+ * override for the effective response ceiling `findResponseCapBytes()`/
+ * `findInventoryCapBytes()` resolve against for THIS call only — see
+ * `activeFindResponseByteCeilingOverride`'s own doc comment (above) for
+ * exactly what it covers and does not. `undefined` (the default — no
+ * production caller sets it yet) changes nothing: every accessor falls
+ * through to the flag-driven default exactly as before this parameter
+ * existed.
  */
 export function buildFindResponse(
   input: FindTextInput,
   workspace: string,
-  opts: { extraHint?: string } = {},
+  opts: { extraHint?: string; responseByteCeiling?: number } = {},
+): FindResponse {
+  return withResponseByteCeilingOverride(opts.responseByteCeiling, () => buildFindResponseImpl(input, workspace, opts));
+}
+
+function buildFindResponseImpl(
+  input: FindTextInput,
+  workspace: string,
+  opts: { extraHint?: string; responseByteCeiling?: number },
 ): FindResponse {
   const query = input.query;
   const build = (files: FindFileGroup[], extra: Record<string, unknown> = {}): FindResponse => {
@@ -3337,7 +3618,21 @@ export interface FindTextMultiInput {
   caseInsensitive?: boolean;
 }
 
-export function buildFindResponseForQueries(input: FindTextMultiInput, workspace: string): FindResponse {
+/**
+ * `opts.responseByteCeiling` (SPC, 2026-09-29): same per-call override as
+ * `buildFindResponse()`'s own — see that function's doc comment and
+ * `activeFindResponseByteCeilingOverride`'s doc comment (above) for exactly
+ * what it covers. `undefined`/omitted changes nothing.
+ */
+export function buildFindResponseForQueries(
+  input: FindTextMultiInput,
+  workspace: string,
+  opts: { responseByteCeiling?: number } = {},
+): FindResponse {
+  return withResponseByteCeilingOverride(opts.responseByteCeiling, () => buildFindResponseForQueriesImpl(input, workspace));
+}
+
+function buildFindResponseForQueriesImpl(input: FindTextMultiInput, workspace: string): FindResponse {
   const queries = input.queries;
   const build = (files: FindFileGroup[], extra: Record<string, unknown> = {}): FindResponse => {
     const total_matches = files.reduce((n, f) => n + f.lines.length, 0);

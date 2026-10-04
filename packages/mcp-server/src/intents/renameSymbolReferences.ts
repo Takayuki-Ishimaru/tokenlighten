@@ -35,7 +35,7 @@ export async function applyRenameSymbolReferences(
     return {
       ok: false,
       reason: "intent-unsupported",
-      detail: "handle must be kind=symbol — use read_file with a symbol target to get one",
+      detail: "handle must be kind=symbol — use tl_read_file with a symbol target to get one",
     };
   }
 
@@ -45,7 +45,7 @@ export async function applyRenameSymbolReferences(
       ok: false,
       reason: "intent-unsupported",
       ...(handle.symbol
-        ? { next: { tool: "search_files", arguments: { action: "references", queries: [handle.symbol] } } }
+        ? { next: { tool: "tl_search_files", arguments: { action: "references", queries: [handle.symbol] } } }
         : {}),
       detail: "set precondition=references-reviewed after reviewing the emitted reference search",
     };

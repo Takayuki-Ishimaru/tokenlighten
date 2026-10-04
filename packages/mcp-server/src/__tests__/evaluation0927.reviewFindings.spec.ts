@@ -136,9 +136,9 @@ describe("item 4 — importSpecifiersNaming: TS/JS barrel re-exports", () => {
     expect(importSpecifiersNaming(['export { DEFAULT_OPTIONS } from "./defaults";'], "DEFAULT_OPTIONS", false))
       .toEqual([{ specifier: "./defaults", relative: true, wildcard: false, packageEligible: true }]);
   });
-  it("an aliased barrel re-export resolves by the EXPORTED alias, not the original name", () => {
+  it("an aliased barrel re-export is matched by the LOCAL alias, and now also carries the source's own exported name (FIX-ALIAS, eval-0929 §4) so a caller can chase THAT name in the target file instead of the local one", () => {
     expect(importSpecifiersNaming(['export { Foo as DEFAULT_OPTIONS } from "./defaults";'], "DEFAULT_OPTIONS", false))
-      .toEqual([{ specifier: "./defaults", relative: true, wildcard: false, packageEligible: true }]);
+      .toEqual([{ specifier: "./defaults", relative: true, wildcard: false, packageEligible: true, exportedName: "Foo" }]);
     expect(importSpecifiersNaming(['export { Foo as DEFAULT_OPTIONS } from "./defaults";'], "Foo", false)).toEqual([]);
   });
   it("a wildcard re-export is a candidate for any name (it names nothing itself)", () => {
@@ -243,7 +243,7 @@ async function ask(ws: string, query: string, hopCap = 14): Promise<ChainResult>
   const s = await spawnedServer(ws);
   return followNextToEnd(
     s,
-    { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
+    { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
     { cwd: ws, hopCap },
   );
 }
@@ -481,12 +481,12 @@ describe("item 10 — the facet plan memo is lane-scoped", () => {
     const query = "Explain the default HTTP_TIMEOUT_MS value and the shouldRetry conditions.";
     const chainA = await followNextToEnd(
       s,
-      { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws, lane: "fab-lane-a" } },
+      { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws, lane: "fab-lane-a" } },
       { cwd: ws, hopCap: 10 },
     );
     const chainB = await followNextToEnd(
       s,
-      { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws, lane: "fab-lane-b" } },
+      { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws, lane: "fab-lane-b" } },
       { cwd: ws, hopCap: 10 },
     );
     for (const chain of [chainA, chainB]) {

@@ -474,7 +474,7 @@ export function resolveReadCursor(
  * The page that ships is
  * `{"v":1,"kind":"read.text","evidence":[{"handle","path","range","body",
  * "remaining"}],"sha","total_lines","limit":{"cause":"wire","omitted",
- * "next":{"tool":"read_file","arguments":{"cwd","cursor"}}}}`, and the cursor
+ * "next":{"tool":"tl_read_file","arguments":{"cwd","cursor"}}}}`, and the cursor
  * token alone is ~200 characters (a 61-byte handle body plus a 64-hex binding
  * `aad` plus the MAC, base64url'd, behind a 12-char prefix).
  *
@@ -894,6 +894,42 @@ export function settleReadRequest(
   return undefined;
 }
 
+/**
+ * DRY RUN of `settleReadRequest` (R2-R1, P0-2): the D (per target path) a
+ * settle of `shippedWindowsByPath` WOULD record, computed on a shallow COPY of
+ * `staged` — nothing is booked onto `staged`, persisted or minted.
+ * `recordShippedPage` and `settledTargets` only ever REPLACE `staged.state` /
+ * `staged.page` by reference (never mutate a shared array or object), so a
+ * spread copy is enough to keep the real staged request untouched.
+ *
+ * WHICH COVERAGE `C` IT READS. NOT the live ledger: that already holds this
+ * call's own PROVISIONAL spans (`recordServedRange` writes them at serve time
+ * for the whole window the producer BUILT; the funnel confirms or retracts them
+ * only after the response is decided), and a line the ladder or the fit is
+ * about to cut would then look delivered — a page cut down to ONE line of a
+ * fully-booked window previewed as COMPLETE, i.e. with no continuation at all,
+ * where the real settle (which runs after the retraction) owes the whole rest:
+ * the measured size was off by the entire continuation (375 B for a markdown
+ * range at 1.5 KB), which is what let the response overshoot the budget the
+ * fit had just certified. It reads the request's OWN baseline instead — the
+ * settled coverage recorded when the request was opened, before this call
+ * booked anything — so that `D = Q - (C_baseline u S)` counts exactly what the
+ * candidate payload ships (`S`, in `shippedWindowsByPath`) and everything the
+ * caller held BEFORE this call. Where the live ledger grew between pages of a
+ * resumed request (another read of the same lines), the baseline is the smaller
+ * set, so the preview's D can only be WIDER than the real one: it sizes the
+ * continuation conservatively, never optimistically.
+ */
+export function previewSettledRemaining(
+  staged: StagedReadRequest,
+  shippedWindowsByPath?: ReadonlyMap<string, readonly LineWindow[]>,
+): Map<string, LineWindow[]> {
+  const copy: StagedReadRequest = { ...staged };
+  recordShippedPage(copy, shippedWindowsByPath);
+  const baselineOf = (target: { path: string }): LineWindow[] => parseWindows(staged.state.ledger_baseline?.[target.path] ?? []);
+  return new Map(settledTargets(copy, baselineOf).map((target) => [target.path, target.remaining]));
+}
+
 /** ONE settle attempt — see `settleReadRequest` for the retry contract. */
 function settleOnce(
   staged: StagedReadRequest,
@@ -931,9 +967,15 @@ function settleOnce(
  * payload. Nothing here re-derives delivery from a page's PLANNED boundary —
  * see the "SHIPPED, NEVER PLANNED" note below for the defect that rule closes.
  */
-function settledTargets(staged: StagedReadRequest): ReadRequestState["targets"] {
+function settledTargets(
+  staged: StagedReadRequest,
+  /** The coverage `C` to subtract. The live ledger for a real settle; `previewSettledRemaining` passes the request's baseline. */
+  coverageOf?: (target: { path: string; sha: string }) => LineWindow[],
+): ReadRequestState["targets"] {
   return staged.state.targets.map((target) => {
-    const ledgerNow = ledgerCoverage(staged.workspaceRoot, target.path, target.sha);
+    const ledgerNow = coverageOf !== undefined
+      ? coverageOf(target)
+      : ledgerCoverage(staged.workspaceRoot, target.path, target.sha);
     const baseline = staged.state.force_serve_origin === true
       ? parseWindows(staged.state.ledger_baseline?.[target.path] ?? [])
       : [];

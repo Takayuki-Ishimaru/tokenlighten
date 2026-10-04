@@ -1,7 +1,7 @@
 /**
  * readCodeSymbolCapDowngrade.spec.ts — FIX C (2026-07-12c forensics).
  *
- * Live failure: `read_file mode=symbol symbol=place` on QuoteOrchestrator.java
+ * Live failure: `tl_read_file mode=symbol symbol=place` on QuoteOrchestrator.java
  * refused `{ok:false,"error":"cap-exceeded",bytes:8378,maxBytes:8192,...}` for
  * being 2.3% over READ_SYMBOL_CAP_BYTES, forcing the agent to immediately
  * re-fetch the same content via mode=slice (which succeeded) — a pure-loss
@@ -179,7 +179,7 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(READ_SYMBOL_CAP_BYTES);
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "symbol", path: "big.ts", symbol },
     });
 
@@ -213,7 +213,7 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     // The continuation is a mode=slice over the SAME handle, starting strictly
     // after the exact source lines served, so it never replays the head.
     const next = limit["next"] as Record<string, unknown>;
-    expect(next["tool"]).toBe("read_file");
+    expect(next["tool"]).toBe("tl_read_file");
     const nextArgs = next["arguments"] as Record<string, unknown>;
     expect(nextArgs["content"]).toBe("auto");
     const nextTarget = (nextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
@@ -232,7 +232,7 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     const { ws, srv } = await newServer("under-cap-unchanged");
     writeFile(ws, "small.ts", "export function tiny(): number {\n  return 1;\n}\n");
 
-    const res = await srv.call("read_file", { mode: "symbol", path: "small.ts", symbol: "tiny" });
+    const res = await srv.call("tl_read_file", { mode: "symbol", path: "small.ts", symbol: "tiny" });
 
     // Rule T: absence of `limit` IS completeness — the v1 successor of
     // "no downgrade fields".
@@ -249,7 +249,7 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     const { content, symbol } = makeOverCapFileContent();
     writeFile(ws, "big2.ts", content);
 
-    const res = await srv.call("read_file", { mode: "symbol", path: "big2.ts", symbol });
+    const res = await srv.call("tl_read_file", { mode: "symbol", path: "big2.ts", symbol });
     // Rule T: the trimmed serve declares itself through `limit`; the bytes are
     // `evidence[0].body` (see d1's note on the re-point).
     expect(res["limit"]).toBeDefined();
@@ -280,7 +280,7 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     const { content, symbol } = makeOverCapFileContent();
     writeFile(ws, "big3.ts", content);
 
-    const res = await srv.call("read_file", { mode: "symbol", path: "big3.ts", symbol });
+    const res = await srv.call("tl_read_file", { mode: "symbol", path: "big3.ts", symbol });
     const limit = res["limit"] as Record<string, unknown>;
     expect(limit).toBeDefined();
     const downgradeEvidence = (res["evidence"] as Array<Record<string, unknown>>)[0]!;
@@ -292,7 +292,7 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     const range = String(nextTarget["range"]);
     expect(range).toMatch(/^\d+-\d+$/);
 
-    const sliceRes = await srv.call("read_file", nextArgs);
+    const sliceRes = await srv.call("tl_read_file", nextArgs);
     // resolveSlice's RANGE branch never refuses on cap — it serves a
     // (possibly further truncated) slice with its own continuation.
     expect(sliceRes["kind"]).toBe("read.text");
@@ -316,7 +316,7 @@ describe("readCodeSymbolCapDowngrade — mode=symbol cap-exceeded now downgrades
     const { content, symbol } = makeOverCapFileContent();
     writeFile(ws, "big4.ts", content);
 
-    const res = await srv.call("read_file", { mode: "auto", path: "big4.ts", symbol });
+    const res = await srv.call("tl_read_file", { mode: "auto", path: "big4.ts", symbol });
     // Same branch, same v1 shape: a bounded serve of the symbol's head, with
     // the cap's own dialect collapsed into `limit` + a mode=slice remainder.
     expect(res["kind"]).toBe("read.text");

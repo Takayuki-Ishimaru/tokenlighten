@@ -2,7 +2,7 @@
 // nudge).
 //
 // Evidence (bench run 2026-07-11c): an agent made 21 SINGLETON
-// edit_file calls in one session — never once using the edits[] batch form —
+// tl_edit_file calls in one session — never once using the edits[] batch form —
 // at ~1 billed turn each. Prompt guidance alone ("Batch the TL calls
 // themselves too" / the v18 "Batch independent edits" template bullet) does
 // not reliably land for every session, so this is the complementary
@@ -12,7 +12,7 @@
 //
 // 2026-07-24 (bench task T09 forensics): the hint used to fire on the 4th
 // successful single edit — too late in practice. Both observed T09 sessions
-// made 5 sequential single-file edit_file calls apiece and never saw (or at
+// made 5 sequential single-file tl_edit_file calls apiece and never saw (or at
 // least never heeded) a hint that landed only after 4 of those 5 calls were
 // already spent one-shot. The fire point is now the 2ND successful single
 // edit, and the wording is more actionable: it names the multi-FILE +
@@ -22,7 +22,7 @@
 //
 // See packages/mcp-server/src/util/session.ts (recordSingleEditCompletion,
 // recordEditsBatchUsed, BATCH_HINT_THRESHOLD = 2) and server.ts's
-// BATCH_HINT_TEXT / finishEdit's hint-firing logic inside the edit_file
+// BATCH_HINT_TEXT / finishEdit's hint-firing logic inside the tl_edit_file
 // dispatch case.
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -186,7 +186,7 @@ describe("editBatchingHint — fires exactly once on the 2nd successful single e
     const responses: Array<{ text: string; data: Record<string, unknown> }> = [];
     for (let i = 1; i <= 5; i++) {
       const res = await srv.rpc(i + 1, "tools/call", {
-        name: "edit_file",
+        name: "tl_edit_file",
         arguments: { path: "src/vals.ts", search: `A${i} = ${i}`, replace: `A${i} = ${i + 100}` },
       });
       responses.push(parseEdit(res));
@@ -237,7 +237,7 @@ describe("editBatchingHint — prior edits[] batch use suppresses the hint perma
     // First call this session: an edits[] batch (2 items) — the agent has
     // now demonstrated it knows the form, per recordEditsBatchUsed.
     const batchRes = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         edits: [
           { path: "src/a.ts", search: '"a-old"', replace: '"a-new"' },
@@ -255,7 +255,7 @@ describe("editBatchingHint — prior edits[] batch use suppresses the hint perma
     // just delayed).
     for (let i = 1; i <= 4; i++) {
       const res = await srv.rpc(i + 2, "tools/call", {
-        name: "edit_file",
+        name: "tl_edit_file",
         arguments: { path: "src/vals.ts", search: `V${i} = ${i}`, replace: `V${i} = ${i + 100}` },
       });
       const { data } = parseEdit(res);
@@ -283,7 +283,7 @@ describe("editBatchingHint — create=true and failed edits are excluded from th
 
     // 1 successful singleton edit (counter -> 1).
     const firstRes = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/vals.ts", search: "B1 = 1", replace: "B1 = 101" },
     });
     const firstData = parseEdit(firstRes).data;
@@ -292,7 +292,7 @@ describe("editBatchingHint — create=true and failed edits are excluded from th
 
     // create=true — must NOT increment the counter (excluded by design).
     const createRes = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/new.ts", content: "export const NEW = 1;\n", create: true, cwd: ws },
     });
     const createData = parseEdit(createRes).data;
@@ -301,7 +301,7 @@ describe("editBatchingHint — create=true and failed edits are excluded from th
 
     // A failed edit (search string absent) — must NOT increment the counter.
     const failRes = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/vals.ts", search: "DOES_NOT_EXIST_TOKEN_XYZ", replace: "irrelevant" },
     });
     const failData = parseEdit(failRes).data;
@@ -312,7 +312,7 @@ describe("editBatchingHint — create=true and failed edits are excluded from th
     // the failure were correctly excluded above), so THIS call brings it to
     // 2 and fires the hint, staying within the carved-out byte ceiling.
     const secondRes = await srv.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/vals.ts", search: "B4 = 4", replace: "B4 = 400" },
     });
     const { data: secondData } = parseEdit(secondRes);

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// protocol v1 — the `search_files` response family, authored (C2-4).
+// protocol v1 — the `tl_search_files` response family, authored (C2-4).
 //
 // NORMATIVE SOURCE: DESIGN-v0.10-protocol-v1-contract-freeze.md §10.3 Appendix A
 // (Revision 4, user-approved 2026-08-13) A.5.8–A.5.10 and the A.5.3–A.5.10
@@ -60,8 +60,8 @@ type Body = Record<string, unknown>;
 
 /**
  * FX-R1 (2026-09-03, round-18B review finding 10, additive): the CANONICAL
- * `search_files action` values — the six the server actually dispatches
- * (`server.ts`'s `case "search_files"` `if (action === …)` chain plus the
+ * `tl_search_files action` values — the six the server actually dispatches
+ * (`server.ts`'s `case "tl_search_files"` `if (action === …)` chain plus the
  * `DIAG_SEARCH_FILES_ACTIONS` diagnostics allowlist, kept in sync by hand
  * since neither can import the other without a cycle). This is deliberately
  * NOT the advertised JSON-Schema `action.enum` (`["find","references","diff",
@@ -74,7 +74,7 @@ type Body = Record<string, unknown>;
  * touching the advertised schema at all.
  *
  * Separately, seven UNDOCUMENTED aliases normalize onto these six before
- * dispatch ever sees them (`server.ts`'s `canonical === "search_files"`
+ * dispatch ever sees them (`server.ts`'s `canonical === "tl_search_files"`
  * argument-normalization block): `grep`/`search` -> `find`, `list` -> `tree`,
  * `def`/`definitions` -> `symbols`, `usages`/`callers` -> `references`.
  * Aliases stay accepted (this is additive, not a narrowing) but are
@@ -323,7 +323,7 @@ function findNext(body: Body, args: Body): ToolCall | undefined {
   // DESIGN-v0.15 §6.1 (R3): this branch used to fall through, once ALREADY
   // narrowed to exactly this one file (`args["path"] === scope`, i.e. this is
   // not the first pass — a prior call already scoped `find` to this file and
-  // it is STILL truncated), into a `read_file mode:"full"` escalation —
+  // it is STILL truncated), into a `tl_read_file mode:"full"` escalation —
   // "検索の続きが全文へ膨張" (the search's continuation expanding into a full
   // read), the exact defect the design names by name. That escalation is
   // DELETED, not merely narrowed: re-scoping `find` to one file whose own
@@ -335,7 +335,7 @@ function findNext(body: Body, args: Body): ToolCall | undefined {
   // `protocol/searchRequestContinuation.ts`'s job: `server.ts`'s find dispatch
   // stages a full, uncapped snapshot whenever a response comes back
   // `truncated:true`, and the emit tail (`applySearchRequestContinuation`)
-  // installs the authoritative `search_files find {cursor}` continuation —
+  // installs the authoritative `tl_search_files find {cursor}` continuation —
   // OVERRIDING whatever this function returns for that call. Declining here
   // (no re-scoped re-search that would just reproduce the same truncated
   // preview, no escalation out of the search family) is therefore always
@@ -392,7 +392,7 @@ export function findScopedNext(scope: string, body: Body, args: Body): ToolCall 
   // plain `query` (single-string) branch above, which never sets `queries`.
   const sanctioned = sanctionSearchContinuation(call, { absentTerms: absentTermsOf(body) });
   if (sanctioned === undefined) return undefined;
-  return emittableToolCall({ tool: "search_files", arguments: sanctioned });
+  return emittableToolCall({ tool: "tl_search_files", arguments: sanctioned });
 }
 
 function projectFind(body: Body, args: Body): Body {
@@ -468,7 +468,7 @@ export function symbolsNext(body: Body, args: Body): ToolCall | undefined {
   // that still makes this a thin adapter rather than a special case.
   const sanctioned = sanctionSearchContinuation(call, { absentTerms: NO_ABSENT_TERMS });
   if (sanctioned === undefined) return undefined;
-  return emittableToolCall({ tool: "search_files", arguments: sanctioned });
+  return emittableToolCall({ tool: "tl_search_files", arguments: sanctioned });
 }
 
 function projectSymbols(body: Body, args: Body): Body {
@@ -534,7 +534,7 @@ function projectLocate(body: Body): Body {
  * classifies it as a `refusal` before the success projection runs.
  *
  * TRUNCATION TAKES THE `capped` ARM (fold-rule clause 3). [R5-9] asked whether
- * a re-scoped `search_files` call could be constructed here instead; it cannot,
+ * a re-scoped `tl_search_files` call could be constructed here instead; it cannot,
  * and the evidence is in `tools/getCurrentDiff.ts:186-198`. The cap drops WHOLE
  * FILES off the end of `allFiles` and the response never names the ones it
  * dropped — `files[]` holds only what fitted, `totalFiles` is a count. So a
@@ -717,7 +717,7 @@ function projectTree(body: Body): Body {
 // ---------------------------------------------------------------------------
 
 /**
- * Two `search_files` branches return a FAILURE through `toolOk` with no
+ * Two `tl_search_files` branches return a FAILURE through `toolOk` with no
  * `isError` and no `ok:false`, so the generic funnel test
  * (`isRefusalBody`) cannot see them. Both are D6 conversions, and both are done
  * HERE rather than at the producer so the module-level callers and their specs
@@ -779,7 +779,7 @@ export function isSearchFamilyKind(kind: Kind): boolean {
  * Returns the body UNCHANGED for a shape this module does not recognise, per
  * the C2-3 precedent: a projector that guesses is worse than one that declines,
  * because a wrong `form` is a lie a client branches on. The one reachable case
- * is `action:"office"` — an Office extraction served through `search_files`,
+ * is `action:"office"` — an Office extraction served through `tl_search_files`,
  * whose member is `read.artifact` and which now declares that kind at its emit
  * site rather than defaulting into this family.
  */
@@ -859,7 +859,7 @@ export function projectSearchBody(kind: Kind, body: Body, action: string, args: 
  * `CANONICAL_TASK`) is excluded WHOLE, not by trying to enumerate its
  * fields under their old flat spellings: two calls differing only in, say,
  * `task.handle` (resuming vs. starting a pack) are still the identical
- * `search_files` request. `qref` joins `cwd`/`lane` as a replay-identity
+ * `tl_search_files` request. `qref` joins `cwd`/`lane` as a replay-identity
  * carrier, same reasoning. The legacy (`TL_LEGACY_INPUT=accept`) flat
  * spellings are ALSO excluded, since `ProtocolCallContext.args` is the
  * inbound call as received — a legacy caller's args reach this fingerprint
@@ -884,7 +884,7 @@ function canonicalDedupJson(value: unknown): string {
 }
 
 /**
- * The canonical fingerprint of one `search_files` request: the resolved
+ * The canonical fingerprint of one `tl_search_files` request: the resolved
  * `action` plus every argument that can select different bytes, with
  * `SEARCH_DEDUP_FINGERPRINT_EXCLUDED_ARGS` removed first.
  *

@@ -105,22 +105,22 @@ describe("next_call progress — unresolvable caller inputs stay out of role fil
     // degenerated into an identity re-call whenever the invocation WAS
     // query+that dir, and an obedient caller looped on it.
     expect(result.next).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "tree", path: "packages/desktop-app" },
     });
     // The canonical ToolCall itself is the executable follow-up; no prose
     // decoding step may stand between the pack and the execution contract.
     const call = result.next;
-    expect(call?.tool).toBe("search_files");
+    expect(call?.tool).toBe("tl_search_files");
     expect(call?.arguments["action"]).toBe("tree");
     expect(call?.arguments["path"]).toBe("packages/desktop-app");
   }, 30000);
 
   it("round-trips the path-scoped re-seed form through the continuation encoding", () => {
-    const next = 'read_file mode=task_pack query="add retry" paths=["packages/cli","packages/usage"]';
+    const next = 'tl_read_file mode=task_pack query="add retry" paths=["packages/cli","packages/usage"]';
     const call = nextStringToCall(next);
     expect(call).toEqual({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "task_pack", query: "add retry", paths: ["packages/cli", "packages/usage"] },
     });
     expect(callToNextString(call!)).toBe(next);
@@ -134,7 +134,7 @@ describe("next_call progress — unresolvable caller inputs stay out of role fil
 describe("next_call progress — list-item escaping in the legacy next encoding", () => {
   it("escapes a double quote inside a path instead of silently truncating it", () => {
     const call: ContinuationCall = {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "task_pack", query: "q", paths: ['packages/a"b'] },
     };
     const next = callToNextString(call);
@@ -149,7 +149,7 @@ describe("next_call progress — list-item escaping in the legacy next encoding"
   it("round-trips a path containing a comma or a backslash", () => {
     for (const p of ["packages/a,b", "packages\\a"]) {
       const call: ContinuationCall = {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: { mode: "task_pack", query: "q", paths: [p] },
       };
       expect(nextStringToCall(callToNextString(call)!)).toEqual(call);
@@ -159,12 +159,12 @@ describe("next_call progress — list-item escaping in the legacy next encoding"
   it("leaves the emitted form byte-identical for ordinary items", () => {
     // The escaping change must be invisible on every shape the packs actually
     // emit today, or it silently rewrites the agent-facing `next` wording.
-    expect(callToNextString({ tool: "read_file", arguments: { handles: ["h1", "h2"] } }))
-      .toBe('read_file handles=["h1","h2"]');
+    expect(callToNextString({ tool: "tl_read_file", arguments: { handles: ["h1", "h2"] } }))
+      .toBe('tl_read_file handles=["h1","h2"]');
     expect(callToNextString({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "task_pack", query: "add retry", surfaceRoles: ["api", "domain"] },
-    })).toBe('read_file mode=task_pack query="add retry" surfaceRoles=["api","domain"]');
+    })).toBe('tl_read_file mode=task_pack query="add retry" surfaceRoles=["api","domain"]');
   });
 
   it("a double quote inside the QUERY already round-trips — the greedy match covers it", () => {
@@ -172,8 +172,8 @@ describe("next_call progress — list-item escaping in the legacy next encoding"
     // capture is greedy and anchored on the trailing form, so quotes inside the
     // query survive. Only list ITEMS needed escaping.
     for (const call of [
-      { tool: "search_files", arguments: { action: "locate", query: 'why is "foo" null' } },
-      { tool: "read_file", arguments: { mode: "task_pack", query: 'add "retry"', surfaceRoles: ["api"] } },
+      { tool: "tl_search_files", arguments: { action: "locate", query: 'why is "foo" null' } },
+      { tool: "tl_read_file", arguments: { mode: "task_pack", query: 'add "retry"', surfaceRoles: ["api"] } },
     ] as ContinuationCall[]) {
       expect(nextStringToCall(callToNextString(call)!)).toEqual(call);
     }
@@ -217,7 +217,7 @@ describe("next_call progress — 2026-07-31 self-loop regression (exact call sha
     const workspace = path.resolve(__dirname, "../../../../");
     setActiveRootWorkspace(workspace);
 
-    const response = await callTool("read_file", {
+    const response = await callTool("tl_read_file", {
       cwd: workspace,
       mode: "task_pack",
       taskEpoch: "new",
@@ -256,10 +256,10 @@ describe("next_call progress — 2026-07-31 self-loop regression (exact call sha
     }
 
     // 3. A locate follow-up keeps a usable query — never a single CJK function
-    //    word. The live defect emitted `search_files action=locate query="こんな"`
+    //    word. The live defect emitted `tl_search_files action=locate query="こんな"`
     //    because the term list was consumed positionally and hiragana runs sort
     //    first in a Japanese sentence.
-    if (nextCall?.["tool"] === "search_files" && nextCall?.["arguments"]?.["action"] === "locate") {
+    if (nextCall?.["tool"] === "tl_search_files" && nextCall?.["arguments"]?.["action"] === "locate") {
       const q = String(nextCall["arguments"]["query"] ?? "");
       expect(q.length).toBeGreaterThan(4);
       expect(q).not.toMatch(/^[\p{Script=Hiragana}ー]+$/u);
@@ -270,7 +270,7 @@ describe("next_call progress — 2026-07-31 self-loop regression (exact call sha
     const servedHandles = new Set(
       surfaces.filter((s) => s["code"] !== undefined).map((s) => String(s["handle"])),
     );
-    if (nextCall?.["tool"] === "read_file"
+    if (nextCall?.["tool"] === "tl_read_file"
       && typeof nextCall["arguments"]?.["handle"] === "string"
       && nextCall["arguments"]["range"] === undefined
       && nextCall["arguments"]["mode"] === "slice") {
@@ -308,7 +308,7 @@ describe("rootSuggestion progress — canonical re-scope next", () => {
     );
 
     const query = "add a paramount badge level to PriorityChip";
-    const firstResponse = await callTool("read_file", {
+    const firstResponse = await callTool("tl_read_file", {
       cwd: workspace,
       query,
       task: { epoch: "new", profile: "generic" },
@@ -323,7 +323,7 @@ describe("rootSuggestion progress — canonical re-scope next", () => {
     const next = decision["next"] as { tool: string; arguments: Record<string, any> };
     const suggestedCwd = fs.realpathSync(path.join(workspace, "apps/tracker"));
     expect(next).toMatchObject({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         cwd: suggestedCwd,
         query,

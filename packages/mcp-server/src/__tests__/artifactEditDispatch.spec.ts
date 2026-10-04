@@ -6,9 +6,9 @@ function payload(result: Awaited<ReturnType<typeof callTool>>): Record<string, u
   return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
 }
 
-describe("edit_file artifact dispatch", () => {
+describe("tl_edit_file artifact dispatch", () => {
   it("advertises credential references and the structured artifact envelope", () => {
-    const edit = advertisedTools().find((tool) => tool.name === "edit_file") as
+    const edit = advertisedTools().find((tool) => tool.name === "tl_edit_file") as
       | { inputSchema: { properties: Record<string, unknown> } }
       | undefined;
     const properties = edit?.inputSchema.properties ?? {};
@@ -25,7 +25,7 @@ describe("edit_file artifact dispatch", () => {
   });
 
   it("refuses the exact binary search/replace call shape before it can corrupt a document", async () => {
-    const result = await callTool("edit_file", {
+    const result = await callTool("tl_edit_file", {
       path: "protected.pdf",
       search: "before",
       replace: "after",
@@ -38,7 +38,7 @@ describe("edit_file artifact dispatch", () => {
   });
 
   it("routes a structured XLSX edit through the write gate", async () => {
-    const result = await callTool("edit_file", {
+    const result = await callTool("tl_edit_file", {
       path: "protected.xlsx",
       credentialRef: "project-docs",
       artifact: {

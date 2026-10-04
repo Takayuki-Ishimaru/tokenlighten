@@ -1,6 +1,6 @@
 // WP-S6 (2026-09-20) regression spec.
 //
-// A documented, advertised read_file shape -- a query-less multi-target
+// A documented, advertised tl_read_file shape -- a query-less multi-target
 // read whose targets carry `symbol` (targets[].symbol; "partial=>
 // targets[].range/.ranges/.symbol") -- was refused "path is required"
 // instead of being served, because normalizeCanonicalRequest
@@ -9,14 +9,14 @@
 // is ever promoted to the legacy dispatcher for targets.length > 1.
 //
 // Recorded live (2026-09-20 GitHub Copilot session, new build):
-//   read_file {"targets":[
+//   tl_read_file {"targets":[
 //     {"path":"backend/.../OrderController.java","symbol":"cancel","purpose":"…"},
 //     {"path":"backend/.../OrderService.java","symbol":"cancel","purpose":"…"},
 //     {"path":"backend/.../OrderStatus.java","purpose":"…"}],
 //    "content":"auto","task":{"handle":"<valid task handle>","profile":"answer"},"cwd":"<ws>"}
 //   -> {"kind":"refusal","code":"invalid-input","field":"path","detail":"path is required"}
 //
-// server.ts's "S6" block (dispatchTool, read_file case, just before the
+// server.ts's "S6" block (dispatchTool, tl_read_file case, just before the
 // "Pathless query entry" mode-unspecified task_pack promotion) now
 // resolves this shape directly -- one target at a time, exactly as a
 // single-target call would resolve it -- instead of either forcing the
@@ -176,7 +176,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const server = startServer(ws);
       await server.initialize();
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [
           { path: "src/orderController.ts", symbol: "cancelController", purpose: "check controller cancel" },
           { path: "src/orderService.ts", symbol: "cancelService", purpose: "check service cancel" },
@@ -213,7 +213,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       await server.initialize();
 
       // A first pack, mirroring the live session's already-prepared context.
-      const seed = await callTool(server, "read_file", {
+      const seed = await callTool(server, "tl_read_file", {
         targets: [{ path: "src/orderController.ts" }, { path: "src/orderService.ts" }],
         content: "auto",
         cwd: ws,
@@ -222,7 +222,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const taskId = (seed["task"] as Record<string, unknown> | undefined)?.["id"];
       expect(typeof taskId, JSON.stringify(seed).slice(0, 500)).toBe("string");
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [
           { path: "src/orderController.ts", symbol: "cancelController", purpose: "check controller cancel" },
           { path: "src/orderService.ts", symbol: "cancelService", purpose: "check service cancel" },
@@ -252,7 +252,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const server = startServer(ws);
       await server.initialize();
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [
           { path: "src/orderController.ts", range: "1-3" },
           { path: "src/orderService.ts", range: "1-3" },
@@ -279,10 +279,10 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const server = startServer(ws);
       await server.initialize();
 
-      const minted = await callTool(server, "read_file", { path: "src/orderController.ts", content: "auto", cwd: ws });
+      const minted = await callTool(server, "tl_read_file", { path: "src/orderController.ts", content: "auto", cwd: ws });
       const handle = (minted["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [
           { handle, symbol: "cancelController" },
           { path: "src/orderService.ts", range: "1-3" },
@@ -312,7 +312,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const server = startServer(ws);
       await server.initialize();
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [
           { path: "src/orderController.ts", symbol: "doesNotExist" },
           { path: "src/orderService.ts", symbol: "cancelService" },
@@ -340,7 +340,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const server = startServer(ws);
       await server.initialize();
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [{ path: "src/orderController.ts", symbol: "cancelController" }],
         content: "auto",
         cwd: ws,
@@ -356,12 +356,12 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const server = startServer(ws);
       await server.initialize();
 
-      const mintedA = await callTool(server, "read_file", { path: "src/orderController.ts", content: "auto", cwd: ws });
-      const mintedB = await callTool(server, "read_file", { path: "src/orderService.ts", content: "auto", cwd: ws });
+      const mintedA = await callTool(server, "tl_read_file", { path: "src/orderController.ts", content: "auto", cwd: ws });
+      const mintedB = await callTool(server, "tl_read_file", { path: "src/orderService.ts", content: "auto", cwd: ws });
       const handleA = (mintedA["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
       const handleB = (mintedB["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [
           { handle: handleA, range: "1-3" },
           { handle: handleB, symbol: "cancelService" },
@@ -382,7 +382,7 @@ describe("WP-S6: query-less multi-target read with per-entry symbol windows", ()
       const server = startServer(ws);
       await server.initialize();
 
-      const body = await callTool(server, "read_file", {
+      const body = await callTool(server, "tl_read_file", {
         targets: [{ path: "src/orderController.ts" }, { path: "src/orderService.ts" }],
         content: "auto",
         cwd: ws,

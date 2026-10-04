@@ -1,19 +1,23 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.14.4.
+This directory contains the public documentation for TokenLighten v0.15.0.
 
 ## Start here
 
 - [Getting started](getting-started.md) — install, build, and set up a workspace.
 - [Managed environments](managed-environments.md) — administrator notes for
   fleet, policy-managed, or AppLocker/WDAC-restricted machines.
-- [MCP tools](mcp-tools.md) — the three tools and canonical v0.14 workflow.
+- [MCP tools](mcp-tools.md) — the three tools and current canonical workflow.
 - [VS Code extension](vscode-extension.md) /
   [日本語](vscode-extension.ja.md) — install and diagnose the VSIX.
 - [Language support](language-support.md) — languages, formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
-- [GitHub Release v0.14.4](github-release-v0.14.4.md) — more reliable
+- [GitHub Release v0.15.0](github-release-v0.15.0.md) — answers backed by
+  the evidence they depend on (values behind aliases and renames), edit
+  results that return the edited text, budget-filling reads and search
+  pages, prefixed tool names, and updated Copilot and shared agent guides.
+- [Historical GitHub Release v0.14.4](github-release-v0.14.4.md) — more reliable
   ranged reads, task continuation, and answer evidence in English and
   Japanese, with less repeated work in large workspaces.
 - [Historical GitHub Release v0.14.3](github-release-v0.14.3.md) — extension-free
@@ -38,7 +42,7 @@ This directory contains the public documentation for TokenLighten v0.14.4.
 
 ## Release scope
 
-The v0.14.4 public release includes four platform install archives (CLI,
+The v0.15.0 public release includes four platform install archives (CLI,
 MCP server and a bundled Node.js runtime), the CLI and MCP server as source
 with selected developer tests, and the VS Code extension. The desktop
 application is not included.

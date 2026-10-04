@@ -129,7 +129,7 @@ function selectorFor(
   path: string,
 ): { ref: string; call: ToolCall } | undefined {
   const build = (args: Record<string, unknown>, ref: string): { ref: string; call: ToolCall } | undefined => {
-    const call = emittableToolCall({ tool: "read_file", arguments: { mode: "artifact", path, ...args } });
+    const call = emittableToolCall({ tool: "tl_read_file", arguments: { mode: "artifact", path, ...args } });
     return call === undefined ? undefined : { ref, call };
   };
 
@@ -150,7 +150,7 @@ function selectorFor(
     const member = str(dropped["member"]);
     if (member === undefined) return undefined;
     const call = emittableToolCall({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "archive", archive: { path, member } },
     });
     return call === undefined ? undefined : { ref: `member:${member}`, call };

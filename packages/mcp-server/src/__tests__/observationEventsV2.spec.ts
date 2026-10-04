@@ -12,9 +12,9 @@
  *
  * server.ts's `ALLOW_WRITE` is resolved once from `process.argv` at module
  * load, so an in-process vitest run (no `--allow-write`) cannot exercise a
- * REAL edit_file write. The post_edit_readback tests seed state/session.ts's
+ * REAL tl_edit_file write. The post_edit_readback tests seed state/session.ts's
  * edited-paths ledger directly via `recordEditedPath` — exactly what a
- * successful edit_file call would have written there — so the test still
+ * successful tl_edit_file call would have written there — so the test still
  * exercises the actual READ-side seam under test, not a mocked substitute.
  */
 
@@ -98,12 +98,12 @@ describe("V10-02 observation events — repeated_query", () => {
     const root = workspace("repeated-query");
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
-    const first = await callTool("read_file", {
+    const first = await callTool("tl_read_file", {
       mode: "task_pack", query: "update order handling", paths: ["src/order.ts"], cwd: root,
     }) as ToolResult;
     expect(first.isError, JSON.stringify(first)).not.toBe(true);
 
-    const second = await callTool("read_file", {
+    const second = await callTool("tl_read_file", {
       mode: "task_pack", query: "update order handling", paths: ["src/order.ts"], cwd: root,
     }) as ToolResult;
     expect(second.isError, JSON.stringify(second)).not.toBe(true);
@@ -132,7 +132,7 @@ describe("V10-02 observation events — repeated_query", () => {
     const root = workspace("fresh-query");
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       mode: "task_pack", query: "brand new task never seen before", paths: ["src/order.ts"], cwd: root,
     });
 
@@ -144,10 +144,10 @@ describe("V10-02 observation events — repeated_query", () => {
     const root = workspace("different-queries");
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       mode: "task_pack", query: "first distinct task", paths: ["src/order.ts"], cwd: root,
     });
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       mode: "task_pack", query: "second distinct task", paths: ["src/order.ts"], cwd: root,
     });
 
@@ -165,21 +165,21 @@ describe("V10-02 observation events — forced_resend", () => {
     const root = workspace("forced-resend");
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       mode: "full", path: "src/order.ts", cwd: root, force_serve: true,
     });
 
     const records = readTraceRecords(root);
     const forced = records.filter((r) => r["event"] === "forced_resend");
     expect(forced).toHaveLength(1);
-    expect(forced[0]!["tool"]).toBe("read_file");
+    expect(forced[0]!["tool"]).toBe("tl_read_file");
   });
 
   it("never fires when the arg is absent (no wire schema declares it in this tree)", async () => {
     const root = workspace("no-forced-resend");
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
-    await callTool("read_file", { mode: "full", path: "src/order.ts", cwd: root });
+    await callTool("tl_read_file", { mode: "full", path: "src/order.ts", cwd: root });
 
     const records = readTraceRecords(root);
     expect(records.filter((r) => r["event"] === "forced_resend")).toHaveLength(0);
@@ -189,7 +189,7 @@ describe("V10-02 observation events — forced_resend", () => {
     const root = workspace("falsy-forced-resend");
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
-    await callTool("read_file", { mode: "full", path: "src/order.ts", cwd: root, force_serve: false });
+    await callTool("tl_read_file", { mode: "full", path: "src/order.ts", cwd: root, force_serve: false });
 
     const records = readTraceRecords(root);
     expect(records.filter((r) => r["event"] === "forced_resend")).toHaveLength(0);
@@ -225,11 +225,11 @@ describe("V10-02 observation events — repeated_range", () => {
     const root = workspace("repeated-range");
     write(root, "src/pid.cpp", makeNonTinyContent());
 
-    const first = await callTool("read_file", { mode: "full", path: "src/pid.cpp", cwd: root }) as ToolResult;
+    const first = await callTool("tl_read_file", { mode: "full", path: "src/pid.cpp", cwd: root }) as ToolResult;
     expect(first.isError, JSON.stringify(first)).not.toBe(true);
     expect(parseResult(first)["kind"]).toBe("read.text");
 
-    const second = await callTool("read_file", { mode: "full", path: "src/pid.cpp", cwd: root }) as ToolResult;
+    const second = await callTool("tl_read_file", { mode: "full", path: "src/pid.cpp", cwd: root }) as ToolResult;
     expect(second.isError, JSON.stringify(second)).not.toBe(true);
     // The W1 content-equivalent receipt shape (readCodeFullDowngrade.spec.ts
     // pins the same recipe for the response side).
@@ -247,7 +247,7 @@ describe("V10-02 observation events — repeated_range", () => {
     const root = workspace("fresh-full-read");
     write(root, "src/pid.cpp", makeNonTinyContent());
 
-    await callTool("read_file", { mode: "full", path: "src/pid.cpp", cwd: root });
+    await callTool("tl_read_file", { mode: "full", path: "src/pid.cpp", cwd: root });
 
     const records = readTraceRecords(root);
     expect(records.filter((r) => r["event"] === "repeated_range")).toHaveLength(0);
@@ -264,10 +264,10 @@ describe("V10-02 observation events — post_edit_readback", () => {
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
     // See this file's header doc: recordEditedPath is exactly what a
-    // successful edit_file call writes into this ledger.
+    // successful tl_edit_file call writes into this ledger.
     recordEditedPath(root, "src/order.ts");
 
-    const result = await callTool("read_file", {
+    const result = await callTool("tl_read_file", {
       mode: "task_pack", query: "review the order function", paths: ["src/order.ts"], cwd: root,
     }) as ToolResult;
     expect(result.isError, JSON.stringify(result)).not.toBe(true);
@@ -282,7 +282,7 @@ describe("V10-02 observation events — post_edit_readback", () => {
     const root = workspace("no-post-edit-readback");
     write(root, "src/order.ts", "export function order() { return 1; }\n");
 
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       mode: "task_pack", query: "review the order function", paths: ["src/order.ts"], cwd: root,
     });
 
@@ -297,7 +297,7 @@ describe("V10-02 observation events — post_edit_readback", () => {
 
     recordEditedPath(root, "src/other.ts");
 
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       mode: "task_pack", query: "review the order function", paths: ["src/order.ts"], cwd: root,
     });
 

@@ -393,7 +393,7 @@ export function planDocSliver(
     headingsTotal: index.total,
     ...(index.note ? { headingsNote: index.note } : {}),
     nextCall: {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "slice", handle: surface.handle, range: targetRange },
     },
     targetHeading: target.text,
@@ -557,5 +557,5 @@ export function docSliverRouteClause(surface: TaskPackSurface, plan: DocSliverPl
   const where = plan.concernMatched && plan.targetHeading !== undefined
     ? `its heading index is attached and "${plan.targetHeading}" matches this task`
     : "its heading index is attached";
-  return `code surfaces located — edit from resident handles; ${DOC_SLIVER_ROUTE_MARKER}${surface.path} is only ${plan.servedLines}/${plan.totalLines} lines served (${plan.servedPercent}), ${where}; ONE section-scoped read_file mode=slice of that handle is sanctioned first`;
+  return `code surfaces located — edit from resident handles; ${DOC_SLIVER_ROUTE_MARKER}${surface.path} is only ${plan.servedLines}/${plan.totalLines} lines served (${plan.servedPercent}), ${where}; ONE section-scoped tl_read_file mode=slice of that handle is sanctioned first`;
 }

@@ -22,13 +22,13 @@ import { parseMarkdownHeadings, buildMarkdownHeadingIndex } from "../util/markdo
 // ---------------------------------------------------------------------------
 // D8: `GetFileSkeletonInput` / `GetFileSkeletonOutput` used to live in
 // `@tokenlighten/types`' `mcp/legacy-read.ts`, which is DELETED. They were
-// never legacy in substance — this module serves the ADVERTISED `read_file
+// never legacy in substance — this module serves the ADVERTISED `tl_read_file
 // mode=skeleton` path — so the two shapes move here, next to their one
 // emitter, instead of being retired. `FileSkeletonPayload` replaces the old
 // `GetFileSkeletonOutput & { ... }` intersection that three sites repeated.
 // ---------------------------------------------------------------------------
 
-/** Request shape of the `read_file mode=skeleton` path. */
+/** Request shape of the `tl_read_file mode=skeleton` path. */
 export interface GetFileSkeletonInput {
   /** Workspace-relative file path. */
   path: string;
@@ -373,7 +373,7 @@ export async function getFileSkeleton(
     // buildFullDowngradePayload's skeletonUsable check (signatures.trim())
     // still reads it as no-signal and falls back to its bounded `head`.
     const marker = kept.trim().length > 0
-      ? '\n[truncated: unrecognized extension served verbatim up to the byte budget; use read_file {targets:[{path:"…", range:"a-b"}]} or search_files {action:"find", queries:["…"]} for the rest]'
+      ? '\n[truncated: unrecognized extension served verbatim up to the byte budget; use tl_read_file {targets:[{path:"…", range:"a-b"}]} or tl_search_files {action:"find", queries:["…"]} for the rest]'
       : "";
     return {
       ok: true,
@@ -382,7 +382,7 @@ export async function getFileSkeleton(
         language: "unknown",
         truncated: true,
         byte_budget: MAX_RESPONSE_BYTES,
-        hint: 'unrecognized extension; use read_file {targets:[{path:"…", range:"a-b"}]} or search_files {action:"find", queries:["…"]} for targeted reads',
+        hint: 'unrecognized extension; use tl_read_file {targets:[{path:"…", range:"a-b"}]} or tl_search_files {action:"find", queries:["…"]} for targeted reads',
       },
     };
   }

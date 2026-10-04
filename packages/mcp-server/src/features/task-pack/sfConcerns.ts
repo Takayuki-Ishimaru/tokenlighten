@@ -165,8 +165,8 @@ export interface SfStructuralConcern extends SfConcernSeed {
    *               `scope_inferred` subtree arrives here as an
    *               `explicit-target` path concern), or a path the index says
    *               does not exist. `selectCanonicalNext` skips such a concern
-   *               rather than minting `read_file targets:[{path:<dir>}]` or a
-   *               `search_files references` whose query TERM is a directory —
+   *               rather than minting `tl_read_file targets:[{path:<dir>}]` or a
+   *               `tl_search_files references` whose query TERM is a directory —
    *               the exact call the sealed SF05 replay produced.
    *   `undefined` UNKNOWN — no index was injected, or the anchor is not a
    *               path. Every pre-D8 behaviour is preserved on this value, so
@@ -225,7 +225,7 @@ export interface SfWorkspaceIndex {
   readonly counterpartsFor?: (relPath: string) => readonly string[];
 }
 
-/** One caller-declared address, in the shapes `read_file` accepts. */
+/** One caller-declared address, in the shapes `tl_read_file` accepts. */
 export interface SfExplicitTarget {
   readonly path?: string;
   readonly symbol?: string;
@@ -859,7 +859,7 @@ function extractConcerns(input: SfConcernExtractionInput): SfStructuralConcern[]
       // D8 (FX-R3c): a caller "target" is not always a servable FILE. The
       // discovery layer's own auto-narrow publishes the inferred SUBTREE here
       // (`bench/fixtures/<x>/firmware` on the sealed SF05 replay), and a
-      // directory is neither a `read_file` target nor a `references` query
+      // directory is neither a `tl_read_file` target nor a `references` query
       // term. `hasPath` answers `false` for it; absent index = unknown.
       ...(symbol !== undefined ? {} : { fileAnchor: workspaceIndex?.hasPath?.(relPath) }),
     });

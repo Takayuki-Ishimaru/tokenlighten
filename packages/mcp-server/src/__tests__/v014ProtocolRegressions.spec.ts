@@ -135,7 +135,7 @@ describe("v0.14 target:all safety", () => {
     const server = startServer(root, true);
     await server.initialize();
 
-    const result = await server.call("edit_file", {
+    const result = await server.call("tl_edit_file", {
       path: "src/scope.ts",
       symbol: "first",
       search: "TARGET_TOKEN",
@@ -158,7 +158,7 @@ describe("v0.14 target:all safety", () => {
     const server = startServer(root, true);
     await server.initialize();
 
-    const result = await server.call("edit_file", {
+    const result = await server.call("tl_edit_file", {
       path: "src/duplicate.ts",
       search: "DUPLICATE",
       replace: "CHANGED",
@@ -178,7 +178,7 @@ describe("v0.14 target:all safety", () => {
     const server = startServer(root, true);
     await server.initialize();
 
-    const result = await server.call("edit_file", {
+    const result = await server.call("tl_edit_file", {
       path: "src/large.txt",
       search: "x",
       replace: "y",
@@ -198,7 +198,7 @@ describe("v0.14 canonical task-pack calls", () => {
     const server = startServer(root);
     await server.initialize();
 
-    const result = await server.call("read_file", {
+    const result = await server.call("tl_read_file", {
       query: "where is thing",
       task: { epoch: "new" },
       budget: { bytes: 100 },
@@ -226,7 +226,7 @@ describe("v0.14 canonical task-pack calls", () => {
     const server = startServer(root);
     await server.initialize();
 
-    const result = await server.call("read_file", {
+    const result = await server.call("tl_read_file", {
       query: "serve the selected ranges and other target",
       targets: [
         { path: "src/ranges.ts", ranges: ["2-3", "8-9"] },
@@ -256,7 +256,7 @@ describe("v0.14 canonical task-pack calls", () => {
     await server.initialize();
 
     const query = "applyOrder must trim and upper-case the order string";
-    const first = await server.call("read_file", {
+    const first = await server.call("tl_read_file", {
       query,
       targets: [{ path: "src/order.ts" }],
       task: { epoch: "new", profile: "generic" },
@@ -268,7 +268,7 @@ describe("v0.14 canonical task-pack calls", () => {
     const certificate = firstDecision["certificate"] as Record<string, unknown>;
     const obligations = certificate["obligations"] as string[];
 
-    await server.call("read_file", {
+    await server.call("tl_read_file", {
       query,
       targets: [{ path: "src/order.ts" }],
       task: {
@@ -282,7 +282,7 @@ describe("v0.14 canonical task-pack calls", () => {
       lane: "next-01-lane",
     }, 180_000);
 
-    const revoked = await server.call("read_file", {
+    const revoked = await server.call("tl_read_file", {
       query,
       targets: [{ path: "src/order.ts" }],
       task: { handle: firstTask["id"] },
@@ -318,7 +318,7 @@ describe("ND-1 continuation canonicalization", () => {
     const server = startServer(root, true);
     await server.initialize();
 
-    const seed = await server.call("read_file", {
+    const seed = await server.call("tl_read_file", {
       query: "inspect the existing target",
       targets: [{ path: "src/existing.ts" }],
       task: { epoch: "new" },
@@ -329,7 +329,7 @@ describe("ND-1 continuation canonicalization", () => {
     const seedTask = seed.body["task"] as Record<string, unknown>;
     expect(typeof seedTask["id"]).toBe("string");
 
-    const refusal = await server.call("edit_file", {
+    const refusal = await server.call("tl_edit_file", {
       create: true,
       path: "src/existing.ts",
       content,
@@ -340,7 +340,7 @@ describe("ND-1 continuation canonicalization", () => {
     expect(refusal.isError, JSON.stringify(refusal.body)).toBe(true);
     expect(refusal.body["code"]).toBe("create-target-exists");
     const next = refusal.body["next"] as { tool: string; arguments: Record<string, unknown> };
-    expect(next.tool).toBe("read_file");
+    expect(next.tool).toBe("tl_read_file");
     expect(next.arguments).toMatchObject({
       cwd: root,
       lane: "nd1-lane",

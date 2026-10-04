@@ -72,7 +72,7 @@ describe("module boundary compatibility", () => {
     expect(toolError("boom")).toEqual({
       content: [{
         type: "text",
-        text: "{\"ok\":false,\"error\":\"boom\",\"retry\":\"new-task\",\"remaining\":\"no working set survives this call — resend read_file with your original request text as query and task.epoch=\\\"new\\\" (canonical input; legacy mode is refused)\"}",
+        text: "{\"ok\":false,\"error\":\"boom\",\"retry\":\"new-task\",\"remaining\":\"no working set survives this call — resend tl_read_file with your original request text as query and task.epoch=\\\"new\\\" (canonical input; legacy mode is refused)\"}",
       }],
       isError: true,
     });

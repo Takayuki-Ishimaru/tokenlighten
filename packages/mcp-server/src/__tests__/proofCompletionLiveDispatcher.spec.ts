@@ -83,10 +83,10 @@ describe("proof completion live dispatcher flag", () => {
 
     const on = start(cwd, "on", onTrace);
     await on.initialize();
-    const onBody = await on.call(2, "read_file", args);
+    const onBody = await on.call(2, "tl_read_file", args);
     const off = start(cwd, "off", offTrace);
     await off.initialize();
-    const offBody = await off.call(2, "read_file", args);
+    const offBody = await off.call(2, "tl_read_file", args);
 
     expect(onBody.kind).toBe("read.task_pack");
     expect(offBody.kind).toBe("read.task_pack");
@@ -138,10 +138,10 @@ describe("proof completion live dispatcher flag", () => {
 
     const on = start(cwd, "on", path.join(cwd, "on.trace.jsonl"));
     await on.initialize();
-    const onBody = await on.call(2, "read_file", { ...args, lane: "parity-on" });
+    const onBody = await on.call(2, "tl_read_file", { ...args, lane: "parity-on" });
     const off = start(cwd, "off", path.join(cwd, "off.trace.jsonl"));
     await off.initialize();
-    const offBody = await off.call(2, "read_file", { ...args, lane: "parity-off" });
+    const offBody = await off.call(2, "tl_read_file", { ...args, lane: "parity-off" });
 
     const onDecision = onBody.decision as { kind?: string; certificate?: { id?: string } } | undefined;
     const offDecision = offBody.decision as { kind?: string; certificate?: { id?: string } } | undefined;
@@ -153,7 +153,7 @@ describe("proof completion live dispatcher flag", () => {
     // suppression above is the quantifier at work, not a blanket refusal to
     // certify. Its id stays single-segment because its ledger recorded no
     // obligation, and A-F3 forbids dressing that as a discharge.
-    const plain = await on.call(3, "read_file", {
+    const plain = await on.call(3, "tl_read_file", {
       mode: "task_pack",
       query: "Show the implementation of calculateInvoiceTotal",
       paths: ["src/invoice.ts"],

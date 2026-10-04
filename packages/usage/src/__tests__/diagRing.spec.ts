@@ -29,7 +29,7 @@ function tmp(prefix: string): string {
 
 const baseCall: DiagRingCall = {
   at: "2026-08-22T00:00:00.000Z",
-  tool: "read_file",
+  tool: "tl_read_file",
   mode: "task_pack",
   kind: "read.task_pack",
   ms: 12,

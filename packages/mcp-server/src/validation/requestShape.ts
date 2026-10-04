@@ -24,7 +24,7 @@
  * edit executed WITHOUT its precondition — the protocol silently discards the
  * one argument whose entire purpose is to prevent a wrong-site write. That is
  * not hypothetical here: the 2026-08-01 incident (findReferences.ts, 788 -> 57
- * lines) was a dropped top-level `range`, and it is why `edit_file` already
+ * lines) was a dropped top-level `range`, and it is why `tl_edit_file` already
  * failed closed before this module existed (server.ts EDIT_FILE_KNOWN_ARGS).
  * This module generalises that guard to all three tools and gives it the
  * ergonomics CONDITION ② requires.
@@ -49,7 +49,7 @@
  * args record and returns data. It does not import server.ts (that would be a
  * cycle — server.ts imports this), so the caller passes the schema in. The
  * single source of truth therefore stays ALL_TOOLS, exactly as
- * `editFileAdvertisedProperties()` already arranged for edit_file.
+ * `editFileAdvertisedProperties()` already arranged for tl_edit_file.
  */
 
 // ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ export interface SchemaNode {
  *    `maxCells`, `includeComments`). Hiding any of them reproduced the
  *    2026-08-01 surfaceRoles defect: a schema-validating client drops the
  *    argument and silently gets a different result than it asked for.
- *  - 1 DELETED: `allow_create` on edit_file, a silent synonym for the
+ *  - 1 DELETED: `allow_create` on tl_edit_file, a silent synonym for the
  *    advertised `create`. Advertising a second spelling of one capability would
  *    freeze duplicate authority into v1; the engine option and the deprecated
  *    search_replace_edit alias (which advertises it on its own schema) both
@@ -140,7 +140,7 @@ export const PENDING_C6_ADJUDICATION: Readonly<Record<string, readonly string[]>
  *    refusal buys the caller nothing but a corrected retry, so it should cost
  *    at most half of the cheapest thing the server considers a real answer.
  *  - Measured (A.9.2 row 17, corrected 2026-08-14): the base refusal is ~293 B
- *    and the largest advertised key list is `read_file`'s — 37 properties
+ *    and the largest advertised key list is `tl_read_file`'s — 37 properties
  *    after C-6's advertise-or-delete closure raised it from the 28 this comment
  *    used to claim (`server.ts:615-716`) — which serialises to ~400 B. The
  *    normal case still fits, with ~330 B to spare rather than ~440 B, and the
@@ -264,13 +264,13 @@ export interface UnknownPropertyViolation {
   /**
    * Full WIRE path of the offending property, as §1.3.1(5) requires:
    * `preconditon` at the top level, `edits[2].serch` inside an array item.
-   * The key is echoed verbatim — HEAD's edit_file guard does the same, and a
+   * The key is echoed verbatim — HEAD's tl_edit_file guard does the same, and a
    * normalised name would not be the thing the caller has to delete.
    */
   field: string;
   /**
-   * STRUCTURAL path of the containing shape, indices stripped: `edit_file`,
-   * `edit_file.edits[]`. This is the PENDING_C6_ADJUDICATION key and the
+   * STRUCTURAL path of the containing shape, indices stripped: `tl_edit_file`,
+   * `tl_edit_file.edits[]`. This is the PENDING_C6_ADJUDICATION key and the
    * identity of the advertised key set the suggestion came from.
    */
   parentPath: string;
@@ -292,7 +292,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *
  * Order is DOCUMENT order (depth-first, insertion order within each object),
  * which is what makes `violations[0]` a stable "first offending property" for
- * an identical request. This matches HEAD's edit_file guard, which filters
+ * an identical request. This matches HEAD's tl_edit_file guard, which filters
  * `Object.keys(args)` directly.
  */
 export function findUnknownProperties(
@@ -396,11 +396,11 @@ export type UnknownPropertyRefusal = {
 };
 
 /**
- * Does a candidate refusal fit REFUSAL_MAX_BYTES? Exported because `edit_file`
+ * Does a candidate refusal fit REFUSAL_MAX_BYTES? Exported because `tl_edit_file`
  * renders its own payload (it carries the 2026-08-01 incident fields that
  * editDispatchHardening.spec.ts pins) and must therefore weigh the key list
  * against the bytes it will ACTUALLY emit, not against this module's shorter
- * generic body. Note that `edit_file`'s incident branch carries `next_call`
+ * generic body. Note that `tl_edit_file`'s incident branch carries `next_call`
  * rather than `next`, so in the (measured-unreachable) case where its key list
  * does not fit, the omission is silent there and the caller falls back on
  * `tools/list` unprompted.
@@ -450,7 +450,7 @@ export function unknownPropertyRefusal(
 
 /**
  * One-call convenience for the read-only tools: validate and render.
- * `edit_file` does not use this — it keeps its own renderer so the fields the
+ * `tl_edit_file` does not use this — it keeps its own renderer so the fields the
  * 2026-08-01 incident specs pin (`unknown_arguments`,
  * `unknown_edits_item_arguments`, the corrective `next_call`) stay exactly
  * where they were, and takes only the detection from `findUnknownProperties`.

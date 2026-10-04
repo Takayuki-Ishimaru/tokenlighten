@@ -13,6 +13,7 @@ import { detectEol, stripBom, sha256hex } from "./sentinel.js";
 import type { Clock } from "./clock.js";
 import { RealClock } from "./clock.js";
 import type { GuideProfile, Locale } from "./render.js";
+import { copilotGuideModeForWorkspace, type CopilotGuideMode } from "./copilotGuide.js";
 import { migrateLegacyTargetPath } from "./migrateLegacyTarget.js";
 import { assertSafeWriteTarget, ensureSafeWriteParent } from "./safeWritePath.js";
 
@@ -27,6 +28,17 @@ export interface InjectAllConfig {
   repoRoot: string;
   /** Guide profile to inject: "full" (default) | "medium" | "compact". */
   profile?: GuideProfile;
+  /**
+   * Which guide GitHub Copilot reads (copilotGuide.ts): "agents-md" renders
+   * the Copilot stub targets as pointers to AGENTS.md; "standalone" renders
+   * them self-contained, for a workspace whose Copilot does not attach
+   * AGENTS.md. Affects only the "copilot"/"copilot-agent" targets —
+   * AGENTS.md itself always gets `profile`. Omitted, it is read from the
+   * workspace's own `.vscode/settings.json` (`copilotGuideModeForWorkspace`),
+   * so `tl-agents update`/`check` and `tl clients …` keep whichever guide
+   * `tl workspace setup` gave Copilot instead of reverting it to the pointer.
+   */
+  copilotGuide?: CopilotGuideMode;
   /**
    * P2-3(1): the advertised MCP tool surface this guide should describe.
    * Defaults to "full" — the exact prior behavior — so every existing
@@ -99,7 +111,11 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
   // "auto-rewrite" already) but keeps the invariant true for any other
   // caller.
   const toolSurfaceRequested = config.toolSurface !== undefined;
-  const profileSwitch = (profileRequested || toolSurfaceRequested) && driftMode !== "fail-build";
+  // Same immediate-rewrite reasoning for a Copilot guide switch. An inferred
+  // guide (no request) follows the workspace's settings and forces nothing.
+  const copilotGuide: CopilotGuideMode = config.copilotGuide ?? copilotGuideModeForWorkspace(repoRoot);
+  const copilotGuideRequested = config.copilotGuide !== undefined;
+  const profileSwitch = (profileRequested || toolSurfaceRequested || copilotGuideRequested) && driftMode !== "fail-build";
 
   const result: GenerateResult = { wrote: [], skipped: [], drifted: [] };
 
@@ -116,6 +132,7 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
     driftMode: force || profileSwitch ? "auto-rewrite" : driftMode,
     result,
     clock,
+    alternates: knownRenderings(undefined, version),
   });
 
   // Process each stub target
@@ -140,8 +157,8 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
       }
       continue;
     }
-    const block = renderBlock(target.id, locale, version, profile, toolSurface);
-    const targetSha = blockSha256(locale, version, target.id, profile, toolSurface);
+    const block = renderBlock(target.id, locale, version, profile, toolSurface, copilotGuide);
+    const targetSha = blockSha256(locale, version, target.id, profile, toolSurface, copilotGuide);
     await processFile({
       repoRoot,
       relPath: target.file,
@@ -151,6 +168,7 @@ export async function injectAll(config: InjectAllConfig): Promise<GenerateResult
       driftMode: effectiveDriftMode,
       result,
       clock,
+      alternates: knownRenderings(target.id, version),
     });
   }
 
@@ -307,6 +325,39 @@ export async function removeAll(config: RemoveAllConfig): Promise<RemoveAllResul
   return result;
 }
 
+const RENDER_LOCALES: readonly Locale[] = ["en", "jp"];
+const RENDER_PROFILES: readonly GuideProfile[] = ["full", "medium", "compact"];
+const RENDER_SURFACES: readonly ToolSurface[] = ["full", "code"];
+const RENDER_COPILOT_GUIDES: readonly CopilotGuideMode[] = ["agents-md", "standalone"];
+
+/**
+ * Lazily, every rendering TokenLighten itself makes of `target` at `version`
+ * (any guide profile, tool surface, locale or Copilot guide). `rewrite`
+ * treats a managed block equal to one of them as a settings switch, not a
+ * manual edit: TokenLighten can always make it again, so replacing it takes
+ * no backup and no warning (review 2026-10-02 — a Copilot guide switch
+ * printed "manual edits detected" and left a backup behind).
+ */
+function knownRenderings(target: StubTargetId | undefined, version: string): () => Iterable<string> {
+  return () => {
+    const renderings = new Set<string>();
+    for (const locale of RENDER_LOCALES) {
+      for (const profile of RENDER_PROFILES) {
+        for (const surface of RENDER_SURFACES) {
+          for (const guide of RENDER_COPILOT_GUIDES) {
+            try {
+              renderings.add(renderBlock(target, locale, version, profile, surface, guide));
+            } catch {
+              // A template that cannot be loaded proves nothing either way.
+            }
+          }
+        }
+      }
+    }
+    return renderings;
+  };
+}
+
 interface ProcessFileOptions {
   repoRoot: string;
   relPath: string;
@@ -316,10 +367,12 @@ interface ProcessFileOptions {
   driftMode: DriftMode;
   result: GenerateResult;
   clock: Clock;
+  /** Other renderings of this target at `version` (`knownRenderings`). */
+  alternates?: () => Iterable<string>;
 }
 
 async function processFile(opts: ProcessFileOptions): Promise<void> {
-  const { repoRoot, relPath, canonical, version, sha, driftMode, result, clock } = opts;
+  const { repoRoot, relPath, canonical, version, sha, driftMode, result, clock, alternates } = opts;
   const absPath = join(repoRoot, relPath);
 
   // §9.3 + §9.10: symlink check
@@ -418,7 +471,7 @@ async function processFile(opts: ProcessFileOptions): Promise<void> {
   const { hasBom } = stripBom(existingRaw);
 
   // Run idempotent rewrite
-  const rwResult = rewrite(existingRaw, canonical, version, sha, driftMode);
+  const rwResult = rewrite(existingRaw, canonical, version, sha, driftMode, alternates);
 
   if (rwResult.action === "fail") {
     result.skipped.push({

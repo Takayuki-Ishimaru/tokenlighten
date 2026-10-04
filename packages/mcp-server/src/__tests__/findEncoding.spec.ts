@@ -81,9 +81,9 @@ afterAll(() => {
 
 type Body = Record<string, unknown>;
 
-/** Wire-level `search_files action=find query=...` call (single token). */
+/** Wire-level `tl_search_files action=find query=...` call (single token). */
 async function findQuery(root: string, query: string): Promise<Body> {
-  const result = await callTool("search_files", { action: "find", query, cwd: root });
+  const result = await callTool("tl_search_files", { action: "find", query, cwd: root });
   const text = (result.content[0] as { text?: string } | undefined)?.text ?? "{}";
   const body = JSON.parse(text) as Body;
   expect(body["kind"], JSON.stringify(body).slice(0, 300)).toBe("search.matches");
@@ -92,9 +92,9 @@ async function findQuery(root: string, query: string): Promise<Body> {
   return matches!;
 }
 
-/** Wire-level `search_files action=find queries=[...]` call (OR-set). */
+/** Wire-level `tl_search_files action=find queries=[...]` call (OR-set). */
 async function findQueries(root: string, queries: string[]): Promise<Body> {
-  const result = await callTool("search_files", { action: "find", queries, cwd: root });
+  const result = await callTool("tl_search_files", { action: "find", queries, cwd: root });
   const text = (result.content[0] as { text?: string } | undefined)?.text ?? "{}";
   const body = JSON.parse(text) as Body;
   expect(body["kind"], JSON.stringify(body).slice(0, 300)).toBe("search.matches");
@@ -133,7 +133,7 @@ describe("readLinesCached — BOM-aware decoding", () => {
     expect(response.files[0]?.lines).toEqual([1]);
   });
 
-  it("end-to-end via search_files action=find: a UTF-16LE .ps1 matches through the full dispatch path", async () => {
+  it("end-to-end via tl_search_files action=find: a UTF-16LE .ps1 matches through the full dispatch path", async () => {
     const ws = mkWorkspace("le-wire");
     writeBytes(ws, "scripts/setup.ps1", utf16leWithBom("function invokeNetUse {\r\n}\r\n"));
 
@@ -247,7 +247,7 @@ describe("readLinesCached — unchanged plain UTF-8 behavior", () => {
 
 // ---------------------------------------------------------------------------
 // findReferences.ts adoption (2026-08-27 follow-up wave): the same
-// exclude-and-disclose pattern as find, applied to search_files
+// exclude-and-disclose pattern as find, applied to tl_search_files
 // action=references. A UTF-16-BOM file's call sites must be found; an
 // undecodable file must be excluded from scanned_files and disclosed via
 // omitted.undecodable, and the absence certificate must withhold (never

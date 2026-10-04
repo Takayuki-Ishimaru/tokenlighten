@@ -298,10 +298,10 @@ export function applySingleEdit(
     return {
       ok: false,
       code: "empty-search",
-      // FIX 2c (mcp-server): edit_file's ADVERTISED param for this is
+      // FIX 2c (mcp-server): tl_edit_file's ADVERTISED param for this is
       // `create`, not `allow_create` — `allow_create` only ever existed on
       // the deprecated search_replace_edit alias's own schema, so an agent
-      // using edit_file could not see the name this hint used to reference.
+      // using tl_edit_file could not see the name this hint used to reference.
       error: "search string is empty — for new file creation use create:true with an empty search",
     };
   }

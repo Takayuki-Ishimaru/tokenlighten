@@ -45,7 +45,10 @@ const tmpDirs: string[] = [];
 function startServer(root: string, env: Record<string, string>): RpcServer {
   const child: ChildProcess = spawn(process.execPath, [tsx, "--liftoff-only", bin, "--workspace", root, "--allow-write"], {
     cwd: root,
-    env: { ...process.env, TOKENLIGHTEN_ALLOWED_PARENTS: os.homedir(), ...env },
+    // TL_EFF_SLIM_EDIT=0 restores the ±20 / enclosing-symbol after-window these
+    // cases' exact spans were measured against (the default since 2026-10-01
+    // is ±3); a case may override it, as (b2) does.
+    env: { ...process.env, TOKENLIGHTEN_ALLOWED_PARENTS: os.homedir(), TL_EFF_SLIM_EDIT: "0", ...env },
     stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32",
   });
   let pending = "";
@@ -138,10 +141,10 @@ function makeWorkspace(prefix: string, source: string): string {
   return root;
 }
 
-/** 60 comment-free lines: no doc elision, so a served body IS the file text. */
-function wideSource(): string {
+/** Comment-free lines: no doc elision, so a served body IS the file text. Defaults to 60; cell (a) below passes a bigger count so the edit's own PEW window (see its doc comment) covers only a fraction of the file, leaving real "outside the window" territory. */
+function wideSource(lineCount = 60): string {
   const lines: string[] = [];
-  for (let i = 1; i <= 60; i += 1) {
+  for (let i = 1; i <= lineCount; i += 1) {
     lines.push(`export const marker${i} = "row ${i} payload ${"a".repeat(56)}";`);
   }
   return `${lines.join("\n")}\n`;
@@ -157,6 +160,7 @@ function narrowSource(): string {
 const WIDE_LINE_30 = `export const marker30 = "row 30 payload ${"a".repeat(56)}";`;
 const WIDE_LINE_10 = `export const marker10 = "row 10 payload ${"a".repeat(56)}";`;
 const WIDE_LINE_50 = `export const marker50 = "row 50 payload ${"a".repeat(56)}";`;
+const WIDE_LINE_100 = `export const marker100 = "row 100 payload ${"a".repeat(56)}";`;
 
 interface EvidenceEntry {
   range: string;
@@ -227,7 +231,7 @@ afterAll(() => {
 });
 
 describe("B2 / V12-02 delta context — real dispatcher", () => {
-  it("(a) OFF PARITY: the flag adds zero wire bytes anywhere in an edit-then-read sequence", async () => {
+  it("(a) OFF PARITY: the flag adds zero wire bytes for a read the edit's own window never touches", async () => {
     // THE CONSTRUCTION. Run the IDENTICAL three-call sequence twice against the
     // SAME workspace root — once with the flag off, once with it on — and
     // compare the serialized bytes call by call. Same root matters: handles are
@@ -236,12 +240,28 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     // between runs so both servers see the same starting bytes and the same
     // governor/budget state at every step.
     //
-    // The claim this proves is the one that governs a default-OFF lever: the
-    // ONLY response the feature can change is the post-edit read, and only when
-    // the flag is on. A pre-edit read and the edit response itself must be
-    // byte-identical in both runs — the write seam, the ledger transformation
-    // and the read-side decision are all invisible on the wire.
-    const root = makeWorkspace("off", wideSource());
+    // RE-PINNED 2026-09-29 (INT, eval-0929 wave, ruling dlc/2): the post-edit
+    // read used to be a whole-file `mode:"full"` re-read, which the PEW
+    // "edit-after" mechanism (server.ts / state/session.ts, unconditional —
+    // fires with the flag OFF too) now legitimately turns into a residency
+    // claim on ITS OWN, whenever the request's own coverage falls entirely
+    // inside the edit's disclosed +-20/enclosing-symbol window (confirmed on
+    // the wire: identical `read.receipt` with `served_by:"edit-after ..."` in
+    // both OFF and ON runs for such a read — that is PEW, not this lever, and
+    // is exercised on its own by the NEW "edit-after receipt" corpus case
+    // below). A whole-file read on a small fixture always falls inside that
+    // window, so it no longer isolates TL_DELTA_CONTEXT's OWN contribution.
+    // Isolating it needs a read PEW's window cannot explain at all: a range
+    // request for lines the edit never touched and never came near. The fixture
+    // is enlarged (200 lines; the edit sits at line 100) so such a range
+    // genuinely exists and was never previously served in full either.
+    //
+    // The claim this proves is the one that governs a default-OFF lever: for a
+    // read outside the edit's own window, the flag changes NOTHING except
+    // whether a still-valid earlier full-file read may be cited instead of
+    // resent — the write seam and the edit response itself stay byte-identical
+    // in both runs either way.
+    const root = makeWorkspace("off", wideSource(200));
     const target = path.join(root, "src", "order.ts");
     const pristine = fs.readFileSync(target, "utf8");
     const common = { cwd: root, lane: "delta-parity" };
@@ -257,17 +277,19 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
       // run of the pair would carry it). A find keeps the full-read budget —
       // which both runs must enter the sequence with identically — untouched.
       await server.rpc(id++, "tools/call", {
-        name: "search_files", arguments: { ...common, action: "find", query: "warmup", path: "src" },
+        name: "tl_search_files", arguments: { ...common, action: "find", query: "warmup", path: "src" },
       });
       out.push(wireText(await server.rpc(id++, "tools/call", {
-        name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+        name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
       })));
       out.push(wireText(await server.rpc(id++, "tools/call", {
-        name: "edit_file",
-        arguments: { ...common, path: "src/order.ts", search: WIDE_LINE_30, replace: `export const marker30 = "CHANGED";` },
+        name: "tl_edit_file",
+        arguments: { ...common, path: "src/order.ts", search: WIDE_LINE_100, replace: `export const marker100 = "CHANGED";` },
       })));
+      // Lines 180-190 sit far outside line 100's +-20/enclosing-symbol window —
+      // PEW's edit-after mechanism has nothing to say about this range.
       out.push(wireText(await server.rpc(id++, "tools/call", {
-        name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+        name: "tl_read_file", arguments: { ...common, targets: [{ path: "src/order.ts", range: "180-190" }] },
       })));
       server.kill();
       return out;
@@ -281,20 +303,38 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     expect(JSON.parse(off[1]!)["kind"]).toBe("edit.applied");
     expect(normalizeHandles(on[1]!)).toBe(normalizeHandles(off[1]!));
 
-    // OFF's post-edit read is the pre-B2 contract: one whole-file body, no
-    // residency claim of any kind.
-    const offEntries = evidenceOf(JSON.parse(off[2]!));
+    // OFF's out-of-window read is the pre-B2 contract: a fresh body, no
+    // residency claim of any kind — PEW cannot reach it and the base ledger
+    // does not survive an edit on its own.
+    const offBody = JSON.parse(off[2]!);
+    expect(offBody["kind"], JSON.stringify(offBody).slice(0, 400)).toBe("read.text");
+    const offEntries = evidenceOf(offBody);
     expect(offEntries).toHaveLength(1);
     expect(offEntries[0]!.prior).toBeUndefined();
-    expectWholeFileBody(offEntries[0]!, target);
+    expect(typeof offEntries[0]!.body).toBe("string");
 
     // ON's differs — which is the whole point, and is what makes the two
-    // equalities above evidence rather than a tautology.
+    // equalities above evidence rather than a tautology. Delta-context's
+    // ledger recognises the range as still covered by the earlier full read,
+    // so it dedups to a zero-byte receipt naming that earlier call.
     expect(normalizeHandles(on[2]!)).not.toBe(normalizeHandles(off[2]!));
-    expect(evidenceOf(JSON.parse(on[2]!)).some((e) => e.prior !== undefined)).toBe(true);
+    const onBody = JSON.parse(on[2]!);
+    expect(onBody["kind"], JSON.stringify(onBody).slice(0, 400)).toBe("read.receipt");
+    expect(String(onBody["receipt"]?.["served_by"] ?? "")).toContain("full 1-200");
   }, 180000);
 
   it("(b) ON: the post-edit read serves prior + residual that reconstruct the file exactly", async () => {
+    // RE-PINNED 2026-09-29 (INT, eval-0929 wave, ruling dlc/2): a `mode:"full"`
+    // FIRST read makes every later full re-read 100% coverable from (that full
+    // body) + (the edit's own PEW-disclosed `applied[].after` window) alone —
+    // confirmed on the wire, this now dedups all the way to a zero-byte
+    // `read.receipt` (cell (a)'s territory), leaving nothing for THIS lever's
+    // OWN prior+residual splitting to add. Reading only PART of the file first
+    // (1-45 of 60) keeps a genuine multi-piece reconstruction reachable: the
+    // untouched prefix is jointly provable from that partial read plus the
+    // edit's own disclosed window (delta-context's specific, still-real value —
+    // OFF cannot do this join, only PEW's own narrower window), while lines
+    // 46-60 were never served before and must still arrive as fresh bytes.
     const root = makeWorkspace("on", wideSource());
     const traceHome = fs.mkdtempSync(path.join(os.tmpdir(), "tl-delta-home-"));
     tmpDirs.push(traceHome);
@@ -305,47 +345,52 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     await initialize(server);
     let id = 10;
     const first = body(await server.rpc(id++, "tools/call", {
-      name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+      name: "tl_read_file", arguments: { ...common, targets: [{ path: "src/order.ts", range: "1-45" }] },
     }));
     const firstServed = evidenceOf(first)[0]!.body!;
 
-    await server.rpc(id++, "tools/call", {
-      name: "edit_file",
+    const edited = body(await server.rpc(id++, "tools/call", {
+      name: "tl_edit_file",
       arguments: {
         ...common, path: "src/order.ts", search: WIDE_LINE_30,
         replace: `export const marker30 = "CHANGED";\nexport const marker30b = "EXTRA";`,
       },
-    });
+    }));
+    // PEW's own disclosed post-edit window — the OTHER source a merged `prior`
+    // citation below is allowed to draw on, alongside `firstServed`.
+    const editAfter = (((edited["applied"] as unknown[])?.[0] ?? {}) as Record<string, unknown>)["after"] as
+      { range: string; body: string } | undefined;
+    expect(editAfter, JSON.stringify(edited).slice(0, 400)).toBeDefined();
 
     const reread = body(await server.rpc(id++, "tools/call", {
-      name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+      name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
     }));
     const entries = evidenceOf(reread);
     const disk = fs.readFileSync(target, "utf8");
 
-    // A one-line -> two-line edit at line 30 of a 60-line file: lines 1-29 keep
-    // their numbers, the change occupies 30-31, and 31-60 shift to 32-61.
-    expect(entries.map((e) => e.range)).toEqual(["1-29", "30-31", "32-61"]);
+    // The partial read (1-45) and the edit's own window (10-51) overlap and
+    // merge into ONE prior span (1-51); lines 52-61 (never read before) arrive
+    // fresh. A one-line -> two-line edit at line 30 of a 60-line file shifts
+    // everything after it by +1, hence 52-61 rather than 51-60.
+    expect(entries.map((e) => e.range)).toEqual(["1-51", "52-61"]);
     expect(entries[0]!.body).toBeUndefined();
     expect(entries[0]!.prior).toBeTruthy();
     expect(typeof entries[1]!.body).toBe("string");
-    expect(entries[2]!.body).toBeUndefined();
-    expect(entries[2]!.prior).toBeTruthy();
 
     // DELTA RECONSTRUCTION 100%.
     expect(reconstruct(entries, disk)).toBe(disk);
 
-    // SERVE HONESTY: every `prior` window names bytes the caller demonstrably
-    // received earlier — the transformed windows must appear verbatim in the
-    // FIRST response's body, which is the only thing that was ever served.
+    // SERVE HONESTY: the merged `prior` window's bytes must be fully explained
+    // by the TWO sources it names — the part before the edit's own window came
+    // from the first (partial) read, and the edited window itself is exactly
+    // PEW's own disclosed `after` text, never a fresh invention.
+    const editAfterRange = parseRange(editAfter!.range);
+    const mergedRange = parseRange(entries[0]!.range);
     const diskLines = disk.replace(/\n$/, "").split("\n");
-    for (const entry of entries.filter((e) => e.prior !== undefined)) {
-      const { start, end } = parseRange(entry.range);
-      expect(firstServed).toContain(diskLines.slice(start - 1, end).join("\n"));
-    }
+    expect(firstServed).toContain(diskLines.slice(mergedRange.start - 1, editAfterRange.start - 1).join("\n"));
+    expect(editAfter!.body).toBe(diskLines.slice(editAfterRange.start - 1, editAfterRange.end).join("\n"));
 
-    // The residual body is only the changed lines — the point of the lever.
-    expect(entries[1]!.body).toBe(`export const marker30 = "CHANGED";\nexport const marker30b = "EXTRA";`);
+    // The response is still far smaller than resending the whole file.
     expect(wireText({ result: { content: [{ text: JSON.stringify(reread) }] } }).length)
       .toBeLessThan(Buffer.byteLength(disk, "utf8") / 2);
 
@@ -362,8 +407,48 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     expect(deltaLines.map((r) => r["phase"])).toEqual(["ledger-transform", "serve"]);
     expect(deltaLines[0]!["line_delta"]).toBe(1);
     expect(deltaLines[0]!["hunk"]).toBe("30-30");
-    expect(deltaLines[1]!["prior_segments"]).toBe(2);
+    // ONE merged prior segment now (was 2 pre-merge): the partial read and
+    // PEW's edit-after window join into a single provable span.
+    expect(deltaLines[1]!["prior_segments"]).toBe(1);
     expect((deltaLines[1]!["flags_active"] as string[])).toContain("TL_DELTA_CONTEXT");
+  }, 120000);
+
+  it("(b2) ON under the default ±3 after-window: prior + residual still reconstruct the file exactly", async () => {
+    // Same sequence as (b) with TL_EFF_SLIM_EDIT left at its default. The
+    // edit at line 30 (one line -> two) now discloses 27-34, inside what the
+    // partial read already covered (1-45, shifted to 1-46 by the extra
+    // line), so the prior span is 1-46 and 47-61 arrive fresh.
+    const root = makeWorkspace("on-slim", wideSource());
+    const target = path.join(root, "src", "order.ts");
+    const common = { cwd: root, lane: "delta-on-slim" };
+
+    const server = startServer(root, { TL_DELTA_CONTEXT: "1", TL_EFF_SLIM_EDIT: "1" });
+    await initialize(server);
+    let id = 10;
+    await server.rpc(id++, "tools/call", {
+      name: "tl_read_file", arguments: { ...common, targets: [{ path: "src/order.ts", range: "1-45" }] },
+    });
+    const edited = body(await server.rpc(id++, "tools/call", {
+      name: "tl_edit_file",
+      arguments: {
+        ...common, path: "src/order.ts", search: WIDE_LINE_30,
+        replace: `export const marker30 = "CHANGED";\nexport const marker30b = "EXTRA";`,
+      },
+    }));
+    const editAfter = (((edited["applied"] as unknown[])?.[0] ?? {}) as Record<string, unknown>)["after"] as
+      { range: string } | undefined;
+    expect(editAfter?.range, JSON.stringify(edited).slice(0, 400)).toBe("27-34");
+
+    const reread = body(await server.rpc(id++, "tools/call", {
+      name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+    }));
+    const entries = evidenceOf(reread);
+    const disk = fs.readFileSync(target, "utf8");
+    expect(entries.map((e) => e.range)).toEqual(["1-46", "47-61"]);
+    expect(entries[0]!.body).toBeUndefined();
+    expect(entries[0]!.prior).toBeTruthy();
+    expect(typeof entries[1]!.body).toBe("string");
+    expect(reconstruct(entries, disk)).toBe(disk);
   }, 120000);
 
   it("(c) ON: an external write between edit and read falls back to the full body", async () => {
@@ -373,9 +458,9 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     const server = startServer(root, { TL_DELTA_CONTEXT: "1" });
     await initialize(server);
     let id = 10;
-    await server.rpc(id++, "tools/call", { name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" } });
+    await server.rpc(id++, "tools/call", { name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" } });
     await server.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { ...common, path: "src/order.ts", search: WIDE_LINE_30, replace: `export const marker30 = "CHANGED";` },
     });
     // Something outside this server rewrites the file: the carried ledger's
@@ -383,7 +468,7 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     fs.writeFileSync(target, `${fs.readFileSync(target, "utf8")}export const appended = 1;\n`, "utf8");
 
     const reread = body(await server.rpc(id++, "tools/call", {
-      name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+      name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
     }));
     const entries = evidenceOf(reread);
     expect(entries.every((e) => e.prior === undefined)).toBe(true);
@@ -398,13 +483,13 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     const server = startServer(root, { TL_DELTA_CONTEXT: "1" });
     await initialize(server);
     let id = 10;
-    await server.rpc(id++, "tools/call", { name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" } });
+    await server.rpc(id++, "tools/call", { name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" } });
     await server.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { ...common, path: "src/order.ts", search: WIDE_LINE_30, replace: `export const marker30 = "CHANGED";` },
     });
     const forced = body(await server.rpc(id++, "tools/call", {
-      name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts", force_serve: true },
+      name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts", force_serve: true },
     }));
     const entries = evidenceOf(forced);
     expect(entries).toHaveLength(1);
@@ -412,43 +497,80 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
     expectWholeFileBody(entries[0]!, target);
   }, 120000);
 
-  it("(e) ON: the size guard serves the plain body when the projection would cost more", async () => {
+  it("(e) ON: the size guard's tiny fixture now reaches an even cheaper zero-byte receipt, matching OFF", async () => {
+    // RE-PINNED 2026-09-29 (INT, eval-0929 wave, ruling dlc/2): the guard's own
+    // point — a tiny held window is not worth citing — is now made moot by PEW,
+    // which is unconditional (server.ts / state/session.ts): on THIS 24-line
+    // fixture, editing line 12 discloses an `applied[].after` window ("1-25")
+    // that alone already covers the WHOLE file, so a full re-read dedups to a
+    // zero-byte `read.receipt` before delta-context's own citation-cost
+    // comparison ever gets a chance to run — confirmed on the wire, byte-
+    // identical in OFF and ON (PEW does not consult the flag). A receipt costs
+    // strictly less than either a citation or a plain body, so this is a
+    // strictly CHEAPER outcome than the "plain body wins" the guard used to
+    // demonstrate, on the exact same fixture and edit. Cell (b) above still
+    // exercises delta-context's own citation-vs-body accounting on a fixture
+    // PEW's window does not fully swallow.
     const root = makeWorkspace("guard", narrowSource());
-    const target = path.join(root, "src", "order.ts");
     const common = { cwd: root, lane: "delta-guard" };
-    const server = startServer(root, { TL_DELTA_CONTEXT: "1" });
-    await initialize(server);
-    let id = 10;
-    await server.rpc(id++, "tools/call", { name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" } });
-    await server.rpc(id++, "tools/call", {
-      name: "edit_file",
-      arguments: { ...common, path: "src/order.ts", search: "const s12=12;", replace: "const s12=1200;" },
-    });
-    const reread = body(await server.rpc(id++, "tools/call", {
-      name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
-    }));
-    const entries = evidenceOf(reread);
-    // 23 held lines of ~13 bytes are worth less than the two prior markers plus
-    // the fresh-segment overhead they would cost, so the body wins.
-    expect(entries).toHaveLength(1);
-    expect(entries[0]!.prior).toBeUndefined();
-    expectWholeFileBody(entries[0]!, target);
+
+    const sequence = async (env: Record<string, string>): Promise<Record<string, unknown>> => {
+      const server = startServer(root, env);
+      await initialize(server);
+      let id = 10;
+      await server.rpc(id++, "tools/call", { name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" } });
+      await server.rpc(id++, "tools/call", {
+        name: "tl_edit_file",
+        arguments: { ...common, path: "src/order.ts", search: "const s12=12;", replace: "const s12=1200;" },
+      });
+      const reread = body(await server.rpc(id++, "tools/call", {
+        name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+      }));
+      server.kill();
+      return reread;
+    };
+
+    const off = await sequence({});
+    expect(off["kind"], JSON.stringify(off).slice(0, 400)).toBe("read.receipt");
+    expect(String((off["receipt"] as Record<string, unknown>)?.["served_by"] ?? "")).toContain("edit-after");
+
+    fs.writeFileSync(path.join(root, "src", "order.ts"), narrowSource(), "utf8");
+    const on = await sequence({ TL_DELTA_CONTEXT: "1" });
+    expect(on["kind"], JSON.stringify(on).slice(0, 400)).toBe("read.receipt");
+    // Compare everything except `handle`, which is minted per SERVER PROCESS
+    // (see `normalizeHandles`'s own doc comment) — the receipt's own claim
+    // (type, cited provenance, content hash) must still match exactly.
+    const offReceipt = { ...(off["receipt"] as Record<string, unknown>) };
+    const onReceipt = { ...(on["receipt"] as Record<string, unknown>) };
+    delete offReceipt["handle"];
+    delete onReceipt["handle"];
+    expect(onReceipt).toEqual(offReceipt);
   }, 120000);
 
   it("(f) ON: a multi-hunk edits[] batch composes into one enclosing region and still reconstructs", async () => {
-    const root = makeWorkspace("batch", wideSource());
+    // RE-PINNED 2026-09-29 (INT, eval-0929 wave, ruling dlc/2): same root cause
+    // as cell (b) — a `mode:"full"` first read makes the whole file trivially
+    // 100%-coverable from (that full body) + (the batch's own PEW-disclosed
+    // `applied[0].after` enclosing window) alone, collapsing to a zero-byte
+    // receipt (confirmed on the wire) before this lever's own merge logic gets
+    // to add anything. The fixture is enlarged (120 lines; the two hunks sit at
+    // lines 10 and 50) so PEW's own enclosing window — generous, but still
+    // bounded — covers only its own neighbourhood, and the first read is
+    // partial (1-90) so real "never read before" territory (past line 90)
+    // survives for the lever to genuinely need fresh bytes for.
+    const root = makeWorkspace("batch", wideSource(120));
     const target = path.join(root, "src", "order.ts");
     const common = { cwd: root, lane: "delta-batch" };
     const server = startServer(root, { TL_DELTA_CONTEXT: "1" });
     await initialize(server);
     let id = 10;
     const first = body(await server.rpc(id++, "tools/call", {
-      name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+      name: "tl_read_file", arguments: { ...common, targets: [{ path: "src/order.ts", range: "1-90" }] },
     }));
     const firstServed = evidenceOf(first)[0]!.body!;
 
     const applied = body(await server.rpc(id++, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         ...common,
         edits: [
@@ -458,25 +580,32 @@ describe("B2 / V12-02 delta context — real dispatcher", () => {
       },
     }));
     expect(applied["kind"], JSON.stringify(applied).slice(0, 300)).toBe("edit.applied");
+    const editAfter = (((applied["applied"] as unknown[])?.[0] ?? {}) as Record<string, unknown>)["after"] as
+      { range: string; body: string } | undefined;
+    expect(editAfter, JSON.stringify(applied).slice(0, 400)).toBeDefined();
 
     const reread = body(await server.rpc(id++, "tools/call", {
-      name: "read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
+      name: "tl_read_file", arguments: { ...common, mode: "full", path: "src/order.ts" },
     }));
     const entries = evidenceOf(reread);
     const disk = fs.readFileSync(target, "utf8");
 
-    // Two distant hunks collapse into the ONE region the prefix/suffix pair can
-    // prove — 10..50 pre-edit — so 1-9 keeps its lines and 51-60 shifts to
-    // 52-61. Conservative by design: never a guessed interior alignment.
-    expect(entries.map((e) => e.range)).toEqual(["1-9", "10-51", "52-61"]);
+    // The partial read (1-90) and the batch's own enclosing window (here 1-64)
+    // merge into ONE prior span; lines past it (never read before) arrive
+    // fresh. Conservative by design: never a guessed interior alignment.
+    expect(entries).toHaveLength(2);
     expect(entries[0]!.prior).toBeTruthy();
-    expect(entries[2]!.prior).toBeTruthy();
+    expect(entries[0]!.body).toBeUndefined();
+    expect(typeof entries[1]!.body).toBe("string");
     expect(reconstruct(entries, disk)).toBe(disk);
 
+    // SERVE HONESTY, as in cell (b): the merged `prior` window is fully
+    // explained by the partial first read PLUS PEW's own disclosed `after`
+    // text — never a fresh invention.
+    const editAfterRange = parseRange(editAfter!.range);
+    const mergedRange = parseRange(entries[0]!.range);
     const diskLines = disk.replace(/\n$/, "").split("\n");
-    for (const entry of entries.filter((e) => e.prior !== undefined)) {
-      const { start, end } = parseRange(entry.range);
-      expect(firstServed).toContain(diskLines.slice(start - 1, end).join("\n"));
-    }
+    expect(firstServed).toContain(diskLines.slice(mergedRange.start - 1, editAfterRange.start - 1).join("\n"));
+    expect(editAfter!.body).toBe(diskLines.slice(editAfterRange.start - 1, editAfterRange.end).join("\n"));
   }, 120000);
 });

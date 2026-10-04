@@ -46,7 +46,7 @@ async function ask(ws: string, query: string): Promise<any> {
   const s = startDevServer(ws, "default");
   servers.push(s);
   await s.initialize();
-  return (await s.callTool("read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } })).body;
+  return (await s.callTool("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } })).body;
 }
 
 function served(body: any): string {

@@ -126,7 +126,7 @@ describe("importSpecifiersNaming: one import case per language family", () => {
     ).toEqual([{ specifier: "./config", relative: true, wildcard: false, packageEligible: true }]);
     expect(
       importSpecifiersNaming(lines('import { foo as DEFAULT_OPTIONS } from "./config";'), "DEFAULT_OPTIONS", false),
-    ).toEqual([{ specifier: "./config", relative: true, wildcard: false, packageEligible: true }]);
+    ).toEqual([{ specifier: "./config", relative: true, wildcard: false, packageEligible: true, exportedName: "foo" }]);
     expect(
       importSpecifiersNaming(lines('import defaultThing from "./thing";'), "defaultThing", false),
     ).toEqual([{ specifier: "./thing", relative: true, wildcard: false, packageEligible: true }]);
@@ -141,7 +141,7 @@ describe("importSpecifiersNaming: one import case per language family", () => {
     ).toEqual([{ specifier: ".config", relative: true, wildcard: false, packageEligible: true }]);
     expect(
       importSpecifiersNaming(lines("from pkg.config import DEFAULT_TIMEOUT as TIMEOUT"), "TIMEOUT", true),
-    ).toEqual([{ specifier: "pkg.config", relative: false, wildcard: false, packageEligible: true }]);
+    ).toEqual([{ specifier: "pkg.config", relative: false, wildcard: false, packageEligible: true, exportedName: "DEFAULT_TIMEOUT" }]);
   });
 
   it("Go: never resolves an individual name (package-qualified access is this module's own stated limitation)", () => {

@@ -11,6 +11,7 @@ import type { GuardedWorkspaceRoot } from "./guardedWorkspace.js";
 import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
 import { preflightZip, ZIP_LIMITS } from "../office/zipPreflight.js";
 import { shaOfBytes } from "../util/handles.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 
 const MAX_INPUT_BYTES = 25 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -913,6 +914,12 @@ export async function editArtifact(
       output = editedPlain;
     }
   }
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the
+  // document was parsed, edited and re-verified in memory above — the long,
+  // async part of this call, and the part a client is likely to cancel — and
+  // the atomic write below is the first byte it puts on the disk.
+  throwIfRequestCancelled();
 
   const writeFailure = atomicWriteBinary(target.abs, output);
   if (writeFailure) return writeFailure;

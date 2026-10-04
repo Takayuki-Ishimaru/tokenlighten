@@ -135,7 +135,7 @@ function buildCsv(dataRows: number): string {
   return lines.join("\n") + "\n";
 }
 
-describe("read_file mode=artifact (csv) — server dispatch", () => {
+describe("tl_read_file mode=artifact (csv) — server dispatch", () => {
   it("no-selector call serves the bounded table head with columns, rows, total_rows, handle, short sha", async () => {
     const ws = mkDir("artifact-head");
     const csv = buildCsv(300);
@@ -147,7 +147,7 @@ describe("read_file mode=artifact (csv) — server dispatch", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "artifact", path: "rates.csv" },
     });
     const data = parseToolResult(res);
@@ -189,7 +189,7 @@ describe("read_file mode=artifact (csv) — server dispatch", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "artifact", path: "rates.csv", range: "2-6" },
     });
     const data = parseToolResult(res);
@@ -212,7 +212,7 @@ describe("read_file mode=artifact (csv) — server dispatch", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "artifact", path: "rates.csv", columns: ["code", "min"] },
     });
     const data = parseToolResult(res);
@@ -233,7 +233,7 @@ describe("read_file mode=artifact (csv) — server dispatch", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "artifact", path: "rates.tsv" },
     });
     const data = parseToolResult(res);
@@ -246,7 +246,7 @@ describe("read_file mode=artifact (csv) — server dispatch", () => {
   }, 30000);
 });
 
-describe("read_file plain reads (csv) — size-gated routing", () => {
+describe("tl_read_file plain reads (csv) — size-gated routing", () => {
   it("a LARGE csv (> TINY_BYTES) serves the structured table on the first auto read (not a redirect)", async () => {
     const ws = mkDir("auto-large");
     const csv = buildCsv(300);
@@ -259,7 +259,7 @@ describe("read_file plain reads (csv) — size-gated routing", () => {
 
     // No mode → auto.
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { path: "big.csv" },
     });
     const data = parseToolResult(res);
@@ -286,7 +286,7 @@ describe("read_file plain reads (csv) — size-gated routing", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { path: "small.csv" },
     });
     const data = parseToolResult(res);
@@ -309,7 +309,7 @@ describe("read_file plain reads (csv) — size-gated routing", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "big.csv" },
     });
     const data = parseToolResult(res);

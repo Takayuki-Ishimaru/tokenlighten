@@ -62,11 +62,29 @@ import {
   recordLaneTaskHandle,
   resetLaneTaskHandlesForTest,
 } from "../state/laneTaskHandles.js";
-import { resolveTaskHandle } from "../state/stateHandles.js";
+import { isDeadTaskHandleOutcome, resolveTaskHandle } from "../state/stateHandles.js";
 
 // ---------------------------------------------------------------------------
 // Part 1 — pure predicate / lineage-search unit tests (no server)
 // ---------------------------------------------------------------------------
+
+// Route (c), review 2026-10-02: beside task.epoch:"new" only a handle that
+// names no task this server could continue is dropped; a real token of
+// another kind, another workspace's handle, or an unavailable store keep
+// their own refusals.
+describe("isDeadTaskHandleOutcome — which handles route (c) may drop", () => {
+  it("drops never-issued, garbled, foreign-installation, expired, reset-store and no-longer-stored handles", () => {
+    for (const outcome of ["invalid", "wrong-subject", "expired", "stale", "unknown"]) {
+      expect(isDeadTaskHandleOutcome(outcome), outcome).toBe(true);
+    }
+  });
+
+  it("keeps the refusal for another kind of token, another workspace's handle, and an unavailable store", () => {
+    for (const outcome of ["wrong-purpose", "wrong-workspace", "store-unavailable"]) {
+      expect(isDeadTaskHandleOutcome(outcome), outcome).toBe(false);
+    }
+  });
+});
 
 /**
  * The measured incident's own B and X (task prompt, verbatim). Real,
@@ -274,7 +292,7 @@ async function call(name: string, args: Record<string, unknown>): Promise<any> {
 }
 
 async function mintLiveTaskHandle(query: string, lane: string): Promise<{ id: string; body: Record<string, unknown> }> {
-  const opened = parseToolResult(await call("read_file", { query, cwd, lane, task: { epoch: "new" } }));
+  const opened = parseToolResult(await call("tl_read_file", { query, cwd, lane, task: { epoch: "new" } }));
   expect(opened["kind"], JSON.stringify(opened)).not.toBe("refusal");
   const task = opened["task"] as Record<string, unknown> | undefined;
   const id = task?.["id"];
@@ -289,7 +307,7 @@ async function mintLiveTaskHandle(query: string, lane: string): Promise<{ id: st
  * reproduced deterministically rather than replayed from an uncapturable
  * real session's exact args. */
 async function repackForcingChurn(handle: string, query: string, lane: string): Promise<{ id: string; body: Record<string, unknown> }> {
-  const repacked = parseToolResult(await call("read_file", { query, cwd, lane, task: { handle } }));
+  const repacked = parseToolResult(await call("tl_read_file", { query, cwd, lane, task: { handle } }));
   expect(repacked["kind"], JSON.stringify(repacked)).not.toBe("refusal");
   const task = repacked["task"] as Record<string, unknown> | undefined;
   const id = task?.["id"];
@@ -317,8 +335,8 @@ describe("TL_TASK_HANDLE_RECOVERY — a mangled task.handle recovers instead of 
     const { id: A } = await mintLiveTaskHandle("Explain src/shared.ts", LANE);
     expect(A).toMatch(/^tlh_task_v1_/);
 
-    // call2: search_files under A — ok, no mint.
-    const searched = parseToolResult(await call("search_files", {
+    // call2: tl_search_files under A — ok, no mint.
+    const searched = parseToolResult(await call("tl_search_files", {
       cwd, lane: LANE, task: { handle: A }, action: "find", queries: ["Shared"],
     }));
     expect(searched["kind"], JSON.stringify(searched)).not.toBe("refusal");
@@ -346,7 +364,7 @@ describe("TL_TASK_HANDLE_RECOVERY — a mangled task.handle recovers instead of 
     // resolves — the caller self-corrects from the response alone.
     const fifthArgs: Record<string, unknown> = { cwd, lane: LANE, task: { handle: X } };
     if (typeof qref === "string" && qref !== "") fifthArgs["qref"] = qref;
-    const finalPack = parseToolResult(await call("read_file", fifthArgs));
+    const finalPack = parseToolResult(await call("tl_read_file", fifthArgs));
     expect(finalPack["kind"], JSON.stringify(finalPack)).not.toBe("refusal");
     const recoveredId = (finalPack["task"] as Record<string, unknown> | undefined)?.["id"];
     expect(typeof recoveredId, JSON.stringify(finalPack)).toBe("string");
@@ -354,7 +372,7 @@ describe("TL_TASK_HANDLE_RECOVERY — a mangled task.handle recovers instead of 
     expect(reResolved.ok, JSON.stringify(reResolved)).toBe(true);
   });
 
-  it("search_files with a spliced handle and NO qref also recovers, via the lane mid-splice lineage route alone", async () => {
+  it("tl_search_files with a spliced handle and NO qref also recovers, via the lane mid-splice lineage route alone", async () => {
     const LANE = "thr-no-qref";
     const { id: A } = await mintLiveTaskHandle("Explain src/shared.ts for search", LANE);
     const { id: B } = await repackForcingChurn(A, "Explain src/shared.ts for search in more detail", LANE);
@@ -363,29 +381,29 @@ describe("TL_TASK_HANDLE_RECOVERY — a mangled task.handle recovers instead of 
 
     // Deliberately no `qref` field at all: route (a) cannot fire, so a
     // non-refusal here proves route (b) alone recovered.
-    const searched = parseToolResult(await call("search_files", {
+    const searched = parseToolResult(await call("tl_search_files", {
       cwd, lane: LANE, task: { handle: X }, action: "find", queries: ["Shared"],
     }));
     expect(searched["kind"], JSON.stringify(searched)).not.toBe("refusal");
   });
 
-  it("a live handle with a few characters repeated after it (second measured shape) recovers on search_files, with no qref", async () => {
+  it("a live handle with a few characters repeated after it (second measured shape) recovers on tl_search_files, with no qref", async () => {
     // Live GitHub Copilot session, 2026-09-19: the model sent the whole valid
     // 115-character handle followed by its own last seven characters again.
     const LANE = "thr-tail-extension";
     const { id: A } = await mintLiveTaskHandle("Explain src/shared.ts tail", LANE);
     const stuttered = `${A}${A.slice(-7)}`;
-    const searched = parseToolResult(await call("search_files", {
+    const searched = parseToolResult(await call("tl_search_files", {
       cwd, lane: LANE, task: { handle: stuttered }, action: "find", queries: ["Shared"],
     }));
     expect(searched["kind"], JSON.stringify(searched)).toBe("search.matches");
     // Bounded: a long tail is not a stutter, and another lane never inherits the proof.
-    const longTail = parseToolResult(await call("search_files", {
+    const longTail = parseToolResult(await call("tl_search_files", {
       cwd, lane: LANE, task: { handle: `${A}${"Q".repeat(17)}` }, action: "find", queries: ["Shared"],
     }));
     expect(longTail["kind"], JSON.stringify(longTail)).toBe("refusal");
     expect(longTail["code"]).toBe("handle-unknown");
-    const otherLane = parseToolResult(await call("search_files", {
+    const otherLane = parseToolResult(await call("tl_search_files", {
       cwd, lane: "thr-tail-extension-other", task: { handle: stuttered }, action: "find", queries: ["Shared"],
     }));
     expect(otherLane["kind"], JSON.stringify(otherLane)).toBe("refusal");
@@ -397,7 +415,7 @@ describe("TL_TASK_HANDLE_RECOVERY — a mangled task.handle recovers instead of 
     const garbage = `tlh_task_v1_${"Z".repeat(A.length - "tlh_task_v1_".length)}`;
     expect(garbage.length).toBe(A.length);
 
-    const refused = parseToolResult(await call("read_file", {
+    const refused = parseToolResult(await call("tl_read_file", {
       query: "Explain src/shared.ts for garbage check", cwd, lane: LANE, task: { handle: garbage },
     }));
     expect(refused["kind"], JSON.stringify(refused)).toBe("refusal");
@@ -412,16 +430,16 @@ describe("TL_TASK_HANDLE_RECOVERY — a mangled task.handle recovers instead of 
     expect(B).not.toBe(A);
     const X = midSplice(A, B, 12);
 
-    const refused = parseToolResult(await call("read_file", {
+    const refused = parseToolResult(await call("tl_read_file", {
       query: "Explain src/shared.ts for lane check in more detail", cwd, lane: laneOther, task: { handle: X },
     }));
     expect(refused["kind"], JSON.stringify(refused)).toBe("refusal");
     expect(refused["code"]).toBe("handle-unknown");
   });
 
-  it("edit_file never recovers a spliced task handle (strict authentication only)", async () => {
+  it("tl_edit_file never recovers a spliced task handle (strict authentication only)", async () => {
     const LANE = "thr-edit-strict";
-    // The task_handle's own identity is unrelated to the file edit_file will
+    // The task_handle's own identity is unrelated to the file tl_edit_file will
     // touch below — minting uses the proven-churning shared.ts query pair
     // (same pattern as every other test in this spec) purely to obtain two
     // live sibling handles to splice; src/edit_target.ts is the edit target.
@@ -430,12 +448,65 @@ describe("TL_TASK_HANDLE_RECOVERY — a mangled task.handle recovers instead of 
     expect(B).not.toBe(A);
     const X = midSplice(A, B, 12);
 
-    const editRes = parseToolResult(await call("edit_file", {
+    const editRes = parseToolResult(await call("tl_edit_file", {
       path: "src/edit_target.ts", search: "X = 1", replace: "X = 2",
       task: { handle: X }, cwd, lane: LANE,
     }));
     expect(editRes["kind"], JSON.stringify(editRes)).toBe("refusal");
     expect(editRes["code"]).toBe("handle-unknown");
+  });
+
+  // Route (c) (Copilot standard-setup evaluation, 2026-10-02): a handle that
+  // names no live task, sent BESIDE task.epoch:"new", is dropped — the
+  // caller already asked for a fresh task. The measured call shape:
+  // MAI-Code-1.1-Flash invented "config-read" (and an unknown profile) and,
+  // on the refusal, told the user TokenLighten was unavailable.
+  it("route (c): an invented handle beside epoch:new is dropped and the call is served as the new task", async () => {
+    const res = parseToolResult(await call("tl_read_file", {
+      query: "Read src/shared.ts and report the Shared value.",
+      targets: [{ path: path.join(cwd, "src/shared.ts"), range: "1-200" }],
+      content: "auto",
+      task: { handle: "config-read", epoch: "new", profile: "default" },
+      cwd, lane: "thr-epoch-new-invented",
+    }));
+    expect(res["kind"], JSON.stringify(res)).toBe("read.task_pack");
+    const id = String((res["task"] as Record<string, unknown> | undefined)?.["id"] ?? "");
+    expect(id.startsWith("tlh_task_v1_"), JSON.stringify(res)).toBe(true);
+    expect(JSON.stringify(res["evidence"] ?? [])).toContain("src/shared.ts");
+  });
+
+  it("route (c): a garbage handle beside epoch:new is dropped on tl_search_files too", async () => {
+    const res = parseToolResult(await call("tl_search_files", {
+      action: "find", queries: ["Shared"],
+      task: { handle: `tlh_task_v1_${"Z".repeat(80)}`, epoch: "new" },
+      cwd, lane: "thr-epoch-new-search",
+    }));
+    expect(res["kind"], JSON.stringify(res)).toBe("search.matches");
+  });
+
+  it("route (c) boundaries: no epoch:new, an expected_state_version beside it, or tl_edit_file — all still refuse", async () => {
+    const LANE = "thr-epoch-new-bounds";
+    const noEpoch = parseToolResult(await call("tl_read_file", {
+      query: "Read src/shared.ts and report the Shared value.",
+      task: { handle: "config-read" }, cwd, lane: LANE,
+    }));
+    expect(noEpoch["kind"], JSON.stringify(noEpoch)).toBe("refusal");
+    expect(noEpoch["code"]).toBe("handle-unknown");
+
+    const withCas = parseToolResult(await call("tl_read_file", {
+      query: "Read src/shared.ts and report the Shared value.",
+      task: { handle: "config-read", epoch: "new", expected_state_version: 1 }, cwd, lane: LANE,
+    }));
+    expect(withCas["kind"], JSON.stringify(withCas)).toBe("refusal");
+    expect(withCas["code"]).toBe("handle-unknown");
+
+    const edit = parseToolResult(await call("tl_edit_file", {
+      path: "src/edit_target.ts", search: "X = 1", replace: "X = 2",
+      task: { handle: "config-read", epoch: "new" }, cwd, lane: LANE,
+    }));
+    expect(edit["kind"], JSON.stringify(edit)).toBe("refusal");
+    expect(edit["code"]).toBe("handle-unknown");
+    expect(fs.readFileSync(path.join(cwd, "src/edit_target.ts"), "utf8")).toBe("export const X = 1;\n");
   });
 });
 
@@ -481,12 +552,12 @@ describe("a declared task.profile persists across re-packs of the same task", ()
   const QUESTION_QUERY = "what does the Shared constant do?";
 
   it("premise: the same queries, undeclared, infer the OTHER profile", async () => {
-    const statement = packView(parseToolResult(await call("read_file", {
+    const statement = packView(parseToolResult(await call("tl_read_file", {
       query: STATEMENT_QUERY, cwd, lane: "thr-profile-premise-a", targets: [{ path: "src/shared.ts" }], task: { epoch: "new" },
     })));
     expect(statement.kind).toBe("read.task_pack");
     expect(statement.profile).toBe("generic");
-    const question = packView(parseToolResult(await call("read_file", {
+    const question = packView(parseToolResult(await call("tl_read_file", {
       query: QUESTION_QUERY, cwd, lane: "thr-profile-premise-b", targets: [{ path: "src/shared.ts" }], task: { epoch: "new" },
     })));
     expect(question.kind).toBe("read.task_pack");
@@ -495,14 +566,14 @@ describe("a declared task.profile persists across re-packs of the same task", ()
 
   it("answer declared on call 1, omitted on the qref+targets re-pack under its handle: still answer, SAME task.id", async () => {
     const LANE = "thr-profile-answer";
-    const opened = packView(parseToolResult(await call("read_file", {
+    const opened = packView(parseToolResult(await call("tl_read_file", {
       query: STATEMENT_QUERY, cwd, lane: LANE, targets: [{ path: "src/shared.ts" }], task: { epoch: "new", profile: "answer" },
     })));
     expect(opened.kind).toBe("read.task_pack");
     expect(opened.profile).toBe("answer");
     expect(opened.qref).not.toBe("");
 
-    const repackedBody = parseToolResult(await call("read_file", {
+    const repackedBody = parseToolResult(await call("tl_read_file", {
       qref: opened.qref, cwd, lane: LANE, targets: [{ path: "src/edit_target.ts" }], task: { handle: opened.id, force_serve: true },
     }));
     const repacked = packView(repackedBody);
@@ -515,10 +586,10 @@ describe("a declared task.profile persists across re-packs of the same task", ()
 
   it("a bare qref re-pack with no handle inherits through the qref's own task binding", async () => {
     const LANE = "thr-profile-bare-qref";
-    const opened = packView(parseToolResult(await call("read_file", {
+    const opened = packView(parseToolResult(await call("tl_read_file", {
       query: STATEMENT_QUERY, cwd, lane: LANE, targets: [{ path: "src/shared.ts" }], task: { epoch: "new", profile: "answer" },
     })));
-    const repacked = packView(parseToolResult(await call("read_file", {
+    const repacked = packView(parseToolResult(await call("tl_read_file", {
       qref: opened.qref, cwd, lane: LANE, targets: [{ path: "src/edit_target.ts" }], task: { force_serve: true },
     })));
     expect(repacked.profile).toBe("answer");
@@ -527,11 +598,11 @@ describe("a declared task.profile persists across re-packs of the same task", ()
 
   it("one direction only: generic declared on call 1 is NOT carried over — a question-shaped re-pack still narrows to answer, as before", async () => {
     const LANE = "thr-profile-generic";
-    const opened = packView(parseToolResult(await call("read_file", {
+    const opened = packView(parseToolResult(await call("tl_read_file", {
       query: QUESTION_QUERY, cwd, lane: LANE, targets: [{ path: "src/shared.ts" }], task: { epoch: "new", profile: "generic" },
     })));
     expect(opened.profile).toBe("generic");
-    const repacked = packView(parseToolResult(await call("read_file", {
+    const repacked = packView(parseToolResult(await call("tl_read_file", {
       qref: opened.qref, cwd, lane: LANE, targets: [{ path: "src/edit_target.ts" }], task: { handle: opened.id, force_serve: true },
     })));
     expect(repacked.profile).toBe("answer");
@@ -540,10 +611,10 @@ describe("a declared task.profile persists across re-packs of the same task", ()
 
   it("a restated profile always wins over the inherited one", async () => {
     const LANE = "thr-profile-restated";
-    const opened = packView(parseToolResult(await call("read_file", {
+    const opened = packView(parseToolResult(await call("tl_read_file", {
       query: STATEMENT_QUERY, cwd, lane: LANE, targets: [{ path: "src/shared.ts" }], task: { epoch: "new", profile: "answer" },
     })));
-    const repacked = packView(parseToolResult(await call("read_file", {
+    const repacked = packView(parseToolResult(await call("tl_read_file", {
       qref: opened.qref, cwd, lane: LANE, targets: [{ path: "src/edit_target.ts" }], task: { handle: opened.id, profile: "generic", force_serve: true },
     })));
     expect(repacked.profile).toBe("generic");
@@ -552,14 +623,14 @@ describe("a declared task.profile persists across re-packs of the same task", ()
 
   it("a new epoch never inherits, and neither does a different query under the same handle", async () => {
     const LANE = "thr-profile-boundaries";
-    const opened = packView(parseToolResult(await call("read_file", {
+    const opened = packView(parseToolResult(await call("tl_read_file", {
       query: STATEMENT_QUERY, cwd, lane: LANE, targets: [{ path: "src/shared.ts" }], task: { epoch: "new", profile: "answer" },
     })));
-    const otherQuery = packView(parseToolResult(await call("read_file", {
+    const otherQuery = packView(parseToolResult(await call("tl_read_file", {
       query: `${STATEMENT_QUERY} again`, cwd, lane: LANE, targets: [{ path: "src/shared.ts" }], task: { handle: opened.id, force_serve: true },
     })));
     expect(otherQuery.profile, "a different query is a different task identity").toBe("generic");
-    const newEpoch = packView(parseToolResult(await call("read_file", {
+    const newEpoch = packView(parseToolResult(await call("tl_read_file", {
       query: STATEMENT_QUERY, cwd, lane: LANE, targets: [{ path: "src/shared.ts" }], task: { epoch: "new" },
     })));
     expect(newEpoch.profile, "task.epoch:new severs the task, declaration included").toBe("generic");
@@ -596,22 +667,31 @@ describe("TL_TASK_HANDLE_RECOVERY=0 — the exact mid-splice shape that recovers
       return parseToolResult(await srvOff.rpc(nextId(), "tools/call", { name, arguments: args }));
     }
     const LANE = "thr-off";
-    const opened = await callOff("read_file", { query: "Explain src/off.ts", cwd: cwdOff, lane: LANE, task: { epoch: "new" } });
+    const opened = await callOff("tl_read_file", { query: "Explain src/off.ts", cwd: cwdOff, lane: LANE, task: { epoch: "new" } });
     expect(opened["kind"], JSON.stringify(opened)).not.toBe("refusal");
     const A = String((opened["task"] as Record<string, unknown>)["id"]);
 
     const query2 = "Explain src/off.ts, in more detail";
-    const repacked = await callOff("read_file", { query: query2, cwd: cwdOff, lane: LANE, task: { handle: A } });
+    const repacked = await callOff("tl_read_file", { query: query2, cwd: cwdOff, lane: LANE, task: { handle: A } });
     expect(repacked["kind"], JSON.stringify(repacked)).not.toBe("refusal");
     const B = String((repacked["task"] as Record<string, unknown>)["id"]);
     expect(B, "id churn is this test's own precondition too — the flag governs RECOVERY, not minting").not.toBe(A);
     const X = midSplice(A, B, 12);
 
-    const refused = await callOff("read_file", { query: query2, cwd: cwdOff, lane: LANE, task: { handle: X } });
+    const refused = await callOff("tl_read_file", { query: query2, cwd: cwdOff, lane: LANE, task: { handle: X } });
     expect(refused["kind"], JSON.stringify(refused)).toBe("refusal");
     expect(refused["code"]).toBe("handle-unknown");
     expect(refused["did_you_mean"]).toBeUndefined();
     expect(String(refused["hint"] ?? "")).toContain("failed authentication");
     expect(refused["retry"]).toBe("new-task");
+  });
+
+  it("route (c) is off too: an invented handle beside epoch:new still refuses handle-unknown", async () => {
+    const res = parseToolResult(await srvOff.rpc(nextId(), "tools/call", {
+      name: "tl_read_file",
+      arguments: { query: "Explain src/off.ts", task: { handle: "config-read", epoch: "new" }, cwd: cwdOff, lane: "thr-off-epoch-new" },
+    }));
+    expect(res["kind"], JSON.stringify(res)).toBe("refusal");
+    expect(res["code"]).toBe("handle-unknown");
   });
 });

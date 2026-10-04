@@ -192,7 +192,7 @@ describe("finding 3: prior never claimed for bytes this task never actually ship
     await server.initialize();
 
     const query = "Raise the default timeout in src/config.ts from 5000 to 10000.";
-    const hop0 = await server.call("read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    const hop0 = await server.call("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
     const qref = hop0["qref"];
     expect(typeof qref, `hop0 carried no qref: ${JSON.stringify(hop0)}`).toBe("string");
 
@@ -228,7 +228,7 @@ describe("finding 3: prior never claimed for bytes this task never actually ship
     recordAndCheck(hop0);
     let hop = hop0;
     for (let i = 0; i < 4; i++) {
-      hop = await server.call("read_file", { qref, cwd: ws });
+      hop = await server.call("tl_read_file", { qref, cwd: ws });
       recordAndCheck(hop);
     }
     expect(
@@ -254,7 +254,7 @@ describe("finding 13: budget-below-minimum refusal next names every original tar
     servers.push(server);
     await server.initialize();
 
-    const res = await server.call("read_file", {
+    const res = await server.call("tl_read_file", {
       targets: [{ path: "src/config.ts", range: "5-7" }, { path: "src/retry.ts", range: "2-2" }],
       content: "full",
       budget: { bytes: 300 },
@@ -293,7 +293,7 @@ describe("finding 14: profile_binding survives an undeclared task.handle/qref co
     await server.initialize();
 
     const query = "Explain the default HTTP_TIMEOUT_MS value that loadOptions falls back to.";
-    const hop0 = await server.call("read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    const hop0 = await server.call("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
     const taskId = (hop0["task"] as Record<string, unknown> | undefined)?.["id"];
     expect(typeof taskId, `hop0 carried no task.id: ${JSON.stringify(hop0)}`).toBe("string");
 
@@ -301,14 +301,14 @@ describe("finding 14: profile_binding survives an undeclared task.handle/qref co
     // may legitimately be omitted here (SEND-ONCE/NO-ECHO); this test does
     // not assert either way about hop0.
 
-    const hop1 = await server.call("read_file", { query, cwd: ws, task: { handle: taskId } });
+    const hop1 = await server.call("tl_read_file", { query, cwd: ws, task: { handle: taskId } });
     const binding1 = hop1["profile_binding"] as Record<string, unknown> | undefined;
     expect(binding1, `task.handle continuation dropped profile_binding: ${JSON.stringify(hop1)}`).toBeDefined();
     expect(binding1?.["selected"]).toBe("answer");
 
     const qref = hop0["qref"];
     if (typeof qref === "string") {
-      const hop2 = await server.call("read_file", { qref, cwd: ws });
+      const hop2 = await server.call("tl_read_file", { qref, cwd: ws });
       const binding2 = hop2["profile_binding"] as Record<string, unknown> | undefined;
       expect(binding2, `bare qref continuation dropped profile_binding: ${JSON.stringify(hop2)}`).toBeDefined();
       expect(binding2?.["selected"]).toBe("answer");
@@ -363,7 +363,7 @@ describe("finding 15: a served window is not re-shipped fresh on a later hop of 
 
     const query = "Explain the default HTTP_TIMEOUT_MS value and the shouldRetry conditions.";
     let qref: unknown;
-    let lastQrefBody = await server.call("read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" }, budget: { bytes: 6144 } });
+    let lastQrefBody = await server.call("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" }, budget: { bytes: 6144 } });
     qref = lastQrefBody["qref"] ?? qref;
 
     // Track, per (path, range), whether THIS chain has already shipped a
@@ -391,7 +391,7 @@ describe("finding 15: a served window is not re-shipped fresh on a later hop of 
       const call = next as { tool?: string; arguments?: Record<string, unknown> } | undefined;
       const body = call?.arguments !== undefined
         ? await server.call(call.tool as string, { ...call.arguments, cwd: ws })
-        : await server.call("read_file", { qref, cwd: ws });
+        : await server.call("tl_read_file", { qref, cwd: ws });
       scan(body);
       qref = body["qref"] ?? qref;
       next = (body["decision"] as Record<string, unknown> | undefined)?.["next"];
@@ -418,16 +418,16 @@ describe("finding 16: identical qref replay never flips the certified decision",
     await server.initialize();
 
     const query = "Raise the default timeout in src/config.ts from 5000 to 10000.";
-    const hop0 = await server.call("read_file", { query, cwd: ws, task: { epoch: "new" } });
+    const hop0 = await server.call("tl_read_file", { query, cwd: ws, task: { epoch: "new" } });
     const qref = hop0["qref"];
     expect(typeof qref, `hop0 carried no qref: ${JSON.stringify(hop0)}`).toBe("string");
 
-    const hop2 = await server.call("read_file", { qref, cwd: ws });
+    const hop2 = await server.call("tl_read_file", { qref, cwd: ws });
     const decision2 = hop2["decision"] as Record<string, unknown> | undefined;
     // The SAME identical bare-qref call, twice more.
-    const hop3 = await server.call("read_file", { qref, cwd: ws });
+    const hop3 = await server.call("tl_read_file", { qref, cwd: ws });
     const decision3 = hop3["decision"] as Record<string, unknown> | undefined;
-    const hop4 = await server.call("read_file", { qref, cwd: ws });
+    const hop4 = await server.call("tl_read_file", { qref, cwd: ws });
     const decision4 = hop4["decision"] as Record<string, unknown> | undefined;
 
     expect(
@@ -464,7 +464,7 @@ describe("finding 20: await_input unresolved wording matches the actual candidat
     await server.initialize();
 
     const query = "Raise the default timeout in src/config.ts from 5000 to 10000.";
-    const hop0 = await server.call("read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    const hop0 = await server.call("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
     const decision = hop0["decision"] as Record<string, unknown> | undefined;
     if (decision?.["kind"] !== "await_input") return; // this fixture's own ambiguity shape; nothing to check otherwise
     const unresolved = decision["unresolved"] as Array<Record<string, unknown>> | undefined;
@@ -496,7 +496,7 @@ describe("pre-existing defect: an over-budget single-target ranged read ships a 
     servers.push(server);
     await server.initialize();
 
-    const res = await server.call("read_file", {
+    const res = await server.call("tl_read_file", {
       query: "Explain what bigModule.ts does around this window.",
       targets: [{ path: "bigModule.ts", range: "300-900" }],
       content: "auto",
@@ -546,7 +546,7 @@ describe("pre-existing waste: next never re-reads a line this same response just
     await server.initialize();
 
     const query = "Trace INVOICE_V2_FLAG invoiceVersion renderInvoice src/feature_flags.ts relation feature flag branch.";
-    const hop0 = await server.call("read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
+    const hop0 = await server.call("tl_read_file", { query, cwd: ws, task: { epoch: "new", profile: "answer" } });
     const decision = hop0["decision"] as Record<string, unknown> | undefined;
     const gapsBefore = JSON.stringify(decision?.["gaps"]);
     const shippedWindows = new Set(

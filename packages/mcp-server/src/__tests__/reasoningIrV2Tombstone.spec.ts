@@ -30,7 +30,7 @@ const absence: DirectAbsenceProof = {
   evidenceId: "abs",
   scopeComplete: true,
   observedMatches: 0,
-  provider: "search_files/find",
+  provider: "tl_search_files/find",
 };
 
 const common = {

@@ -43,7 +43,7 @@ export interface NormalizedTurnUsage {
   /** ISO-8601, or null when the source line carried no parseable timestamp. */
   readonly timestamp: string | null;
   /** Ordered TokenLighten tool-call names THIS TURN invoked (full wire form,
-   *  e.g. "mcp__tokenlighten__read_file"), for sessionMatcher.ts's
+   *  e.g. "mcp__tokenlighten__tl_read_file"), for sessionMatcher.ts's
    *  fingerprint-sequence scoring. Empty when the turn made no TL calls. */
   readonly toolCallFingerprint: readonly string[];
   readonly counts: NormalizedTokenCounts;

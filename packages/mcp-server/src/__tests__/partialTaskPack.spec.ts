@@ -97,7 +97,7 @@ export function IssueBadge({ priority }: { priority: TicketPriority }) { return 
         expect(nextCall).toBeUndefined();
         expect(contract.call_budget?.discovery_allowed).toBe(false);
       } else {
-        expect(["read_file", "edit_file", "search_files"]).toContain(nextCall?.tool);
+        expect(["tl_read_file", "tl_edit_file", "tl_search_files"]).toContain(nextCall?.tool);
         expect(nextCall?.arguments).toEqual(expect.any(Object));
         expect(contract?.call_budget?.discovery_allowed).toBe(true);
       }

@@ -26,8 +26,8 @@
 // back into one object is the "recurring root-cause class" the split exists
 // to forbid.
 //
-// `next.tool` is narrowed to `"read_file" | "search_files"` (never
-// `edit_file`) — a continuation resumes a READ, matching the plan's own
+// `next.tool` is narrowed to `"tl_read_file" | "tl_search_files"` (never
+// `tl_edit_file`) — a continuation resumes a READ, matching the plan's own
 // example and keeping this reducer type free of mutation rights by
 // construction, consistent with the D-1 codec/projection note in
 // `./evidence.ts`'s file header.
@@ -53,7 +53,7 @@ export type ContinuationControl = {
    * placeholder-bearing calls") on the wire side of the same rule.
    */
   next?: {
-    tool: "read_file" | "search_files";
+    tool: "tl_read_file" | "tl_search_files";
     arguments: Record<string, unknown> & { continuation_token: string };
     idempotent: true;
   };

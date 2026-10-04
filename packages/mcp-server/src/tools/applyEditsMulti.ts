@@ -53,6 +53,7 @@ import {
   type NearestMatchInfo,
 } from "../write/editForensics.js";
 import { handleTable, shaOfText, shortSha } from "../util/handles.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import { measureBlastRadius, type BlastRadiusMeasure } from "../write/blastRadius.js";
 
 // ---------------------------------------------------------------------------
@@ -242,7 +243,7 @@ export interface EditEntry {
    * refuses a same-path create+edit mix before this module ever sees it —
    * see the "batch create v1 scope" comment on its edits[] pre-pass).
    * Validated and published through the SAME no-replace primitives the
-   * single edit_file `create:true` path uses (tools/createFileCore.ts), so
+   * single tl_edit_file `create:true` path uses (tools/createFileCore.ts), so
    * the two paths cannot drift apart on the CWE-59/CWE-367 no-replace
    * guarantee or the lstat-based "something already occupies this name"
    * check.
@@ -276,7 +277,7 @@ export interface EditFileResult {
   /**
    * Edited SPAN, e.g. "12-15". Omitted for a create entry (`total_lines`
    * below instead) — a create has no "edited span", the whole file is new.
-   * This is the SAME asymmetry the single edit_file `create:true` path's own
+   * This is the SAME asymmetry the single tl_edit_file `create:true` path's own
    * response already carries (server.ts's create dispatch reports
    * `total_lines`, never `lines`), read by both server.ts's
    * attachAppliedReadback (per-entry `typeof f.lines === "string"` decides
@@ -430,7 +431,7 @@ export function rollbackRecoveryHint(ledger: RollbackFileState[]): string {
       `inspect ${shown.join(", ")}${more > 0 ? ` (+${more} more)` : ""}: each still holds POST-edit bytes ` +
       `(stuck_sha) instead of expected_sha. This batch wrote no checkpoint (checkpoints are taken only ` +
       `after a fully successful batch) - restore each file from version control or the previous ` +
-      `edit_file checkpoint, confirm it hashes to expected_sha, then re-run the batch.`
+      `tl_edit_file checkpoint, confirm it hashes to expected_sha, then re-run the batch.`
     );
   })();
 
@@ -611,7 +612,7 @@ export async function applyEditsMulti(
     // valid verbatim for a first/solo step — exactly the shape being
     // redirected to a single call anyway.
     // R29-FIX (2026-09-05, D2): the hint used to say "issue this hunk as its
-    // own single edit_file call {handle, content, precondition, expectedSha}"
+    // own single tl_edit_file call {handle, content, precondition, expectedSha}"
     // without saying WHERE those fields go — a caller that wrapped the exact
     // recommended fields inside edits:[{...}] (a one-item array) was refused
     // AGAIN, byte-identically, because a per-item precondition/expectedSha
@@ -625,8 +626,8 @@ export async function applyEditsMulti(
       const shaHint = shortSha(shaOfText(currentText));
       const ackFields = `precondition:"expected-hash", expectedSha:${shaHint}`;
       const hint = edits.length === 1
-        ? `retry this SAME edits[] call with ${ackFields} added to this one item — a single-item edits[] batch honors a per-item acknowledgment — or issue {handle, content, ${ackFields}} as TOP-LEVEL edit_file args with no edits[] wrapper, or narrow the range to the lines that actually change`
-        : `a multi-item edits[] batch does not honor a per-item acknowledgment for this hunk — issue it as its OWN single edit_file call, either edits:[{handle, content, ${ackFields}}] (one item only, no other items in the same call) or the same fields as TOP-LEVEL args {handle, content, ${ackFields}} with no edits[] wrapper — or narrow the range to the lines that actually change`;
+        ? `retry this SAME edits[] call with ${ackFields} added to this one item — a single-item edits[] batch honors a per-item acknowledgment — or issue {handle, content, ${ackFields}} as TOP-LEVEL tl_edit_file args with no edits[] wrapper, or narrow the range to the lines that actually change`
+        : `a multi-item edits[] batch does not honor a per-item acknowledgment for this hunk — issue it as its OWN single tl_edit_file call, either edits:[{handle, content, ${ackFields}}] (one item only, no other items in the same call) or the same fields as TOP-LEVEL args {handle, content, ${ackFields}} with no edits[] wrapper — or narrow the range to the lines that actually change`;
       return {
         ok: false,
         error: `this single hunk replaces ${blast.replacedLines} of the file's ${blast.fileLines} lines (${blast.replacedPercent}%) and would leave ${blast.resultingLines} lines — a whole-file-scale replacement must be explicitly acknowledged`,
@@ -879,7 +880,7 @@ export async function applyEditsMulti(
       }
       return {
         ok: false,
-        error: "search string is empty — edits[] items cannot create files; use a separate edit_file call with create:true (content=... or from=...)",
+        error: "search string is empty — edits[] items cannot create files; use a separate tl_edit_file call with create:true (content=... or from=...)",
         code: "empty-search",
       };
     }
@@ -889,7 +890,7 @@ export async function applyEditsMulti(
     // sibling of the top-level (non-batch) args["target"]==="all" dispatch
     // in server.ts, which already calls write/rangeEdit.ts's
     // replaceAllInRange for the identical shape reached through a single
-    // (non-array) edit_file call. applyReplaceAll (write/textEdit.ts) is
+    // (non-array) tl_edit_file call. applyReplaceAll (write/textEdit.ts) is
     // this whole-file layer's own exact-match-only implementation — see
     // its doc comment for why it does NOT share applySingleEdit's escape/
     // indentation recovery fallbacks. server.ts's edits[] mapping loop
@@ -1217,6 +1218,15 @@ export async function applyEditsMulti(
       ...(totalReplaced > 0 ? { replaced: totalReplaced } : {}),
     });
   }
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the one
+  // place a cancelled batch is abandoned. Phase 1 above validated every item
+  // and built every new text in memory; no byte has reached the disk yet.
+  // Past this line the batch is all-or-nothing as ever — Phase 2 is never
+  // cut off between files, and its mid-batch rollback never is either. This
+  // sits outside Phase 2's try/catch on purpose: a cancel is not a write
+  // failure and must not enter the rollback path.
+  throwIfRequestCancelled();
 
   // Phase 2: Write all files atomically. Track what was written for rollback.
   const writtenFiles: string[] = [];

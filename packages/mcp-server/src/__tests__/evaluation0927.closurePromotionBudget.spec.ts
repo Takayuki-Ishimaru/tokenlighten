@@ -75,7 +75,7 @@ async function firstPack(ws: string): Promise<any> {
   const s = startDevServer(ws, "default");
   servers.push(s);
   await s.initialize();
-  return (await s.callTool("read_file", {
+  return (await s.callTool("tl_read_file", {
     query: "What default values does loadOptions use?",
     cwd: ws,
     task: { epoch: "new", profile: "answer" },

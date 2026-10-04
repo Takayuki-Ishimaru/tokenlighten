@@ -73,7 +73,7 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     const query = "Add REFUNDED everywhere InvoiceStatus is used.";
 
     // STEP 0: open the task and learn its real CAS version.
-    const first = await dispatch("read_file", { mode: "task_pack", query, cwd, lane, taskEpoch: "new" });
+    const first = await dispatch("tl_read_file", { mode: "task_pack", query, cwd, lane, taskEpoch: "new" });
     expect(first["kind"], JSON.stringify(first)).toBe("read.task_pack");
     const task = first["task"] as Record<string, unknown> | undefined;
     const taskHandle = String(task?.["id"]);
@@ -83,7 +83,7 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     const liveVersion = (resolved as { stateVersion: number }).stateVersion;
     const prescribed = nextOf(first);
     expect(prescribed, JSON.stringify(first)).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { cwd, lane, task: { handle: taskHandle }, action: "find", queries: ["REFUNDED"] },
     });
 
@@ -91,7 +91,7 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     // the LIVE version via `actual` — the exact shape
     // pi09StateHandles.spec.ts's own expected_state_version suite pins.
     const wrongVersion = liveVersion + 7;
-    const refused = await dispatch("read_file", {
+    const refused = await dispatch("tl_read_file", {
       mode: "task_pack", query, cwd, lane,
       task_handle: taskHandle, expected_state_version: wrongVersion,
     });
@@ -102,7 +102,7 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     // The retry is an executable qref re-pack, not the placeholder-shaped next
     // that the refusal scrub correctly removes.
     expect(refused["next"], JSON.stringify(refused)).toMatchObject({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { task: { epoch: "new" } },
     });
     expect((refused["next"] as { arguments: { qref?: unknown } }).arguments.qref).toEqual(
@@ -123,7 +123,7 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     // so retrying with the version the caller already holds is the honest,
     // supported continuation shape (not a second, harder-to-justify
     // "omit expected_state_version entirely" workaround).
-    const continued = await dispatch("read_file", {
+    const continued = await dispatch("tl_read_file", {
       mode: "task_pack", query, cwd, lane,
       task_handle: taskHandle, expected_state_version: liveVersion,
     });
@@ -145,12 +145,12 @@ describe("CAS refusal then prescribed-find continuation does not fall to new-tas
     const saved = process.env["TL_LEGACY_INPUT"];
     try {
       delete process.env["TL_LEGACY_INPUT"];
-      const refused = await dispatch("read_file", { mode: "task_pack", query: "value", cwd });
+      const refused = await dispatch("tl_read_file", { mode: "task_pack", query: "value", cwd });
       expect(refused).toMatchObject({ kind: "refusal", code: "legacy-input", field: "mode", retry: "call" });
       expect(refused["did_you_mean"]).toBeDefined();
 
       process.env["TL_LEGACY_INPUT"] = "accept";
-      const accepted = await dispatch("read_file", { mode: "task_pack", query: "value", cwd });
+      const accepted = await dispatch("tl_read_file", { mode: "task_pack", query: "value", cwd });
       expect(accepted["kind"], JSON.stringify(accepted)).toBe("read.task_pack");
     } finally {
       if (saved === undefined) delete process.env["TL_LEGACY_INPUT"];

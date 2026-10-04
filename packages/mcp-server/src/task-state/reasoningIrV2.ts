@@ -237,13 +237,13 @@ export function projectTaskReasoningIrV2(input: ProjectReasoningIrV2Input): Task
   // --- allowedNext / constraints / invalidation keys ------------------------
   const allowedNext: TaskReasoningIRv2["allowedNext"] = [];
   if (result.route !== undefined) {
-    const tool = result.route.action === "edit_from_handles" ? "edit_file"
-      : result.route.action === "locate_missing_surfaces" ? "search_files"
-        : "read_file";
+    const tool = result.route.action === "edit_from_handles" ? "tl_edit_file"
+      : result.route.action === "locate_missing_surfaces" ? "tl_search_files"
+        : "tl_read_file";
     allowedNext.push({ tool, reason: result.route.action });
   }
   if (result.next !== undefined && canonical?.kind === "discover") {
-    allowedNext.push({ tool: "read_file", reason: "continue-discovery" });
+    allowedNext.push({ tool: "tl_read_file", reason: "continue-discovery" });
   }
 
   const constraints: TaskReasoningIRv2["constraints"] = [];
@@ -431,7 +431,7 @@ export function staleTombstoneOps(
  * `close` ops anywhere in v2: `deriveProjectionOps` above never emits one — a
  * re-served surface is not proof anything changed, so a pack re-read must
  * never promote an obligation. `editedPaths` is the opposite kind of fact: it
- * names paths the server ITSELF just wrote (edit_file's own `editedPathsOf`
+ * names paths the server ITSELF just wrote (tl_edit_file's own `editedPathsOf`
  * accounting, threaded in by the caller), so this is the only producer
  * allowed to ask `canClose` on `prior`'s behalf.
  *

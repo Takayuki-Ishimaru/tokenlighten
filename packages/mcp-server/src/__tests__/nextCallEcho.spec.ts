@@ -71,13 +71,13 @@ describe("D1 — caller-dir pack must not echo its own invocation", () => {
 
     expect(result.missing).toContain("src/ (directory)");
     expect(result.next).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "tree", path: "src" },
     });
     const nextCall = result.execution_contract?.next_call;
     if (nextCall !== undefined) {
       const args = (nextCall.arguments ?? {}) as Record<string, unknown>;
-      const identical = nextCall.tool === "read_file"
+      const identical = nextCall.tool === "tl_read_file"
         && args["mode"] === "task_pack"
         && typeof args["query"] === "string"
         && query.startsWith(args["query"])
@@ -99,11 +99,11 @@ describe("D3 — executed-locate ledger", () => {
     expect(consultExecutedLocate(root, "q8")).toBeUndefined();
   });
 
-  it("dispatching search_files action=locate records the call with its candidate handles", async () => {
+  it("dispatching tl_search_files action=locate records the call with its candidate handles", async () => {
     const root = homeWorkspace("locate-record");
     write(root, "src/alpha.ts", "export function alphaThing() { return 1; }\n");
 
-    await callTool("search_files", { cwd: root, action: "locate", query: "alphaThing" });
+    await callTool("tl_search_files", { cwd: root, action: "locate", query: "alphaThing" });
 
     const recorded = consultExecutedLocate(root, "alphaThing");
     expect(recorded).toBeDefined();
@@ -115,7 +115,7 @@ describe("D4 — over-cap queries remedy stays on find", () => {
     const root = homeWorkspace("queries-cap");
     write(root, "src/a.ts", "export const a = 1;\n");
 
-    const res = await callTool("search_files", {
+    const res = await callTool("tl_search_files", {
       cwd: root,
       action: "find",
       queries: ["zq1a", "zq2a", "zq3a", "zq4a", "zq5a", "zq6a"],
@@ -124,10 +124,10 @@ describe("D4 — over-cap queries remedy stays on find", () => {
 
     expect(String(body["detail"])).toContain("at most 5 entries");
     // W2-4: was string-prose `nextText(body)` checks. Same facts on the wire
-    // directly: `next` stays on search_files find (never redirects to a
-    // read_file task_pack) and carries the first over-cap query verbatim.
+    // directly: `next` stays on tl_search_files find (never redirects to a
+    // tl_read_file task_pack) and carries the first over-cap query verbatim.
     const next = body["next"] as { tool?: unknown; arguments?: Record<string, unknown> } | undefined;
-    expect(next?.tool, JSON.stringify(body)).toBe("search_files");
+    expect(next?.tool, JSON.stringify(body)).toBe("tl_search_files");
     expect(next?.arguments?.["action"], JSON.stringify(body)).toBe("find");
     expect(next?.arguments?.["queries"], JSON.stringify(body)).toContain("zq1a");
   });

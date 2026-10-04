@@ -347,13 +347,13 @@ describe("ContinuationControl", () => {
       cause: "capped",
       limit: { requested: 4096, effectiveBytes: 2048, hostSafeBytes: 2048 },
       next: {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: { continuation_token: "tlh_cont_v1_abc", path: "src/x.ts" },
         idempotent: true,
       },
       remaining: { items: 3, ranges: ["43-90"] },
     });
-    expect(v.next?.tool).toBe("read_file");
+    expect(v.next?.tool).toBe("tl_read_file");
     expect(v.next?.arguments.continuation_token).toBe("tlh_cont_v1_abc");
   });
 });
@@ -371,9 +371,9 @@ function classifyStateHandlePurpose(purpose: StateHandlePurpose): string {
     case "continuation":
       return "immutable response snapshot or reconstruction condition";
     case "read-request":
-      return "one read_file fetch request's original scope and remainder";
+      return "one tl_read_file fetch request's original scope and remainder";
     case "search-request":
-      return "one search_files fetch request's match snapshot and remainder";
+      return "one tl_search_files fetch request's match snapshot and remainder";
     default: {
       const exhaustive: never = purpose;
       throw new Error(`classifyStateHandlePurpose(): unhandled StateHandlePurpose ${String(exhaustive)}`);
@@ -588,7 +588,7 @@ describe("TaskReasoningIR", () => {
         { id: "ob_1", claim: "domain.spec.ts is green", state: "satisfied", evidenceRefs: [] },
       ],
       decision: { state: "verifying", evidenceRefs: [] },
-      allowedNext: [{ tool: "read_file", reason: "confirm build output" }],
+      allowedNext: [{ tool: "tl_read_file", reason: "confirm build output" }],
       invalidationKeys: [{ type: "workspace-sha", value: "abc123" }],
     });
     expect(v.decision.state).toBe("verifying");

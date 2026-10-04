@@ -26,7 +26,7 @@ To remove TokenLighten from the machine entirely — not just this workspace —
 
 Coding agents often spend many tokens reading entire files, repeating searches, and asking predictable follow-up questions before they can make a small change. TokenLighten moves that context-selection work into a local MCP server.
 
-TokenLighten exposes three MCP tools: `read_file`, `search_files`, and `edit_file`. For each task, it can return compact structure, symbols, exact source ranges, and stable edit handles instead of repeatedly sending whole files. Searches can lazily build the compact workspace skeleton when it is first needed. The server also closes predictable discovery follow-ups by returning the next relevant context in the same workflow.
+TokenLighten exposes three MCP tools: `tl_read_file`, `tl_search_files`, and `tl_edit_file`. For each task, it can return compact structure, symbols, exact source ranges, and stable edit handles instead of repeatedly sending whole files. Searches can lazily build the compact workspace skeleton when it is first needed. The server also closes predictable discovery follow-ups by returning the next relevant context in the same workflow.
 
 The coding agent and its model do not change. TokenLighten reduces the amount of repository context that must be placed in the model's prompt. Savings vary by task, language, repository, and agent behavior; the Control Center figures are local estimates rather than provider billing records.
 

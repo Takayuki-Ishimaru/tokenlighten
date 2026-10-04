@@ -30,16 +30,15 @@
 // The channel is `params._meta["io.tokenlighten/context-state"]` on
 // `tools/call`. BOTH eras deliver it:
 //
-//   legacy (SDK v1, `mcp/transport/legacyStdio.ts`) — the handler receives the
-//     raw request and reads `r.params`; `_meta` is a declared member of the
-//     MCP `tools/call` params object in every revision this server serves, and
-//     the SDK's schema passes it through. It was simply never read before.
-//   legacy fallback (hand-rolled JSON-RPC, `mcp/transport/fallbackStdio.ts`) —
+//   legacy (hand-rolled JSON-RPC, `mcp/transport/legacyStdio.ts`) —
 //     `handleRequest` parses `params` itself, so `_meta` is whatever the client
-//     sent, verbatim.
+//     sent, verbatim. `_meta` is a declared member of the MCP `tools/call`
+//     params object in every revision this server serves; it was simply never
+//     read before. (An @modelcontextprotocol/sdk v1 leg once sat beside it in
+//     this list; it never ran and is gone.)
 //   modern (SDK v2, `mcp/transport/modernStdio.ts`) — same shape, same read.
 //
-// So the tier is NOT scoped to one era. All three legs pass the metadata into
+// So the tier is NOT scoped to one era. Both legs pass the metadata into
 // `callTool`, and `modernEraTransport`/`dualEraReplay` keep the two eras'
 // bytes comparable. What is era-INDEPENDENT by construction is the
 // verification itself: it never consults the era, per PI-09 item 14 ("one

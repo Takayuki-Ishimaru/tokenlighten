@@ -1,11 +1,11 @@
 /**
- * exploreOffice.spec.ts — S1/C3: search_files action=office no longer
+ * exploreOffice.spec.ts — S1/C3: tl_search_files action=office no longer
  * dead-ends with toolError("action=office was removed..."). It now extracts
- * office text directly (the same primitive read_file's office paths use:
+ * office text directly (the same primitive tl_read_file's office paths use:
  * readBytesSafe + extractOfficeText), so no doc path ends in a hard error.
  *
  * `action=office` stays a compat-only redirect: it is NOT added to the
- * advertised search_files action enum (schemaSize.spec.ts pins
+ * advertised tl_search_files action enum (schemaSize.spec.ts pins
  * ["find","symbols","references","diff","locate","tree"] unchanged).
  */
 
@@ -71,7 +71,7 @@ describe("explore action=office — S1/C3 redirect (no more dead-end error)", ()
     const buf = await buildMinimalDocx();
     fs.writeFileSync(path.join(ws, "report.docx"), buf);
 
-    const res = await callTool("search_files", { action: "office", path: "report.docx", cwd: ws });
+    const res = await callTool("tl_search_files", { action: "office", path: "report.docx", cwd: ws });
     const body = parse(res);
 
     // Not an error result.
@@ -85,14 +85,14 @@ describe("explore action=office — S1/C3 redirect (no more dead-end error)", ()
 
   it("missing path still returns a clean error (not a crash)", async () => {
     const ws = mkWs("nopath");
-    const res = await callTool("search_files", { action: "office", cwd: ws });
+    const res = await callTool("tl_search_files", { action: "office", cwd: ws });
     const body = parse(res);
     expect(body["kind"]).toBe("refusal");
   });
 
   it("action=office is NOT in the advertised explore action enum (compat redirect only)", async () => {
     const tools = advertisedTools() as Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }>;
-    const exploreTool = tools.find((t) => t.name === "search_files");
+    const exploreTool = tools.find((t) => t.name === "tl_search_files");
     expect(exploreTool).toBeDefined();
     const actionProp = exploreTool?.inputSchema?.properties?.["action"] as { enum?: string[] } | undefined;
     expect(actionProp?.enum).toEqual(["find", "references", "diff", "tree"]);
@@ -101,7 +101,7 @@ describe("explore action=office — S1/C3 redirect (no more dead-end error)", ()
 });
 
 // D11: the "extract_office_text deprecated alias — description points at
-// read_file (S1/C3b)" suite that stood here is DELETED with the alias. It
+// tl_read_file (S1/C3b)" suite that stood here is DELETED with the alias. It
 // source-inspected server.ts for the alias's `description:` string, because a
 // hidden tool's schema had no wire path to assert against. There is no such
 // schema now — the alias entry is gone — and its absence is pinned where it

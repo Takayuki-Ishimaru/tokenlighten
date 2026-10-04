@@ -11,7 +11,7 @@ const originalLogHome = process.env["TOKENLIGHTEN_LOG_HOME"];
 // The diagnostics ring file (packages/usage's diagRing.ts) is keyed off
 // os.homedir() only — it has no TOKENLIGHTEN_HOME-style override, by design
 // (the extension must resolve the identical path with zero coordination).
-// Redirect HOME/USERPROFILE too, or this test's real read_file call writes a
+// Redirect HOME/USERPROFILE too, or this test's real tl_read_file call writes a
 // stray file under the actual developer/CI home directory.
 const originalHome = process.env["HOME"];
 const originalUserProfile = process.env["USERPROFILE"];
@@ -30,7 +30,7 @@ afterEach(() => {
 });
 
 describe("MCP usage logging boundary", () => {
-  it("records derived counts for the exact read_file call without recording arguments", async () => {
+  it("records derived counts for the exact tl_read_file call without recording arguments", async () => {
     const root = join(tmpdir(), `tokenlighten-mcp-usage-${randomUUID()}`);
     const logs = join(root, "logs");
     const home = join(root, "home");
@@ -48,12 +48,12 @@ describe("MCP usage logging boundary", () => {
     vi.resetModules();
 
     const { callTool, modelVisibleBytes } = await import("../server.js");
-    const result = await callTool("read_file", {
+    const result = await callTool("tl_read_file", {
       mode: "full",
       path: "sample.ts",
       cwd: root,
     });
-    const repeatedResult = await callTool("read_file", {
+    const repeatedResult = await callTool("tl_read_file", {
       mode: "full",
       path: "sample.ts",
       cwd: root,
@@ -69,14 +69,14 @@ describe("MCP usage logging boundary", () => {
     const events = readUsageEvents(logs);
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       baselineMethod: "file-bytes",
       responseBytes: modelVisibleBytes(result),
     });
     expect(events[0]!.baselineTokens).toBeGreaterThan(0);
     expect(events[1]).toMatchObject({
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       baselineMethod: "file-bytes",
       baselineTokens: 0,
@@ -127,7 +127,7 @@ describe("MCP usage logging boundary", () => {
 
     const { callTool } = await import("../server.js");
 
-    const first = await callTool("read_file", {
+    const first = await callTool("tl_read_file", {
       mode: "task_pack",
       query: "Where is the greet function defined and what does it return?",
       cwd: root,
@@ -138,7 +138,7 @@ describe("MCP usage logging boundary", () => {
     // argMatrix.spec.ts): server.ts's taskQueryRef, "q-" + 16 hex chars.
     expect(qref).toMatch(/^q-[a-f0-9]{16}$/);
 
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       qref,
       targets: [{ path: "greeting.ts" }],
       cwd: root,

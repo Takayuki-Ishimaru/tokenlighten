@@ -2,7 +2,7 @@
  * receiptStaleNextBrake.spec.ts — F-V13-5 (v0.13.0 external verification, P0-A).
  *
  * THE INCIDENT. A caller re-sent one query and received the SAME
- * `search_files` `next` seven times running, after having executed that search
+ * `tl_search_files` `next` seven times running, after having executed that search
  * on the first turn. Every re-send produced zero progress and zero new bytes.
  *
  * THE CAUSE, and why the existing brakes did not fire. The FRESH-BUILD path
@@ -117,10 +117,10 @@ function nextOf(body: Record<string, unknown>): Record<string, unknown> | undefi
   return next !== null && typeof next === "object" ? next as Record<string, unknown> : undefined;
 }
 
-/** Does the emitted `next` name this search_files action over this term? */
+/** Does the emitted `next` name this tl_search_files action over this term? */
 function proposesSearch(body: Record<string, unknown>, action: string, term: string): boolean {
   const next = nextOf(body);
-  if (next === undefined || next["tool"] !== "search_files") return false;
+  if (next === undefined || next["tool"] !== "tl_search_files") return false;
   const args = JSON.stringify(next["arguments"] ?? {});
   return args.includes(`"${action}"`) && args.includes(term);
 }
@@ -156,24 +156,24 @@ describe("F-V13-5: a receipt never replays a search this session already ran", (
         cwd: ws,
       };
 
-      const first = await call("read_file", request);
+      const first = await call("tl_read_file", request);
       expect(first["kind"]).toBe("read.task_pack");
       // Precondition of the whole test: the pack really did prescribe it.
       expect(proposesSearch(first, shape.action, shape.term)).toBe(true);
 
       // The caller does exactly as told. The dispatcher books it as consumed
       // work in both ledgers the brake reads.
-      const ran = await call("search_files", { ...shape.run, cwd: ws });
+      const ran = await call("tl_search_files", { ...shape.run, cwd: ws });
       expect(String(ran["kind"])).toContain("search.");
 
       // The byte-identical re-ask. Pre-fix this short-circuited on the request
       // fingerprint into a compact receipt that replayed the very call just
       // executed — turn 3 of 7 in the observed loop.
-      const second = await call("read_file", request);
+      const second = await call("tl_read_file", request);
       expect(proposesSearch(second, shape.action, shape.term)).toBe(false);
 
       // And it stays closed: a third re-ask must not resurrect it either.
-      const third = await call("read_file", request);
+      const third = await call("tl_read_file", request);
       expect(proposesSearch(third, shape.action, shape.term)).toBe(false);
     });
 
@@ -186,13 +186,13 @@ describe("F-V13-5: a receipt never replays a search this session already ran", (
         cwd: ws,
       };
 
-      const first = await call("read_file", request);
+      const first = await call("tl_read_file", request);
       expect(proposesSearch(first, shape.action, shape.term)).toBe(true);
 
       // No search runs in between. The prescription is still owed, so the
       // re-ask must keep naming it — this is what makes the assertions in the
       // test above measure the executed-work ledger and nothing else.
-      const second = await call("read_file", request);
+      const second = await call("tl_read_file", request);
       expect(proposesSearch(second, shape.action, shape.term)).toBe(true);
     });
   }
@@ -205,16 +205,16 @@ describe("F-V13-5: a receipt never replays a search this session already ran", (
       task: { profile: "generic" },
       cwd: ws,
     };
-    const first = await call("read_file", request);
+    const first = await call("tl_read_file", request);
     const qref = first["qref"];
     expect(typeof qref).toBe("string");
     expect(proposesSearch(first, "references", "alphaTotal")).toBe(true);
 
-    await call("search_files", { ...WIRING_REFERENCES.run, cwd: ws });
+    await call("tl_search_files", { ...WIRING_REFERENCES.run, cwd: ws });
 
     // A qref re-pack is the OTHER door into the same record — the one D3's
     // original receipt-staleness note was written against.
-    const replay = await call("read_file", { qref, cwd: ws });
+    const replay = await call("tl_read_file", { qref, cwd: ws });
     expect(proposesSearch(replay, "references", "alphaTotal")).toBe(false);
   });
 
@@ -229,9 +229,9 @@ describe("F-V13-5: a receipt never replays a search this session already ran", (
       task: { profile: "answer" },
       cwd: ws,
     };
-    const first = await call("read_file", request);
+    const first = await call("tl_read_file", request);
     expect(first["kind"]).toBe("read.task_pack");
-    const second = await call("read_file", request);
+    const second = await call("tl_read_file", request);
     expect(second["kind"]).toBe("read.receipt");
   });
 });

@@ -7,7 +7,7 @@
 // `OrderService.java:27-420 remaining:["1-26"]`, `PaymentService.java:15-123
 // remaining:["2-14"]`, `OrderStatus.java:3-36 remaining:["2-2"]` — a package
 // line, imports, a blank line. The model then issued a WHOLE extra turn
-// (`read_file {targets:[{handle,range:"1-14"}]}`) to fetch the 14 import
+// (`tl_read_file {targets:[{handle,range:"1-14"}]}`) to fetch the 14 import
 // lines nobody needed withheld; one extra turn prices at roughly 9-14 KB of
 // served bytes on every host measured, so withholding ~400 bytes cost far
 // more than it saved, and the standing `remaining` entry is itself a standing
@@ -371,7 +371,7 @@ describe("applyFoldSmallRemainder — direct unit coverage", () => {
 
 // ---------------------------------------------------------------------------
 // (3) The acceptance bar: a LATER ranged read of the folded head returns the
-//     already-served receipt (spawned server — a real read_file round trip).
+//     already-served receipt (spawned server — a real tl_read_file round trip).
 // ---------------------------------------------------------------------------
 
 const nodeRequire = createRequire(import.meta.url);
@@ -460,7 +460,7 @@ afterAll(async () => {
 });
 
 describe("spawned server: the folded head is already served for a later ranged read", () => {
-  it("a task-pack query folds the head, and a follow-up read_file over that head returns a code-unchanged receipt", async () => {
+  it("a task-pack query folds the head, and a follow-up tl_read_file over that head returns a code-unchanged receipt", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "tl-fold-remainder-server-"));
     workspaces.push(root);
     fs.mkdirSync(path.join(root, "src"), { recursive: true });
@@ -473,7 +473,7 @@ describe("spawned server: the folded head is already served for a later ranged r
     spawnedServers.push(server);
     await server.initialize();
 
-    const first = await server.call("read_file", {
+    const first = await server.call("tl_read_file", {
       cwd: root,
       query: `Explain what ${CLASS_NAME} does`,
       task: { epoch: "new", profile: "answer" },
@@ -487,7 +487,7 @@ describe("spawned server: the folded head is already served for a later ranged r
     const handle = row!["handle"] as string;
     expect(typeof handle).toBe("string");
 
-    const second = await server.call("read_file", {
+    const second = await server.call("tl_read_file", {
       cwd: root,
       targets: [{ handle, range: "1-10" }],
     });

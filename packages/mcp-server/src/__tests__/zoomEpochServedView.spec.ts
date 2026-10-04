@@ -10,12 +10,12 @@
  * read-only view it has a sibling for (`recordReadOnlyServedSurfaces`,
  * readCodeTaskPack.ts, WP-S11) are both reachable ONLY from the task-pack
  * builder's own post-serve booking pass (`bookShippedPackServeState`). A
- * plain `read_file {targets:[{handle,range}]}` / `{path,range}` dispatch in
+ * plain `tl_read_file {targets:[{handle,range}]}` / `{path,range}` dispatch in
  * server.ts — the "AA1 direct slice route" — never calls either. So the
  * sequence "query -> discover (evidence handle + `remaining` ranges) -> the
  * caller zooms straight to a `remaining` range BY HANDLE instead of running
  * the pack's own `next` -> a bare `{qref}` re-pack" left the re-pack blind to
- * bytes the caller already holds: it re-proposed the identical `search_files
+ * bytes the caller already holds: it re-proposed the identical `tl_search_files
  * find` for an identifier the zoom's own body already contained.
  *
  * THE FIX (three seats, all additive — no new wire field, no flag):
@@ -65,7 +65,7 @@ const ZOOM_IDENTIFIER = "finalizeShutdownSequence";
  * (small enough that a 6,200-byte budget embeds a window around it directly)
  * and `finalizeShutdownSequence` at the very tail, past ~60 filler lines —
  * far enough that hop 0 cannot also embed it under the same budget and must
- * leave it for a follow-up (`next` proposes `search_files find` for it; the
+ * leave it for a follow-up (`next` proposes `tl_search_files find` for it; the
  * evidence row's own `remaining` already names the tail span that contains
  * it, which is exactly what a caller impatient enough to zoom by handle would
  * jump to instead of running `next` verbatim).
@@ -155,7 +155,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
     });
 
     it("hop0 discovers with a next targeting the uncovered identifier", async () => {
-      const hop0 = await server.callTool("read_file", {
+      const hop0 = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -171,7 +171,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
     it("a bare-qref re-pack sees the identifier a plain handle+range zoom already served (no task field on the zoom)", async () => {
       const lane = "zoom-no-task-field";
-      const hop0 = await server.callTool("read_file", {
+      const hop0 = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -184,14 +184,14 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
       // THE ZOOM: a plain ranged read by handle, no `next` executed, no
       // `task` field at all — exactly the shape held item 4 describes.
-      const hop1 = await server.callTool("read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
+      const hop1 = await server.callTool("tl_read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
       expect(hop1.body?.kind).toBe("read.text");
       expect(
         JSON.stringify(hop1.body).includes(ZOOM_IDENTIFIER),
         `the zoom itself must serve the identifier's body: ${JSON.stringify(hop1.body)}`,
       ).toBe(true);
 
-      const hop2 = await server.callTool("read_file", { qref, cwd: ws, lane });
+      const hop2 = await server.callTool("tl_read_file", { qref, cwd: ws, lane });
       // THE CORE ASSERTION: the re-pack must not re-open the concern the zoom
       // already served — its OWN `next` must not re-propose the identical
       // search/zoom for the identifier the caller already holds.
@@ -211,7 +211,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
     it("a bare-qref re-pack sees the identifier when the zoom DOES carry an explicit task.handle", async () => {
       const lane = "zoom-with-task-handle";
-      const hop0 = await server.callTool("read_file", {
+      const hop0 = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -222,7 +222,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       const taskHandle: string = hop0.body.task.id;
       const qref: string = hop0.body.qref;
 
-      const hop1 = await server.callTool("read_file", {
+      const hop1 = await server.callTool("tl_read_file", {
         targets: [{ handle, range: ZOOM_RANGE }],
         task: { handle: taskHandle },
         cwd: ws,
@@ -230,7 +230,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       });
       expect(hop1.body?.kind).toBe("read.text");
 
-      const hop2 = await server.callTool("read_file", { qref, cwd: ws, lane });
+      const hop2 = await server.callTool("tl_read_file", { qref, cwd: ws, lane });
       expect(
         JSON.stringify(nextOf(hop2.body) ?? null).includes(ZOOM_IDENTIFIER),
       ).toBe(false);
@@ -240,7 +240,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
     it("control: a file edited between the zoom and the re-pack re-opens the touched concern", async () => {
       const lane = "control-file-edited";
-      const hop0 = await server.callTool("read_file", {
+      const hop0 = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -249,13 +249,13 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       });
       const handle: string = hop0.body.evidence[0].handle;
       const qref: string = hop0.body.qref;
-      await server.callTool("read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
+      await server.callTool("tl_read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
 
       const abs = path.join(ws, "src/pipelineConfig.ts");
       const original = fs.readFileSync(abs, "utf8");
       fs.writeFileSync(abs, `${original}\n// touched by the file-edited control\n`, "utf8");
       try {
-        const hop2 = await server.callTool("read_file", { qref, cwd: ws, lane });
+        const hop2 = await server.callTool("tl_read_file", { qref, cwd: ws, lane });
         const text = JSON.stringify(hop2.body);
         expect(text.includes("pipelineConfig.ts"), `the touched file must not silently vanish: ${text}`).toBe(true);
       } finally {
@@ -265,7 +265,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
     it("control: task.epoch:\"new\" on the re-pack inherits nothing from the zoom", async () => {
       const lane = "control-new-epoch";
-      const hop0 = await server.callTool("read_file", {
+      const hop0 = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -273,9 +273,9 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         lane,
       });
       const handle: string = hop0.body.evidence[0].handle;
-      await server.callTool("read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
+      await server.callTool("tl_read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane });
 
-      const fresh = await server.callTool("read_file", {
+      const fresh = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -289,7 +289,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
     }, 45_000);
 
     it("control: a different lane's identical query inherits nothing from the zoom", async () => {
-      const hop0 = await server.callTool("read_file", {
+      const hop0 = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -297,9 +297,9 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         lane: "control-owner-lane",
       });
       const handle: string = hop0.body.evidence[0].handle;
-      await server.callTool("read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane: "control-owner-lane" });
+      await server.callTool("tl_read_file", { targets: [{ handle, range: ZOOM_RANGE }], cwd: ws, lane: "control-owner-lane" });
 
-      const peer = await server.callTool("read_file", {
+      const peer = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         budget: { bytes: 6200 },
@@ -314,7 +314,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
     it("control: a generic (edit) profile task-pack chain is unaffected by this fix's answer-only gate", async () => {
       const lane = "control-generic-profile";
-      const hop0 = await server.callTool("read_file", {
+      const hop0 = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "generic" },
         budget: { bytes: 6200 },

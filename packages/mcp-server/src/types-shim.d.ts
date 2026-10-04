@@ -114,15 +114,3 @@ declare module "web-tree-sitter" {
   const Parser: ParserConstructor;
   export default Parser;
 }
-
-declare module "@modelcontextprotocol/sdk/server/index.js" {
-  export class Server {
-    constructor(info: { name: string; version: string }, opts: { capabilities: Record<string, unknown>; instructions?: string });
-    setRequestHandler(matcher: { method: string }, handler: (req: unknown) => Promise<unknown>): void;
-    connect(transport: unknown): Promise<void>;
-  }
-}
-
-declare module "@modelcontextprotocol/sdk/server/stdio.js" {
-  export class StdioServerTransport {}
-}

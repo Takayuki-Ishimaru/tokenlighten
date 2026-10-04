@@ -1,5 +1,5 @@
 /**
- * pathlessEdit.ts — workspace-scoped and symbol-scoped pathless edit_file.
+ * pathlessEdit.ts — workspace-scoped and symbol-scoped pathless tl_edit_file.
  *
  * Implements DESIGN-v0.4-one-shot-read-write.md §"Write: Pathless edit_code"
  * (lines 157–229, 326–375).
@@ -159,7 +159,7 @@ function pathlessWorkspaceBoundaryRefusal(
     paths: [relPath],
     detail,
     next: {
-      tool: "edit_file",
+      tool: "tl_edit_file",
       arguments: {
         cwd: foreign,
         edits: [{

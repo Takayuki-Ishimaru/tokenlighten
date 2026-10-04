@@ -1,7 +1,7 @@
 # @tokenlighten/mcp-server
 
-Stdio MCP server exposing exactly 3 advertised tools — `read_file`,
-`edit_file`, `search_files` — that return the exact slices, edit handles, and
+Stdio MCP server exposing exactly 3 advertised tools — `tl_read_file`,
+`tl_edit_file`, `tl_search_files` — that return the exact slices, edit handles, and
 verification kits a coding-agent task needs, instead of forcing an agent to
 Read/Grep/cat its way through a repo one file at a time.
 
@@ -26,7 +26,7 @@ npm run build --workspace @tokenlighten/mcp-server
 # Read-only (default)
 node dist/bin.js /path/to/project
 
-# Enable the write tools (edit_file mutations, artifact rewrites)
+# Enable the write tools (tl_edit_file mutations, artifact rewrites)
 node dist/bin.js /path/to/project --allow-write
 ```
 

@@ -153,7 +153,7 @@ describe("edit_code review:true opt-in (server-level)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/util.ts",
         search: "OLD",
@@ -179,7 +179,7 @@ describe("edit_code review:true opt-in (server-level)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/service/statsService.ts",
         search: "PRIORITY_LEVEL",
@@ -215,7 +215,7 @@ describe("edit_code review:true opt-in (server-level)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "target.ts",
         search: "X = 1",
@@ -238,7 +238,7 @@ describe("edit_code review:true opt-in (server-level)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/service/orderService.ts",
         search: "return null",

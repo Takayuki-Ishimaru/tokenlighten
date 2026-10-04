@@ -226,7 +226,7 @@ describe("envelope invariants — end-to-end toolOk full response", () => {
 
 describe("envelope invariants — searchReplaceEdit responses", () => {
   it("write-not-enabled error response has no forbidden keys and correct MCP shape", () => {
-    // Simulate what callTool returns for the edit_file search/replace path when
+    // Simulate what callTool returns for the tl_edit_file search/replace path when
     // write is disabled.
     const errorPayload = {
       ok: false,

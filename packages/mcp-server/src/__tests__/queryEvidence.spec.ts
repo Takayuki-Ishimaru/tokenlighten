@@ -6,7 +6,7 @@ import {
 
 describe("query evidence selection", () => {
   it("keeps MCP protocol literals out of generic symbol lookup", () => {
-    expect(isProtocolSymbolSearchToken("read_file")).toBe(true);
+    expect(isProtocolSymbolSearchToken("tl_read_file")).toBe(true);
     expect(isProtocolSymbolSearchToken("execution_contract")).toBe(false);
     expect(isProtocolSymbolSearchToken("readFile")).toBe(false);
     expect(isProtocolSymbolSearchToken("buildTaskExecutionContract")).toBe(false);
@@ -27,7 +27,7 @@ describe("query evidence selection", () => {
 
     const evidence = selectQueryEvidence(
       content,
-      "trace how read_file task_pack builds execution_contract readiness and structured next_call; identify the exact regression tests",
+      "trace how tl_read_file task_pack builds execution_contract readiness and structured next_call; identify the exact regression tests",
       { path: "src/__tests__/readCodeTaskPack.spec.ts" },
     );
 
@@ -73,7 +73,7 @@ describe("query evidence selection", () => {
   it("refuses a test-focused answer when no test or assertion block matches", () => {
     const evidence = selectQueryEvidence(
       "function readFile(path: string): string { return path; }\n",
-      "find the exact read_file regression test",
+      "find the exact tl_read_file regression test",
       { path: "helpers.ts" },
     );
     expect(evidence).toBeUndefined();

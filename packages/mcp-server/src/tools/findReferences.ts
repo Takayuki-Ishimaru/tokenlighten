@@ -137,6 +137,7 @@ import {
 } from "../state/searchRequestStore.js";
 import { readFileSafe } from "../util/safePath.js";
 import { shaOfText } from "../util/handles.js";
+import { effTolerantInputEnabled } from "../util/flags.js";
 
 const MAX_REFERENCES = 200;
 /** Safety valve: never tree-sitter-parse more than this many candidate files for one member_sweep lookup. */
@@ -204,7 +205,7 @@ export interface FindReferencesInput {
   /** Restrict to a file or subdirectory (workspace-relative). */
   path?: string;
   /** L2 (2026-08-01 references-contract): caller's match cap. Was accepted by
-   * the advertised search_files schema and then silently dropped here. It now
+   * the advertised tl_search_files schema and then silently dropped here. It now
    * clamps to [1, MAX_REFERENCES] and bounds only what is SERVED (the files[]
    * grouping input and the match-cap verdict) — `total` still reports the true
    * count, which is free because the walk is exhaustive either way. */
@@ -342,7 +343,7 @@ export interface FindReferencesResult {
    * matched LINE exactly once (see the module doc contract). Present exactly
    * while any matched line is still unserved. Replaces the v1 string `next`,
    * whose whitespace-joined form broke on paths containing spaces. */
-  next_call?: { tool: "search_files"; arguments: Record<string, unknown> };
+  next_call?: { tool: "tl_search_files"; arguments: Record<string, unknown> };
   /** L4: present when the supplied cursor failed to decode — this page was
    * served from the START of the match list, never a guessed window. */
   cursor_note?: string;
@@ -428,6 +429,18 @@ export function qualifiedSymbolMember(raw: string): string | undefined {
   const parts = raw.split("::");
   if (parts.length < 2) return undefined;
   if (!parts.every((part) => IDENT_RE.test(part))) return undefined;
+  return parts[parts.length - 1];
+}
+
+/**
+ * EFF (TL_EFF_TOLERANT_INPUT, default OFF): the member of a package-qualified
+ * dotted name (`balance.Compute`, `pkg.Type.method`) — the name both recorded
+ * h2 refusals of this shape were corrected to by the solver's next call.
+ */
+function dottedSymbolMember(raw: string): string | undefined {
+  if (!raw.includes(".")) return undefined;
+  const parts = raw.split(".");
+  if (parts.length < 2 || !parts.every((part) => IDENT_RE.test(part))) return undefined;
   return parts[parts.length - 1];
 }
 
@@ -612,14 +625,18 @@ const CURSOR_INVALID_NOTE =
  * clamped `limit` so the call is idempotent under re-issue, and puts the whole
  * continuation state in one opaque `cursor` token — no whitespace joining, so
  * a path like `src/my dir/a.ts` cannot corrupt the call.
+ *
+ * `cursorToken` is `undefined` for a `cursor-stale` RESTART (eval-0929 §3/§7):
+ * the same echoed scoping/budget, minus the `cursor` field, since a restart is
+ * a fresh request over the current revision, never a resume of the stale one.
  */
 function continuationNextCall(
   symbol: string,
-  cursorToken: string,
+  cursorToken: string | undefined,
   input: FindReferencesInput,
-): { tool: "search_files"; arguments: Record<string, unknown> } {
+): { tool: "tl_search_files"; arguments: Record<string, unknown> } {
   return {
-    tool: "search_files",
+    tool: "tl_search_files",
     arguments: {
       action: "references",
       query: symbol,
@@ -654,7 +671,7 @@ function continuationNextCall(
       // no-op for the legacy shape's existing pinned tests.
       ...(input.lane !== undefined && input.lane !== "" ? { lane: input.lane } : {}),
       ...(input.taskHandle !== undefined ? { task: { handle: input.taskHandle } } : {}),
-      cursor: cursorToken,
+      ...(cursorToken !== undefined ? { cursor: cursorToken } : {}),
     },
   };
 }
@@ -882,15 +899,14 @@ async function resolveReferencesCursorInput(
         field: "cursor",
         detail: `the source revision of ${resumePosition.path} moved under this cursor; restart the original request`,
         retry: "call",
-        next: {
-          tool: "search_files",
-          arguments: {
-            action: "references",
-            query: symbol,
-            ...(input.path ? { path: input.path } : {}),
-            ...(input.lang ? { lang: input.lang } : {}),
-          },
-        },
+        // eval-0929 §3/§7: reuse the SAME builder the ordinary (non-stale)
+        // continuation uses, so a caller-declared `limit`/`maxBytes`/`lane`/
+        // `taskHandle` overrides this cursor call carried are restated on the
+        // restart too, instead of a hand-rolled subset that silently dropped
+        // them. `undefined` in place of a cursor token omits `cursor` — a
+        // restart is a fresh request over the current revision, never a
+        // resume of the stale one.
+        next: continuationNextCall(symbol, undefined, input),
       },
     };
   }
@@ -910,7 +926,9 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
   // walk; refuse anything that resolves to no identifier at all.
   const symbol = requested && IDENT_RE.test(requested)
     ? requested
-    : (requested ? qualifiedSymbolMember(requested) : undefined);
+    : (requested
+      ? qualifiedSymbolMember(requested) ?? (effTolerantInputEnabled() ? dottedSymbolMember(requested) : undefined)
+      : undefined);
   if (symbol === undefined) {
     return {
       symbol: requested,
@@ -922,7 +940,7 @@ export async function findReferences(input: FindReferencesInput, workspace: stri
     } as unknown as FindReferencesResult;
   }
 
-  // FX-R1 (2026-09-03, round-18B review finding 5): `search_files
+  // FX-R1 (2026-09-03, round-18B review finding 5): `tl_search_files
   // action=references` had no `not-found`/`path-outside-workspace` parity
   // with `find`/`tree` — a nonexistent `path` returned a bare
   // `{total:0,references:[],files:[]}` with no `omitted`/`absence`/refusal

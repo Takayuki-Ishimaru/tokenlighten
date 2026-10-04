@@ -1,7 +1,7 @@
 /**
  * rangeEdit.ts — handle-scoped line-range write primitives.
  *
- * These helpers intentionally reuse existing edit_file fields so the MCP
+ * These helpers intentionally reuse existing tl_edit_file fields so the MCP
  * advertised schema does not grow.
  */
 
@@ -12,6 +12,7 @@ import { batchCheckpoint } from "./checkpoint.js";
 import { looksLikeSecretFile } from "./secretScan.js";
 import { rangeMissForensics, type NearestMatchInfo } from "./editForensics.js";
 import { formatDelta, formatLines } from "../util/lineDelta.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import { detectWriteEncodingRisk, writeEncodingRefusalMessage } from "../util/textDecode.js";
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -128,6 +129,11 @@ function writeExistingFile(
   mode: number | undefined,
   indexInvalidation: { root: string; relPath: string },
 ): RangeEditResult | null {
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts), for both
+  // range edits: each has resolved, bounds-checked and spliced the new text in
+  // memory before calling here, and the atomic write below is the first byte
+  // either puts on the disk. Outside the try: a cancel is not a write failure.
+  throwIfRequestCancelled();
   try {
     writeExistingFileAtomic(abs, content, mode, indexInvalidation);
     return null;

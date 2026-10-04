@@ -9,7 +9,7 @@
 // below, mirroring localizationGuards.spec.ts's proven Feature 1 recipe).
 //
 // Needs a real spawned server (--allow-write): finishEdit only runs inside
-// dispatchTool's real edit_file path, which is gated on ALLOW_WRITE — a
+// dispatchTool's real tl_edit_file path, which is gated on ALLOW_WRITE — a
 // module-level constant read from argv at server.ts's import time, so it
 // cannot be flipped true for an in-process callTool() in this test process
 // (every other edit-path spec in this suite spawns for the same reason).
@@ -201,7 +201,7 @@ describe("closureSatisfied gates the unread-sibling note too (2026-07-16a)", () 
     await srv.initialize();
 
     const packRes = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "task_pack",
         query: "Wire getHealth health into sendStatus using the existing encodeStatus adapter; replace the hard-coded healthy value so false clears the output health bit.",
@@ -218,7 +218,7 @@ describe("closureSatisfied gates the unread-sibling note too (2026-07-16a)", () 
     expect(pack.decision?.kind).toBe("act.edit");
 
     const editRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/consumer.ts",
         cwd: ws,
@@ -249,7 +249,7 @@ describe("closureSatisfied gates the unread-sibling note too (2026-07-16a)", () 
     await srv.initialize();
 
     const packRes = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: TASK_PACK_QUERY, cwd: ws },
     });
     const pack = parseToolResult(packRes) as any;
@@ -263,7 +263,7 @@ describe("closureSatisfied gates the unread-sibling note too (2026-07-16a)", () 
     expect(JSON.stringify(pack.plan?.internalized ?? [])).toContain('"op":"find"');
 
     const editRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/shared/status.ts",
         cwd: ws,
@@ -288,14 +288,14 @@ describe("closureSatisfied gates the unread-sibling note too (2026-07-16a)", () 
 
     // Register the style check while the css token is still absent.
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: TASK_PACK_QUERY, cwd: ws },
     });
 
-    // NATIVE (non-edit_file) changes satisfy every registered check — git
+    // NATIVE (non-tl_edit_file) changes satisfy every registered check — git
     // detects them as modified/untracked files, same mechanism as
     // closureMode.spec.ts's "counts native (git-detected) edits" test. No
-    // edit_file call has happened yet this session. The query registers MORE
+    // tl_edit_file call has happened yet this session. The query registers MORE
     // than the single style check (a live run showed 4 verifiable checks:
     // style + per-surface "STALLED present in <file>" contract/api checks) —
     // satisfy all of them rather than assuming the exact set, so this test
@@ -309,7 +309,7 @@ describe("closureSatisfied gates the unread-sibling note too (2026-07-16a)", () 
     writeFile(ws, "apps/api/src/routes/tickets.ts", "export function route() {}\n// STALLED\n");
 
     const closureRes = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "closure", cwd: ws },
     });
     const closureBody = parseToolResult(closureRes);
@@ -329,10 +329,10 @@ describe("closureSatisfied gates the unread-sibling note too (2026-07-16a)", () 
       && (receiptTag === "closure-complete" || receiptTag === "decision-unchanged");
     expect(certified, `closure not certified: ${JSON.stringify(closureBody)}`).toBe(true);
 
-    // Session's FIRST successful edit_file call — closure was ALREADY
+    // Session's FIRST successful tl_edit_file call — closure was ALREADY
     // certified complete before this call landed.
     const editRes = await srv.rpc(4, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/shared/status.ts",
         cwd: ws,

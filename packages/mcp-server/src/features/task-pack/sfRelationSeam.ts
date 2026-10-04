@@ -8,7 +8,7 @@
 // + direct callers/callees as edge lines with zoom handles, riding the
 // EXISTING `plan.wiring.evidence_graph` field — no new wire field per §4.2;
 // `SF_RELATION_PACKET_BYTES = 4096`; large fan-out gets honest truncation and
-// the CONSUMER decides whether to fall back to `search_files
+// the CONSUMER decides whether to fall back to `tl_search_files
 // {action:"references"}`, never this seam) and §3.7.2 (edges come from
 // `features/graph-evidence`'s `EdgeDeriver`/providers via the real
 // `RelationGraphPort`, never a literal scan; a real edge — never a

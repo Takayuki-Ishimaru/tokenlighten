@@ -412,7 +412,7 @@ describe("FX-N static fence: no read-family booking producer runs before the fun
     // lines are blanked in place, so line indices survive), so slice `SERVER`.
     const around = SERVER.slice(Math.max(0, serverCalls[0]! - 400), serverCalls[0]! + 120);
     expect(around, "both read-family tools must publish it").toMatch(
-      /canonical === "read_file" \|\| canonical === "search_files"/,
+      /canonical === "tl_read_file" \|\| canonical === "tl_search_files"/,
     );
   });
 
@@ -811,10 +811,24 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
    * plain `spansExcludingWindows`-over-`elided` site, an allowlist reason)
    * fails the enumeration-completeness check below.
    */
-  const SITES: ReadonlyArray<{ id: string; category: "a1-elided" | "a2-markdown" | "a2-csv" | "a2-task-pack" | "a2-verification-kit" | "a2-comments-keep-head" | "a2-range-batch-unelided" | "allowlist"; reason?: string }> = [
+  const SITES: ReadonlyArray<{ id: string; category: "a1-elided" | "a2-markdown" | "a2-csv" | "a2-task-pack" | "a2-verification-kit" | "a2-comments-keep-head" | "a2-range-batch-unelided" | "a2-post-edit-window" | "allowlist"; reason?: string }> = [
+    // PEW (v0.15.0): file order — the post-edit window helpers sit well before
+    // dispatchTool's read-mode switch, so this is the earliest site in server.ts.
+    // R2-PEW (2026-09-30, review P0-1): the site MOVED, it was not added — from
+    // attachAppliedReadback (which books what it merely BUILT, before the byte-
+    // ceiling shed could shrink or drop it) to bookShippedPostEditWindows (which
+    // books what the FINAL response carries). The count stays 17.
+    { id: "server.ts: bookShippedPostEditWindows' after-window (mode=edit-after)", category: "a2-post-edit-window" },
     { id: "server.ts: bookCsvArtifactServe (mode=artifact)", category: "a2-csv" },
     { id: "server.ts: resolveFullReadForPath governed head chunk (mode=full-head)", category: "a1-elided" },
     { id: "server.ts: buildFullDowngradePayload's comments-keep head (mode=full-comments-keep)", category: "a2-comments-keep-head" },
+    // R2-R1 (2026-09-30, review P1-5): the SAME W1 downgrade head on the DEFAULT
+    // (elide) path. It is served from the RAW file text exactly like the
+    // comments-keep head above — `serveGovernedFullHead(content, ...)`, no
+    // elision — so every line in `1..servedLines` genuinely reached the caller
+    // and there is no renderer accounting to exclude: the same a2 justification.
+    // ADDED, not moved: the count goes 17 -> 18.
+    { id: "server.ts: buildFullDowngradePayload's default head (mode=full-head)", category: "a2-comments-keep-head" },
     { id: "server.ts: bookFullFileExpansionServe (mode=full)", category: "a1-elided" },
     { id: "server.ts: buildLedgerDifferenceFullPayload's appendFresh (mode=full/auto/symbol/slice)", category: "a1-elided" },
     { id: "server.ts: dropServedBody (mode=verification-kit)", category: "a2-verification-kit" },
@@ -851,7 +865,7 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
       serverSites.length,
       "server.ts's recordServedRange call-site count must match this file's enumeration "
       + "exactly — a new site (or a deleted one) must update SITES above, not pass silently",
-    ).toBe(16);
+    ).toBe(18);
     expect(smallFileSites.length, "readCodeSmallFile.ts's one known site").toBe(1);
     expect(taskPackSites.length, "readCodeTaskPack.ts's one known site").toBe(1);
     expect(
@@ -994,6 +1008,42 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
   });
 
   // ---- a2: documented "never elided" producers ----
+
+  it("PEW (R2-PEW, review P0-1): the after-window is booked from the SHIPPED response — the surviving `after.range`, verbatim, after the byte-ceiling shed; attachAppliedReadback books nothing", () => {
+    // Three facts, checked separately because together they are the whole
+    // justification for this site being an a2:
+    //  (1) the booked span is exactly the `after.range` of a window that is STILL
+    //      on the response — parsed from that range, never re-derived and never
+    //      the pre-shed intention — and the booking is bound to the sha/line
+    //      count staged when the window was cut;
+    expect(
+      body(SERVER, "bookShippedPostEditWindows"),
+      "the after-window must book exactly the span its own (post-shed) `after.range` names",
+    ).toMatch(
+      /const span = after\.range\.match\(\/\^\(\\d\+\)-\(\\d\+\)\$\/\);[\s\S]{0,500}?recordServedRange\(\s*workspace,\s*entryPath,\s*facts\.sha,\s*from,\s*to,\s*facts\.totalLines,\s*\{ mode: "edit-after", range: after\.range,/,
+    );
+    //  (2) attachAppliedReadback only BUILDS the window: any booking there would
+    //      be written before `shedPostEditWindowsToFit` can shrink or drop the
+    //      window, and a later read of a line that never left the server would be
+    //      answered with a receipt (review P0-1). It stages sha + line count only;
+    expect(
+      withoutComments(body(SERVER, "attachAppliedReadback")),
+      "attachAppliedReadback must never book: the byte-ceiling shed runs AFTER it",
+    ).not.toMatch(/recordServedRange\(/);
+    //  (3) finishEdit books strictly AFTER the shed, from the response it returns.
+    expect(
+      SERVER,
+      "the booking must run on the post-shed response, never on `augmented`",
+    ).toMatch(
+      /shipped = shedPostEditWindowsToFit\([\s\S]{0,600}?bookShippedPostEditWindows\(workspace, shipped, stagedPostEditWindows\);\s*return shipped;/,
+    );
+    //  (4) and no elision runs in either function — `lines` comes straight from
+    //      `servedTextOrUndefined` (raw disk text), so there is nothing to exclude.
+    expect(
+      body(SERVER, "attachAppliedReadback") + body(SERVER, "bookShippedPostEditWindows"),
+      "an elided window would need a1 accounting instead",
+    ).not.toMatch(/elideDocComments/);
+  });
 
   it("the markdown section serve books ONE literal span per section — markdown is never a comment-elision target", () => {
     expect(SERVER).toMatch(

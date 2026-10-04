@@ -162,7 +162,7 @@ export type TombstoneScope = {
 
 /**
  * A direct-absence observation, in the shape of this repo's absence discipline
- * (`search_files` 0 matches + a scope-complete report). The literal `true`/`0`
+ * (`tl_search_files` 0 matches + a scope-complete report). The literal `true`/`0`
  * make a strong tombstone unconstructible from a partial observation at the
  * TYPE level; `tombstone.ts` re-checks the same facts at runtime for untrusted
  * input.

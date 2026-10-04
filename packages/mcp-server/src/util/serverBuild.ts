@@ -76,7 +76,7 @@ const SERVER_PACKAGE_NAME = "@tokenlighten/mcp-server";
  * version, so it cannot drift silently the way the previous hardcoded
  * serverInfo "0.2.0" did.
  */
-export const SERVER_PACKAGE_VERSION_FALLBACK = "0.14.4";
+export const SERVER_PACKAGE_VERSION_FALLBACK = "0.15.0";
 
 /**
  * Resolve the running server's own package version by walking up from the

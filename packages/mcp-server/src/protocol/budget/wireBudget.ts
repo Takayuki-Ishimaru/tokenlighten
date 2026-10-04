@@ -925,7 +925,7 @@ export function validateStartupBudgets(
 /**
  * The zero-argument production check: real budget table, real floor table,
  * real reserve. `server.ts`'s `run()` calls this once, strictly before
- * `tryRunWithSdk()` / `runStdioFallback()` starts accepting requests — a
+ * `runTransport()` starts a stdio transport that accepts requests — a
  * throw here propagates to `bin.ts`'s existing fatal catch (`[tl-mcp] fatal:
  * <message>`, exit 1), with zero bytes ever written to stdout, since no
  * transport was created.

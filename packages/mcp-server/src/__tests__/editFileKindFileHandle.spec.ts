@@ -1,9 +1,9 @@
 /**
  * editFileKindFileHandle.spec.ts — FIX A (2026-07-12c forensics).
  *
- * Live failure: `read_file mode=full path=X` mints a handle with kind:"file"
+ * Live failure: `tl_read_file mode=full path=X` mints a handle with kind:"file"
  * and NO range (server.ts's resolveFullReadForPath). A later
- * `edit_file {handle, content}` (no search/replace/range/edits) is meant to
+ * `tl_edit_file {handle, content}` (no search/replace/range/edits) is meant to
  * be a full-body replacement — the same shape a kind:"range" 1-EOF handle
  * already supports — but the gate that routes to replaceRangeContent used to
  * require handleRange, so the call fell through to the exact-search fallback
@@ -169,15 +169,15 @@ async function newServer(tag: string): Promise<{ ws: string; srv: ServerHandle }
 // (a1) kind:"file" handle + content full replace succeeds end-to-end.
 // =============================================================================
 describe("editFileKindFileHandle — (a1) kind:\"file\" handle + content full replace", () => {
-  it("edit_file {handle, content} on a mode=full-minted kind:\"file\" handle replaces the whole body", async () => {
+  it("tl_edit_file {handle, content} on a mode=full-minted kind:\"file\" handle replaces the whole body", async () => {
     const { ws, srv } = await newServer("full-replace-basic");
     writeFile(ws, "f.ts", "export const OLD = 1;\nexport const KEEP_GONE = 2;\n");
 
-    const read = await srv.call("read_file", { path: "f.ts", mode: "full" });
+    const read = await srv.call("tl_read_file", { path: "f.ts", mode: "full" });
     expect(String(read["handle"])).toMatch(/^h[0-9a-z]+$/);
 
     const newBody = "export const NEW = 42;\n";
-    const res = await srv.call("edit_file", { handle: read["handle"], content: newBody });
+    const res = await srv.call("tl_edit_file", { handle: read["handle"], content: newBody });
 
     expect(res["ok"]).not.toBe(false);
     expect(res["path"]).toBe("f.ts");
@@ -194,17 +194,17 @@ describe("editFileKindFileHandle — (a1) kind:\"file\" handle + content full re
     const { ws, srv } = await newServer("full-replace-twice");
     writeFile(ws, "g.ts", "export const A = 1;\n");
 
-    const read = await srv.call("read_file", { path: "g.ts", mode: "full" });
+    const read = await srv.call("tl_read_file", { path: "g.ts", mode: "full" });
     const handle = read["handle"];
 
-    const res1 = await srv.call("edit_file", { handle, content: "export const B = 2;\n" });
+    const res1 = await srv.call("tl_edit_file", { handle, content: "export const B = 2;\n" });
     expect(res1["ok"]).not.toBe(false);
     expect(readFile(ws, "g.ts")).toBe("export const B = 2;\n");
 
     // Second edit through the SAME handle id — proves withHandleAugment
     // refreshed the handle's sha (and kept it kind:"file", no range) after
     // the first edit, rather than leaving it pinned to the stale pre-edit sha.
-    const res2 = await srv.call("edit_file", { handle, content: "export const C = 3;\n" });
+    const res2 = await srv.call("tl_edit_file", { handle, content: "export const C = 3;\n" });
     expect(res2["ok"]).not.toBe(false);
     expect(readFile(ws, "g.ts")).toBe("export const C = 3;\n");
   }, 30000);
@@ -215,10 +215,10 @@ describe("editFileKindFileHandle — (a1) kind:\"file\" handle + content full re
 
     // mode=auto on a small file mints a kind:"file" handle too (server.ts's
     // small-file auto-mode branch), independent of mode=full's path.
-    const read = await srv.call("read_file", { path: "h.ts", mode: "auto" });
+    const read = await srv.call("tl_read_file", { path: "h.ts", mode: "auto" });
     expect(String(read["handle"])).toMatch(/^h[0-9a-z]+$/);
 
-    const res = await srv.call("edit_file", { handle: read["handle"], content: "export const Y = 2;\n" });
+    const res = await srv.call("tl_edit_file", { handle: read["handle"], content: "export const Y = 2;\n" });
     expect(res["ok"]).not.toBe(false);
     expect(readFile(ws, "h.ts")).toBe("export const Y = 2;\n");
   }, 30000);
@@ -237,9 +237,9 @@ describe("editFileKindFileHandle — (a1) kind:\"file\" handle + content full re
     ].join("\n");
     writeFile(ws, "m.ts", original);
 
-    const read = await srv.call("read_file", { path: "m.ts", mode: "full" });
+    const read = await srv.call("tl_read_file", { path: "m.ts", mode: "full" });
     const newBody = "export function gamma() {\n  return 3;\n}\n";
-    const res = await srv.call("edit_file", { handle: read["handle"], content: newBody });
+    const res = await srv.call("tl_edit_file", { handle: read["handle"], content: newBody });
 
     expect(res["ok"]).not.toBe(false);
     // No orphan-tail warning: the whole file was replaced, nothing left over.
@@ -258,8 +258,8 @@ describe("editFileKindFileHandle — (a2) sanity: search+content conflict guard 
     writeFile(ws, "s.ts", "export const S = 1;\n");
     const before = readFile(ws, "s.ts");
 
-    const read = await srv.call("read_file", { path: "s.ts", mode: "full" });
-    const res = await srv.call("edit_file", {
+    const read = await srv.call("tl_read_file", { path: "s.ts", mode: "full" });
+    const res = await srv.call("tl_edit_file", {
       handle: read["handle"],
       search: "S = 1",
       content: "export const S = 999;\n",
@@ -291,11 +291,11 @@ describe("editFileKindFileHandle — (a3) batch edits[] with a kind:\"file\" han
     writeFile(ws, "whole.ts", "export const OLD = 1;\nexport const KEEP_GONE = 2;\n");
     writeFile(ws, "companion.ts", 'export const COMPANION = "before";\n');
 
-    const read = await srv.call("read_file", { path: "whole.ts", mode: "full" });
+    const read = await srv.call("tl_read_file", { path: "whole.ts", mode: "full" });
     expect(String(read["handle"])).toMatch(/^h[0-9a-z]+$/);
 
     const newBody = "export const NEW = 42;\n";
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [
         { handle: read["handle"], content: newBody },
         { path: "companion.ts", search: '"before"', replace: '"after"' },
@@ -322,14 +322,14 @@ describe("editFileKindFileHandle — (a3) batch edits[] with a kind:\"file\" han
   it("the SAME kind:\"file\" handle can be reused for a second batch whole-file replace", async () => {
     const { ws, srv } = await newServer("batch-full-replace-twice");
     writeFile(ws, "g.ts", "export const A = 1;\n");
-    const read = await srv.call("read_file", { path: "g.ts", mode: "full" });
+    const read = await srv.call("tl_read_file", { path: "g.ts", mode: "full" });
     const handle = read["handle"];
 
-    const res1 = await srv.call("edit_file", { edits: [{ handle, content: "export const B = 2;\n" }] });
+    const res1 = await srv.call("tl_edit_file", { edits: [{ handle, content: "export const B = 2;\n" }] });
     expect(res1["ok"]).not.toBe(false);
     expect(readFile(ws, "g.ts")).toBe("export const B = 2;\n");
 
-    const res2 = await srv.call("edit_file", { edits: [{ handle, content: "export const C = 3;\n" }] });
+    const res2 = await srv.call("tl_edit_file", { edits: [{ handle, content: "export const C = 3;\n" }] });
     expect(res2["ok"]).not.toBe(false);
     expect(readFile(ws, "g.ts")).toBe("export const C = 3;\n");
   }, 30000);
@@ -346,10 +346,10 @@ describe("editFileKindFileHandle — (a3) batch edits[] with a kind:\"file\" han
     // assembly time (5 lines, before edit 1 even runs) instead of
     // currentText at execution time, edit 2 would wrongly refuse
     // ("out of bounds") once edit 1 has already shrunk the file to 4 lines.
-    const rangeHandle = await srv.call("read_file", { path: "merge.ts", mode: "slice", range: "1-2" });
-    const wholeHandle = await srv.call("read_file", { path: "merge.ts", mode: "full" });
+    const rangeHandle = await srv.call("tl_read_file", { path: "merge.ts", mode: "slice", range: "1-2" });
+    const wholeHandle = await srv.call("tl_read_file", { path: "merge.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [
         { handle: rangeHandle["handle"], content: "shrunk\n" }, // 5 lines -> 4 lines
         { handle: wholeHandle["handle"], content: "final-whole-file-body\n" },
@@ -373,8 +373,8 @@ describe("editFileKindFileHandle — (a4) batch guard sanity for the kind:\"file
     writeFile(ws, "s.ts", "export const S = 1;\n");
     const before = readFile(ws, "s.ts");
 
-    const read = await srv.call("read_file", { path: "s.ts", mode: "full" });
-    const res = await srv.call("edit_file", {
+    const read = await srv.call("tl_read_file", { path: "s.ts", mode: "full" });
+    const res = await srv.call("tl_edit_file", {
       edits: [{ handle: read["handle"], search: "S = 1", content: "export const S = 999;\n" }],
     });
 
@@ -387,8 +387,8 @@ describe("editFileKindFileHandle — (a4) batch guard sanity for the kind:\"file
     writeFile(ws, "bare.ts", "export const BARE = 1;\n");
     const before = readFile(ws, "bare.ts");
 
-    const read = await srv.call("read_file", { path: "bare.ts", mode: "full" });
-    const res = await srv.call("edit_file", { edits: [{ handle: read["handle"] }] });
+    const read = await srv.call("tl_read_file", { path: "bare.ts", mode: "full" });
+    const res = await srv.call("tl_edit_file", { edits: [{ handle: read["handle"] }] });
 
     expect(res["kind"]).toBe("refusal");
     expect(readFile(ws, "bare.ts")).toBe(before);
@@ -404,7 +404,7 @@ describe("editFileKindFileHandle — (b) bare {path, content} messaging", () => 
     writeFile(ws, "e.ts", "export const E = 1;\n");
     const before = readFile(ws, "e.ts");
 
-    const res = await srv.call("edit_file", { path: "e.ts", content: "export const E = 999;\n" });
+    const res = await srv.call("tl_edit_file", { path: "e.ts", content: "export const E = 999;\n" });
 
     expect(res["kind"]).toBe("refusal");
     const msg = String(res["detail"]); // A.9.2 row 6: `error` splits into `code` + `detail`.
@@ -421,7 +421,7 @@ describe("editFileKindFileHandle — (b) bare {path, content} messaging", () => 
   it("(b2) MISSING file: keeps the pre-existing create:true hint from searchReplaceEdit's not-found branch, unchanged", async () => {
     const { ws, srv } = await newServer("bare-path-missing");
 
-    const res = await srv.call("edit_file", { path: "missing.ts", content: "export const M = 1;\n" });
+    const res = await srv.call("tl_edit_file", { path: "missing.ts", content: "export const M = 1;\n" });
 
     expect(res["kind"]).toBe("refusal");
     const msg = String(res["detail"]); // A.9.2 row 6: `error` splits into `code` + `detail`.
@@ -432,7 +432,7 @@ describe("editFileKindFileHandle — (b) bare {path, content} messaging", () => 
 
   it("sanity (no regression): bare {path, content, create:true} on a missing file still creates it normally", async () => {
     const { ws, srv } = await newServer("bare-path-create-true");
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       path: "new.ts",
       content: "export const N = 1;\n",
       create: true,
@@ -457,7 +457,7 @@ describe("editFileKindFileHandle — (c) batch bare {path, content} messaging", 
     writeFile(ws, "e.ts", "export const E = 1;\n");
     const before = readFile(ws, "e.ts");
 
-    const res = await srv.call("edit_file", { edits: [{ path: "e.ts", content: "export const E = 999;\n" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ path: "e.ts", content: "export const E = 999;\n" }] });
 
     expect(res["kind"]).toBe("refusal");
     const msg = String(res["detail"]); // A.9.2 row 6: `error` splits into `code` + `detail`.
@@ -474,7 +474,7 @@ describe("editFileKindFileHandle — (c) batch bare {path, content} messaging", 
   it("(c2) MISSING file: the new existence-gated refusal must NOT fire for a path that doesn't exist — falls through unchanged to applyEditsMulti's own not-found handling", async () => {
     const { ws, srv } = await newServer("batch-bare-path-missing");
 
-    const res = await srv.call("edit_file", { edits: [{ path: "missing.ts", content: "export const M = 1;\n" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ path: "missing.ts", content: "export const M = 1;\n" }] });
 
     expect(res["kind"]).toBe("refusal");
     const msg = String(res["detail"]); // A.9.2 row 6: `error` splits into `code` + `detail`.
@@ -489,7 +489,7 @@ describe("editFileKindFileHandle — (c) batch bare {path, content} messaging", 
     writeFile(ws, "e.ts", "export const E = 1;\n");
     writeFile(ws, "other.ts", "export const OTHER = 1;\n");
 
-    const res = await srv.call("edit_file", {
+    const res = await srv.call("tl_edit_file", {
       edits: [
         { path: "other.ts", search: "OTHER = 1", replace: "OTHER = 2" },
         { path: "e.ts", content: "export const E = 999;\n" },
@@ -505,7 +505,7 @@ describe("editFileKindFileHandle — (c) batch bare {path, content} messaging", 
     const { ws, srv } = await newServer("batch-bare-path-searchreplace-unaffected");
     writeFile(ws, "e.ts", "export const E = 1;\n");
 
-    const res = await srv.call("edit_file", { edits: [{ path: "e.ts", search: "E = 1", replace: "E = 2" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ path: "e.ts", search: "E = 1", replace: "E = 2" }] });
 
     expect(res["kind"]).not.toBe("refusal");
     expect(readFile(ws, "e.ts")).toBe("export const E = 2;\n");
@@ -514,9 +514,9 @@ describe("editFileKindFileHandle — (c) batch bare {path, content} messaging", 
   it("sanity (no regression): batch handle+content (kind:\"file\") whole-file replace is unaffected by the new bare-path guard", async () => {
     const { ws, srv } = await newServer("batch-handle-content-unaffected");
     writeFile(ws, "h.ts", "export const H = 1;\n");
-    const read = await srv.call("read_file", { path: "h.ts", mode: "full" });
+    const read = await srv.call("tl_read_file", { path: "h.ts", mode: "full" });
 
-    const res = await srv.call("edit_file", { edits: [{ handle: read["handle"], content: "export const H = 999;\n" }] });
+    const res = await srv.call("tl_edit_file", { edits: [{ handle: read["handle"], content: "export const H = 999;\n" }] });
 
     expect(res["kind"]).not.toBe("refusal");
     expect(readFile(ws, "h.ts")).toBe("export const H = 999;\n");

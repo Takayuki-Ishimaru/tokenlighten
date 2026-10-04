@@ -4,8 +4,8 @@
 // any of the following caps to be exceeded must be rejected.
 //
 //   read_code mode=map (small file):            <= 1024 bytes   MAP_CAP_BYTES
-//   read_file mode=map paths=[...] (files[]):   <= 65536 bytes  MULTI_FILE_MAP_CAP_BYTES
-//   read_file mode=skeleton (unknown ext):      <= 8192 bytes   getFileSkeleton MAX_RESPONSE_BYTES
+//   tl_read_file mode=map paths=[...] (files[]):   <= 65536 bytes  MULTI_FILE_MAP_CAP_BYTES
+//   tl_read_file mode=skeleton (unknown ext):      <= 8192 bytes   getFileSkeleton MAX_RESPONSE_BYTES
 //   read_code mode=digest (small file):         <= 2048 bytes   DIGEST_CAP_BYTES
 //   read_code mode=slice (small symbol):        <= 24576 bytes  READ_SYMBOL_CAP_BYTES (2026-07-16a: was 8192)
 //   read_code mode=task_pack (~3 surfaces):     <= 4096 bytes   MAX_TASK_PACK_BYTES
@@ -148,7 +148,7 @@ describe("responseSizeRegression — read_code mode=small_file ceiling", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "small_file", path: "src/near.ts" },
     });
 
@@ -194,7 +194,7 @@ describe("responseSizeRegression — read_code mode=slice successful response ce
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/util.ts", symbol: "computeTotal" },
     });
 
@@ -224,7 +224,7 @@ describe("responseSizeRegression — read_code mode=slice successful response ce
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/consts.ts", range: "1-10" },
     });
 
@@ -254,7 +254,7 @@ describe("responseSizeRegression — read_code mode=slice successful response ce
 
 const MULTI_FILE_MAP_CAP_BYTES = 65536;
 
-describe("responseSizeRegression — read_file mode=map paths=[...] multi-file budget", () => {
+describe("responseSizeRegression — tl_read_file mode=map paths=[...] multi-file budget", () => {
   it(">64KB of per-file signature blocks trims at file boundaries to <= 65536 served bytes with the explicit trim indicator", async () => {
     const wsDir = mkDir("map-cap");
     const paths: string[] = [];
@@ -279,7 +279,7 @@ describe("responseSizeRegression — read_file mode=map paths=[...] multi-file b
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "map", paths },
     }, 60000);
 
@@ -333,7 +333,7 @@ describe("responseSizeRegression — read_file mode=map paths=[...] multi-file b
 // keeps its separate DOC_CONTENT_CAP_BYTES (4096) serve.
 // ---------------------------------------------------------------------------
 
-describe("responseSizeRegression — read_file mode=skeleton unrecognized-extension ceiling", () => {
+describe("responseSizeRegression — tl_read_file mode=skeleton unrecognized-extension ceiling", () => {
   it("32KB .txt skeleton is capped at 8192 signature bytes; auto stays on its 4096 doc cap", async () => {
     const wsDir = mkDir("skel-txt");
     const prose = Array.from({ length: 480 }, (_, i) =>
@@ -346,7 +346,7 @@ describe("responseSizeRegression — read_file mode=skeleton unrecognized-extens
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "skeleton", path: "notes/field-notes.txt" },
     });
 
@@ -372,7 +372,7 @@ describe("responseSizeRegression — read_file mode=skeleton unrecognized-extens
     // under its own 4096 cap (unchanged behavior, pinned here so the two
     // routes cannot silently swap).
     const res2 = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { path: "notes/field-notes.txt" },
     });
     expect(res2.result?.isError).toBeFalsy();

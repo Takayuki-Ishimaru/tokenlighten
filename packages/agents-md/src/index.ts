@@ -10,6 +10,17 @@ export type { ParsedSentinel } from "./sentinel.js";
 export { renderBlock, renderCanonicalBlock, renderMediumBlock, renderCompactBlock, blockSha256, INSTRUCTIONS_VERSION, defaultGuideProfileForSurface } from "./render.js";
 export type { GuideProfile, Locale } from "./render.js";
 
+export {
+  holdsOnlyManagedBlock,
+  parseJsonc,
+  readWorkspaceSettings,
+  copilotGuideModeFromSettings,
+  copilotGuideModeForWorkspace,
+  COPILOT_AGENTS_MD_SETTING,
+  COPILOT_CLAUDE_MD_SETTING,
+} from "./copilotGuide.js";
+export type { CopilotGuideMode, WorkspaceSettingsRead } from "./copilotGuide.js";
+
 // B-F6(c): the canonical guide-profile allowlist, so a consumer validating a
 // caller-supplied profile string (e.g. packages/cli's `tl workspace setup
 // --guide-profile`) can reference this instead of re-declaring the same

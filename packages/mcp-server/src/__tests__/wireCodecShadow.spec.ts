@@ -60,7 +60,7 @@ function eligiblePayload(rows: number): Record<string, unknown> {
   return { v: 1, kind: "search.matches", matches: { form: "symbols", locations: items, total: rows } };
 }
 
-const CONTEXT: ProtocolCallContext = { tool: "search_files", workspace: WS_ROOT };
+const CONTEXT: ProtocolCallContext = { tool: "tl_search_files", workspace: WS_ROOT };
 
 // ---------------------------------------------------------------------------
 // Trace shape

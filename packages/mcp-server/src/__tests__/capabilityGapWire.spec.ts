@@ -142,7 +142,7 @@ describe("OB-GAP — invalid-request reaches decision.gaps (was: silently droppe
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "task_pack",
         query: "add a rate limit to the login path",
@@ -181,7 +181,7 @@ describe("OB-GAP — invalid-request reaches decision.gaps (was: silently droppe
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "task_pack",
         query: "add a rate limit to the login path",
@@ -210,7 +210,7 @@ function contractWithGaps(gaps: TaskCapabilityGap[]): TaskExecutionContract {
     max_additional_discovery_calls: 1,
     reason: "synthetic contract for the gap projection",
     typestate: { phase: "discovery", certificate_id: "cert-gapwire" },
-    next_call: { tool: "search_files", arguments: { action: "tree", path: "src" } },
+    next_call: { tool: "tl_search_files", arguments: { action: "tree", path: "src" } },
     capability_gaps: gaps,
   } as unknown as TaskExecutionContract;
 }

@@ -50,9 +50,9 @@ describe("parseClaudeCodeSession — basic fixture", () => {
   });
 
   it("only the turn with a tool_use content block carries a fingerprint", () => {
-    expect(session.turns[0].toolCallFingerprint).toEqual(["mcp__tokenlighten__read_file"]);
+    expect(session.turns[0].toolCallFingerprint).toEqual(["mcp__tokenlighten__read_file"]); // recorded before the tl_ rename (2026-10-02)
     expect(session.turns[1].toolCallFingerprint).toEqual([]);
-    expect(session.turns[2].toolCallFingerprint).toEqual(["mcp__tokenlighten__edit_file"]);
+    expect(session.turns[2].toolCallFingerprint).toEqual(["mcp__tokenlighten__edit_file"]); // recorded before the tl_ rename (2026-10-02)
   });
 
   it("preserves unrecognized usage keys by NAME only, never values", () => {

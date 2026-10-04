@@ -14,7 +14,7 @@
  * bodies and names the rest `prior` — the SAME `segments[]`/`code_unchanged`
  * projection that already exists; protocol v1 gains no kind, field or argument.
  *
- * WHY THE HUNK IS DERIVED FROM BYTES. `edit_file` reports a `lines` span and
+ * WHY THE HUNK IS DERIVED FROM BYTES. `tl_edit_file` reports a `lines` span and
  * `applyEditsMulti` computes an `added`/`removed` delta, but both describe what
  * the CALLER asked for after the applier's own recovery (literal-escape
  * unescaping, indentation-equivalent matching, range/anchor forms, whole-file

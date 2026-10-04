@@ -658,12 +658,20 @@ function resolveSemanticWiringInScope(
       hub.path,
       ...companionPaths(relFiles, hub.path),
     ];
+  // A constructed receiver must BUILD the adapter's argument, and in a
+  // C-family module that argument's type lives in the adapter's declaration
+  // header, never in the implementation file the adapter was resolved from.
+  // Same-module headers only (the `sameModule` key the consumer's include was
+  // already resolved against), so a same-stem file elsewhere cannot ride in.
+  const adapterDeclarationPaths = companionPaths(relFiles, adapter.record.path)
+    .filter((candidate) => !isImplementationPath(candidate) && sameModule(candidate, adapter.record.path));
   const reviewPathCandidates = connectionMode === "existing-receiver"
     ? [producer.record.path, adapter.record.path]
     : [
       producer.record.path,
       ...companionPaths(relFiles, producer.record.path),
       adapter.record.path,
+      ...adapterDeclarationPaths,
       constructionHostPath,
     ];
   const editPaths = editPathCandidates

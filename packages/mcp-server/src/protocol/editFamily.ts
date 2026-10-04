@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// protocol v1 — the `edit_file` response family, authored (C2-5).
+// protocol v1 — the `tl_edit_file` response family, authored (C2-5).
 //
 // NORMATIVE SOURCE: DESIGN-v0.10-protocol-v1-contract-freeze.md §2.4 (the four
 // members, discriminated by SIDE-EFFECT STATE), §4.2.1 (side-effect reports are
@@ -70,6 +70,7 @@ import type {
   EditReclassification,
   Kind,
   NormalizationReceipt,
+  PostEditWindow,
   SideEffectCore,
   WorkspaceMarker,
 } from "@tokenlighten/types";
@@ -282,7 +283,7 @@ function editedRows(body: Body): Body[] {
   if (path !== undefined) {
     const row: Body = { path };
     keep(row, body, ["lines", "delta", "handle"]);
-    // INV-I-5 (FX-P2): `path_fallback:true` (server.ts's edit_file dispatch,
+    // INV-I-5 (FX-P2): `path_fallback:true` (server.ts's tl_edit_file dispatch,
     // the stale-handle-but-unique-path-search case) rides the SAME plain
     // {path,...} body shape `keep` already reads here — carried through so
     // `appliedEntries` below can surface it as `AppliedEntry.path_fallback`.
@@ -374,6 +375,28 @@ function addAppliedReadback(
   if (braceDelta !== undefined) entry.brace_delta = braceDelta;
 }
 
+/**
+ * PEW (v0.15.0) — the wide post-edit window server.ts's `attachAppliedReadback`
+ * stages on a `body.applied[]` row as raw `after: {range, body, remaining?}`.
+ *
+ * A VALIDATOR, NOT A COPY (same rule `frontierMarkerOf` states): `range` and
+ * `body` are REQUIRED on `PostEditWindow` (a window that names a span but
+ * cannot show text for it, or shows text with no span, is worse than no
+ * window), so either being absent/malformed drops the whole field rather than
+ * emitting a half-shaped one. `remaining` is copied only as a non-empty
+ * string array — server.ts already only populates it that way, but this
+ * module never trusts an internal shape without checking, per this file's own
+ * fail-open discipline (see the module banner).
+ */
+function postEditWindowOf(raw: unknown): PostEditWindow | undefined {
+  if (!isRecord(raw)) return undefined;
+  const range = str(raw["range"]);
+  const rawBody = raw["body"];
+  if (range === undefined || typeof rawBody !== "string" || rawBody === "") return undefined;
+  const remaining = stringArray(raw["remaining"]);
+  return { range, body: rawBody, ...(remaining !== undefined ? { remaining } : {}) };
+}
+
 function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
   // FX-L soft frontier marker (user ruling 2026-09-14): "a batch with mixed
   // items marks per item". The marker names every path it covers, so the
@@ -420,6 +443,12 @@ function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
     if (typeof enclosing === "string" || isRecord(enclosing)) {
       entry.enclosing_symbol = enclosing as AppliedEntry["enclosing_symbol"];
     }
+    // PEW (v0.15.0): the wide post-edit window, staged by server.ts on the
+    // SAME served row `code`/`enclosing_symbol` just came from. Additive —
+    // absent whenever server.ts declined to stage one (wholeFile/create
+    // entries, a shed-to-nothing budget outcome, or no read-back at all).
+    const after = postEditWindowOf(served?.["after"]);
+    if (after !== undefined) entry.after = after;
     const handle = str(row["handle"]);
     if (handle !== undefined) entry.handle = handle;
     if (lines !== undefined && lines !== range) entry.lines = lines;
@@ -455,6 +484,9 @@ function appliedEntries(body: Body, rows: readonly Body[]): AppliedEntry[] {
     if (typeof enclosing === "string" || isRecord(enclosing)) {
       entry.enclosing_symbol = enclosing as AppliedEntry["enclosing_symbol"];
     }
+    // PEW (v0.15.0): see the identical block above — same field, same source.
+    const after = postEditWindowOf(served["after"]);
+    if (after !== undefined) entry.after = after;
     markFrontier(entry);
     entries.push(entry);
   }
@@ -711,7 +743,19 @@ function projectApplied(body: Body, root: string | undefined): Body {
  * `RollbackFileState` itself carries over unchanged (A.5.13).
  */
 function ledgerRows(body: Body): Body[] {
-  return Array.isArray(body["rollback"]) ? body["rollback"].filter(isRecord) : [];
+  if (!Array.isArray(body["rollback"])) return [];
+  // PEW (v0.15.0) hardening: unlike `appliedEntries`, this function copies each
+  // row onto the wire WHOLESALE (`projectLedgerMember`'s `projected[...] =
+  // ledger`), not field-by-field — so `RollbackFileState` not declaring `after`
+  // is a type-level fact, not, on its own, a runtime guarantee. No emitter
+  // ever attaches `after` to a rollback row today (it is built entirely inside
+  // `attachAppliedReadback`, which server.ts's `augmentEdit` never calls on the
+  // `ok:false` path these two members are for), but requirement #4's "never
+  // carry it" is a WIRE promise, and this is the one seam a future emitter bug
+  // could cross without either side's own tests noticing. Stripped here,
+  // structurally, the same way this module drops other things it will not
+  // assert without proof.
+  return body["rollback"].filter(isRecord).map(({ after: _after, ...row }) => row);
 }
 
 /**
@@ -816,7 +860,7 @@ export function projectEditBody(kind: Kind, body: Body, root: string | undefined
 // ---------------------------------------------------------------------------
 
 /**
- * `edit_file`'s `operation_id` replay (server.ts, beside `state/stateStore.ts`'s
+ * `tl_edit_file`'s `operation_id` replay (server.ts, beside `state/stateStore.ts`'s
  * operation ledger) returns the FINAL, already-`projectEditBody`-projected wire
  * text verbatim on a repeat call — byte-identical to the first apply's
  * response, by design, because dispatch (and this module's own projectors)

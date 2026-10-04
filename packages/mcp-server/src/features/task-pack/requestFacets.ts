@@ -108,6 +108,16 @@ export interface FacetRequirement {
    * back-compatibility reason as `qualifiedMembers` above.
    */
   readonly subjectWeakCandidates?: readonly string[];
+  /**
+   * Names the clause writes in CALL syntax (`quote()`, `estimate(cart)`; never
+   * a method called on an object) — see `callShapedNamesIn`. The clause's own
+   * when it writes any; otherwise the lead sentence's, exactly when
+   * `inheritedFromLead`. Absent when empty. resolveFacetFocal tries these
+   * against workspace DECLARATIONS before every identifier tier, so a value
+   * question's explicit callable outranks an identifier the question only
+   * carries as data (Copilot retest r2, 2026-10-02).
+   */
+  readonly subjectCallables?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +264,10 @@ const VALUE_NEGATIVE_GUARDS: readonly RegExp[] = [
   // spelling of 戻り値 above (返り and 戻り are both ordinary readings of
   // "return"/"give back") -- same guard, same reasoning, different kanji.
   /返り値/g,
+  // Copilot retest (2026-10-02): "compute" naming a KIND of resource (a
+  // compute shader/node/cluster) never asks for a computed value -- the
+  // guard keeps VALUE_COMPUTED_IMPERATIVE_EN_RE below off it.
+  /\bcompute\s+(?:shaders?|nodes?|instances?|clusters?|units?|engines?|resources?|budgets?|capacity)\b/gi,
 ];
 
 function stripGuardedSpans(text: string, guards: readonly RegExp[]): string {
@@ -368,8 +382,36 @@ const VALUE_PERCENTAGE_RATE_RE = /\bwhat(?:'s|\s+is)\s+the\b(?:\s+\w+){0,3}?\s+(
 // held-out4 d-ja-25: 率 ("rate/percentage" suffix, e.g. 割引率 "discount
 // rate") is the JA mirror of the EN "percentage/rate" noun below -- general
 // software/business vocabulary, not tied to any domain.
+// WP-C (2026-09-29, eval-0929 §8, orchestrator chip adopted from WP-B):
+// bare 既定/最大/最小 join the alternation — 既定 ("default") already had a
+// SYNONYM (デフォルト) bare-matching with no noun required, and 上限/下限
+// ("upper/lower bound") already bare-match with no noun required, but 既定
+// itself required the specific suffix 値 ("既定値") and 最大/最小 required
+// their own 値 suffix ("最大値"/"最小値") -- an arbitrary inconsistency
+// between synonyms/siblings, not a reasoned narrowing (unlike 定数's
+// deliberate exclusion above, which has its own held-out counterexample).
+// Measured gap: "fetchWithRetry の既定タイムアウト" ("fetchWithRetry's DEFAULT
+// TIMEOUT") named no value facet at all, because 既定 was never bare and
+// "既定タイムアウト" contains no 値. Bare, exactly like デフォルト/上限/下限
+// already are, closes the same gap for any noun that follows.
 const VALUE_BARE_JA_RE =
-  /既定値|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最小値|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|数を教えて|率/;
+  /既定値|既定|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最大|最小値|最小|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|数を教えて|率/;
+// WP-C (2026-09-29, eval-0929 §8, orchestrator chip adopted from WP-B): a
+// relative clause "AがBする<value-shaped noun>" ("the <noun> that A does B
+// to/with") asks about that noun as A's own value/parameter -- the JA
+// mirror of VALUE_WHICH_WHAT_RE's own "which/what ... status codes" gate
+// (EN: a noun-class member only counts as a value ask inside a WH/allowed
+// frame, never bare alone, to avoid over-firing on an ordinary mention of
+// "code"/"status"). Anchored on が...する (a relative-clause subject
+// marker followed, within a bounded gap, by a する-conjugated verb) so a
+// bare mention of the noun elsewhere never matches; the noun itself is the
+// SAME closed value-noun class already used bare above, plus ステータス/コード
+// (deliberately still gated behind this relative-clause frame, mirroring
+// the EN noun class's own "never bare alone" restraint) and タイムアウト.
+// Measured gap: "shouldRetry が再試行する HTTP ステータス" ("the HTTP status that
+// shouldRetry retries") named no facet at all.
+const VALUE_JA_RELATIVE_CLAUSE_NOUN_RE =
+  /が.{0,20}?する.{0,10}?(?:ステータス(?:コード)?|コード|タイムアウト|上限|下限|最大値?|最小値?|しきい値|閾値|既定値?|デフォルト値?|初期値|設定値)/u;
 // held-out4 d-ja-05/d-ja-25: 「<名詞>の定数(を|と|は)」 EXPLICITLY asks to be told
 // a named constant's value -- different from a bare 定数 used as a mere
 // TYPE-NOUN naming what a symbol IS (held-out ja-20: "the `MAX_UPLOAD_SIZE`
@@ -408,22 +450,110 @@ const VALUE_JA_RESOLVE_RE = /何に(?:解決|評価|設定)され/;
 // back to") is the JA mirror of VALUE_SET_OR_RESOLVE_EN_RE's "fall back to"
 // alternative, in the JA word order (noun before the verb, は何 at the end).
 const VALUE_JA_FALLBACK_RE = /フォールバックする[^\s、。]{0,10}は何/;
+// WP-C4 (2026-09-29, eval-0929 §8 item 1, matrix rows */bullets): a
+// VALUE_NOUN_CLASS member (statuses/codes/values/limits/settings/...) only
+// fires bare inside a leading which/what/allowed FRAME above -- deliberately,
+// so a bare mention of "code"/"status" elsewhere in ordinary prose never
+// over-fires (see VALUE_NOUN_CLASS's own comment). A clause with no such
+// leading frame can still unambiguously ask for a value when the noun is the
+// SUBJECT of a trailing passive verb naming its owner ("Retry statuses
+// CHECKED BY canRetry", "the codes USED BY parseStatus", "values READ BY
+// loadConfig" -- eval fixture: "Retry statuses checked by can_retry", a
+// bulleted point that named no facet at all before this fix). The passive
+// "by"-phrase is exactly as strong an anchor as a leading determiner, and
+// generalizes past the single "checked" verb the fixture happens to use to
+// the whole closed family of passive verbs a value/constant is commonly
+// described with. The bare possessive frame ("canRetry's retry statuses",
+// "the config's limits") is the same ownership relation spelled the other
+// way around (owner before the noun, via 's, rather than after it via "by")
+// -- brief's own "f's X" shape. Neither branch captures the owner itself:
+// `explicitIdentifiersIn` already finds any code-shaped word anywhere in the
+// clause independently, so this only ever needs to detect THAT the clause
+// asks for a value, never WHERE its owner sits.
+const VALUE_NOUN_PASSIVE_VERB_EN =
+  "(?:checked|used|read|returned|required|accepted|expected|validated|allowed|handled|" +
+  "determined|decided|computed|calculated|generated|issued|enforced|applied|tracked|" +
+  "stored|held|kept|consulted|referenced|recognized|supported|verified|produced|consumed)";
+const VALUE_NOUN_PASSIVE_AGENT_EN_RE = new RegExp(
+  `\\b${VALUE_NOUN_CLASS}\\b(?:[^.?!]){0,20}?\\b${VALUE_NOUN_PASSIVE_VERB_EN}\\b\\s+by\\b` +
+    `|\\b\\w+['’]s\\s+(?:[\\w-]+\\s+){0,2}?${VALUE_NOUN_CLASS}\\b`,
+  "i",
+);
+
+// Copilot retest (2026-10-02): a COMPUTED value -- what a named callable
+// returns, outputs or produces for the asker, or an explicit "calculate the
+// result" -- asks for a value exactly like "what is X set to" above, yet none
+// of the noun frames above sees it ("What exact delay sequence does
+// retrySchedule return", "Calculate the exact result of `estimate(...)`";
+// a fresh held-out set measured value recall 0.33 on this shape before these
+// frames). The closure such a question needs is the callable's body, its
+// callees' bodies and the constants they read (readCodeTaskPack.ts's value
+// branch). All three EN anchors are general interrogative/imperative frames:
+// "what ... do-aux <subject> return|compute|output|produce|yield|emit|give
+// back|hand back" (never after a condition noun: "under what conditions does
+// X return null" asks for a condition), "what is/'s the result/output of",
+// and "calculate|compute|work out ... result|output|total|returns|gives|
+// yields|produces". JA: 何を返, 計算結果(は|を教えて ...), and a code-shaped subject
+// followed by の(計算)?結果/出力 + は/と/を教えて -- never when the clause goes on
+// to ask who uses/shows/receives that result (callers). "return value"/
+// 戻り値/返り値 stay guarded above: the held-out labels keep "What is the return
+// value of parseProxy?" a non-value ask.
+const VALUE_COMPUTED_SUBJECT = "(?:`[^`]*`|[\\w.$]+(?:\\([^)]*\\))?)";
+const VALUE_COMPUTED_WHAT_DOES_EN_RE = new RegExp(
+  `\\bwhat\\b(?:\\s+(?!(?:conditions?|circumstances?|cases?|situations?|scenarios?|criteria|reasons?|kinds?\\s+of\\s+(?:errors?|exceptions?)|does|do|did|will|would|should|can|could)\\b)[\\w'-]+){0,3}?`
+    + `\\s+(?:does|do|did|will|would|should|can|could)\\s+${VALUE_COMPUTED_SUBJECT}(?:\\s+${VALUE_COMPUTED_SUBJECT}){0,3}?`
+    + `\\s+(?:return|compute|output|produce|yield|emit|give(?:\\s+back)?|hand\\s+back)\\b`,
+  "i",
+);
+// Review (2026-10-02): the result-of and imperative frames need a CODE-shaped
+// subject (backticked, or a call with parentheses) or a "what/that ...
+// returns" clause -- "What's the result of the last CI run?" and "Please
+// compute the digest once and reuse the result" are no value questions about
+// the code -- and "what" never swallows the auxiliary itself ("What does the
+// pipeline do after transform() produces its output?" is a flow question).
+const VALUE_COMPUTED_CODE_SUBJECT = "(?:`[^`]+`|[A-Za-z_$][\\w$.]*\\([^)]*\\))";
+const VALUE_COMPUTED_RESULT_OF_EN_RE = new RegExp(
+  `\\bwhat(?:'s|\\s+is|\\s+are|\\s+was|\\s+were|\\s+will\\s+be|\\s+would\\s+be)\\s+(?:the\\s+)?(?:(?:exact|final|resulting|expected|actual)\\s+)?`
+    + `(?:results?|outputs?)\\s+(?:of|from|for)\\s+(?:(?:calling|running|evaluating|executing)\\s+)?${VALUE_COMPUTED_CODE_SUBJECT}`,
+  "i",
+);
+const VALUE_COMPUTED_IMPERATIVE_EN_RE = new RegExp(
+  // "calculate the exact result of `f(...)`" / "compute g()'s output" / "calculate what `h(...)` returns".
+  // Copilot retest r3 (2026-10-02): and "compute retrySchedule() for RETRY_LIMIT 3" -- the call
+  // itself as the object, its input after for/with/given (readCodeTaskPack.ts's
+  // hasComputationRequest binds the same shape to the answer profile).
+  `\\b(?:calculate|compute|work\\s+out)\\s+(?:(?:the|exact|exactly|final|precise|expected)\\s+)*`
+    + `(?:(?:results?|outputs?|totals?|values?)\\s+(?:of|for|from)\\s+(?:(?:calling|running|evaluating|executing)\\s+)?${VALUE_COMPUTED_CODE_SUBJECT}`
+    + `|${VALUE_COMPUTED_CODE_SUBJECT}(?:'s)?\\s+(?:results?|outputs?|totals?|values?)\\b`
+    + `|${VALUE_COMPUTED_CODE_SUBJECT}\\s+(?:for|with|given)\\b`
+    + `|(?:what|the\\s+(?:[\\w-]+\\s+){0,4}?(?:that|which))\\s+${VALUE_COMPUTED_SUBJECT}(?:\\s+${VALUE_COMPUTED_SUBJECT}){0,3}?`
+    + `\\s+(?:returns?|gives?|yields?|produces?|outputs?|hands?\\s+back|evaluates?\\s+to)\\b)`,
+  "i",
+);
+const VALUE_COMPUTED_JA_RE =
+  /何を返|計算結果(?:は|を(?:教えて|知りたい|求めて|出して))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*の(?:計算)?(?:結果|出力)(?:[はと](?![^。？?]*(?:使われ|使って|呼ば|参照|表示|渡さ|受け取))|を(?:具体的に)?(?:教えて|知りたい|求めて|計算))/u;
 
 function isValueClause(guardedClause: string): boolean {
   return VALUE_BARE_EN_RE.test(guardedClause)
+    || VALUE_COMPUTED_WHAT_DOES_EN_RE.test(guardedClause)
+    || VALUE_COMPUTED_RESULT_OF_EN_RE.test(guardedClause)
+    || VALUE_COMPUTED_IMPERATIVE_EN_RE.test(guardedClause)
+    || VALUE_COMPUTED_JA_RE.test(guardedClause)
     || VALUE_WHICH_WHAT_RE.test(guardedClause)
     || VALUE_ALLOWED_VALID_SUPPORTED_RE.test(guardedClause)
     || VALUE_SET_OR_RESOLVE_EN_RE.test(guardedClause)
     || VALUE_PERCENTAGE_RATE_RE.test(guardedClause)
     || VALUE_ALLOWED_SET_RE.test(guardedClause)
     || VALUE_ENUM_MEMBERS_RE.test(guardedClause)
+    || VALUE_NOUN_PASSIVE_AGENT_EN_RE.test(guardedClause)
     || VALUE_BARE_JA_RE.test(guardedClause)
     || VALUE_ALLOWED_VALID_JA_RE.test(guardedClause)
     || VALUE_JA_COUNTER_RE.test(guardedClause)
     || VALUE_JA_RESOLVE_RE.test(guardedClause)
     || VALUE_JA_REQUESTED_CONSTANT_RE.test(guardedClause)
     || VALUE_JA_ENUM_ENUMERATE_RE.test(guardedClause)
-    || VALUE_JA_FALLBACK_RE.test(guardedClause);
+    || VALUE_JA_FALLBACK_RE.test(guardedClause)
+    || VALUE_JA_RELATIVE_CLAUSE_NOUN_RE.test(guardedClause);
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +746,11 @@ const CALLERS_ANYONE_RE =
 // (to|of|for) X" name the CALLER'S ROLE directly (a subscriber IS a kind of
 // caller/usage site), the general noun-role mirror of the verb "subscribes
 // to" above.
-const CALLERS_ROLE_NOUN_EN_RE = /\b(?:subscribers?|listeners?|consumers?|observers?)\b\s+(?:to|of|for)\b/i;
+// WP-C3 (2026-09-29): the noun alternation is its own constant so the
+// descriptor vocabulary below (`isFacetDescriptorTerm`) reads the SAME
+// spelling — the regex is unchanged.
+const CALLERS_ROLE_NOUNS_EN = "(?:subscribers?|listeners?|consumers?|observers?)";
+const CALLERS_ROLE_NOUN_EN_RE = new RegExp(`\\b${CALLERS_ROLE_NOUNS_EN}\\b\\s+(?:to|of|for)\\b`, "i");
 // held-out3 c-en-12: "which <plural noun> read(s) X" is the same verb-frame
 // shape as CALLERS_WHICH_VERB_RE (same do-support guard, so "what does X
 // read" -- X's own reads, not X's readers -- never matches), but "read" is
@@ -891,6 +1025,107 @@ function detectFacets(clause: string): RequestFacet[] {
   return FACET_ORDER.filter((facet) => hits.has(facet));
 }
 
+
+// ---------------------------------------------------------------------------
+// WP-C3 (2026-09-29, eval-0929 §6, orchestrator RULING rule 2(a)) — THE
+// facet-DESCRIPTOR vocabulary, declared here once and exported.
+//
+// A descriptor is a word that names WHICH KIND of information a clause asks
+// for — a value, a condition, who calls it, a flow — never the SUBJECT the
+// clause asks about ("the conditions of should_retry": `conditions` is the
+// kind, `should_retry` the subject). The facet detectors above ARE that
+// vocabulary, so `isFacetDescriptorTerm` reads them directly: it asks whether
+// ONE already-isolated word (EN) or noun segment (JA) is, as a whole, one of
+// the detectors' own bare nouns — each detector anchored to the whole term
+// (`^(?:…)$`), never a second spelling of the same words. The answer-kind
+// nouns just below ("explain the implementation / logic / behaviour of X",
+// 「Xの実装/一覧/仕組み」) are the one addition: a question uses them exactly
+// like a facet noun, but they say nothing about WHICH evidence a closure must
+// fetch, so they deliberately stay out of `detectFacets` (adding them there
+// would widen facet detection, which the held-out floors guard).
+//
+// Consumers: the literal-absence eligibility gate (requestItems.ts
+// `isLiteralEligibleTerm`, readCodeTaskPack.ts `disclosableAbsenceTerm`) and
+// requestItems.ts `isGenericJapaneseAbsenceTerm`. `detectFacets` never reads
+// this section.
+// ---------------------------------------------------------------------------
+const ANSWER_KIND_DESCRIPTORS_EN: ReadonlySet<string> = new Set([
+  "implementation", "implementations", "behavior", "behaviors", "behaviour", "behaviours",
+  "logic", "mechanism", "mechanisms", "list", "lists", "overview",
+  // The head nouns of FLOW_PHRASE_EN_RE's compounds ("request path", "call
+  // flow", "sequence of events", "step by step"): bare, they still name the
+  // kind of answer, never its subject.
+  "flow", "flows", "path", "paths", "sequence", "sequences", "step", "steps",
+  // The parts of the QUESTION itself ("account for all three points",
+  // "answer both questions"), never of the workspace. R2-T2: the reply
+  // itself too ("…and the answer in Japanese" is a format instruction, never
+  // a coordinated subject of its own).
+  "point", "points", "question", "questions", "aspect", "aspects", "answer", "answers", "reply",
+  // R2-T2 (2026-09-30, review-0929 P0-5/P1-2): the question-kind nouns —
+  // "the purpose of X", "the reason for X", "the difference between X and Y",
+  // "the way X retries" — name the kind of answer (why / what for / how it
+  // differs), never its subject. Needed once a coordinated conjunct ("…and
+  // the purpose of the health probe") becomes its own identifier-free point:
+  // its head "purpose" must not become a certified absence. EN only: a JA
+  // descriptor also leaves `salientWords` (requestItems.ts
+  // `isGenericJapaneseAbsenceTerm`), which this package does not widen.
+  "purpose", "purposes", "reason", "reasons", "rationale", "meaning", "difference", "differences",
+  "relationship", "relationships", "explanation", "description", "detail", "details", "summary",
+  "example", "examples", "way", "ways",
+  // R2-T2 follow-up (orchestrator ruling on the round-2 combined run): the
+  // condition-kind nouns of "in which CASES …", "under what CIRCUMSTANCES …"
+  // name the kind of answer exactly like "conditions" — never its subject.
+  "case", "cases", "circumstance", "circumstances", "situation", "situations", "scenario", "scenarios",
+  // Copilot standard-setup evaluation (2026-10-02): the relation-kind nouns
+  // of "the IMPACT of points on shipping", "the EFFECT of retries on
+  // latency", "its INFLUENCE on X" ask how one thing bears on another -- the
+  // kind of answer, exactly like "relationship"/"difference" above, never a
+  // subject ("points impact on free shipping eligibility" certified
+  // `request-item-absent:impact`).
+  "impact", "impacts", "effect", "effects", "influence", "influences", "consequence", "consequences",
+  "implication", "implications",
+]);
+const ANSWER_KIND_DESCRIPTORS_JA: ReadonlySet<string> = new Set([
+  "実装", "一覧", "仕組み", "動作", "挙動", "ロジック", "種類",
+  // FLOW_JA_RE keeps 経路/流れ bare-gated (a shipping 経路 is not a flow
+  // question), but as the head of 「Xの流れ/経路/手順/順序」 they name the kind.
+  "流れ", "経路", "手順", "順序",
+]);
+
+function anchoredWhole(re: RegExp): RegExp {
+  return new RegExp(`^(?:${re.source})$`, re.flags.replace(/[gy]/gu, ""));
+}
+
+const FACET_DESCRIPTOR_EN_RES: readonly RegExp[] = [
+  anchoredWhole(VALUE_BARE_EN_RE),
+  new RegExp(`^${VALUE_NOUN_CLASS}$`, "i"),
+  anchoredWhole(CONDITION_BARE_EN_RE),
+  anchoredWhole(CALLERS_PHRASE_EN_RE),
+  new RegExp(`^${CALLERS_ROLE_NOUNS_EN}$`, "i"),
+  anchoredWhole(FLOW_PHRASE_EN_RE),
+];
+const FACET_DESCRIPTOR_JA_RES: readonly RegExp[] = [
+  anchoredWhole(VALUE_BARE_JA_RE),
+  anchoredWhole(CONDITION_JA_RE),
+  anchoredWhole(CALLERS_JA_RE),
+  anchoredWhole(FLOW_JA_RE),
+];
+
+/**
+ * WP-C3 (rule 2(a)) — true when `term` (ONE word, or one の-free JA noun
+ * segment — never a whole clause) is a facet descriptor: one of the facet
+ * detectors' own nouns or an answer-kind noun (see this section's header).
+ * Case-insensitive for EN.
+ */
+export function isFacetDescriptorTerm(term: string): boolean {
+  const trimmed = term.trim();
+  if (trimmed.length === 0) return false;
+  if (/[぀-ヿ一-鿿]/u.test(trimmed)) {
+    return ANSWER_KIND_DESCRIPTORS_JA.has(trimmed) || FACET_DESCRIPTOR_JA_RES.some((re) => re.test(trimmed));
+  }
+  return ANSWER_KIND_DESCRIPTORS_EN.has(trimmed.toLowerCase()) || FACET_DESCRIPTOR_EN_RES.some((re) => re.test(trimmed));
+}
+
 // ---------------------------------------------------------------------------
 // Subject extraction — identifiers (explicitCodeIdentifiers-style rules,
 // readCodeTaskPack.ts) and concept terms (EN stems; JA via jaGlossary).
@@ -992,6 +1227,45 @@ export function explicitIdentifiersIn(clause: string): string[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(token);
+  }
+  return out;
+}
+
+// Copilot retest r2 (2026-10-02): a name written directly before "(" — the
+// same syntactic code signal the computed-value frames already accept as a
+// subject (VALUE_COMPUTED_CODE_SUBJECT). A method called on an object
+// (`res.json()`, `USER_FIELDS.map()`) is never one: its name is the
+// object's, and a same-named workspace function (an `http/json.ts`
+// exporting `json`) made itself the focal in review (camelCase and
+// `Owner.member` spellings keep their own tiers). "(s)"/"(es)" right after
+// a word is an English plural, not a call.
+const CALL_SHAPED_NAME_RE = /(?<![\w$.])([A-Za-z_$][\w$]*)\(([^()]*)\)?/g;
+
+/**
+ * Names `clause` writes in call syntax, in order, deduplicated
+ * case-insensitively: `quote()` -> `quote`, `estimate(cart)` -> `estimate`.
+ * `explicitIdentifiersIn` keeps rejecting a plain lowercase word, so without
+ * this "calculate exact quote() results for these three carts" named no
+ * identifier of its own, inherited the lead sentence's `SAVE500` (a coupon
+ * code in the cart data), and resolveFacetFocal's literal tier made the
+ * function holding that string (`couponDiscount`) the value focal: quote()'s
+ * callees were never served and the pack certified act.answer from 3 of the
+ * 9 files the answer needs. Path spans are stripped first, as in
+ * `explicitIdentifiersIn`.
+ */
+export function callShapedNamesIn(clause: string): string[] {
+  const cleaned = stripPathSpans("", clause);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const match of cleaned.matchAll(CALL_SHAPED_NAME_RE)) {
+    const inner = match[2];
+    if (inner !== undefined && match[0].endsWith(")") && /^(?:s|es)$/i.test(inner)) continue;
+    const name = match[1]!;
+    if (name.length < 2) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
   }
   return out;
 }
@@ -1207,14 +1481,110 @@ const SENTENCE_SPLIT_RE = /[!?]+(?=\s|$)|\.(?=\s|$)|[。！？]+/g;
 // A lone `:` (`Show the default: 30000`) must still split; only a `:`
 // immediately preceded OR followed by another `:` never does, so `::` is
 // never a cut point and the whole qualified name rides through as one piece.
-const CLAUSE_SPLIT_RE = /[,、;]|(?<!:):(?!:)|\band\b/gi;
+//
+// WP-C (2026-09-29, eval-0929 §6/§8) — a bullet/numbered LIST names one
+// independent point per LINE, never one clause glued across every line by
+// the delimiters above. Measured root cause: "Explain the HTTP client:\n-
+// Default timeout value\n- Retry status codes\n- Callers of
+// fetchWithRetry" used to reach `detectFacets` as ONE clause (the three
+// bullets joined by bare newlines, which this regex did not split on at
+// all) — its "value" and "callers" facets both inherited EVERY identifier
+// found anywhere in that glued text, so a value bullet with no identifier
+// of its own silently absorbed a LATER bullet's identifier, and a bullet
+// naming no facet keyword of its own ("Retry status codes") never got a
+// clause of its own to be judged on. The new list-marker alternative below
+// mirrors requestItems.ts's OWN list-marker vocabulary (`splitEnumerated`'s
+// marker replace: `[-*•]`/numbered/circled-numeral, anchored at a line
+// start) so the two modules split a query into the same points; a bare
+// newline with NO marker also splits (requestItems.ts's `splitEnumerated`
+// already always treats `\n` as a boundary, marker or not, via its own
+// trailing `.split(/[,、，\n]+/u)` — this keeps clause-splitting consistent
+// with that item-splitting rather than inventing a narrower newline rule
+// here). A mid-line hyphen ("multi-point") never matches: the marker
+// alternative requires whitespace immediately after it, which a compound
+// word has no instance of.
+//
+// WP-C2 (2026-09-29, eval-0929 §6/§8, rule 1 recall-control fix) — bare
+// "plus"/"as well as"/"along with"/"together with" join `\band\b` as
+// clause-boundary joiners, mirroring requestItems.ts's OWN joiner
+// vocabulary for splitting a query into independent points
+// (`BARE_AND_RE`: "and(?: also| then)?|as well as|plus|along with|together
+// with") — the SAME "the two modules split a query into the same points"
+// rationale as the bullet-marker addition just above, generalized past
+// "and" to the joiner's own closed grammatical class. Measured root cause
+// (concernRetentionMatrix.spec.ts MATRIX-A2, "... how X plus how Y"): this
+// module's OWN clause-splitting kept such a query as ONE clause (no comma/
+// colon/bare-and/marker/newline present), so a facet resolved for X's own
+// narrower topic (e.g. "flow") carried the WHOLE unsplit sentence as its
+// `requirement.clause` — wide enough that `facetClauseMatchesItem`'s
+// one-directional substring-containment test (facetGate.ts, by design: an
+// item no broader than the facet's clause is owned by it) then also
+// (wrongly) claimed Y's own, textually narrower, entirely unrelated
+// request item, silently discharging a genuinely open/absent point under
+// the wrong facet's evidence. Splitting on the SAME joiners requestItems.ts
+// already treats as independent-point boundaries keeps each facet's own
+// `requirement.clause` no wider than the single point it actually resolved,
+// so this substring test can no longer over-claim a sibling point joined
+// only by "plus"/"as well as"/"along with"/"together with".
+const CLAUSE_SPLIT_RE = /[,、;]|(?<!:):(?!:)|\band\b|\bas\s+well\s+as\b|\bplus\b|\balong\s+with\b|\btogether\s+with\b|(?:^|\n)[ \t]*(?:[-*•]|\(?\d{1,2}[.)]|[①-⑳])[ \t]*|\n/gi;
+
+// WP-C4 (2026-09-29, eval-0929 §8 item 1, matrix rows */bullets): a residual
+// list-marker FRAGMENT glued to a clause's edge by the cuts-based split
+// above. `splitProtectingBackticks`'s own trim class (`[\s,、;;::]`) strips
+// whitespace/comma/semicolon/colon but has no entry for a bullet dash/
+// asterisk/bullet dot, a parenthesised/dotted digit marker, a circled
+// numeral, or the JA list dot "・" -- so a bullet's own marker can survive
+// attached to whichever piece's slice happens to include it. Measured root
+// cause: "Explain the job client:\n- Default limit returned by BASE_LIMIT\n-
+// Retry statuses checked by canRetry\n- Callers of dispatchJob" produced a
+// `value` requirement whose own `clause` field read
+// "Default limit returned by BASE_LIMIT\n-" -- CLAUSE_SPLIT_RE's own
+// bullet-line-start alternative consumes a marker THROUGH to the next
+// line's real content, so the marker survives as a TRAILING fragment of the
+// piece BEFORE it (the delimiter always lands at the tail of the preceding
+// slice, never the head of the following one, by construction of the
+// cuts-based split: `cuts[i+1]` is the END of the delimiter that comes
+// AFTER piece i's own content).
+//
+// A marker character CLAUSE_SPLIT_RE's own bullet alternative does not
+// recognize at all (JA "・") is never consumed as part of a delimiter in the
+// first place, so it instead survives as a LEADING fragment of the
+// FOLLOWING clause -- but this one is deliberately left ALONE, not stripped
+// here. `facetClauseMatchesItem` (facetGate.ts) owns a request item to a
+// facet by a one-directional substring test between THIS module's own
+// `requirement.clause` and requestItems.ts's own `item.text` — and
+// requestItems.ts's `splitEnumerated` has the SAME "・" gap (its own marker
+// alternative does not recognize it either) and, unlike this module's
+// cuts-based split, never gets a trailing-residue defect for the markers it
+// DOES recognize (its own text-substitution approach replaces a whole
+// recognized marker match with a clean "\n" before splitting). So a JA
+// bullet's `item.text` is ALWAYS "・<point>" verbatim; stripping the SAME
+// leading "・" from only this module's own `clause` (tried, then reverted)
+// breaks that one-directional match outright (the now-shorter, clean clause
+// can no longer contain the still-"・"-prefixed item as a substring) —
+// measured regression: `evalkit`'s `japanese_bullets` case, which used to
+// close with no gap at all, started disclosing a could-not-determine entry
+// for a now-orphaned item. Leaving this module's own leading "・" exactly as
+// dirty as requestItems.ts's keeps the two derivations of "the same point"
+// textually identical, exactly as WP-C2's own joiner-alignment fix above
+// this comment already established the general principle for. A general
+// fix belongs in `facetClauseMatchesItem`'s own `matchKey` (also stripping a
+// leading list-marker class before comparing) — out of this module's region.
+const LIST_MARKER_FRAGMENT_SRC = "(?:[-*•]|\\(?\\d{1,2}[.)]|[①-⑳])";
+const TRAILING_LIST_MARKER_RE = new RegExp(`\\n[ \\t]*${LIST_MARKER_FRAGMENT_SRC}[ \\t]*$`, "u");
+
+function stripListMarkerEdges(clause: string): string {
+  return clause.replace(TRAILING_LIST_MARKER_RE, "");
+}
 
 function splitSentences(query: string): string[] {
   return splitProtectingBackticks(query, SENTENCE_SPLIT_RE, ".!?。！？,、;;::");
 }
 
 function splitClauses(sentence: string): string[] {
-  return splitProtectingBackticks(sentence, CLAUSE_SPLIT_RE, ",、;;::");
+  return splitProtectingBackticks(sentence, CLAUSE_SPLIT_RE, ",、;;::")
+    .map(stripListMarkerEdges)
+    .filter((clause) => clause.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,6 +1611,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
   const leadIdentifiers = explicitIdentifiersIn(sentences[0]!);
   const leadTerms = conceptTermsIn(sentences[0]!);
   const leadQualifiedMembers = qualifiedMemberPairsIn(sentences[0]!);
+  const leadCallables = callShapedNamesIn(sentences[0]!);
 
   const requirements: FacetRequirement[] = [];
   for (const sentence of sentences) {
@@ -1266,6 +1637,8 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       const subjectIdentifiers = inheritedFromLead ? leadIdentifiers : identifiers;
       const subjectTerms = inheritedFromLead ? [...new Set([...ownTerms, ...leadTerms])] : ownTerms;
       const qualifiedMembers = inheritedFromLead ? leadQualifiedMembers : ownQualifiedMembers;
+      const ownCallables = callShapedNamesIn(declawed);
+      const subjectCallables = ownCallables.length > 0 ? ownCallables : inheritedFromLead ? leadCallables : [];
       // P1-8: a weak candidate is never dropped from concept terms either —
       // folded into `subjectTerms` (lowercased, deduped) so a downstream
       // concept-anchored resolution can still use it even where the exact-
@@ -1278,6 +1651,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
         requirements.push({
           facet, clause, subjectIdentifiers, subjectTerms: subjectTermsWithWeak, inheritedFromLead,
           qualifiedMembers, subjectWeakCandidates: weakCandidates,
+          ...(subjectCallables.length > 0 ? { subjectCallables } : {}),
         });
       }
     }

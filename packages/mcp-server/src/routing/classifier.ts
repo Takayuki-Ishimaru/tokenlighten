@@ -15,7 +15,7 @@
 // `dispatchTool` (server.ts) already routes implicitly today —
 // mode=slice/handle reads and handle-scoped edits already skip the
 // query-driven candidate pipeline (buildTaskPack / locateTaskContext), and
-// mode=task_pack / search_files action=locate already run it. This module
+// mode=task_pack / tl_search_files action=locate already run it. This module
 // only NAMES that existing split so it can be traced. `classifyRoute` is a
 // pure function of (tool, args): it must never be a second source of dispatch
 // behavior, and no call may depend on its output in this wave (advisory
@@ -35,10 +35,10 @@
 //
 // route                  | reason                  | dispatch shape (server.ts unless noted)
 // -----------------------+--------------------------+----------------------------------------
-// reuse_or_continuation  | qref-replay              | read_file: non-empty `qref` (resolveTaskPackQueryArg
+// reuse_or_continuation  | qref-replay              | tl_read_file: non-empty `qref` (resolveTaskPackQueryArg
 //                        |                          | resolves it and IGNORES `query` — see
 //                        |                          | resolveTaskPackQueryArg, ~server.ts:616-666)
-// reuse_or_continuation  | cursor-page              | search_files: non-empty `cursor` (references
+// reuse_or_continuation  | cursor-page              | tl_search_files: non-empty `cursor` (references
 //                        |                          | pagination continuation token)
 // reuse_or_continuation  | task-handle-replay       | any tool: non-empty `task_handle` (PI-09 —
 //                        |                          | `taskHandleRefusal`/`resolveTaskHandle`,
@@ -52,72 +52,72 @@
 //                        |                          | the caller's own continuation marker, not a
 //                        |                          | reset)
 // -----------------------+--------------------------+----------------------------------------
-// orchestrated           | task-pack-query          | read_file: mode="task_pack"/"pack", OR any
+// orchestrated           | task-pack-query          | tl_read_file: mode="task_pack"/"pack", OR any
 //                        |                          | mode with a non-empty `query` (auto + query
 //                        |                          | promotes to task_pack — see the schema's
 //                        |                          | "auto ... plus a non-empty paths[] ALSO
 //                        |                          | promotes to task_pack" comment, server.ts
 //                        |                          | ~:717-721, and the observed `read.task_pack`
 //                        |                          | kind on every bare mode-omitted+query call)
-// orchestrated           | closure-query            | read_file: mode="closure"
-// orchestrated           | surface-projection       | read_file: mode in {map, digest, overview,
+// orchestrated           | closure-query            | tl_read_file: mode="closure"
+// orchestrated           | surface-projection       | tl_read_file: mode in {map, digest, overview,
 //                        |                          | archive, artifact} — multi-file or
 //                        |                          | structured/transformed projections, not a
 //                        |                          | single raw slice (archive needs member
 //                        |                          | resolution via selectorFromArgs; artifact
 //                        |                          | needs sheet/slide/page addressing)
-// orchestrated           | multi-path-target        | read_file: `paths[]` with 2+ entries (not
+// orchestrated           | multi-path-target        | tl_read_file: `paths[]` with 2+ entries (not
 //                        |                          | "1 file/1 semantic target", V10-06 eligibility)
-// orchestrated           | locate-query             | search_files: action="locate" (calls
+// orchestrated           | locate-query             | tl_search_files: action="locate" (calls
 //                        |                          | locateTaskContext directly, or buildTaskPack
 //                        |                          | when includeClosure=true — server.ts ~:10196)
-// orchestrated           | search-query             | search_files: action in {find, symbols,
+// orchestrated           | search-query             | tl_search_files: action in {find, symbols,
 //                        |                          | references (no cursor), tree, diff} — a
 //                        |                          | search is discovery over an unknown location
 //                        |                          | by definition, never "known local"
-// orchestrated           | structured-artifact-edit | edit_file: `artifact` present (xlsx/docx/
+// orchestrated           | structured-artifact-edit | tl_edit_file: `artifact` present (xlsx/docx/
 //                        |                          | pptx/pdf/zip structured op)
-// orchestrated           | edit-intent              | edit_file: `intent` present (semantic
+// orchestrated           | edit-intent              | tl_edit_file: `intent` present (semantic
 //                        |                          | intent-based edit, e.g. rename-symbol-
 //                        |                          | references — can span files)
-// orchestrated           | rename-mode              | edit_file: mode="rename" (cross-file blast
+// orchestrated           | rename-mode              | tl_edit_file: mode="rename" (cross-file blast
 //                        |                          | radius by construction)
-// orchestrated           | create-no-provenance     | edit_file: `create===true` (no prior handle,
+// orchestrated           | create-no-provenance     | tl_edit_file: `create===true` (no prior handle,
 //                        |                          | so no base SHA — V10-06 eligibility requires
 //                        |                          | one)
-// orchestrated           | multi-item-edit-batch    | edit_file: `edits[]` with 2+ items
-// orchestrated           | unanchored-edit          | edit_file: no qualifying handle-anchored
+// orchestrated           | multi-item-edit-batch    | tl_edit_file: `edits[]` with 2+ items
+// orchestrated           | unanchored-edit          | tl_edit_file: no qualifying handle-anchored
 //                        |                          | single-target shape (path-only edits with no
 //                        |                          | handle carry no base-SHA provenance either)
-// orchestrated           | ambiguous-fallback       | read_file: unrecognized mode string, or
+// orchestrated           | ambiguous-fallback       | tl_read_file: unrecognized mode string, or
 //                        |                          | mode=symbol with a path but no `symbol`, or
 //                        |                          | no handle/path/query at all
-// orchestrated           | unknown-tool             | any name outside {read_file, edit_file,
-//                        |                          | search_files} (dispatchTool's own default
+// orchestrated           | unknown-tool             | any name outside {tl_read_file, tl_edit_file,
+//                        |                          | tl_search_files} (dispatchTool's own default
 //                        |                          | case refuses these; classified conservatively
 //                        |                          | rather than left undefined)
 // -----------------------+--------------------------+----------------------------------------
-// known_local_fast       | explicit-handle          | read_file: non-empty `handle`, no query (the
+// known_local_fast       | explicit-handle          | tl_read_file: non-empty `handle`, no query (the
 //                        |                          | handle IS the exact locator — server.ts's
 //                        |                          | handle-resolution block, ~:4644-4735)
-// known_local_fast       | explicit-range-slice     | read_file: mode="slice", or an explicit
+// known_local_fast       | explicit-range-slice     | tl_read_file: mode="slice", or an explicit
 //                        |                          | `range`/`ranges[]` with an explicit `path`
-// known_local_fast       | explicit-symbol          | read_file: mode="symbol" with an explicit
+// known_local_fast       | explicit-symbol          | tl_read_file: mode="symbol" with an explicit
 //                        |                          | `path` AND `symbol`
-// known_local_fast       | explicit-small-file      | read_file: mode="small_file" (one-call
+// known_local_fast       | explicit-small-file      | tl_read_file: mode="small_file" (one-call
 //                        |                          | full+handle response for tiny files,
 //                        |                          | server.ts ~:6721)
-// known_local_fast       | explicit-skeleton        | read_file: mode="skeleton" with an explicit
+// known_local_fast       | explicit-skeleton        | tl_read_file: mode="skeleton" with an explicit
 //                        |                          | `path` (single-file compact symbol view)
-// known_local_fast       | explicit-path-default    | read_file: mode="full", or mode="auto" with
+// known_local_fast       | explicit-path-default    | tl_read_file: mode="full", or mode="auto" with
 //                        |                          | an explicit `path` and no range/symbol/query
-// known_local_fast       | explicit-handle-edit     | edit_file: a handle-anchored single edit —
+// known_local_fast       | explicit-handle-edit     | tl_edit_file: a handle-anchored single edit —
 //                        |                          | top-level `handle` + (`search`+`replace` OR
 //                        |                          | `range`+`content`), OR `edits[]` with exactly
 //                        |                          | ONE handle-anchored item, and none of the
 //                        |                          | artifact/intent/rename/create shapes above
 //
-// Everything not covered above (e.g. a read_file call with neither handle,
+// Everything not covered above (e.g. a tl_read_file call with neither handle,
 // path, nor query) falls through to `ambiguous-fallback` / `orchestrated`.
 
 import { fastPathV2Enabled } from "../util/flags.js";
@@ -128,7 +128,7 @@ import { evaluateCheapImpactSignals, type ImpactGuardResult } from "../write/imp
 // ---------------------------------------------------------------------------
 //
 // `RouteDecision` gains an OPTIONAL `guard` field: the Cheap Impact Guard's
-// (write/impactGuard.ts) verdict over an edit_file call's ARGS ALONE — path +
+// (write/impactGuard.ts) verdict over an tl_edit_file call's ARGS ALONE — path +
 // search/replace TEXT, no file read, no graph probe. This function must stay
 // pure and synchronous (this file's header), so only the guard's I/O-free
 // half (`evaluateCheapImpactSignals`) is ever called from here; the graph-
@@ -152,7 +152,7 @@ export interface RouteDecision {
   readonly reason: string;
   /**
    * V11-06, behind TL_FAST_PATH_V2 — see the addendum above. Present only for
-   * an edit_file call carrying an explicit `path` (a handle-anchored edit
+   * an tl_edit_file call carrying an explicit `path` (a handle-anchored edit
    * resolves its path only at dispatch time, which this pure classifier
    * never sees, so it is left undefined rather than guessed) and only when
    * the flag is on. Advisory / trace-only.
@@ -176,7 +176,7 @@ function hasEntries(value: unknown): value is unknown[] {
  * resolveTaskPackQueryArg). TASK_STATE_PROPS (server.ts ~:498-546) advertises
  * `task_handle`/`taskEpoch` identically on all three tools, so this check is
  * tool-agnostic by design; `qref` and `cursor` are only ever meaningful on
- * read_file/search_files respectively, so checking them unconditionally on
+ * tl_read_file/tl_search_files respectively, so checking them unconditionally on
  * the other tools is harmless (they will simply never be set there by a
  * well-formed caller).
  */
@@ -291,7 +291,7 @@ function classifyReadFile(args: Record<string, unknown>): RouteDecision {
   return { route: "known_local_fast", reason: "explicit-path-default" };
 }
 
-/** True for a single edit_file item that anchors on a handle with a complete search/replace or range/content pair. */
+/** True for a single tl_edit_file item that anchors on a handle with a complete search/replace or range/content pair. */
 function isSingleTargetEditShape(item: Record<string, unknown>): boolean {
   if (!isNonEmptyString(item["handle"])) return false;
   const hasSearchReplace = isNonEmptyString(item["search"]) && typeof item["replace"] === "string";
@@ -342,7 +342,7 @@ function classifyEditFileRoute(args: Record<string, unknown>): RouteDecision {
 
 /**
  * V11-06 (behind TL_FAST_PATH_V2): the Cheap Impact Guard's I/O-free half,
- * evaluated over whatever an edit_file call's ARGS ALONE can prove. Returns
+ * evaluated over whatever an tl_edit_file call's ARGS ALONE can prove. Returns
  * undefined (no guard field at all — not a manufactured "local" verdict) when
  * the flag is off or the call carries no explicit `path` to evaluate against.
  */
@@ -366,7 +366,7 @@ function classifyEditFile(args: Record<string, unknown>): RouteDecision {
 }
 
 function classifySearchFiles(args: Record<string, unknown>): RouteDecision {
-  // search_files is a discovery tool by construction: every action answers
+  // tl_search_files is a discovery tool by construction: every action answers
   // "where is X", which is the opposite of "I already know exactly where
   // this is". None of its actions are known_local_fast; `locate` gets its
   // own reason since the plan names it explicitly.
@@ -386,11 +386,11 @@ export function classifyRoute(tool: string, args: Record<string, unknown>): Rout
   if (continuation !== null) return continuation;
 
   switch (tool) {
-    case "read_file":
+    case "tl_read_file":
       return classifyReadFile(args);
-    case "edit_file":
+    case "tl_edit_file":
       return classifyEditFile(args);
-    case "search_files":
+    case "tl_search_files":
       return classifySearchFiles(args);
     default:
       return { route: "orchestrated", reason: "unknown-tool" };

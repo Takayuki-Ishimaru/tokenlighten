@@ -12,13 +12,13 @@
 // immediately after the served-range ledger settles. THIS module is a
 // SEPARATE, ADDITIVE block that runs immediately AFTER that read-request
 // block (never inside it, never editing it — see this task's file-ownership
-// rule): it settles a staged `search_files find` request's `delivered` prefix
+// rule): it settles a staged `tl_search_files find` request's `delivered` prefix
 // from the FINALIZED payload and installs the ONE canonical continuation, or
 // clears it once nothing is owed.
 //
 // BYTE-IDENTICAL WHEN NOTHING IS STAGED. Returns the payload BY IDENTITY
 // unless THIS call actually staged a search request AND that request's own
-// `matches.truncated` is `true` — every other `search_files` response (every
+// `matches.truncated` is `true` — every other `tl_search_files` response (every
 // `symbols`/`locate`/`diff`/`tree`/`references` response, and every `find`
 // whose result already fit) is untouched by construction.
 // ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ function cursorCall(staged: StagedSearchRequest, cursor: string): ToolCall {
   if (echo.cwd !== undefined && echo.cwd !== "") args["cwd"] = echo.cwd;
   if (echo.lane !== undefined && echo.lane !== "") args["lane"] = echo.lane;
   if (echo.taskHandle !== undefined && echo.taskHandle !== "") args["task"] = { handle: echo.taskHandle };
-  return canonicalToolCall("search_files", args) as ToolCall;
+  return canonicalToolCall("tl_search_files", args) as ToolCall;
 }
 
 /**
@@ -145,7 +145,7 @@ function cappedRecoveryCall(staged: StagedSearchRequest): ToolCall | undefined {
   if (echo.cwd !== undefined && echo.cwd !== "") args["cwd"] = echo.cwd;
   if (echo.lane !== undefined && echo.lane !== "") args["lane"] = echo.lane;
   if (echo.taskHandle !== undefined && echo.taskHandle !== "") args["task"] = { handle: echo.taskHandle };
-  return canonicalToolCall("search_files", args) as ToolCall;
+  return canonicalToolCall("tl_search_files", args) as ToolCall;
 }
 
 /**

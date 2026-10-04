@@ -92,7 +92,7 @@ export function containsPlaceholder(value: unknown): boolean {
 /**
  * R31 finding #3 (P1, 2026-09-05): the small, fixed set of literal
  * placeholder strings this codebase's OWN `next_call`/`next` shapes actually
- * emit inside an `edit_file` payload field (server.ts's
+ * emit inside an `tl_edit_file` payload field (server.ts's
  * `editFileUnknownArgumentRefusal`/edits-item-shape refusals) -- these are
  * genuinely unfilled templates and must still be caught, but by EXACT
  * string match, never by the generic `<...>` substring regex below, because
@@ -117,7 +117,7 @@ const EDIT_PAYLOAD_PLACEHOLDER_LITERALS = new Set([
 ]);
 
 /**
- * `edit_file` field names — top-level or inside one `edits[]` item — that
+ * `tl_edit_file` field names — top-level or inside one `edits[]` item — that
  * carry the CALLER's own verbatim text, never a server-authored template.
  */
 const EDIT_VERBATIM_PAYLOAD_FIELDS = new Set(["search", "replace", "content"]);
@@ -139,7 +139,7 @@ function editsItemContainsPlaceholder(item: unknown): boolean {
 }
 
 /**
- * Placeholder scan for a tool call's `arguments`, aware that an `edit_file`
+ * Placeholder scan for a tool call's `arguments`, aware that an `tl_edit_file`
  * call's `search`/`replace`/`content` (top-level, or inside each `edits[]`
  * item) are documented to always carry the caller's own verbatim text —
  * exempt from the recursive `<...>` regex `containsPlaceholder` runs, and
@@ -149,7 +149,7 @@ function editsItemContainsPlaceholder(item: unknown): boolean {
  * scanned exactly as `containsPlaceholder` always has.
  */
 export function containsPlaceholderForCall(tool: string, value: unknown): boolean {
-  if (tool !== "edit_file" || value === null || typeof value !== "object" || Array.isArray(value)) {
+  if (tool !== "tl_edit_file" || value === null || typeof value !== "object" || Array.isArray(value)) {
     return containsPlaceholder(value);
   }
   const args = value as Record<string, unknown>;
@@ -175,7 +175,7 @@ export function emittableToolCall(value: unknown): ToolCall | undefined {
   // This gate also serves shedders/refusal projectors directly, before the
   // envelope's recursive pass. Build via the same continuation boundary.
   const call = canonicalToolCall(record.tool as ToolName, record.arguments as Record<string, unknown>) as ToolCall;
-  // R31 finding #3: `edit_file`'s caller-verbatim payload fields
+  // R31 finding #3: `tl_edit_file`'s caller-verbatim payload fields
   // (search/replace/content) are exempt from the generic regex here — see
   // `containsPlaceholderForCall`'s own doc comment.
   if (containsPlaceholderForCall(call.tool, call.arguments)) return undefined;
@@ -183,7 +183,7 @@ export function emittableToolCall(value: unknown): ToolCall | undefined {
 }
 
 /**
- * Parse the prose call form this tree emits today (`read_file mode=slice
+ * Parse the prose call form this tree emits today (`tl_read_file mode=slice
  * handle=h1 range=1-40`) into a `ToolCall`. STRICT and fail-closed: anything
  * this cannot parse exactly returns `undefined` and the prose is kept as
  * `detail` instead, so a refusal never trades a readable sentence for an
@@ -459,7 +459,7 @@ function routeUnlockAlternatives(body: Record<string, unknown>): void {
     let alternative: unknown = transition;
     if (transition === "taskEpoch:new") {
       alternative = {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: { mode: "task_pack", taskEpoch: "new", ...(cwd !== undefined ? { cwd } : {}) },
       };
     } else if (transition === "challenge" && record["challenge"] !== undefined) {
@@ -788,7 +788,7 @@ const REFUSAL_ADVISORY_KEYS_BY_CODE: Readonly<Record<string, readonly string[]>>
    * frontier. Since FX-L there is a second, materially different reason a
    * CERTIFICATE-NAMED address can be outside it: the response that named it was
    * capped, so the caller never received its bytes. `next` carries the whole
-   * recovery (a `read_file` of exactly those addresses), and `code`/`retry` are
+   * recovery (a `tl_read_file` of exactly those addresses), and `code`/`retry` are
    * unchanged — this key only lets the refusal say, in the read family's own
    * vocabulary, WHICH of the two situations produced it, so a caller can tell
    * "you may not write here" from "you have not been given this yet".
@@ -936,7 +936,7 @@ export const REFUSAL_ADVISORY_KEYS: readonly string[] = [
   // the top-level handle's path.
   "note",
   // `remaining_queries` — FIELD DEFECT (2026-08-27 field-eval T2). A
-  // `search_files find queries[]` call over the 5-entry cap named the
+  // `tl_search_files find queries[]` call over the 5-entry cap named the
   // dropped COUNT in `hint`'s prose but never the tokens themselves, so
   // recovery meant hand-slicing the caller's OWN original array. This is the
   // structured tail, in `next`'s stringified form, so the follow-up call
@@ -1063,7 +1063,7 @@ export function buildRefusal(forTool: ToolName, body: Record<string, unknown>): 
   // PI-07 / F-A1-5 (2026-08-20): this used to be a VERBATIM, unrevalidated
   // passthrough — `nearest_existing` was a raw filesystem ancestor walk that
   // FOLLOWS symlinks, so a symlink whose realpath escaped every allowed
-  // parent could reach the wire as a write-path (edit_file) `did_you_mean`
+  // parent could reach the wire as a write-path (tl_edit_file) `did_you_mean`
   // and draw the same refusal again on verbatim retry. The fix lives at the
   // SOURCE, not here: `checkCwdOrRefuse` (server.ts) now computes
   // `nearest_existing` via `workspace/candidates.ts`'s
@@ -1105,7 +1105,7 @@ export function buildRefusal(forTool: ToolName, body: Record<string, unknown>): 
   // §2.6 + A.5.15's conditional requirement, USER-ADJUDICATED 2026-08-13.
   //
   // §2.6 makes the agent AUTHOR the challenge — "from the advertised
-  // `edit_file`/`read_file` request schema plus the refusal's
+  // `tl_edit_file`/`tl_read_file` request schema plus the refusal's
   // `retry:\"challenge\"`" — and `challenge.certificate_id` is a REQUIRED
   // argument of that call (`server.ts:460`, and `state/session.ts:2150` refuses
   // a challenge whose id does not match the active task). A `retry:"challenge"`

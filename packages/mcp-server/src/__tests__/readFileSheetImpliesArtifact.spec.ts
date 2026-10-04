@@ -1,7 +1,7 @@
 /**
  * readFileSheetImpliesArtifact.spec.ts — FIX B (2026-07-12c forensics).
  *
- * Live failure: `read_file {handle, sheet}` (or path+sheet) WITHOUT explicit
+ * Live failure: `tl_read_file {handle, sheet}` (or path+sheet) WITHOUT explicit
  * mode="artifact" silently ignored the sheet param and re-served the
  * workbook roster — the xlsx params (sheet/range/columns/...) were only ever
  * consulted inside `if (mode === "artifact")` (server.ts). A caller that
@@ -174,7 +174,7 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     const { ws, srv } = await newServer("path-sheet-no-mode");
     writeBinaryFile(ws, "rates.xlsx", await buildTestXlsxBytes());
 
-    const res = await srv.call("read_file", { path: "rates.xlsx", sheet: "Rates" });
+    const res = await srv.call("tl_read_file", { path: "rates.xlsx", sheet: "Rates" });
 
     // C2-3: the top-level xlsx|docx|pptx|... kind vocabulary relocates to
     // content.form (Rule K) — "xlsx.table" vs "xlsx.roster" IS the routing
@@ -195,13 +195,13 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     writeBinaryFile(ws, "rates.xlsx", await buildTestXlsxBytes());
 
     // Mint a plain file handle first (roster view — no sheet yet).
-    const roster = await srv.call("read_file", { path: "rates.xlsx" });
+    const roster = await srv.call("tl_read_file", { path: "rates.xlsx" });
     expect(roster["kind"]).toBe("read.artifact");
     expect((roster["content"] as Record<string, unknown>)["form"]).toBe("xlsx.roster");
     const handle = roster["handle"];
     expect(typeof handle).toBe("string");
 
-    const res = await srv.call("read_file", { handle, sheet: "Rates" });
+    const res = await srv.call("tl_read_file", { handle, sheet: "Rates" });
 
     expect(res["kind"]).toBe("read.artifact");
     const content = res["content"] as Record<string, unknown>;
@@ -216,7 +216,7 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     const { ws, srv } = await newServer("path-sheet-explicit-auto");
     writeBinaryFile(ws, "rates.xlsx", await buildTestXlsxBytes());
 
-    const res = await srv.call("read_file", { path: "rates.xlsx", sheet: "Rates", mode: "auto" });
+    const res = await srv.call("tl_read_file", { path: "rates.xlsx", sheet: "Rates", mode: "auto" });
 
     expect(res["kind"]).toBe("read.artifact");
     const content = res["content"] as Record<string, unknown>;
@@ -229,7 +229,7 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     const { ws, srv } = await newServer("path-sheet-conflicting-mode");
     writeBinaryFile(ws, "rates.xlsx", await buildTestXlsxBytes());
 
-    const res = await srv.call("read_file", { path: "rates.xlsx", sheet: "Rates", mode: "skeleton" });
+    const res = await srv.call("tl_read_file", { path: "rates.xlsx", sheet: "Rates", mode: "skeleton" });
 
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("invalid-input");
@@ -241,7 +241,7 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     const { ws, srv } = await newServer("path-sheet-conflicting-mode-full");
     writeBinaryFile(ws, "rates.xlsx", await buildTestXlsxBytes());
 
-    const res = await srv.call("read_file", { path: "rates.xlsx", sheet: "Rates", mode: "full" });
+    const res = await srv.call("tl_read_file", { path: "rates.xlsx", sheet: "Rates", mode: "full" });
 
     expect(res["kind"]).toBe("refusal");
     expect(res["code"]).toBe("invalid-input");
@@ -252,7 +252,7 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     const { ws, srv } = await newServer("path-sheet-explicit-artifact");
     writeBinaryFile(ws, "rates.xlsx", await buildTestXlsxBytes());
 
-    const res = await srv.call("read_file", { path: "rates.xlsx", sheet: "Rates", mode: "artifact" });
+    const res = await srv.call("tl_read_file", { path: "rates.xlsx", sheet: "Rates", mode: "artifact" });
 
     expect(res["kind"]).toBe("read.artifact");
     const content = res["content"] as Record<string, unknown>;
@@ -265,7 +265,7 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     const { ws, srv } = await newServer("path-no-sheet-roster");
     writeBinaryFile(ws, "rates.xlsx", await buildTestXlsxBytes());
 
-    const res = await srv.call("read_file", { path: "rates.xlsx" });
+    const res = await srv.call("tl_read_file", { path: "rates.xlsx" });
 
     expect(res["kind"]).toBe("read.artifact");
     const content = res["content"] as Record<string, unknown>;
@@ -278,7 +278,7 @@ describe("readFileSheetImpliesArtifact — sheet= implies mode=artifact", () => 
     fs.mkdirSync(ws, { recursive: true });
     fs.writeFileSync(path.join(ws, "plain.ts"), "export const A = 1;\n", "utf8");
 
-    const res = await srv.call("read_file", { path: "plain.ts", sheet: "Rates" });
+    const res = await srv.call("tl_read_file", { path: "plain.ts", sheet: "Rates" });
 
     // Not an artifact response, and not the invalid-input refusal either —
     // sheet is simply not meaningful for a non-office file at mode=auto, so

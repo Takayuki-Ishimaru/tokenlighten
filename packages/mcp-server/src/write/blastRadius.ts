@@ -2,7 +2,7 @@
  * blastRadius.ts — single-hunk blast-radius precondition (2026-08-01).
  *
  * Measured incident (2026-08-01, this repo): a caller passed TOP-LEVEL
- * {handle, range:"676-788", content} to edit_file. The unknown `range` was
+ * {handle, range:"676-788", content} to tl_edit_file. The unknown `range` was
  * silently dropped and the {handle, content} range-content-replace branch ran
  * over the handle's OWN 1-788 whole-file range — findReferences.ts went
  * 788 → 57 lines and was recovered from .tokenlighten/checkpoints. The

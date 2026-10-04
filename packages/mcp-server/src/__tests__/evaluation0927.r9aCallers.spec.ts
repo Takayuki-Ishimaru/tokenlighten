@@ -293,7 +293,7 @@ async function spawnedServer(ws: string): Promise<ServerHandle> {
 }
 
 async function askOn(s: ServerHandle, ws: string, query: string, hopCap = 20): Promise<ChainResult> {
-  return followNextToEnd(s, { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap });
+  return followNextToEnd(s, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } }, { cwd: ws, hopCap });
 }
 
 async function ask(ws: string, query: string, hopCap = 20): Promise<ChainResult> {

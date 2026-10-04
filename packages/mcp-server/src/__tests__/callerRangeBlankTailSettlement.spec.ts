@@ -17,7 +17,7 @@
  * `["a"].join("\n") + "\n"`. CONFIRMED by the orchestrator (in-process probe,
  * tree vs clean HEAD `03002d8c`), fixture = a 141-line `calc.ts` whose line
  * 141 is BLANK (content ends `}\n\n`):
- *   `read_file {query:"Explain what calc.ts does.", targets:[{path:"calc.ts"}],
+ *   `tl_read_file {query:"Explain what calc.ts does.", targets:[{path:"calc.ts"}],
  *    content:"auto", task:{epoch:"new",profile:"answer"}, budget:{bytes:60000}}`
  *   clean HEAD -> `act.answer` (obligations `surface-content`), evidence
  *     `calc.ts:1-141`, no `remaining`.
@@ -265,7 +265,7 @@ async function readCalcTs(
   budgetBytes: number,
 ): Promise<WireResponse | undefined> {
   const res = await withEnv(env, () =>
-    callTool("read_file", {
+    callTool("tl_read_file", {
       query: "Explain what calc.ts does.",
       targets: [target],
       content: "auto",

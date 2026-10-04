@@ -38,7 +38,7 @@ function mkWorkspace(): string {
 }
 
 function chainOf(evidence: Array<Record<string, unknown>>): ChainResult {
-  const hop: Hop = { hopIndex: 0, call: { tool: "read_file", arguments: {} }, response: { evidence }, textBytes: 0, nextSource: "none" };
+  const hop: Hop = { hopIndex: 0, call: { tool: "tl_read_file", arguments: {} }, response: { evidence }, textBytes: 0, nextSource: "none" };
   return { hops: [hop], final: hop.response, capped: false };
 }
 

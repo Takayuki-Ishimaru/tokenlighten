@@ -436,7 +436,7 @@ function audit(cell: Cell, chains: Record<string, Chain | undefined>, served: Re
  *    `recordPredatesAdditionalServedEvidence`); the rebuilt pathless pack used
  *    to read only its OWN fresh surfaces for `surface-content` /
  *    `behavior-body`, missing carried-forward evidence from the rest of the
- *    epoch and falling to the no-dead-end guard's generic `search_files`
+ *    epoch and falling to the no-dead-end guard's generic `tl_search_files`
  *    fallback (a decision-less response). Fixed two ways, both in
  *    `readCodeTaskPack.ts`: (1) `buildReadinessObligations`'s
  *    `surface-content`/`behavior-body` (and its pre-existing `identifier:*`
@@ -466,7 +466,7 @@ function audit(cell: Cell, chains: Record<string, Chain | undefined>, served: Re
  *    safe to search for). That is not a certified `act.answer`/`act.edit`, so
  *    `tryServeSupersedingCertifiedRecord` has no certificate to restate; the
  *    rebuild's own (uncertified) fallback instead proposes a generic
- *    multi-term JA `search_files find` that dead-ends. The fix belongs to
+ *    multi-term JA `tl_search_files find` that dead-ends. The fix belongs to
  *    whichever candidate-fallback mints that generic find becoming
  *    epoch/evidence-aware of hop 1's own "no safe candidate" verdict for the
  *    SAME unresolved concern — out of this wave's two mechanisms.
@@ -573,9 +573,9 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         servers.push(server);
         try {
           await server.initialize();
-          const followed = await follow(server, { tool: "read_file", arguments: { query: cell.query, task: { epoch: "new", profile: "answer" } } }, ws);
+          const followed = await follow(server, { tool: "tl_read_file", arguments: { query: cell.query, task: { epoch: "new", profile: "answer" } } }, ws);
           const qref = [...followed.hops].reverse().map((hop) => hop.body?.qref).find((value) => typeof value === "string");
-          const repacked = typeof qref === "string" ? await follow(server, { tool: "read_file", arguments: { qref } }, ws) : undefined;
+          const repacked = typeof qref === "string" ? await follow(server, { tool: "tl_read_file", arguments: { qref } }, ws) : undefined;
           const served = new Set<string>();
           for (const chain of [followed, repacked]) {
             if (chain === undefined) continue;
@@ -618,7 +618,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       servers.push(server);
       try {
         await server.initialize();
-        const chain = await follow(server, { tool: "read_file", arguments: { query: "1. How are refunds processed?\n2. How is inventory replenished?", task: { epoch: "new", profile: "answer" } } }, ws);
+        const chain = await follow(server, { tool: "tl_read_file", arguments: { query: "1. How are refunds processed?\n2. How is inventory replenished?", task: { epoch: "new", profile: "answer" } } }, ws);
         const texts = chain.hops.flatMap((hop) => disclosures(hop.body)).filter((text) => /inventory|replenish/i.test(text) && ABSENCE_RE.test(text));
         expect(texts.length, JSON.stringify(chain.hops.map((hop) => hop.body?.decision))).toBeGreaterThan(0);
         expect(texts.filter((text) => /no occurrence/i.test(text)), JSON.stringify(texts)).toEqual([]);

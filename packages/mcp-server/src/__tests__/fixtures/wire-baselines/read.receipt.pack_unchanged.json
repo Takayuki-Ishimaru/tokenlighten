@@ -13,7 +13,7 @@
       "handle": "$H1",
       "path": "fw/src/estimator/qkf.cpp",
       "range": "21-26",
-      "prior": "read_file mode=task_pack qref=$QREF",
+      "prior": "tl_read_file mode=task_pack qref=$QREF",
       "role": "unknown",
       "sha": "$SHA1"
     }
@@ -21,7 +21,7 @@
   "decision": {
     "kind": "discover",
     "next": {
-      "tool": "search_files",
+      "tool": "tl_search_files",
       "arguments": {
         "cwd": "$WS",
         "action": "tree",

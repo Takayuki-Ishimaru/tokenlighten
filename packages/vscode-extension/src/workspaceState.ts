@@ -140,7 +140,9 @@ export function machineInstallCached(): MachineInstallInfo | null {
  * Reads `<root>/.vscode/mcp.json` directly (no CLI spawn) and reports
  * whether it carries a managed TokenLighten entry
  * (`servers.tokenlighten.env.TOKENLIGHTEN_MANAGED === "1"`, written by
- * `tl workspace setup` / `tl install`). DESIGN-v0.14-mcp-only-install.md
+ * `tl workspace setup` / `tl install`, or the unmarked vscode entry an
+ * older `tl workspace setup` wrote — see the body). Two consumers: the
+ * provider below and hostActivation.ts's off switch. DESIGN-v0.14-mcp-only-install.md
  * §4.6 C5: the MCP provider must return no definition whenever this is
  * true — the workspace file already carries a live definition and VS
  * Code's collision policy would otherwise silently disable one copy
@@ -162,10 +164,26 @@ export function vscodeMcpJsonManaged(root: string): boolean {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
     const env = (entry as Record<string, unknown>)["env"];
     if (!env || typeof env !== "object" || Array.isArray(env)) return false;
-    return (env as Record<string, unknown>)["TOKENLIGHTEN_MANAGED"] === "1";
+    const variables = env as Record<string, unknown>;
+    if (variables["TOKENLIGHTEN_MANAGED"] === "1") return true;
+    // The unmarked vscode entry `tl workspace setup` wrote through a launcher
+    // with no install identity (the managed shim, a global `tl`, the bare
+    // fallback) until it stamped the marker itself (Copilot retest r3,
+    // 2026-10-02). VS Code launches that server for this folder all the same,
+    // so the provider must stay out of its way and the off switch must reach
+    // it: the vscode client tag plus the server's own `mcp start --stdio`.
+    const vscodeTagged = variables["TOKENLIGHTEN_CLIENT"] === "vscode"
+      || variables["TOKENLIGHTEN_CLIENT_ID"] === "vscode";
+    return vscodeTagged && launchesTokenLightenStdio((entry as Record<string, unknown>)["args"]);
   } catch {
     return false;
   }
+}
+
+/** `args` runs the TokenLighten MCP server over stdio (`mcp start --stdio`, after any launcher prefix). */
+function launchesTokenLightenStdio(args: unknown): boolean {
+  if (!Array.isArray(args)) return false;
+  return args.some((value, index) => value === "mcp" && args[index + 1] === "start" && args[index + 2] === "--stdio");
 }
 
 export function workspaceActivationStateCached(): WorkspaceActivationState {

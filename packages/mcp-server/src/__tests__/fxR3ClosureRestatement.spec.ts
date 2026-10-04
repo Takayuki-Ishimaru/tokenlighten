@@ -10,10 +10,10 @@
  *        on `result.next` / `result.continuation`, so the candidate chain in
  *        `buildTaskExecutionContract` restated it as the caller's `next`. The
  *        observed wire: `decision.kind:"discover"` +
- *        `gaps:[missing-evidence surface-content]` + `next: search_files find
+ *        `gaps:[missing-evidence surface-content]` + `next: tl_search_files find
  *        ["contract"]` — a search the server had already run — while the
  *        obligation actually open was a CODELESS required surface that the
- *        chain's own `gapFallback` (`read_file {handle}`) would have closed.
+ *        chain's own `gapFallback` (`tl_read_file {handle}`) would have closed.
  *
  *   D2 — the closure's merge/dedup checks compared `range` STRINGS, so a
  *        narrower window of a path the pack already served with a wider body
@@ -79,7 +79,7 @@ function packResult(overrides: Record<string, unknown>): TaskPackResult {
 
 /** The search the loop will run for itself — carried as BOTH `next` and stage 0. */
 const SEARCH_CALL = {
-  tool: "search_files",
+  tool: "tl_search_files",
   arguments: { action: "find", query: "calculateInvoiceTotal rounding" },
 } as const;
 
@@ -101,7 +101,7 @@ function selfExecutingPack(overrides: Record<string, unknown> = {}): TaskPackRes
 describe("FX-R3 D1 — a self-executed closure call is never restated as `next`", () => {
   const QUERY = "update calculateInvoiceTotal rounding across the audit trail";
 
-  it("FIX-PROVING: with `surface-content` still open, `next` is the codeless surface's read_file — never the executed search", () => {
+  it("FIX-PROVING: with `surface-content` still open, `next` is the codeless surface's tl_read_file — never the executed search", () => {
     const workspace = closureWorkspace();
     // A REQUIRED, CODELESS surface: exactly the obligation the recorded wire
     // left open (`gaps:[missing-evidence surface-content]`). Its handle is what
@@ -124,15 +124,15 @@ describe("FX-R3 D1 — a self-executed closure call is never restated as `next`"
     expect(result.internalized).toEqual([{ op: "find", status: "used", evidence: 1 }]);
 
     const contract = buildTaskExecutionContract(result, "generic", QUERY, undefined, workspace);
-    // PRE-FIX: `search_files` — the very call the loop above had just run.
-    expect(contract.next_call?.tool).toBe("read_file");
+    // PRE-FIX: `tl_search_files` — the very call the loop above had just run.
+    expect(contract.next_call?.tool).toBe("tl_read_file");
     expect(contract.next_call?.arguments).toMatchObject({ handle: "h-gap" });
     // And the same through the canonical decision the wire is projected from
     // (which reads the pack's own `execution_contract`).
     (result as unknown as Record<string, unknown>)["execution_contract"] = contract;
     const decision = deriveCanonicalTaskDecision(result);
     expect(decision?.kind).toBe("discover");
-    expect(decision?.next_call?.tool).toBe("read_file");
+    expect(decision?.next_call?.tool).toBe("tl_read_file");
   });
 
   it("the executed search is dropped from BOTH stale slots (`continuation` stage 0 and `next`)", () => {
@@ -143,7 +143,7 @@ describe("FX-R3 D1 — a self-executed closure call is never restated as `next`"
     const result = selfExecutingPack({ surfaces: [] });
     expect(runRecursiveReadOnlyClosure(result, "generic", QUERY, workspace)).toBe(1);
     const contract = buildTaskExecutionContract(result, "generic", QUERY, undefined, workspace);
-    expect(contract.next_call?.tool).not.toBe("search_files");
+    expect(contract.next_call?.tool).not.toBe("tl_search_files");
   });
 
   it("CONTROL: a pack whose closure ran NOTHING keeps its `next` exactly as before", () => {
@@ -171,7 +171,7 @@ describe("FX-R3 D1 — a self-executed closure call is never restated as `next`"
     });
     expect(runRecursiveReadOnlyClosure(result, "generic", QUERY, workspace)).toBe(0);
     const contract = buildTaskExecutionContract(result, "generic", QUERY, undefined, workspace);
-    expect(contract.next_call?.tool).toBe("search_files");
+    expect(contract.next_call?.tool).toBe("tl_search_files");
   });
 
   it("CONTROL: with nothing open, the decision is untouched — the loop executes nothing and the fingerprint set stays empty", () => {
@@ -233,7 +233,7 @@ describe("FX-R3 D2 — a closure hit inside an already-served window merges into
         stages: [{
           execution: "parallel",
           // A NARROWER window of the very path the row above already serves.
-          calls: [{ tool: "read_file", arguments: { path: "src/order.ts", range: "1-2" } }],
+          calls: [{ tool: "tl_read_file", arguments: { path: "src/order.ts", range: "1-2" } }],
         }],
       },
     });
@@ -294,7 +294,7 @@ describe("FX-R3 D2 — a closure hit inside an already-served window merges into
         version: 1,
         stages: [{
           execution: "parallel",
-          calls: [{ tool: "search_files", arguments: { action: "find", query: "auditInvoiceTotal" } }],
+          calls: [{ tool: "tl_search_files", arguments: { action: "find", query: "auditInvoiceTotal" } }],
         }],
       },
     });

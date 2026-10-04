@@ -179,7 +179,7 @@ export interface ElidedRangeEntry {
  * asserting "served earlier this session" with no way to check.
  */
 export interface ServedRangeProvenance {
-  /** The read_file mode that served them, e.g. `slice`, `symbol`, `task_pack`. */
+  /** The tl_read_file mode that served them, e.g. `slice`, `symbol`, `task_pack`. */
   mode: string;
   /** The window the caller asked for, e.g. `1-40`. */
   range: string;
@@ -415,7 +415,7 @@ export interface ExecutionFenceState {
    * the refusal these addresses now produce carries the recovery ruling (r)
    * requires — "the fence STAYS and refuses, and the refusal must carry a
    * recoverable `next` … so it is not refuse-only". `executionRefusal` turns it
-   * into a `read_file` re-read of exactly the refused address, which restores
+   * into a `tl_read_file` re-read of exactly the refused address, which restores
    * residency (`recordServedRange` / the booking pass) and admits the same
    * edit on the next call. That loop IS the T13 anti-desertion property.
    */
@@ -532,7 +532,7 @@ const SERVED_FIND_LEDGER_CAP = 32;
 
 /**
  * TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, W-T-D wave): one
- * recorded `search_files` response, keyed by its canonical fingerprint (see
+ * recorded `tl_search_files` response, keyed by its canonical fingerprint (see
  * `protocol/searchFamily.ts`'s `searchDedupFingerprint`) in
  * `WorkspaceSession.searchDedupLedger`.
  *
@@ -546,7 +546,7 @@ const SERVED_FIND_LEDGER_CAP = 32;
 export interface SearchDedupLedgerEntry {
   /** The wire `kind` the first serving response carried (`search.matches`, etc). */
   readonly kind: string;
-  /** The resolved `search_files` action (`find`, `symbols`, `references`, `tree`). */
+  /** The resolved `tl_search_files` action (`find`, `symbols`, `references`, `tree`). */
   readonly action: string;
   /** F3-style audit label for the first serving call, e.g. `search find (call #2)`. */
   readonly servedBy: string;
@@ -982,7 +982,7 @@ export interface WorkspaceSession {
 
   /**
    * DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2) — layer 2 OBSERVED evidence
-   * for `sfIntent.ts`'s `resolveIntent`: has an `edit_file` call already
+   * for `sfIntent.ts`'s `resolveIntent`: has an `tl_edit_file` call already
    * passed `guardExecutionEdit` (i.e. `decision.allowed` — see
    * `guardExecutionEdit`'s exported wrapper) during the CURRENT task epoch?
    * Same lifetime as the task-state ledger: lane/workspace-scoped (this is a
@@ -992,9 +992,9 @@ export interface WorkspaceSession {
    * else — an edit that lands stays observed for the rest of this task, per
    * §4.2's "以後の pack は書き込み可能 frontier を出す".
    *
-   * L1 (2026-09-05 R28 remediation): an edit_file call that ITSELF carries
+   * L1 (2026-09-05 R28 remediation): an tl_edit_file call that ITSELF carries
    * `task.epoch:"new"` is NOT excluded from setting this. `guardExecutionEdit`
-   * used to gate on `resetForNewTask !== true`, on the (false, for edit_file)
+   * used to gate on `resetForNewTask !== true`, on the (false, for tl_edit_file)
    * assumption that a reset-tagged decision meant "nothing observed yet" —
    * true for the discovery guard's `taskEpoch:"new"` exit, which returns
    * before any bytes are served, but `guardExecutionEditCore`'s own
@@ -1058,7 +1058,7 @@ export interface WorkspaceSession {
    * explores several files via successive task_packs (each installing a fresh
    * certificate whose action_frontier is only that pack's target) and then
    * edits an EARLIER one; binding edits to just the most-recent frontier made
-   * `edit_file handle=h102` fail with "edit target is outside certificate
+   * `tl_edit_file handle=h102` fail with "edit target is outside certificate
    * frontier {h217}" after a later pack served app.py as h217, forcing a
    * wasteful re-pack + challenge + 2-stage edit (~5 turns). guardExecutionEdit
    * consults the LATEST frontier first (unchanged fast path) then this union; a
@@ -1201,7 +1201,7 @@ export interface WorkspaceSession {
   recentEditRefusalSignatures: string[];
 
   /**
-   * W6 (2026-08-24): refusal-shape ledger for edit_file.  This deliberately
+   * W6 (2026-08-24): refusal-shape ledger for tl_edit_file.  This deliberately
    * keeps the request identity separate from the older compact-response ring:
    * the former explains an unchanged retry, while the latter only controls
    * payload size.  Entries are FIFO and are reset at taskEpoch:new.
@@ -1225,7 +1225,7 @@ export interface WorkspaceSession {
   writeEventSerial: number;
 
   /**
-   * Successful single-edit edit_file completions this session (search/replace,
+   * Successful single-edit tl_edit_file completions this session (search/replace,
    * handle+content, target=all, pathless, symbol+search — NOT create=true, NOT
    * an edits[] batch, NOT a failed/refused edit). Drives the one-shot edits[]
    * batching hint; see recordSingleEditCompletion and BATCH_HINT_THRESHOLD.
@@ -1241,7 +1241,7 @@ export interface WorkspaceSession {
 
   /**
    * Fix B (2026-07-12c single-query-find-loop forensics): successful single-`query`
-   * search_files find completions this session — a `queries:[...]` call
+   * tl_search_files find completions this session — a `queries:[...]` call
    * does NOT increment this (see the find dispatch in server.ts). Sibling of
    * singleEditCompletions/BATCH_HINT_THRESHOLD; drives the one-shot find
    * batching hint via recordSingleFindCompletion and FIND_HINT_THRESHOLD.
@@ -1261,14 +1261,14 @@ export interface WorkspaceSession {
 
   /**
    * W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF): consecutive
-   * single-target read-family calls (read_file with exactly one
-   * target/handle, or search_files action=find with exactly one query) this
+   * single-target read-family calls (tl_read_file with exactly one
+   * target/handle, or tl_search_files action=find with exactly one query) this
    * task epoch has issued with no intervening multi-target read-family call.
    * Unlike singleFindCompletions/findHintFired above (a per-session one-shot
    * latch), this streak is scoped to (workspace, lane, task epoch): reset to
    * 0 by any multi-target read-family call AND by `taskEpoch:"new"` — see
    * recordReadFamilySingleTargetCall and guardExecutionDiscovery's epoch-reset
-   * block. Read by server.ts at the read_file/search_files dispatch sites
+   * block. Read by server.ts at the tl_read_file/tl_search_files dispatch sites
    * only; getSession(workspaceRoot) is already lane-scoped (laneScopedKey),
    * so no separate per-lane map is needed here.
    */
@@ -1328,7 +1328,7 @@ export interface WorkspaceSession {
 
   /**
    * TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, default OFF): the
-   * per-task record of already-served `search_files` fingerprints — see
+   * per-task record of already-served `tl_search_files` fingerprints — see
    * `SearchDedupLedgerEntry`'s doc comment for what it holds and why.
    *
    * TASK-scoped like `servedFindLedger`: cleared wholesale on `taskEpoch:
@@ -1348,9 +1348,9 @@ export interface WorkspaceSession {
    * F9 (2026-09-02 review fix): the search-dedup ledger's OWN serve-call
    * ordinal, used ONLY to label a first-time entry's `servedBy` provenance
    * string (`search find (call #N)`). Deliberately SEPARATE from
-   * `serveCallSerial` above: that counter numbers every read_file serving
+   * `serveCallSerial` above: that counter numbers every tl_read_file serving
    * call server.ts labels a `served_by`/`code_unchanged` receipt against, so
-   * a search_files call drawing from it would silently renumber every READ
+   * a tl_search_files call drawing from it would silently renumber every READ
    * receipt issued afterward whenever TL_SEARCH_DEDUP happens to be on — an
    * observable wire-shape difference from merely enabling a (B) flag, which
    * the flag's own byte-identity contract forbids. See
@@ -2097,7 +2097,7 @@ export function rememberTaskQuery(workspaceRoot: string, query: string, taskBind
  * `withTaskHandle`, read right after this function's caller computes
  * `taskBinding`). A DIFFERENT value from `taskBinding`: that fingerprint
  * partitions the executed-next ledger, while `taskHandle` is what a later
- * handleless `read_file {qref}` re-pack must present as `task_handle` so
+ * handleless `tl_read_file {qref}` re-pack must present as `task_handle` so
  * `taskContractScopeOf` resolves the exact `{lane, taskHandle}` scope
  * `taskContractStore.ts`'s `bindTaskContractHandle` relocated the epoch's
  * requirement/obligation ledger to when this task's handle was first minted.
@@ -2295,7 +2295,7 @@ export function repeatedEditRefusalAdvisory(
 ): string | undefined {
   const repeated = noteRefusedEditShape(getSession(workspaceRoot), args, correction);
   if (repeated === undefined) return undefined;
-  return `This edit_file shape was already refused in this task (attempt ${repeated.count}); retrying it unchanged cannot change the result. First correction: ${repeated.firstDetail}`;
+  return `This tl_edit_file shape was already refused in this task (attempt ${repeated.count}); retrying it unchanged cannot change the result. First correction: ${repeated.firstDetail}`;
 }
 
 /**
@@ -2382,9 +2382,9 @@ function capTargetPairs(pairs: readonly HandlePathPair[], cap: number): HandlePa
  * The ONE concrete call that satisfies a refusal's required_action, with real
  * argument values where known — so the model executes it instead of re-packing
  * to relocate the frontier:
- *   - verifying                     -> read_file mode=closure (+cwd)
- *   - edit-ready, handles in scope  -> edit_file edits=[{handle}, ...]
- *   - edit-ready, only paths        -> edit_file path=<frontier path>
+ *   - verifying                     -> tl_read_file mode=closure (+cwd)
+ *   - edit-ready, handles in scope  -> tl_edit_file edits=[{handle}, ...]
+ *   - edit-ready, only paths        -> tl_edit_file path=<frontier path>
  *   - answer-ready / no frontier    -> the challenge shape (the sole admissible
  *                                      tool action; required_action already
  *                                      says "answer from certified evidence").
@@ -2400,11 +2400,11 @@ function frontierNextCall(
 ): Record<string, unknown> {
   const cwd = workspaceRoot ? { cwd: workspaceRoot } : {};
   if (verifyingEffective) {
-    return { tool: "read_file", arguments: { mode: "closure", ...cwd } };
+    return { tool: "tl_read_file", arguments: { mode: "closure", ...cwd } };
   }
   if (fence.terminalAction === "edit") {
     // C4 (2026-08-02 T05c rep0 idx 155→156): the prescription must be a call
-    // edit_file's OWN dispatch accepts. It used to emit bare `{handle}` items,
+    // tl_edit_file's OWN dispatch accepts. It used to emit bare `{handle}` items,
     // which server.ts's edits[] mapping loop refuses outright ("a range-scoped
     // edits[] entry needs either content ... or search+replace"); the solver
     // executed the prescription verbatim, got that error, and abandoned TL for
@@ -2414,7 +2414,7 @@ function frontierNextCall(
     // prescribing a call this server refuses is a defect with no upside.
     if (frontierHandles.length > 0) {
       return {
-        tool: "edit_file",
+        tool: "tl_edit_file",
         arguments: {
           edits: frontierHandles.slice(0, NEXT_CALL_EDIT_CAP).map((handle) => ({
             handle,
@@ -2427,7 +2427,7 @@ function frontierNextCall(
     }
     if (frontierPaths.length > 0) {
       return {
-        tool: "edit_file",
+        tool: "tl_edit_file",
         arguments: {
           path: frontierPaths[0],
           search: EDIT_SEARCH_PLACEHOLDER,
@@ -2446,7 +2446,7 @@ function frontierNextCall(
     // placeholder challenge buried the actual way forward (taskEpoch:"new") in
     // free-text `detail` and cost a measured 4-turn detour per occurrence.
     return {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "task_pack", taskEpoch: "new", paths: [...remedyRepackPaths], ...cwd },
     };
   }
@@ -2456,10 +2456,10 @@ function frontierNextCall(
   // taskEpoch:"new" before any fence check).
   const escapeChallenge = challengeTemplate(fence, CHALLENGE_LEAD_DECISION);
   if (escapeChallenge === undefined) {
-    return { tool: "read_file", arguments: { mode: "task_pack", taskEpoch: "new", ...cwd } };
+    return { tool: "tl_read_file", arguments: { mode: "task_pack", taskEpoch: "new", ...cwd } };
   }
   return {
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: {
       ...cwd,
       challenge: escapeChallenge,
@@ -2513,13 +2513,13 @@ function unlockPayload(fence: ExecutionFenceState): Record<string, unknown> {
   if (challenge === undefined) {
     return {
       accepted_transitions: ["taskEpoch:new"],
-      note: "this certificate lists no challengeable obligation, so `challenge` cannot be accepted — start a new task epoch with read_file mode=task_pack taskEpoch:\"new\"",
+      note: "this certificate lists no challengeable obligation, so `challenge` cannot be accepted — start a new task epoch with tl_read_file mode=task_pack taskEpoch:\"new\"",
     };
   }
   return {
     accepted_transitions: ["challenge", "taskEpoch:new"],
     challenge,
-    note: "re-issue THIS call unchanged, with the `challenge` object attached and its `expected_action_change` placeholder REPLACED by your own one-sentence decision (the placeholder text itself is refused); or start a new task epoch with read_file mode=task_pack taskEpoch:\"new\"",
+    note: "re-issue THIS call unchanged, with the `challenge` object attached and its `expected_action_change` placeholder REPLACED by your own one-sentence decision (the placeholder text itself is refused); or start a new task epoch with tl_read_file mode=task_pack taskEpoch:\"new\"",
   };
 }
 
@@ -2564,7 +2564,7 @@ export function servedFindCertificateUnlock(workspaceRoot: string): {
       if (path !== undefined) editTargetPath = path;
     }
     if (editTargetHandle !== undefined) {
-      acceptedTransitions.push(`edit_file handle=${editTargetHandle}`);
+      acceptedTransitions.push(`tl_edit_file handle=${editTargetHandle}`);
     }
   }
   const challenge = challengeTemplate(fence, CHALLENGE_LEAD_DECISION);
@@ -2664,8 +2664,8 @@ function classifyEditRefusal(
       reason: "create-target-not-servable",
       detail: `create target ${target} can never enter this certificate's path frontier (the frontier only holds paths this server served); executing the frontier batch will not change that`,
       unlock: {
-        accepted_transitions: ["read_file mode=task_pack taskEpoch:new"],
-        note: "challenge and taskEpoch:new may rebind create authority only through a read/contract transition; do not attach either field to this edit_file create",
+        accepted_transitions: ["tl_read_file mode=task_pack taskEpoch:new"],
+        note: "challenge and taskEpoch:new may rebind create authority only through a read/contract transition; do not attach either field to this tl_edit_file create",
       },
     };
   }
@@ -2696,7 +2696,7 @@ function terminalNextCall(
     ? { create: true, content: CREATE_BODY_PLACEHOLDER }
     : { search: EDIT_SEARCH_PLACEHOLDER, replace: EDIT_REPLACE_PLACEHOLDER };
   return {
-    tool: "edit_file",
+    tool: "tl_edit_file",
     arguments: {
       ...target,
       ...body,
@@ -2732,7 +2732,7 @@ function executionRefusal(
   opts?: {
     editContext?: boolean;
     remedyRepackPaths?: readonly string[];
-    /** The caller's own edit_file arguments — read only to classify terminality. */
+    /** The caller's own tl_edit_file arguments — read only to classify terminality. */
     editArgs?: Record<string, unknown>;
     /** Resolves a served handle to its workspace-relative path (demand ledger). */
     resolveHandlePath?: (handle: string) => string | undefined;
@@ -2740,10 +2740,10 @@ function executionRefusal(
      * ND-3 (2026-08-08): this refusal is the DISCOVERY LOOP BRAKE. Its
      * accepted transitions are not a typestate refusal's: the braked call is
      * terminal for its exact shape, and the only things that re-open it are a
-     * different selection, a successful edit_file (which clears the counter),
+     * different selection, a successful tl_edit_file (which clears the counter),
      * or a challenge. Measured at 67da02c2: the shape this flag replaces
      * advertised required_action "verify-with-closure-or-diff", a
-     * `read_file mode=closure` next_call and an allowed_verification_calls
+     * `tl_read_file mode=closure` next_call and an allowed_verification_calls
      * pair — and executing closure ("no-registered-checks"), diff, find or
      * tree cleared nothing, so every machine field pointed at a recovery that
      * does not exist while the prose `detail` already told the truth.
@@ -2790,7 +2790,7 @@ function executionRefusal(
   const brake = opts?.discoveryBrake === true;
   // ND-3: scoped precisely to the DEAD END. A braked call in any other phase
   // is already prescribed a transition that works — "batch-edit-certified-
-  // frontier" with an edit_file template (a successful edit clears the
+  // frontier" with an tl_edit_file template (a successful edit clears the
   // counter) or the challenge escape (which revokes the fence) — and those
   // pins stay exactly as they are. Only the verifying variant prescribed
   // closure/diff, which reset nothing.
@@ -2871,7 +2871,7 @@ function executionRefusal(
   // (empty action frontier, non-empty union) keeps today's next_call rather
   // than silently collapsing to the challenge escape. A "" side (a write
   // target named by path only, or by handle only) is never prescription
-  // material — edit_file cannot dispatch on an empty handle or path.
+  // material — tl_edit_file cannot dispatch on an empty handle or path.
   const prescriptionCandidateHandles = writeTargets.handles.filter((handle) => handle !== "");
   const prescriptionCandidatePaths = writeTargets.paths.filter((path) => path !== "");
   const prescriptionHandles =
@@ -2886,7 +2886,7 @@ function executionRefusal(
   // (r) requires that refusal to be recoverable, "the same executable shape the
   // read family uses for `cause:"capped"`": re-read exactly the unshipped
   // addresses, keep the workspace and the task binding, and the very next
-  // `edit_file` is admitted — because a served range marks the path shipped
+  // `tl_edit_file` is admitted — because a served range marks the path shipped
   // (`recordServedRange`) and the booking pass books it into the union.
   //
   // SCOPED TO THE ADDRESSES THIS REFUSAL IS ABOUT. It fires when the refused
@@ -2914,8 +2914,8 @@ function executionRefusal(
   // address being refused whenever the certificate had no pairing for it, and
   // the recovery fell through to `nothingElseToPrescribe`'s whole-complement
   // branch, whose FIRST entry is an unrelated file. Measured (`r16_b`, flags
-  // off): `edit_file {path:"src/pricing_0.ts"}` refused with
-  // `next = read_file targets:[{path:"src/anchor.ts"}]`; running it verbatim
+  // off): `tl_edit_file {path:"src/pricing_0.ts"}` refused with
+  // `next = tl_read_file targets:[{path:"src/anchor.ts"}]`; running it verbatim
   // served anchor.ts, the same edit refused AGAIN, and only that second
   // refusal named pricing_0.ts — one wasted round trip per address, and a
   // first `next` that is not the executable recovery for the refusal it rides
@@ -2943,14 +2943,14 @@ function executionRefusal(
   // can refuse with a recovery instead of being cleared. What it prescribed was
   // the certificate's WHOLE withheld complement, whose first entry has no
   // relation to the edit being refused — measured in `r16_b`: an
-  // `edit_file {path:"src/pricing_0.ts"}` answered
-  // `next = read_file targets:[{path:"src/anchor.ts"}]`, and only the SECOND
+  // `tl_edit_file {path:"src/pricing_0.ts"}` answered
+  // `next = tl_read_file targets:[{path:"src/anchor.ts"}]`, and only the SECOND
   // refusal, after that unrelated read, named pricing_0.ts. The loop terminated
   // but cost an extra round trip per address, and the first `next` was not the
   // executable recovery for the refusal it rode on.
   //
   // The refused address IS the honest recovery here, by the same rule FX-L
-  // states for the withheld case: a `read_file … content:"full"` of it puts
+  // states for the withheld case: a `tl_read_file … content:"full"` of it puts
   // bytes on the wire and books them, and the very next edit is admitted (this
   // is the A1 serve-time admissibility rule, not a new affordance —
   // `r16_b`'s own second step is the measurement). The certificate's withheld
@@ -2998,7 +2998,7 @@ function executionRefusal(
   // discard the very certificate the caller is trying to execute).
   // NO `qref`, DELIBERATELY, AND THIS WAS MEASURED. Ruling (r) asks for the
   // task binding to ride; on this fixture it makes the recovery unexecutable.
-  // `read_file {qref, targets:[…]}` is a task-pack RE-ASK, and the pack dedup
+  // `tl_read_file {qref, targets:[…]}` is a task-pack RE-ASK, and the pack dedup
   // answers it `pack-unchanged` with a `prior` restatement for the very surface
   // the capped pack shipped no body for — the recovery would route straight
   // back through the mechanism that withheld the bytes, and hand the caller a
@@ -3031,7 +3031,7 @@ function executionRefusal(
   // from there.
   const withheldNextCall = recoveryTargets.length > 0
     ? {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           targets: recoveryTargets.map((candidate) => ({ path: candidate })),
           content: "full",
@@ -3043,7 +3043,7 @@ function executionRefusal(
   // F-R8: a known-but-out-of-epoch batch takes priority over both the brake
   // rescope and the generic frontier/challenge prescription — neither of
   // those names the caller's actual targets, and this one is a real,
-  // placeholder-free `read_file` call that re-covers exactly them.
+  // placeholder-free `tl_read_file` call that re-covers exactly them.
   //
   // FX-L outranks even that: `knownOutsideRepack` prescribes
   // `taskEpoch:"new"`, which THROWS AWAY the live certificate. When the reason
@@ -3053,7 +3053,7 @@ function executionRefusal(
     ? withheldNextCall
     : knownOutsideRepack !== undefined
     ? {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           mode: "task_pack",
           taskEpoch: "new",
@@ -3073,7 +3073,7 @@ function executionRefusal(
         prescriptionHandles,
         prescriptionPaths,
         workspaceRoot,
-        // ND-3: `verifying` prescribes read_file mode=closure, which does NOT
+        // ND-3: `verifying` prescribes tl_read_file mode=closure, which does NOT
         // clear the brake. A braked call therefore never gets it — it falls back
         // to the frontier/challenge prescription, every branch of which is a
         // transition that actually releases the counter.
@@ -3142,11 +3142,11 @@ function executionRefusal(
           // decided, so the two can never drift apart the way they did
           // here: this ternary used to fall through to terminalNextCall
           // even once classifyEditRefusal stopped naming challenge,
-          // which would have prescribed a same-shaped edit_file replay
+          // which would have prescribed a same-shaped tl_edit_file replay
           // with no challenge and no taskEpoch -- a guaranteed dead
           // loop, strictly worse than the false challenge promise it
           // replaced. Other terminal edit refusals (the demand-ledger
-          // case) retain the historical edit_file unlock template.
+          // case) retain the historical tl_edit_file unlock template.
           next_call: terminality.reason === "create-target-not-servable"
             // v0.14.1 defect 1 fix (2026-09-07): this next_call is a
             // next_call_is_template:true payload (set unconditionally a few
@@ -3168,12 +3168,12 @@ function executionRefusal(
             // canonical shape is hand-built here instead: `task.epoch`/
             // `task.profile` replace `taskEpoch`/`taskProfile`, `targets`
             // (path-only entries) replaces `paths`, and `mode` is dropped --
-            // byte-identical to what canonicalToolCall("read_file", {mode:
+            // byte-identical to what canonicalToolCall("tl_read_file", {mode:
             // "task_pack", ...}) produces for this exact shape (no `content`
             // key: canonicalReadArguments only defaults one for mode !==
             // "task_pack"/"closure").
             ? {
-                tool: "read_file",
+                tool: "tl_read_file",
                 arguments: {
                   task: { epoch: "new", profile: "generic" },
                   query: `<one sentence change request that explicitly says to create ${requestedEditPaths(opts.editArgs ?? {})[0] ?? "the target file"}>`,
@@ -3194,7 +3194,7 @@ function executionRefusal(
   // C5 (clauses 3 + 5): record the edit-shaped demand this refusal just
   // emitted, keyed by PATH. `satisfiedPaths` survives re-emission so a demand
   // discharged by an earlier batch is not silently re-armed.
-  if (opts?.editContext === true && isEditContext && nextCall["tool"] === "edit_file") {
+  if (opts?.editContext === true && isEditContext && nextCall["tool"] === "tl_edit_file") {
     const previous = fence.demand;
     // Blocker C (durability): NEVER shrink `paths`. Recomputing them from
     // whatever the handle registry still resolves silently DELETES outstanding
@@ -3276,7 +3276,7 @@ function executionRefusal(
       // what THIS next_call actually dropped); the `next_call` above
       // silently drops the tail, so name what it dropped instead of losing
       // it -- a caller that re-issues `next_call` verbatim and then retries
-      // the SAME edit_file call is refused again for exactly the omitted
+      // the SAME tl_edit_file call is refused again for exactly the omitted
       // paths otherwise.
       //
       // Review finding 3 residual (2026-09-08): `recoveryPaths` orders the
@@ -3292,25 +3292,25 @@ function executionRefusal(
       ...(knownOutsideRepack !== undefined && knownOutsideRepack.recoveryPaths.length > KNOWN_OUTSIDE_REPACK_PATH_CAP
         ? { remaining: knownOutsideRepack.recoveryPaths.slice(KNOWN_OUTSIDE_REPACK_PATH_CAP) }
         : {}),
-      // Rides the REFUSAL, never the arguments: edit_file's unknown-argument
+      // Rides the REFUSAL, never the arguments: tl_edit_file's unknown-argument
       // layer fails closed, so a marker inside `arguments` would make the
       // prescription unexecutable all over again.
-      ...(nextCall["tool"] === "edit_file" ? { next_call_is_template: true } : {}),
+      ...(nextCall["tool"] === "tl_edit_file" ? { next_call_is_template: true } : {}),
       // ND-3: never advertised on a braked call — closure and diff are served
       // normally but reset nothing, so naming them as this refusal's allowed
       // recovery is the machine-readable half of the dead end.
       ...(verifying && !brake
         ? {
             allowed_verification_calls: [
-              { tool: "read_file", arguments: { mode: "closure" } },
-              { tool: "search_files", arguments: { action: "diff" } },
+              { tool: "tl_read_file", arguments: { mode: "closure" } },
+              { tool: "tl_search_files", arguments: { action: "diff" } },
             ],
           }
         : {}),
       // ND-3: the brake's real accepted transitions, in the repo's terminal
       // vocabulary. Every entry is one this server verifiably honours: a
       // different selection is served normally (the signature differs), a
-      // successful edit_file clears the counter (L2b), and the challenge is
+      // successful tl_edit_file clears the counter (L2b), and the challenge is
       // listed only when this fence carries an obligation applyChallenge will
       // actually accept.
       ...(brakeDeadEnd
@@ -3319,10 +3319,10 @@ function executionRefusal(
             terminal_reason: "discovery-loop-brake",
             unlock: {
               accepted_transitions: [
-                "read_file|search_files naming a different window, path, symbol or query",
-                "edit_file - any successful edit under this certificate",
+                "tl_read_file|tl_search_files naming a different window, path, symbol or query",
+                "tl_edit_file - any successful edit under this certificate",
                 ...(advanceableChallenge !== undefined
-                  ? ["read_file challenge={certificate_id, obligation_id, expected_action_change}"]
+                  ? ["tl_read_file challenge={certificate_id, obligation_id, expected_action_change}"]
                   : []),
               ],
               note: "this exact call shape stays refused until one of the accepted transitions runs; verification calls are served normally but do not re-open it",
@@ -3357,7 +3357,7 @@ function executionRefusal(
 }
 
 /**
- * Signature of an edit_file call, for verbatim-retry detection: two calls with
+ * Signature of an tl_edit_file call, for verbatim-retry detection: two calls with
  * the same handles/paths/create/search/replace/symbol/target/intent/content and
  * the same edits[] bodies produce the same string. A changed search/replace is
  * genuinely different work and does NOT compact.
@@ -3485,7 +3485,7 @@ function refuseExecutionEdit(
     const currentDetail = typeof full.refusal["detail"] === "string"
       ? `${full.refusal["detail"]} `
       : "";
-    full.refusal["detail"] = `${currentDetail}This edit_file shape was already refused in this task (attempt ${repeatedShape.count}); retrying it unchanged cannot change the result. First correction: ${repeatedShape.firstDetail}`;
+    full.refusal["detail"] = `${currentDetail}This tl_edit_file shape was already refused in this task (attempt ${repeatedShape.count}); retrying it unchanged cannot change the result. First correction: ${repeatedShape.firstDetail}`;
   }
   // C2: a terminal refusal is already minimal and byte-idempotent — compacting
   // it would strip the very `unlock` it exists to advertise, which is the
@@ -3738,12 +3738,12 @@ export function recordWithheldEditAddresses(
  *
  * INV-I-1, THE MEASURED DEFECT (live, all SF flags off, `scratchpad/fxp1/i1.mjs`):
  *
- *   read_file { query:<generic pricing change>, task:{profile:"generic",epoch:"new"},
+ *   tl_read_file { query:<generic pricing change>, task:{profile:"generic",epoch:"new"},
  *               budget:{ bytes: 6144 } }
  *     -> read.task_pack, decision.kind = "discover", ONE evidence row
  *        (`src/pricing_5.ts`) whose body the byte cap stripped: `hasBody:false`.
  *        The booking pass marks it `withheld` exactly as FX-L designed.
- *   edit_file { edits:[{ handle:<that row's handle>, content:"…" }] }
+ *   tl_edit_file { edits:[{ handle:<that row's handle>, content:"…" }] }
  *     -> edit.applied.   The 575-byte real file is replaced by a 37-byte guess.
  *
  * Reproduced identically for `handle`+`search`, `path`+`search`, and
@@ -3943,7 +3943,7 @@ export function recordServedEditAdmissibility(
  *
  * Measured incident (2026-08-07-semantic-signal5-2): L1 made `create:true`
  * self-authorizing, so the file landed in one call — but the created path
- * entered no admissible set, so the very next `edit_file` against it was
+ * entered no admissible set, so the very next `tl_edit_file` against it was
  * refused `execution-typestate` / `batch-edit-certified-frontier`, advertising
  * a frontier that omitted the file this session had just authored. The
  * observed recoveries were a re-READ of our own fresh bytes (5 turns for one
@@ -3981,7 +3981,7 @@ export function recordExecutionContract(
   workspaceRoot: string,
   query: string,
   contract: TaskExecutionContract | undefined,
-  sanctionedDiscovery?: { tool: "read_file" | "search_files"; args: Record<string, unknown> },
+  sanctionedDiscovery?: { tool: "tl_read_file" | "tl_search_files"; args: Record<string, unknown> },
   /**
    * Defect G (2026-08-13): the handles whose surfaces shipped `remaining_ranges`
    * on the response installing this fence, plus the route's own
@@ -4093,7 +4093,7 @@ export function recordExecutionContract(
   // Measured defect (round-15 `r15_k`, all SF flags off): a `budget.bytes`
   // pack ships five bodyless rows, `priorEpochActionFrontier` carries one of
   // their handles into the next certificate's `action_frontier`, and this
-  // function lifted it into `admissibleEditHandles` — so `edit_file
+  // function lifted it into `admissibleEditHandles` — so `tl_edit_file
   // {handle:…}` landed `edit.applied` against a file the session sent no bytes
   // for, while the PATH form of the same edit refused. FX-K closed the union
   // half in the booking pass and recorded this half as carried-forward.
@@ -4133,7 +4133,7 @@ export function recordExecutionContract(
   // The complement, kept on the fence so the refusal it now produces is
   // RECOVERABLE rather than refuse-only (ruling (r)): these are exactly the
   // addresses this certificate promised and this session never sent, and a
-  // `read_file` of them restores their authority in one call.
+  // `tl_read_file` of them restores their authority in one call.
   const rawEvidenceOnlyPairs: HandlePathPair[] = [...evidenceHandleSet]
     .filter((handle) => !actionHandles.has(handle))
     .map((handle) => ({ handle, path: pathOf(handle) }));
@@ -4420,10 +4420,10 @@ const SELF_MATERIAL_RECEIPT_WINDOW_CAP = 6;
  */
 function consumeSanctionedZoom(
   fence: ExecutionFenceState,
-  tool: "read_file" | "search_files",
+  tool: "tl_read_file" | "tl_search_files",
   args: Record<string, unknown>,
 ): boolean {
-  if (tool !== "read_file") return false;
+  if (tool !== "tl_read_file") return false;
   const sanction = fence.sanctionedDiscovery;
   if (sanction?.zoomHandles === undefined || (sanction.zoomRemaining ?? 0) <= 0) return false;
   const handle = typeof args["handle"] === "string" ? args["handle"] : undefined;
@@ -4529,7 +4529,7 @@ function brakeTargetPath(
  * payloads, each asserting `code_unchanged:true`. Four defects, fixed here:
  *
  *   A  It emitted placeholder-bearing next_calls (the challenge template, and
- *      via frontierNextCall an edit_file template carrying
+ *      via frontierNextCall an tl_edit_file template carrying
  *      EDIT_SEARCH_PLACEHOLDER) WITHOUT `next_call_is_template`, the marker
  *      every other producer in this tree attaches. A caller that executes an
  *      unmarked template verbatim sends `<exact text to replace>` as real bytes.
@@ -4560,7 +4560,7 @@ function preparedDiscoveryReceipt(
   fence: ExecutionFenceState,
   workspaceRoot: string | undefined,
   repeated: boolean,
-  tool: "read_file" | "search_files",
+  tool: "tl_read_file" | "tl_search_files",
   args: Record<string, unknown>,
 ): Record<string, unknown> {
   const isEdit = fence.terminalAction === "edit";
@@ -4574,7 +4574,7 @@ function preparedDiscoveryReceipt(
   const mismatch = newTaskQueryMismatch(fence, tool, args);
   const nextCall = mismatch !== undefined
     ? {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           mode: "task_pack",
           // Verbatim, never an excerpt: this call must be EXECUTABLE, and a
@@ -4588,7 +4588,7 @@ function preparedDiscoveryReceipt(
     : frontierNextCall(fence, handles, paths, workspaceRoot, false);
   // [R5-10] F-1 (2026-08-14) — WHY THIS PRESCRIPTION IS LEFT AS IT IS.
   //
-  // `frontierNextCall` may return a PLACEHOLDER call here: an `edit_file` whose
+  // `frontierNextCall` may return a PLACEHOLDER call here: an `tl_edit_file` whose
   // `search`/`replace` the caller fills in, or a `challenge` whose
   // `expected_action_change` it writes. That is the correct in-process
   // prescription — CONDITION ① pins it, and it names the edit frontier, which
@@ -4686,7 +4686,7 @@ function truncateForReceipt(value: string | undefined, cap: number): string {
  * refusals produce the same payload.
  */
 function refusedCallDescriptor(
-  tool: "read_file" | "search_files",
+  tool: "tl_read_file" | "tl_search_files",
   args: Record<string, unknown>,
 ): Record<string, unknown> {
   const str = (key: string): string | undefined => {
@@ -4700,10 +4700,10 @@ function refusedCallDescriptor(
     ?? firstPath
     ?? str("handle")
     ?? (str("query") !== undefined ? truncateForReceipt(str("query"), REFUSED_TARGET_CAP) : undefined);
-  const selector = tool === "search_files" ? str("action") : str("mode");
+  const selector = tool === "tl_search_files" ? str("action") : str("mode");
   return {
     tool,
-    ...(selector !== undefined ? (tool === "search_files" ? { action: selector } : { mode: selector }) : {}),
+    ...(selector !== undefined ? (tool === "tl_search_files" ? { action: selector } : { mode: selector }) : {}),
     ...(target !== undefined ? { target } : {}),
   };
 }
@@ -4745,10 +4745,10 @@ function containsTemplatePlaceholder(value: unknown): boolean {
  */
 function newTaskQueryMismatch(
   fence: ExecutionFenceState,
-  tool: "read_file" | "search_files",
+  tool: "tl_read_file" | "tl_search_files",
   args: Record<string, unknown>,
 ): string | undefined {
-  if (tool !== "read_file" || args["mode"] !== "task_pack") return undefined;
+  if (tool !== "tl_read_file" || args["mode"] !== "task_pack") return undefined;
   if (typeof args["qref"] === "string" && args["qref"] !== "") return undefined;
   if (args["taskEpoch"] !== undefined || args["challenge"] !== undefined) return undefined;
   const query = typeof args["query"] === "string" ? args["query"] : "";
@@ -4897,7 +4897,7 @@ const DISCOVERY_LOOP_BRAKE_THRESHOLD = 2;
  */
 const DISCOVERY_LOOP_BRAKE_DETAIL =
   "this call is byte-identical to two earlier calls under the active certificate, so its bytes are already in your context; "
-  + "a different window, path, symbol or query is served normally, and a successful edit_file re-opens re-reads of what it changed — "
+  + "a different window, path, symbol or query is served normally, and a successful tl_edit_file re-opens re-reads of what it changed — "
   + "those are the transitions that release it; otherwise challenge the certificate with the decision the evidence would change";
 
 /**
@@ -4909,7 +4909,7 @@ const DISCOVERY_LOOP_BRAKE_DETAIL =
  * context". That claim is only WELL-FORMED when the call would put bytes on
  * the wire. Two shapes observed live at 67da02c2 where it is not:
  *
- *   ND-1  read_file mode=symbol with an absent symbol. Calls 1 and 2 answered
+ *   ND-1  tl_read_file mode=symbol with an absent symbol. Calls 1 and 2 answered
  *         with the 395 B {code:"not-found", candidates, skeleton, next}; the
  *         3rd was answered from the FILE-level ledger with a 408 B
  *         {ok:true, reason:"already-served", windows:[{range:"1-41"}]} — a
@@ -4967,7 +4967,7 @@ function brakeRescopeNextCall(
   const unserved = unservedServedRanges(state.ranges, state.totalLines);
   if (unserved.length === 0) return undefined;
   return {
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: {
       mode: "slice",
       path,
@@ -5012,7 +5012,7 @@ function brakeRescopeNextCall(
  */
 export function guardExecutionDiscovery(
   workspaceRoot: string,
-  tool: "read_file" | "search_files",
+  tool: "tl_read_file" | "tl_search_files",
   args: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
   exactPreparedTaskPackReceipt = false,
@@ -5041,7 +5041,7 @@ export function guardExecutionDiscovery(
     // DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): "an edit already landed
     // THIS task" is exactly as task-shaped as the ledgers above — a NEW
     // declared task has observed no edit of its own yet, even when reached
-    // via a discovery call rather than an edit_file call.
+    // via a discovery call rather than an tl_edit_file call.
     session.intentEditObserved = false;
     // FX-L soft frontier marker (user ruling 2026-09-14): the latest CERTIFIED
     // decision is as task-shaped as `intentEditObserved` directly above — a
@@ -5126,7 +5126,7 @@ export function guardExecutionDiscovery(
     if (
       !batchFenceActive
       && fence.terminalAction === "edit"
-      && tool === "read_file"
+      && tool === "tl_read_file"
       && args["mode"] === "full"
       && args["force_serve"] !== true
     ) {
@@ -5137,7 +5137,7 @@ export function guardExecutionDiscovery(
     // reach task_pack's existing pack_unchanged encoder. The dispatcher
     // proves the hit up front, so a stale or changed pack cannot use this
     // exception to re-serve fresh content under a prepared certificate.
-    if (tool === "read_file" && args["mode"] === "task_pack" && exactPreparedTaskPackReceipt) {
+    if (tool === "tl_read_file" && args["mode"] === "task_pack" && exactPreparedTaskPackReceipt) {
       return { allowed: true };
     }
     // A prepared certificate stops arbitrary discovery, but an explicit
@@ -5167,13 +5167,13 @@ export function guardExecutionDiscovery(
     // advertised zooms above and explicit recovery may serve before it lands.
     if (batchFenceActive) {
       if (args["force_serve"] === true) return { allowed: true };
-      if (tool === "read_file") {
+      if (tool === "tl_read_file") {
         const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
         if (receipt !== undefined) return { allowed: false, servedReceipt: receipt };
       }
       return { allowed: false, servedReceipt: preparedDiscoveryReceipt(session, fence, workspaceRoot, seen > 0, tool, args) };
     }
-    // F-V12-1 (2026-08-27, D1-b): `search_files` bypasses the read-side
+    // F-V12-1 (2026-08-27, D1-b): `tl_search_files` bypasses the read-side
     // residency receipt below UNCONDITIONALLY, ahead of it rather than after.
     // heldSelfMaterialReceipt answers "do I already hold these EXACT BYTES" —
     // a question `find`/`tree`/`references`/`symbols` never asks (they ask
@@ -5186,15 +5186,15 @@ export function guardExecutionDiscovery(
     // total_matches:0, files:[]` — a FABRICATED absence certificate for a
     // token provably present in a file this session holds, indistinguishable
     // on the wire from a genuine scope-complete zero-match. Measured: a
-    // `search_files action=find path=<file>` (any query text, regex/literal/
+    // `tl_search_files action=find path=<file>` (any query text, regex/literal/
     // queries[] alike) reproducibly returns this false-empty response, but
     // ONLY while an active `prepared` certificate's evidence/edit material
     // includes that exact path — the same signature reissued after
     // `taskEpoch:"new"`, or in a fresh session, or from a `discover`-phase
     // session, searches for real. Root cause: this call reached
-    // heldSelfMaterialReceipt BEFORE the tool==="search_files" bypass a few
+    // heldSelfMaterialReceipt BEFORE the tool==="tl_search_files" bypass a few
     // lines below, which the 2026-08-22 fence-serves-unserved-scope wave
-    // already states as this fence's intent ("`search_files` (any action)...
+    // already states as this fence's intent ("`tl_search_files` (any action)...
     // now reach the ordinary...path below this guard") — that wave's own
     // regression spec (fenceServesUnservedScope.rc.spec.ts) never drove a
     // find scoped to the certificate's OWN evidence path, so the ordering gap
@@ -5202,13 +5202,13 @@ export function guardExecutionDiscovery(
     // exists downstream, correctly worded and line-accurate:
     // applyServedFindProtocol/servedFindEscalation.ts's `all_served`/
     // escalation, which this bypass now reaches unconditionally instead.
-    if (tool === "search_files") {
+    if (tool === "tl_search_files") {
       return { allowed: true };
     }
     // A residency proof over the fence's OWN evidence/edit material: "content
     // the caller already has" (required semantics #1(b)) — keeps its receipt
-    // unconditionally, including past the change below. `read_file` only —
-    // `search_files` is bypassed above (F-V12-1).
+    // unconditionally, including past the change below. `tl_read_file` only —
+    // `tl_search_files` is bypassed above (F-V12-1).
     const receipt = heldSelfMaterialReceipt(session, fence, args, resolveHandlePath);
     if (receipt !== undefined) {
       return { allowed: false, servedReceipt: receipt };
@@ -5218,19 +5218,19 @@ export function guardExecutionDiscovery(
     // arm-wide; v0.10 had the same loop on T07/T13). A prepared certificate is
     // a terminal verdict about the ANSWER/EDIT decision, not a lock on
     // further READ-ONLY discovery of scope this session has not proven itself
-    // to hold. `read_file` in any mode OTHER than `task_pack` reaches the
+    // to hold. `tl_read_file` in any mode OTHER than `task_pack` reaches the
     // ordinary, fence-INDEPENDENT serve/dedup path below this guard — the same
     // one that runs when no fence exists at all, and the one
     // `servedReceipts.spec.ts` / `receiptHonesty.spec.ts` already hold to "an
     // already-served re-ask receipts, everything else serves real bytes"
-    // (servedContentReceipt's own code-unchanged tag). `search_files` no
+    // (servedContentReceipt's own code-unchanged tag). `tl_search_files` no
     // longer needs naming here — it already returned above (F-V12-1). Only
     // `task_pack` stays gated here: a fresh pack mints a NEW certificate,
     // which is exactly the transition the epoch boundary (`taskEpoch:"new"`,
     // or the qref/cache-hit shortcut above) exists to make deliberate rather
     // than incidental — see `preparedDiscoveryReceipt` and `readFamily.ts`'s
     // `receiptHasContinuation` for what still happens to that narrower class.
-    if (tool === "read_file" && args["mode"] !== "task_pack") {
+    if (tool === "tl_read_file" && args["mode"] !== "task_pack") {
       return { allowed: true };
     }
     return {
@@ -5268,7 +5268,7 @@ export function guardExecutionDiscovery(
  */
 export function noteDiscoveryServedNoBytes(
   workspaceRoot: string,
-  tool: "read_file" | "search_files",
+  tool: "tl_read_file" | "tl_search_files",
   args: Record<string, unknown>,
 ): void {
   const fence = getSession(workspaceRoot).executionFence;
@@ -5348,7 +5348,7 @@ function requestedItemCreatePaths(args: Record<string, unknown>): string[] {
 // SHOULD-FIX 38)
 //
 // THE RULING, AND WHAT IT DELIBERATELY DOES NOT MOVE. review-findings-6
-// finding 38 measured that an `edit_file` on a served evidence handle applies
+// finding 38 measured that an `tl_edit_file` on a served evidence handle applies
 // even when the certified decision named that file read-only (or named it
 // not at all): `act.edit` with frontier `[{src/retry.ts}]` still wrote
 // `src/cache.ts`; `act.answer` with no frontier still wrote its served file.
@@ -5460,7 +5460,7 @@ function requestedEditTargets(
 }
 
 /**
- * True iff this `edit_file` call's own task binding (if it carries one) still
+ * True iff this `tl_edit_file` call's own task binding (if it carries one) still
  * names the lane+epoch the recorded decision belongs to.
  *
  * WHY THIS IS A GUARD AND NOT A COMPARISON OF IDENTIFIERS IN EVERY CASE.
@@ -5485,7 +5485,7 @@ function certifiedDecisionBindingHolds(record: CertifiedDecisionRecord, args: Re
 }
 
 /**
- * The FX-L soft marker for this `edit_file` call, or `undefined` when the
+ * The FX-L soft marker for this `tl_edit_file` call, or `undefined` when the
  * latest certified decision authorized every target it names (and when there
  * is no certified decision bound to this lane+epoch at all).
  *
@@ -5497,7 +5497,7 @@ export function certifiedFrontierMarkerFor(
   args: Record<string, unknown>,
   resolveHandlePath?: (handle: string) => string | undefined,
 ): ExecutionFrontierMarker | undefined {
-  // An edit_file that carries its OWN `task.epoch:"new"` opens a new task, and
+  // An tl_edit_file that carries its OWN `task.epoch:"new"` opens a new task, and
   // a new task has been handed no certified decision yet. `guardExecutionEditCore`
   // retires the record for exactly this reason — but it does so INSIDE the call
   // this marker describes, and the wrapper reads the record before that (see
@@ -5601,7 +5601,7 @@ function refuseStrictFrontierWrite(
       certificate_id: record.certificateId,
       detail: `TL_FRONTIER_STRICT_WRITES: ${marker.paths.join(",")} is outside the writable frontier of the latest certified decision (${record.certificateId || "no certificate id"}) — that decision ${reason}. Nothing was written. Run the next call to re-pack with the edit intent stated${recordedQuery !== "" ? `; the task this decision closed was "${recordedQuery}"` : ""}.`,
       next_call: {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           query: `edit ${path}`,
           targets: [{ path }],
@@ -5626,7 +5626,7 @@ function refuseStrictFrontierWrite(
  * `execution-typestate` (the code), an advisory `cause` (only where the
  * diagnosis is true — `"capped"` is a claim about the byte budget, never
  * attached to a lane refusal), and the executable per-address recovery
- * `next_call` — `read_file … content:"full"`, which is the one `targets`
+ * `next_call` — `tl_read_file … content:"full"`, which is the one `targets`
  * shape that routes through `recordServedRange` and therefore actually books
  * what it serves, so the very next edit is admitted.
  *
@@ -5662,7 +5662,7 @@ function _refuseUngatedEdit(
   const repeated = noteRefusedEditShape(session, args, spec.detail);
   const detail = repeated === undefined
     ? spec.detail
-    : `${spec.detail} This edit_file shape was already refused in this task (attempt ${repeated.count}); retrying it unchanged cannot change the result. First correction: ${repeated.firstDetail}`;
+    : `${spec.detail} This tl_edit_file shape was already refused in this task (attempt ${repeated.count}); retrying it unchanged cannot change the result. First correction: ${repeated.firstDetail}`;
   return {
     allowed: false,
     refusal: {
@@ -5674,7 +5674,7 @@ function _refuseUngatedEdit(
       ...(targets.length > 0
         ? {
             next_call: {
-              tool: "read_file",
+              tool: "tl_read_file",
               arguments: {
                 targets: targets.map((candidate) => ({ path: candidate })),
                 content: "full",
@@ -5794,6 +5794,13 @@ function guardExecutionEditCore(
   opts?: {
     createWorkspacePin?: CreateWorkspacePin;
     /**
+     * EFF (TL_EFF_LENIENT_EDIT, default OFF): paths whose every edit item the
+     * server proved to be a unique exact `search` match on disk (server.ts
+     * uniqueExactMatchPaths). Admitted by the frontier-membership check below
+     * unless this session emitted the path and withheld its bytes.
+     */
+    uniqueMatchPaths?: ReadonlySet<string>;
+    /**
      * FX-P1 (INV-I-2): the lane a handle was minted in, from the dispatcher's
      * handle table. `undefined` for an unknown handle, a handle from another
      * workspace, or a lane-less mint — all three are "no positive evidence
@@ -5831,12 +5838,12 @@ function guardExecutionEditCore(
     // discovery guard's identical clear above — see there.
     session.intentEditObserved = false;
     // FX-L soft frontier marker (user ruling 2026-09-14): same epoch reset as
-    // the discovery guard's identical clear above — see there. An `edit_file`
+    // the discovery guard's identical clear above — see there. An `tl_edit_file`
     // that opens its own epoch is bound to no certified decision, so it is
     // never marked (and, under TL_FRONTIER_STRICT_WRITES, never refused).
     session.certifiedDecision = undefined;
     // M1 (2026-09-05 R28 remediation): same epoch reset as the discovery
-    // guard's identical clear above — see there. An `edit_file` call carrying
+    // guard's identical clear above — see there. An `tl_edit_file` call carrying
     // its OWN `task.epoch:"new"` is exactly as much "a new task" as a
     // discovery call carrying one; the served-surface ledger must not survive
     // it either.
@@ -5852,7 +5859,7 @@ function guardExecutionEditCore(
   // MEASURED (`scratchpad/fxp1/i2.mjs`, and INV-I's own `p10_lane_isolation`):
   // lane A reads `src/shared.ts` in full and receives handle h; lane B, which
   // issued ZERO reads in this workspace, sends
-  // `edit_file {lane:"agent-B", edits:[{handle:h, content:"…HIJACKED…"}]}`
+  // `tl_edit_file {lane:"agent-B", edits:[{handle:h, content:"…HIJACKED…"}]}`
   // and the file is overwritten. Every OTHER piece of session state is
   // lane-partitioned (`sessionKeyFor` = `laneScopedKey`), so lane B's fence,
   // its admissible union and its byte residency all correctly said "you have
@@ -5941,7 +5948,7 @@ function guardExecutionEditCore(
 
 
   // D5/W4: challenge/taskEpoch:new are decision-reset inputs, not create
-  // authority. An edit_file create cannot combine either with the mutation to
+  // authority. An tl_edit_file create cannot combine either with the mutation to
   // bypass an installed answer fence; a read/contract transition must first
   // install a lineage whose exact create target is grounded.
   if (fence !== undefined && fence.terminalAction === "answer" && createRequested) {
@@ -5983,7 +5990,7 @@ function guardExecutionEditCore(
     //
     // MEASURED (`scratchpad/r18/d3_gate.mts`, live, every SF flag off): a
     // capped DISCOVERY pack mints a handle for a row it shipped no body for
-    // (residency "withheld"); `edit_file {task:{epoch:"new"}, edits:[{handle,
+    // (residency "withheld"); `tl_edit_file {task:{epoch:"new"}, edits:[{handle,
     // content}]}` used to hit the OLD version of this branch, which returned
     // `{allowed:true}` immediately — several statements before the
     // `_withheldEditAddresses` predicate below ever ran. `taskEpoch:"new"`
@@ -6027,7 +6034,7 @@ function guardExecutionEditCore(
       });
     }
     // Mirror of the discovery guard's branch above: an epoch reset through
-    // edit_file discards an unexecuted prepared frontier just the same, so it
+    // tl_edit_file discards an unexecuted prepared frontier just the same, so it
     // owes the same one-shot advisory (w12 merge-review symmetry fix).
     if (fence?.phase === "prepared") {
       const handles = [...new Set(fence.actionFrontier.filter((handle) => handle !== ""))];
@@ -6038,7 +6045,7 @@ function guardExecutionEditCore(
     session.executionFence = undefined;
     _clearAdmissibleEditUnion(session);
     // FX-G-A: same co-lifetime as the discovery guard's branch above — an
-    // epoch reset declared through `edit_file` retires the dead task's VF-5
+    // epoch reset declared through `tl_edit_file` retires the dead task's VF-5
     // verify obligations too.
     _clearRecordedVerifyObligations(session);
     return { allowed: true, resetForNewTask: true };
@@ -6191,7 +6198,7 @@ function guardExecutionEditCore(
     if (!packNamedCreate) {
     // L1 (2026-08-07 T05c/T10 forensics): this fence ALREADY authorizes
     // writes, and the only transition the refusal below can advertise --
-    // `read_file mode=task_pack taskEpoch:"new"` -- grants the create no
+    // `tl_read_file mode=task_pack taskEpoch:"new"` -- grants the create no
     // authority it lacks here: that branch DISCARDS the fence outright (see
     // the taskEpoch:"new" reset above), after which the byte-identical create
     // is admitted by the `fence === undefined` fast path. Measured cost of
@@ -6248,8 +6255,15 @@ function guardExecutionEditCore(
     !fence.actionFrontier.includes(handle)
     && !session.admissibleEditHandles.includes(handle)
     && !handlePathAdmissible(handle));
+  // EFF (TL_EFF_LENIENT_EDIT): a server-proven unique exact match admits a
+  // never-served path; an address this session emitted and WITHHELD still
+  // refuses, asked through the gate's own request-side predicate.
+  const uniqueMatchWithheld = opts?.uniqueMatchPaths !== undefined && opts.uniqueMatchPaths.size > 0
+    ? new Set(_withheldEditAddresses(session, args, resolveHandlePath).map((pair) => pair.path))
+    : undefined;
   const outsidePaths = checkPaths.filter((candidate) =>
-    !fence.actionPaths.includes(candidate) && !session.admissibleEditPaths.includes(candidate));
+    !fence.actionPaths.includes(candidate) && !session.admissibleEditPaths.includes(candidate)
+    && !(opts?.uniqueMatchPaths?.has(candidate) === true && uniqueMatchWithheld?.has(candidate) !== true));
   if (!anyCreateRequested && handles.length === 0 && paths.length === 0) {
     return refuseExecutionEdit(session, fence, workspaceRoot, editSignature, "edit has no certificate-backed handle or path", undefined, args, resolveHandlePath);
   }
@@ -6344,7 +6358,7 @@ type GuardExecutionEditOpts = Parameters<typeof guardExecutionEditCore>[3];
 
 /**
  * DESIGN-v0.15-sf-intent-layers.md §4.2 (IL-W2): records layer 2's
- * OBSERVED evidence for `sfIntent.ts`'s `resolveIntent` — has an edit_file
+ * OBSERVED evidence for `sfIntent.ts`'s `resolveIntent` — has an tl_edit_file
  * call already passed this guard, genuinely, during the current task epoch?
  *
  * L1 (2026-09-05 R28 remediation): `resetForNewTask` no longer excludes this
@@ -6356,15 +6370,15 @@ type GuardExecutionEditOpts = Parameters<typeof guardExecutionEditCore>[3];
  * in-place and, absent a withheld-address refusal, falls through to
  * `{allowed:true, resetForNewTask:true}` while server.ts's dispatcher
  * CONTINUES on to actually apply the requested edit in this SAME call (the
- * only gate is `if (!executionGuard.allowed) return …`). An edit_file call
+ * only gate is `if (!executionGuard.allowed) return …`). An tl_edit_file call
  * that opens its own new epoch and lands is therefore exactly as much "an
- * edit_file call passed this guard, genuinely, during the current task
+ * tl_edit_file call passed this guard, genuinely, during the current task
  * epoch" as an ordinary one — the epoch it belongs to is simply the one it
  * just opened. The old `resetForNewTask !== true` guard treated "opened a new
  * epoch" as synonymous with "did not edit", which is true for discovery and
- * false for edit_file; excluding it here left a landed edit unrecorded, so
+ * false for tl_edit_file; excluding it here left a landed edit unrecorded, so
  * `referencesObserved`/`editObserved`-gated logic downstream saw a task that
- * had (from ITS OWN edit_file call) already written a file but had
+ * had (from ITS OWN tl_edit_file call) already written a file but had
  * apparently never edited anything. A REFUSED edit — `decision.allowed ===
  * false`, whether or not it also carried `task.epoch:"new"` — still never
  * sets this: `decision.allowed` alone is the exact predicate the
@@ -6452,7 +6466,7 @@ export function recordExecutionEditResult(
   // even a further SUCCESSFUL edit all left the counter standing, so the
   // refusal's own required_action could not be discharged and the call stayed
   // refused for the rest of the session. This is the minimal correct site —
-  // the single funnel a successful edit_file reports through, and already the
+  // the single funnel a successful tl_edit_file reports through, and already the
   // owner of the fence's other post-write transitions (demand ledger, phase,
   // reclassification). Cleared BEFORE the early returns below so the
   // reclassification and non-prepared paths reset too.
@@ -6559,7 +6573,7 @@ export function getAdmissibleEditUnionForTest(
  * read-only scan of the registry — deliberately does NOT call getSession, so
  * asking about a root (including `resolvedRoot` itself) never creates a
  * session as a side effect of the check. Used by server.ts's callTool to
- * warn a cwd-less, handle-less read_file/search_files call when more than
+ * warn a cwd-less, handle-less tl_read_file/tl_search_files call when more than
  * one workspace is live, so a call that silently resolves against the
  * default root isn't mistaken for the OTHER active worktree.
  */
@@ -6673,7 +6687,7 @@ export function recordPathSearchEdit(workspaceRoot: string): void {
 export const BATCH_HINT_THRESHOLD = 2;
 
 /**
- * Records a successful single-edit edit_file completion (search/replace,
+ * Records a successful single-edit tl_edit_file completion (search/replace,
  * handle+content, target=all, pathless, symbol+search) — callers gate on
  * ok!==false before calling this, same convention as recordHandleEdit /
  * recordPathSearchEdit above. NOT called for create=true or an edits[] batch
@@ -6714,7 +6728,7 @@ export function recordEditsBatchUsed(workspaceRoot: string): void {
 export const FIND_HINT_THRESHOLD = 2;
 
 /**
- * Records a successful single-`query` search_files find completion (Fix B,
+ * Records a successful single-`query` tl_search_files find completion (Fix B,
  * 2026-07-12c single-query-find-loop forensics) — a `queries:[...]` call does NOT call
  * this (see the find dispatch in server.ts). Mirrors
  * recordSingleEditCompletion's counter/threshold shape, but guards on an
@@ -6745,7 +6759,7 @@ export function recordSingleFindCompletion(workspaceRoot: string): boolean {
 /**
  * W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF; DESIGN-v0.15-sf-
  * turn-economy.md §3). Threshold at which a run of consecutive single-target
- * read-family calls (read_file with one target/handle, or search_files
+ * read-family calls (tl_read_file with one target/handle, or tl_search_files
  * action=find with one query — see server.ts's classification at its two
  * `guardExecutionDiscovery` call sites) starts advertising the fold-into-one-
  * call hint. UNLIKE FIND_HINT_THRESHOLD/BATCH_HINT_THRESHOLD (one-shot: the
@@ -6764,16 +6778,16 @@ export const SERIAL_SINGLE_TARGET_HINT_THRESHOLD = 3;
  * (laneScopedKey) and `guardExecutionDiscovery`'s epoch-reset block zeroes
  * `serialSingleTargetReads` on `taskEpoch:"new"`, so this function itself
  * only has to handle the streak's own increment/reset rule: `isSingleTarget`
- * true advances the streak by one; false (a multi-target read_file or
- * search_files-find call) resets it to zero — the "a multi-target call
+ * true advances the streak by one; false (a multi-target tl_read_file or
+ * tl_search_files-find call) resets it to zero — the "a multi-target call
  * resets the counter" rule this candidate specifies. Call this UNCONDITIONALLY
- * for every read_file/search_files-find call that reaches dispatch (never for
- * edit_file, which does not participate at all — neither advancing nor
+ * for every tl_read_file/tl_search_files-find call that reaches dispatch (never for
+ * tl_edit_file, which does not participate at all — neither advancing nor
  * resetting the streak), regardless of whether the response that follows
  * turns out to be a receipt or a refusal: the streak counts CALL SHAPES, and
  * whether to actually attach the hint to THIS response is a separate,
  * narrower decision the caller makes from the boolean this returns (never
- * fires on edit_file/refusal/receipt kinds — see envelope.ts's
+ * fires on tl_edit_file/refusal/receipt kinds — see envelope.ts's
  * `applySerialSingleTargetHint`).
  *
  * Returns true from the call that brings the streak to
@@ -7056,7 +7070,7 @@ export function markRangeContinuationWatched(workspaceRoot: string, filePath: st
  *    acceptance text rules out);
  *  - no ledger entry exists for the path, or its sha already matches
  *    `freshSha` (unchanged file, OR a change this session's OWN successful
- *    `edit_file` made — `transformServedRangesAcrossServerEdit`,
+ *    `tl_edit_file` made — `transformServedRangesAcrossServerEdit`,
  *    `write/atomicWrite.ts`'s write seam, updates `state.fileSha` to the
  *    POST-edit sha in place rather than resetting the entry, so a self-edit
  *    reaches here with `state.fileSha === freshSha` and is never flagged);
@@ -7091,8 +7105,20 @@ export function servedRangeStaleness(
 /**
  * TL-06 (plan-0143 §4/§8.1, R04, 2026-09-21): records that a stale-
  * continuation refusal has now told the caller about `filePath`'s new
- * `sha` — call exactly once, when `admitCallerRangedContinuation` (server.ts)
- * actually MINTS that refusal, never speculatively.
+ * `sha` — call exactly once per refusal actually MINTED, never speculatively.
+ *
+ * Two call sites, both server.ts, both minting their OWN `cursor-stale`
+ * refusal for this exact path:
+ *  - `admitCallerRangedContinuation`, the original (2026-09-21) site, for its
+ *    own caller-ranged (`targets[].range`, no cursor) admission refusal;
+ *  - the READ CURSOR's own source-revision check (2026-09-29, eval-0929 §3/§7
+ *    follow-up), for ITS `cursor-stale` refusal — added because that
+ *    refusal's restart `next` restates the caller's original `targets[].range`
+ *    verbatim, which mints a ranged-continuation window for it
+ *    (`mintRangedContinuationWindow`, via `canonicalToolCall`) and would
+ *    otherwise hand `admitCallerRangedContinuation` an unacknowledged
+ *    staleness signal for the SAME (path, sha) on the very next hop — the
+ *    "two refusals before any progress" defect this second call site closes.
  *
  * WHY THIS MUST EXIST. The refusal is a PRE-FLIGHT check: it runs before the
  * real read, specifically so a torn read is never assembled at all. That
@@ -7307,9 +7333,9 @@ export function recordServedRange(
   // HERE, while the body was still being assembled — before the budget/cap
   // shed, before the response kind was known, and outside [R5-10]'s
   // corroboration entirely. Round-16 measured the cost end to end: a
-  // `read_file … budget:{bytes:300}` that shed to `refusal/cap-exceeded`
+  // `tl_read_file … budget:{bytes:300}` that shed to `refusal/cap-exceeded`
   // (ZERO file bytes on the wire) still enrolled the path in the admissible
-  // union and marked it `"shipped"`, so the next `edit_file` landed on a file
+  // union and marked it `"shipped"`, so the next `tl_edit_file` landed on a file
   // no byte of which had ever been sent (`r16_e`), and an FX-L `withheld`
   // address was laundered to `shipped` by the same byte-free call (`r16_q`).
   //
@@ -7542,7 +7568,7 @@ export interface ServeCorroboration {
    * whose corroboration cannot promote a path it did not itself ship" — false
    * for exactly the responses that took it: a staged residue for a file no
    * byte of which was ever sent became `"shipped"` on the next unattributed
-   * response and unlocked `edit_file` (round-17 finding 2).
+   * response and unlocked `tl_edit_file` (round-17 finding 2).
    *
    * The cost the old comment feared (re-serving bytes the caller holds) is
    * paid by nothing in production: the two shapes that reached this arm —
@@ -7756,6 +7782,60 @@ function _promoteStagedServeBookings(session: WorkspaceSession, paths: ReadonlyS
   const list = [...paths];
   _appendAdmissible(session.admissibleEditPaths, list);
   _markEditResidency(session.editPathResidency, list, "shipped");
+}
+
+/**
+ * WP-B (eval-0929 §5/§8): retract, NOW, this response's still-PROVISIONAL span
+ * bookings that overlap `windows` — lines the response itself withdrew after
+ * booking them, which `_settleSessionServeBookings` would retract at the
+ * funnel exit anyway because the finalized wire will not carry them.
+ *
+ * WHY EARLY. `buildAnswerTaskPack` books its pack inside `dedupeTrimAndPersist`
+ * and only then runs its post-certification passes; when one of those passes
+ * withdraws a window the certificate cites, the contract is re-derived in the
+ * SAME call, and the re-derivation reads carried evidence off this ledger
+ * (`reconstructServedEntryEvidence`). Until settlement, the withdrawn window
+ * still reads as served there, which would let the re-derived certificate
+ * re-cite exactly the bytes that never reached the client.
+ *
+ * Touches only `pendingServeSpans` (this call's own unsettled bookings): an
+ * earlier call's settled residency is never withdrawn. An overlapping span is
+ * withdrawn whole — under-claiming, the safe direction; the caller re-books
+ * whatever still ships. Returns the number of spans withdrawn.
+ */
+export function withdrawProvisionalServedRanges(
+  workspaceRoot: string,
+  windows: ReadonlyArray<{ path: string; start: number; end: number }>,
+): number {
+  if (windows.length === 0) return 0;
+  const session = getSession(workspaceRoot);
+  if (session.pendingServeSpans.length === 0) return 0;
+  const withdrawnByPath = new Map<string, Set<number>>();
+  session.pendingServeSpans = session.pendingServeSpans.filter((span) => {
+    const overlaps = windows.some((window) =>
+      _servePathsMatch(window.path, span.path) && span.start <= window.end && window.start <= span.end);
+    if (!overlaps) return true;
+    let ids = withdrawnByPath.get(span.path);
+    if (ids === undefined) { ids = new Set(); withdrawnByPath.set(span.path, ids); }
+    ids.add(span.id);
+    return false;
+  });
+  let withdrawn = 0;
+  for (const [filePath, ids] of withdrawnByPath) {
+    const state = session.servedRangeLedger.get(filePath);
+    if (state === undefined) continue;
+    const kept = state.spans.filter((span) => !ids.has(span.id));
+    withdrawn += state.spans.length - kept.length;
+    // Same rule as settlement: an entry nothing served survives in is itself
+    // the claim to delete.
+    if (kept.length === 0) {
+      session.servedRangeLedger.delete(filePath);
+      continue;
+    }
+    state.spans = kept;
+    materializeServedRanges(state);
+  }
+  return withdrawn;
 }
 
 // ---------------------------------------------------------------------------
@@ -8284,7 +8364,7 @@ export function recordConcernTokens(workspaceRoot: string, tokens: readonly stri
     // W9 backstop (root-leak forensics): significantQueryTokens /
     // concreteIdentifierTokens / compactCodeTerms already enforce their own
     // length floors (>=3) before a token ever reaches here, but the
-    // search_files find `queries[]` feeder records entries VERBATIM with no
+    // tl_search_files find `queries[]` feeder records entries VERBATIM with no
     // floor of its own (see server.ts's dispatchTool). A stray 1-2 char or
     // purely-numeric token carries no locate-able concern either way, so
     // drop it here once, for every feeder, rather than duplicating the
@@ -8610,7 +8690,7 @@ function servedCoverageRanges(workspaceRoot: string, filePath: string): Array<[n
  * L2 — true when the matched lines of an already-served file still have bytes
  * this session has NOT put on the wire, i.e. a zoom would genuinely serve
  * something. Used to decide whether an escalation may honestly advertise a
- * `read_file mode=slice` transition instead of prescribing a re-serve that
+ * `tl_read_file mode=slice` transition instead of prescribing a re-serve that
  * would come back as a `code_unchanged` receipt.
  */
 export function servedFindWindowHasUnservedLines(

@@ -4,7 +4,7 @@
  * An answer task_pack whose query literally names an identifier that exists in
  * the workspace used to serve unrelated candidates (`confirm_candidates`) with
  * `unresolved: ["identifier:<name>"]` — knowingly routing the model into the
- * exact literal search (`search_files action=find <name>`) the server can run
+ * exact literal search (`tl_search_files action=find <name>`) the server can run
  * itself. Live reproduction: query "How does applyPackDedupe deduplicate
  * surfaces…" served persistPackFingerprints + two unrelated files while the
  * definition sat 30 lines above the served range.

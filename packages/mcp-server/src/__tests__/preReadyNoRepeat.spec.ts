@@ -75,7 +75,7 @@ describe("no-repeat holds in the pre-ready, fence non-armed zone (P1-h(iii), A-3
     writeFile(cwd, "src/consumer.ts", "import { InvoiceStatus } from './status.js'; export const current = InvoiceStatus.PAID;\n");
     const lane = "pre-ready-no-repeat";
 
-    const first = await dispatch("read_file", {
+    const first = await dispatch("tl_read_file", {
       mode: "task_pack",
       query: "Add REFUNDED everywhere InvoiceStatus is used.",
       cwd,
@@ -92,7 +92,7 @@ describe("no-repeat holds in the pre-ready, fence non-armed zone (P1-h(iii), A-3
     expect(taskHandle).toMatch(/^tlh_task_v1_/);
     const prescribed = nextOf(first);
     expect(prescribed, JSON.stringify(first)).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { cwd, lane, task: { handle: taskHandle }, action: "find", queries: ["REFUNDED"] },
     });
 
@@ -103,9 +103,9 @@ describe("no-repeat holds in the pre-ready, fence non-armed zone (P1-h(iii), A-3
     await dispatch(prescribed!.tool, { ...prescribed!.arguments, cwd, lane });
     // Still fence-cleared: the absence-consuming call was a read, not a
     // contract state !== "ready" -> "ready" transition.
-    expect(getExecutionFence(cwd), "a read-only search_files call must not install a fence").toBeUndefined();
+    expect(getExecutionFence(cwd), "a read-only tl_search_files call must not install a fence").toBeUndefined();
 
-    const continued = await dispatch("read_file", {
+    const continued = await dispatch("tl_read_file", {
       mode: "task_pack",
       query: "Add REFUNDED everywhere InvoiceStatus is used.",
       cwd,

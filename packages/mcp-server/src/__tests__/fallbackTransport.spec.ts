@@ -1,19 +1,21 @@
-// Regression tests for the hand-rolled stdio JSON-RPC fallback transport.
+// Regression tests for the hand-rolled stdio JSON-RPC transport — the legacy
+// era's only transport (mcp/transport/legacyStdio.ts). The file keeps its
+// historical name, from when that transport was believed to be a fallback
+// beneath an SDK leg that never ran; cancellation has its own spec
+// (stdioCancellation.spec.ts).
 //
-// TL-SECURITY-REVIEW-2026-08-15 finding 7 (CWE-400): runStdioFallback()
-// (used only when the MCP SDK's stdio transport is unavailable — see
-// tryRunWithSdk() in server.ts) used to buffer+JSON.parse any readline
-// "line" of unbounded size and fire every handleRequest() concurrently
-// with zero backpressure. `input`/`output`/`handler`/`maxLineBytes` are
-// TEST-ONLY injection points added specifically so these tests can drive
-// the transport with in-memory streams and a controllable-latency handler
-// — there is no supported way to force the real SDK transport unavailable
-// from outside the process, so a real-subprocess spawn (this suite's usual
-// convention for transport-level coverage) cannot exercise this path.
+// TL-SECURITY-REVIEW-2026-08-15 finding 7 (CWE-400): runLegacyStdio()
+// used to buffer+JSON.parse any readline "line" of unbounded size and fire
+// every handleRequest() concurrently with zero backpressure.
+// `input`/`output`/`handler`/`maxLineBytes` are TEST-ONLY injection points
+// added specifically so these tests can drive the transport with in-memory
+// streams and a controllable-latency handler — a real-subprocess spawn (this
+// suite's usual convention for transport-level coverage) cannot shrink the
+// line cap or control how long a handler takes.
 
 import { describe, it, expect } from "vitest";
 import { PassThrough } from "node:stream";
-import { runStdioFallback, type RpcRequest, type RpcResponse } from "../server.js";
+import { runLegacyStdio, type RpcRequest, type RpcResponse } from "../server.js";
 
 function fakeOutput(): { stream: NodeJS.WritableStream; responses: RpcResponse[] } {
   const responses: RpcResponse[] = [];
@@ -45,7 +47,7 @@ function sendLine(input: PassThrough, obj: unknown): void {
   input.write(JSON.stringify(obj) + "\n");
 }
 
-describe("runStdioFallback — resource bounds (finding 7)", () => {
+describe("runLegacyStdio — resource bounds (finding 7)", () => {
   it("drops an oversized request line without dispatching it to the handler or answering it", async () => {
     const input = new PassThrough();
     const { stream: output, responses } = fakeOutput();
@@ -57,7 +59,7 @@ describe("runStdioFallback — resource bounds (finding 7)", () => {
     // A tiny maxLineBytes override (instead of the real 16 MB constant)
     // means the "oversized" line here can be well under 1 KB — no
     // multi-megabyte fixture needed to exercise the real boundary check.
-    runStdioFallback(input, output, handler, 50);
+    runLegacyStdio(input, output, handler, 50);
 
     sendLine(input, {
       jsonrpc: "2.0",
@@ -87,7 +89,7 @@ describe("runStdioFallback — resource bounds (finding 7)", () => {
       order.push(id);
       return { jsonrpc: "2.0", id, result: { ok: true } };
     };
-    runStdioFallback(input, output, handler);
+    runLegacyStdio(input, output, handler);
 
     // Both lines arrive back-to-back, well before request 1's handler
     // resolves — an unbounded-concurrency implementation would let request
@@ -109,11 +111,70 @@ describe("runStdioFallback — resource bounds (finding 7)", () => {
       id: req.id ?? null,
       result: { echoed: req.method },
     });
-    runStdioFallback(input, output, handler);
+    runLegacyStdio(input, output, handler);
 
     sendLine(input, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     await waitUntil(() => responses.length >= 1);
     expect(responses[0]).toEqual({ jsonrpc: "2.0", id: 1, result: { echoed: "tools/list" } });
+    input.end();
+  });
+});
+
+describe("runLegacyStdio — framing behaviour kept byte-for-byte", () => {
+  it("drops a line that is not JSON, or not an object, without answering and without stalling later requests", async () => {
+    const input = new PassThrough();
+    const { stream: output, responses } = fakeOutput();
+    const seen: Array<string | number | null | undefined> = [];
+    const handler = async (req: RpcRequest): Promise<RpcResponse> => {
+      seen.push(req.id);
+      return { jsonrpc: "2.0", id: req.id ?? null, result: { ok: true } };
+    };
+    runLegacyStdio(input, output, handler);
+
+    input.write("this is not json\n");
+    input.write("\n");
+    input.write("   \n");
+    input.write("42\n");
+    input.write("null\n");
+    input.write('"a string"\n');
+    sendLine(input, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+
+    await waitUntil(() => responses.length >= 1);
+    expect(responses.map((r) => r.id)).toEqual([1]);
+    expect(seen).toEqual([1]);
+    input.end();
+  });
+
+  it("answers a handler that throws with -32603 'Internal error' under the request's own id", async () => {
+    const input = new PassThrough();
+    const { stream: output, responses } = fakeOutput();
+    const handler = async (req: RpcRequest): Promise<RpcResponse> => {
+      if (req.id === 1) throw new Error("boom");
+      return { jsonrpc: "2.0", id: req.id ?? null, result: { ok: true } };
+    };
+    runLegacyStdio(input, output, handler);
+
+    sendLine(input, { jsonrpc: "2.0", id: 1, method: "tools/call" });
+    sendLine(input, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+
+    await waitUntil(() => responses.length >= 2);
+    expect(responses[0]).toEqual({ jsonrpc: "2.0", id: 1, error: { code: -32603, message: "Internal error" } });
+    expect(responses[1]).toEqual({ jsonrpc: "2.0", id: 2, result: { ok: true } });
+    input.end();
+  });
+
+  it("writes nothing for a notification (the handler answers null) and keeps serving", async () => {
+    const input = new PassThrough();
+    const { stream: output, responses } = fakeOutput();
+    const handler = async (req: RpcRequest): Promise<RpcResponse | null> =>
+      req.id === undefined ? null : { jsonrpc: "2.0", id: req.id, result: { ok: true } };
+    runLegacyStdio(input, output, handler);
+
+    sendLine(input, { jsonrpc: "2.0", method: "notifications/initialized" });
+    sendLine(input, { jsonrpc: "2.0", id: 5, method: "tools/list" });
+
+    await waitUntil(() => responses.length >= 1);
+    expect(responses.map((r) => r.id)).toEqual([5]);
     input.end();
   });
 });

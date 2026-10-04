@@ -119,7 +119,7 @@ describe("ledger certificate binding", () => {
       taskReplay: "replay-shed",
       workspaceIdentity: "/workspace/shed",
     });
-    const emitted = emitFinalizedPayload(payload, "read.task_pack", { tool: "read_file" }, { budgetOverrideBytes: 900 });
+    const emitted = emitFinalizedPayload(payload, "read.task_pack", { tool: "tl_read_file" }, { budgetOverrideBytes: 900 });
     expect(emitted.isError).not.toBe(true);
     const body = JSON.parse(emitted.content[0]!.text) as Record<string, unknown>;
     expect(body.kind).toBe("read.task_pack");
@@ -231,7 +231,7 @@ describe("ledger certificate binding", () => {
       taskReplay: "q-funnel",
       workspaceIdentity: "/workspace/funnel",
     });
-    const emitted = emitFinalizedPayload(payload, "read.task_pack", { tool: "read_file" });
+    const emitted = emitFinalizedPayload(payload, "read.task_pack", { tool: "tl_read_file" });
     expect(emitted.isError).not.toBe(true);
   });
 
@@ -273,7 +273,7 @@ describe("ledger certificate binding", () => {
         taskReplay: "q-unverifiable",
         workspaceIdentity: "/workspace/unverifiable",
       });
-      const emitted = emitFinalizedPayload(payload, "read.task_pack", { tool: "read_file" });
+      const emitted = emitFinalizedPayload(payload, "read.task_pack", { tool: "tl_read_file" });
       expect(emitted.isError).toBe(true);
       const body = JSON.parse((emitted.content as Array<{ text: string }>)[0]!.text) as { kind?: string };
       expect(body.kind).toBe("refusal");

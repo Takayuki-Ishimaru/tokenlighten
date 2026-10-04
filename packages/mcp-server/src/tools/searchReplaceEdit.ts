@@ -20,6 +20,7 @@ import { applySingleEdit } from "../write/textEdit.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import { countLines } from "../util/countLines.js";
 import { shortSha } from "../util/handles.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import { fastPathV2Enabled } from "../util/flags.js";
 import { trace } from "../util/trace.js";
 import { evaluateImpactGuard, isFastPathEligible } from "../write/impactGuard.js";
@@ -211,13 +212,13 @@ export async function searchReplaceEdit(
       if (!allowCreate) {
         return {
           ok: false,
-          // FIX 2c: edit_file's ADVERTISED schema has `create`, not
+          // FIX 2c: tl_edit_file's ADVERTISED schema has `create`, not
           // `allow_create` (that name only ever existed on the deprecated
           // search_replace_edit alias's schema) — an agent that hit this hint
           // could not see the param it named, and abandoned the tool. Point
           // at the name the caller can actually see; this function's own
           // `allow_create` field survives as an engine-internal option, fed
-          // ONLY from the advertised `create` now — server.ts's edit_file
+          // ONLY from the advertised `create` now — server.ts's tl_edit_file
           // dispatch computes `allow_create: args["create"] === true`; the
           // caller-facing `allow_create` alias itself was deleted.
           error: `File not found: ${relPath}. Use create:true to create new files.`,
@@ -251,6 +252,10 @@ export async function searchReplaceEdit(
         code: "invalid-input",
       };
     }
+    // COMMIT POINT (client cancellation, util/requestCancellation.ts) of the
+    // create path: validation is done; the parent directories below are the
+    // first thing this call would put on the disk.
+    throwIfRequestCancelled();
     // Create parent directories if needed.
     const parentDir = path.dirname(absPath);
     try {
@@ -377,6 +382,11 @@ export async function searchReplaceEdit(
   }
 
   const newContent = editResult.text!;
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the edit
+  // is applied in memory and every guard above has passed; the write below is
+  // the first byte this call puts on the disk.
+  throwIfRequestCancelled();
 
   // Atomic write — preserves the original file's mode (see
   // writeExistingFileAtomic's doc comment; 2026-08-07 chmod-reset incident).

@@ -44,7 +44,9 @@ export interface SentinelBlock {
  * block inside a rules/instructions file), it renders a whole VS Code
  * Copilot Chat custom-agent file (`.github/agents/tokenlighten-explore.agent.md`)
  * that a parent agent's `runSubagent` tool can target by name so the child
- * also uses TokenLighten. It is only ever included in `injectAll`/`removeAll`
+ * also uses TokenLighten. Since v105 the user can also select it directly
+ * for a read-only question, with only the two TL inspection tools enabled.
+ * It is only ever included in `injectAll`/`removeAll`
  * when the caller opts in (see `packages/cli/src/commands/workspace.ts`'s
  * `setupWorkspace()`, which adds it to the managed-target list only while
  * configuring the `vscode` client) and is deliberately excluded from

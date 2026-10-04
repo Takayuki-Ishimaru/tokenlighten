@@ -157,7 +157,7 @@ async function readTaskPack(args: Record<string, unknown>): Promise<Record<strin
   const { callTool } = await import("../server.js") as unknown as {
     callTool: (name: string, args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
   };
-  const response = await callTool("read_file", args);
+  const response = await callTool("tl_read_file", args);
   return JSON.parse(response.content[0]!.text) as Record<string, unknown>;
 }
 
@@ -321,7 +321,7 @@ describe("qualified Class::method anchors", () => {
 // SF-5 residuals (round 11): `qualifiedAnchorSiteKind` (readCodeTaskPack.ts)
 // runs on the output of `maskCommentsAndStrings` (sfCodeMask.ts) — a masking
 // bug is a D5 CORRECTNESS bug, on the DEFAULT (unflagged) wire path. This
-// pins three decoy shapes end to end, through the real `read_file` handler:
+// pins three decoy shapes end to end, through the real `tl_read_file` handler:
 // a commented-out fake definition, a quoted (string-literal) fake
 // definition, and a regex literal on the SAME LINE as the real definition
 // (a masking bug in the OTHER direction — over-masking a real definition —

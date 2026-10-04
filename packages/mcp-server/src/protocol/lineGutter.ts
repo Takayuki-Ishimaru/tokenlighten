@@ -10,7 +10,7 @@
 // count from the body's own text to a statement's true source line. This
 // module numbers each line of an eligible served body with that true line,
 // so a host that wants `file:line` (or a model asked to cite one) never has
-// to spend a native grep/`search_files find` call re-discovering it.
+// to spend a native grep/`tl_search_files find` call re-discovering it.
 //
 // THE ONE SEAM. `applyAnswerLineGutter` is called from exactly one place:
 // `protocol/envelope.ts`'s `finalizeProtocolResponse`, immediately before it
@@ -146,6 +146,17 @@ function splitLines(text: string): string[] {
   const lines = text.split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   return lines;
+}
+
+/** A `read.batch` whole-file entry (`form:"file"` / `fullFileExpansion:true`): the one rangeless shape `numberEntryFieldInPlace` numbers. */
+function isWholeFileEntry(record: WireBody): boolean {
+  return record["form"] === "file" || record["fullFileExpansion"] === true;
+}
+
+/** `1-N` over `fileText`'s real lines (a trailing "\n" adds none). */
+function wholeFileBounds(fileText: string): { start: number; end: number } | undefined {
+  const count = splitLines(fileText).length;
+  return count > 0 ? { start: 1, end: count } : undefined;
 }
 
 /**
@@ -536,14 +547,22 @@ function numberEntryFieldInPlace(
   const path = record["path"];
   const range = record["range"];
   const text = record[field];
-  if (!isNonEmptyString(path) || !isNonEmptyString(range) || !isNonEmptyString(text)) return;
+  if (!isNonEmptyString(path) || !isNonEmptyString(text)) return;
   if (!isGutterEligiblePath(path)) return;
-
-  const bounds = parseLineRange(range);
-  if (bounds === undefined) return;
+  // Copilot retest r2 (2026-10-02): a whole-file `read.batch` entry carries no
+  // `range` at all, so it shipped un-numbered and a model asked for line
+  // numbers re-read the same nine files with explicit ranges just to get them
+  // (one whole extra round, 18 % of that session). Its span is the whole
+  // file; the byte-equality checks below still decide whether numbering it
+  // is sound.
+  if (range !== undefined && !isNonEmptyString(range)) return;
+  if (range === undefined && !isWholeFileEntry(record)) return;
 
   const fileText = readCached(path);
   if (fileText === undefined) return;
+
+  const bounds = isNonEmptyString(range) ? parseLineRange(range) : wholeFileBounds(fileText);
+  if (bounds === undefined) return;
 
   const lang = languageForPath(path);
   const bodyLines = splitLines(text);
@@ -571,7 +590,7 @@ function numberEntryFieldInPlace(
  * `finalizeProtocolResponse`'s own `resolvedWorkspace = context.workspace ??
  * context.codecTraceWorkspace` fallback, and the read-family branch's
  * neighboring comment: "`codecTraceWorkspace` ... is the only workspace root
- * this funnel has for a read/search call"), so a read_file call's resolved
+ * this funnel has for a read/search call"), so a tl_read_file call's resolved
  * root -- confirmed empirically: `read.task_pack`/`read.text`/`read.batch`
  * all carry `context.workspace === undefined` and the REAL realpath'd root in
  * `codecTraceWorkspace` -- is reached only through the second field. Mirrors
@@ -631,7 +650,7 @@ function hasQuery(context: AnswerLineGutterContext | undefined): boolean {
 /**
  * WP-V1 (2026-09-20, replay-forensics follow-up): true iff `payload`'s own
  * `decision.kind` is `"act.edit"`. An edit-directed pack must stay
- * copy-exact for `edit_file`'s search/replace matching — the same reasoning
+ * copy-exact for `tl_edit_file`'s search/replace matching — the same reasoning
  * `applyAnswerLineGutter` below already applies to an explicit generic
  * profile — so the lane-inherited fallback must never number one, even when
  * its OWN resolved `profile` happens to be the inferred "generic" this

@@ -166,7 +166,7 @@ describe("B2e — one mode=full serve is capped, and only what was sent is recor
     await srv.initialize();
 
     const first = parseResult(await srv.rpc(2, "tools/call", {
-      name: "read_file", arguments: { mode: "full", path: "src/big.ts" },
+      name: "tl_read_file", arguments: { mode: "full", path: "src/big.ts" },
     }));
     expect(first["kind"]).toBe("read.text");
     const firstEvidence = (first["evidence"] as Array<Record<string, unknown>> | undefined)?.[0];
@@ -197,14 +197,14 @@ describe("B2e — one mode=full serve is capped, and only what was sent is recor
     await srv.initialize();
 
     const first = parseResult(await srv.rpc(2, "tools/call", {
-      name: "read_file", arguments: { mode: "full", path: "src/big.ts" },
+      name: "tl_read_file", arguments: { mode: "full", path: "src/big.ts" },
     }));
     const firstLimit = first["limit"] as Record<string, unknown>;
     const firstNextArgs = (firstLimit["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
     const firstTarget = (firstNextArgs["targets"] as Array<Record<string, unknown>>)[0]!;
     const remainder = String(firstTarget["range"]);
     const tail = parseResult(await srv.rpc(3, "tools/call", {
-      name: "read_file", arguments: { mode: "slice", path: "src/big.ts", range: remainder },
+      name: "tl_read_file", arguments: { mode: "slice", path: "src/big.ts", range: remainder },
     }));
     // THE defect: TL used to record the whole file as served, so this answered
     // `code_unchanged` for content the model had never received. v1's carrier
@@ -224,7 +224,7 @@ describe("B2e — one mode=full serve is capped, and only what was sent is recor
     await srv.initialize();
 
     const res = parseResult(await srv.rpc(2, "tools/call", {
-      name: "read_file", arguments: { mode: "full", path: "src/big.ts", allowFull: true },
+      name: "tl_read_file", arguments: { mode: "full", path: "src/big.ts", allowFull: true },
     }));
     expect(res["kind"]).toBe("read.text");
     // v1 deletes `truncated`/`fullFileExpansion` (Rule T + A.5.4) — absence of
@@ -244,7 +244,7 @@ describe("B2e — one mode=full serve is capped, and only what was sent is recor
     await srv.initialize();
 
     const res = parseResult(await srv.rpc(2, "tools/call", {
-      name: "read_file", arguments: { mode: "full", path: "src/small.ts" },
+      name: "tl_read_file", arguments: { mode: "full", path: "src/small.ts" },
     }));
     expect(res["kind"]).toBe("read.text");
     expect(res["limit"]).toBeUndefined();
@@ -266,7 +266,7 @@ describe("B2d — a cap-clipped ranges[] slice spends its budget on UNSERVED win
 
     // Establish the ledger exactly as a first zoom would.
     const seed = parseResult(await srv.rpc(2, "tools/call", {
-      name: "read_file", arguments: { mode: "slice", path: "src/wide.ts", range: "45-270" },
+      name: "tl_read_file", arguments: { mode: "slice", path: "src/wide.ts", range: "45-270" },
     }));
     expect(typeof (seed["evidence"] as Array<Record<string, unknown>> | undefined)?.[0]?.["body"]).toBe("string");
 
@@ -274,7 +274,7 @@ describe("B2d — a cap-clipped ranges[] slice spends its budget on UNSERVED win
     // brand new. Held window listed FIRST, so request order alone would have
     // spent the budget on the duplicate.
     const zoom = parseResult(await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/wide.ts", ranges: ["45-105", "271-400"] },
     }));
     expect(zoom["kind"]).toBe("read.text");
@@ -304,7 +304,7 @@ describe("B2d — a cap-clipped ranges[] slice spends its budget on UNSERVED win
     await srv.initialize();
 
     const pack = parseResult(await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "task_pack",
         query: "explain what value7 in src/target.ts is used for",
@@ -317,7 +317,7 @@ describe("B2d — a cap-clipped ranges[] slice spends its budget on UNSERVED win
 
     // The exact lines the pack put on the wire — a re-slice buys nothing.
     const again = parseResult(await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/target.ts", range: String(served!["range"]) },
     }));
     // W14 L3: text responses must never contain only prior evidence. The
@@ -345,7 +345,7 @@ describe("B2b(i) — an omitted taskProfile is the SAME request, not a new one",
 
     const query = "explain what value7 in src/target.ts is used for";
     const first = parseResult(await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query, paths: ["src/target.ts"], taskProfile: "answer" },
     }));
     expect(first["kind"]).not.toBe("read.receipt");
@@ -355,7 +355,7 @@ describe("B2b(i) — an omitted taskProfile is the SAME request, not a new one",
     // live this re-served the whole 14.7KB pack while the identical call WITH
     // the profile received a 1.9KB receipt.
     const replay = parseResult(await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query, paths: ["src/target.ts"] },
     }));
     // POSSIBLE STOP (reported, hedged): readCodeTaskPack.ts's
@@ -389,14 +389,14 @@ describe("B2b(i) — an omitted taskProfile is the SAME request, not a new one",
 
     const query = "explain what value7 in src/target.ts is used for";
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query, paths: ["src/target.ts"], taskProfile: "answer" },
     });
     // The receipt is only ever content-EQUIVALENT: every file-sha / workspace
     // fingerprint gate still runs behind the relaxed profile match.
     writeFile(ws, "src/target.ts", numberedSource(40, 40) + "export const ADDED = 1;\n");
     const afterEdit = parseResult(await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query, paths: ["src/target.ts"] },
     }));
     // `pack_unchanged` is deleted from the wire outright (A.4/C2-3). Verified

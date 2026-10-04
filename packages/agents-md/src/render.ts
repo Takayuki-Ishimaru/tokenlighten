@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import type { StubTargetId, ToolSurface } from "@tokenlighten/types";
 import { SENTINEL_START, SENTINEL_END, sha256hex } from "./sentinel.js";
 import { INSTRUCTIONS_VERSION } from "./version.js";
+import type { CopilotGuideMode } from "./copilotGuide.js";
 
 // Re-exported unchanged for existing consumers (injectAll.ts, index.ts) —
 // version.ts is now the source of truth; see its header comment for why.
@@ -46,28 +47,31 @@ ${SENTINEL_END}
 // request (unlike Claude Code's native @AGENTS.md import), so a full guide
 // copy here used to double the fixed per-request cost and hasten
 // compaction. It also collided with Copilot's own built-in `read_file`
-// tool name. Keep this a short pointer + Copilot-specific operational
-// notes instead of duplicating the protocol prose — see AGENTS.md for
-// that. WP-V1 (2026-09-20, still under INSTRUCTIONS_VERSION's v97 label —
-// v97 itself has not shipped yet, so this is a further edit of it, not a
-// new version): tool identity (the tokenlighten_* names), deferred-tool
-// reload, and query-language guidance are cut here -- VS Code's own
-// `initialize`-time instructions (clientAdvertisement.ts's
-// VSCODE_SERVER_INSTRUCTIONS, injected on every single request regardless
-// of whether a tool has been loaded yet) already say all three, so this
-// stub only needs the notes that are NOT there: the large-result
-// workaround, the do-not-target-AGENTS.md/omit-budget rule, the
+// tool name (until the tools took the `tl_` prefix, 2026-10-02). Keep this a
+// short pointer + Copilot-specific operational notes instead of duplicating
+// the protocol prose — see AGENTS.md for that. WP-V1 (2026-09-20, still under
+// INSTRUCTIONS_VERSION's v97 label — v97 itself has not shipped yet, so this
+// is a further edit of it, not a new version): tool identity (the
+// tokenlighten_* names), deferred-tool reload, and query-language guidance
+// are cut here -- VS Code's own `initialize`-time instructions
+// (clientAdvertisement.ts's VSCODE_SERVER_INSTRUCTIONS) already say all
+// three, so this stub only needs the notes that are NOT there: the
+// large-result workaround, the do-not-target-AGENTS.md/omit-budget rule, the
 // answer-as-soon-as-act.answer rule, and the delegation-cost warning.
+// Copilot retest r4 (2026-10-02) measured that Copilot injects those
+// instructions only for a model with `tool_search` (GPT-6 Luna); a model
+// without it (MAI flash) never sees them — one more reason this pointer is
+// not setup's default (the `standalone` guide below is).
 const COPILOT_IMPORT_TEMPLATE = `${SENTINEL_START}
 <!-- tl-instructions-version: {{VERSION}} -->
 <!-- tl-instructions-sha256: {{SHA256}} -->
 # TokenLighten MCP - GitHub Copilot notes
 
-TL protocol: \`AGENTS.md\`; follow it. Copilot notes:
+TL protocol: \`AGENTS.md\`; follow it. Source first: \`mcp__tokenlighten_tl_read_file\` with verbatim request as \`query\`. Copilot notes:
 
 - A "Large tool result ... written to file" reply means the host hid it: re-issue with \`budget.bytes\` <= 7000; \`tl workspace setup\` raises Copilot's inline-result threshold.
 - Do not list \`AGENTS.md\`/\`CLAUDE.md\` as targets (already in your instructions), and omit \`budget\` unless you want LESS than TL's default; follow a \`limit\`/\`next\` instead of a built-in read.
-- Answer or edit as soon as \`decision.kind\` is \`act.answer\`/\`act.edit\`. To read more, make ONE \`read_file {targets:[...]}\` call naming all of them (a \`qref\` is optional); never fetch a \`remaining\` range you do not need.
+- Answer or edit as soon as \`decision.kind\` is \`act.answer\`/\`act.edit\`. To read more, make ONE \`tl_read_file {targets:[...]}\` call naming all of them (a \`qref\` is optional); never fetch a \`remaining\` range you do not need.
 - Do not delegate what one or two TL calls can answer: a subagent re-pays the whole context (~5 of your turns just to start). Only for a large independent investigation, pass \`agentName:"tokenlighten-explore"\` to \`runSubagent\` so the subagent also uses TL.
 ${SENTINEL_END}
 `;
@@ -96,15 +100,15 @@ ${SENTINEL_END}
 // `tools:` array against these full reference names. Deliberately two
 // explicit tool entries, never the `tokenlighten/*` toolset wildcard
 // (`Fbn()`, ~offset 13517431) — the wildcard would also enable
-// `tokenlighten/edit_file`, breaking this agent's read-only-by-construction
+// `tokenlighten/tl_edit_file`, breaking this agent's read-only-by-construction
 // guarantee.
 const COPILOT_AGENT_FRONTMATTER = `---
 name: tokenlighten-explore
-description: Use ONLY when you have already decided to hand a LARGE, independent read-only investigation (many files across the repository) to a subagent. Do NOT delegate an ordinary question or trace - a subagent starts a whole new context and costs more than calling the TokenLighten tools yourself. Read-only; cannot edit.
+description: Select for read-only workspace questions using TokenLighten. Delegate only LARGE independent investigations (subagents re-pay context).
 tools:
-  - tokenlighten/read_file
-  - tokenlighten/search_files
-user-invocable: false
+  - tokenlighten/tl_read_file
+  - tokenlighten/tl_search_files
+user-invocable: true
 ---
 
 `;
@@ -118,15 +122,70 @@ const COPILOT_AGENT_IMPORT_TEMPLATE = `${SENTINEL_START}
 <!-- tl-instructions-sha256: {{SHA256}} -->
 # TokenLighten MCP - exploration subagent
 
-Explore using ONLY the TokenLighten (TL) MCP tools (\`tokenlighten/read_file\`, \`tokenlighten/search_files\`); follow the protocol in \`AGENTS.md\`.
+Answer read-only workspace questions using ONLY the TokenLighten (TL) MCP tools (\`tl_read_file\`, \`tl_search_files\`); follow the protocol in \`AGENTS.md\`. For changes or unavailable TL, ask the user to switch to Agent.
 
-- Start with \`read_file {query:"<the subtask, with likely code identifiers>", task:{epoch:"new"}}\`.
-- To read more files or ranges, make ONE \`read_file {targets:[...]}\` call naming all of them; answer as soon as \`decision.kind\` is \`act.answer\`.
-- Use \`search_files\` for identifiers, references, and tree/inventory lookups.
+- Start with \`tl_read_file {query:"<entire user request, verbatim>", task:{epoch:"new",profile:"answer"}}\`; never shorten or rephrase the query.
+- To read more files or ranges, make ONE \`tl_read_file {targets:[...]}\` call naming all of them; answer as soon as \`decision.kind\` is \`act.answer\`.
+- Use \`tl_search_files\` for identifiers, references, and tree/inventory lookups.
 - Put every known file into ONE \`targets:[...]\` call, not one call per file.
 - When a reply carries \`limit\`/\`remaining\`, run its \`next\`.
 - Omit \`budget\` unless you want LESS than TL's default.
-- You cannot edit; never call \`edit_file\` or any write tool.
+- You cannot edit; never call \`tl_edit_file\` or any write tool.
+- Report findings with exact file paths and line ranges, not just summaries.
+${SENTINEL_END}
+`;
+
+// Copilot standard-setup evaluation (2026-10-02) — the `standalone`
+// CopilotGuideMode (copilotGuide.ts): Copilot no longer attaches AGENTS.md,
+// so this file IS Copilot's whole TokenLighten protocol, compact and
+// self-contained (no "see AGENTS.md"), carrying the same Copilot-only notes
+// as COPILOT_IMPORT_TEMPLATE. Locale-, profile- and surface-independent like
+// that pointer: it names no archive/Office/credential capability, so the
+// "code" surface has nothing to strip. Every rule restates AGENTS.md.tmpl's
+// own; a protocol change there must be mirrored here.
+//
+// Retest r9: MAI received the guide and all definitions but chose native
+// grep then read in all eight TL arms. r11's text-only candidates still left
+// native inspection/re-reading. The standalone guide now names the concrete
+// tools and exact served evidence; VS Code setup adds a SessionStart hint.
+// Adoption is a live
+// model outcome, not something wording tests can certify. Preserve recovery,
+// write outcomes, explicit user tool choice and the compact attachment.
+const COPILOT_STANDALONE_TEMPLATE = `${SENTINEL_START}
+<!-- tl-instructions-version: {{VERSION}} -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+# TokenLighten MCP - GitHub Copilot
+
+Do not fetch AGENTS.md/CLAUDE.md for this protocol.
+
+1. FIRST source inspection: \`mcp__tokenlighten_tl_read_file\` with \`{"query":"<entire user request, verbatim>","task":{"epoch":"new"}}\`; read-only => add \`"profile":"answer"\` inside \`task\`. Paths: \`targets:[{path},...]\`. Finds AND serves; replaces grep_search/semantic_search/read_file.
+2. \`act.answer\` => answer from exact \`evidence[].body\`; \`whole:true\` means \`context\` is already read. No re-read of served files. Batch independent context calls with TL.
+3. Native search/read only when TL is unavailable, the user asks for native, or TL reports incomplete scope/verified absence. Identifier/reference/inventory-only => \`mcp__tokenlighten_tl_search_files\`. New task => new epoch.
+- Replies are \`{v:1,kind,...}\`; an unknown \`kind\` => stop and report. \`act.answer\`/\`act.edit\` => act NOW; \`discover\`/\`await_input\` => run its \`next\` (else re-pack ONCE with \`{qref, targets:[<candidate paths>]}\`, or ask); \`done\` => stop.
+- Run every \`next\` verbatim. \`refusal.retry\`: \`call\` => fix \`field\`; \`new-task\` => re-pack; \`user-input\` => ask; \`none\` => stop that shape. \`read.receipt\` => already served; lost context => same call with \`task.force_serve:true\`.
+- Edits: ONE \`mcp__tokenlighten_tl_edit_file\` call for all of them; \`edit.state_unknown\` => run its \`recovery\`; \`edit.rolled_back\` => nothing landed. Stop after a passing check.
+- "Large tool result ... written to file" => re-issue with \`budget.bytes\` <= 7000; otherwise omit \`budget\`.
+- Subagent: \`agentName:"tokenlighten-explore"\`; large jobs only.
+${SENTINEL_END}
+`;
+
+// The `standalone` variant of COPILOT_AGENT_IMPORT_TEMPLATE: identical rules,
+// but no "follow the protocol in AGENTS.md" — Copilot no longer attaches it.
+const COPILOT_AGENT_STANDALONE_TEMPLATE = `${SENTINEL_START}
+<!-- tl-instructions-version: {{VERSION}} -->
+<!-- tl-instructions-sha256: {{SHA256}} -->
+# TokenLighten MCP - exploration subagent
+
+Answer read-only workspace questions using ONLY the TokenLighten (TL) MCP tools (\`tl_read_file\`, \`tl_search_files\`); the rules below are the TL protocol. For changes or unavailable TL, ask the user to switch to Agent.
+
+- Start with \`tl_read_file {query:"<entire user request, verbatim>", task:{epoch:"new",profile:"answer"}}\`; never shorten or rephrase the query.
+- To read more files or ranges, make ONE \`tl_read_file {targets:[...]}\` call naming all of them; answer as soon as \`decision.kind\` is \`act.answer\`.
+- Use \`tl_search_files\` for identifiers, references, and tree/inventory lookups.
+- Put every known file into ONE \`targets:[...]\` call, not one call per file.
+- When a reply carries \`limit\`/\`remaining\`, or is a \`refusal\`, run its \`next\` verbatim.
+- \`whole:true\` means the file's \`context\` is already read; answer from it. \`read.receipt\` means already served; lost context => same call with \`task.force_serve:true\`.
+- Omit \`budget\` unless you want LESS than TL's default.
+- You cannot edit; never call \`tl_edit_file\` or any write tool.
 - Report findings with exact file paths and line ranges, not just summaries.
 ${SENTINEL_END}
 `;
@@ -283,8 +342,13 @@ function loadTemplateForProfile(
   locale: Locale,
   profile: GuideProfile,
   toolSurface: ToolSurface,
+  copilotGuide: CopilotGuideMode = "agents-md",
 ): string {
   if (target === "claude") return applyToolSurface(CLAUDE_IMPORT_TEMPLATE, toolSurface);
+  // Copilot standard-setup evaluation (2026-10-02): `standalone` swaps both
+  // Copilot files for their self-contained variants (copilotGuide.ts).
+  if (target === "copilot" && copilotGuide === "standalone") return applyToolSurface(COPILOT_STANDALONE_TEMPLATE, toolSurface);
+  if (target === "copilot-agent" && copilotGuide === "standalone") return applyToolSurface(COPILOT_AGENT_STANDALONE_TEMPLATE, toolSurface);
   // Copilot's stub is fixed regardless of profile (like Claude's import
   // block above): the short pointer replaces medium/compact too, since the
   // whole point is to never duplicate protocol prose in this file, at any
@@ -308,8 +372,12 @@ export function renderBlock(
   // "full" reproduces exactly today's output (applyToolSurface's "full"
   // branch only removes the (new, otherwise-invisible) marker lines).
   toolSurface: ToolSurface = "full",
+  // Copilot standard-setup evaluation (2026-10-02): trailing/optional for the
+  // same reason as `toolSurface` — "agents-md" reproduces today's output.
+  // Read only for the "copilot"/"copilot-agent" targets.
+  copilotGuide: CopilotGuideMode = "agents-md",
 ): string {
-  const template = loadTemplateForProfile(target, locale, profile, toolSurface);
+  const template = loadTemplateForProfile(target, locale, profile, toolSurface, copilotGuide);
   const rendered = renderTemplate(template, version);
   return renderTargetPreamble(target) + rendered;
 }
@@ -336,8 +404,9 @@ export function blockSha256(
   target?: StubTargetId,
   profile: GuideProfile = "full",
   toolSurface: ToolSurface = "full",
+  copilotGuide: CopilotGuideMode = "agents-md",
 ): string {
-  const template = loadTemplateForProfile(target, locale, profile, toolSurface);
+  const template = loadTemplateForProfile(target, locale, profile, toolSurface, copilotGuide);
   const withVersion = template
     .replace(/{{VERSION}}/g, version)
     .replace(/{{SHA256}}/g, "0".repeat(64));

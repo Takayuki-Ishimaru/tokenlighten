@@ -1,6 +1,6 @@
 /**
  * editForensics.spec.ts — search-not-found forensics (2026-07-26).
- * Pinned by the T09 R2 escape chain: an edit_file not-found with no evidence
+ * Pinned by the T09 R2 escape chain: an tl_edit_file not-found with no evidence
  * of the range's actual bytes sent the solver into 4 native turns of
  * `cat -A`/`od -c` whitespace archaeology. The error must carry the closest
  * region verbatim so tab/space drift is visible in the response itself.

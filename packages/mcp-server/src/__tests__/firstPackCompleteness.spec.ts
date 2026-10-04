@@ -1,5 +1,5 @@
 // firstPackCompleteness.spec.ts — regression coverage for WP-P2 (2026-09-20):
-// the FIRST pack of a `read_file {query, targets:[files…, directories…]}` call
+// the FIRST pack of a `tl_read_file {query, targets:[files…, directories…]}` call
 // must already carry what the caller pointed at.
 //
 // DEFECTS UNDER TEST (all three measured on recorded GitHub Copilot sessions,
@@ -163,7 +163,13 @@ describe("A — a directory purpose is discharged only from inside that director
 
   it("OFF: the directory contributes nothing (today's behaviour)", async () => {
     const result = await pack(makeWorkspace(A_FILES), A_QUERY, namedOutside);
-    expect(surfacesUnder(result, "services")).toHaveLength(0);
+    // R2-T2 (2026-09-30, review-0929 P0-5 ruling): "the payment refund and the
+    // stock release" is now two coordinated points, so the default-on
+    // per-clause locate may serve the stock-release module for the query's OWN
+    // clause (`why: filename-match`). What this flag-off case pins is that the
+    // DIRECTORY ENTRY contributes nothing: no services/ surface is attributed
+    // to the caller-supplied entry (its contributions carry `caller-supplied`).
+    expect(surfacesUnder(result, "services").filter((surface) => /caller-supplied/u.test(surface.why ?? "")), JSON.stringify(result.surfaces.map((surface) => [surface.path, surface.why]))).toHaveLength(0);
   });
 
   it("ON: a CHANGE (generic) pack is untouched — readiness and obligations stay as they are", async () => {

@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { advertisedTools } from "../server.js";
+import { advertisedTools, stampedToolSurfaces } from "../server.js";
 import { computeSchemaStamp, stableStringify } from "../util/schemaStamp.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -92,6 +92,45 @@ describe("--print-schema-stamp (bin.ts) integration sanity", () => {
     expect(printed).toMatch(STAMP_RE);
     // Best-effort: only a valid comparison if the built dist reflects this
     // same checkout's source (true for a normal `npm run build` workflow).
-    expect(printed).toBe(computeSchemaStamp(advertisedTools()));
+    expect(printed).toBe(computeSchemaStamp(stampedToolSurfaces()));
+  });
+});
+
+// Copilot retest r5 (2026-10-03): TL_MINIMAL_TOOLS changed only what a VS Code
+// client receives under the VS Code setup's TL_TURN_ECONOMY=1, and a stamp
+// over the default advertisement alone stayed byte-identical (500a3167… both
+// before and after), so VS Code could keep its cached tool definitions.
+describe("the stamp covers the VS Code setup's own advertisement", () => {
+  function withEnv<T>(env: Readonly<Record<string, string | undefined>>, fn: () => T): T {
+    const saved: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(env)) {
+      saved[key] = process.env[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    try {
+      return fn();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  it("changes when only the vscode advertisement changes, and leaves the ambient TL_TURN_ECONOMY as it found it", () => {
+    const minimal = withEnv({ TL_TURN_ECONOMY: undefined, TL_MINIMAL_TOOLS: undefined }, () => computeSchemaStamp(stampedToolSurfaces()));
+    const r4Tier = withEnv({ TL_TURN_ECONOMY: undefined, TL_MINIMAL_TOOLS: "0" }, () => computeSchemaStamp(stampedToolSurfaces()));
+    expect(withEnv({ TL_TURN_ECONOMY: undefined, TL_MINIMAL_TOOLS: undefined }, () => computeSchemaStamp(advertisedTools())))
+      .toBe(withEnv({ TL_TURN_ECONOMY: undefined, TL_MINIMAL_TOOLS: "0" }, () => computeSchemaStamp(advertisedTools())));
+    expect(minimal).not.toBe(r4Tier);
+    withEnv({ TL_TURN_ECONOMY: undefined }, () => {
+      stampedToolSurfaces();
+      expect(process.env["TL_TURN_ECONOMY"]).toBeUndefined();
+    });
+    withEnv({ TL_TURN_ECONOMY: "0" }, () => {
+      stampedToolSurfaces();
+      expect(process.env["TL_TURN_ECONOMY"]).toBe("0");
+    });
   });
 });

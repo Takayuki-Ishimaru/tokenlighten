@@ -9,7 +9,7 @@
 //
 // RUNG 4 TRUNCATES RATHER THAN STRIPS, and that is this kind's whole shape:
 // "cut `body` on a line boundary, push the cut window into `remaining`, emit
-// `limit{cause:"wire", omitted:["evidence"], next: read_file{handle, range}}`"
+// `limit{cause:"wire", omitted:["evidence"], next: tl_read_file{handle, range}}`"
 // (§5.2). Today's `mode=full` `truncated`+`next` chain, `mode=slice`
 // `continued`, and the served-range ledger are all this rung's output
 // re-expressed.
@@ -189,7 +189,7 @@ function truncateLargestBody(payload: ShedPayload): ShedOutcome | undefined {
   }
   const unkeptRange = `${cutStart}-${unkeptEnd}`;
   const continuation = emittableToolCall({
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: { mode: "slice", handle, range: unkeptRange },
   });
   if (continuation === undefined) return undefined;

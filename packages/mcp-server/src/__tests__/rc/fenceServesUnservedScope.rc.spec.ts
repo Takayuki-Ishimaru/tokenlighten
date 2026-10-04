@@ -4,10 +4,10 @@
  *
  * MEASURED DEFECT (bench 2026-08-22, same scope as the v0.10 decision run):
  * after a prepared pack (`act.edit`/`act.answer` with a certificate), EVERY
- * subsequent read-only call — `search_files find` with a NEW query/scope,
- * `tree`, `references`, `read_file mode=map`, `slice` of a served handle —
+ * subsequent read-only call — `tl_search_files find` with a NEW query/scope,
+ * `tree`, `references`, `tl_read_file mode=map`, `slice` of a served handle —
  * was answered with `read.receipt {receipt:"decision-unchanged", ...,
- * next:{tool:"read_file", arguments:{mode:"task_pack", taskEpoch:"new",
+ * next:{tool:"tl_read_file", arguments:{mode:"task_pack", taskEpoch:"new",
  * paths:[...]}}}`. The guide says `next` is executable verbatim, so the
  * solver issued a 5-23 KB generic re-pack with `taskEpoch:"new"`, which
  * minted a NEW certificate and re-armed the fence; the next exploration call
@@ -17,12 +17,12 @@
  * THIS DRILL reproduces T09 rep1's call SHAPE end to end against the real,
  * built server (not the in-process `guardExecutionDiscovery` unit — see
  * preparedReceiptHonesty.spec.ts / executionTypestate.spec.ts for that
- * layer): task_pack (act.edit) -> search_files find (new query) -> tree ->
- * read_file mode=map -> slice of a served handle's served range -> slice of
+ * layer): task_pack (act.edit) -> tl_search_files find (new query) -> tree ->
+ * tl_read_file mode=map -> slice of a served handle's served range -> slice of
  * an unserved range -> exact pack re-issue. Required semantics (see
  * AGENTS.md / the task brief this wave shipped against):
  *
- *   1. search_files (any action) and read_file in any mode OTHER than
+ *   1. tl_search_files (any action) and tl_read_file in any mode OTHER than
  *      task_pack now reach the ordinary, fence-independent serve/dedup path
  *      even under a prepared certificate — they are SERVED, never
  *      stonewalled, regardless of whether the scope was ever served before.
@@ -164,7 +164,7 @@ function bodyOf(rpcResult: any): Record<string, unknown> {
 function isTaskEpochNewRepack(next: unknown): boolean {
   if (next === null || typeof next !== "object") return false;
   const call = next as { tool?: unknown; arguments?: unknown };
-  if (call.tool !== "read_file" || call.arguments === null || typeof call.arguments !== "object") return false;
+  if (call.tool !== "tl_read_file" || call.arguments === null || typeof call.arguments !== "object") return false;
   const args = call.arguments as Record<string, unknown>;
   return args["mode"] === "task_pack" && args["taskEpoch"] === "new";
 }
@@ -187,7 +187,7 @@ describe("2026-08-22 fence-serves-unserved-scope — T09 rep1 call-shape reprodu
     // (checkout.ts as supporting evidence) — search/util/logger.ts is
     // deliberately never referenced.
     const seedCall = { mode: "task_pack", query: EDIT_QUERY, cwd: ws };
-    const seed = bodyOf(await server.rpc(2, "tools/call", { name: "read_file", arguments: seedCall }));
+    const seed = bodyOf(await server.rpc(2, "tools/call", { name: "tl_read_file", arguments: seedCall }));
     expect(seed["kind"], JSON.stringify(seed).slice(0, 500)).toBe("read.task_pack");
     expect((seed["decision"] as Record<string, unknown> | undefined)?.["kind"], JSON.stringify(seed).slice(0, 500))
       .toBe("act.edit");
@@ -200,7 +200,7 @@ describe("2026-08-22 fence-serves-unserved-scope — T09 rep1 call-shape reprodu
     // Broad full reads after prepared act.edit use the existing skeleton
     // downgrade and executable handle/slice continuation immediately.
     const broadFull = bodyOf(await server.rpc(2.5, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "src/pricing.ts", cwd: ws },
     }));
     // A served pack range may validly produce the existing code-unchanged
@@ -212,29 +212,29 @@ describe("2026-08-22 fence-serves-unserved-scope — T09 rep1 call-shape reprodu
       expect(String(broadFull.next), JSON.stringify(broadFull).slice(0, 800)).toContain("mode=slice handle=");
     }
 
-    // 2. search_files find with a query the pack never saw. REQUIRED
+    // 2. tl_search_files find with a query the pack never saw. REQUIRED
     // SEMANTICS #1: this must be SERVED (search.matches), never stonewalled
     // into a decision-unchanged receipt.
     const found = bodyOf(await server.rpc(3, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "formatOrderLog", cwd: ws },
     }));
-    expect(found["kind"], `search_files find must serve under a prepared fence; got ${JSON.stringify(found).slice(0, 500)}`)
+    expect(found["kind"], `tl_search_files find must serve under a prepared fence; got ${JSON.stringify(found).slice(0, 500)}`)
       .toBe("search.matches");
     expect(found["receipt"]).toBeUndefined();
 
     // 3. tree — inventory of a directory the pack never walked.
     const tree = bodyOf(await server.rpc(4, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "tree", path: "src/util", cwd: ws },
     }));
     expect(tree["kind"], `tree must serve under a prepared fence; got ${JSON.stringify(tree).slice(0, 500)}`)
       .toBe("search.tree");
     expect(tree["receipt"]).toBeUndefined();
 
-    // 4. read_file mode=map on the never-referenced file.
+    // 4. tl_read_file mode=map on the never-referenced file.
     const map = bodyOf(await server.rpc(5, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "map", path: "src/util/logger.ts", cwd: ws },
     }));
     expect(map["kind"], `mode=map must serve under a prepared fence; got ${JSON.stringify(map).slice(0, 500)}`)
@@ -252,7 +252,7 @@ describe("2026-08-22 fence-serves-unserved-scope — T09 rep1 call-shape reprodu
     // evidence gets this compact treatment directly — PI-03
     // `client_acknowledged_prior`).
     const servedSlice = bodyOf(await server.rpc(6, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/pricing.ts", range: servedRange, cwd: ws },
     }));
     const servedIsReceipt = servedSlice["kind"] === "read.receipt"
@@ -268,7 +268,7 @@ describe("2026-08-22 fence-serves-unserved-scope — T09 rep1 call-shape reprodu
 
     // 6. slice of a file/range the session never served — must SERVE.
     const unservedSlice = bodyOf(await server.rpc(7, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/util/logger.ts", range: "1-3", cwd: ws },
     }));
     expect(unservedSlice["kind"], `unserved scope must serve; got ${JSON.stringify(unservedSlice).slice(0, 500)}`)
@@ -281,7 +281,7 @@ describe("2026-08-22 fence-serves-unserved-scope — T09 rep1 call-shape reprodu
     // SEMANTICS #3 its `next` (if any) must never be a task_pack
     // taskEpoch:"new" re-pack — that would re-arm the fence into exactly the
     // loop this drill exists to prove closed.
-    const reissue = bodyOf(await server.rpc(8, "tools/call", { name: "read_file", arguments: seedCall }));
+    const reissue = bodyOf(await server.rpc(8, "tools/call", { name: "tl_read_file", arguments: seedCall }));
     expect(reissue["kind"], JSON.stringify(reissue).slice(0, 500)).toBe("read.receipt");
     const reissueReceipt = reissue["receipt"] as Record<string, unknown>;
     expect(["pack-unchanged", "decision-unchanged"]).toContain(reissueReceipt["receipt"]);

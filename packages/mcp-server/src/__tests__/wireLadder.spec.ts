@@ -39,7 +39,7 @@ function emit(
   budgetOverrideBytes: number,
   args?: Record<string, unknown>,
 ): { body: Body; bytes: number; shed: readonly ShedRecord[]; context: ProtocolCallContext; isError: boolean } {
-  const context: ProtocolCallContext = { tool: "read_file", ...(args === undefined ? {} : { args }) };
+  const context: ProtocolCallContext = { tool: "tl_read_file", ...(args === undefined ? {} : { args }) };
   const result = emitFinalizedPayload(payload, kind, context, { budgetOverrideBytes });
   const text = result.content[0]?.text ?? "";
   return {
@@ -126,7 +126,7 @@ function pagedReferences(): Body {
       cause: "records",
       omitted: ["results"],
       next: {
-        tool: "search_files",
+        tool: "tl_search_files",
         arguments: { action: "references", symbol: "resolveHandle", cursor: "opaque-cursor-token" },
       },
     },
@@ -266,8 +266,8 @@ describe("erratum E5 — which rungs may emit a `limit`", () => {
 describe("erratum E3 — the five-clause merge (wireLimit.ts)", () => {
   const prose: ShedRecord[] = [{ rung: 1, bytes: 10 }];
   const results: ShedRecord[] = [{ rung: 6, bytes: 10 }];
-  const boundaryNext = { tool: "read_file" as const, arguments: { mode: "slice", handle: "h1" } };
-  const emitterNext = { tool: "search_files" as const, arguments: { action: "references", cursor: "tok" } };
+  const boundaryNext = { tool: "tl_read_file" as const, arguments: { mode: "slice", handle: "h1" } };
+  const emitterNext = { tool: "tl_search_files" as const, arguments: { action: "references", cursor: "tok" } };
 
   it("clause 2: nothing limit-bearing shed -> the emitter's limit is untouched", () => {
     const emitter = { cause: "capped", omitted: ["results"] };
@@ -498,7 +498,7 @@ describe("the SE-STABLE trio (ruling 7)", () => {
 
   it("refuses an unknown runtime kind before budget lookup", () => {
     const malformedKind = "edit.future" as Parameters<typeof emitFinalizedPayload>[1];
-    const context: ProtocolCallContext = { tool: "read_file" };
+    const context: ProtocolCallContext = { tool: "tl_read_file" };
     const result = emitFinalizedPayload({ v: 1, kind: malformedKind }, malformedKind, context, { budgetOverrideBytes: 1 });
     const body = JSON.parse(result.content[0]?.text ?? "{}") as Body;
     expect(body).toMatchObject({ kind: "refusal", code: "invalid-input", retry: "none" });
@@ -514,7 +514,7 @@ describe("§4.3's fail-closed tail", () => {
     const out = emit(payload, "search.matches", 40, { query: "needle" });
 
     expect(out.body["kind"]).toBe("refusal");
-    expect(out.body["for"]).toBe("read_file");
+    expect(out.body["for"]).toBe("tl_read_file");
     expect(out.body["code"]).toBe("cap-exceeded");
     expect(out.body["retry"]).toBe("call");
     expect(String(out.body["detail"])).toContain("wire budget");
@@ -546,9 +546,9 @@ describe("§4.3's fail-closed tail", () => {
     const refusal: Body = {
       v: 1,
       kind: "refusal",
-      for: "edit_file",
+      for: "tl_edit_file",
       code: "search-not-unique",
-      next: { tool: "edit_file", arguments: { handle: "h1", search: "a", replace: "b" } },
+      next: { tool: "tl_edit_file", arguments: { handle: "h1", search: "a", replace: "b" } },
       field: "search",
       did_you_mean: "precondition",
       keys: ["search", "replace", "precondition"],
@@ -571,7 +571,7 @@ describe("P2 #3 — attribution growth re-enters the wire cap", () => {
   it("re-sheds a post-attribution overage while retaining an executable continuation", () => {
     const raw = pagedReferences();
     const context: ProtocolCallContext = {
-      tool: "read_file",
+      tool: "tl_read_file",
       args: {
         cwd: "/workspace/project",
         lane: "lane-with-attribution",
@@ -609,7 +609,7 @@ describe("P2 #3 — attribution growth re-enters the wire cap", () => {
     const limit = wire["limit"] as Body;
     const next = limit["next"] as Body;
     expect(limit["cause"]).toBeDefined();
-    expect(next).toMatchObject({ tool: "search_files" });
+    expect(next).toMatchObject({ tool: "tl_search_files" });
     expect(next["arguments"] as Body).toMatchObject({
       action: "references",
       cwd: "/workspace/project",

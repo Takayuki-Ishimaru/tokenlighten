@@ -34,7 +34,8 @@
 //          deliberately: this leg is modern-only strict, so a 2025-era
 //          request over THIS port gets the SDK's own
 //          unsupported-protocol-version error rather than a second,
-//          duplicate legacy implementation living beside legacyStdio.ts's.
+//          duplicate legacy implementation living beside the stdio one
+//          (legacyStdio.ts).
 //          `responseMode: 'json'` is pinned rather than left at the 'auto'
 //          default: every tool call here answers synchronously with no
 //          mid-call notification, so 'auto' would already always choose a
@@ -68,8 +69,8 @@
 //   containment story for v0.10: the socket is reachable only from
 //   processes already running on this machine. TOKENLIGHTEN_HTTP_HOST
 //   widens this EXPLICITLY (an operator choice, not a default) — widening
-//   to any non-loopback address exposes the tool surface (read_file,
-//   edit_file when --allow-write is set, search_files) to every other host
+//   to any non-loopback address exposes the tool surface (tl_read_file,
+//   tl_edit_file when --allow-write is set, tl_search_files) to every other host
 //   that can reach that address, with NO authentication layer in front of
 //   it (below). Do not widen this on a shared or otherwise untrusted
 //   network.
@@ -94,8 +95,8 @@
 //   cannot be pre-enumerated into a Host/Origin allowlist (the operator may
 //   bind any address for any reason), so that posture relies solely on the
 //   operator's own network containment, exactly as documented above.
-//   Request body cap. MAX_HTTP_BODY_BYTES mirrors fallbackStdio.ts's
-//   MAX_FALLBACK_LINE_BYTES ceiling class (CWE-400 finding,
+//   Request body cap. MAX_HTTP_BODY_BYTES mirrors legacyStdio.ts's
+//   MAX_LEGACY_LINE_BYTES ceiling class (CWE-400 finding,
 //   TL-SECURITY-REVIEW-2026-08-15 #7): an oversized POST body is rejected
 //   rather than buffered without bound.
 
@@ -112,7 +113,7 @@ export const HTTP_HOST_ENV = "TOKENLIGHTEN_HTTP_HOST";
 /** Hard-coded bind default — see the module header's SECURITY section. */
 export const DEFAULT_HTTP_HOST = "127.0.0.1";
 
-/** Same ceiling CLASS as fallbackStdio.ts's MAX_FALLBACK_LINE_BYTES; see SECURITY above. */
+/** Same ceiling CLASS as legacyStdio.ts's MAX_LEGACY_LINE_BYTES; see SECURITY above. */
 const MAX_HTTP_BODY_BYTES = 16 * 1024 * 1024;
 
 /**

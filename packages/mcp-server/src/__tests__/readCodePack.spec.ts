@@ -177,7 +177,7 @@ describe("read_code mode=pack (server-level)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "pack",
         paths: [
@@ -218,7 +218,7 @@ describe("read_code mode=pack (server-level)", () => {
     // maxTokens=1 (4 chars budget) — big.ts alone exceeds the entire budget → cap-exceeded.
     // small.ts comes after → cap-exhausted (or also cap-exceeded if budget is already gone).
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "pack",
         maxTokens: 1,
@@ -257,7 +257,7 @@ describe("read_code mode=pack (server-level)", () => {
 
     // maxTokens=1 means the entire pack budget is 4 chars; big.ts content far exceeds it.
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "pack",
         maxTokens: 1,
@@ -296,7 +296,7 @@ describe("read_code mode=pack (server-level)", () => {
 
     // Intentionally omit the top-level "path" key.
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "pack",
         paths: [{ path: "target.ts", range: "1-3" }],
@@ -343,7 +343,7 @@ describe("read_code mode=pack (server-level)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "pack",
         paths: [
@@ -380,7 +380,7 @@ describe("read_code mode=pack (server-level)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "pack",
         paths: [{ path: "src.ts", range: "1-1" }],
@@ -462,7 +462,7 @@ describe("read_code mode=pack (server-level)", () => {
     let rpcId = 2;
     for (const maxTokens of [50, 100]) {
       const res = await srv.rpc(rpcId++, "tools/call", {
-        name: "read_file",
+        name: "tl_read_file",
         arguments: { mode: "pack", paths, maxTokens },
       });
       const text = res?.result?.content?.[0]?.text as string;
@@ -491,7 +491,7 @@ describe("read_code mode=pack (server-level)", () => {
       expect(next, `budget-below-minimum refusal must carry an executable next: ${JSON.stringify(data).slice(0, 400)}`).toBeDefined();
       expect(next!.arguments["budget"]).toEqual({ bytes: requiredMinBytes });
 
-      const retryRes = await srv.rpc(rpcId++, "tools/call", { name: "read_file", arguments: next!.arguments });
+      const retryRes = await srv.rpc(rpcId++, "tools/call", { name: "tl_read_file", arguments: next!.arguments });
       const retryText = retryRes?.result?.content?.[0]?.text as string;
       const retryBytes = Buffer.byteLength(retryText, "utf8");
       const retryData = JSON.parse(retryText) as Record<string, unknown>;
@@ -537,9 +537,9 @@ describe("read_code handles=[] batch read (server-level)", () => {
     await srv.initialize();
 
     // Mint 3 handles via mode=slice (one call each, as today).
-    const h1res = await srv.rpc(2, "tools/call", { name: "read_file", arguments: { mode: "slice", path: "a.ts", range: "1-3" } });
-    const h2res = await srv.rpc(3, "tools/call", { name: "read_file", arguments: { mode: "slice", path: "b.ts", symbol: "betaFn" } });
-    const h3res = await srv.rpc(4, "tools/call", { name: "read_file", arguments: { mode: "slice", path: "c.ts", range: "1-3" } });
+    const h1res = await srv.rpc(2, "tools/call", { name: "tl_read_file", arguments: { mode: "slice", path: "a.ts", range: "1-3" } });
+    const h2res = await srv.rpc(3, "tools/call", { name: "tl_read_file", arguments: { mode: "slice", path: "b.ts", symbol: "betaFn" } });
+    const h3res = await srv.rpc(4, "tools/call", { name: "tl_read_file", arguments: { mode: "slice", path: "c.ts", range: "1-3" } });
     const h1 = (parsePackResult(h1res)["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
     const h2 = (parsePackResult(h2res)["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
     const h3 = (parsePackResult(h3res)["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
@@ -549,7 +549,7 @@ describe("read_code handles=[] batch read (server-level)", () => {
 
     // Single batched call resolves all 3 handles.
     const batchRes = await srv.rpc(5, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { handles: [h1, h2, h3] },
     });
 
@@ -579,11 +579,11 @@ describe("read_code handles=[] batch read (server-level)", () => {
     servers.push(srv);
     await srv.initialize();
 
-    const sliceRes = await srv.rpc(2, "tools/call", { name: "read_file", arguments: { mode: "slice", path: "only.ts", range: "1-1" } });
+    const sliceRes = await srv.rpc(2, "tools/call", { name: "tl_read_file", arguments: { mode: "slice", path: "only.ts", range: "1-1" } });
     const h1 = (parsePackResult(sliceRes)["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
 
     const batchRes = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { handles: [h1, "h9999"] },
     });
 
@@ -907,7 +907,7 @@ describe("readCodePack query-pack", () => {
 // ---------------------------------------------------------------------------
 // Finding #6: includeClosure remains discoverable on the canonical read scope.
 // ---------------------------------------------------------------------------
-describe("read_file includeClosure canonical schema (Finding #6)", () => {
+describe("tl_read_file includeClosure canonical schema (Finding #6)", () => {
   // v0.13 wave-3 (Track D, W3-2) restoration: this test used to accept a
   // bare `toBeDefined()` on `includeClosure`, which a stripped-to-`{}`
   // property still satisfies (`{}` is defined — it is just empty). Tightened
@@ -917,7 +917,7 @@ describe("read_file includeClosure canonical schema (Finding #6)", () => {
   it("advertises includeClosure inside the closed scope object, with a description", async () => {
     const { advertisedTools } = await import("../server.js");
     const tools = advertisedTools() as Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }>;
-    const readCode = tools.find((t) => t.name === "read_file");
+    const readCode = tools.find((t) => t.name === "tl_read_file");
     expect(readCode).toBeDefined();
     const scope = readCode?.inputSchema?.properties?.["scope"] as {
       properties?: Record<string, { type?: string; description?: string }>;

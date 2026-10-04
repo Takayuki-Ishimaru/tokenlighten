@@ -24,14 +24,14 @@ import { escapeRegExp, MAX_REGEX_QUERY_CHARS } from "../features/search/find/fin
 // ---------------------------------------------------------------------------
 // D8: `GetSymbolWithContextInput` / `GetSymbolWithContextOutput` used to live
 // in `@tokenlighten/types`' `mcp/legacy-read.ts`, which is DELETED. This module
-// serves the ADVERTISED `read_file mode=symbol` path, so the request shape
+// serves the ADVERTISED `tl_read_file mode=symbol` path, so the request shape
 // moves here next to its one emitter and the output shape is renamed to what
 // it actually is: the payload the funnel projects onto the v1 `read.text`
 // member (types `mcp/read-result.ts`). The v1 member is the contract; this
 // interface is the producer-side shape it is projected from.
 // ---------------------------------------------------------------------------
 
-/** Request shape of the `read_file mode=symbol` path. */
+/** Request shape of the `tl_read_file mode=symbol` path. */
 export interface GetSymbolWithContextInput {
   /** Workspace-relative file path. */
   path: string;
@@ -981,7 +981,7 @@ export async function getSymbolWithContext(
   // Check if we used tree-sitter (if siblings came from fallback, add note).
   const astFallback = language === "unknown" || !treeSitterSupports(language) || found.source === "regex";
   const fallbackNote = astFallback
-    ? `\n${commentNote(language, "note: AST-fallback mode (no scope header); use read_file instead for unsupported languages.")}`
+    ? `\n${commentNote(language, "note: AST-fallback mode (no scope header); use tl_read_file instead for unsupported languages.")}`
     : "";
 
   const code = compressFormat(rawCode + fallbackNote);

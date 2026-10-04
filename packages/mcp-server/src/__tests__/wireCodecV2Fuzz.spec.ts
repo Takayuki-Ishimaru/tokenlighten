@@ -139,8 +139,8 @@ describe("v2 fuzz -- JSON fallback 100%, byte-safety, and round-trip under rando
       const hasClientId = rng() < 0.5;
       const counter = rng() < 0.5 ? byteCounter : adversarialCounter(rng);
       const context: ProtocolCallContext = hasClientId
-        ? { tool: "read_file", workspace: WS_ROOT, clientId: "tl-reference-client" }
-        : { tool: "read_file", workspace: WS_ROOT };
+        ? { tool: "tl_read_file", workspace: WS_ROOT, clientId: "tl-reference-client" }
+        : { tool: "tl_read_file", workspace: WS_ROOT };
 
       let result = "";
       expect(() => {
@@ -172,7 +172,7 @@ describe("v2 fuzz -- JSON fallback 100%, byte-safety, and round-trip under rando
       const payload = randomPayload(rng, kind);
       const jsonText = JSON.stringify(payload);
       const limit = int(rng, 0, 200); // frequently far too tight to fit any non-json candidate
-      const context: ProtocolCallContext = { tool: "read_file", workspace: WS_ROOT, clientId: "tl-reference-client" };
+      const context: ProtocolCallContext = { tool: "tl_read_file", workspace: WS_ROOT, clientId: "tl-reference-client" };
 
       let result = "";
       expect(() => {

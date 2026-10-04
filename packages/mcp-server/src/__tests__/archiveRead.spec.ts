@@ -57,7 +57,7 @@ function tarWithMember(member: string, content: string): Buffer {
 }
 
 async function invoke(
-  tool: "read_file" | "search_files" | "edit_file",
+  tool: "tl_read_file" | "tl_search_files" | "tl_edit_file",
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const response = await callTool(tool, args);
@@ -140,7 +140,7 @@ describe("read-only archive containers", () => {
   ])(
     "lists and reads a real %s archive",
     async (archivePath, format, member, expectedText) => {
-      const manifest = await invoke("read_file", {
+      const manifest = await invoke("tl_read_file", {
         cwd: workspace,
         mode: "archive",
         archive: { path: archivePath },
@@ -159,7 +159,7 @@ describe("read-only archive containers", () => {
       expect(entries.length).toBeGreaterThan(0);
       expect(entries.some((entry) => entry["member"] === "ignored.txt")).toBe(false);
 
-      const read = await invoke("read_file", {
+      const read = await invoke("tl_read_file", {
         cwd: workspace,
         mode: "auto",
         archive: { path: archivePath, member },
@@ -180,8 +180,8 @@ describe("read-only archive containers", () => {
     30_000,
   );
 
-  it("closes a ZIP task in one exact read_file call shape", async () => {
-    const result = await invoke("read_file", {
+  it("closes a ZIP task in one exact tl_read_file call shape", async () => {
+    const result = await invoke("tl_read_file", {
       cwd: workspace,
       mode: "task_pack",
       taskProfile: "answer",
@@ -255,7 +255,7 @@ describe("read-only archive containers", () => {
     // cannot do without knowing what members exist. §2.1's `discover` is
     // unrepresentable without a `next`, and F5 requires that call to be
     // executable NOW: the manifest read is, with arguments this pack holds.
-    const result = await invoke("read_file", {
+    const result = await invoke("tl_read_file", {
       cwd: workspace,
       mode: "task_pack",
       taskProfile: "answer",
@@ -269,7 +269,7 @@ describe("read-only archive containers", () => {
     expect(result["decision"]).toEqual({
       kind: "discover",
       next: {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           cwd: workspace,
           task: { handle: taskHandle },
@@ -281,7 +281,7 @@ describe("read-only archive containers", () => {
   }, 30_000);
 
   it("searches and inventories inside ZIP without native extraction", async () => {
-    const found = await invoke("search_files", {
+    const found = await invoke("tl_search_files", {
       cwd: workspace,
       action: "find",
       query: "OFFICE_FORMATS",
@@ -302,7 +302,7 @@ describe("read-only archive containers", () => {
     expect(typeof archiveScope?.["scanned_entries"]).toBe("number");
     expect(found["archive_scope"]).toBeUndefined();
 
-    const absent = await invoke("search_files", {
+    const absent = await invoke("tl_search_files", {
       cwd: workspace,
       action: "find",
       query: "TOKEN_THAT_IS_NOT_PRESENT",
@@ -310,7 +310,7 @@ describe("read-only archive containers", () => {
     });
     expect((absent["matches"] as Record<string, unknown>)["absence"]).toBeDefined();
 
-    const tree = await invoke("search_files", {
+    const tree = await invoke("tl_search_files", {
       cwd: workspace,
       action: "tree",
       archive: { path: "sample.zip" },
@@ -324,7 +324,7 @@ describe("read-only archive containers", () => {
   }, 30_000);
 
   it("refuses every archive edit even when the member path is explicit", async () => {
-    const result = await invoke("edit_file", {
+    const result = await invoke("tl_edit_file", {
       cwd: workspace,
       path: "sample.zip!/src/policy.ts",
       search: "ZIP_BOMB_MAX_UNCOMPRESSED_BYTES",
@@ -334,7 +334,7 @@ describe("read-only archive containers", () => {
       kind: "refusal",
       code: "archive-member-read-only",
     });
-    const reread = await invoke("read_file", {
+    const reread = await invoke("tl_read_file", {
       cwd: workspace,
       archive: { path: "sample.zip", member: "src/policy.ts" },
     });
@@ -367,7 +367,7 @@ describe("read-only archive containers", () => {
       ["unsafe.tar", "archive-unsafe-path", false],
       ["bomb.zip", "archive-bomb", false],
     ] as const) {
-      const raw = await callTool("read_file", {
+      const raw = await callTool("tl_read_file", {
         cwd: workspace,
         mode: "archive",
         archive: { path: archivePath },
@@ -377,7 +377,7 @@ describe("read-only archive containers", () => {
       const body = JSON.parse(raw.content[0]!.text) as Record<string, unknown>;
       expect(body, archivePath).toMatchObject({
         kind: "refusal",
-        for: "read_file",
+        for: "tl_read_file",
         code,
         retry: "call",
       });
@@ -395,7 +395,7 @@ describe("read-only archive containers", () => {
     process.env["TOKENLIGHTEN_PASSWORD_ARCHIVE_OK"] = "12345678";
     process.env["TOKENLIGHTEN_PASSWORD_ARCHIVE_WRONG"] = "wrong-password";
     try {
-      const manifest = await invoke("read_file", {
+      const manifest = await invoke("tl_read_file", {
         cwd: workspace,
         mode: "archive",
         credentialRef: "archive-ok",
@@ -406,7 +406,7 @@ describe("read-only archive containers", () => {
         content: { form: "archive", format: "zip", read_only: true },
       });
 
-      const read = await invoke("read_file", {
+      const read = await invoke("tl_read_file", {
         cwd: workspace,
         mode: "auto",
         credentialRef: "archive-ok",
@@ -417,7 +417,7 @@ describe("read-only archive containers", () => {
       expect(String(decrypted["body"]).length).toBeGreaterThan(0);
       expect(JSON.stringify(read)).not.toContain("12345678");
 
-      const wrong = await invoke("read_file", {
+      const wrong = await invoke("tl_read_file", {
         cwd: workspace,
         mode: "auto",
         credentialRef: "archive-wrong",
@@ -447,7 +447,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
 
   describe("F5: scope.archive silently hijacked targets/paths before this fix (selectorFromArgs/resolvedPath reads the legacy top-level `archive` field unconditionally) — now a fail-closed refusal", () => {
     it("shape e: two plain targets + scope.archive (no query) refuses instead of silently serving only the archive member", async () => {
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         targets: [{ path: "plain-one.ts" }, { path: "plain-two.ts" }],
         scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
@@ -458,7 +458,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
     });
 
     it("shape l: two plain targets + scope.archive + query refuses the same way", async () => {
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         query: "one",
         targets: [{ path: "plain-one.ts" }, { path: "plain-two.ts" }],
@@ -470,7 +470,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
     });
 
     it("shape m: ONE plain target + scope.archive also refuses — the hijack does not need a second target to be ambiguous", async () => {
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         targets: [{ path: "plain-one.ts" }],
         scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
@@ -489,11 +489,11 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
       // `targets.length >= 1` check makes this shape entirely untouched by
       // it — mode falls through auto->archive (the manifest) unless the
       // caller spells `mode:"task_pack"` explicitly, same as the existing
-      // "closes a ZIP task in one exact read_file call shape" test above
+      // "closes a ZIP task in one exact tl_read_file call shape" test above
       // (which uses the equivalent legacy `archive:{...}` field). This test
       // reproduces that exact AGENTS.md-documented pattern through the
       // CANONICAL `scope.archive` spelling instead.
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         mode: "task_pack",
         query: "ZIP_BOMB_MAX_UNCOMPRESSED_BYTES",
@@ -505,7 +505,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
     });
 
     it("query + scope.archive with NO targets and no explicit mode still serves (not a refusal) — pre-existing archive-manifest fallback, unaffected either way by this fix", async () => {
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         query: "ZIP_BOMB_MAX_UNCOMPRESSED_BYTES",
         scope: { archive: { path: "sample.zip" } },
@@ -514,7 +514,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
     });
 
     it("a single target that carries its OWN archive selector still serves normally (no call-level scope.archive involved)", async () => {
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         targets: [{ archive: { path: "sample.zip", member: "src/policy.ts" } }],
       });
@@ -524,7 +524,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
 
   describe("F4: the refusal's recovery `next` carries query/task through, not just select/content", () => {
     it("shape l's refusal next carries the original query", async () => {
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         query: "SOME_QUERY_TEXT",
         targets: [{ path: "plain-one.ts" }, { path: "plain-two.ts" }],
@@ -538,7 +538,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
     });
 
     it("a refusal's next carries task (epoch/profile) through when present, and omits it entirely when absent", async () => {
-      const withTask = await invoke("read_file", {
+      const withTask = await invoke("tl_read_file", {
         cwd: workspace,
         targets: [{ path: "plain-one.ts" }],
         scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
@@ -548,7 +548,7 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
       const nextArgsWithTask = (withTask["next"] as Record<string, unknown>)["arguments"] as Record<string, unknown>;
       expect(nextArgsWithTask["task"], JSON.stringify(withTask)).toMatchObject({ epoch: "new", profile: "answer" });
 
-      const withoutTask = await invoke("read_file", {
+      const withoutTask = await invoke("tl_read_file", {
         cwd: workspace,
         targets: [{ path: "plain-one.ts" }],
         scope: { archive: { path: "sample.zip", member: "src/policy.ts" } },
@@ -561,12 +561,12 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
 
   describe("F2: all-handle batch + artifact select is an intentional refusal (v0.13.1 pin), not the pre-fix silent-ignore", () => {
     it("targets:[{handle},{handle}] + select.pages refuses (select is never silently ignored in favor of the handle batch)", async () => {
-      const mintedA = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-one.ts", range: "1-1" });
+      const mintedA = await invoke("tl_read_file", { cwd: workspace, mode: "slice", path: "plain-one.ts", range: "1-1" });
       const handleA = String((mintedA["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
-      const mintedB = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-two.ts", range: "1-1" });
+      const mintedB = await invoke("tl_read_file", { cwd: workspace, mode: "slice", path: "plain-two.ts", range: "1-1" });
       const handleB = String((mintedB["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
 
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         targets: [{ handle: handleA }, { handle: handleB }],
         select: { pages: ["1"] },
@@ -577,12 +577,12 @@ describe("F5/F4/F2: scope.archive + targets gate, next carry-through, and the ex
     });
 
     it("the SAME two handles with NO select still serve as an ordinary read.batch (contrast — proves the refusal above is select-triggered, not handle-batch-triggered)", async () => {
-      const mintedA = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-one.ts", range: "1-1" });
+      const mintedA = await invoke("tl_read_file", { cwd: workspace, mode: "slice", path: "plain-one.ts", range: "1-1" });
       const handleA = String((mintedA["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
-      const mintedB = await invoke("read_file", { cwd: workspace, mode: "slice", path: "plain-two.ts", range: "1-1" });
+      const mintedB = await invoke("tl_read_file", { cwd: workspace, mode: "slice", path: "plain-two.ts", range: "1-1" });
       const handleB = String((mintedB["evidence"] as Array<Record<string, unknown>>)[0]!["handle"]);
 
-      const result = await invoke("read_file", {
+      const result = await invoke("tl_read_file", {
         cwd: workspace,
         targets: [{ handle: handleA }, { handle: handleB }],
       });

@@ -168,7 +168,7 @@ describe("read_code mode=full paths=[...] — both served", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", paths: ["src/a.ts", "src/b.ts"] },
     });
     const data = parseResult(res);
@@ -207,7 +207,7 @@ describe("read_code mode=full paths=[...] — both served", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", paths: [{ path: "src/x.ts" }, { path: "src/y.ts" }] },
     });
     const data = parseResult(res);
@@ -242,7 +242,7 @@ describe("read_code mode=full paths=[...] — governor cap is shared across sing
     // ordinary single-path calls.
     let rpcId = 2;
     for (const p of priorPaths) {
-      const r = await srv.rpc(rpcId++, "tools/call", { name: "read_file", arguments: { mode: "full", path: p } });
+      const r = await srv.rpc(rpcId++, "tools/call", { name: "tl_read_file", arguments: { mode: "full", path: p } });
       expect(parseResult(r)["kind"]).toBe("read.text");
     }
 
@@ -251,7 +251,7 @@ describe("read_code mode=full paths=[...] — governor cap is shared across sing
     // batch item 2 (the next, over PER_TASK_FULL_CAP) is served-downgraded
     // instead.
     const res = await srv.rpc(rpcId++, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", paths: ["src/three.ts", "src/four.ts"] },
     });
     const data = parseResult(res);
@@ -297,7 +297,7 @@ describe("read_code mode=full paths=[...] — governor cap is shared across sing
     // same server so both vocabulary and attribution stay covered.
     const nextCall = entries[1]!["next"] as { tool: string; arguments: Record<string, unknown> };
     expect(nextCall).toEqual({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         cwd: ws,
         targets: [{ handle: entries[1]!["handle"], ranges: ["1-130"] }],
@@ -329,7 +329,7 @@ describe("read_code mode=full — single-path behavior is unchanged by the paths
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "src/solo.ts" },
     });
     const data = parseResult(res);
@@ -362,7 +362,7 @@ describe("read_code mode=full paths=[...] — a 1-entry batch is served, not rej
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", paths: ["src/solo2.ts"] },
     });
     const data = parseResult(res);
@@ -391,7 +391,7 @@ describe("read_code mode=full paths=[...] — a nonexistent path omits, does not
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", paths: ["src/real.ts", "src/does-not-exist.ts"] },
     });
     const data = parseResult(res);
@@ -423,7 +423,7 @@ describe("read_code mode=full paths=[...] — a nonexistent path omits, does not
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", paths: ["src/nope1.ts", "src/nope2.ts"] },
     });
     const data = parseResult(res);
@@ -457,7 +457,7 @@ describe("read_code mode=full paths=[...] — a directory entry omits with a hel
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", paths: ["src/real2.ts", "src/adir"] },
     });
     const data = parseResult(res);

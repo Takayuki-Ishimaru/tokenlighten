@@ -333,6 +333,8 @@ export interface DevServerOptions {
   toolSurface?: "code" | "full";
   allowWrite?: boolean;
   extraArgs?: readonly string[];
+  /** Env overrides layered last, over the config's own (a per-flag A/B on the same config). */
+  extraEnv?: Readonly<Record<string, string>>;
 }
 
 /** Starts the DEV tree's server directly (`tsx bin.ts <ws> ...`) — no CLI
@@ -342,7 +344,7 @@ export function startDevServer(workspace: string, config: ConfigName, opts: DevS
   const args = [tsxCli, "--liftoff-only", DEV_BIN_TS, workspace, "--tool-surface", opts.toolSurface ?? "code"];
   if (opts.allowWrite) args.push("--allow-write");
   if (opts.extraArgs) args.push(...opts.extraArgs);
-  return spawnJsonRpcServer(process.execPath, args, workspace, devSpawnEnv(config));
+  return spawnJsonRpcServer(process.execPath, args, workspace, { ...devSpawnEnv(config), ...(opts.extraEnv ?? {}) });
 }
 
 export interface CliServerOptions {
@@ -472,7 +474,7 @@ export async function followNextToEnd(server: ServerHandle, firstCall: ToolCallS
     }
     if (lastQref !== undefined && repacksUsed < maxQrefRepacks) {
       repacksUsed += 1;
-      call = { tool: "read_file", arguments: { qref: lastQref, cwd: opts.cwd } };
+      call = { tool: "tl_read_file", arguments: { qref: lastQref, cwd: opts.cwd } };
       hops[hops.length - 1]!.nextSource = hops[hops.length - 1]!.nextSource === "none" ? "none" : hops[hops.length - 1]!.nextSource;
       continue;
     }
@@ -1290,7 +1292,7 @@ export interface Scenario {
   id: string;
   planItem: string;
   summary: string;
-  /** True iff this scenario calls `edit_file` and needs the server started
+  /** True iff this scenario calls `tl_edit_file` and needs the server started
    *  with `--allow-write` (E01). Both callers must start the server for this
    *  scenario accordingly; every other scenario is read-only by default. */
   needsWrite?: boolean;
@@ -1329,7 +1331,7 @@ async function runR01Member(ctx: ScenarioContext, member: R01Member): Promise<Re
   const chain = await followNextToEnd(
     ctx.server,
     {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         targets: r01TargetsFor(member),
         content: "auto",
@@ -1471,7 +1473,7 @@ async function runR02(ctx: ScenarioContext): Promise<ScenarioVerdict> {
     const chain = await followNextToEnd(
       ctx.server,
       {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: { targets: member.targets, content: "auto", budget: { bytes: member.budgetBytes }, task: { epoch: "new" }, cwd: ctx.ws },
       },
       { cwd: ctx.ws },
@@ -1515,7 +1517,7 @@ function buildR03Workspace(root: string): void {
 
 async function runR03(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const firstCall: ToolCallShape = {
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: {
       targets: [
         { path: "gamma.txt", range: "61-110" }, // overlaps the next gamma range at 90-110
@@ -1601,7 +1603,7 @@ interface R04MemberResult {
  *  only a broken/capped chain is not. */
 async function runR04Append(ctx: ScenarioContext): Promise<R04MemberResult> {
   const relPath = "append/data.txt";
-  const first = await ctx.server.callTool("read_file", {
+  const first = await ctx.server.callTool("tl_read_file", {
     targets: [{ path: relPath, range: "1-150" }],
     content: "auto",
     budget: { bytes: 3000 },
@@ -1640,7 +1642,7 @@ async function runR04Append(ctx: ScenarioContext): Promise<R04MemberResult> {
  *  "a clean completion that mixes old and new bodies." */
 async function runR04Rewrite(ctx: ScenarioContext): Promise<R04MemberResult> {
   const relPath = "rewrite/data.txt";
-  const first = await ctx.server.callTool("read_file", {
+  const first = await ctx.server.callTool("tl_read_file", {
     targets: [{ path: relPath, range: "1-150" }],
     content: "auto",
     budget: { bytes: 3000 },
@@ -1681,7 +1683,7 @@ async function runR04Rewrite(ctx: ScenarioContext): Promise<R04MemberResult> {
  *  still work -- proving the corrupt attempt left no server-side damage. */
 async function runR04GarbledCursor(ctx: ScenarioContext): Promise<R04MemberResult> {
   const relPath = "garbled/data.txt";
-  const first = await ctx.server.callTool("read_file", {
+  const first = await ctx.server.callTool("tl_read_file", {
     targets: [{ path: relPath, range: "1-150" }],
     content: "auto",
     budget: { bytes: 3000 },
@@ -1698,7 +1700,7 @@ async function runR04GarbledCursor(ctx: ScenarioContext): Promise<R04MemberResul
   const garbledBody = garbled.body as Record<string, unknown>;
   const isGracefulRefusal = garbledBody["kind"] === "refusal" && typeof garbledBody["retry"] === "string";
 
-  const restart = await ctx.server.callTool("read_file", {
+  const restart = await ctx.server.callTool("tl_read_file", {
     targets: [{ path: relPath, range: "1-150" }],
     content: "auto",
     budget: { bytes: 3000 },
@@ -1720,7 +1722,7 @@ async function runR04GarbledCursor(ctx: ScenarioContext): Promise<R04MemberResul
 async function runR04MultiTargetMix(ctx: ScenarioContext): Promise<R04MemberResult> {
   const alphaPath = "mix/alpha.txt";
   const betaPath = "mix/beta.txt";
-  const first = await ctx.server.callTool("read_file", {
+  const first = await ctx.server.callTool("tl_read_file", {
     targets: [{ path: alphaPath, range: "11-90" }, { path: betaPath, range: "31-100" }],
     content: "auto",
     budget: { bytes: 6500 },
@@ -1772,7 +1774,7 @@ async function runC01a(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const chain = await followNextToEnd(
     ctx.server,
     {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         targets: RANGE_FIXTURE_REQUEST.targets,
         content: "full",
@@ -1810,7 +1812,7 @@ async function runC01b(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const chain = await followNextToEnd(
     ctx.server,
     {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         targets: RANGE_FIXTURE_REQUEST.targets,
         content: "auto",
@@ -1848,10 +1850,10 @@ async function runC01b(ctx: ScenarioContext): Promise<ScenarioVerdict> {
 
 async function runC02a(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const baseArgs = { targets: [{ path: "small.txt" }], content: "full", cwd: ctx.ws };
-  const call1 = await ctx.server.callTool("read_file", { ...baseArgs, task: { epoch: "new" } });
-  const call2 = await ctx.server.callTool("read_file", { ...baseArgs });
-  const call3 = await ctx.server.callTool("read_file", { ...baseArgs, task: { force_serve: true } });
-  const call4 = await ctx.server.callTool("read_file", { ...baseArgs, budget: { allowFull: true } });
+  const call1 = await ctx.server.callTool("tl_read_file", { ...baseArgs, task: { epoch: "new" } });
+  const call2 = await ctx.server.callTool("tl_read_file", { ...baseArgs });
+  const call3 = await ctx.server.callTool("tl_read_file", { ...baseArgs, task: { force_serve: true } });
+  const call4 = await ctx.server.callTool("tl_read_file", { ...baseArgs, budget: { allowFull: true } });
 
   const checks = {
     firstIsFullBody: call1.body?.kind === "read.text",
@@ -1874,7 +1876,7 @@ export const Q01_QUERY = "Explain how credentials are validated and how database
 async function runQ01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const chain = await followNextToEnd(
     ctx.server,
-    { tool: "read_file", arguments: { query: Q01_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+    { tool: "tl_read_file", arguments: { query: Q01_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
     { cwd: ctx.ws },
   );
   const authServed = anyEvidenceContains(chain, CREDENTIALS_SYMBOLS);
@@ -1936,7 +1938,7 @@ async function runQ02(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   for (const member of Q02_MEMBERS) {
     const chain = await followNextToEnd(
       ctx.server,
-      { tool: "read_file", arguments: { query: member.query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+      { tool: "tl_read_file", arguments: { query: member.query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
       { cwd: ctx.ws },
     );
     const authServed = anyEvidenceContains(chain, CREDENTIALS_SYMBOLS);
@@ -1964,7 +1966,7 @@ export const Q03_QUERY_JP = "キャッシュが期限切れの場合の処理と
 async function runQ03(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const chain = await followNextToEnd(
     ctx.server,
-    { tool: "read_file", arguments: { query: Q03_QUERY_JP, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+    { tool: "tl_read_file", arguments: { query: Q03_QUERY_JP, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
     { cwd: ctx.ws },
   );
   const expiryServed = anyEvidenceContains(chain, CACHE_EXPIRY_EVIDENCE);
@@ -1990,7 +1992,7 @@ export const Q04_QUERY = "Explain how credentials are validated; also explain wh
 async function runQ04(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const chain = await followNextToEnd(
     ctx.server,
-    { tool: "read_file", arguments: { query: Q04_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+    { tool: "tl_read_file", arguments: { query: Q04_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
     { cwd: ctx.ws },
   );
   const authServed = anyEvidenceContains(chain, CREDENTIALS_SYMBOLS);
@@ -2014,7 +2016,7 @@ export const Q05_QUERY =
 async function runQ05(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const chain = await followNextToEnd(
     ctx.server,
-    { tool: "read_file", arguments: { query: Q05_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+    { tool: "tl_read_file", arguments: { query: Q05_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
     { cwd: ctx.ws, hopCap: 16 },
   );
   const coverage: Record<string, boolean> = {};
@@ -2090,7 +2092,7 @@ async function runQ06(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   {
     const chain = await followNextToEnd(
       ctx.server,
-      { tool: "read_file", arguments: { query: "How is rate limiting implemented in this project?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+      { tool: "tl_read_file", arguments: { query: "How is rate limiting implemented in this project?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
       { cwd: ctx.ws },
     );
     const fabricated = anyEvidenceContains(chain, ["RateLimit", "rateLimit", "rate_limit"]);
@@ -2101,7 +2103,7 @@ async function runQ06(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   {
     const chain = await followNextToEnd(
       ctx.server,
-      { tool: "read_file", arguments: { query: "How is the quota computation implemented in this project?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+      { tool: "tl_read_file", arguments: { query: "How is the quota computation implemented in this project?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
       { cwd: ctx.ws },
     );
     const falseAbsolute = scopeCompleteAbsenceClaimed(chain, ["quota"]);
@@ -2110,7 +2112,7 @@ async function runQ06(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   {
     const chain = await followNextToEnd(
       ctx.server,
-      { tool: "read_file", arguments: { query: "How is the throttle window computed in this project?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+      { tool: "tl_read_file", arguments: { query: "How is the throttle window computed in this project?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
       { cwd: ctx.ws },
     );
     const falseAbsolute = scopeCompleteAbsenceClaimed(chain, ["throttle"]);
@@ -2119,7 +2121,7 @@ async function runQ06(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   {
     const chain = await followNextToEnd(
       ctx.server,
-      { tool: "read_file", arguments: { query: "How is the discount computed?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
+      { tool: "tl_read_file", arguments: { query: "How is the discount computed?", task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } },
       { cwd: ctx.ws },
     );
     const evidenceServed = anyEvidenceContains(chain, ["computeDiscount", "computeDiscountRate"]);
@@ -2156,9 +2158,9 @@ function buildC02bWorkspace(root: string): void {
 
 async function runC02b(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const relPath = "src/thing.ts";
-  const call1 = await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
-  const call2 = await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "outline", cwd: ctx.ws });
-  const call3 = await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws });
+  const call1 = await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
+  const call2 = await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "outline", cwd: ctx.ws });
+  const call3 = await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws });
   const checks = {
     fullIsBody: call1.body?.kind === "read.text",
     outlineIsNotReceipted: call2.body?.kind !== "read.receipt",
@@ -2206,8 +2208,8 @@ async function runS01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // inherit served state" -- a hollow second answer with no evidence would
   // be exactly that; a stable id with fresh evidence each time is not).
   {
-    const call1 = await ctx.server.callTool("read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
-    const call2 = await ctx.server.callTool("read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
+    const call1 = await ctx.server.callTool("tl_read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
+    const call2 = await ctx.server.callTool("tl_read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
     const evidence1 = (call1.body as Record<string, unknown> | null)?.["evidence"];
     const evidence2 = (call2.body as Record<string, unknown> | null)?.["evidence"];
     const pass = Array.isArray(evidence1) && evidence1.length > 0 && Array.isArray(evidence2) && evidence2.length > 0;
@@ -2221,9 +2223,9 @@ async function runS01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (b) another lane does not see this lane's receipts.
   {
     const args = { targets: [{ path: "src/widget.ts" }], content: "full", cwd: ctx.ws };
-    const laneA1 = await ctx.server.callTool("read_file", { ...args, lane: "s01-lane-a", task: { epoch: "new" } });
-    const laneA2 = await ctx.server.callTool("read_file", { ...args, lane: "s01-lane-a" });
-    const laneB1 = await ctx.server.callTool("read_file", { ...args, lane: "s01-lane-b" });
+    const laneA1 = await ctx.server.callTool("tl_read_file", { ...args, lane: "s01-lane-a", task: { epoch: "new" } });
+    const laneA2 = await ctx.server.callTool("tl_read_file", { ...args, lane: "s01-lane-a" });
+    const laneB1 = await ctx.server.callTool("tl_read_file", { ...args, lane: "s01-lane-b" });
     const pass = laneA1.body?.kind !== "read.receipt" && laneA2.body?.kind === "read.receipt" && laneB1.body?.kind !== "read.receipt";
     checks.push({ id: "lane-isolated-receipts", pass, detail: `A1=${String(laneA1.body?.kind)} A2=${String(laneA2.body?.kind)} B1=${String(laneB1.body?.kind)}` });
   }
@@ -2231,14 +2233,14 @@ async function runS01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (c) qref/task.handle continuation keeps the declared read-only "answer"
   // profile when a re-pack omits `profile`.
   {
-    const first = await ctx.server.callTool("read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
+    const first = await ctx.server.callTool("tl_read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
     const qref = first.body?.qref;
     const handle = pick(first.body, "task.id");
     let repacked: any;
     if (typeof qref === "string") {
-      repacked = (await ctx.server.callTool("read_file", { qref, cwd: ctx.ws })).body;
+      repacked = (await ctx.server.callTool("tl_read_file", { qref, cwd: ctx.ws })).body;
     } else if (typeof handle === "string") {
-      repacked = (await ctx.server.callTool("read_file", { task: { handle }, cwd: ctx.ws })).body;
+      repacked = (await ctx.server.callTool("tl_read_file", { task: { handle }, cwd: ctx.ws })).body;
     }
     const profileHeld = repacked === undefined ? true : repacked?.profile === "answer" || pick(repacked, "profile_binding.selected") === "answer";
     checks.push({ id: "repack-keeps-answer-profile", pass: profileHeld, detail: `qref=${String(qref)} repackedProfile=${String(repacked?.profile)}` });
@@ -2249,7 +2251,7 @@ async function runS01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // the defect this wave's FIX-D is fixing -- brief-w0b UPDATE: keep this
   // chain even if it still fails).
   {
-    const chain = await followNextToEnd(ctx.server, { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } }, { cwd: ctx.ws, maxQrefRepacks: 2 });
+    const chain = await followNextToEnd(ctx.server, { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws } }, { cwd: ctx.ws, maxQrefRepacks: 2 });
     const kinds = chain.hops.map((h) => pick(h.response, "decision.kind")).filter((k): k is string => typeof k === "string");
     let regressed = false;
     for (let i = 1; i < kinds.length; i++) {
@@ -2264,12 +2266,12 @@ async function runS01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // resumes honestly or refuses with retry:"new-task" -- never fabricates a
   // decision with no evidence behind it.
   if (typeof ctx.restartServer === "function") {
-    const first = await ctx.server.callTool("read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
+    const first = await ctx.server.callTool("tl_read_file", { query, task: { epoch: "new", profile: "answer" }, cwd: ctx.ws });
     const handle = pick(first.body, "task.id");
     const newServer = await ctx.restartServer();
     let afterRestart: any;
     if (typeof handle === "string") {
-      afterRestart = (await newServer.callTool("read_file", { task: { handle }, cwd: ctx.ws })).body;
+      afterRestart = (await newServer.callTool("tl_read_file", { task: { handle }, cwd: ctx.ws })).body;
     }
     const honestOutcome = afterRestart === undefined ? true : afterRestart?.kind === "refusal" ? typeof afterRestart?.retry === "string" : true;
     const fabricated =
@@ -2316,10 +2318,10 @@ async function runE01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (1) duplicate operation_id replays instead of re-applying.
   {
     const relPath = "opid/target.txt";
-    await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
+    await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
     const opId = "w0b-e01-op-" + Math.random().toString(36).slice(2);
-    const edit1 = await ctx.server.callTool("edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
-    const edit2 = await ctx.server.callTool("edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
+    const edit1 = await ctx.server.callTool("tl_edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
+    const edit2 = await ctx.server.callTool("tl_edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
     const contentAfter = fs.readFileSync(path.join(ctx.ws, relPath), "utf8");
     const pass = edit1.body?.kind === "edit.applied" && edit2.body?.replayed === true && contentAfter === "hello universe\nsecond line\n";
     checks.push({ id: "operation-id-replay", pass, detail: `edit1Kind=${String(edit1.body?.kind)} edit2Replayed=${String(edit2.body?.replayed)} contentAfter=${JSON.stringify(contentAfter)}` });
@@ -2328,8 +2330,8 @@ async function runE01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (2) an ambiguous replace refuses rather than auto-picking a match.
   {
     const relPath = "ambiguous/dup.txt";
-    await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
-    const edit1 = await ctx.server.callTool("edit_file", { edits: [{ path: relPath, search: "same line", replace: "changed line" }], cwd: ctx.ws });
+    await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
+    const edit1 = await ctx.server.callTool("tl_edit_file", { edits: [{ path: relPath, search: "same line", replace: "changed line" }], cwd: ctx.ws });
     const contentAfter = fs.readFileSync(path.join(ctx.ws, relPath), "utf8");
     const pass = edit1.body?.kind === "refusal" && contentAfter === "same line\nsame line\nsame line\n";
     checks.push({ id: "ambiguous-replace-refuses", pass, detail: `kind=${String(edit1.body?.kind)} code=${String(edit1.body?.code)} unchanged=${contentAfter === "same line\nsame line\nsame line\n"}` });
@@ -2338,8 +2340,8 @@ async function runE01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (3) an edit of never-served bytes under a live fence refuses with an
   // executable `next`.
   {
-    await ctx.server.callTool("read_file", { query: "Explain line one in fence/seen.txt", task: { epoch: "new", profile: "generic" }, cwd: ctx.ws });
-    const edit1 = await ctx.server.callTool("edit_file", { edits: [{ path: "fence/unseen.txt", search: "target text here", replace: "replaced text here" }], cwd: ctx.ws });
+    await ctx.server.callTool("tl_read_file", { query: "Explain line one in fence/seen.txt", task: { epoch: "new", profile: "generic" }, cwd: ctx.ws });
+    const edit1 = await ctx.server.callTool("tl_edit_file", { edits: [{ path: "fence/unseen.txt", search: "target text here", replace: "replaced text here" }], cwd: ctx.ws });
     const contentAfter = fs.readFileSync(path.join(ctx.ws, "fence/unseen.txt"), "utf8");
     const pass = edit1.body?.kind === "refusal" && edit1.body?.code === "execution-typestate" && edit1.body?.next !== undefined && contentAfter.includes("target text here");
     checks.push({ id: "unserved-fence-refuses", pass, detail: `kind=${String(edit1.body?.kind)} code=${String(edit1.body?.code)} hasNext=${edit1.body?.next !== undefined} unchanged=${contentAfter.includes("target text here")}` });
@@ -2347,8 +2349,8 @@ async function runE01(ctx: ScenarioContext): Promise<ScenarioVerdict> {
 
   // (4) a failing item in a batch rolls the WHOLE batch back.
   {
-    await ctx.server.callTool("read_file", { targets: [{ path: "batch/good.txt" }, { path: "batch/bad.txt" }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
-    const edit1 = await ctx.server.callTool("edit_file", {
+    await ctx.server.callTool("tl_read_file", { targets: [{ path: "batch/good.txt" }, { path: "batch/bad.txt" }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
+    const edit1 = await ctx.server.callTool("tl_edit_file", {
       edits: [
         { path: "batch/good.txt", search: "alpha content here", replace: "alpha CHANGED here" },
         { path: "batch/bad.txt", search: "NO SUCH TEXT EXISTS ANYWHERE", replace: "whatever" },

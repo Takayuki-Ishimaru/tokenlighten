@@ -23,6 +23,7 @@ import type {
   TokenLightenUsageExportManifest,
   TokenLightenUsageSummary,
 } from "@tokenlighten/types";
+import { renamedToolName } from "@tokenlighten/types";
 import {
   canonicalWorkspacePath,
   readAiUsageLogs,
@@ -217,7 +218,7 @@ const CLIENTS = new Set<TokenLightenClient>([
   "desktop",
   "other",
 ]);
-const TOOLS = new Set<TokenLightenTool>(["read_file", "search_files", "edit_file"]);
+const TOOLS = new Set<TokenLightenTool>(["tl_read_file", "tl_search_files", "tl_edit_file"]);
 const EVENT_FIELD_SET_V1 = new Set<string>(EVENT_FIELDS_V1);
 const EVENT_FIELD_SET = new Set<string>(EVENT_FIELDS);
 const USAGE_RESET_FILE = ".usage-reset.ndjson";
@@ -376,7 +377,7 @@ export interface UsageObservation {
   taskRef?: string | null;
   /** Response envelope `kind` (e.g. "read.task_pack", "refusal") — diagnostics-only, never persisted to the usage NDJSON event. */
   kind?: string;
-  /** read_file `mode` / search_files `action` enum value — diagnostics-only, never user text. */
+  /** tl_read_file `mode` / tl_search_files `action` enum value — diagnostics-only, never user text. */
   mode?: string;
   /** Short refusal/error code only — never message text. Diagnostics-only. */
   errorCode?: string;
@@ -503,6 +504,19 @@ export function createUsageRecorder(options: {
   };
 }
 
+/**
+ * A usage line written before the `tl_` rename (2026-10-02) names the tool
+ * "read_file"; the same call logged today names it "tl_read_file". Read the
+ * old spelling as the new one so history keeps counting after an upgrade —
+ * the log itself stays append-only and is never rewritten.
+ */
+function withCurrentToolName(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const tool = (value as { tool?: unknown }).tool;
+  const renamed = typeof tool === "string" ? renamedToolName(tool) : undefined;
+  return renamed === undefined ? value : { ...(value as Record<string, unknown>), tool: renamed };
+}
+
 function isUsageEvent(value: unknown): value is TokenLightenUsageEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const event = value as Partial<TokenLightenUsageEvent>;
@@ -619,7 +633,7 @@ export function readUsageEvents(
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       try {
-        const parsed: unknown = JSON.parse(line);
+        const parsed: unknown = withCurrentToolName(JSON.parse(line));
         if (
           isUsageEvent(parsed)
           && (
@@ -1057,9 +1071,9 @@ export function summarizeUsage(
   options?: { scope?: TokenLightenSummaryScope },
 ): TokenLightenUsageSummary {
   const byTool: TokenLightenUsageSummary["byTool"] = {
-    read_file: 0,
-    search_files: 0,
-    edit_file: 0,
+    tl_read_file: 0,
+    tl_search_files: 0,
+    tl_edit_file: 0,
   };
   const byClient: TokenLightenUsageSummary["byClient"] = {
     vscode: 0,

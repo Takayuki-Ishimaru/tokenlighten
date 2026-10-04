@@ -1,5 +1,5 @@
 // memberSweep.ts — call-site sweep affordance for type-like (class/interface/
-// struct) symbol lookups (search_files action=references, and action=find on
+// struct) symbol lookups (tl_search_files action=references, and action=find on
 // a single identifier).
 //
 // Evidence (2026-07-30 signal5 T11, repo-rename alignment task): a live A/B
@@ -94,7 +94,7 @@ function buildAttachment(symbol: string, members: string[]): MemberSweepAttachme
     symbol,
     members,
     next: {
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "find", queries: members.slice(0, NEXT_BATCH_SIZE) },
     },
   };
@@ -202,7 +202,7 @@ export interface FindMemberSweepOptions {
 }
 
 /**
- * Post-process hook for search_files action=find (single-`query`; see
+ * Post-process hook for tl_search_files action=find (single-`query`; see
  * server.ts's find dispatch): attaches member_sweep to an ALREADY-BUILT
  * buildFindResponse() result when it resolves to a type definition.
  *

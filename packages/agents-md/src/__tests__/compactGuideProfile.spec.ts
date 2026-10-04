@@ -69,7 +69,7 @@ describe("compact GuideProfile round-trip via injectAll (all targets, both local
         const content = readFile(repo, target);
         expect(content, target).toContain("## TokenLighten MCP (compact)");
         expect(content, target).toContain(INSTRUCTIONS_VERSION);
-        expect(content, target).toContain("read_file");
+        expect(content, target).toContain("tl_read_file");
         expect(content, target).toContain("SAFE-STOP");
         // The deep, full-only rules stay absent from the compact body.
         expect(content, target).not.toContain("brace_delta");

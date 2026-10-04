@@ -84,7 +84,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("V10-10 — write path invalidates the in-process index for the very next read", () => {
-  it("searchReplaceEdit (single edit_file path): a symbol rename is visible to an immediately-following searchSymbols call", async () => {
+  it("searchReplaceEdit (single tl_edit_file path): a symbol rename is visible to an immediately-following searchSymbols call", async () => {
     const ws = mkWorkspace();
     writeFile(ws, "src/a.ts", "export function oldName() { return 1; }\n");
 
@@ -109,7 +109,7 @@ describe("V10-10 — write path invalidates the in-process index for the very ne
     expect(afterNew.locations.map((l) => l.symbol)).toContain("newName");
   });
 
-  it("applyEditsMulti (batch edit_file path): a batch edit is visible to an immediately-following searchSymbols call", async () => {
+  it("applyEditsMulti (batch tl_edit_file path): a batch edit is visible to an immediately-following searchSymbols call", async () => {
     const ws = mkWorkspace();
     writeFile(ws, "src/b.ts", "export function beforeBatch() { return 1; }\n");
 

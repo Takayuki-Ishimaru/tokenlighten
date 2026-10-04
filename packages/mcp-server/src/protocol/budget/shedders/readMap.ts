@@ -131,7 +131,7 @@ function shedOutlineEntry(payload: ShedPayload): ShedOutcome | undefined {
  */
 function mapCall(form: string, path: string): ToolCall | undefined {
   const mode = form === "surfaces" ? "surfaces" : "map";
-  return emittableToolCall({ tool: "read_file", arguments: { mode, paths: [path] } });
+  return emittableToolCall({ tool: "tl_read_file", arguments: { mode, paths: [path] } });
 }
 
 export const READ_MAP_SHEDDER: Shedder = {

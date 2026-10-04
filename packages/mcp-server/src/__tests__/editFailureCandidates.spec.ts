@@ -148,7 +148,7 @@ describe("editFailureCandidates — not-found failure includes candidates", () =
     await srv.initialize();
 
     const result = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/service.ts",
         search: "THIS_STRING_DOES_NOT_EXIST_IN_THE_FILE",
@@ -186,7 +186,7 @@ describe("editFailureCandidates — not-found failure includes candidates", () =
     await srv.initialize();
 
     const result = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/big.ts",
         search: "NONEXISTENT",
@@ -215,7 +215,7 @@ describe("editFailureCandidates — not-found failure includes candidates", () =
     await srv.initialize();
 
     const result = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/mod.ts",
         search: "MISSING_SEARCH_STRING",
@@ -255,7 +255,7 @@ describe("editFailureCandidates — candidates emitted regardless of TL_SESSION_
     await srv.initialize();
 
     const result = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/util.ts",
         search: "NO_MATCH_HERE",

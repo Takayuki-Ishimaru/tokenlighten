@@ -43,18 +43,40 @@ import { isProseAcronym } from "./concernRecovery.js";
 // Tunables (named, per brief-fix-c1.md Deliverable 2's own bound list)
 // ---------------------------------------------------------------------------
 
-/** How many module-level constants one facet requirement's closure ever serves. */
-export const MAX_CONSTANTS_PER_REQUIREMENT = 4;
-/** How many direct in-workspace callees one facet requirement's closure ever follows (one hop only — a callee's OWN callees are never visited). */
+/**
+ * How many of a focal's direct callees get the deeper, costlier walks: their
+ * own callees (readCodeTaskPack.ts MAX_FLOW_CALLEE_DEPTH) and, for the value
+ * closure, the self-properties it chases. Copilot retest (2026-10-02): it no
+ * longer decides WHICH direct callees are required -- every one is, up to
+ * MAX_SCANNED_CALLEE_NAMES / MAX_REQUIRED_CALLEE_WINDOWS below. Cutting the
+ * required list at three names with nothing recording the cut certified a
+ * hub function (`quote()`) from two of its six callees.
+ */
 export const MAX_CALLEES_PER_REQUIREMENT = 3;
-/** How many files reached through the focal file's own import lines are opened per focal callable. */
+/** Copilot retest (2026-10-02): how many call names in a focal's body are considered as direct callees at all (built-ins included). A body naming more reports its callee list cut (`calleesComplete:false`), which the facet gate discloses as undetermined. */
+export const MAX_SCANNED_CALLEE_NAMES = 64;
+/** Copilot retest (2026-10-02): how many RESOLVED direct callees become required windows; past it the callee list is reported cut, never silently covered. */
+export const MAX_REQUIRED_CALLEE_WINDOWS = 16;
+/**
+ * How many files reached through the focal file's own import lines are opened
+ * to tell WHICH declaration a same-named subject means (readCodeTaskPack.ts,
+ * `importedDeclarationFile` -- a miss there is an ambiguity the pack discloses).
+ * R2-T3 (eval-0929 final review, P0-4): it no longer bounds a CONSTANT or CALLEE
+ * search -- the re-export/include chase, the callee lookup and the Go
+ * same-package scan each carry their own file/byte budget and report a miss
+ * that hit it (`onBounded`), because a two-file cap that ends a search
+ * without a word becomes a silent `request-item-empty`.
+ */
 export const MAX_IMPORT_RESOLVED_FILES_PER_FOCAL = 2;
 /** A single constant/declaration window's own line cap; a larger declaration serves its head and reports the rest as remaining (mirrors callerExpansion.ts's own CALLER_WINDOW_MARGIN_LINES-style honesty, never a silent truncation). */
 export const MAX_CONSTANT_WINDOW_LINES = 40;
 /** P1-6: the sane ceiling `declarationRealExtent` re-measures a truncated declaration's REAL close against — far larger than the 40-line serving cap (so an 80-200-line real-world table/config object is captured whole), but still bounded, so a pathological unterminated brace can never turn a continuation ask into a literal-EOF read. */
 export const MAX_CONSTANT_REAL_EXTENT_LINES = 2000;
-/** Total embedded bytes this module's OWN windows may contribute to one pack — the hook enforces this across every requirement, mirroring callerExpansion.ts's MAX_CALLER_EXPANSION_BYTES. */
-export const MAX_CLOSURE_BYTES_PER_PACK = 4096;
+/**
+ * Total embedded bytes this module's OWN windows may contribute to one pack — the hook enforces this across every requirement, mirroring callerExpansion.ts's MAX_CALLER_EXPANSION_BYTES.
+ * Copilot retest (2026-10-02): 4096 -> 8192. The value/condition closure now serves a focal's callee bodies and every constant they read; a required window past this budget is still asked for by a ranged `next`, and that extra round trip costs far more than the bytes.
+ */
+export const MAX_CLOSURE_BYTES_PER_PACK = 8192;
 
 // ---------------------------------------------------------------------------
 // Module-level constant / enum declaration lookup
@@ -96,14 +118,21 @@ interface FileLineIndex {
   readonly masked: readonly [Map<number, string>, Map<number, string>];
   /** 0-based indexes of lines that can carry an import / re-export / include shape. */
   importLines?: number[];
+  /** Parallel to `importLines`: each statement's text, the raw line itself unless a brace/paren-wrapped import spans several lines (`joinedImportStatement`). */
+  importTexts?: string[];
   /** Go grouped `const (`/`var (` openers per hashComment flag (index 1 = true). */
   groupOpeners: [number[] | undefined, number[] | undefined];
+  /** Parallel to `groupOpeners`: the 0-based line index where each grouped block ends (exclusive), see `goGroupedBlockWindow`. */
+  groupEnds: [number[] | undefined, number[] | undefined];
 }
 
 const fileLineIndexes = new WeakMap<readonly string[], FileLineIndex>();
 const WORD_RUN_RE = /[A-Za-z0-9_]+/g;
 const WORD_ONLY_RE = /^[A-Za-z0-9_]+$/;
-const IMPORT_SHAPED_LINE_RE = /^\s*(?:import\b|export\b|from\b|using\b|#include\b|(?:const|let|var)\s*\{)/;
+// R2-T3: `const|let|var NAME = require(` joins the destructuring opener — the
+// member form `const B = require("./x").A` binds a name exactly like
+// `const { A: B } = require("./x")` (see `importSpecifiersNaming`).
+const IMPORT_SHAPED_LINE_RE = /^\s*(?:import\b|export\b|from\b|using\b|#include\b|(?:const|let|var)\s*\{|(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*require\b)/;
 
 function fileLineIndex(lines: readonly string[]): FileLineIndex {
   let index = fileLineIndexes.get(lines);
@@ -116,7 +145,7 @@ function fileLineIndex(lines: readonly string[]): FileLineIndex {
         else if (list[list.length - 1] !== i) list.push(i);
       }
     }
-    index = { tokens, masked: [new Map(), new Map()], groupOpeners: [undefined, undefined] };
+    index = { tokens, masked: [new Map(), new Map()], groupOpeners: [undefined, undefined], groupEnds: [undefined, undefined] };
     fileLineIndexes.set(lines, index);
   }
   return index;
@@ -240,33 +269,62 @@ export function declarationRealExtent(lines: readonly string[], startLine: numbe
 }
 
 /**
- * A GROUPED Go `const (…)` / `var (…)` block: scans forward from a column-0
- * opener for a member line naming `name` at the head of its trimmed text,
- * stopping at the block's own column-0 closing `)`. Bounded to
- * MAX_CONSTANT_WINDOW_LINES lines of block scan (a pathological block still
- * cannot runaway this function).
+ * A GROUPED Go `const (…)` / `var (…)` block: a member line naming `name` at
+ * the head of its trimmed text, inside a column-0 `const (` / `var (` opener
+ * and before that block's own column-0 closing `)`.
+ *
+ * R2-T3 (eval-0929 final review, P0-4 class -- "a cap never becomes a silent
+ * empty"): the scan used to be bounded to MAX_CONSTANT_WINDOW_LINES (40)
+ * lines FROM THE OPENER, so a member sitting 41+ lines into a big enum-style
+ * block (HTTP codes, error codes, an iota table -- ordinary Go) was never
+ * found, and the caller certified a false `request-item-empty`. The block is
+ * now searched to its real end through the per-file token index (only the
+ * lines that contain the NAME are tested, so a 2000-line block costs the same
+ * as a 5-line one). The block's end is its column-0 `)` -- or, for a block
+ * that never closes, the next column-0 top-level declaration -- never an
+ * INDENTED `)`, which is the tail of a member's own multi-line call
+ * (`x = f(\n\t\t1,\n\t)`) and used to end the scan early. The SERVED window is
+ * still capped (`declarationExtent`): only the search is unbounded.
  */
 function goGroupedBlockWindow(lines: readonly string[], name: string, hashComment: boolean): ConstantWindow | undefined {
   const memberRe = new RegExp(`^\\s*${escapeForRegex(name)}\\b`);
   const index = fileLineIndex(lines);
   const slot = hashComment ? 1 : 0;
   let openers = index.groupOpeners[slot];
-  if (openers === undefined) {
+  let ends = index.groupEnds[slot];
+  if (openers === undefined || ends === undefined) {
     // A masked line can only open a block where the raw line already starts
     // with the keyword (masking never touches column-0 code characters).
     openers = [];
+    ends = [];
     for (let i = 0; i < lines.length; i++) {
       if (!/^(?:const|var)/.test(lines[i]!)) continue;
-      if (/^(?:const|var)\s*\(/.test(maskedLineAt(lines, index, i, hashComment))) openers.push(i);
+      // `(` ends the opener line (gofmt's own shape) -- a C# top-level tuple
+      // deconstruction `var (a, b) = pair;` is one statement, not a block.
+      if (!/^(?:const|var)\s*\(\s*$/.test(maskedLineAt(lines, index, i, hashComment))) continue;
+      let end = lines.length;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (/^(?:\)|(?:func|type|const|var|import|package)\b)/.test(lines[j]!)) { end = j; break; }
+      }
+      openers.push(i);
+      ends.push(end);
     }
     index.groupOpeners[slot] = openers;
+    index.groupEnds[slot] = ends;
   }
-  for (const i of openers) {
-    const blockLimit = Math.min(lines.length, i + MAX_CONSTANT_WINDOW_LINES);
-    for (let j = i + 1; j < blockLimit; j++) {
-      const masked = maskedLineAt(lines, index, j, hashComment);
-      if (/^\s*\)/.test(masked)) break; // block closer -- name not in THIS block
-      if (memberRe.test(masked)) return declarationExtent(lines, j + 1, hashComment);
+  const candidateLines = WORD_ONLY_RE.test(name) ? (index.tokens.get(name) ?? []) : undefined;
+  for (const [k, i] of openers.entries()) {
+    const end = ends[k]!;
+    if (candidateLines !== undefined) {
+      for (const j of candidateLines) {
+        if (j <= i) continue;
+        if (j >= end) break;
+        if (memberRe.test(maskedLineAt(lines, index, j, hashComment))) return declarationExtent(lines, j + 1, hashComment);
+      }
+      continue;
+    }
+    for (let j = i + 1; j < end; j++) {
+      if (memberRe.test(maskedLineAt(lines, index, j, hashComment))) return declarationExtent(lines, j + 1, hashComment);
     }
   }
   return undefined;
@@ -593,10 +651,54 @@ export function declarationIsCallable(windowLines: readonly string[], hashCommen
   return initializerOpensWithArrowParams(initializer);
 }
 
-/** A numeric or quoted literal on `line` once a trailing `//`/`#` comment is dropped -- mirrors facetGate.ts's own `lineHasLiteral` (kept as a small local duplicate: evidenceClosure.ts must stay fs/task-state-free and importing FROM facetGate.ts, which already imports from here, would be circular). Decides only whether a resolved window is "empty of any concrete value", never a status. */
+/** The first type-declaring keyword of a declaration head. */
+const TYPE_DECLARATION_KEYWORD_RE = /\b(class|interface|enum|struct|trait|protocol|object|record|union)\b/u;
+
+/**
+ * Copilot standard-setup evaluation (2026-10-02) and its review: true when a
+ * top-level declaration (`kind` as the symbol parser reports it, the window
+ * starting at its first line) carries no constant VALUE a value question
+ * could be missing — a function or method, a const bound to one (an arrow,
+ * a lambda), a type alias, an interface, a trait or a protocol. The parser
+ * files enums, interfaces, structs and traits under "class", so the head's
+ * first type keyword tells them apart. A class, enum, struct, object or
+ * record may carry the value itself (`Status.PAID`, `Limits.MAX`, a Rust
+ * associated const), so it is never exempt.
+ */
+export function declarationCarriesNoConstantValue(kind: string, windowLines: readonly string[], hashComment: boolean): boolean {
+  if (kind === "function" || kind === "method" || kind === "type") return true;
+  if (kind === "const") return declarationIsCallable(windowLines, hashComment);
+  if (kind !== "class") return false;
+  const head = windowLines.slice(0, 6).map((line) => maskNonCode(line, hashComment)).join("\n");
+  const keyword = TYPE_DECLARATION_KEYWORD_RE.exec(head)?.[1];
+  return keyword === "interface" || keyword === "trait" || keyword === "protocol";
+}
+
+/**
+ * A numeric or quoted literal on `line` once a trailing `//`/`#` comment is
+ * dropped -- mirrors facetGate.ts's own `lineHasLiteral` (kept as a small
+ * local duplicate: evidenceClosure.ts must stay fs/task-state-free and
+ * importing FROM facetGate.ts, which already imports from here, would be
+ * circular). Decides only whether a resolved window is "empty of any
+ * concrete value", never a status.
+ *
+ * eval-0929 §4/§8 fix: a digit run is a literal only when it OPENS the
+ * token it sits in -- `64`, `0x40`, `1_000`, `1e3` and `64u64` (a literal
+ * with a language type/unit suffix) all open on a digit, because no
+ * mainstream language lets an identifier start with one. A digit run that
+ * instead sits inside a digit-SUFFIXED type/const name (`u64`, `i32`,
+ * `int8_t`, `Float64`, `uint16` in Rust/C/C++/Go/Julia/Kotlin/…) never
+ * opens its token, so stripping every `IDENTIFIER_RE` match first (each
+ * runs from its own leading letter/`_`/`$` through every trailing digit)
+ * removes such a name whole while always leaving a real literal's leading
+ * digit behind. The prior one-character lookbehind/lookahead only ever
+ * inspected the digit run's immediate neighbour, so a 2+ digit suffix could
+ * retry-match on its OWN trailing digit (preceded by another digit, not a
+ * letter) and be misread as carrying a literal.
+ */
 function lineHasLiteralText(line: string): boolean {
   const code = line.replace(/\s(?:\/\/|#).*$/u, "").replace(/^\s*(?:\/\/|#|\*|\/\*).*$/u, "");
-  return /(?<![A-Za-z_$])\d+(?:\.\d+)?(?![A-Za-z_$])/u.test(code) || /["'`]/u.test(code);
+  return /\d/u.test(code.replace(IDENTIFIER_RE, "")) || /["'`]/u.test(code);
 }
 
 /**
@@ -664,6 +766,91 @@ export function isRequireModuleInitializer(windowLines: readonly string[], hashC
   return /^require\(\s*\)$/.test(initializer);
 }
 
+/**
+ * R2-T3 (eval-0929 final review, P1-4): true when `windowLines`' own
+ * top-level initializer is NOTHING BUT a member read off a `require()` --
+ * `const TTL_MS = require("./consts").RAW_TTL;` -- an IMPORT BINDING exactly
+ * like `const { RAW_TTL: TTL_MS } = require("./consts")`: the value lives in
+ * the required module, never on this line. `importSpecifiersNaming` reads the
+ * same statement as a named spec (`exportedName: "RAW_TTL"`); a declaration
+ * lookup that returned this line as the constant's own window would serve a
+ * line that holds no literal and certify the facet `covered` (the
+ * `isRequireModuleInitializer` P3 violation, one property access later).
+ * Same masked-text convention as `isRequireModuleInitializer` above.
+ */
+export function isRequireMemberInitializer(windowLines: readonly string[], hashComment: boolean): boolean {
+  const text = windowLines.map((line) => maskNonCode(line, hashComment)).join("\n");
+  const eq = topLevelAssignmentIndex(text);
+  if (eq === -1) return false;
+  let initializer = text.slice(eq + 1).trim();
+  if (initializer.endsWith(";")) initializer = initializer.slice(0, -1).trim();
+  return /^require\(\s*\)(?:\s*\.\s*[A-Za-z_$][\w$]*)+$/.test(initializer);
+}
+
+/** A bare name, or a dotted/`::`-qualified reference chain (`RAW_TIMEOUT`, `Config.Base.timeout`, `crate::limits::RAW`) -- no call, no operator, no literal. Shared by `isPureReferenceExpression`'s two branches (a bare value, or one aggregate member's value). */
+const PURE_REFERENCE_NAME_RE = /^[A-Za-z_$][\w$]*(?:(?:\.|::)[A-Za-z_$][\w$]*)*$/u;
+
+/**
+ * True when `expr` (already trimmed, and stripped of any trailing `;`) is
+ * NOTHING BUT a single name/qualified-name reference, or an object/array
+ * aggregate whose EVERY member's value is -- recursively -- the same: no
+ * literal anywhere, no call/construction. An aggregate with even ONE
+ * literal-or-call member (`{ a: NAME, b: 4 }`) does NOT qualify -- some
+ * value already reached this window, so it is the ORDINARY served-value
+ * case (`chaseConstant`'s pre-existing depth-limited nested scan), never
+ * the pure-reference one this predicate exists to flag.
+ */
+function isPureReferenceExpression(expr: string): boolean {
+  const trimmed = expr.trim();
+  if (trimmed === "") return false;
+  if (PURE_REFERENCE_NAME_RE.test(trimmed)) return true;
+  const isObject = trimmed.startsWith("{") && trimmed.endsWith("}");
+  const isArray = trimmed.startsWith("[") && trimmed.endsWith("]");
+  if (!isObject && !isArray) return false;
+  const inner = trimmed.slice(1, -1).trim();
+  if (inner === "") return false; // an empty aggregate carries no reference to chase -- never "pure reference"
+  const members = topLevelSplit(inner, ",").map((m) => m.trim()).filter((m) => m !== "");
+  if (members.length === 0) return false;
+  return members.every((member) => {
+    if (!isObject) return isPureReferenceExpression(member);
+    if (member.startsWith("...")) return isPureReferenceExpression(member.slice(3));
+    const colon = topLevelIndexOf(member, ":");
+    return isPureReferenceExpression(colon === -1 ? member : member.slice(colon + 1));
+  });
+}
+
+/**
+ * WP-A2 (eval-0929 §4/§8, defect (c) -- WP-A's own deferred item): true when
+ * `windowLines`' own top-level initializer is a PURE reference (see
+ * `isPureReferenceExpression`'s own doc) -- no literal anywhere in the
+ * window, no call/construction. `chaseConstant`'s long-standing comment
+ * ("the value itself is already served, so leaving its own sub-references
+ * unchased is a bounded, honest depth choice") is true ONLY when the pushed
+ * window's own text already carries a value; a pure-reference window like
+ * `export const BASE_TIMEOUT = RAW_TIMEOUT;` or `const CONFIG = { t:
+ * DEFAULTS.t };` serves NOTHING concrete on its own, so `chaseConstant` must
+ * keep chasing the name(s) it points at past the ordinary
+ * `MAX_CONSTANT_INITIALIZER_DEPTH` bound (under its own separate,
+ * still-bounded hop/file budget), or disclose them -- never silently stop
+ * as though the value had already been served. Mutually exclusive with
+ * `constructionOnlyInitializer`/`declarationIsCallable` by construction: a
+ * call or construction always contains a `(`, which no shape this predicate
+ * accepts can ever have. Purely syntactic -- a bare/qualified name, or an
+ * aggregate of only such names -- so it applies uniformly to every language
+ * `resolveConstantWindow` resolves a window for (TS/JS, Python, Go, Java,
+ * Kotlin, C#, Rust, C/C++, …), never keyed to any one language's own
+ * declaration syntax.
+ */
+export function isPureReferenceInitializer(windowLines: readonly string[], hashComment: boolean): boolean {
+  if (windowLines.some((line) => lineHasLiteralText(line))) return false;
+  const text = windowLines.map((line) => maskNonCode(line, hashComment)).join("\n");
+  const eq = topLevelAssignmentIndex(text);
+  if (eq === -1) return false;
+  let initializer = text.slice(eq + 1).trim();
+  if (initializer.endsWith(";")) initializer = initializer.slice(0, -1).trim();
+  return isPureReferenceExpression(initializer);
+}
+
 // ---------------------------------------------------------------------------
 // Candidate identifiers a body reads that MIGHT be module-level constants
 // ---------------------------------------------------------------------------
@@ -701,10 +888,10 @@ const RESERVED_WORD_RE = new RegExp(
 
 /**
  * True when `value` is shaped like a MODULE/PACKAGE-LEVEL binding reference
- * — UPPER_SNAKE (>=2 chars, not ordinary prose vocabulary — `isProseAcronym`),
- * a Capitalized identifier with at least one lowercase letter (`Status`,
- * `AbortController`), OR (item 3, eval-0927 review #4/#6) any other
- * identifier of >=2 chars that is not a reserved word. `export const
+ * — UPPER_SNAKE (>=2 chars), a Capitalized identifier with at least one
+ * lowercase letter (`Status`, `AbortController`), OR (item 3, eval-0927
+ * review #4/#6) any other identifier of >=2 chars that is not a reserved
+ * word. `export const
  * defaultOptions = {...}` and Python's `default_timeout_s = 5.5` are exactly
  * as real a module constant as `DEFAULT_OPTIONS` — naming CASE never told a
  * real module-level binding apart from an ordinary local, its SCOPE did, and
@@ -721,12 +908,28 @@ const RESERVED_WORD_RE = new RegExp(
  * a real code identifier apart from an ordinary English word starting a
  * QUESTION -- "Explain..."). A source-code BODY has no such
  * sentence-initial-capitalization problem.
+ *
+ * R2-T3 (eval-0929 final review, P1-4's cjsRename* repros): a bare ALL-CAPS
+ * word that is ordinary PROSE vocabulary in a QUESTION (`TTL`, `URL`, `API`,
+ * `SQL`, `CPU` -- `concernRecovery.ts`'s `isProseAcronym`) used to be
+ * dropped here for EVERY occurrence. That list answers "is this token a code
+ * name or an English word in the user's sentence?" -- a question a SOURCE
+ * body never asks: `return TTL;` inside a function body reads a binding named
+ * `TTL`, and dropping the candidate meant a module constant named like an
+ * acronym (`export const TTL = 9314`, `const { RAW_TTL: TTL } = require(...)`,
+ * `import { RAW_TTL as TTL }`) was never looked up at all -- a false
+ * `request-item-empty` (or `covered` with the literal never served) in the
+ * commonest shape there is, whatever the import syntax. The acronym rule
+ * survives only where it is right about the SOURCE: the operand of `new`
+ * (`new HTTP.Request(url)`, `new URL(u)`) is a TYPE, never a constant
+ * (`constantLikeReferencesIn`'s `constructedOnly`). Anywhere else the token
+ * is a LOOKUP attempt (a miss is silent, see above); the disclosure rule for
+ * an unresolved one keeps treating those acronyms conservatively
+ * (readCodeTaskPack.ts, `disclosableNamedSpecs`), so a platform global such
+ * as `URL` imported from a package never becomes a noisy gap.
  */
 function looksLikeConstantReference(value: string): boolean {
   if (RESERVED_WORD_RE.test(value)) return false;
-  if (/^[A-Z][A-Z0-9_]*$/.test(value) && value.length >= 2) {
-    return !(/^[A-Z]+$/.test(value) && isProseAcronym(value));
-  }
   return value.length >= 2;
 }
 
@@ -1103,7 +1306,17 @@ export function constantLikeReferencesIn(
    * behaviour is byte-for-byte what it was before this parameter existed.
    */
   relPath?: string,
+  /**
+   * OPTIONAL (Copilot standard-setup evaluation, 2026-10-02): the path that
+   * decides whether an unquoted object-literal KEY is skipped
+   * (`isObjectLiteralKeyPosition`, TS/JS only). Defaults to `relPath`; a
+   * caller scanning a resolved window's own initializer passes that
+   * window's path here WITHOUT `relPath`, so the scan's masking and
+   * continuation handling stay exactly what they were.
+   */
+  objectKeyLangPath: string | undefined = relPath,
 ): string[] {
+  const skipObjectKeys = objectKeyLangPath !== undefined && OBJECT_KEY_LANG_RE.test(objectKeyLangPath);
   const continuation = argumentContinuationLines(bodyLines, hashComment, relPath);
   const locallyBound = namesDeclaredWithin(bodyLines, hashComment, continuation);
   const order: string[] = [];
@@ -1114,8 +1327,14 @@ export function constantLikeReferencesIn(
   // for good (short-circuits the very next update via `(prior ?? true) &&
   // isBareUse`, never re-set true afterward).
   const bareReceiverOnly = new Map<string, boolean>();
+  // R2-T3: the same running AND for "EVERY occurrence is the operand of
+  // `new`" -- only ever consulted for a prose acronym (see the return below).
+  const constructedOnly = new Map<string, boolean>();
+  let prevTail = "";
   for (const [index, rawLine] of bodyLines.entries()) {
     const masked = maskNonCode(rawLine, hashComment, relPath);
+    const lineTail = prevTail;
+    prevTail = lastCodeChar(masked) ?? prevTail;
     for (const match of masked.matchAll(IDENTIFIER_RE)) {
       const token = match[0];
       const at = match.index ?? -1;
@@ -1137,14 +1356,65 @@ export function constantLikeReferencesIn(
       // annotation elements, JSX attributes): the first token followed by
       // `=` (never `==`/`=>`) names the callee's parameter, it is not a read.
       if (continuation[index] === true && masked.slice(0, at).trim() === "" && /^\s*=(?![=>])/.test(masked.slice(at + token.length))) continue;
+      // A POSITIONAL skip too: an object-literal key names a property, never
+      // the same-named binding (see isObjectLiteralKeyPosition).
+      if (skipObjectKeys && isObjectLiteralKeyPosition(masked, at, token, lineTail)) continue;
       if (token === ownName || excludeNames.has(token) || locallyBound.has(token)) continue;
       if (!seenOrder.has(token)) { seenOrder.add(token); order.push(token); }
       const after = masked.slice(at + token.length);
       const isBareUse = RECEIVER_CALL_RE.test(after) && isBareReceiverStatement(masked, at);
       bareReceiverOnly.set(token, (bareReceiverOnly.get(token) ?? true) && isBareUse);
+      constructedOnly.set(token, (constructedOnly.get(token) ?? true) && /\bnew\s+$/.test(masked.slice(0, at)));
     }
   }
-  return order.filter((token) => !bareReceiverOnly.get(token) && looksLikeConstantReference(token));
+  // A prose acronym (`API`, `HTTP`, `URL`, `TTL`...) is a candidate like any
+  // other name EXCEPT as the operand of `new` (`new HTTP.Request(url)`,
+  // `new URL(u)`): there it names a type, never a constant. Everywhere else
+  // it is a binding a body may read (`return TTL;`) -- see
+  // `looksLikeConstantReference`'s own R2-T3 note.
+  return order.filter((token) =>
+    !bareReceiverOnly.get(token)
+    && !(constructedOnly.get(token) === true && isProseAcronym(token))
+    && looksLikeConstantReference(token));
+}
+
+/**
+ * TS/JS-family sources (Copilot standard-setup evaluation, 2026-10-02): an
+ * unquoted object-literal key there names a property and never reads a
+ * binding. Python dicts, Go map literals and Swift dictionaries key by VALUE
+ * (`{KEY: v}` reads `KEY`), so they are deliberately absent.
+ */
+const OBJECT_KEY_LANG_RE = /\.[cm]?[jt]sx?$/i;
+
+/** The last non-whitespace character of a masked line; undefined for a blank (or comment-only) line. */
+function lastCodeChar(masked: string): string | undefined {
+  const trimmed = masked.trimEnd();
+  return trimmed.length > 0 ? trimmed[trimmed.length - 1] : undefined;
+}
+
+/**
+ * Copilot standard-setup evaluation (2026-10-02): true when the occurrence
+ * of `token` at `at` in `masked` is an unquoted object-literal KEY -- callers
+ * gate this on OBJECT_KEY_LANG_RE (TS/JS) -- i.e. followed by a single `:`
+ * (or the `?:` of an optional property) and preceded by `{` or `,`, on this
+ * line or, for a key that opens its own line, as the last code character of
+ * the lines before it (`prevTail`). Such a key names a property and never
+ * reads the same-named binding. Measured: `return {subtotal, ...,
+ * shipping:delivery}` in a `quote` that also imports the function
+ * `shipping` was read as a VALUE read of that import, and its failed
+ * constant resolution became the false "shipping is read by quote but its
+ * declaration could not be resolved"; `return { MAX_RETRIES: 3 }` and an
+ * `export const LIMITS = { MAX_RETRIES: 3 }` initializer were disclosed the
+ * same way. A ternary's middle (`cond ? NAME : other`, preceded by `?`), a
+ * `case NAME:` label and a computed key (`[NAME]:`) are reads and stay
+ * reads.
+ */
+export function isObjectLiteralKeyPosition(masked: string, at: number, token: string, prevTail: string): boolean {
+  if (!/^\??\s*:(?!:)/.test(masked.slice(at + token.length))) return false;
+  let i = at - 1;
+  while (i >= 0 && /\s/.test(masked[i]!)) i--;
+  const before = i >= 0 ? masked[i]! : prevTail;
+  return before === "{" || before === ",";
 }
 
 /**
@@ -1179,14 +1449,30 @@ function isTypeAnnotationPosition(masked: string, at: number): boolean {
  * VALUE evidence: the facet never needed the name's own "value", only
  * whatever it returns or does.
  */
-export function hasValuePositionOccurrence(bodyLines: readonly string[], hashComment: boolean, name: string): boolean {
+export function hasValuePositionOccurrence(
+  bodyLines: readonly string[],
+  hashComment: boolean,
+  name: string,
+  /**
+   * OPTIONAL (Copilot standard-setup evaluation, 2026-10-02): the path that
+   * decides whether an unquoted object-literal KEY is skipped -- see
+   * `isObjectLiteralKeyPosition`. Omitted, no key is skipped (the
+   * pre-existing behaviour).
+   */
+  objectKeyLangPath?: string,
+): boolean {
   if (name.length === 0) return false;
+  const skipObjectKeys = objectKeyLangPath !== undefined && OBJECT_KEY_LANG_RE.test(objectKeyLangPath);
   const occurrenceRe = new RegExp(`(?<![\\w$.])${escapeForRegex(name)}(?![\\w$])`, "g");
+  let prevTail = "";
   for (const rawLine of bodyLines) {
     const masked = maskNonCode(rawLine, hashComment);
+    const lineTail = prevTail;
+    prevTail = lastCodeChar(masked) ?? prevTail;
     for (const match of masked.matchAll(occurrenceRe)) {
       const at = match.index ?? -1;
       if (at < 0) continue;
+      if (skipObjectKeys && isObjectLiteralKeyPosition(masked, at, name, lineTail)) continue;
       if (isTypeAnnotationPosition(masked, at)) continue;
       const after = masked.slice(at + name.length);
       if (/^\s*\(/.test(after)) continue; // name( / new name( -- invoked, not read
@@ -1370,6 +1656,27 @@ export interface ImportSpecifier {
    * `wildcard` above.
    */
   readonly packageEligible?: boolean;
+  /**
+   * FIX-ALIAS (eval-0929 §4, aliasTransitive/aliasSingle/aliasPathNamed):
+   * the name this specifier's SOURCE module declares — set ONLY when it
+   * differs from the LOCAL bound name the caller queried (`name`), i.e. only
+   * for a rename: TS/JS `import { A as B }` / `export { A as B } from` /
+   * `import { default as B }` (here `exportedName` is the literal string
+   * `"default"` — the caller resolves the target's default export, or
+   * discloses when it cannot), CJS/ESM destructure `const { A: B } =
+   * require(...)`, Python `from m import A as B`, Kotlin/Scala member import
+   * `import a.b.A as B`. OPTIONAL, purely additive: every NON-aliased spec
+   * (the overwhelming majority) leaves this `undefined`, meaning "the same
+   * name queried" — a caller that never reads this field resolves EXACTLY as
+   * it always did. A caller that chases an import hop MUST look up
+   * `spec.exportedName ?? name` in the resolved target file, never the bare
+   * `name` alone — resolving under the LOCAL alias instead of the name the
+   * target module actually declares is the confirmed root cause of a served
+   * value window whose own text is nothing but an unresolved reference
+   * (`timeoutMs: DEFAULT_MS`) being certified `covered` while the literal
+   * behind the alias (`7231`) never reaches the client.
+   */
+  readonly exportedName?: string;
 }
 
 /**
@@ -1385,6 +1692,109 @@ function isCommentLine(rawLine: string, hashComment: boolean): boolean {
   return trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*") || (hashComment && trimmed.startsWith("#"));
 }
 
+/** R2-T3: how many physical lines one wrapped import/require statement may span before the join gives up and leaves the opener line as it was (a runaway brace never swallows the file). */
+const MAX_IMPORT_STATEMENT_LINES = 64;
+
+/** The opener of a JS/TS statement whose `{ ... }` list may wrap over several lines: `import {`, `import D, {`, `import type {`, `export {`, `export type {`, and a CJS destructure `const|let|var {`. `export default {`/`export const x = {` are object LITERALS, not import lists, and deliberately do not match. */
+const JS_WRAPPED_LIST_HEAD_RE = /^\s*(?:import\s+(?:type\s+)?(?:[A-Za-z_$][\w$]*\s*,\s*)?|export\s+(?:type\s+)?|(?:const|let|var)\s*)\{/;
+/** The opener of a Python `from m import (` ... `)` list (isort/black wrap every long import this way). */
+const PY_WRAPPED_LIST_HEAD_RE = /^\s*from\s+[.\w]+\s+import\s*\(/;
+
+/** `text` without a trailing `//` line comment (outside quotes) and without inline block comments. */
+function withoutJsComments(text: string): string {
+  const noBlock = text.replace(/\/\*.*?\*\//g, " ");
+  let quote = "";
+  for (let i = 0; i < noBlock.length; i++) {
+    const ch = noBlock[i]!;
+    if (quote !== "") {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = "";
+    } else if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+    else if (ch === "/" && noBlock[i + 1] === "/") return noBlock.slice(0, i);
+  }
+  return noBlock;
+}
+
+/**
+ * R2-T3 (eval-0929 final review, P1-4 -- and the ESM twin it exposed): the
+ * statement that starts at `lines[at]`, on ONE line. A named-import list,
+ * CJS destructure or Python parenthesised import that prettier/black wrapped
+ *
+ *     const {
+ *       RAW_TTL: TTL_MS,
+ *       OTHER,
+ *     } = require("./consts");
+ *
+ * was matched by no shape below (every regex is single-line), so its names
+ * were bound to NOTHING -- and an unbound camelCase/PascalCase name is never
+ * disclosed either (`isUnresolvableConstantName` needs CONST_CASE, the V1
+ * import rule needs a NAMED spec), i.e. a false `request-item-empty` for the
+ * commonest way real code spells a multi-name import. The wrapped list is
+ * joined (comments stripped, bounded to MAX_IMPORT_STATEMENT_LINES, and only
+ * when its closer is actually found) so every shape reads it exactly like the
+ * single-line spelling. Anything else -- including a statement that already
+ * fits on its line -- is returned unchanged.
+ */
+function joinedImportStatement(lines: readonly string[], at: number): string {
+  const first = lines[at]!;
+  const brace = JS_WRAPPED_LIST_HEAD_RE.test(first);
+  const paren = !brace && PY_WRAPPED_LIST_HEAD_RE.test(first);
+  if (!brace && !paren) return first;
+  const open = brace ? "{" : "(";
+  const close = brace ? "}" : ")";
+  const strip = brace ? withoutJsComments : (text: string): string => text.replace(/(^|\s)#.*$/, "$1");
+  const count = (text: string, ch: string): number => { let n = 0; for (const c of text) if (c === ch) n++; return n; };
+  let statement = first;
+  let depth = count(first, open) - count(first, close);
+  if (depth > 0) {
+    const parts = [strip(first)];
+    for (let j = at + 1; j < lines.length && j <= at + MAX_IMPORT_STATEMENT_LINES && depth > 0; j++) {
+      const piece = strip(lines[j]!);
+      depth += count(piece, open) - count(piece, close);
+      parts.push(piece);
+    }
+    // Never closed within the bound: leave the opener line alone.
+    if (depth > 0) return first;
+    statement = parts.join(" ");
+  } else if (paren) {
+    statement = strip(first);
+  }
+  // `from m import ( A, B, )` -> `from m import A, B,` (the one-line parser reads a bare list).
+  return paren ? statement.replace(/^(\s*from\s+[.\w]+\s+import\s*)\(\s*/, "$1").replace(/\s*\)\s*$/, "") : statement;
+}
+
+/**
+ * R2-T3: the LOCAL names a JS/TS object-destructuring pattern binds, each with
+ * the top-level KEY it reads from the destructured value -- `pattern` is the
+ * text BETWEEN the outer braces. `A` -> (A, A); `A: B` -> (A, B); a default
+ * (`A = 1`, `A: B = 1`) is irrelevant to which export is read and is cut
+ * off; `...rest` binds the remaining exports as one object (no single key,
+ * skipped); a nested pattern (`A: { B, C: D }`) binds each inner local to the
+ * OUTER key `A` -- the export that carries them -- so the chase serves that
+ * export's own declaration. A computed/quoted non-identifier key can never
+ * name a declared binding and is skipped.
+ */
+function destructuredBindings(pattern: string): Array<{ key: string; local: string }> {
+  const out: Array<{ key: string; local: string }> = [];
+  for (const rawMember of topLevelSplit(pattern, ",")) {
+    const member = rawMember.trim();
+    if (member === "" || member.startsWith("...")) continue;
+    const colon = topLevelIndexOf(member, ":");
+    const keyEnd = colon !== -1 ? colon : topLevelIndexOf(member, "=");
+    const key = (keyEnd === -1 ? member : member.slice(0, keyEnd)).trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(key)) continue;
+    if (colon === -1) { out.push({ key, local: key }); continue; }
+    let target = member.slice(colon + 1).trim();
+    const eq = topLevelIndexOf(target, "=");
+    if (eq !== -1) target = target.slice(0, eq).trim();
+    if (/^[A-Za-z_$][\w$]*$/.test(target)) out.push({ key, local: target });
+    else if (target.startsWith("{") && target.endsWith("}")) {
+      for (const inner of destructuredBindings(target.slice(1, -1))) out.push({ key, local: inner.local });
+    }
+  }
+  return out;
+}
+
 /**
  * Import (and TS/JS re-export) lines in `fileLines` that plausibly bring
  * `name` into scope, across TS/JS (named/default/namespace import, `require`
@@ -1395,7 +1805,8 @@ function isCommentLine(rawLine: string, hashComment: boolean): boolean {
  * C# (`using static Namespace.Class` — names everything in the class, so any
  * such line is a candidate carrier), and C/C++ (`#include "x.h"` — a macro/
  * enum/const has no per-name import trace, so every local header include is
- * a candidate the hook tries, bounded by MAX_IMPORT_RESOLVED_FILES_PER_FOCAL).
+ * a candidate the hook tries, bounded by the re-export search's own file
+ * budget -- readCodeTaskPack.ts, MAX_REEXPORT_FILES_TOTAL).
  * Go is deliberately absent — a Go package import never names an individual
  * constant (`pkg.Name` is a QUALIFIED reference, this module's own stated
  * limitation); the hook resolves Go's same-PACKAGE (same-directory)
@@ -1428,7 +1839,7 @@ export function importSpecifiersNaming(
   // `ImportSpecifier`'s own doc for what each means and why a wildcard
   // spec's disclosure/package-wording eligibility differs from an ordinary
   // named one even when both resolve the identical FILE.
-  const push = (specifier: string, opts: { forceRelative?: boolean; wildcard: boolean; packageEligible: boolean }): void => {
+  const push = (specifier: string, opts: { forceRelative?: boolean; wildcard: boolean; packageEligible: boolean; exportedName?: string }): void => {
     const key = `${specifier}\u0000${opts.wildcard ? "w" : "n"}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -1437,20 +1848,32 @@ export function importSpecifiersNaming(
       relative: opts.forceRelative ?? (specifier.startsWith(".") || specifier.startsWith("/")),
       wildcard: opts.wildcard,
       packageEligible: opts.packageEligible,
+      ...(opts.exportedName !== undefined ? { exportedName: opts.exportedName } : {}),
     });
   };
   const boundName = (binding: string): string => {
     const asMatch = /^(?:type\s+)?([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/.exec(binding);
     return asMatch ? asMatch[2]! : binding.replace(/^type\s+/, "");
   };
+  // FIX-ALIAS: the SOURCE-side half of the same "A as B" shape `boundName`
+  // already parses for the LOCAL half -- `undefined` (no "as") means "same
+  // name queried", so every existing `boundName(binding) === name` match
+  // site stays byte-for-byte correct when it does not also read this.
+  const exportedNameOf = (binding: string): string | undefined => {
+    const asMatch = /^(?:type\s+)?([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/.exec(binding);
+    return asMatch ? asMatch[1] : undefined;
+  };
   const index = fileLineIndex(fileLines);
-  if (index.importLines === undefined) {
+  if (index.importLines === undefined || index.importTexts === undefined) {
     index.importLines = [];
+    index.importTexts = [];
     for (let at = 0; at < fileLines.length; at++) {
-      if (IMPORT_SHAPED_LINE_RE.test(fileLines[at]!)) index.importLines.push(at);
+      if (!IMPORT_SHAPED_LINE_RE.test(fileLines[at]!)) continue;
+      index.importLines.push(at);
+      index.importTexts.push(joinedImportStatement(fileLines, at));
     }
   }
-  for (const at of index.importLines) {
+  for (const [statementIndex, at] of index.importLines.entries()) {
     const rawLine = fileLines[at]!;
     // NOT `maskNonCode`: that helper blanks the quote MARKS themselves (by
     // design, for call-shape column arithmetic elsewhere), which would
@@ -1460,25 +1883,65 @@ export function importSpecifiersNaming(
     // only needed for the (rarer) `/* ... */`/`*`-continuation shapes that
     // anchor differently.
     if (isCommentLine(rawLine, hashComment)) continue;
-    const line = rawLine;
+    // R2-T3: the whole statement -- the raw line itself unless a wrapped
+    // `{ ... }` / `( ... )` import list spans several lines
+    // (`joinedImportStatement`).
+    const line = index.importTexts[statementIndex]!;
 
     const namedOpts = { wildcard: false, packageEligible: true };
-    const named = /^\s*import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(line);
+    // R2-T3: `import D, { A as B } from "./m"` (a default binding beside the
+    // named list) carries the same named list as `import { A as B } from`.
+    const named = /^\s*import\s+(?:type\s+)?(?:[A-Za-z_$][\w$]*\s*,\s*)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(line);
     if (named) {
       for (const binding of named[1]!.split(",").map((b) => b.trim()).filter(Boolean)) {
-        if (boundName(binding) === name) push(named[2]!, namedOpts);
+        // FIX-ALIAS: `import { A as B }` binds `B` LOCALLY but the source
+        // module declares `A` — `exportedName` carries `A` (undefined when
+        // there is no "as", i.e. this spec names the same thing it always
+        // did). `import { default as B }` matches this same shape with
+        // `A === "default"`: the caller resolves the target's own default
+        // export under that literal name, or discloses when it cannot.
+        if (boundName(binding) === name) push(named[2]!, { ...namedOpts, exportedName: exportedNameOf(binding) });
       }
     }
+    // FIX-ALIAS scope note: a PLAIN default import (`import B from "./m"`) is
+    // left WITHOUT `exportedName` here, on purpose — every existing caller
+    // already resolves it as a MODULE ALIAS (`importedModuleAliasesIn`'s own
+    // `tsDefaultImportAlias`), never through this bare-name chase, and a bare
+    // bodyWide bare bareName that DOES fail this bare lookup is already, and
+    // correctly, reconciled once its qualified member access resolves
+    // (`resolveQualifiedReferencesIn`'s own `MUST` un-disclose). Only the
+    // NAMED `{ default as B }` spec above (which the brief's own scope names)
+    // carries `exportedName: "default"`.
     const dflt = /^\s*import\s+([A-Za-z_$][\w$]*)\s*,?\s*(?:\{[^}]*\})?\s*from\s*["']([^"']+)["']/.exec(line);
     if (dflt && dflt[1] === name) push(dflt[2]!, namedOpts);
     const ns = /^\s*import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s*from\s*["']([^"']+)["']/.exec(line);
     if (ns && ns[1] === name) push(ns[2]!, namedOpts);
-    const req = /^\s*(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*["']([^"']+)["']\s*\)/.exec(line);
+    // R2-T3 (eval-0929 final review, P1-4): the `{ ... }` list is parsed as a
+    // real destructuring pattern (`destructuredBindings`), not split on
+    // commas -- so a rename with a default (`{ A: B = 1 }`), a plain default
+    // (`{ A = 1 }`), a mixed list (`{ A: B, C }`), a nested pattern and a
+    // multi-line list (`joinedImportStatement`) all bind exactly like the ES
+    // `import { A as B }` above.
+    const req = /^\s*(?:const|let|var)\s*\{([\s\S]*)\}\s*=\s*require\(\s*["']([^"']+)["']\s*\)/.exec(line);
     if (req) {
-      for (const binding of req[1]!.split(",").map((b) => b.trim()).filter(Boolean)) {
-        const asMatch = /^([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)$/.exec(binding);
-        if ((asMatch ? asMatch[2]! : binding) === name) push(req[2]!, namedOpts);
+      for (const binding of destructuredBindings(req[1]!)) {
+        // FIX-ALIAS: `const { A: B } = require(...)` binds `B` LOCALLY to
+        // the required module's OWN key `A` — same rename shape as the ES
+        // `as` import above, spelled with a colon instead.
+        if (binding.local === name) push(req[2]!, { ...namedOpts, exportedName: binding.key !== name ? binding.key : undefined });
       }
+    }
+    // R2-T3: the MEMBER form `const B = require("./x").A` binds `B` to the
+    // required module's own export `A` -- the same fact as
+    // `const { A: B } = require("./x")`, spelled as a property read. (The bare
+    // `const M = require("./x")` MODULE alias names no export and is resolved
+    // through `importedModuleAliasesIn`, never here.) `.default` reads the
+    // module's default export exactly like `import { default as B }`.
+    // A longer chain (`require("./x").limits.ttl`) still binds through the
+    // FIRST member: the module export that carries the rest.
+    const reqMember = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*["']([^"']+)["']\s*\)\s*\.\s*([A-Za-z_$][\w$]*)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*;?\s*$/.exec(line);
+    if (reqMember && reqMember[1] === name) {
+      push(reqMember[2]!, { ...namedOpts, exportedName: reqMember[3] !== name ? reqMember[3] : undefined });
     }
     // FIX-FAB item 4 (eval-0927 review #7, barrel): a TS/JS barrel re-export
     // (`export { DEFAULT_OPTIONS } from "./defaults"`, `export { Y as
@@ -1491,13 +1954,16 @@ export function importSpecifiersNaming(
     const namedReexport = /^\s*export\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/.exec(line);
     if (namedReexport) {
       for (const binding of namedReexport[1]!.split(",").map((b) => b.trim()).filter(Boolean)) {
-        if (boundName(binding) === name) push(namedReexport[2]!, namedOpts);
+        // FIX-ALIAS: `export { A as B } from "./mod"` re-exports THIS file's
+        // "./mod" under the LOCAL name B -- a caller chasing B must look up
+        // `A` (the SOURCE's own name) in "./mod", never B itself.
+        if (boundName(binding) === name) push(namedReexport[2]!, { ...namedOpts, exportedName: exportedNameOf(binding) });
       }
     }
     // A wildcard re-export (`export * from "./defaults"`) names nothing, so
     // it cannot be gated on `name` at all — it is a candidate for EVERY
     // lookup in this file, exactly as uncertain (and exactly as bounded by
-    // MAX_IMPORT_RESOLVED_FILES_PER_FOCAL downstream) as a C/C++ local
+    // MAX_REEXPORT_FILES_TOTAL downstream) as a C/C++ local
     // #include already is below. B1: still a TS/JS module specifier
     // (`packageEligible`), but `wildcard` so it never itself "names" a
     // queried identifier (V1) — `resolveConstantWindow`'s own barrel chase
@@ -1509,14 +1975,18 @@ export function importSpecifiersNaming(
     if (pyFrom) {
       for (const binding of pyFrom[2]!.split(",").map((b) => b.trim()).filter(Boolean)) {
         const asMatch = /^([A-Za-z_]\w*)\s+as\s+([A-Za-z_]\w*)$/.exec(binding);
-        if ((asMatch ? asMatch[2]! : binding) === name) push(pyFrom[1]!, { wildcard: false, packageEligible: true });
+        // FIX-ALIAS: `from m import A as B` binds `B` LOCALLY -- module `m`
+        // declares `A`, never `B`.
+        if ((asMatch ? asMatch[2]! : binding) === name) {
+          push(pyFrom[1]!, { wildcard: false, packageEligible: true, exportedName: asMatch ? asMatch[1] : undefined });
+        }
       }
     }
     // V3 follow-up (round-7 orchestrator probe, oPyStarReexport): a Python
     // star re-export (`from .defaults import *`) names NOTHING specific --
     // mirroring the TS/JS wildcard re-export just below, it is a candidate
     // for EVERY lookup in this file (bounded downstream the identical way:
-    // MAX_IMPORT_RESOLVED_FILES_PER_FOCAL / MAX_REEXPORT_FILES_TOTAL). B1
+    // MAX_REEXPORT_FILES_TOTAL). B1
     // (round-8, pyStarImportLowerConst): `wildcard:true` -- it names nothing
     // specific, so it must never make an unrelated body name (a parameter, a
     // loop variable, a keyword-argument name) look "imported".
@@ -1546,7 +2016,11 @@ export function importSpecifiersNaming(
     const ktMember = filePath !== undefined && /\.kts?$/.test(filePath)
       ? /^\s*import\s+([\w.]+)\.([a-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?\s*;?\s*$/.exec(line)
       : null;
-    if (ktMember && (ktMember[3] ?? ktMember[2]) === name) push(ktMember[1]!, { wildcard: false, packageEligible: false });
+    // FIX-ALIAS: `import a.b.A as B` binds `B` LOCALLY -- the member `A`
+    // (ktMember[2]) is the real name to look up, never `B` itself.
+    if (ktMember && (ktMember[3] ?? ktMember[2]) === name) {
+      push(ktMember[1]!, { wildcard: false, packageEligible: false, exportedName: ktMember[3] !== undefined ? ktMember[2] : undefined });
+    }
 
     // B1 (round-8, csUsingStaticPascalConst): `import static`/`using static`
     // name a JVM/CLR NAMESPACE or TYPE, never a "package" (`packageEligible:
@@ -1607,7 +2081,11 @@ export function importedModuleAliasesIn(fileLines: readonly string[], hashCommen
   const out = new Set<string>();
   const addGoImportSpec = (specText: string): void => {
     const aliased = /^([A-Za-z_]\w*)\s+"([^"]+)"$/.exec(specText);
-    if (aliased) { out.add(aliased[1]!); return; }
+    // FIX-GOALIAS (eval-0929 §4/§8, WP-K): a blank import (`_ "path"`) binds
+    // no NAME a value read could ever qualify through -- Go forbids reading
+    // the blank identifier, so "_" is never a real owner, only ever a
+    // structurally-matched alias token this regex happens to also accept.
+    if (aliased) { if (aliased[1] !== "_") out.add(aliased[1]!); return; }
     const plain = /^"([^"]+)"$/.exec(specText);
     if (plain) { const seg = plain[1]!.split("/").pop(); if (seg) out.add(seg); }
   };
@@ -1622,7 +2100,11 @@ export function importedModuleAliasesIn(fileLines: readonly string[], hashCommen
     if (isCommentLine(rawLine, hashComment)) continue;
     if (trimmed === "import (") { inGoImportBlock = true; continue; }
     const goSingle = /^import\s+(?:([A-Za-z_]\w*)\s+)?"([^"]+)"\s*$/.exec(trimmed);
-    if (goSingle) { out.add(goSingle[1] ?? goSingle[2]!.split("/").pop()!); continue; }
+    if (goSingle) {
+      const goAlias = goSingle[1] ?? goSingle[2]!.split("/").pop()!;
+      if (goAlias !== "_") out.add(goAlias);
+      continue;
+    }
     // V3 follow-up (round-7 orchestrator probe, oTsNamespaceImport): a TS/JS
     // namespace import binds a MODULE NAMESPACE object, not one member --
     // `ns.MEMBER` reads that module's own top level, exactly like the other
@@ -1668,6 +2150,56 @@ export function importedModuleAliasesIn(fileLines: readonly string[], hashCommen
   // Rust `use` trees (grouped, multi-line, `as`, `self`) and `mod name;`
   // declarations bind module names too.
   for (const name of rustUseBindings(fileLines, hashComment).keys()) out.add(name);
+  return out;
+}
+
+/**
+ * FIX-GOALIAS (eval-0929 §4/§8, WP-K -- "a Go package-qualified constant
+ * read is never verified empty"): Go import bindings in `fileLines` -- alias
+ * (an explicit `import lim "example.com/app/limits"`, or the unaliased
+ * convention's own last path segment, `import "example.com/app/limits"` ->
+ * "limits") -> the import PATH TEXT it names, across a single-line
+ * `import [alias] "path"` and a parenthesized `import (…)` block (one entry
+ * per line, alias or bare). `importedModuleAliasesIn` above already proves
+ * `owner` is a Go package alias (its own, independently-parsed Go branch);
+ * this is the SAME shapes, kept as its own small duplicate rather than a
+ * shared refactor of that widely-used, already-hardened function (round-7/
+ * 8/9 fable findings), so this addition carries none of that function's own
+ * regression risk. Used only by `findGoQualifiedPackageConstantWindow`
+ * (readCodeTaskPack.ts), which needs the PATH TEXT (not just the alias) to
+ * resolve a go.mod module path to a workspace directory -- a plain
+ * package-name text scan (this fix's own root cause) silently mismatches
+ * the moment the alias differs from the real declared package name. A dot
+ * import (`. "path"`) binds no alias a qualified read could ever use (every
+ * name it introduces is read UNQUALIFIED) and a blank import (`_ "path"`)
+ * binds no readable name at all (Go forbids reading the blank identifier)
+ * -- both excluded, never returned as a key.
+ */
+export function goImportPathAliasesIn(fileLines: readonly string[], hashComment: boolean): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  const addGoImportSpec = (specText: string): void => {
+    const aliased = /^([A-Za-z_]\w*)\s+"([^"]+)"$/.exec(specText);
+    if (aliased) { if (aliased[1] !== "_") out.set(aliased[1]!, aliased[2]!); return; }
+    const plain = /^"([^"]+)"$/.exec(specText);
+    if (plain) { const seg = plain[1]!.split("/").pop(); if (seg) out.set(seg, plain[1]!); }
+  };
+  let inGoImportBlock = false;
+  for (const rawLine of fileLines) {
+    const trimmed = rawLine.trim();
+    if (inGoImportBlock) {
+      if (trimmed === ")") { inGoImportBlock = false; continue; }
+      addGoImportSpec(trimmed);
+      continue;
+    }
+    if (isCommentLine(rawLine, hashComment)) continue;
+    if (trimmed === "import (") { inGoImportBlock = true; continue; }
+    const goSingle = /^import\s+(?:([A-Za-z_]\w*)\s+)?"([^"]+)"\s*$/.exec(trimmed);
+    if (goSingle) {
+      const alias = goSingle[1] ?? goSingle[2]!.split("/").pop()!;
+      if (alias !== "_") out.set(alias, goSingle[2]!);
+      continue;
+    }
+  }
   return out;
 }
 

@@ -134,7 +134,7 @@ describe("createContentSizeCap — single-edit create:true", () => {
 
     const oversized = "x".repeat(CAP_BYTES + 1024);
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/big.ts", create: true, content: oversized },
     });
     const data = parseToolResult(res);
@@ -152,7 +152,7 @@ describe("createContentSizeCap — single-edit create:true", () => {
 
     const exact = "x".repeat(CAP_BYTES);
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/exact.ts", create: true, content: exact },
     });
     const data = parseToolResult(res);
@@ -171,7 +171,7 @@ describe("createContentSizeCap — edits[] batch create item", () => {
 
     const oversized = "y".repeat(CAP_BYTES + 1);
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         edits: [
           { path: "src/ok.ts", create: true, content: "export const OK = 1;\n" },

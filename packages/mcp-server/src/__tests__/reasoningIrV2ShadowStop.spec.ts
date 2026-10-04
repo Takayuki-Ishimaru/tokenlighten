@@ -103,7 +103,7 @@ describe("V11-04 shadow Stop — strong tombstone contradictions", () => {
       scope: { kind: "paths", description: "src/api", paths: paths ?? ["src/api"], complete: true },
       reviveCondition: "a matching symbol appears",
       validityKeys: [{ type: "index-generation", value: "gen-1" }],
-      absence: { evidenceId: "e1", scopeComplete: true, observedMatches: 0, provider: "search_files/find" },
+      absence: { evidenceId: "e1", scopeComplete: true, observedMatches: 0, provider: "tl_search_files/find" },
       evidenceCatalog: catalog,
       ...(contradicts === undefined ? {} : { contradicts }),
     });
@@ -203,7 +203,7 @@ const contradictedTask: ShadowStopFixture = (() => {
     scope: { kind: "paths", description: "src/api", paths: ["src/api"], complete: true },
     reviveCondition: "a consumer appears",
     validityKeys: [{ type: "index-generation", value: "gen-1" }],
-    absence: { evidenceId: "e1", scopeComplete: true, observedMatches: 0, provider: "search_files/find" },
+    absence: { evidenceId: "e1", scopeComplete: true, observedMatches: 0, provider: "tl_search_files/find" },
     evidenceCatalog: catalog,
     contradicts: ["a"],
   });

@@ -136,7 +136,7 @@ export const PROTOCOL_VERSION = 1 as const;
 
 /**
  * §1.2 point 2/3: the `_meta` key the `initialize` result and the `tools/list`
- * `read_file` definition both carry. Namespaced so a multi-server host can tell
+ * `tl_read_file` definition both carry. Namespaced so a multi-server host can tell
  * whose protocol version it is reading (the same argument §1.2 makes for
  * `read.task_pack` over a bare `task_pack`).
  */
@@ -164,9 +164,9 @@ export interface ProtocolCallContext {
    * different search — the class TC-2 exists to catch and §2.1.2 to forbid.
    */
   readonly args?: Readonly<Record<string, unknown>>;
-  /** The read_file mode the dispatcher actually resolved (post-`auto` promotion). */
+  /** The tl_read_file mode the dispatcher actually resolved (post-`auto` promotion). */
   mode?: string;
-  /** The search_files action the dispatcher actually resolved. */
+  /** The tl_search_files action the dispatcher actually resolved. */
   action?: string;
   /** An outright declaration; wins over mode/action derivation. */
   kind?: Kind;
@@ -183,7 +183,7 @@ export interface ProtocolCallContext {
    */
   workspace?: string;
   /**
-   * D1 (F-C2a): the workspace root read_file/search_files dispatch resolved
+   * D1 (F-C2a): the workspace root tl_read_file/tl_search_files dispatch resolved
    * against, published ONLY for protocol/codec/pipeline.ts's trace
    * emissions (`wire_codec_shadow`/`wire_codec_v2_cell`) -- DELIBERATELY
    * SEPARATE from `workspace` above.
@@ -193,8 +193,8 @@ export interface ProtocolCallContext {
    * `readFamily.ts`'s `projectReadBody` (via the `workspace` this module
    * passes it at line ~672) to decide whether a `read.receipt`'s
    * continuation echoes `cwd` — both WIRE-AFFECTING, and both previously
-   * saw `undefined` on every read_file/search_files call because nothing
-   * but edit_file's finishEdit ever populated `workspace`. Populating
+   * saw `undefined` on every tl_read_file/tl_search_files call because nothing
+   * but tl_edit_file's finishEdit ever populated `workspace`. Populating
    * `workspace` itself for read/search (an earlier version of this fix)
    * changed a `read.receipt`'s `next.arguments` shape and broke
    * wireBaselines.spec.ts's pinned bytes — exactly the regression D1's own
@@ -219,7 +219,7 @@ export interface ProtocolCallContext {
    */
   codecTraceWorkspace?: string;
   /**
-   * VF-5/VF-7 hand-off: the workspace root a `read_file` call resolved
+   * VF-5/VF-7 hand-off: the workspace root a `tl_read_file` call resolved
    * against, published ONLY for `protocol/readFamily.ts`'s verify-first
    * closure gate (`verifyClosureGate`'s kit-less session-obligation
    * fallback, and `receiptOf`'s `closure-complete` withhold check) -- a
@@ -251,8 +251,8 @@ export interface ProtocolCallContext {
    */
   nulStrippedServe?: true;
   /**
-   * FX-N (ruling (s), 2026-09-03): the workspace root a `read_file` /
-   * `search_files` call resolved against, published so `emit.ts`'s [R5-10]
+   * FX-N (ruling (s), 2026-09-03): the workspace root a `tl_read_file` /
+   * `tl_search_files` call resolved against, published so `emit.ts`'s [R5-10]
    * settlement runs for the READ family too.
    *
    * A FOURTH dedicated slot, for the same reason `verifyClosureWorkspace` and
@@ -265,12 +265,12 @@ export interface ProtocolCallContext {
    *
    * WHY IT MUST EXIST. Before FX-N the retraction half of [R5-10] was
    * unreachable for reads: `settleServedRanges` ran only under
-   * `context.workspace`, so a `read_file` that booked a provisional serve span
+   * `context.workspace`, so a `tl_read_file` that booked a provisional serve span
    * and then shed to `refusal/cap-exceeded` left that span standing, and the
    * next slice of the same file answered `read.receipt{code-unchanged}` naming
    * the REFUSAL as the serving call (round-16 finding 1a, `r16_y`). It also
    * left the union/residency writes that ride the same booking standing, which
-   * granted `edit_file` write authority over a file no byte of which had ever
+   * granted `tl_edit_file` write authority over a file no byte of which had ever
    * been sent (1b) and laundered an FX-L `withheld` address to `shipped` (1c).
    */
   readServeWorkspace?: string;
@@ -328,8 +328,8 @@ export interface ProtocolCallContext {
    */
   clientId?: string;
   /**
-   * I-7 (2026-08-30 forensics attribution wave): set by read_file/
-   * search_files dispatch (server.ts, both `guardExecutionDiscovery` call
+   * I-7 (2026-08-30 forensics attribution wave): set by tl_read_file/
+   * tl_search_files dispatch (server.ts, both `guardExecutionDiscovery` call
    * sites) when the session's execution fence was ALREADY `phase:"prepared"`
    * the moment THIS call arrived -- i.e. discretionary agent spend after an
    * answer/edit certificate, not evidence the certificate required. The T03
@@ -342,7 +342,7 @@ export interface ProtocolCallContext {
    * Read only by emit.ts's `post_ready_followup` trace emission at the
    * funnel tail, alongside the FINAL `onWire` kind and `used` byte count --
    * both unknowable this early, which is why this rides the context instead
-   * of being traced directly at the guard call site. `edit_file` never sets
+   * of being traced directly at the guard call site. `tl_edit_file` never sets
    * it (guardExecutionEdit is a separate typestate-observed path), so the
    * emission site's `!== undefined` check alone excludes edits with no
    * special-casing. Never serialized onto the wire.
@@ -352,18 +352,18 @@ export interface ProtocolCallContext {
     readonly scopeClass: "handle" | "path" | "query" | "none";
   };
   /**
-   * W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF): set by read_file/
-   * search_files dispatch (server.ts, both `guardExecutionDiscovery` call
+   * W-BATCH-HINT candidate 3 (TL_BATCH_HINTS, default OFF): set by tl_read_file/
+   * tl_search_files dispatch (server.ts, both `guardExecutionDiscovery` call
    * sites) from `recordReadFamilySingleTargetCall`'s (state/session.ts)
    * return value — true iff THIS call is single-target AND it brought the
    * session's consecutive-single-target-read-family-call streak to
    * SERIAL_SINGLE_TARGET_HINT_THRESHOLD or beyond. `undefined`/`false` for
-   * every multi-target call, every edit_file call (which never sets this at
+   * every multi-target call, every tl_edit_file call (which never sets this at
    * all), and every call made before the flag turned this tracking on.
    * Consumed once, at the funnel tail, by `applySerialSingleTargetHint` —
    * which additionally gates on `kind` so the hint never rides an
-   * `edit_file`/refusal/receipt-shaped response even if this happened to be
-   * true for one (it structurally cannot be, since edit_file never sets it,
+   * `tl_edit_file`/refusal/receipt-shaped response even if this happened to be
+   * true for one (it structurally cannot be, since tl_edit_file never sets it,
    * but the kind gate is the honest, non-coincidental reason). Never
    * serialized onto the wire itself.
    */
@@ -388,13 +388,13 @@ export function noteServedBytesSource(
   if (context !== undefined && source !== undefined) context.servedBytesSource = source;
 }
 
-/** Publish the read_file mode this dispatch resolved to (after `auto` promotion). */
+/** Publish the tl_read_file mode this dispatch resolved to (after `auto` promotion). */
 export function noteResolvedMode(mode: string): void {
   const context = _protocolCall.getStore();
   if (context !== undefined && mode !== "") context.mode = mode;
 }
 
-/** Publish the search_files action this dispatch resolved to. */
+/** Publish the tl_search_files action this dispatch resolved to. */
 export function noteResolvedAction(action: string): void {
   const context = _protocolCall.getStore();
   if (context !== undefined && action !== "") context.action = action;
@@ -489,7 +489,7 @@ export function noteServeAttribution(filePath: string): void {
 }
 
 /**
- * D1 (F-C2a): publish the workspace root read_file/search_files dispatch
+ * D1 (F-C2a): publish the workspace root tl_read_file/tl_search_files dispatch
  * resolved against, for protocol/codec/pipeline.ts's trace emissions ONLY.
  * See `ProtocolCallContext.codecTraceWorkspace`'s own doc comment for why
  * this is a dedicated field/setter rather than reusing `noteWorkspaceRoot`
@@ -685,8 +685,8 @@ const SEARCH_MATCH_ACTIONS: ReadonlySet<string> = new Set([
 // turn-economy.md §3). server.ts's own `READ_BATCH_HINT_TEXT`/
 // `composeReadBatchHint` already nudge a caller re-reading the SAME path in
 // serial slices; this is the sibling for a serial run of single-target calls
-// across the read family generally — read_file with one target/handle OR
-// search_files action=find with one query, path- and tool-agnostic, firing
+// across the read family generally — tl_read_file with one target/handle OR
+// tl_search_files action=find with one query, path- and tool-agnostic, firing
 // from the THRESHOLD'th (SERIAL_SINGLE_TARGET_HINT_THRESHOLD, state/
 // session.ts) consecutive single-target call regardless of path — the exact
 // shape a task-handle-replay route produced 32 times running in the r4 SF05
@@ -695,7 +695,7 @@ const SEARCH_MATCH_ACTIONS: ReadonlySet<string> = new Set([
 // R28-FIX (2026-09-05 review): this constant used to be a byte-identical
 // copy of `READ_BATCH_HINT_TEXT`, which was inaccurate on three counts —
 // this mechanism fires from the 3rd+ call, not the 2nd; it fires for
-// search_files find, not only read_file; and it fires across DIFFERENT
+// tl_search_files find, not only tl_read_file; and it fires across DIFFERENT
 // paths, not "on this path". Reworded to describe the actual mechanism.
 // The MARKER substring ("fold the remaining ranges into ONE targets") is
 // kept verbatim on purpose: `bench/workflows/run_semantic_frontier_smoke.mjs`
@@ -707,7 +707,7 @@ const SEARCH_MATCH_ACTIONS: ReadonlySet<string> = new Set([
 // `finalizeProtocolResponse` below, so an import back would be circular).
 // ---------------------------------------------------------------------------
 export const SERIAL_SINGLE_TARGET_HINT_TEXT =
-  "3rd+ consecutive single-target read_file or search_files find call this session — fold the remaining ranges into ONE targets:[...] call (read_file) or queries:[...] call (search_files, <=5, OR-matched) instead of serial single-target calls";
+  "3rd+ consecutive single-target tl_read_file or tl_search_files find call this session — fold the remaining ranges into ONE targets:[...] call (tl_read_file) or queries:[...] call (tl_search_files, <=5, OR-matched) instead of serial single-target calls";
 
 /**
  * Shared substring both this hint and server.ts's `READ_BATCH_HINT_TEXT`
@@ -720,7 +720,7 @@ export const SERIAL_SINGLE_TARGET_HINT_TEXT =
  */
 const BATCH_HINT_DEDUP_MARKER = "fold the remaining ranges into ONE targets";
 
-/** The `Kind`s this hint may ride — every read-family SUCCESS shape; never a receipt, a refusal, or any edit_file kind. */
+/** The `Kind`s this hint may ride — every read-family SUCCESS shape; never a receipt, a refusal, or any tl_edit_file kind. */
 const SERIAL_SINGLE_TARGET_HINT_KINDS: ReadonlySet<Kind> = new Set([
   "read.text", "read.map", "read.batch", "read.artifact", "search.matches",
 ]);
@@ -838,7 +838,7 @@ function priorOnlyTextReceipt(body: Record<string, unknown>): Record<string, unk
     ...(remaining.length > 0
       ? {
           next: {
-            tool: "read_file",
+            tool: "tl_read_file",
             arguments: { targets: [{ handle, ranges: remaining }], content: "auto" },
           },
         }
@@ -925,16 +925,16 @@ function editKindOf(body: Record<string, unknown>): Kind | undefined {
 /**
  * The tools whose responses can report a SIDE EFFECT.
  *
- * `edit_file`, and only `edit_file`. C2-5 had to widen this set to the four
+ * `tl_edit_file`, and only `tl_edit_file`. C2-5 had to widen this set to the four
  * deprecated write aliases (`search_replace_edit`, `apply_edits_multi`,
  * `create_file`, `read_and_edit`), because `CANON` did not map them onto
- * `edit_file` and a write through one of them therefore classified as
+ * `tl_edit_file` and a write through one of them therefore classified as
  * `read.text` — a completed effect on the caller's disk wearing a read's
  * member, an SE-STABLE violation reached through a different door than the one
  * §4.2.1 guards. D11 deleted those four names outright, so the widening is
  * deleted with them: there is exactly one door again.
  */
-const WRITE_TOOLS: ReadonlySet<string> = new Set(["edit_file"]);
+const WRITE_TOOLS: ReadonlySet<string> = new Set(["tl_edit_file"]);
 
 /**
  * The response's `Kind`. `body` is the parsed payload; `isError` is the
@@ -964,22 +964,22 @@ export function kindForCall(
 
   if (isRefusalBody(body, isError) || body["query_mismatch"] === true) return "refusal";
 
-  // A.9.2 rows 9 + 10 (C2-4): two `search_files` branches report a FAILURE
+  // A.9.2 rows 9 + 10 (C2-4): two `tl_search_files` branches report a FAILURE
   // through `toolOk` with neither `isError` nor `ok:false` — a failed `git diff`
   // carrying `error`, and `buildCompactTree`'s symlink-escape guard carrying
   // `refused:true`. Both are invisible to `isRefusalBody` and both are refusals
   // under D6. Classified here, with the rest of the `Kind` question.
-  if (context.tool === "search_files"
+  if (context.tool === "tl_search_files"
     && searchRefusalCodeFor(context.action ?? "", body) !== undefined) {
     return "refusal";
   }
 
   // §2.3: a receipt is a success (isError unset) in every family, including the
-  // prepared fence's stop on a `search_files` call — `Kind` names the payload's
+  // prepared fence's stop on a `tl_search_files` call — `Kind` names the payload's
   // family, not the tool that was called, and there is no `search.receipt`.
   if (isReceiptBody(body, context.verifyClosureWorkspace)) return "read.receipt";
 
-  if (context.tool === "search_files") {
+  if (context.tool === "tl_search_files") {
     const action = context.action ?? "";
     if (action === "references") return "search.references";
     if (action === "tree") return "search.tree";
@@ -1066,7 +1066,7 @@ export function finalizeProtocolResponse(
 
   // L3: receipt conversion happens before classification so an all-prior
   // segment response cannot escape as `read.text` with zero fresh evidence.
-  if (context.tool === "read_file" && READ_TEXT_MODES.has(context.mode ?? "")) {
+  if (context.tool === "tl_read_file" && READ_TEXT_MODES.has(context.mode ?? "")) {
     body = priorOnlyTextReceipt(body) ?? body;
   }
 
@@ -1096,7 +1096,7 @@ export function finalizeProtocolResponse(
     // resolves it — inside the funnel, never appended after it (P3a).
     ? buildRefusal(
         toolNameOf(canonical),
-        context.tool === "search_files" ? searchRefusalBody(context.action ?? "", body) : body,
+        context.tool === "tl_search_files" ? searchRefusalBody(context.action ?? "", body) : body,
       )
     : { v: PROTOCOL_VERSION, kind, ...projectSuccessBody(kind, body, context) };
   // Read/search dispatch records the authoritative resolved root in the
@@ -1175,14 +1175,14 @@ export function canonicalizeEmittedToolCalls(value: Record<string, unknown>): Re
     const tool = copied["tool"];
     const argumentsValue = copied["arguments"];
     if (
-      (tool === "read_file" || tool === "edit_file" || tool === "search_files")
+      (tool === "tl_read_file" || tool === "tl_edit_file" || tool === "tl_search_files")
       && argumentsValue !== null && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)
     ) {
       // Route object-shaped continuations through the public constructor too:
       // otherwise the final recursive pass would normalize syntax but miss
       // cwd/task attribution for direct mint sites. DESIGN-v0.15 §8.2 (R7 Part
       // B): under a `code` surface this constructor can also SWAP `tool`
-      // itself (a full-only read replaced by a `search_files` directory
+      // itself (a full-only read replaced by a `tl_search_files` directory
       // listing — see `fullOnlyPathRecovery`), so `tool` is re-stamped from
       // the SAME call, never just `arguments` alone — leaving the old `tool`
       // paired with the new shape would emit an inconsistent, unexecutable
@@ -1250,10 +1250,10 @@ interface SurfacedCall {
 
 /** Directory-listing recovery for a path this surface can never read — no query to guess, so `tree` (which needs none) is the one recovery that is always constructible. */
 function fullOnlyPathRecovery(removedPath: string): SurfacedCall {
-  return { tool: "search_files", arguments: { action: "tree", scope: { path: posixPath.dirname(removedPath) } } };
+  return { tool: "tl_search_files", arguments: { action: "tree", scope: { path: posixPath.dirname(removedPath) } } };
 }
 
-/** Strip `edit_file`'s two full-only top-level blocks. Structural only: an artifact-only edit with nothing left is a pre-existing narrower gap (edit_file next-calls do not mint bare artifact edits today) left to the schema's own `unknown-arguments`/`edits`-required refusal rather than a fabricated recovery. */
+/** Strip `tl_edit_file`'s two full-only top-level blocks. Structural only: an artifact-only edit with nothing left is a pre-existing narrower gap (tl_edit_file next-calls do not mint bare artifact edits today) left to the schema's own `unknown-arguments`/`edits`-required refusal rather than a fabricated recovery. */
 function withoutFullOnlyEditFileArguments(tool: string, args: Record<string, unknown>): SurfacedCall {
   if (args["artifact"] === undefined && args["credentials"] === undefined) return { tool, arguments: args };
   const next = { ...args };
@@ -1262,7 +1262,7 @@ function withoutFullOnlyEditFileArguments(tool: string, args: Record<string, unk
   return { tool, arguments: next };
 }
 
-/** Strip `search_files.scope.archive`/`.credentialRef`; if the survives-stripping `scope.path` is itself full-only-shaped, the call would still dead-end on this surface — recover with a directory listing instead. */
+/** Strip `tl_search_files.scope.archive`/`.credentialRef`; if the survives-stripping `scope.path` is itself full-only-shaped, the call would still dead-end on this surface — recover with a directory listing instead. */
 function withoutFullOnlySearchFilesArguments(tool: string, args: Record<string, unknown>): SurfacedCall {
   const scope = recordOf(args["scope"]);
   if (scope === undefined) return { tool, arguments: args };
@@ -1279,13 +1279,13 @@ function withoutFullOnlySearchFilesArguments(tool: string, args: Record<string, 
 }
 
 /**
- * Strip `read_file`'s full-only surface: each target's `archive`/
+ * Strip `tl_read_file`'s full-only surface: each target's `archive`/
  * `credentialRef`, `select`'s artifact-addressing keys, `budget.rows`/
  * `.cells`, and `scope.archive`/`.credentialRef`. A target whose PATH is
  * itself full-only-shaped is DROPPED ENTIRELY (field-stripping alone cannot
  * make `data.zip` a plain-text file); if every target is dropped this way,
  * the whole call is replaced by a directory listing of the first removed
- * path's parent — never a `read_file targets:[{archive:…}]` a `code` surface
+ * path's parent — never a `tl_read_file targets:[{archive:…}]` a `code` surface
  * cannot execute.
  */
 function withoutFullOnlyReadFileArguments(tool: string, args: Record<string, unknown>): SurfacedCall {
@@ -1350,14 +1350,14 @@ function withoutFullOnlyReadFileArguments(tool: string, args: Record<string, unk
  */
 function applyToolSurface(tool: string, args: Record<string, unknown>): SurfacedCall {
   if (envelopeToolSurface === "full") return { tool, arguments: args };
-  if (tool === "edit_file") return withoutFullOnlyEditFileArguments(tool, args);
-  if (tool === "search_files") return withoutFullOnlySearchFilesArguments(tool, args);
-  if (tool === "read_file") return withoutFullOnlyReadFileArguments(tool, args);
+  if (tool === "tl_edit_file") return withoutFullOnlyEditFileArguments(tool, args);
+  if (tool === "tl_search_files") return withoutFullOnlySearchFilesArguments(tool, args);
+  if (tool === "tl_read_file") return withoutFullOnlyReadFileArguments(tool, args);
   return { tool, arguments: args };
 }
 
 /**
- * GATE-A2 (plan-0143 §4/§8.1, R04, 2026-09-21): every `read_file`
+ * GATE-A2 (plan-0143 §4/§8.1, R04, 2026-09-21): every `tl_read_file`
  * continuation this module mints for a caller-ranged target IS, by
  * construction, a promise this server itself made — "the next window to ask
  * for is exactly this". Recording it HERE (rather than at each of the
@@ -1380,7 +1380,7 @@ function applyToolSurface(tool: string, args: Record<string, unknown>): Surfaced
  * `targets[]` wrapper (`readFamily.ts`'s `deriveNext`/`resolveSlice`'s own
  * mode=slice shape, reachable wherever the sha-bound read cursor does not
  * supersede it first). A whole-file target (no `range`/`ranges` at all), an
- * `edit_file`/`search_files` call, or a target missing both `path` and
+ * `tl_edit_file`/`tl_search_files` call, or a target missing both `path` and
  * `handle` is never a caller-ranged window and is left unrecorded. A
  * `handle`-only address resolves to its path through the dispatcher's own
  * handle table, so a window minted by handle and later re-asked by path (or
@@ -1393,7 +1393,7 @@ function applyToolSurface(tool: string, args: Record<string, unknown>): Surfaced
  * never the reverse.
  */
 function recordMintedRangedContinuationWindows(tool: string, args: Record<string, unknown>): void {
-  if (tool !== "read_file") return;
+  if (tool !== "tl_read_file") return;
   const context = protocolCallContext();
   const workspace = context?.workspace ?? context?.codecTraceWorkspace;
   if (typeof workspace !== "string" || workspace === "") return;
@@ -1430,7 +1430,7 @@ function recordMintedRangedContinuationWindows(tool: string, args: Record<string
 }
 
 /** Construct an executable wire continuation through the one canonicalizer. */
-export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_files", args: Record<string, unknown>): ToolCall {
+export function canonicalToolCall(tool: "tl_read_file" | "tl_edit_file" | "tl_search_files", args: Record<string, unknown>): ToolCall {
   const attributed = attributedContinuationArguments(tool, canonicalToolArguments(tool, args));
   const leaned = leanContinuationForVsCode(tool, attributed);
   const surfaced = applyToolSurface(tool, leaned);
@@ -1440,10 +1440,10 @@ export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_file
 
 /**
  * WP-V1 (2026-09-20): sheds two purely-redundant fields from an emitted
- * read_file/search_files continuation when BOTH hold — the resolved client
+ * tl_read_file/tl_search_files continuation when BOTH hold — the resolved client
  * is "vscode" (GitHub Copilot Chat; see codec/clientProfile.ts) and
  * `leanCallsEnabled()` (util/flags.ts has the full rollout rationale).
- * `edit_file` is untouched: write safety keeps `cwd`/`task.handle` explicit
+ * `tl_edit_file` is untouched: write safety keeps `cwd`/`task.handle` explicit
  * on every edit, always. Neither condition true: returns `args` unchanged,
  * so a non-vscode client or a flag-off server stays byte-identical.
  *
@@ -1456,7 +1456,7 @@ export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_file
  * keeps `cwd` (the values differ). Compared by VALUE, not by whether
  * `continuationWorkspace` happens to be set, because `context.workspace` is
  * an EDIT-dispatch-only field (see `protocol/lineGutter.ts`'s own
- * `AnswerLineGutterContext` doc comment) — a read_file/search_files call
+ * `AnswerLineGutterContext` doc comment) — a tl_read_file/tl_search_files call
  * resolves its workspace into `codecTraceWorkspace` instead, so checking
  * `context.workspace` alone would silently never fire for the two tools
  * this function actually leans.
@@ -1469,7 +1469,7 @@ export function canonicalToolCall(tool: "read_file" | "edit_file" | "search_file
  * below names the shapes that keep it regardless.
  */
 function leanContinuationForVsCode(tool: string, args: Record<string, unknown>): Record<string, unknown> {
-  if (tool === "edit_file" || !leanCallsEnabled()) return args;
+  if (tool === "tl_edit_file" || !leanCallsEnabled()) return args;
   const context = protocolCallContext();
   if (resolveClientProfile(context?.clientId).id !== "vscode") return args;
 
@@ -1496,7 +1496,7 @@ function leanContinuationForVsCode(tool: string, args: Record<string, unknown>):
  * (CANONICAL_TASK's own `dependentRequired` ties it to `handle` — dropping
  * the handle here would make the call schema-invalid, not merely leaner).
  * Otherwise, a `qref` binds the task on its own, and a plain targets-only
- * read (no `query`, for read_file) or a plain search needs no task
+ * read (no `query`, for tl_read_file) or a plain search needs no task
  * continuity at all.
  */
 function continuationNeedsTaskHandle(  tool: string,
@@ -1508,7 +1508,7 @@ function continuationNeedsTaskHandle(  tool: string,
   if (task["challenge"] !== undefined) return true;
   if (task["expected_state_version"] !== undefined) return true;
   if (args["qref"] !== undefined) return false;
-  if (tool === "read_file") {
+  if (tool === "tl_read_file") {
     const targets = args["targets"];
     return !(Array.isArray(targets) && targets.length > 0 && args["query"] === undefined);
   }
@@ -1598,13 +1598,13 @@ function attributedContinuationArguments(tool: string, args: Record<string, unkn
  *  3. NEVER over a budget the minted call already declares — a producer that
  *     has chosen its own ceiling for the next hop keeps it, and a caller may
  *     change it explicitly on any hop.
- *  4. NOT onto a `cursor` continuation, and NOT onto `edit_file`. The cursor
+ *  4. NOT onto a `cursor` continuation, and NOT onto `tl_edit_file`. The cursor
  *     chain already inherits the caller's budget through the persisted request
  *     state (`server.ts`'s "DESIGN-v0.15 §5.2 原要求のbudgetは状態で継承する"
  *     block, whose reviewed comment states that a minted cursor call carries no
  *     `budget` precisely because of that), so stamping one here would restate
  *     the same number in a second place and change pinned wire bytes for no
- *     behavioural gain. `edit_file` has no `budget` input at all.
+ *     behavioural gain. `tl_edit_file` has no `budget` input at all.
  *  5. NOT onto a continuation this call's OWN staged read/search request will
  *     replace with that same zero-cost cursor before the response ships
  *     (FIX-A3, 2026-09-21 — the regression `hasStagedRequestContinuation`
@@ -1620,7 +1620,7 @@ function attributedContinuationArguments(tool: string, args: Record<string, unkn
  *     stamped bytes below would never reach the wire — they would only be
  *     measured, deep inside `budget/ladder.ts`'s per-step candidate. THAT
  *     measurement is the regression: `fxoServeCoordinateSettlement.spec.ts`'s
- *     "MULTI-window slice" case mints a `read_file
+ *     "MULTI-window slice" case mints a `tl_read_file
  *     {targets:[{path,ranges:["1-20","250-260"]}],budget:{bytes:620}}` whose
  *     FIRST rung-4 truncation pass narrows a 940 B unshed payload to 924 B of
  *     real content — genuine progress — but publishes a candidate carrying
@@ -1651,7 +1651,7 @@ function inheritCallerResponseBudget(
   context: ProtocolCallContext | undefined,
 ): void {
   if (inbound === undefined) return;
-  if (tool !== "read_file" && tool !== "search_files") return;
+  if (tool !== "tl_read_file" && tool !== "tl_search_files") return;
   if (attributed["cursor"] !== undefined) return;
   const positive = (value: unknown): number | undefined =>
     typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
@@ -1661,8 +1661,11 @@ function inheritCallerResponseBudget(
   if (bytes === undefined && tokens === undefined) return;
   // Rule 5 above: a staged read/search request on THIS call already carries
   // the same budget forward at zero wire cost, and will overwrite whatever
-  // this function would stamp here before the response ships.
-  if (context !== undefined && hasStagedRequestContinuation(context)) return;
+  // this function would stamp here before the response ships — but only for
+  // the continuation THAT request actually owns (`ownsMintedContinuation`'s
+  // own doc comment: eval-0929 §8, a mixed batch's still-deferred sibling
+  // target is never touched by another target's staged cursor).
+  if (context !== undefined && hasStagedRequestContinuation(context) && ownsMintedContinuation(tool, attributed, context)) return;
   // The minted call's own declaration wins, in EITHER dialect: `canonicalToolArguments`
   // has already run, so a canonical `budget` is present, but a producer that
   // spelled `maxBytes` still reaches here through that same projection.
@@ -1678,7 +1681,7 @@ function inheritCallerResponseBudget(
   // `resolveCallerByteCeiling` already resolves an inbound pair through (the
   // MIN of both halves when both are declared, matching that function's own
   // `Math.min(...candidates)`), and `bytes` is the SAME spelling clean HEAD
-  // already used for a search_files refusal `next` regardless of which
+  // already used for a tl_search_files refusal `next` regardless of which
   // dialect the caller declared. Only when NEITHER half is already declared
   // by the minted call itself (`next.bytes`/`next.tokens` both undefined, the
   // check just below): a producer's OWN partial/full budget declaration is
@@ -1712,6 +1715,65 @@ function hasStagedRequestContinuation(context: ProtocolCallContext): boolean {
   return loose.readRequest !== undefined || loose.searchRequest !== undefined;
 }
 
+/**
+ * eval-0929 §8 (WP-G): is the staged request `hasStagedRequestContinuation`
+ * found actually the ONE that will overwrite THIS minted call's own
+ * continuation position, per rule 5's own reasoning?
+ *
+ * THE GAP RULE 5 DID NOT ANTICIPATE. A staged READ request's cursor
+ * (`readRequestContinuation.ts`) only ever replaces a continuation ABOUT ITS
+ * OWN staged path(s) — never one minted for a DIFFERENT target. A mixed
+ * `targets:[]` batch (one entry the caller ranged, one it left bare) stages
+ * a read request from ONLY the bare entry (the ranged one is served through
+ * `resolveRangedPathsBatchEntry`, which never stages one at all — see
+ * `server.ts`'s own R2 comment on that helper). When the bare entry alone
+ * admits and the ranged one is deferred for budget, rule 5 saw SOME read
+ * request staged and skipped stamping the caller's budget onto the deferred
+ * entry's own `next` — believing the cursor mechanism would carry it forward
+ * "at zero wire cost" — but that mechanism never touches this `next` at all:
+ * it is not the staged request's path, so the budget-less `next` this call
+ * mints is exactly what ships (confirmed live, alongside the sibling
+ * silent-drop `readRequestContinuation.ts`'s `addressesForeignPath` closes:
+ * once the drop itself is fixed, the surviving `next` still lacked
+ * `budget`, re-opening the response to the calibrated server ceiling instead
+ * of the caller's declared one).
+ *
+ * Scoped to a staged `readRequest`, which is path-keyed and checkable here.
+ * A staged `searchRequest` — or a shape this cannot recognise — keeps rule
+ * 5's original, unconditional answer (`true`): out of this fix's scope, and
+ * the same direction already shipped. A call that names no identifiable
+ * path at all (a bare cursor) also keeps it — nothing here to prove foreign.
+ */
+function ownsMintedContinuation(
+  tool: string,
+  attributed: Record<string, unknown>,
+  context: ProtocolCallContext,
+): boolean {
+  const loose = context as { readRequest?: { state?: { targets?: unknown } } };
+  const targets = loose.readRequest?.state?.targets;
+  if (loose.readRequest === undefined || tool !== "tl_read_file" || !Array.isArray(targets)) return true;
+  const owned = new Set<string>();
+  for (const target of targets) {
+    const path = recordOf(target)?.["path"];
+    if (typeof path === "string" && path !== "") owned.add(path);
+  }
+  if (owned.size === 0) return true;
+  const named = new Set<string>();
+  const addPath = (value: unknown): void => { if (typeof value === "string" && value !== "") named.add(value); };
+  addPath(attributed["path"]);
+  for (const entry of Array.isArray(attributed["targets"]) ? attributed["targets"] : []) {
+    const record = recordOf(entry);
+    if (record !== undefined) addPath(record["path"]);
+  }
+  for (const entry of Array.isArray(attributed["paths"]) ? attributed["paths"] : []) {
+    const record = recordOf(entry);
+    if (record !== undefined) addPath(record["path"]); else addPath(entry);
+  }
+  if (named.size === 0) return true;
+  for (const path of named) if (!owned.has(path)) return false;
+  return true;
+}
+
 function canonicalToolArguments(tool: string, args: Record<string, unknown>): Record<string, unknown> {
   const base: Record<string, unknown> = {};
   if (typeof args["lane"] === "string" && args["lane"] !== "") base["lane"] = args["lane"];
@@ -1722,8 +1784,8 @@ function canonicalToolArguments(tool: string, args: Record<string, unknown>): Re
   const budget = recordOf(args["budget"]) ?? canonicalBudget(args);
   if (budget !== undefined) base["budget"] = budget;
 
-  if (tool === "read_file") return { ...base, ...canonicalReadArguments(args) };
-  if (tool === "edit_file") return { ...base, ...canonicalEditArguments(args) };
+  if (tool === "tl_read_file") return { ...base, ...canonicalReadArguments(args) };
+  if (tool === "tl_edit_file") return { ...base, ...canonicalEditArguments(args) };
   return { ...base, ...canonicalSearchArguments(args) };
 }
 
@@ -1751,7 +1813,7 @@ function canonicalBudget(args: Record<string, unknown>): Record<string, unknown>
 
 function canonicalReadArguments(args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  // DESIGN-v0.15 §5.2 (R2): `read_file.cursor` is carried verbatim, exactly as
+  // DESIGN-v0.15 §5.2 (R2): `tl_read_file.cursor` is carried verbatim, exactly as
   // `canonicalSearchArguments` below already carries the search cursor. An
   // opaque token has no legacy spelling to project from and nothing to derive:
   // dropping it here (the pre-R2 behaviour) silently turned the one canonical
@@ -2102,7 +2164,7 @@ export function servedWindowsOf(
     //
     // BINARY CONTAINERS GRANT NOTHING, and that is the dividing line ruling
     // (s) drew. `form:"xlsx.table"` also carries `rows` + `range`, but those
-    // are SHEET coordinates in an OOXML container an `edit_file`
+    // are SHEET coordinates in an OOXML container an `tl_edit_file`
     // search/replace cannot target at all; docx/pptx/pdf/zip members are the
     // same. They keep `recordArtifactServedRange`'s separate sheet/range dedup
     // ledger and are excluded here by naming the ONE text form explicitly
@@ -2144,12 +2206,12 @@ export function servedWindowsOf(
  * Three names in, three names out: after D11 the only tools that reach this
  * function are the three advertised ones, so `for` can only ever name a tool
  * the caller can actually see in `tools/list` (A.5.15). The C2-5 alias mapping
- * that sent the four deprecated write aliases at `edit_file` is deleted with
+ * that sent the four deprecated write aliases at `tl_edit_file` is deleted with
  * them.
  */
 function toolNameOf(canonical: string): ToolName {
-  if (canonical === "search_files") return "search_files";
-  return WRITE_TOOLS.has(canonical) ? "edit_file" : "read_file";
+  if (canonical === "tl_search_files") return "tl_search_files";
+  return WRITE_TOOLS.has(canonical) ? "tl_edit_file" : "tl_read_file";
 }
 
 /**
@@ -2257,7 +2319,7 @@ function projectSuccessBody(
     // RULE K for this family is the `matches: {form, …}` wrapper — a NEW object
     // that covers `find`/`symbols`/`locate`/`diff`, which ship flat today — so
     // the C2-2 interim that held a top-level `kind` under `form` no longer
-    // applies here and is scoped to `edit_file` below (C2-5's migration).
+    // applies here and is scoped to `tl_edit_file` below (C2-5's migration).
     // -----------------------------------------------------------------------
     projected = projectSearchBody(kind, projected, context.action ?? "", context.args ?? {});
     // TL_SEARCH_DEDUP (DESIGN-v0.15-sf-turn-economy.md §4, W-T-D, default
@@ -2321,7 +2383,7 @@ function projectSuccessBody(
 
   // §2.6: placeholder-bearing calls are ABOLISHED, not marked. Deleting
   // `next_call_is_template` above without this would be strictly worse than
-  // pre-v1 — an unmarked `edit_file` template whose `<exact text to replace>`
+  // pre-v1 — an unmarked `tl_edit_file` template whose `<exact text to replace>`
   // a caller sends as real bytes, which is the exact failure the marker was
   // added for. v1 removes the class: "a `next` is either fully executable or it
   // is not emitted."

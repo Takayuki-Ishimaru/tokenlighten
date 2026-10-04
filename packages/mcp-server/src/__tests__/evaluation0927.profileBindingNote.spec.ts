@@ -88,14 +88,14 @@ describe("profile_binding continuation note on qref replays", () => {
     const s = await server(ws);
     const chain = await followNextToEnd(
       s,
-      { tool: "read_file", arguments: { query: "Who calls backoffDelay?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
+      { tool: "tl_read_file", arguments: { query: "Who calls backoffDelay?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
       { cwd: ws, hopCap: 10 },
     );
     const qref: string = chain.hops[0]!.response?.qref;
     expect(typeof qref).toBe("string");
     expect(chain.hops.length).toBeGreaterThan(2);
     for (let i = 0; i < 3; i++) {
-      const replay = (await s.callTool("read_file", { qref, cwd: ws })).body;
+      const replay = (await s.callTool("tl_read_file", { qref, cwd: ws })).body;
       expect(noteCount(replay), JSON.stringify(replay?.profile_binding)).toBeLessThanOrEqual(1);
     }
     for (const hop of chain.hops) expect(noteCount(hop.response)).toBeLessThanOrEqual(1);
@@ -104,14 +104,14 @@ describe("profile_binding continuation note on qref replays", () => {
   it("an undeclared task: replays never claim the profile was declared", async () => {
     const ws = workspace();
     const s = await server(ws);
-    const first = (await s.callTool("read_file", {
+    const first = (await s.callTool("tl_read_file", {
       query: "How does backoffDelay compute the delay between attempts?", task: { epoch: "new" }, cwd: ws,
     })).body;
     expect(first?.profile_binding?.requested ?? "auto").toBe("auto");
     const qref: string = first?.qref;
     expect(typeof qref).toBe("string");
     for (let i = 0; i < 2; i++) {
-      const replay = (await s.callTool("read_file", { qref, cwd: ws })).body;
+      const replay = (await s.callTool("tl_read_file", { qref, cwd: ws })).body;
       expect(noteCount(replay), JSON.stringify(replay?.profile_binding)).toBe(0);
     }
   });

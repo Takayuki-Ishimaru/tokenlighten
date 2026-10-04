@@ -389,7 +389,7 @@ function _tokensOverlap(a: readonly string[], b: readonly string[]): boolean {
  * at a locate that already ran. Lives in `meta`, so an epoch flip clears it;
  * bounded FIFO of 8 queries.
  *
- * P1-b (2026-08-28 review-fix wave): generalized to every search_files action
+ * P1-b (2026-08-28 review-fix wave): generalized to every tl_search_files action
  * that can name a "next" — advanceExecutedLocateNextCall's `action !== "locate"`
  * passthrough let find/references/tree re-propose an already-answered search
  * forever (the same class of loop the doc comment above already closed for
@@ -862,7 +862,7 @@ const _executedNextFingerprints = new Map<string, Map<string, ExecutedNextRecord
 // records `find`/`references`/`tree` there with a deliberately EMPTY candidate
 // list, so that store can only ever suppress a repeat, never use a result).
 //
-// So when a pack asks the caller to run `search_files find <identifier>` and
+// So when a pack asks the caller to run `tl_search_files find <identifier>` and
 // the caller runs it, the fact the search ESTABLISHED — "the symbol is at
 // src/auth.ts:7", or "the token occurs in no scanned file" — is discarded. The
 // next rebuild of that task re-derives everything from scratch, and when its
@@ -1065,7 +1065,7 @@ export function consultExecutedSearchResult(
 // `effectiveContract.next_call`, and the answer-pack `discover` shape that
 // prescribes an identifier find carries its next on the WIRE decision with
 // `next_call` unset (measured: `R1DBG-reg next=undefined` while
-// `decision.next = search_files find [..]`). That is exactly why the pre-existing
+// `decision.next = tl_search_files find [..]`). That is exactly why the pre-existing
 // fenced recorders never fire on those chains — and a fence that is always shut
 // would not make the ledger honest, it would delete the feature.
 //
@@ -1329,7 +1329,7 @@ function semanticReadTargets(args: Record<string, unknown>): Record<string, unkn
 }
 
 function semanticNextArguments(tool: string, args: Record<string, unknown>): Record<string, unknown> {
-  if (tool !== "read_file" && tool !== "search_files") {
+  if (tool !== "tl_read_file" && tool !== "tl_search_files") {
     return Object.fromEntries(Object.entries(args)
       .filter(([key]) => key !== "cwd" && key !== "lane" && key !== "task_handle" && key !== "taskBinding"));
   }
@@ -1339,7 +1339,7 @@ function semanticNextArguments(tool: string, args: Record<string, unknown>): Rec
   if (task !== undefined) out["task"] = task;
   if (budget !== undefined) out["budget"] = budget;
 
-  if (tool === "search_files") {
+  if (tool === "tl_search_files") {
     const scope = semanticScope(args) ?? {};
     let action = args["action"];
     if (action === "symbols") {
@@ -1468,7 +1468,7 @@ export function hasExecutedNext(
  * resolves it directly from the call's own args), while a `next` with no
  * task fields at all — the shape a plain content read's `next` has — is
  * always recorded under the unbound partition, because that resolver only
- * attempts a registered-scope lookup for `search_files`. Checking the
+ * attempts a registered-scope lookup for `tl_search_files`. Checking the
  * recovered binding FIRST (most specific — matches a caller that supplies
  * its own `task.handle` exactly as before) and the unbound partition SECOND
  * (the historical fallback, still written today) finds either shape without

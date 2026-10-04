@@ -51,6 +51,15 @@
 import type { CreateTarget, FrontierEntry, Kind, ToolCall } from "@tokenlighten/types";
 
 import { answerFloorHolds, editFloorHolds } from "../decisionWire.js";
+import {
+  certificateWireBreaches,
+  parseCitedSpans,
+  REQUEST_ITEM_OBLIGATION_PREFIX,
+  type CertificateCitation,
+  type CitationMode,
+  type CitedWindow,
+  type ServedSpans,
+} from "../../features/task-pack/certificateWireInvariant.js";
 import { isRecord, type ShedPayload } from "./shedders/registry.js";
 
 /**
@@ -105,6 +114,98 @@ function usableEvidenceView(payload: ShedPayload): { body?: string; prior?: stri
 }
 
 // ---------------------------------------------------------------------------
+// WP-H (eval-0929 §5, §8) — THE INVARIANT HOLDS AT THE WIRE TOO.
+//
+// `answerFloorHolds` is the necessary condition decisionWire.ts itself
+// documents: "the response must carry at least one usable entry". It is not
+// sufficient once a shed can remove ONE evidence body while another survives
+// — exactly what `shedders/readTaskPack.ts`'s rung 4 does, one body at a
+// time, widest first, with no notion of which body a `request-item:` (facet)
+// obligation actually needs. MEASURED (eval-0929 §5): "In src/policy.ts,
+// explain all conditions of shouldRetry, including the actual values in
+// TRANSIENT_CODES" lost exactly the constant's evidence to a later pass and
+// still shipped `act.answer` with no gap — the SAME class WP-B's
+// `certificateWireInvariant.ts` closed one layer up (the internal builder),
+// now closed here for the WIRE'S OWN budget ladder.
+//
+// THE WIRE CANNOT JOIN OBLIGATIONS TO EVIDENCE. `certificateCitations`
+// (`features/task-pack/certificateWireInvariant.ts`) reads each PROVED
+// obligation's OWN evidence windows off the INTERNAL `TaskExecutionContract`
+// — but `decisionWire.ts::projectCertificate` keeps only `.id` when it builds
+// the wire `CertificateRef` (protocol v1, A.2.4: `obligations: string[]`), so
+// that join is gone by the time a shed candidate reaches this file: there is
+// no `evidence_handles` list here either (the wire cert has none — A.2.4
+// carries no such field). The one signal that survives is the ID STRING
+// ITSELF, and `certificateCitations` already reads it for exactly one fact:
+// whether it names a `request-item:` (facet) obligation — `every` cited
+// window load-bearing — or anything else — `any` one window standing is
+// enough. `wireAnswerCitations` below reuses that SAME exported prefix (never
+// a second string literal) to build ONE conservative citation per served
+// evidence entry, in the mode the certificate's own obligation ids call for —
+// the wire-level analogue of that module's own compacted-certificate
+// fallback ("every cited handle load-bearing" when no obligation has
+// per-evidence structure): here NO obligation EVER has per-evidence
+// structure at this layer, so the fallback direction is the only one
+// available, applied every time an act.answer evidence array actually loses
+// a body a `request-item:` obligation is in play for.
+// ---------------------------------------------------------------------------
+
+/** `ServedSpans` off the wire's OWN `evidence[]` — every entry that carries a body right now, keyed by path. */
+function wireServedSpans(payload: ShedPayload): ServedSpans {
+  const spans = new Map<string, Array<[number, number]>>();
+  for (const entry of evidenceOf(payload)) {
+    const body = entry["body"];
+    const path = entry["path"];
+    const range = entry["range"];
+    if (typeof body !== "string" || body === "" || typeof path !== "string" || typeof range !== "string") continue;
+    const parsed = parseCitedSpans(range);
+    if (parsed.length === 0) continue;
+    spans.set(path, [...(spans.get(path) ?? []), ...parsed]);
+  }
+  return spans;
+}
+
+/**
+ * See this section's file header for the defect and the mapping this
+ * performs. `original` is the certified, UNSHED payload — one conservative
+ * citation, over every evidence entry `original` served with a body, in
+ * `"every"` mode iff the certificate names a `request-item:` obligation
+ * (the class actually measured) and `"any"` otherwise (so an ordinary
+ * `surface-content`-only certificate — several equally-weighted context
+ * surfaces, none singled out as a facet's own proof — is UNCHANGED by this
+ * check: shedding one of several such bodies while at least one remains is
+ * exactly what `answerFloorHolds` already permits, and this function must
+ * not silently re-tighten that case — the RECALL CONTROL for this change).
+ * `[]` when nothing is certified or nothing was ever served with a body, so
+ * the caller's `citations.length > 0` guard is always the honest "nothing to
+ * check" reading, never a false positive.
+ */
+function wireAnswerCitations(original: ShedPayload): readonly CertificateCitation[] {
+  const decision = decisionOf(original);
+  if (decision === undefined || decision["kind"] !== "act.answer") return [];
+  const certificate = isRecord(decision["certificate"]) ? decision["certificate"] : undefined;
+  const obligations = certificate?.["obligations"];
+  if (!Array.isArray(obligations) || obligations.length === 0) return [];
+  const mode: CitationMode = obligations.some(
+    (id) => typeof id === "string" && id.startsWith(REQUEST_ITEM_OBLIGATION_PREFIX),
+  ) ? "every" : "any";
+  const windows: CitedWindow[] = [];
+  for (const entry of evidenceOf(original)) {
+    const body = entry["body"];
+    const handle = entry["handle"];
+    const path = entry["path"];
+    const range = entry["range"];
+    if (typeof body !== "string" || body === "") continue;
+    if (typeof handle !== "string" || handle === "" || typeof path !== "string" || typeof range !== "string") continue;
+    const parsed = parseCitedSpans(range);
+    if (parsed.length === 0) continue;
+    windows.push({ handle, path, spans: parsed });
+  }
+  if (windows.length === 0) return [];
+  return [{ obligationId: "wire-evidence", mode, windows }];
+}
+
+// ---------------------------------------------------------------------------
 // THE FLOOR
 // ---------------------------------------------------------------------------
 
@@ -119,8 +220,16 @@ function usableEvidenceView(payload: ShedPayload): { body?: string; prior?: stri
  * ladder's S3 stub refused to approximate this — and the cost of a false `true`
  * is a fabricated act. Both directions are therefore decided by reading the
  * exact fields the floor names, never by inference from adjacent ones.
+ *
+ * @param original (WP-H, eval-0929 §5/§8) the UNSHED payload this emission
+ *   started from — `runLadder`'s own `payload`, before any rung ran. Omitted
+ *   by every direct unit-test call in this repo's history, which is exactly
+ *   why it is optional and defaults to skipping the extra check below rather
+ *   than to any particular verdict: those calls test the §2.1.1 NECESSARY
+ *   condition (`answerFloorHolds`) in isolation, and widening the signature
+ *   must not change what they were asserting.
  */
-export function actFloorHolds(candidate: ShedPayload, _kind: Kind): boolean {
+export function actFloorHolds(candidate: ShedPayload, _kind: Kind, original?: ShedPayload): boolean {
   const decision = decisionOf(candidate);
   if (decision === undefined) return true;
 
@@ -131,7 +240,23 @@ export function actFloorHolds(candidate: ShedPayload, _kind: Kind): boolean {
           workspace?: { inventory_complete?: boolean };
         }
       : undefined;
-    return answerFloorHolds(usableEvidenceView(candidate), certificate);
+    if (!answerFloorHolds(usableEvidenceView(candidate), certificate)) return false;
+    // WP-H (eval-0929 §5/§8): the check above is `decisionWire.ts`'s stated
+    // NECESSARY condition only — "at least one usable entry" — which a shed
+    // that removes ONE cited body while another, uncited one survives still
+    // satisfies. See `wireAnswerCitations`'s own doc comment for the measured
+    // defect and why a wire-mapped, conservative citation check is asked here
+    // rather than folded into `answerFloorHolds` itself (that function has no
+    // `original` to diff against, by design — C2-3 is the per-obligation join
+    // that would let it do this alone).
+    if (original !== undefined) {
+      const citations = wireAnswerCitations(original);
+      if (citations.length > 0
+        && certificateWireBreaches(citations, wireServedSpans(original), wireServedSpans(candidate)).length > 0) {
+        return false;
+      }
+    }
+    return true;
   }
 
   if (decision["kind"] === "act.edit") {
@@ -163,7 +288,7 @@ export function actFloorHolds(candidate: ShedPayload, _kind: Kind): boolean {
  *     the candidate has no record of it at all.
  *
  * Returns `undefined` when neither is a string, and the caller then omits that
- * handle: a `read_file {handle}` with no range is a different call (whole file,
+ * handle: a `tl_read_file {handle}` with no range is a different call (whole file,
  * or the server's own window choice), and §2.1.2's "executable NOW" is about
  * calls the client can run, not about calls that happen to parse.
  */
@@ -177,7 +302,7 @@ function windowFor(candidateEntry: Record<string, unknown> | undefined, priorEnt
 }
 
 /**
- * One `read_file {handle, range}` per SHED handle, deduped, in the order the
+ * One `tl_read_file {handle, range}` per SHED handle, deduped, in the order the
  * pre-shed response served them.
  *
  * WHAT "SHED" MEANS HERE, precisely: an entry that carried a `body` before the
@@ -217,7 +342,7 @@ function restoringCalls(candidate: ShedPayload, original: ShedPayload): ToolCall
     // The demotion helper stays a pure payload transform. The envelope-owned
     // post-ladder canonicalization pass rewrites these calls before they are
     // measured/emitted, preserving this helper's standalone contract.
-    calls.push({ tool: "read_file", arguments: { handle, range } });
+    calls.push({ tool: "tl_read_file", arguments: { handle, range } });
   }
   return calls;
 }
@@ -257,7 +382,7 @@ function repackCall(payload: ShedPayload): ToolCall | undefined {
   // This call is minted in the post-projection budget path. The envelope's
   // post-ladder canonicalization pass rewrites it to the advertised shape
   // before measurement/emission.
-  return { tool: "read_file", arguments: { mode: "task_pack", qref } };
+  return { tool: "tl_read_file", arguments: { mode: "task_pack", qref } };
 }
 
 /**

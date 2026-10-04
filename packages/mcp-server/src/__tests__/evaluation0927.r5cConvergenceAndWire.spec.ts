@@ -188,7 +188,7 @@ describe("P1-8: ambiguous-target candidate lists converge", () => {
     const s = await server(ws);
     const chain: ChainResult = await followNextToEnd(
       s,
-      { tool: "read_file", arguments: { query: "Who calls load_record?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
+      { tool: "tl_read_file", arguments: { query: "Who calls load_record?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
       { cwd: ws, hopCap: 12, maxQrefRepacks: 3 },
     );
     expect(chain.capped, JSON.stringify(chain.hops.map((h) => h.response?.kind))).toBe(false);
@@ -248,7 +248,7 @@ describe("P1-8: ambiguous-target candidate lists converge", () => {
     const s = await server(ws);
     const chain = await followNextToEnd(
       s,
-      { tool: "read_file", arguments: { query: "Who calls load_record?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
+      { tool: "tl_read_file", arguments: { query: "Who calls load_record?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
       { cwd: ws, hopCap: 8 },
     );
     expect(chain.capped).toBe(false);
@@ -283,7 +283,7 @@ describe("P1-9: caller-ranged zoom windows are credited to the ledger a rebuild 
     const s = await server(ws);
     const chain: ChainResult = await followNextToEnd(
       s,
-      { tool: "read_file", arguments: { query: "What default timeout does connectWithBackoff use?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
+      { tool: "tl_read_file", arguments: { query: "What default timeout does connectWithBackoff use?", task: { epoch: "new", profile: "answer" }, cwd: ws } },
       { cwd: ws, hopCap: 10, maxQrefRepacks: 3 },
     );
     expect(chain.capped, JSON.stringify(chain.hops.map((h) => h.response?.kind))).toBe(false);
@@ -350,17 +350,17 @@ describe("P2-12: force_serve keeps the declared profile binding", () => {
   it("a task explicitly declared task.profile:\"answer\" reports source:\"explicit\" even under force_serve", async () => {
     const ws = r5cSimpleAnswerWorkspace();
     const s = await server(ws);
-    const first = (await s.callTool("read_file", { query: DECLARED_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ws })).body;
+    const first = (await s.callTool("tl_read_file", { query: DECLARED_QUERY, task: { epoch: "new", profile: "answer" }, cwd: ws })).body;
     expect(first?.decision?.kind).toBe("act.answer");
     const qref: string = first?.qref;
     expect(typeof qref).toBe("string");
 
     // Two ordinary replays first (the always-worked door), then the forced one.
     for (let i = 0; i < 2; i += 1) {
-      const replay = (await s.callTool("read_file", { qref, cwd: ws })).body;
+      const replay = (await s.callTool("tl_read_file", { qref, cwd: ws })).body;
       expect(replay?.profile_binding?.source, JSON.stringify(replay?.profile_binding)).toBe("explicit");
     }
-    const forced = (await s.callTool("read_file", { qref, cwd: ws, task: { force_serve: true } })).body;
+    const forced = (await s.callTool("tl_read_file", { qref, cwd: ws, task: { force_serve: true } })).body;
     expect(forced?.profile_binding?.requested, JSON.stringify(forced?.profile_binding)).toBe("answer");
     expect(forced?.profile_binding?.source, JSON.stringify(forced?.profile_binding)).toBe("explicit");
     // force_serve's own contract is unchanged: bytes ARE re-served (not a receipt).
@@ -375,7 +375,7 @@ describe("P2-12: force_serve keeps the declared profile binding", () => {
     writeFile(ws, "src/limits.ts", "export const MAX_RETRY_COUNT = 6;\n");
     writeFile(ws, "src/runner.ts", "import { MAX_RETRY_COUNT } from \"./limits\";\n\nexport function shouldStop(attempt: number): boolean {\n  return attempt >= MAX_RETRY_COUNT;\n}\n");
     const s = await server(ws);
-    const first = (await s.callTool("read_file", {
+    const first = (await s.callTool("tl_read_file", {
       query: "What is the max retry count?",
       task: { epoch: "new" },
       cwd: ws,
@@ -383,7 +383,7 @@ describe("P2-12: force_serve keeps the declared profile binding", () => {
     expect(first?.profile_binding?.requested ?? "auto").toBe("auto");
     const qref: string = first?.qref;
     expect(typeof qref).toBe("string");
-    const forced = (await s.callTool("read_file", { qref, cwd: ws, task: { force_serve: true } })).body;
+    const forced = (await s.callTool("tl_read_file", { qref, cwd: ws, task: { force_serve: true } })).body;
     expect(forced?.profile_binding?.source ?? "inferred", JSON.stringify(forced?.profile_binding)).not.toBe("explicit");
   });
 });

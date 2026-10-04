@@ -153,14 +153,14 @@ const WIDE_TEXT_MATCH_CAP = 20;
  * always walks with the DEFAULT walkCodeFiles size cap (1 MB,
  * MAX_FILE_SIZE_BYTES) because it has no way to ask for a larger one and
  * does its own internal walk whenever it is not handed a pre-walked `files`
- * list. The exposed `search_files action=find` tool never hits this limit
+ * list. The exposed `tl_search_files action=find` tool never hits this limit
  * because ITS implementation (buildFindResponse) pre-walks with the wider
  * TEXT_SCAN_MAX_FILE_SIZE_BYTES (8 MB) cap and hands scanLiteral() that
  * walked list directly -- bypassing findText()'s narrower internal walk
  * entirely. Layer 3 had no equivalent path, so a real source file between
  * 1 MB and 8 MB (a ~12,000-line file crosses 1 MB easily) was invisible to
  * it even though the exposed find tool sees it instantly: the exact
- * external-eval symptom (search_files found a unique identifier at line
+ * external-eval symptom (tl_search_files found a unique identifier at line
  * 8766; task_pack never located it, served head-of-file, then steered to
  * huge zoom ranges).
  *
@@ -489,7 +489,33 @@ const PROJECT_SCOPE_STOP_TOKENS = new Set([
   "add", "change", "fix", "implement", "support",
 ]);
 
-function inferQueryProjectScopeFromResolver(query: string, resolver: RootResolver): string | undefined {
+/**
+ * The marker root that encloses every other marker root AND every walked code
+ * file: a workspace that holds ONE project in a subdirectory together with
+ * its nested sub-projects (a fixture-only bench cell keeps only
+ * `bench/fixtures/<family>/`, and ledgerd's root encloses its
+ * `plugins/decimal-rs` crate). The workspace root's own markers do not count
+ * against it -- such a cell is a git clone, so `.git` makes the root a marker
+ * directory although it holds no code. Undefined when code lives outside that
+ * root, or for an empty or multi-project layout. A lone marker root stays
+ * undefined, as before: nothing measured needs it, and a scope bound there
+ * becomes a non-generic request's own paths (buildTaskPackCore's named-scope
+ * rewrite), which cost the plain re-ask in v011ReceiptFence.rc.spec.ts
+ * (aeroctl, whose one root is firmware/) its pack-unchanged receipt.
+ */
+function enclosingNestedProjectRoot(resolver: RootResolver, relPaths: ReadonlyArray<string>): string | undefined {
+  const roots = resolver.markerRoots;
+  if (roots.length < 2 || relPaths.length === 0) return undefined;
+  const outer = roots.find((root) => roots.every((other) => other === root || other.startsWith(`${root}/`)));
+  if (outer === undefined) return undefined;
+  return relPaths.every((relPath) => relPath.startsWith(`${outer}/`)) ? outer : undefined;
+}
+
+function inferQueryProjectScopeFromResolver(
+  query: string,
+  resolver: RootResolver,
+  relPaths: ReadonlyArray<string>,
+): string | undefined {
   const splitIdentifier = (token: string): string[] =>
     token
       .replace(/[_-]+/g, " ")
@@ -505,14 +531,29 @@ function inferQueryProjectScopeFromResolver(query: string, resolver: RootResolve
         && !PROJECT_SCOPE_STOP_TOKENS.has(token)
       ),
   );
+  const enclosingRoot = enclosingNestedProjectRoot(resolver, relPaths);
   const candidates: string[] = [];
   for (const token of tokens) {
     const matchingRoots = resolver.markerRoots.filter((root) =>
       root.toLowerCase().split("/").includes(token)
     );
-    // A segment shared by every root ("packages", "fixtures", etc.) carries
-    // no project-selection information and must not become a hard scope.
-    if (matchingRoots.length === 0 || matchingRoots.length === resolver.markerRoots.length) continue;
+    if (matchingRoots.length === 0) continue;
+    if (matchingRoots.length === resolver.markerRoots.length) {
+      // A segment shared by every root ("packages", "fixtures", etc.) carries
+      // no project-selection information and must not become a hard scope.
+      // The exception is the directory name of the one project that encloses
+      // every root: every root shares it BECAUSE the workspace is that project,
+      // and scoping to it lets the M3 retry resolve what the query names.
+      // 2026-10-04: in fixture-only bench cells the T07 query ("ledgerd の
+      // balance 計算 (Compute)") got no scope here and fell to the weak partial
+      // pack (CONTRACT.md, api middleware/router, no compute.go) in all nine
+      // T07 cells, while all fifteen full-repo cells inferred
+      // bench/fixtures/ledgerd and served Compute edit-ready.
+      if (enclosingRoot !== undefined && enclosingRoot.toLowerCase().split("/").pop() === token) {
+        candidates.push(enclosingRoot);
+      }
+      continue;
+    }
     const common = commonAncestorDir(matchingRoots.map((root) => `${root}/__scope__`));
     if (common) candidates.push(common);
   }
@@ -529,7 +570,7 @@ function inferQueryProjectScopeFromResolver(query: string, resolver: RootResolve
 export function inferQueryProjectScope(workspace: string, query: string): string | undefined {
   const files = walkCodeFiles(workspace);
   const resolver = buildRootResolver(workspace, files.map((file) => file.relPath));
-  return inferQueryProjectScopeFromResolver(query, resolver);
+  return inferQueryProjectScopeFromResolver(query, resolver, files.map((file) => file.relPath));
 }
 
 // ---------------------------------------------------------------------------
@@ -2627,7 +2668,8 @@ export async function locateTaskContext(workspace: string, input: LocateInput): 
   // (every candidate is confined to that one subtree).
   const rootFiles = walkCache.get(requestedScope ? { subPath: requestedScope } : {});
   const rootResolver = buildRootResolver(workspace, rootFiles.map((f) => f.relPath));
-  const scope = requestedScope ?? inferQueryProjectScopeFromResolver(input.query, rootResolver);
+  const scope = requestedScope
+    ?? inferQueryProjectScopeFromResolver(input.query, rootResolver, rootFiles.map((f) => f.relPath));
   setActiveRootWorkspace(workspace, rootResolver);
   const queryContext = inferQueryContext(walkCache, input.query, scope);
 
@@ -4324,7 +4366,7 @@ function abstain(
     ...(recoveryHandles.length > 0
       ? {
           next: {
-            tool: "read_file",
+            tool: "tl_read_file",
             arguments: {
               targets: recoveryHandles.map((handle) => ({ handle })),
               content: "full",
@@ -4334,7 +4376,7 @@ function abstain(
       : probeToken !== null
         ? {
             next: {
-              tool: "search_files",
+              tool: "tl_search_files",
               arguments: { action: "find", queries: [probeToken] },
             },
           }
@@ -4346,7 +4388,7 @@ function abstain(
 
 /**
  * Longest ASCII identifier token (>= 3 chars) in a free-text query — the one
- * token worth handing to `search_files action=find`. Non-ASCII spans are
+ * token worth handing to `tl_search_files action=find`. Non-ASCII spans are
  * skipped on purpose: `find` takes an identifier, not a sentence fragment, so
  * a Japanese request still yields its embedded ASCII symbol name.
  */
@@ -4669,9 +4711,9 @@ export function matchBasenameTokens(
       // 2026-08-21 (W4-B, defect 2 / R11 pool entry): a fix restricting the
       // `qt.includes(nt)` direction for compound (underscore/hyphen-joined)
       // query tokens was ATTEMPTED and REVERTED here. It correctly stopped
-      // "search_files" (containing "search") from admitting
+      // "tl_search_files" (containing "search") from admitting
       // searchReferences.ts on two distinct tokens
-      // ({"search_files","references"}) and demoting findReferences.ts's own
+      // ({"tl_search_files","references"}) and demoting findReferences.ts's own
       // exact "references" match — see the probe in the W4-B wave report —
       // but it also blocks EVERY other underscore-joined query token from
       // this containment path, including enum-member literals like
@@ -5391,7 +5433,7 @@ export function extractClassMethodPairs(query: string): Array<{ className: strin
  * ("takayuki", "packages") out of an absolute path mentioned in prose is not
  * a repo identifier just because it matches this function's word-shape
  * regex. Left unscrubbed, this fed both this module's own Layer-3 exact-text
- * search AND `strongestIdentifierToken`'s not-found `search_files
+ * search AND `strongestIdentifierToken`'s not-found `tl_search_files
  * action=find` `next` (abstain()), which could hand back a `find` for a bare
  * path segment. A bare file stem with no directory prefix (`policy.ts`) is
  * unaffected — stripPathSpans only removes spans with a directory separator.

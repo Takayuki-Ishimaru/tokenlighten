@@ -18,13 +18,15 @@
  *
  * A separate file from findWidePage.spec.ts on purpose: that file pins F5's
  * own byte-cap-widening accessors and their OFF-byte-identity; this file
- * pins ONLY the new F6 behaviour (both ON-only, both additive), so neither
- * fix risks disturbing F5's already-green expectations.
+ * pins ONLY the new F6 behaviour (both additive), so neither fix risks
+ * disturbing F5's already-green expectations.
  *
- * Both fixes are OFF by default (TL_FIND_WIDE_PAGE unset/"0", and
- * TL_TURN_ECONOMY unset) -- flags.spec.ts pins findWidePageEnabled()'s own
- * accessor-level OFF-byte-identity and umbrella fallback; this file never
- * edits an existing expectation, only adds new ON-only cases.
+ * SPC (2026-09-29) promoted TL_FIND_WIDE_PAGE (and therefore both F6 fixes,
+ * which key off the SAME flag) from default OFF to (S) supported, DEFAULT ON
+ * for every client -- see util/flags.ts's "SPC addendum". Every "OFF" case
+ * below now sets `TL_FIND_WIDE_PAGE="0"` explicitly to exercise the rollback
+ * path; flags.spec.ts pins findWidePageEnabled()'s own accessor-level
+ * default-ON pin and explicit-override behaviour.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -89,9 +91,9 @@ function buildDegradeBandFixture(prefix: string): { workspace: string; expectedM
 }
 
 describe("F6: soft-degrade threshold scales with the wide-page cap", () => {
-  it("OFF (default): this fixture already collapses to one-line-per-file footholds -- the exact band F5 alone left unfixed", () => {
+  it("OFF (explicit \"0\"): this fixture already collapses to one-line-per-file footholds -- the exact band F5 alone left unfixed", () => {
     const { workspace, expectedMatches } = buildDegradeBandFixture("off");
-    delete process.env["TL_FIND_WIDE_PAGE"];
+    process.env["TL_FIND_WIDE_PAGE"] = "0";
     const off = buildFindResponse({ query: DEGRADE_BAND_QUERY }, workspace);
     expect(off.total_files).toBe(DEGRADE_BAND_FILES);
     expect(off.total_matches).toBe(expectedMatches);
@@ -123,7 +125,7 @@ describe("F6: soft-degrade threshold scales with the wide-page cap", () => {
     expect(bytes).toBeLessThanOrEqual(findResponseCapBytes());
   });
 
-  it("TL_TURN_ECONOMY=1 alone (umbrella, no explicit TL_FIND_WIDE_PAGE) reaches the same ON behaviour", () => {
+  it("TL_TURN_ECONOMY=1 with no explicit TL_FIND_WIDE_PAGE still reaches ON behaviour (SPC retired the umbrella dependency; this now holds for ANY value of TL_TURN_ECONOMY, not because of it)", () => {
     const { workspace } = buildDegradeBandFixture("umbrella");
     process.env["TL_TURN_ECONOMY"] = "1";
     const on = buildFindResponse({ query: DEGRADE_BAND_QUERY }, workspace);
@@ -148,9 +150,9 @@ function buildSingleFileManyMatches(prefix: string, query: string, count: number
 }
 
 describe("F6: cheap line numbers past the snippet cap", () => {
-  it("OFF (default): unchanged -- 8 lines, 8 snippets, more_lines discloses the rest", () => {
+  it("OFF (explicit \"0\"): unchanged -- 8 lines, 8 snippets, more_lines discloses the rest", () => {
     const workspace = buildSingleFileManyMatches("cheap-off", MANY_LINES_QUERY, MANY_LINES_MATCH_COUNT);
-    delete process.env["TL_FIND_WIDE_PAGE"];
+    process.env["TL_FIND_WIDE_PAGE"] = "0";
     const off = buildFindResponse({ query: MANY_LINES_QUERY }, workspace);
     const file = off.files[0]!;
     expect(off.files.length).toBe(1);

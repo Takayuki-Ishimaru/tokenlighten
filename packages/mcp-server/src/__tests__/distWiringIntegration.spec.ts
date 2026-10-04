@@ -113,7 +113,7 @@ describe("built MCP wiring integration", () => {
     const server = startDistServer(workspace);
     await server.initialize();
     const pack = parseBody(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         mode: "task_pack",
         paths: ["src"],
@@ -133,7 +133,7 @@ describe("built MCP wiring integration", () => {
     expect(pack.plan.wiring.edit_frontier).toEqual([connection.destination.handle]);
 
     const edit = parseBody(await server.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle: connection.insertion_handle,
         search: "encodeSignal(true)",

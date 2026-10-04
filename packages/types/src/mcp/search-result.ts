@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
-// protocol v1 — the `search_files` response family (A.5.8–A.5.10).
+// protocol v1 — the `tl_search_files` response family (A.5.8–A.5.10).
 //
 // NORMATIVE SOURCE: DESIGN-v0.10 §10.3 Appendix A (Revision 4, approved
 // 2026-08-13). Implements the A.9.1 `search-result.ts` row.
 //
-// §2.2 records the gap this file closes: `search_files` responses had NO
+// §2.2 records the gap this file closes: `tl_search_files` responses had NO
 // contract type in `packages/types` at all — all five non-`tree` actions
 // returned ad-hoc shapes. The element types below are the ones A.9.1 moves out
 // of `packages/mcp-server`; each emitter keeps its own declaration until the P2
@@ -283,8 +283,13 @@ export type FindFileGroup = {
   range?: string;
   /** Range handle paired with `context`. */
   handle?: string;
-  /** Bounded exact source context around a uniquely dominant repeated hit. */
+  /**
+   * Bounded exact source context around a uniquely dominant repeated hit, or
+   * (TL_FIND_SMALL_BODIES) the whole text of a small file — then `whole`.
+   */
   context?: string;
+  /** `context` is the file's entire text (Copilot retest r7). */
+  whole?: true;
 
   /**
    * DISCLOSED EXTENSIONS, C2-4 (Revision-5 row) — the residency annotations
@@ -362,10 +367,10 @@ export type FindInventoryDirEntry = {
   matches: number;
 };
 
-/** One ready-to-run `search_files` call.
+/** One ready-to-run `tl_search_files` call.
  *  features/search/find/relatedLookups.ts:65-68. */
 export type RelatedLookupCall = {
-  tool: "search_files";
+  tool: "tl_search_files";
   arguments: { action: "symbols" | "references"; query: string };
 };
 

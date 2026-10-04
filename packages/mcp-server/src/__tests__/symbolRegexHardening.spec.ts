@@ -62,7 +62,7 @@ async function readFileSafe(ws: string, rel: string): Promise<string | null> {
   }
 }
 
-describe("symbolRegexHardening — read_file mode=pack paths[].symbol (readCodePack.symbolSlice)", () => {
+describe("symbolRegexHardening — tl_read_file mode=pack paths[].symbol (readCodePack.symbolSlice)", () => {
   it("(a) catastrophic-backtracking payload completes fast against an adversarial line", async () => {
     const ws = mkDir("redos");
     // Pre-fix, `(function|class|def|interface|type)\s+${symbol}\b` with
@@ -250,7 +250,7 @@ describe("symbolRegexHardening — get_symbol_with_context / task_pack paths[].s
 });
 
 // ---------------------------------------------------------------------------
-// edit_file intent append-enum-member — the same CWE-1333 shape on the write
+// tl_edit_file intent append-enum-member — the same CWE-1333 shape on the write
 // path: symbolName is the caller's raw args.symbol (server.ts prefers it over
 // the handle-resolved name). Found by this wave's new-RegExp sweep; fixed by
 // mirroring appendUnionMember.ts's escapeForRegex.

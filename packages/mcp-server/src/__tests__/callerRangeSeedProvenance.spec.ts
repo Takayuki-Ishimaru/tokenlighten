@@ -13,7 +13,7 @@
  * marked exactly like an explicit `{path,range}` window, so the gate withheld
  * the certificate and minted a `next` to page it to completion. Measured live
  * against this repository (default config, no TL_ or TOKENLIGHTEN_ env):
- *   `read_file {query:"How does the server decide which surfaces to serve?",
+ *   `tl_read_file {query:"How does the server decide which surfaces to serve?",
  *   task:{epoch:"new",profile:"answer"}, cwd:<this repo>}` then follow
  *   `decision.next` verbatim. Clean HEAD: 2 hops, ~10 KB, `act.answer`. This
  *   tree (pre-fix): >=5 hops, >=78 KB, never certifies — hop 0's
@@ -144,7 +144,7 @@ describe("B1: a range-less targets[] entry inside a query-bearing task pack is a
       const { hops, cappedWithoutTerminal } = await walkToTerminalOrDeadEnd(
         server,
         {
-          tool: "read_file",
+          tool: "tl_read_file",
           arguments: {
             query: "How does the server decide which surfaces to serve?",
             task: { epoch: "new", profile: "answer" },
@@ -250,7 +250,7 @@ describe("B1: a range-less targets[] entry inside a query-bearing task pack is a
       // Baseline: whatever this workspace's OTHER machinery (request-item
       // gaps, etc.) decides for the query alone, naming only the relevant
       // file — independent of this fix.
-      const baseline = await server.callTool("read_file", {
+      const baseline = await server.callTool("tl_read_file", {
         query,
         targets: [{ path: "widget.md" }],
         task: { epoch: "new", profile: "answer" },
@@ -262,7 +262,7 @@ describe("B1: a range-less targets[] entry inside a query-bearing task pack is a
       // shape (a range-less named target inside a query-bearing pack),
       // whether it got there by the caller typing it or a server `next`
       // re-offering it (indistinguishable at this layer by construction).
-      const withRangeLess = await server.callTool("read_file", {
+      const withRangeLess = await server.callTool("tl_read_file", {
         query,
         targets: [{ path: "widget.md" }, { path: "bundle.generated.js" }],
         task: { epoch: "new", profile: "answer" },
@@ -301,7 +301,7 @@ describe("B1: a range-less targets[] entry inside a query-bearing task pack is a
       activeServers.push(server);
       await server.initialize();
 
-      const baseline = await server.callTool("read_file", {
+      const baseline = await server.callTool("tl_read_file", {
         query,
         targets: [{ path: "widget.md" }],
         task: { epoch: "new", profile: "answer" },
@@ -316,7 +316,7 @@ describe("B1: a range-less targets[] entry inside a query-bearing task pack is a
       // (the clean, expected signature), or some other honest withholding
       // mechanism does — but it must never be silently and fully certified
       // over an unaddressed `remaining`.
-      const withExplicitRange = await server.callTool("read_file", {
+      const withExplicitRange = await server.callTool("tl_read_file", {
         query,
         targets: [{ path: "widget.md" }, { path: "bundle.generated.js", range: "1-4000" }],
         task: { epoch: "new", profile: "answer" },

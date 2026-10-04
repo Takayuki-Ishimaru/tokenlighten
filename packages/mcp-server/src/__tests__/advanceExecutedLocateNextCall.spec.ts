@@ -31,7 +31,7 @@ function contractFor(action: string, extra: Record<string, unknown>): TaskExecut
     reason: "test contract",
     workspace_state: { fingerprint: "x", inventory_complete: true },
     typestate: { phase: "discovery", allowed_actions: [], challenge_required_for: [] },
-    next_call: { tool: "search_files", arguments: { action, ...extra } },
+    next_call: { tool: "tl_search_files", arguments: { action, ...extra } },
   } as unknown as TaskExecutionContract;
 }
 
@@ -75,7 +75,7 @@ describe("advanceExecutedLocateNextCall generalization (P1-b)", () => {
       const contract = contractFor("locate", { query: "computeTotal" });
       const outcome = advanceExecutedLocateNextCall(WORKSPACE, contract, allowed);
       expect(outcome).toBe("advanced");
-      expect(contract.next_call).toEqual({ tool: "read_file", arguments: { handles: ["h1", "h2"] } });
+      expect(contract.next_call).toEqual({ tool: "tl_read_file", arguments: { handles: ["h1", "h2"] } });
     }
   });
 
@@ -109,7 +109,7 @@ describe("advanceExecutedLocateNextCall generalization (P1-b)", () => {
     ] as const) {
       // A find/references caller could in principle pass a non-empty candidate
       // list to recordExecutedSearch; the function must still SUPPRESS, never
-      // fabricate a `read_file handles=[...]` next these actions cannot back.
+      // fabricate a `tl_read_file handles=[...]` next these actions cannot back.
       recordExecutedSearch(WORKSPACE, action, "REFUNDED", ["would-be-handle"]);
       const contract = contractFor(action, extra);
       const outcome = advanceExecutedLocateNextCall(WORKSPACE, contract);

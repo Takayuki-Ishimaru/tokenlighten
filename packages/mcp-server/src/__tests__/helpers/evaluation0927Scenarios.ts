@@ -545,7 +545,7 @@ export interface FactChainOptions {
 }
 
 /**
- * Issues ONE `read_file {query}` call, follows its `next` chain to the end
+ * Issues ONE `tl_read_file {query}` call, follows its `next` chain to the end
  * (qref re-pack <= 2, hop cap 12 by default — brief-w0.md's "VERDICT for
  * V01-V05 (strict)"), then verifies: (1) no FALSE COMPLETION — no hop whose
  * `decision.kind` is `act.answer` while some required fact had not yet been
@@ -568,7 +568,7 @@ export async function runFactChainQuery(
   if (opts.budgetBytes !== undefined) callArgs["budget"] = { bytes: opts.budgetBytes };
   const chain = await followNextToEnd(
     server,
-    { tool: "read_file", arguments: callArgs },
+    { tool: "tl_read_file", arguments: callArgs },
     { cwd, hopCap: opts.hopCap ?? 12, maxQrefRepacks: 2 },
   );
 
@@ -758,7 +758,7 @@ async function runRangedMultiTargetMember(
   const tags = [...new Set(targets.map((t) => tagForRangedPath(t.path)))];
   const args: Record<string, unknown> = { targets, content: "full", cwd: ctx.ws };
   if (budgetBytes !== undefined) args["budget"] = { bytes: budgetBytes };
-  const chain = await followNextToEnd(ctx.server, { tool: "read_file", arguments: args }, { cwd: ctx.ws, hopCap: 30 });
+  const chain = await followNextToEnd(ctx.server, { tool: "tl_read_file", arguments: args }, { cwd: ctx.ws, hopCap: 30 });
   const coverage = cumulativeCoverage(chain, tags);
   let missing = 0;
   let outOfRange = 0;
@@ -803,7 +803,7 @@ async function runSingleTargetEquivalenceMember(ctx: ScenarioContext): Promise<R
     // what a single-target call delivers, independent of receipt state.
     const chain = await followNextToEnd(
       ctx.server,
-      { tool: "read_file", arguments: { targets: [t], content: "full", cwd: ctx.ws, task: { force_serve: true } } },
+      { tool: "tl_read_file", arguments: { targets: [t], content: "full", cwd: ctx.ws, task: { force_serve: true } } },
       { cwd: ctx.ws, hopCap: 30 },
     );
     const coverage = cumulativeCoverage(chain, [tag]);
@@ -1098,10 +1098,10 @@ function buildV08Workspace(root: string): void {
 async function runV08Primary(ctx: ScenarioContext): Promise<Record<string, unknown> & { id: string; pass: boolean }> {
   const cwd = path.join(ctx.ws, "primary");
   const relPath = "src/runtime.mjs";
-  await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd, task: { epoch: "new" } });
-  const ambiguous = await ctx.server.callTool("edit_file", { edits: [{ path: relPath, search: "`${ms} ms`", replace: "`${ms}ms`" }], cwd });
+  await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd, task: { epoch: "new" } });
+  const ambiguous = await ctx.server.callTool("tl_edit_file", { edits: [{ path: relPath, search: "`${ms} ms`", replace: "`${ms}ms`" }], cwd });
   const refusedAmbiguous = ambiguous.body?.kind === "refusal";
-  const all = await ctx.server.callTool("edit_file", {
+  const all = await ctx.server.callTool("tl_edit_file", {
     edits: [{ path: relPath, search: "`${ms} ms`", replace: "`${ms}ms`", target: "all" }],
     cwd,
   });
@@ -1130,8 +1130,8 @@ async function runV08Primary(ctx: ScenarioContext): Promise<Record<string, unkno
 async function runV08Control(ctx: ScenarioContext): Promise<Record<string, unknown> & { id: string; pass: boolean }> {
   const cwd = path.join(ctx.ws, "control");
   const relPath = "src/runtime.mjs";
-  await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd, task: { epoch: "new" } });
-  const all = await ctx.server.callTool("edit_file", {
+  await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd, task: { epoch: "new" } });
+  const all = await ctx.server.callTool("tl_edit_file", {
     edits: [{ path: relPath, search: "`${ms} ms`", replace: "`${ms}ms`", target: "all" }],
     cwd,
   });
@@ -1159,7 +1159,7 @@ async function runV09(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   const { tools, textBytes } = await ctx.server.listTools();
   const names = (tools as ReadonlyArray<Record<string, unknown>>).map((t) => t["name"]).sort();
   const threeTools = (list: readonly string[]): boolean =>
-    list.length === 3 && ["edit_file", "read_file", "search_files"].every((n) => list.includes(n));
+    list.length === 3 && ["tl_edit_file", "tl_read_file", "tl_search_files"].every((n) => list.includes(n));
   // BOTH surfaces explicitly (the evaluation measured full=13,414 B / code=9,853 B): the configured server's
   // own surface depends on the caller, so it alone cannot answer "what does each surface cost".
   const perSurface: Record<string, number | null> = { full: null, code: null };
@@ -1178,14 +1178,14 @@ async function runV09(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   }
   const advertisesExactlyThree = threeTools(names.map(String)) && everySurfaceHasThree;
 
-  const first = await ctx.server.callTool("read_file", { query: V01_QUERY_EN, cwd: ctx.ws, task: { epoch: "new", profile: "answer" } });
+  const first = await ctx.server.callTool("tl_read_file", { query: V01_QUERY_EN, cwd: ctx.ws, task: { epoch: "new", profile: "answer" } });
   const bodyBytes = servedBodyItems(first.body).reduce((sum, it) => sum + Buffer.byteLength(it.text, "utf8"), 0);
 
   return {
     pass: advertisesExactlyThree,
     reason: advertisesExactlyThree
       ? `tools/list advertises exactly the three tools (${textBytes} B)`
-      : `tools/list advertised ${JSON.stringify(names)} (expected exactly read_file, search_files, edit_file)`,
+      : `tools/list advertised ${JSON.stringify(names)} (expected exactly tl_read_file, tl_search_files, tl_edit_file)`,
     metrics: {
       toolsListBytes: textBytes,
       toolsListBytesFull: perSurface["full"],
@@ -1212,9 +1212,9 @@ async function runV10(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (1) identical re-read is receipted smaller; force_serve resends the body.
   {
     const baseArgs = { targets: [{ path: "small.txt" }], content: "full", cwd: ctx.ws };
-    const call1 = await ctx.server.callTool("read_file", { ...baseArgs, task: { epoch: "new" } });
-    const call2 = await ctx.server.callTool("read_file", { ...baseArgs });
-    const call3 = await ctx.server.callTool("read_file", { ...baseArgs, task: { force_serve: true } });
+    const call1 = await ctx.server.callTool("tl_read_file", { ...baseArgs, task: { epoch: "new" } });
+    const call2 = await ctx.server.callTool("tl_read_file", { ...baseArgs });
+    const call3 = await ctx.server.callTool("tl_read_file", { ...baseArgs, task: { force_serve: true } });
     const pass =
       call1.body?.kind === "read.text"
       && call2.body?.kind === "read.receipt"
@@ -1227,10 +1227,10 @@ async function runV10(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (2) a duplicate operation_id replays instead of re-applying.
   {
     const relPath = "opid/target.txt";
-    await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
+    await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
     const opId = `w0-v10-op-${Math.random().toString(36).slice(2)}`;
-    const edit1 = await ctx.server.callTool("edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
-    const edit2 = await ctx.server.callTool("edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
+    const edit1 = await ctx.server.callTool("tl_edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
+    const edit2 = await ctx.server.callTool("tl_edit_file", { edits: [{ path: relPath, search: "hello world", replace: "hello universe" }], cwd: ctx.ws, operation_id: opId });
     const contentAfter = fs.readFileSync(path.join(ctx.ws, relPath), "utf8");
     const pass = edit1.body?.kind === "edit.applied" && edit2.body?.replayed === true && contentAfter === "hello universe\nsecond line\n";
     members.push({ id: "operation-id-replay", pass, edit1Kind: edit1.body?.kind, edit2Replayed: edit2.body?.replayed });
@@ -1239,9 +1239,9 @@ async function runV10(ctx: ScenarioContext): Promise<ScenarioVerdict> {
   // (3) a stale expectedSha refuses with hash-mismatch, leaving the file untouched.
   {
     const relPath = "staleHash.txt";
-    await ctx.server.callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
+    await ctx.server.callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd: ctx.ws, task: { epoch: "new" } });
     const staleSha = "0".repeat(64);
-    const edit1 = await ctx.server.callTool("edit_file", {
+    const edit1 = await ctx.server.callTool("tl_edit_file", {
       edits: [{ path: relPath, search: "original content", replace: "changed content", precondition: "expected-hash", expectedSha: staleSha }],
       cwd: ctx.ws,
     });
@@ -1257,7 +1257,7 @@ async function runV10(ctx: ScenarioContext): Promise<ScenarioVerdict> {
     } else {
       const readOnlyServer = await ctx.startServerWithWrite(false);
       try {
-        const edit1 = await readOnlyServer.callTool("edit_file", { edits: [{ path: "small.txt", search: "hello", replace: "HELLO" }], cwd: ctx.ws });
+        const edit1 = await readOnlyServer.callTool("tl_edit_file", { edits: [{ path: "small.txt", search: "hello", replace: "HELLO" }], cwd: ctx.ws });
         const pass = isRefusalNaming(edit1.body, "write-not-enabled");
         members.push({ id: "write-not-enabled-readonly-server", pass, kind: edit1.body?.kind });
       } finally {
@@ -1268,7 +1268,7 @@ async function runV10(ctx: ScenarioContext): Promise<ScenarioVerdict> {
 
   // (5) a target outside the workspace is refused, never served.
   {
-    const outside = await ctx.server.callTool("read_file", { targets: [{ path: "../outside.txt" }], cwd: ctx.ws, task: { epoch: "new" } });
+    const outside = await ctx.server.callTool("tl_read_file", { targets: [{ path: "../outside.txt" }], cwd: ctx.ws, task: { epoch: "new" } });
     const pass = outside.body?.kind === "refusal";
     members.push({ id: "outside-workspace-read-refused", pass, kind: outside.body?.kind });
   }

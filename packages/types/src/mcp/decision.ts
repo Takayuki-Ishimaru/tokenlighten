@@ -327,7 +327,7 @@ export type CreateTarget = {
  *     STRUCTURALLY UNEMITTABLE: `projectFrontier` builds entries from
  *     handle-joined paths, a create target contributes none, and the decision
  *     degraded to `discover` while the same response separately handed the
- *     caller `edit_file create:true path=…`. The floor is a disjunction now
+ *     caller `tl_edit_file create:true path=…`. The floor is a disjunction now
  *     because "where may I write" has two honest spellings, not because the
  *     floor was weakened — an `act.edit` carrying NEITHER is still a breach.
  *

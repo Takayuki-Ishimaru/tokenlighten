@@ -32,6 +32,7 @@
 import { batchCheckpoint } from "../write/checkpoint.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 import { invalidateCachedWorkspaceFiles } from "@tokenlighten/skeleton-engine";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import { validateCreateTarget, publishNewFile } from "./createFileCore.js";
 
 // ---------------------------------------------------------------------------
@@ -105,6 +106,11 @@ export async function createFile(
       : { ok: false, error: validation.error };
   }
   const absPath = validation.absPath;
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the last
+  // place a cancelled create is abandoned — validation is done, and nothing
+  // below this line, not even the parent directory, exists until the publish.
+  throwIfRequestCancelled();
 
   // mkdir -p the parent, then publish with the no-replace tmp+link (falls
   // back to "wx") primitive — see publishNewFile's own doc comment for the

@@ -3,8 +3,8 @@
 //
 // v0.10 alpha.1 / PI-09 implementation items 1-2 and 14
 // (DESIGN-v0.10-expansion-plan-v1.3.md §4.5). OPT-IN: reached only via
-// TOKENLIGHTEN_PROTOCOL_ERA=modern. The legacy leg (legacyStdio.ts +
-// fallbackStdio.ts) is untouched and stays the default.
+// TOKENLIGHTEN_PROTOCOL_ERA=modern. The legacy leg (legacyStdio.ts) is
+// untouched and stays the default.
 //
 // WHAT IS AND IS NOT DIFFERENT HERE
 //
@@ -28,7 +28,7 @@
 // only acceptable answer — see modernEraTransport.spec.ts, which deep-equals
 // the served `tools/list` against `advertisedTools()`.
 //
-// IMPORT-CYCLE NOTE: see fallbackStdio.ts — every server.ts binding used here
+// IMPORT-CYCLE NOTE: see legacyStdio.ts — every server.ts binding used here
 // is read inside a function body at call time, never at module evaluation.
 // (modernServerFactory.ts, imported below, keeps that same property: its
 // server.ts bindings are read inside the closure it RETURNS, not at its own

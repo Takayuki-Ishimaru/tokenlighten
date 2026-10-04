@@ -210,7 +210,7 @@ describe("candidate-list containment — choose-candidate close (fix 2)", () => 
     const codeless = surfaces.filter((surface) => surface.code === undefined);
     expect(codeless.length).toBe(1);
     // The recomputed `next` names ONLY the codeless remainder, never a served handle.
-    expect(result.next).toMatchObject({ tool: "read_file", arguments: expect.any(Object) });
+    expect(result.next).toMatchObject({ tool: "tl_read_file", arguments: expect.any(Object) });
     const nextJson = JSON.stringify(result.next);
     expect(nextJson).toContain(codeless[0]!.handle);
     for (const surface of surfaces.filter((s) => s.code !== undefined)) {
@@ -219,7 +219,7 @@ describe("candidate-list containment — choose-candidate close (fix 2)", () => 
     const contract = buildTaskExecutionContract(result, "generic", QUERY);
     expect(contract.typestate.phase).toBe("discovery");
     expect(contract.next_call).toBeDefined();
-    expect(contract.next_call?.tool).toBe("read_file");
+    expect(contract.next_call?.tool).toBe("tl_read_file");
   });
 });
 
@@ -321,7 +321,7 @@ describe("deep-closure profile gate (fix 3)", () => {
     const { ws, result } = gateFixture();
     const consumer = result.surfaces[1]!;
     const call = {
-      tool: "read_file" as const,
+      tool: "tl_read_file" as const,
       arguments: { handle: consumer.handle, ...extra } as Record<string, any>,
     };
     result.coverage_reason = "concerns-uncovered";
@@ -438,7 +438,7 @@ describe("query-named files are requirements, not candidates (B1c, 2026-08-01)",
     const { attachCandidateListRecovery } = await import("../tools/readCodeTaskPack.js");
     attachCandidateListRecovery(fixture.result, "CONTRACT.md の規定どおり health を直す", fixture.ws);
     expect(fixture.result.next, JSON.stringify(fixture.result)).toMatchObject({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: expect.any(Object),
     });
     expect(JSON.stringify(fixture.result.next)).toContain("docs/CONTRACT.md");

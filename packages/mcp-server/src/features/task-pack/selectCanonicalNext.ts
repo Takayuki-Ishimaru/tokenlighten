@@ -109,7 +109,7 @@ export interface StructuralConcernView {
    * `explicit-target` path concern) or a path the index says is absent. Such
    * a concern is skipped for `next` selection: on the sealed SF05 replay it
    * was the top REQUIRED concern, and it minted
-   * `search_files action:"references" queries:["<a directory>"]` — a call that
+   * `tl_search_files action:"references" queries:["<a directory>"]` — a call that
    * can never close it — while the caller-named `CONTRACT.md` concern ranked
    * second and was never reached. `undefined` keeps every pre-D8 behaviour.
    */
@@ -142,7 +142,7 @@ export interface ProfileBindingView {
   readonly confidence?: number;
 }
 
-/** One caller-addressable location, in the shapes `read_file`/`search_files` accept. */
+/** One caller-addressable location, in the shapes `tl_read_file`/`tl_search_files` accept. */
 export interface SfAddress {
   readonly path?: string;
   readonly symbol?: string;
@@ -178,10 +178,10 @@ export interface SelectCanonicalNextInput {
   readonly cwd?: string;
   readonly taskHandle?: string;
   /**
-   * The pack's replay ref. A `read_file` `next` this arbiter builds REPLACES a
+   * The pack's replay ref. A `tl_read_file` `next` this arbiter builds REPLACES a
    * legacy continuation that carried one, so dropping it would turn a bounded
-   * re-pack into a fresh, unscoped one (SF-2). `search_files` has no `qref`
-   * field, so it is emitted on `read_file` calls only.
+   * re-pack into a fresh, unscoped one (SF-2). `tl_search_files` has no `qref`
+   * field, so it is emitted on `tl_read_file` calls only.
    */
   readonly qref?: string;
   /**
@@ -272,7 +272,7 @@ function passThrough(currentNext: ToolCall | null | undefined, reason: string): 
  *
  * A `literal`/`verb` anchor spells no address by construction (D6), and a
  * `path` anchor the extractor PROVED is not a file (a directory, or an absent
- * path) is an address no `read_file` can serve and no `references` query term
+ * path) is an address no `tl_read_file` can serve and no `references` query term
  * can name. Selecting one produced the live SF05 dead end: the top required
  * concern minted a references search over a DIRECTORY while the caller-named
  * file behind it was never reached. `fileAnchor === undefined` (no index) is
@@ -413,7 +413,7 @@ function mkCall(tool: ToolCall["tool"], args: Record<string, unknown>): ToolCall
 
 /**
  * The identity fields every arbitrated call must carry (SF-2). `qref` is
- * `read_file`-only: `search_files` has no such argument, and inventing one
+ * `tl_read_file`-only: `tl_search_files` has no such argument, and inventing one
  * would produce a call the server refuses on its own schema.
  */
 interface CallIdentity {
@@ -440,9 +440,9 @@ function buildConcernNext(
   // that file — which is also what D8's frontier join already put a row for.
   const pathAnchored = top.anchor.kind === "path";
   if (!pathAnchored && (top.kind === "usage" || top.kind === "relation")) {
-    // §3.4: usage/relation concern -> search_files references.
+    // §3.4: usage/relation concern -> tl_search_files references.
     const scopePath = top.bindings[0];
-    const call = mkCall("search_files", {
+    const call = mkCall("tl_search_files", {
       action: "references",
       queries: [anchorQueryTerm(top.anchor)],
       ...(scopePath !== undefined ? { scope: { path: scopePath } } : {}),
@@ -467,7 +467,7 @@ function buildConcernNext(
       ?? (top.anchor.kind === "path" ? top.anchor.path : undefined);
     if (directPath !== undefined && directWindows?.has(directPath) === true) {
       const range = directWindows.get(directPath);
-      const call = mkCall("read_file", {
+      const call = mkCall("tl_read_file", {
         targets: [{ path: directPath, ...(range === undefined ? {} : { range }) }],
         content: "full",
         ...task,
@@ -477,11 +477,11 @@ function buildConcernNext(
   }
   // definition / declaration / template / generated / verify / answer (and
   // any path-anchored concern this pack's named-frontier join never
-  // touched): §3.4's read_file mapping (verify/answer fall back to the same
+  // touched): §3.4's tl_read_file mapping (verify/answer fall back to the same
   // shape when no dedicated kit reference is available on this pure input).
   const { paths, folded } = foldReadAddresses(top, concerns, snapshot, fold);
   const targets = (paths.length > 0 ? paths : top.bindings).map((path) => anchorTarget(path, top.anchor));
-  const call = mkCall("read_file", {
+  const call = mkCall("tl_read_file", {
     ...(identity.qref === undefined ? {} : { qref: identity.qref }),
     targets,
     content: "auto",
@@ -496,7 +496,7 @@ function buildExplicitNext(
 ): ToolCall {
   // Priority 1: the caller's own addresses ride through verbatim — same
   // order, none dropped, none added (§3.4 step 4 / §10.0 item 1).
-  return mkCall("read_file", {
+  return mkCall("tl_read_file", {
     ...(identity.qref === undefined ? {} : { qref: identity.qref }),
     targets: targets.map((target) => ({ ...target })),
     content: "auto",

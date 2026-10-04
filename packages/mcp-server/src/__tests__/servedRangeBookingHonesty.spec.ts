@@ -113,7 +113,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         { path: "src/levels.ts", range: "44-83" },
         { path: "src/levels.ts", range: "87-126" },
       ];
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         cwd: ws,
@@ -132,7 +132,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         remainingWindowsOf(e).map((range) => ({ path: e["path"] as string, range })));
       expect(remainingTargets.length).toBeGreaterThan(0);
 
-      const second = await server.callTool("read_file", {
+      const second = await server.callTool("tl_read_file", {
         query: QUERY,
         cwd: ws,
         lane,
@@ -174,7 +174,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         { path: "src/levels.ts", range: "44-83" },
         { path: "src/levels.ts", range: "87-126" },
       ];
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         cwd: ws,
         lane,
         budget: { bytes: BUDGET_BYTES },
@@ -187,7 +187,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       const remainingTargets = shed.flatMap((e) =>
         remainingWindowsOf(e).map((range) => ({ path: e["path"] as string, range })));
 
-      const second = await server.callTool("read_file", {
+      const second = await server.callTool("tl_read_file", {
         cwd: ws,
         lane,
         budget: { bytes: BUDGET_BYTES },
@@ -216,7 +216,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       // depend on either way.
       const lane = `genuine-prior-${config}`;
       const range = "1-40";
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         query: QUERY,
         task: { epoch: "new", profile: "answer" },
         cwd: ws,
@@ -231,7 +231,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       const taskHandle = first.body?.task?.id;
       expect(typeof taskHandle, `hop0 must mint a task handle: ${JSON.stringify(first.body)}`).toBe("string");
 
-      const second = await server.callTool("read_file", {
+      const second = await server.callTool("tl_read_file", {
         targets: [{ path: "src/levels.ts", range }],
         task: { handle: taskHandle },
         cwd: ws,
@@ -258,7 +258,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       const chain = await followNextToEnd(
         server,
         {
-          tool: "read_file",
+          tool: "tl_read_file",
           arguments: { query: QUERY, task: { epoch: "new", profile: "answer" }, cwd: ws, lane, budget: { bytes: BUDGET_BYTES } },
         },
         { cwd: ws, hopCap: 14, maxQrefRepacks: 0 },

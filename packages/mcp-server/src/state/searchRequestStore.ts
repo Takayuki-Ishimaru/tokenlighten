@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// searchRequestStore.ts — DESIGN-v0.15 §6.1 (R3): ONE `search_files find`
+// searchRequestStore.ts — DESIGN-v0.15 §6.1 (R3): ONE `tl_search_files find`
 // REQUEST'S ORDERED MATCH SNAPSHOT, DELIVERED PREFIX AND PAGES.
 //
 // NORMATIVE SOURCE: DESIGN-v0.15-exploration-continuation-reliability.md §6.1
@@ -11,7 +11,7 @@
 //
 // -------------------------------- THE MODEL ---------------------------------
 //
-// A find's continuation used to escalate into `read_file mode:"full"` once a
+// A find's continuation used to escalate into `tl_read_file mode:"full"` once a
 // scope was narrowed to one file whose own preview was STILL truncated
 // (`protocol/searchFamily.ts`'s old `findNext` — see that module's history for
 // the exact branch this replaces). The fix keeps an IMMUTABLE, stable-ordered
@@ -73,12 +73,22 @@ import {
   createScanCoverage,
   enumerateFindTextUniverse,
   escapeRegExp,
+  FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE,
+  FIND_WIDE_PAGE_RESPONSE_BYTES,
   isSafeRegexQuery,
   MAX_LINES_PER_FILE,
+  MAX_RESPONSE_BYTES,
   trimMatchText,
   type FindFileGroup,
 } from "../features/search/find/findText.js";
 import { anyWalkOmission, type FoundFile, type LangKey } from "../tools/walkRepo.js";
+// SPC2 (2026-09-29): host-ceiling lookup for effectiveSearchPageLineCap()
+// below — the SAME pattern findText.ts's own hostResponseByteCeiling() uses
+// (see that function's doc comment). clientProfile.ts has ZERO internal
+// imports of its own (a pure lookup module over a static registry), so this
+// direction cannot form a cycle.
+import { resolveClientProfile } from "../protocol/codec/clientProfile.js";
+import { findWidePageEnabled } from "../util/flags.js";
 import { decodeTextBuffer } from "../util/textDecode.js";
 import { shaOfText } from "../util/handles.js";
 
@@ -635,7 +645,7 @@ export function resolveReferencesCursor(
   const resolved = resolveSearchCursor(token, workspaceRoot, binding);
   if (!resolved.ok) return resolved;
   if (resolved.state.action !== "references") {
-    return { ok: false, reason: "wrong-action", detail: "cursor was not opened for search_files action=references" };
+    return { ok: false, reason: "wrong-action", detail: "cursor was not opened for tl_search_files action=references" };
   }
   if (resolved.state.resume_position === undefined) {
     return { ok: false, reason: "unknown", detail: "stored request has no resume position" };
@@ -746,7 +756,7 @@ const SEARCH_PAGE_ENVELOPE_SAFETY_MARGIN_BYTES = 96;
 /**
  * Bytes reserved for everything a `search.matches` `find` page carries BESIDES
  * its `files[]`: the `{v,kind,matches:{form,query,total_files,total_matches,
- * literal},limit:{cause,next:{tool:"search_files",arguments:{…}}}}` envelope,
+ * literal},limit:{cause,next:{tool:"tl_search_files",arguments:{…}}}}` envelope,
  * measured EXACTLY (mirroring `findText.ts`'s own `fitFilesToCap`'s
  * trial-JSON approach) rather than estimated additively — an additive
  * estimate double-counts the fixed and per-field costs and can alone exceed a
@@ -755,7 +765,7 @@ const SEARCH_PAGE_ENVELOPE_SAFETY_MARGIN_BYTES = 96;
  * once this reserve is measured against the REAL structure).
  *
  * The cursor call re-sends the FULL original `queries`/`scope` (design
- * §5.2/§6.1: "search_files は既存cursorを使い、query等の既存必要入力を含む完全
+ * §5.2/§6.1: "tl_search_files は既存cursorを使い、query等の既存必要入力を含む完全
  * なnextをサーバーが作る"), which is why this is larger than read's ~256 B
  * bare-cursor reserve — but it is measured, not guessed, using a
  * `SEARCH_CURSOR_TOKEN_BYTES_ESTIMATE`-length placeholder cursor (the real
@@ -796,7 +806,7 @@ export function searchPageEnvelopeReserve(input: {
       total_matches: 0,
       literal: true,
     },
-    limit: { cause: "wire", next: { tool: "search_files", arguments: args } },
+    limit: { cause: "wire", next: { tool: "tl_search_files", arguments: args } },
   };
   return Buffer.byteLength(JSON.stringify(envelope), "utf8") + SEARCH_PAGE_ENVELOPE_SAFETY_MARGIN_BYTES;
 }
@@ -815,6 +825,82 @@ export type SearchPageChoice =
   | { ok: false; reason: "complete" };
 
 /**
+ * SPC2 (2026-09-29 search-cursor-page-sizing): the "host ceiling" tier of
+ * `effectiveSearchPageLineCap`'s precedence below — duplicates findText.ts's
+ * own (unexported) `hostResponseByteCeiling()` rather than importing it, so
+ * this fix stays confined to this module. Resolves ONLY the explicit
+ * `TOKENLIGHTEN_CLIENT_ID` override half of server.ts's `resolvedClientId()`
+ * — the same documented coverage limit as findText.ts's copy of this lookup;
+ * see that function's own doc comment for what a client identified solely
+ * through the MCP `initialize` handshake still misses today.
+ */
+function hostSearchPageByteCeiling(): number | undefined {
+  const override = process.env["TOKENLIGHTEN_CLIENT_ID"];
+  const clientId = override !== undefined && override !== "" ? override : undefined;
+  return resolveClientProfile(clientId).responseByteCeiling;
+}
+
+/**
+ * SPC2 (2026-09-29 search-cursor-page-sizing): the per-file LINE-COUNT cap
+ * `chooseSearchPage` (below) enforces while accumulating one page — mirrors
+ * findText.ts's `capFileGroup`'s identical decision
+ * (`findWidePageEnabled() && findResponseCapBytes() > MAX_RESPONSE_BYTES`)
+ * with the ONE substitution this module's own timing requires: by the time
+ * a cursor call resumes, findText.ts's transient per-call ceiling override
+ * (`activeFindResponseByteCeilingOverride`) has long since been restored to
+ * `undefined` — that variable lives only for the duration of the ORIGINAL,
+ * synchronous `buildFindResponse()` call, never across a later request. The
+ * durable substitute for "what did the caller declare" is exactly
+ * `state.budget?.bytes` — `SearchRequestState.budget`'s own doc comment:
+ * "Inherited from the ORIGINAL call and echoed verbatim on every
+ * continuation" (never overwritten by a later resume's own declared budget:
+ * server.ts's `serveSearchCursorPage` threads a resume's own `maxBytes` only
+ * into its local `budgetBytes`/`reserve` room calculation, never back into
+ * `staged.state.budget`). So the precedence here is "the caller budget
+ * inherited through the cursor's stored state > host ceiling > the flat
+ * 16 KB default" — the SAME three tiers `findResponseCapBytes()` resolves,
+ * with tier 1 sourced from durable state instead of a live variable, and
+ * tier 3 the identical `FIND_WIDE_PAGE_RESPONSE_BYTES` constant.
+ *
+ * BEFORE THIS FIX: `chooseSearchPage` capped every file at the bare,
+ * unconditional `MAX_LINES_PER_FILE` (8) on EVERY page it ever built —
+ * including a staged request's own FIRST page, not only later cursor hops,
+ * since `stageSearchRequestForFind` (server.ts) calls this SAME function for
+ * page 1 once a request is staged — regardless of TL_FIND_WIDE_PAGE or how
+ * much byte headroom the response actually had. A single file needing
+ * multi-hop pagination (e.g. 200 matching lines) therefore always took
+ * ~25 hops (200/8), even when the effective ceiling had ample room to show
+ * `FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE` (64) lines per hop instead.
+ * This closes that gap: every page this module builds now applies the
+ * identical headroom-gated allowance findText.ts's own non-staged pipeline
+ * already applies to its own first page.
+ *
+ * Applied to `lines`/`snippets` TOGETHER as one cap, unlike `capFileGroup`'s
+ * own split (bare `lines` widen to 64, `snippets` stay pinned at 8):
+ * `chooseSearchPage` never builds a bare line number without its snippet —
+ * every `(path,line)` group it accumulates ships a real trimmed snippet in
+ * the same step (see the main loop below) — so there is no separate "cheap
+ * line number, no text yet" tier to widen independently here. The
+ * byte-fitting loop below (`used + cost > room`) still bounds the page's
+ * total size independently of this per-file allowance, so raising it can
+ * never itself push a page over its caller's own declared/default room.
+ */
+function effectiveSearchPageLineCap(state: SearchRequestState): number {
+  if (!findWidePageEnabled()) return MAX_LINES_PER_FILE;
+  const storedBudgetBytes = state.budget?.bytes;
+  let ceiling: number;
+  if (storedBudgetBytes !== undefined && Number.isFinite(storedBudgetBytes)) {
+    ceiling = Math.max(MAX_RESPONSE_BYTES, Math.floor(storedBudgetBytes));
+  } else {
+    const hostCeiling = hostSearchPageByteCeiling();
+    ceiling = hostCeiling !== undefined && Number.isFinite(hostCeiling)
+      ? Math.max(MAX_RESPONSE_BYTES, Math.floor(hostCeiling))
+      : FIND_WIDE_PAGE_RESPONSE_BYTES;
+  }
+  return ceiling > MAX_RESPONSE_BYTES ? FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE : MAX_LINES_PER_FILE;
+}
+
+/**
  * Choose the next page GREEDILY, on whole `(path,line)` groups, under
  * `budgetBytes - reserve`. Never splits a group (§6.1: "同じ行の複数一致…を
  * 区別する" — the wire's one `snippets[]` entry per line cannot represent half
@@ -826,18 +912,21 @@ export type SearchPageChoice =
  * (skipping would break the prefix invariant `delivered` depends on).
  *
  * PER-FILE CAP, EVEN UNDER A GENEROUS BYTE BUDGET. `findText.ts`'s
- * `capFileGroup` bounds any ONE file's preview to `MAX_LINES_PER_FILE`
- * unconditionally — "applied before any response-wide byte fitting" — and
- * this module only ever runs for a request that ALREADY needed that cap
- * exceeded (`server.ts`'s `findWouldHaveEscalated`), so a page here mirrors
- * the same bound: once the file CURRENTLY being accumulated would exceed
- * `MAX_LINES_PER_FILE`, the page stops — never silently expanding to show a
- * whole 500-line file in one response merely because the caller declared a
- * large budget. Snapshot order is path-major, so every one file's groups are
- * contiguous; stopping (rather than skipping ahead to the next file) is what
- * keeps `end` a clean prefix boundary — the next page picks up this same
- * file's remaining lines first, then moves on, exactly as the design
- * describes for a multi-file request.
+ * `capFileGroup` bounds any ONE file's preview to a HEADROOM-GATED cap (8,
+ * or 64 once the effective ceiling clears the legacy floor — see
+ * `effectiveSearchPageLineCap` above, SPC2 2026-09-29) — "applied before any
+ * response-wide byte fitting" — and this module only ever runs for a request
+ * that ALREADY needed that cap exceeded (`server.ts`'s
+ * `findWouldHaveEscalated`), so a page here mirrors the SAME (now dynamic)
+ * bound: once the file CURRENTLY being accumulated would exceed that cap,
+ * the page stops — never silently expanding to show a whole 500-line file in
+ * one response merely because the caller declared a large budget, but also
+ * never needlessly narrower than findText.ts's own first-page policy once
+ * there is real byte headroom to show more. Snapshot order is path-major, so
+ * every one file's groups are contiguous; stopping (rather than skipping
+ * ahead to the next file) is what keeps `end` a clean prefix boundary — the
+ * next page picks up this same file's remaining lines first, then moves on,
+ * exactly as the design describes for a multi-file request.
  */
 export function chooseSearchPage(
   state: SearchRequestState,
@@ -849,6 +938,10 @@ export function chooseSearchPage(
   if (state.delivered >= state.matches.length) return { ok: false, reason: "complete" };
   const groups = groupRecordsByLine(state.matches.slice(state.delivered));
   const room = budgetBytes - reserve;
+  // SPC2 (2026-09-29): dynamic, headroom-gated per-file cap — see
+  // `effectiveSearchPageLineCap`'s own doc comment above for why this reads
+  // `state.budget` rather than a per-call parameter.
+  const lineCap = effectiveSearchPageLineCap(state);
 
   const files: FindFileGroup[] = [];
   const byPath = new Map<string, FindFileGroup>();
@@ -859,7 +952,7 @@ export function chooseSearchPage(
   for (const group of groups) {
     if (itemsBudget !== undefined && consumedRecords + group.records.length > itemsBudget) break;
     const existing = byPath.get(group.path);
-    if (existing !== undefined && existing.lines.length >= MAX_LINES_PER_FILE) break;
+    if (existing !== undefined && existing.lines.length >= lineCap) break;
     const text = lineTextOf(group.path, group.line);
     if (text === undefined) break;
     let anchor: number | undefined;

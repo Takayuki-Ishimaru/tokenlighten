@@ -311,7 +311,7 @@ describe("loadOrBuildSourceIndex", () => {
 // Tests: .h C++ content sniff (Task A — index-side sniffing, index A/B evidence)
 // ---------------------------------------------------------------------------
 //
-// This is the module search_files action=symbols actually reads from
+// This is the module tl_search_files action=symbols actually reads from
 // (mcp-server's searchSymbols.ts calls loadOrBuildSourceIndex, not
 // graph.ts's buildFileInputs — that separately feeds buildSkeleton's own
 // PageRank/topN pipeline in index.ts). The reviewer-proven bug
@@ -745,7 +745,7 @@ describe("V10-10 — corrupt manifest safe fallback (end-to-end through loadOrBu
 // fix locates the captured name and prefers the declaring keyword
 // structurally closest to it. These exercise the real end-to-end pipeline
 // (loadOrBuildSourceIndex -> extractSymbolsRegex -> symbolKindFromSignature)
-// — the same path search_files action=symbols reads from — since the
+// — the same path tl_search_files action=symbols reads from — since the
 // function itself has no export to test directly.
 
 describe("symbolKindFromSignature — kind precedence (F-A1-4)", () => {

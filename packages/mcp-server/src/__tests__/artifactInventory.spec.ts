@@ -157,7 +157,7 @@ describe("WS4 artifact inventory", () => {
       size: bytes.byteLength,
       handle: artifact!.handle,
       // 2026-09-20 legacy-spelling sweep: the pointer names the canonical read.
-      extract: 'read_file {targets:[{path:"docs/design/rate-table.xlsx"}]}',
+      extract: 'tl_read_file {targets:[{path:"docs/design/rate-table.xlsx"}]}',
     });
     expect("code" in artifact!).toBe(false);
 

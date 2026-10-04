@@ -31,7 +31,7 @@
 //  * NOT wired. Nothing in `features/task-pack/**`, `server.ts`,
 //    `protocol/**`, or `task-state/**` imports this file this wave. Deciding
 //    WHEN a relation concern is satisfied by a packet (vs. falling back to
-//    `search_files {action:"references"}` on a big fan-out, per §3.7.2's
+//    `tl_search_files {action:"references"}` on a big fan-out, per §3.7.2's
 //    "packet は『1 応答で足りるとき』の最適化であって、上限の代替ではない") is
 //    W-SATISFACTION's job, not this compiler's.
 //  * NOT reading flags or the environment. `sfRelationPacketsEnabled()`

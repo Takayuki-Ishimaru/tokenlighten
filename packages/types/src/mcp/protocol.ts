@@ -117,7 +117,7 @@ export type Kind =
   | "refusal";
 
 /**
- * Every read_file success member (A.5.1–A.5.7). One of the four families of
+ * Every tl_read_file success member (A.5.1–A.5.7). One of the four families of
  * `ProtocolResult`.
  */
 export type ReadResult =
@@ -129,7 +129,7 @@ export type ReadResult =
   | ReadReceiptResult
   | ReadClosureResult;
 
-/** Every search_files success member (A.5.8–A.5.10). */
+/** Every tl_search_files success member (A.5.8–A.5.10). */
 export type SearchResult =
   | SearchMatchesResult
   | SearchReferencesResult
@@ -172,7 +172,7 @@ export type JsonValue =
  * advertises to MCP, not protocol vocabulary this document may re-spell —
  * renaming them renames the tools.
  */
-export type ToolName = "read_file" | "edit_file" | "search_files";
+export type ToolName = "tl_read_file" | "tl_edit_file" | "tl_search_files";
 
 /**
  * An open map of JSON values, deliberately NOT a closed per-tool struct.
@@ -198,7 +198,7 @@ export type ToolCallOf<T extends ToolName> = { tool: T; arguments: ToolArguments
 /** Executable. Never a template: §2.6 abolishes placeholder-bearing calls. */
 export type ToolCall = ToolCallOf<ToolName>;
 
-export type EditToolCall = ToolCallOf<"edit_file">;
+export type EditToolCall = ToolCallOf<"tl_edit_file">;
 
 // ---------------------------------------------------------------------------
 // A.2.2 `WorkspaceMarker`
@@ -270,6 +270,18 @@ export type WorkspaceMarker = {
  * absence and reaches `act.answer`/`act.edit` has no `gaps` slot to carry it on
  * (the underlying obligation's `reason` still states it), because extending
  * that structural rule itself is a protocol-level change this addition does not make.
+ *
+ * SEVEN SINCE R2-T2 (2026-09-30, review-0929, orchestrator ruling; additive,
+ * the same way `request-item-absent` entered). `request-item-undetermined` is a
+ * request item the pack could NOT settle either way — no evidence covers it and
+ * no verified absence is certifiable (a katakana loanword with no known English
+ * spelling, a coordinated point whose candidates were not served, a point whose
+ * only words are descriptors/predicates). It is a DISCLOSURE, never blocking and
+ * never carrying a call, exactly like `request-item-absent`, and rides
+ * `decision.discover.gaps` only (D-4); a certified `act.*` already names it on
+ * `certificate.gaps` as `explicit-gap:request-item-undetermined:<term>`. Before
+ * it, an undetermined point on an intermediate `discover` whose `next` led to a
+ * non-pack response was named nowhere in the chain.
  */
 export type CapabilityGap = {
   code:
@@ -278,11 +290,13 @@ export type CapabilityGap = {
     | "invalid-request"
     | "unsupported-operation"
     | "workspace-changed"
-    | "request-item-absent";
+    | "request-item-absent"
+    | "request-item-undetermined";
   /**
    * Handles/paths/identifiers the gap is about. Emitted iff the server can name
    * them; absence means the gap is not localisable, NOT that it is unimportant.
    * For `request-item-absent`: `[<request item id>, <the absent search term>]`.
+   * For `request-item-undetermined`: `[<request item id>, <the point's term>]`.
    */
   refs?: string[];
 };
@@ -433,7 +447,7 @@ export type Refusal =
    * USER-ADJUDICATED 2026-08-13, implemented in C2-4.
    *
    * §2.6 makes the agent AUTHOR the challenge "from the advertised
-   * `edit_file`/`read_file` request schema plus the refusal's
+   * `tl_edit_file`/`tl_read_file` request schema plus the refusal's
    * `retry:\"challenge\"`", and `challenge.certificate_id` is a required
    * argument of that call (the server refuses a challenge whose id does not
    * match the active task, `state/session.ts:2150`). A `retry:"challenge"` with
@@ -629,7 +643,7 @@ export type TypestateCode =
    * been given this yet" / "this address is outside the fence's shipped
    * projection"). This one is about AUTHORITY over bytes the caller demonstrably
    * holds, so its recovery is a re-pack that states the edit intent, not a read
-   * — `retry:"new-task"` with a `read_file` `next` naming the path under
+   * — `retry:"new-task"` with a `tl_read_file` `next` naming the path under
    * `task:{epoch:"new",profile:"generic"}`.
    */
   | "frontier-read-only"                                     // state/session.ts (grep "frontier-read-only")
@@ -669,7 +683,7 @@ export type WriteCode =
   | "file-too-large"                      // applyEditsMulti.ts (grep "file-too-large"); write/rangeEdit.ts (grep "file-too-large")
   | "path-outside-workspace";             // intents/appendEnumMember.ts (grep "path-outside-workspace"); tools/readCodeSmallFile.ts (grep "path-outside-workspace")
 
-/** `edit_file intent=…`. */
+/** `tl_edit_file intent=…`. */
 export type IntentCode =
   | "intent-unknown"                 // intents/index.ts (grep "intent-unknown")
   | "intent-unsupported"             // intents/appendUnionMember.ts (grep "intent-unsupported"); intents/renameSymbolReferences.ts (grep "intent-unsupported")

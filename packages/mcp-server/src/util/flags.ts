@@ -104,6 +104,37 @@
  *       packs; neither adds a kind, field, or tool argument. See the "FP
  *       addendum" doc block below for the full mechanism.
  *
+ *       TL_LEAN_SCHEMA (v0.15.0, USER ruling after the pre-registered
+ *       3-real-client gate passed 2026-09-30): the all-client advertised-schema
+ *       diet -- `tools/list` no longer carries each tool's top-level
+ *       `oneOf`/`anyOf` or `task.dependentRequired` -- is promoted from a
+ *       default-OFF experiment to supported policy, default ON.
+ *       Explicit `0`/`off` restores the full pre-v0.15.0 schema byte-for-byte
+ *       and remains the rollback path. Advertising-only: dispatch enforces
+ *       every one of those constraints regardless of what is advertised, and
+ *       nothing adds a kind, field, or tool argument. See `leanSchemaEnabled`'s
+ *       doc block below for the gate's three results.
+ *
+ *       TL_EFF_TOLERANT_INPUT (USER ruling 2026-10-01, after the paired
+ *       efficiency A/B in bench/workflows/experiments/2026-10-01-efficiency-ideas):
+ *       unambiguous near-miss inputs that used to refuse are served instead,
+ *       default ON. Explicit `0`/`off` restores every refusal byte-for-byte
+ *       and remains the rollback path. It adds no kind, field, or tool
+ *       argument; each rewrite is one the refusal's own `retry: call` named.
+ *       The wider find cap that rode it in the experiment stays a (B) flag,
+ *       TL_EFF_WIDE_FIND, because the guide documents `>5 queries` as a
+ *       refusal.
+ *
+ *       TL_EFF_SLIM_EDIT (USER ruling 2026-10-01, same A/B; the T13 verified
+ *       gap was traced to the verifier's static tracer, not to this flag --
+ *       behaviourally both arms were 3/6): `edit.applied` ships its `after`
+ *       window as the changed lines ±3 and its verification kit without
+ *       inline bodies, default ON. Explicit `0`/`off` restores the ±20 /
+ *       enclosing-symbol window and inline kit bodies byte-for-byte and
+ *       remains the rollback path. It adds no kind, field, or tool argument:
+ *       a body-less kit entry is the existing `omitted` label with the kit's
+ *       existing batched `next_call`.
+ *
  *   (B) out-of-contract, experiment-only (default OFF; D10(b)). Turning one on
  *       is an unfrozen capability addition, not a supported posture:
  *       TL_DELTA_CONTEXT,
@@ -198,7 +229,7 @@
  *       stale symbol data indefinitely, within one long-lived server
  *       process, for a same-stat (size+mtime) external write that skips
  *       invalidateCachedWorkspaceFiles — reproduced end-to-end against the
- *       real server via search_files action=symbols (the one production
+ *       real server via tl_search_files action=symbols (the one production
  *       loadOrBuildSourceIndex call site); see faultInjection.spec.ts and
  *       consistencyScan.spec.ts for the pinned regression shape. Cost is
  *       bounded by design (maxFiles/maxDurationMs in consistencyScan.ts)
@@ -249,6 +280,20 @@
  *       operational/platform class like the pair above; see the V11-07
  *       addendum below for the wire-serialization consequence it can (only
  *       conditionally) reach.
+ *       TOKENLIGHTEN_CLIENT (2026-10-02, read only by mcp/hostActivation.ts)
+ *       is the older spelling of that identity in the VS Code entry `tl
+ *       workspace setup` writes (TOKENLIGHTEN_CLIENT=vscode, later joined by
+ *       TOKENLIGHTEN_CLIENT_ID=vscode); either one equal to "vscode" makes
+ *       this server the VS Code client for ONE purpose: it may honor
+ *       `<workspace>/.tokenlighten/host-activation.json`, the VS Code
+ *       extension's window-scoped off switch. While that file is live (its
+ *       ownerPid runs AND its updatedAt is fresh: no older than 90 s, none
+ *       more than 60 s ahead, the extension rewriting it every 30 s)
+ *       `tools/list` is empty and `tools/call` answers
+ *       JSON-RPC -32601; `initialize` declares `tools.listChanged` for that
+ *       client alone. No new protocol kind, field or tool argument, and with
+ *       no live file — or for any other client, file or no file — no response
+ *       byte moves. Operational/platform class like TOKENLIGHTEN_CLIENT_ID.
  *       TL_ENABLE_DEPRECATED_ALIASES and the three per-tool disables
  *       (TL_DISABLE_GET_FILE_SKELETON, TL_DISABLE_GET_SYMBOL_WITH_CONTEXT,
  *       TL_DISABLE_EXTRACT_OFFICE_TEXT) are D11 territory, not D10's, and are
@@ -329,7 +374,7 @@
  * `ProtocolCallContext.clientId` is now populated -- captured once from the
  * hand-rolled dispatcher's `initialize` clientInfo.name (server.ts's ONE
  * read site for it), or from TOKENLIGHTEN_CLIENT_ID when a leg never reaches
- * that capture (every leg but the hand-rolled fallback). Neither source is
+ * that capture (every leg but the hand-rolled legacy-era transport). Neither source is
  * itself wire-affecting: a clientId that fails to resolve a KNOWN, FRESH
  * profile still yields UNKNOWN_CLIENT_PROFILE, and this whole selection
  * branch stays behind TL_WIRE_BREAKEVEN+auto exactly as above.
@@ -499,7 +544,10 @@
  * F5 addendum -- Find Wide Snippet Page (2026-09-19)
  * ---------------------------------------------------------------------------
  *
- * TL_FIND_WIDE_PAGE joins class (B): out-of-contract, default OFF.
+ * TL_FIND_WIDE_PAGE joined class (B): out-of-contract, default OFF, at
+ * introduction -- see the SPC addendum below for its 2026-09-29 promotion to
+ * (S) supported, DEFAULT ON for every client. This block is kept for the
+ * mechanism's own rationale, which the promotion does not change.
  *
  * Widens the explore action=find snippet-section byte cap
  * (features/search/find/findText.ts's fitFilesToCap()/applyRoles() calls,
@@ -520,13 +568,63 @@
  * makes one extra turn cost about as much as 10-20 KB of new payload, so a
  * 4 KB page sits far below break-even on every host measured.
  *
- * OFF (the default) is byte-identical to pre-F5 output: both accessors
- * return their unchanged pre-flag constants, so replayCorpus.spec.ts and
- * wireBaselines.spec.ts pass without regeneration. ON changes only HOW MANY
- * BYTES of the SAME fields (files[]/roles/matched_terms/hint, then
- * inventory/rollup) ship before truncation kicks in -- same fields, same
- * ordering, same total_files/total_matches honesty either way; no new kind,
- * field, or tool argument.
+ * Explicit OFF (`TL_FIND_WIDE_PAGE=0`) is byte-identical to pre-F5 output:
+ * both accessors return their unchanged pre-flag constants, so
+ * replayCorpus.spec.ts and wireBaselines.spec.ts pass unmodified under that
+ * override -- see the SPC addendum for what the (now default) ON state pins
+ * instead. Either way, the flag changes only HOW MANY BYTES of the SAME
+ * fields (files[]/roles/matched_terms/hint, then inventory/rollup) ship
+ * before truncation kicks in -- same fields, same ordering, same
+ * total_files/total_matches honesty either way; no new kind, field, or tool
+ * argument.
+ *
+ * ---------------------------------------------------------------------------
+ * SPC addendum -- Search Pages sized to the host Ceiling (2026-09-29; (S)
+ * supported policy, DEFAULT ON for every client, promoted from F5's class
+ * (B)/default-OFF by this wave's USER-approved v0.15.0 package)
+ * ---------------------------------------------------------------------------
+ *
+ * WHY THE PROMOTION IS SAFE. F5's own OFF-by-default gate meant Claude
+ * Code/Codex (hosts with NO response-byte ceiling at all -- widening is pure
+ * upside for them) only got the wide page when an operator additionally set
+ * TL_TURN_ECONOMY, and TL_TURN_ECONOMY itself was, in practice, written ONLY
+ * by the VS Code setup script -- so almost every non-VS-Code session ran the
+ * narrow 4096-byte/8-line-per-file page. MEASURED: a 2.3 KB find result
+ * still needed 2 hops under that narrow page purely from the flat
+ * MAX_LINES_PER_FILE(8) per-file cap (independent of the 4096-byte budget
+ * having room to spare), and evaluator sessions averaged 1.06 `limit`+`next`
+ * responses/cell, 17 of 18 of them `find` wire pages. VS Code is UNCHANGED
+ * by this promotion (it already received the widened page via the
+ * TURN_ECONOMY umbrella), so the promotion's entire effect is Claude
+ * Code/Codex moving from the narrow to the wide page by default.
+ *
+ * `findResponseCapBytes()`/`findInventoryCapBytes()` (findText.ts) also gained
+ * an optional PER-CALL ceiling override (`buildFindResponse`/
+ * `buildFindResponseForQueries`'s own `opts.responseByteCeiling`), which
+ * server.ts's find dispatch resolves from the caller's own declared
+ * `budget.bytes`/`budget.tokens` (the SAME `resolveCallerByteCeiling` helper
+ * every other caller-declared-budget consumer in that file already uses) --
+ * "caller budget" outranks BOTH the host-ceiling tier and the flat
+ * FIND_WIDE_PAGE_RESPONSE_BYTES default. See findText.ts's own doc comment
+ * on that mechanism for exactly what it covers (the FIRST find response
+ * only; continuation pages already run through an independent, separately
+ * generous budget in server.ts/state/searchRequestStore.ts, untouched here).
+ * No caller declaring a budget (the common case) changes nothing beyond the
+ * ON-by-default flip itself.
+ *
+ * `findWidePageEnabled()` is NO LONGER a TL_TURN_ECONOMY umbrella member:
+ * unlike that umbrella's other (still default-OFF, still VS-Code-setup-only)
+ * members, this flag's default no longer depends on it at all -- an unset
+ * TL_FIND_WIDE_PAGE now reads ON regardless of TL_TURN_ECONOMY, and
+ * TL_TURN_ECONOMY=1 alone (no explicit TL_FIND_WIDE_PAGE) still reads ON too
+ * (same value, different reason). Explicit `TL_FIND_WIDE_PAGE=0`/"false"/
+ * "no"/"off" remains the rollback path to the pre-F5 narrow page, same
+ * override semantics as every other (S) supported policy in this file
+ * (concernRecoveryEnabled, jaQueryBridgeEnabled, taskHandleRecoveryEnabled).
+ * Per that same precedent, `findWidePageEnabled` is no longer reported by
+ * `activeExperimentFlags()` (util/trace.ts's `flags_active`) -- it is a
+ * shipped default, not an active experiment, whether left unset or set
+ * explicitly in either direction.
  *
  * ---------------------------------------------------------------------------
  * FP addendum -- First-Pack Precision (2026-09-19; promoted to (S) supported
@@ -886,9 +984,13 @@ export function activeExperimentFlags(): readonly string[] {
   // this file's "FX-M addendum" doc block above.
   if (packGuideElideEnabled()) active.push("TL_PACK_GUIDE_ELIDE");
   if (packFairTrimEnabled()) active.push("TL_PACK_FAIR_TRIM");
-  // F5 (2026-09-19): find wide snippet page. Default OFF; see this file's
-  // "F5 addendum" doc block above.
-  if (findWidePageEnabled()) active.push("TL_FIND_WIDE_PAGE");
+  // F5 (2026-09-19) reported find-wide-page here while it was class (B),
+  // default OFF. SPC (2026-09-29) promoted it to (S) supported, DEFAULT ON
+  // for every client — see this file's "SPC addendum" doc block above — so,
+  // matching concernRecoveryEnabled/jaQueryBridgeEnabled/
+  // taskHandleRecoveryEnabled's own precedent, it is no longer reported
+  // here: a shipped default is not an active experiment, whether left
+  // unset or set explicitly in either direction.
   // Turn economy (2026-09-20): the per-host umbrella and each member policy
   // it governs. Both default OFF, so a stock session's `flags_active` is
   // byte-identical to before them; a member is reported whenever it is
@@ -907,6 +1009,18 @@ export function activeExperimentFlags(): readonly string[] {
   // other member, since this trace is about the FLAG'S value, not about
   // whether the current call happens to be vscode-scoped.
   if (leanCallsEnabled()) active.push("TL_LEAN_CALLS");
+  // Copilot retest r5 (2026-10-03): two more umbrella members, reported the
+  // same way.
+  if (minimalToolsEnabled()) active.push("TL_MINIMAL_TOOLS");
+  if (findSmallBodiesEnabled()) active.push("TL_FIND_SMALL_BODIES");
+  // V15-LTS (2026-09-29): the all-client schema diet. It was reported here
+  // while it was a default-OFF experiment; v0.15.0 (2026-09-30) made it (S)
+  // supported policy, DEFAULT ON for every client (see leanSchemaEnabled's own
+  // doc block), so -- matching concernRecoveryEnabled/jaQueryBridgeEnabled/
+  // taskHandleRecoveryEnabled/findWidePageEnabled's own precedent above -- it
+  // is no longer reported: a shipped default is not an active experiment,
+  // whether left unset or set explicitly in either direction. A stock
+  // session's `flags_active` stays byte-identical to before this promotion.
   // v0.15 W-CORE-FLAGS: Semantic Frontier v2 program flags -- registration
   // only today (no production branch reads them yet, see their own doc
   // blocks above); reported here for trace-inventory parity with every
@@ -921,6 +1035,21 @@ export function activeExperimentFlags(): readonly string[] {
   if (receiptCoverageEnabled()) active.push("TL_RECEIPT_COVERAGE");
   if (batchHintsEnabled()) active.push("TL_BATCH_HINTS");
   if (searchDedupEnabled()) active.push("TL_SEARCH_DEDUP");
+  // V15-NBR/FUI (2026-09-29): independent prototypes, not SF v2 members —
+  // see their own accessor doc blocks at the end of this file.
+  if (neighbourIndexEnabled()) active.push("TL_NEIGHBOUR_INDEX");
+  if (usageInventoryEnabled()) active.push("TL_USAGE_INVENTORY");
+  // EFF (2026-10-01): efficiency experiment, default OFF. TL_EFF_TOLERANT_INPUT
+  // and TL_EFF_SLIM_EDIT were promoted to supported policy, DEFAULT ON (see
+  // this file's header), so -- matching taskHandleRecoveryEnabled/
+  // leanSchemaEnabled's own precedent -- they are no longer reported here.
+  if (effAutofollowEnabled()) active.push("TL_EFF_AUTOFOLLOW");
+  if (effLenientEditEnabled()) active.push("TL_EFF_LENIENT_EDIT");
+  if (effWideFindEnabled()) active.push("TL_EFF_WIDE_FIND");
+  if (effPlanTrimEnabled()) active.push("TL_EFF_PLAN_TRIM");
+  if (effFindPhraseEnabled()) active.push("TL_EFF_FIND_PHRASE");
+  if (effHubWholeEnabled()) active.push("TL_EFF_HUB_WHOLE");
+  if (effEditNoteEnabled()) active.push("TL_EFF_EDIT_NOTE");
   return active;
 }
 
@@ -1009,7 +1138,7 @@ export function batchEditFrontierEnabled(): boolean {
  * D10 (B): FX-L STRICT FRONTIER WRITES (user ruling 2026-09-14,
  * review-findings-6 SHOULD-FIX 38). Default OFF.
  *
- * OFF — the ruling's default behaviour: an `edit_file` whose target the LATEST
+ * OFF — the ruling's default behaviour: an `tl_edit_file` whose target the LATEST
  * certified decision did not authorize still APPLIES, and the `edit.applied`
  * response discloses the fact through `EditReclassification.frontier_status`
  * (`state/session.ts`'s `certifiedFrontierMarkerFor`). FX-L is untouched: the
@@ -1104,28 +1233,32 @@ export function packFairTrimEnabled(): boolean {
 }
 
 /**
- * F5 (2026-09-19), D10 (B): out-of-contract, default OFF. See this file's
- * "F5 addendum" doc block above for the full rationale.
+ * F5 (2026-09-19) introduced this as D10 (B): out-of-contract, default OFF.
+ * SPC (2026-09-29) promotes it to (S) supported, DEFAULT ON for every
+ * client — see this file's "F5 addendum" and "SPC addendum" doc blocks
+ * above for the full rationale (mechanism and promotion respectively).
  *
- * ON: `features/search/find/findText.ts`'s `findResponseCapBytes()` (the
- * explore action=find snippet-section cap) and `findInventoryCapBytes()`
- * (the companion whole-response-with-inventory ceiling) both widen — see
- * each accessor's own doc comment for the exact bytes.
+ * ON (the default): `features/search/find/findText.ts`'s
+ * `findResponseCapBytes()` (the explore action=find snippet-section cap)
+ * and `findInventoryCapBytes()` (the companion whole-response-with-inventory
+ * ceiling) both widen — see each accessor's own doc comment for the exact
+ * bytes and for the optional per-call ceiling override they also read.
  *
- * OFF (the default): both accessors return their pre-flag constants
- * unchanged, so the find response family is byte-identical to pre-F5
- * output.
+ * OFF (explicit `TL_FIND_WIDE_PAGE="0"`/"false"/"no"/"off"): both accessors
+ * return their pre-flag constants unchanged, so the find response family is
+ * byte-identical to pre-F5 output — the rollback path, same shape as
+ * `concernRecoveryEnabled`/`jaQueryBridgeEnabled`/`taskHandleRecoveryEnabled`.
  *
- * 2026-09-20 addendum: joined the TL_TURN_ECONOMY umbrella as a member,
- * with exactly the override semantics `seededGenerousEnabled` documents —
- * its own TL_FIND_WIDE_PAGE variable wins outright whenever it is set
- * (including explicit "0"); only an UNSET variable falls back to
- * `turnEconomyEnabled()`. Unset both and this reads exactly as before.
+ * No longer a TL_TURN_ECONOMY umbrella member (unlike this file's other,
+ * still-default-OFF turn-economy policies): promoting the DEFAULT to ON
+ * makes following that still-default-OFF umbrella pointless — an unset
+ * TL_FIND_WIDE_PAGE would otherwise depend on an unrelated, unset variable
+ * to reach the very state this promotion makes the default. Reads ON
+ * whether TL_TURN_ECONOMY is unset, "0", or "1"; only this flag's OWN
+ * variable can turn it off.
  */
 export function findWidePageEnabled(): boolean {
-  const raw = process.env["TL_FIND_WIDE_PAGE"];
-  if (raw !== undefined) return parseBool(raw, false);
-  return turnEconomyEnabled();
+  return parseBool(process.env["TL_FIND_WIDE_PAGE"], true);
 }
 
 /**
@@ -1172,9 +1305,9 @@ export function jaQueryBridgeEnabled(): boolean {
 /**
  * TL_TASK_HANDLE_RECOVERY (2026-09-19), (S) supported policy — DEFAULT ON;
  * explicit "0"/"off" is the rollback path, restoring today's behaviour
- * byte-for-byte. `read_file`/`search_files` only; `edit_file` keeps strict
+ * byte-for-byte. `tl_read_file`/`tl_search_files` only; `tl_edit_file` keeps strict
  * authentication always (see server.ts's `recoverAuthFailedTaskHandle`,
- * never wired into the edit_file dispatch arm).
+ * never wired into the tl_edit_file dispatch arm).
  *
  * ON (the default): when a presented `task.handle` fails authentication,
  * server.ts's `recoverAuthFailedTaskHandle` tries, in order, (0) a live
@@ -1186,12 +1319,17 @@ export function jaQueryBridgeEnabled(): boolean {
  * the presented string. On a match the call proceeds as if that recovered handle had been
  * presented — same task, same wire `task.id` on the way out — instead of
  * refusing `handle-unknown`. Two or more qualifying candidates is ambiguous
- * and recovers nothing. Adds no kind, field, or tool argument: an
- * already-defined refusal turns into an already-defined success on the SAME
- * schema, nothing new ships either way.
+ * and recovers nothing. (c) (2026-10-02, Copilot standard-setup evaluation)
+ * when nothing was recovered and the SAME call sends `task.epoch:"new"`
+ * without `expected_state_version`, a handle that names no live task (any
+ * outcome but `wrong-workspace`) is dropped and the call proceeds as the new
+ * task it asked for (server.ts's `dropDeadTaskHandleForNewEpoch`). Adds no
+ * kind, field, or tool argument: an already-defined refusal turns into an
+ * already-defined success on the SAME schema, nothing new ships either way.
  *
- * OFF (explicit "0"): `recoverAuthFailedTaskHandle` returns immediately;
- * every call reaches `taskHandleRefusal` exactly as it does today.
+ * OFF (explicit "0"): `recoverAuthFailedTaskHandle` and
+ * `dropDeadTaskHandleForNewEpoch` return immediately; every call reaches
+ * `taskHandleRefusal` exactly as it does today.
  */
 export function taskHandleRecoveryEnabled(): boolean {
   return parseBool(process.env["TL_TASK_HANDLE_RECOVERY"], true);
@@ -1225,7 +1363,7 @@ export function turnEconomyEnabled(): boolean {
  * (either "0"/"off" or "1"/"on") always wins; unset, this flag follows
  * `turnEconomyEnabled()`. With neither variable set the seeded/anchor paths
  * are byte-identical to pre-WP-S2 output. Scoped to `readCodeTaskPack.ts`'s
- * SEEDED pack (`buildSeededTaskPack` — a `read_file {query, targets:[{path},…]}`
+ * SEEDED pack (`buildSeededTaskPack` — a `tl_read_file {query, targets:[{path},…]}`
  * where the CALLER named the files) and to `selectAnchorFocus`'s member
  * ranking.
  *
@@ -1283,7 +1421,7 @@ export function seededGenerousEnabled(): boolean {
  * mints `identifier:ShopFlow` as a BLOCKING obligation, because the word is
  * PascalCase and that is all the shape oracle can see. No symbol in the
  * workspace is named `ShopFlow` (only neighbours such as `ShopFlowApiClient`),
- * so the pack's own prescribed `next` — `search_files find ["ShopFlow"]` — is a
+ * so the pack's own prescribed `next` — `tl_search_files find ["ShopFlow"]` — is a
  * call the server can predict will find nothing useful: following it returned
  * fuzzy symbol hits and a re-pack that served an unrelated file and REGRESSED
  * the decision. Two model turns bought a worse task state. A stop-list
@@ -1362,7 +1500,7 @@ export function identifierGroundingEnabled(): boolean {
  * so the true source line of a statement inside the body cannot be counted
  * off the wire (a method actually starting at file line 274 is unreachable by
  * counting from a body that opens at line 256). The model issued serial
- * `search_files find` calls on exact code text purely to learn line numbers
+ * `tl_search_files find` calls on exact code text purely to learn line numbers
  * — 3 extra model turns in one session, 1 in another — and a turn prices at
  * roughly the same as 9-14 KB of served bytes on every host measured, so
  * serving the numbers in-band is strictly cheaper than the native escape.
@@ -1373,7 +1511,7 @@ export function identifierGroundingEnabled(): boolean {
  * ANSWER-profile response (`read.task_pack` with `profile:"answer"`, or a
  * `read.text`/`read.batch` whose OWN call args declare `task.profile:"answer"`
  * — never a `generic`/change task, whose bodies must stay copy-exact for
- * `edit_file` search/replace): each body line gains a source-line-number
+ * `tl_edit_file` search/replace): each body line gains a source-line-number
  * gutter, re-derived from the renderer per ruling (aa) (never by re-parsing
  * marker-shaped text) and applied ONLY when the served body is byte-equal to
  * `elideDocCommentsWithWindows`'s own rendering of that path+range, or a
@@ -1464,7 +1602,7 @@ export function namedTargetResolutionEnabled(): boolean {
  * listed the file's own head as `remaining` — e.g. `OrderService.java:27-420
  * remaining:["1-26"]` — a package line, imports and a blank line nobody asked
  * about. The model then spent a WHOLE extra turn
- * (`read_file {targets:[{handle,range:"1-14"}]}`) fetching the 14 import lines
+ * (`tl_read_file {targets:[{handle,range:"1-14"}]}`) fetching the 14 import lines
  * it needed; one extra turn prices at roughly 9-14 KB of served source on
  * every host measured, so withholding ~400 bytes nobody needed cost far more
  * than it saved, and the standing `remaining` entry is itself a standing
@@ -1566,9 +1704,9 @@ export function callerExpansionEnabled(): boolean {
  * `seededGenerousEnabled`/`identifierGroundingEnabled`/`foldSmallRemainderEnabled`/
  * `callerExpansionEnabled` document: an explicit `TL_RESERVE_SMALL_WINDOWS`
  * value (either "0"/"off" or "1"/"on") always wins; unset, this flag follows
- * `turnEconomyEnabled()`. With neither variable set, `read_file`'s dedupe
+ * `turnEconomyEnabled()`. With neither variable set, `tl_read_file`'s dedupe
  * receipts are byte-identical to pre-WP-S10 output. Scoped to ONE seam in
- * `server.ts`'s `read_file` dispatch, immediately before the S1-A1 qref-repack
+ * `server.ts`'s `tl_read_file` dispatch, immediately before the S1-A1 qref-repack
  * reprojection: when this flag is on, the call addresses one or more explicit
  * line windows (a single target's `range`/`ranges`/`symbol`, or a
  * `paths[]`/`handles[]` batch whose every entry does, by path or handle, with
@@ -1623,7 +1761,7 @@ export function reserveSmallWindowsEnabled(): boolean {
  * client is unaffected regardless of this flag's value.
  *
  * ON, and the resolved client is "vscode": `protocol/envelope.ts`'s
- * `canonicalToolCall` omits `cwd` from an emitted read_file/search_files
+ * `canonicalToolCall` omits `cwd` from an emitted tl_read_file/tl_search_files
  * continuation when it targets the same workspace the triggering call is
  * already resolved against (VS Code launches one server per single
  * workspace root, so that call's own workspace IS the server's root), and
@@ -1632,9 +1770,9 @@ export function reserveSmallWindowsEnabled(): boolean {
  * needs no task continuity to be served. A cursor continuation,
  * `task.pull:"closure"`, a challenge, or `task.expected_state_version`
  * still keep the handle explicit — each genuinely needs it.
- * `edit_file` continuations are unchanged: write safety keeps `cwd`/
+ * `tl_edit_file` continuations are unchanged: write safety keeps `cwd`/
  * `task.handle` explicit always. `server.ts`'s `advertisedTools()`
- * additionally sheds read_file's `budget.bytes`/`budget.tokens`, each
+ * additionally sheds tl_read_file's `budget.bytes`/`budget.tokens`, each
  * tool's top-level `oneOf`/`anyOf`, `task`'s `dependentRequired` and every
  * nested property description from the advertised schema for that same
  * vscode+flag case (`targets[].purpose` STAYS advertised, described as a
@@ -1644,8 +1782,11 @@ export function reserveSmallWindowsEnabled(): boolean {
  * enforces every one of these constraints at dispatch regardless of what is
  * advertised, so nothing served becomes stricter or looser than today.
  *
- * OFF (the default), or any other client: every emitted call and every
- * advertised schema is byte-identical to pre-WP-V1 output.
+ * OFF (the default), or any other client: every emitted call is
+ * byte-identical to pre-WP-V1 output, and so is every advertised schema apart
+ * from the two elements `TL_LEAN_SCHEMA` (`leanSchemaEnabled` below) sheds for
+ * EVERY client since v0.15.0 -- with `TL_LEAN_SCHEMA=0` as well, byte-identical
+ * to pre-WP-V1 output.
  */
 export function leanCallsEnabled(): boolean {
   // Same PRESENCE-first read as `seededGenerousEnabled`/
@@ -1654,6 +1795,126 @@ export function leanCallsEnabled(): boolean {
   const raw = process.env["TL_LEAN_CALLS"];
   if (raw !== undefined) return parseBool(raw, false);
   return turnEconomyEnabled();
+}
+
+/**
+ * Copilot retest r5 (2026-10-03), turn-economy policy — DEFAULT OFF, a member
+ * of the TL_TURN_ECONOMY umbrella with `seededGenerousEnabled`'s override
+ * semantics, and in effect only where `leanCallsEnabled` is (the resolved
+ * "vscode" client, through server.ts's `leanToolDefinitionForClient`).
+ *
+ * ON: the vscode advertisement keeps only the arguments a Copilot model
+ * writes on its own (query; targets path/handle/range/symbol/purpose; task
+ * epoch/profile/force_serve; plain edits plus cwd; find/references/tree with
+ * scope.path/regex) and the short, steering tool descriptions
+ * (clientAdvertisement.ts `VSCODE_MINIMAL_TOOL_DESCRIPTIONS`). Archive,
+ * credential, structural-intent, budget and idempotency arguments, and since
+ * Copilot retest r6 also qref/cursor/content/cwd on reads and searches and the
+ * rarely written options (see server.ts MINIMAL_SCHEMA_PROPERTY_PATHS), are no
+ * longer advertised; `select` and `artifact` stay advertised as one-line
+ * opaque objects. Dispatch still accepts every one of them (inbound
+ * validation reads ALL_TOOLS, never the advertisement), and a server-issued
+ * `next` still carries whichever one it needs.
+ *
+ * WHY: r5 measured that a model without `tool_search` (MAI flash) pays every
+ * advertised byte on every round; TokenLighten's share was ~1,870 tokens of
+ * the first round. Explicit "0" restores the r4/r5 lean advertisement so
+ * the two can be compared on the same build.
+ */
+export function minimalToolsEnabled(): boolean {
+  const raw = process.env["TL_MINIMAL_TOOLS"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * Copilot retest r5 (2026-10-03), turn-economy policy — DEFAULT OFF, a member
+ * of the TL_TURN_ECONOMY umbrella with `seededGenerousEnabled`'s override
+ * semantics. Not client-scoped (like every member but TL_LEAN_CALLS).
+ *
+ * ON: a `tl_search_files` `find` whose WHOLE result is a few small files
+ * (findText.ts `attachSmallFileContexts`: at most 6 files, each at most 80
+ * lines and 2,400 bytes, 3,200 bytes in all) carries each file's full text in
+ * the existing `range`/`handle`/`context` fields of its `files[]` entry —
+ * the shape the dominant-edit context already uses, so no kind, field or
+ * argument is added. A file the session already holds, or one that already
+ * carries a dominant-edit window, is left as it was.
+ *
+ * WHY: r5's one TokenLighten run searched (`find`), then read the three hits
+ * in a second call, then answered — three model rounds, the same as the
+ * native grep/read path, so it saved nothing. With the bodies in the search
+ * result that run needs two.
+ */
+export function findSmallBodiesEnabled(): boolean {
+  const raw = process.env["TL_FIND_SMALL_BODIES"];
+  if (raw !== undefined) return parseBool(raw, false);
+  return turnEconomyEnabled();
+}
+
+/**
+ * V15-LTS (2026-09-29) -- the ALL-CLIENT counterpart to `leanCallsEnabled`'s
+ * ADVERTISED-SCHEMA diet (never its emitted-continuation-shape changes,
+ * which stay vscode-only: omitting `cwd`/`task.handle` from a server-authored
+ * `next` steers what the SERVER sends back, so it needs a client that
+ * actually benefits from a single-root assumption; the schema diet only
+ * changes what `tools/list` advertises, which every client reads). Plain
+ * standalone env reader, DEFAULT ON since v0.15.0 (2026-09-30), NOT a
+ * `turnEconomyEnabled()` umbrella member -- turn economy is written only by
+ * the VS Code setup script, and this flag is meant for hosts turn economy
+ * never reaches (Claude Code, Codex CLI), so following that umbrella would be
+ * the wrong default source.
+ *
+ * See `server.ts`'s `leanSchemaForEveryClient` for the exact two elements it
+ * sheds (top-level `oneOf`/`anyOf`; `task.dependentRequired`) and why both
+ * are safe for EVERY client, not just vscode: each is a constraint
+ * `dispatchTool` already enforces regardless of what is advertised, AND
+ * each is already stated in prose the model already has -- AGENTS.md's
+ * protocol section for `task.dependentRequired` ("Pass
+ * task.expected_state_version ONLY beside a task.handle ... alone it
+ * refuses"), and, for the top-level choice keywords, the tool's own
+ * un-shed top-level `description` plus the same guide's per-shape bullets
+ * (bare `qref`, `task.pull`, a cursor-only continuation). Deliberately
+ * narrower than `leanCallsEnabled`'s vscode diet: it does NOT shed
+ * `budget.bytes`/`budget.tokens` (a real capability whose removal was
+ * motivated by a Copilot-specific replay finding, not a universal
+ * no-information-loss argument) and does NOT strip nested property
+ * descriptions (that cut needs a field-by-field audit against guide
+ * coverage this wave does not attempt) -- both remain exactly as
+ * out-of-scope for this flag as the D10(B) note above requires.
+ *
+ * Default ON since v0.15.0: the pre-registered 3-real-client conformance gate
+ * (Claude Code / Codex CLI / VS Code Copilot Chat) -- the SAME kind of gate
+ * that retired `TL_SCHEMA_DEFS` after it never passed
+ * (DESIGN-v0.14-proposal-2026-08-31.md §5; see this file's TL_SCHEMA_DEFS
+ * retirement stamp in the D10 block above) -- PASSED on 2026-09-30, with these
+ * three results:
+ *   - Claude Code 2.1.211, headless run: all three tools called, edit applied.
+ *   - Codex CLI 0.159.1, headless run: all three tools called; the model's
+ *     first `oldText`/`newText` edit was refused `unknown-arguments` and
+ *     recovered -- the SAME behaviour in a default-schema (full-schema)
+ *     control run, so it is not caused by the lean schema.
+ *   - VS Code Copilot Chat, production evidence: the VS Code setup has served
+ *     `TL_TURN_ECONOMY`'s strictly leaner schema since 2026-09-20 (8,337 B,
+ *     oneOf 2 / anyOf 1 / dependentRequired 0; 8,361 B after the Copilot
+ *     retest r3 description change; 6,755 B with oneOf/anyOf 0 since the r4
+ *     cut and the tl_ tool names).
+ * Unlike TL_SCHEMA_DEFS, this flag changes no wire SHAPE at all -- both
+ * elements it sheds are already proven advertising-only by
+ * `leanCallsEnabled`'s own shipped vscode behavior -- so the gate was about
+ * CLIENT SCHEMA ACCEPTANCE (does the shrunk schema still validate/parse for
+ * that host), not about a new capability's wire risk.
+ *
+ * ON (the default): every client's advertised schema sheds the top-level
+ * `oneOf`/`anyOf` and `task.dependentRequired`. Explicit `TL_LEAN_SCHEMA=0`
+ * (or `false`/`no`/`off`) restores the full pre-v0.15.0 schema byte-for-byte
+ * on every client -- the rollback path, same shape as
+ * `findWidePageEnabled`/`concernRecoveryEnabled`/`taskHandleRecoveryEnabled`.
+ * Being a shipped default now, it is no longer an active experiment:
+ * `activeExperimentFlags` does not report it, whether unset or set explicitly
+ * in either direction (same precedent as those three).
+ */
+export function leanSchemaEnabled(): boolean {
+  return parseBool(process.env["TL_LEAN_SCHEMA"], true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1933,4 +2194,158 @@ export function assertSemanticFrontierV2FlagConsistency(): void {
       "TL_SF_VERIFY_FIRST requires TL_SF_STATEFUL: TL_SF_VERIFY_FIRST is enabled but TL_SF_STATEFUL is not.",
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// V15-NBR/FUI (2026-09-29): two independent v0.15.0 candidate prototypes,
+// prepared for a small paid A/B engagement probe (measure-v015/REPORT.md's
+// "Extra finding" and ideation-v015-fable.md candidate 5). Both (B):
+// out-of-contract, default OFF, no wire kind/field beyond an additive
+// `plan` member (readFamily.ts's PLAN_MEMBERS, A.6.1's rare-extension rule).
+// Neither depends on the other or on any SF v2 flag above. With both unset a
+// task pack is byte-identical to pre-V15-NBR/FUI output by construction: the
+// attach functions (features/task-pack/frontierNeighbours.ts,
+// features/task-pack/usageInventory.ts) open with this exact flag check and
+// do nothing else when it reads false.
+// ---------------------------------------------------------------------------
+
+/**
+ * v0.15 (B): NBR frontier neighbour index. ON: a `read.task_pack` (answer and
+ * generic profiles), after its final surfaces are fixed, gets up to 8
+ * BODYLESS rows (`plan.neighbours`) for workspace files the served files
+ * import, `#include`, reference without an import (same Java/Kotlin package,
+ * same Go package) or pair with (C/C++ header/source), and that this
+ * response, `frontier_index` and `served_earlier` do not already name —
+ * path, a minted handle, and a short `why` — ranked by relevance to the
+ * request and by use in the served slice, capped at ~1 KiB. Imports resolve
+ * in projects nested below the workspace root (features/task-pack/
+ * importResolution.ts and the per-family resolvers). Never evidence, never
+ * cited by a certificate/obligation, never booked as served. OFF (default):
+ * the attach hook returns before doing anything; the pack is byte-identical
+ * to pre-NBR output.
+ */
+export function neighbourIndexEnabled(): boolean {
+  return parseBool(process.env["TL_NEIGHBOUR_INDEX"], false);
+}
+
+/**
+ * v0.15 (B): FUI frontier usage inventory. ON: the same pack gets
+ * `plan.usages`, a lexical (never "callers") inventory for up to 6
+ * identifiers ranked by relevance to the request — named by the request,
+ * matching its terms, or constants/types/enum members the served code
+ * references or declares — `{symbol, files:[{path, lines}], total,
+ * inventory_complete, scope?}`, the declaring file first, from the same
+ * word-bounded scanner `tl_search_files find` uses, scanned only inside the
+ * served file's own project (`scope`, omitted when that is the whole
+ * workspace), capped at ~1.5 KiB. OFF (default): the attach hook returns
+ * before doing anything; byte-identical to pre-FUI output.
+ */
+export function usageInventoryEnabled(): boolean {
+  return parseBool(process.env["TL_USAGE_INVENTORY"], false);
+}
+
+// ---------------------------------------------------------------------------
+// EFF (2026-10-01): efficiency experiment, class (B), default OFF, except
+// TL_EFF_TOLERANT_INPUT and TL_EFF_SLIM_EDIT, promoted to supported policy,
+// DEFAULT ON (USER ruling 2026-10-01; see this file's header). Measured
+// against the h2 decision windows (2026-09-30/10-01): each lever targets a
+// reply byte or round-trip cost observed there.
+// ---------------------------------------------------------------------------
+
+/**
+ * TL_EFF_AUTOFOLLOW: a task pack whose decision is `discover` with exactly one
+ * executable tl_read_file `next` (the shape every recorded solver re-issued
+ * verbatim) runs that follow-up server-side and returns its pack, carrying the
+ * first pack's evidence the follow-up does not repeat.
+ */
+export function effAutofollowEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_AUTOFOLLOW"], false);
+}
+
+/**
+ * TL_EFF_SLIM_EDIT: `edit.applied` ships a post-edit window of the changed
+ * lines plus a few lines of context (no enclosing-symbol widening) and a
+ * verification kit without inline bodies (handles plus one `next_call`).
+ * Default ON since 2026-10-01; explicit `0` restores the ±20 /
+ * enclosing-symbol window and inline kit bodies.
+ */
+export function effSlimEditEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_SLIM_EDIT"], true);
+}
+
+/**
+ * TL_EFF_LENIENT_EDIT: an edit item whose exact `search` text occurs once on
+ * disk is admitted on a file the session has not been served yet, and the
+ * native-edit argument names (`file_path`/`old_string`/`new_string`/
+ * `replace_all`, `oldText`/`newText`) map to their canonical items.
+ */
+export function effLenientEditEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_LENIENT_EDIT"], false);
+}
+
+/**
+ * TL_EFF_TOLERANT_INPUT: unambiguous near-miss inputs that the h2 windows saw
+ * refused are served instead (a one-element `ranges` on a batch target, a
+ * package-qualified references name, a directory path given to tl_read_file, a
+ * legacy `task.taskProfile`, tl_edit_file's own `task.profile`), each disclosed in
+ * a `normalized` note. Default ON since 2026-10-01; explicit `0` restores the
+ * refusals.
+ */
+export function effTolerantInputEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_TOLERANT_INPUT"], true);
+}
+
+/**
+ * TL_EFF_WIDE_FIND: a `find` accepts up to ten `queries` instead of refusing
+ * past five. Split from TL_EFF_TOLERANT_INPUT when that flag became default
+ * ON, since the guide documents the five-query refusal.
+ */
+export function effWideFindEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_WIDE_FIND"], false);
+}
+
+/**
+ * TL_EFF_PLAN_TRIM: a task pack omits `plan.wiring.evidence_graph` (a node and
+ * relation index of paths and handles the pack's own evidence already
+ * carries) unless TL_SF_RELATION_PACKETS asks for relation packets.
+ */
+export function effPlanTrimEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_PLAN_TRIM"], false);
+}
+
+/**
+ * TL_EFF_FIND_PHRASE: a `find` whose queries all match nothing, at least one
+ * of them a phrase of several words, is re-run once on the identifier-like
+ * tokens inside those queries (camelCase, snake_case, dotted or digit-bearing
+ * names, file names, ALLCAPS words), at most five, and that result is served
+ * with a `normalized` note naming the tokens. Measured 2026-10-01: 33 of the
+ * 93 finds in the efficiency A/B's treatment arm were phrases that matched
+ * nothing, each costing the solver a turn.
+ */
+export function effFindPhraseEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_FIND_PHRASE"], false);
+}
+
+/**
+ * TL_EFF_HUB_WHOLE: in a construct-receiver wiring pack, the construction hub
+ * (the wiring's insertion site, the file the solver must edit to construct
+ * and drive the receiver) is served whole up to WIRING_COMPLETE_SURFACE_BYTES
+ * as a priority draw, like the produced class's own header, instead of
+ * drawing on the bounded extra budget. Measured 2026-10-02 (T13 arm A): the
+ * 19.6 KB hub exceeded that 10 KB budget, arrived as a 5.4 KB skeleton, and
+ * every cell that edited it natively read it whole first.
+ */
+export function effHubWholeEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_HUB_WHOLE"], false);
+}
+
+/**
+ * TL_EFF_EDIT_NOTE: an `act.edit` task pack with a non-empty frontier carries
+ * one `advisory` sentence saying that `tl_edit_file` edits the served frontier
+ * handles without the whole-file Read a native Edit requires first. Measured
+ * 2026-10-02 (T13 arm A): most post-pack native Reads were that forced Read,
+ * and the cells that edited through `tl_edit_file` had few or none.
+ */
+export function effEditNoteEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_EDIT_NOTE"], false);
 }

@@ -73,9 +73,9 @@ try {
   await client.connect(new StdioClientTransport({ command: installedNode, args: [installedCli, "mcp", "start", "--stdio", "--no-prereq-check", "--workspace", workspace], cwd: workspace, env, stderr: "inherit" }));
   assert.equal(client.getServerVersion()?.version, version);
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["edit_file", "read_file", "search_files"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["tl_edit_file", "tl_read_file", "tl_search_files"]);
   for (const target of [{ path: "hello.txt" }, { archive: { path: "sample.tar.gz", member: "hello.txt" } }]) {
-    const result = await client.callTool({ name: "read_file", arguments: { targets: [target], cwd: workspace } }, undefined, { timeout: 30_000 });
+    const result = await client.callTool({ name: "tl_read_file", arguments: { targets: [target], cwd: workspace } }, undefined, { timeout: 30_000 });
     assert(!result.isError, JSON.stringify(result));
     assert(JSON.stringify(result).includes(sentence), "Installed server must return the requested content");
   }

@@ -135,7 +135,7 @@ describe("searchReplaceEdit — allow_create", () => {
 
     // File doesn't exist + allow_create + non-empty search = error
     expect(result.ok).toBe(false);
-    // FIX 2c: the hint must reference edit_file's ADVERTISED param name
+    // FIX 2c: the hint must reference tl_edit_file's ADVERTISED param name
     // (create:true), never the unadvertised engine-internal allow_create.
     if (!result.ok) {
       expect(result.error).toContain("create:true");
@@ -156,8 +156,8 @@ describe("searchReplaceEdit — allow_create", () => {
     if (!result.ok) {
       expect(result.code).toBe("not-found");
       // FIX 2c: same rename as above — this is the exact hint a bench agent
-      // hit via edit_file {path:<new file>, search:"", replace} and could
-      // not act on, because allow_create is not in edit_file's schema.
+      // hit via tl_edit_file {path:<new file>, search:"", replace} and could
+      // not act on, because allow_create is not in tl_edit_file's schema.
       expect(result.error).toContain("create:true");
       expect(result.error).not.toContain("allow_create");
     }

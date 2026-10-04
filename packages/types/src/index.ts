@@ -89,6 +89,10 @@ export {
   // DESIGN-v0.15 §8.2 (R7 Part B): the code/full tool surface.
   TOOL_SURFACE_VALUES,
   isToolSurface,
+  // The advertised tool names and their pre-`tl_` spellings (2026-10-02).
+  TOOL_NAMES,
+  LEGACY_TOOL_NAMES,
+  renamedToolName,
 } from "./mcp.js";
 
 // ---------------------------------------------------------------------------
@@ -197,6 +201,7 @@ export type {
   EditCounts,
   RollbackFileState,
   AppliedEntry,
+  PostEditWindow,
   NormalizationReceipt,
   EditReclassification,
   EditApplied,
@@ -282,6 +287,8 @@ export type {
   TokenLightenWorkspaceListResult,
   CopilotInlineResultsStatus,
   CopilotInlineResultsReport,
+  CopilotGuideStatus,
+  CopilotGuideReport,
 } from "./setup.js";
 
 export type {

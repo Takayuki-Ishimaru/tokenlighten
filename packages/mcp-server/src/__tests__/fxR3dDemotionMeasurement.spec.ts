@@ -140,11 +140,11 @@ function attestationFor(
   const root = workspace(tag);
   const tracePath = getTracePath(root);
   setTraceEnabledForTest(true);
-  runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root }, () => {
+  runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root }, () => {
     noteSemanticFrontierTraceSeed(traceSeed(tag));
     for (const row of marks.demoted ?? []) noteSemanticFrontierWithholding("demoted", row);
     for (const row of marks.named ?? []) noteSemanticFrontierWithholding("named", row);
-    finalizeProtocolResponse("read_file", { content: [{ type: "text", text: taskPackText(evidence) }] });
+    finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: taskPackText(evidence) }] });
   });
   setTraceEnabledForTest(false);
   return attestationIn(tracePath);
@@ -288,13 +288,13 @@ describe("FX-R3d D10 (2) — a body the demotion pass actually withheld IS engag
     const root = workspace("real-demotion");
     const tracePath = getTracePath(root);
     setTraceEnabledForTest(true);
-    runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root }, () => {
+    runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root }, () => {
       noteSemanticFrontierTraceSeed(traceSeed("real-demotion"));
       const evidence = projectEvidence(result.surfaces) as unknown as Record<string, unknown>[];
       const demotedRow = evidence.find((row) => row["path"] === "src/supporting_notes.ts");
       expect(demotedRow?.["body"], "a demoted row is bodyless").toBeUndefined();
       expect(demotedRow?.["remaining"]).toEqual(["1-17"]);
-      finalizeProtocolResponse("read_file", { content: [{ type: "text", text: taskPackText(evidence) }] });
+      finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: taskPackText(evidence) }] });
     });
     setTraceEnabledForTest(false);
 
@@ -352,7 +352,7 @@ describe("FX-R3d D10 (3) — a marked row that ships bytes after all is not coun
       "regained-prior",
       [
         { handle: "h-primary", path: "src/main.ts", range: "1-3", body: "ok\n" },
-        { ...marked, prior: "read_file mode=task_pack (earlier in this session)" },
+        { ...marked, prior: "tl_read_file mode=task_pack (earlier in this session)" },
       ],
       { demoted: [marked] },
     );

@@ -6,7 +6,7 @@
  * probe, tree vs clean HEAD `03002d8c`), fixture = a single `calc.ts` (a
  * header comment naming the file, then several tiny arithmetic helpers using
  * `sum`/`diff`):
- *   `read_file {query:"Explain what calc.ts does and how its operations
+ *   `tl_read_file {query:"Explain what calc.ts does and how its operations
  *    combine sum and diff.", targets:[{path:"calc.ts"}], content:"auto",
  *    task:{epoch:"new",profile:"answer"}, budget:{bytes:60000}}`
  *   clean HEAD -> `act.answer` (no `request-item:*` obligation at all: HEAD's
@@ -187,7 +187,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
       writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
       const body = await withEnv(config.env, () =>
-        callWire("read_file", {
+        callWire("tl_read_file", {
           query: "Explain what calc.ts does and how its operations combine sum and diff.",
           targets: [{ path: "calc.ts" }],
           content: "auto",
@@ -214,7 +214,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
     writeFile(ws, "calc.ts", calcTsSource());
     writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
-    const body = await callWire("read_file", {
+    const body = await callWire("tl_read_file", {
       query: "Explain what calc.ts does and how the invoice tax surcharge is rounded.",
       targets: [{ path: "calc.ts" }],
       content: "auto",
@@ -256,7 +256,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
     );
     writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
-    const body = await callWire("read_file", {
+    const body = await callWire("tl_read_file", {
       query: "Explain what src/util/mathHelpers.ts does and how clampValue restricts a value.",
       targets: [{ path: "src/util/mathHelpers.ts" }],
       content: "auto",
@@ -295,7 +295,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
     );
     writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
-    const body = await callWire("read_file", {
+    const body = await callWire("tl_read_file", {
       query: "Explain what computeDiscountRate does and how applyDiscount reduces amount.",
       targets: [{ path: "src/pricing.ts" }],
       content: "auto",
@@ -348,7 +348,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
     writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
     setTraceEnabledForTest(true);
-    const body = await callWire("read_file", {
+    const body = await callWire("tl_read_file", {
       query: "Explain what bigModule.ts's ledger handling does and how internalHelper42 returns its result.",
       targets: [{ path: "bigModule.ts", range: "700-900" }],
       content: "auto",
@@ -385,7 +385,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
     writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
     setTraceEnabledForTest(true);
-    const body = await callWire("read_file", {
+    const body = await callWire("tl_read_file", {
       query: "Explain what bigModuleB.ts's ledger handling does and how addTwo combines two numbers.",
       targets: [{ path: "bigModuleB.ts" }, { path: "calc2.ts" }],
       content: "auto",
@@ -425,7 +425,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
     writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
     setTraceEnabledForTest(true);
-    await callWire("read_file", {
+    await callWire("tl_read_file", {
       query: "Explain what auth does and how checkToken validates a value.",
       targets: [{ path: "src/auth/tokenCheck.ts" }],
       content: "auto",
@@ -463,7 +463,7 @@ describe("GATE-B — a concern that names a served artefact is covered by servin
     writeFile(ws, "package.json", JSON.stringify({ name: "fixture", version: "0.0.0" }) + "\n");
 
     setTraceEnabledForTest(true);
-    await callWire("read_file", {
+    await callWire("tl_read_file", {
       query: "Explain what pricing does and how applyDiscount reduces amount.",
       targets: [{ path: "src/pricing.ts" }],
       content: "auto",

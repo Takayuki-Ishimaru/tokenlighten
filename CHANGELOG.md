@@ -2,6 +2,69 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.15.0
+
+- A value reached through an alias, a re-export, or a rename
+  (`import { A as B }`, CommonJS destructuring, Python `as`, Go package
+  constants) is returned, or disclosed as undetermined, instead of the answer
+  being marked ready without it. Naming a file in a question no longer drops
+  the constants its code reads.
+- A ready answer is checked against the bytes actually sent, including under
+  a host size limit: a requirement without a body in the response or a range
+  already served in the task is requested or disclosed, not claimed.
+- Explanatory words such as "conditions" or "callers" are never reported as
+  "not found", a second topic in a question is kept as its own point, and
+  same-name functions are told apart by file path and import relationship.
+- A successful edit returns the verbatim text around the change
+  (`applied[].after`, the changed lines with three lines of context), so a
+  confirming read is usually unnecessary; a later read of those lines answers
+  with a receipt that names the edit. Its verification kit names the tests to
+  read by handle instead of inlining them.
+- A near-miss request that used to be refused with a one-step fix — a
+  one-element `ranges` in a multi-target read, `pkg.Func` as a `references`
+  name, a directory given to `tl_read_file` — is served, with a `normalized`
+  note naming the rewrite.
+- Reads with a declared budget and `tl_search_files` `find` pages fill the
+  budget or host limit, so they take fewer follow-up calls while still
+  delivering every requested line once.
+- The tool definition advertised to every client is smaller; the server
+  still enforces every constraint that was dropped from it.
+- Continuations keep the caller's budget after a file changes mid-read, a
+  read of several targets never silently drops one, a refusal's `next` never
+  repeats the refused call, and resuming a completed task after an outside
+  file change recomputes the changed value.
+- MCP tool names now use the `tl_` prefix to avoid collisions with editor
+  tools. Refresh the tool list after upgrading.
+- VS Code setup writes a short Copilot guide and a SessionStart hint for
+  normal local Agent chats, preserving user instructions and hooks. The hint
+  requires a trusted workspace, enabled hooks, and `node` on PATH; use
+  `--copilot-session-context keep` to retain your existing hook configuration.
+- Shared Codex and Claude Code guides preserve the complete request,
+  support discovery without known paths, and reuse source already returned.
+- Small search results can return full file bodies. Discovery recognizes
+  named projects nested within a workspace and retains the original request
+  during continuation.
+- TokenLighten's disable/native controls also disable its managed Copilot
+  guidance; VS Code tool definitions accept server-provided continuations.
+
+### Migration
+
+Upgrade the runtime or VSIX to v0.15.0, re-run `tl workspace setup` or
+**Set up this workspace**, then start a new agent session or reconnect the MCP
+client. Custom clients must use the prefixed tool names `tl_read_file`,
+`tl_search_files`, and `tl_edit_file`; the old unprefixed names are refused.
+These changes are
+enabled by default: `TL_LEAN_SCHEMA=0` restores the previous advertised tool
+definition, `TL_FIND_WIDE_PAGE=0` the previous find page size,
+`TL_EFF_SLIM_EDIT=0` the wider post-edit window and inline kit bodies, and
+`TL_EFF_TOLERANT_INPUT=0` the near-miss refusals. Responses add
+`applied[].after` to edit results and a `request-item-undetermined` entry to
+`decision.gaps`; clients should preserve disclosed gaps. Runtime dependencies include upstream fixes. The VSIX packaging tool is
+updated; building a VSIX from source now requires Node.js 22 or later. The read-only default, and temporary legacy-input migration bridge are
+unchanged.
+
+See the [v0.15.0 release notes](release-docs/github-release-v0.15.0.md).
+
 ## 0.14.4
 
 - Ranged reads across multiple files retain every requested range through

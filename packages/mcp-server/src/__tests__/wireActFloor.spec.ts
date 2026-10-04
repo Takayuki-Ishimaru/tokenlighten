@@ -44,7 +44,7 @@ function bytesOf(payload: unknown): number {
 
 /** One emission through the real funnel tail, at a chosen budget. */
 function emit(payload: Body, budgetOverrideBytes: number): { body: Body; bytes: number } {
-  const context: ProtocolCallContext = { tool: "read_file" };
+  const context: ProtocolCallContext = { tool: "tl_read_file" };
   const result = emitFinalizedPayload(payload, "read.task_pack", context, { budgetOverrideBytes });
   const text = result.content[0]?.text ?? "";
   return { body: JSON.parse(text) as Body, bytes: Buffer.byteLength(text, "utf8") };
@@ -131,7 +131,7 @@ describe("§2.1.1 act floor — the predicate", () => {
     // A member that makes no claim about what to do next has nothing a shed can
     // falsify. This is why at most ONE demotion per emission is structural.
     for (const decision of [
-      { kind: "discover", next: { tool: "read_file", arguments: { handle: "h", range: "1-2" } } },
+      { kind: "discover", next: { tool: "tl_read_file", arguments: { handle: "h", range: "1-2" } } },
       { kind: "await_input", code: "no-grounded-call-remains" },
       { kind: "done" },
     ]) {
@@ -146,7 +146,7 @@ describe("§2.1.1 act floor — the predicate", () => {
       decision: { kind: "act.answer", certificate: { id: "c", obligations: ["o"], workspace: WORKSPACE } },
     });
     expect(actFloorHolds(withDecision([{ handle: "h", body: "served bytes" }]), "read.task_pack")).toBe(true);
-    expect(actFloorHolds(withDecision([{ handle: "h", prior: "read_file mode=task_pack qref=q1" }]), "read.task_pack")).toBe(true);
+    expect(actFloorHolds(withDecision([{ handle: "h", prior: "tl_read_file mode=task_pack qref=q1" }]), "read.task_pack")).toBe(true);
     // The exact state rung 4 produces: addressed, body-less, `remaining`
     // populated. Honest, and NOT answerable from.
     expect(actFloorHolds(withDecision([{ handle: "h", path: "p", range: "1-9", remaining: ["1-9"] }]), "read.task_pack")).toBe(false);
@@ -230,7 +230,7 @@ describe("§2.1.1 act floor — the predicate", () => {
 // ---------------------------------------------------------------------------
 
 describe("§2.1.1 DEGRADE — demoteToDiscover", () => {
-  it("names one executable, mutually independent read_file per SHED handle — never a template", () => {
+  it("names one executable, mutually independent tl_read_file per SHED handle — never a template", () => {
     const original = answerPack();
     const candidate: Body = {
       ...original,
@@ -248,7 +248,7 @@ describe("§2.1.1 DEGRADE — demoteToDiscover", () => {
     expect(Array.isArray(next)).toBe(true);
     expect(next).toHaveLength(4);
     // Executable NOW: every argument is a concrete value read off the response.
-    expect(next.every((call) => call.tool === "read_file")).toBe(true);
+    expect(next.every((call) => call.tool === "tl_read_file")).toBe(true);
     expect(next.map((call) => call.arguments["handle"])).toEqual(["hcontract", "hapi", "hdoc", "htest"]);
     expect(next.every((call) => call.arguments["range"] === "1-40")).toBe(true);
     // §2.6 abolished `next_call_is_template`: no placeholder may survive.
@@ -279,7 +279,7 @@ describe("§2.1.1 DEGRADE — demoteToDiscover", () => {
     expect(demoted!["create_target"]).toEqual({ path: "src/new_module.py", directory_evidence: ["src/sibling.py"] });
     // `act.edit` demotes to the RE-PACK that would produce a fitting frontier
     // (plan §6 constraint 4), not to a per-handle zoom.
-    expect(decision["next"]).toEqual({ tool: "read_file", arguments: { mode: "task_pack", qref: "q-create" } });
+    expect(decision["next"]).toEqual({ tool: "tl_read_file", arguments: { mode: "task_pack", qref: "q-create" } });
   });
 
   it("DECLINES when no restoring call can be named — `discover` with no `next` is unrepresentable", () => {
@@ -336,7 +336,7 @@ describe("the ladder demotes rather than shipping a shorn act (P13)", () => {
     const calls = Array.isArray(next) ? next : [next];
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls as Array<{ tool: string; arguments: Record<string, unknown> }>) {
-      expect(call.tool).toBe("read_file");
+      expect(call.tool).toBe("tl_read_file");
       const targets = call.arguments["targets"];
       const target = Array.isArray(targets) ? targets[0] as Body | undefined : undefined;
       expect(typeof target?.["handle"] === "string" || typeof call.arguments["qref"] === "string").toBe(true);
@@ -352,7 +352,7 @@ describe("the ladder demotes rather than shipping a shorn act (P13)", () => {
     // A budget far under any reachable floor: rung 4 strips all four bodies
     // (the last one breaks FLOOR-ANSWER and demotes), then the ladder keeps
     // going — rung 5 drops whole entries. A second demotion would throw.
-    const context: ProtocolCallContext = { tool: "read_file" };
+    const context: ProtocolCallContext = { tool: "tl_read_file" };
     const outcome = runLadder({
       payload: answerPack(),
       kind: "read.task_pack",
@@ -514,7 +514,7 @@ describe("[R5-30] branch 3 (`act-on-served-evidence`) is re-sited, gated on the 
     });
     expect(decision?.kind).toBe("discover");
     expect((decision as { next: unknown }).next).toEqual({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { handle: "hpartial", range: "81-160" },
     });
   });

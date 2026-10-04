@@ -3,7 +3,7 @@
 //
 // GitHub Copilot Chat defers every MCP tool behind its own `tool_search`
 // tool (the model sees only a bare name, e.g. one ending in
-// `tokenlighten_read_file`, until it loads the tool) and — unusually among
+// `tokenlighten_tl_read_file`, until it loads the tool) and — unusually among
 // MCP hosts — injects the server's `initialize`-time `instructions` string
 // into its system prompt on EVERY request, tools loaded or not. This spec
 // proves three things, each load-bearing for that host:
@@ -18,9 +18,10 @@
 //      `description` strings do.
 //
 // See protocol/clientAdvertisement.ts's own header for the full rationale,
-// including the confirmed gap in the two SDK-backed transport legs
-// (mcp/transport/legacyStdio.ts, mcp/transport/modernServerFactory.ts),
-// which this spec does not cover (out of this change's ownership scope).
+// including the open gap in the modern SDK v2 transport leg
+// (mcp/transport/modernServerFactory.ts), which this spec does not cover (out
+// of this change's ownership scope). The legacy-era leg IS `handleRequest`
+// (served over stdio by mcp/transport/legacyStdio.ts), which this spec drives.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
@@ -85,38 +86,53 @@ describe("clientAdvertisement: VSCODE_SERVER_INSTRUCTIONS content and budget", (
     expect(bytes, `VSCODE_SERVER_INSTRUCTIONS is ${bytes} B`).toBeLessThanOrEqual(1000);
   });
 
-  it("names the tools as ending in tokenlighten_read_file/tokenlighten_edit_file/tokenlighten_search_files", () => {
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("tokenlighten_read_file");
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("tokenlighten_edit_file");
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("tokenlighten_search_files");
+  it("names the tools as ending in tl_read_file/tl_edit_file/tl_search_files", () => {
+    // Copilot shows them as e.g. `mcp__tokenlighten_tl_read_file`; an "ends in"
+    // match holds whatever prefix the host prepends.
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("MCP tools ending in tl_read_file/tl_edit_file/tl_search_files;");
   });
 
-  it("says the tools are deferred and tells the model to batch tool_search with its first other call, never alone, including the post-summary re-load case", () => {
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("tool_search");
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("tokenlighten");
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain('in your FIRST tool batch, next to whatever else you call first, also call tool_search {query:"tokenlighten"} - never spend a turn on it alone');
-    expect(VSCODE_SERVER_INSTRUCTIONS).toMatch(/vanish after a conversation summary/);
+  it("uses loaded definitions directly, discovers once when needed, and reloads only missing definitions after a summary", () => {
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("if the needed definitions are loaded, call TL directly.");
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain('Otherwise load once with tool_search {query:"tokenlighten"}, then call TL.');
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("Stop tool_search once loaded; reload only missing definitions, including after a conversation summary.");
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("Batch independent context calls with TL.");
+    expect(VSCODE_SERVER_INSTRUCTIONS).not.toContain("whatever else you call first");
+    expect(VSCODE_SERVER_INSTRUCTIONS).not.toContain("never spend a turn on it alone");
   });
 
-  it("disambiguates bare read_file from the built-in BEFORE the first usage example, never after", () => {
-    const disambiguationIndex = VSCODE_SERVER_INSTRUCTIONS.indexOf("never the built-in read_file");
-    const usageExampleIndex = VSCODE_SERVER_INSTRUCTIONS.indexOf('read_file {query:"<request>"}');
-    expect(disambiguationIndex, "disambiguation sentence must be present").toBeGreaterThan(-1);
-    expect(usageExampleIndex, "read_file {query:...} usage example must be present").toBeGreaterThan(-1);
-    expect(disambiguationIndex).toBeLessThan(usageExampleIndex);
+  it("uses only the host's advertised query argument (r9 real host schema)", () => {
+    const args = /tool_search (\{[^}]+\})/u.exec(VSCODE_SERVER_INSTRUCTIONS)?.[1];
+    expect(args).toBe('{query:"tokenlighten"}');
+    expect(VSCODE_SERVER_INSTRUCTIONS).not.toMatch(/limit\s*:/u);
   });
 
-  it("keeps the essential routing from SERVER_INSTRUCTIONS: TL-first, unknown-location routing, act-on-decision, batching, and the AGENTS.md pointer", () => {
+  it("needs no disambiguation from the built-in read_file any more: no bare pre-rename name is left (2026-10-02)", () => {
+    // The sentence "Bare read_file/edit_file/search_files mean these, never the
+    // built-in read_file" existed because the names collided; Copilot retest r4
+    // found that a model without tool_search never receives these instructions
+    // at all, so the tools took the tl_ prefix instead.
+    expect(VSCODE_SERVER_INSTRUCTIONS).not.toContain("built-in read_file");
+    expect(VSCODE_SERVER_INSTRUCTIONS).not.toMatch(/(?<![\w])(?:read_file|edit_file|search_files)(?![\w])/);
+    expect(VSCODE_SERVER_INSTRUCTIONS.indexOf('tl_read_file {query:"<request>"}')).toBeGreaterThan(-1);
+  });
+
+  it("keeps the essential routing from SERVER_INSTRUCTIONS: TL-first, unknown-location routing, act-on-decision, batching, and the protocol pointer", () => {
     expect(VSCODE_SERVER_INSTRUCTIONS).toContain("TL first for code/doc/config.");
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain('Unknown-location/multi-file=>read_file {query:"<request>"}.');
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain('Unknown-location/multi-file=>tl_read_file {query:"<request>"}.');
     expect(VSCODE_SERVER_INSTRUCTIONS).toContain("Act on act.answer/act.edit");
     expect(VSCODE_SERVER_INSTRUCTIONS).toContain("batch edits in one edits[] call");
-    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("AGENTS.md");
+    // Copilot standard-setup evaluation (2026-10-02): the pointer names the
+    // instructions the host already attaches, never a file — setup's default
+    // Copilot guide (.github/copilot-instructions.md) stops Copilot attaching
+    // AGENTS.md, and "Protocol: AGENTS.md." would send it to read that file.
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("Protocol: in your instructions.");
+    expect(VSCODE_SERVER_INSTRUCTIONS).not.toContain("AGENTS.md");
   });
 
-  it("adds VS Code-specific guidance: query language and single/parallel-batch targets", () => {
-    expect(VSCODE_SERVER_INSTRUCTIONS).toMatch(/code's own language/);
-    expect(VSCODE_SERVER_INSTRUCTIONS).toMatch(/usually English/);
+  it("adds VS Code-specific guidance: verbatim query and single/parallel-batch targets", () => {
+    expect(VSCODE_SERVER_INSTRUCTIONS).toContain("Pass the entire user request verbatim as query; preserve every requirement.");
+    expect(VSCODE_SERVER_INSTRUCTIONS).not.toContain("Write query in the code's own language");
     expect(VSCODE_SERVER_INSTRUCTIONS).toContain("ONE targets:[...] call");
     expect(VSCODE_SERVER_INSTRUCTIONS).toMatch(/parallel batch/);
   });
@@ -134,7 +150,7 @@ describe("clientAdvertisement: VSCODE_SERVER_INSTRUCTIONS content and budget", (
 
 describe("clientAdvertisement: VSCODE_TOOL_DESCRIPTIONS content and budget", () => {
   it("carries exactly the three advertised tool names", () => {
-    expect(Object.keys(VSCODE_TOOL_DESCRIPTIONS).sort()).toEqual(["edit_file", "read_file", "search_files"]);
+    expect(Object.keys(VSCODE_TOOL_DESCRIPTIONS).sort()).toEqual(["tl_edit_file", "tl_read_file", "tl_search_files"]);
   });
 
   it("each description is ASCII-only and roughly 200-350 chars (richer than the ~30-40 char default, but not a paragraph)", () => {
@@ -150,13 +166,13 @@ describe("clientAdvertisement: VSCODE_TOOL_DESCRIPTIONS content and budget", () 
     // Derived from AGENTS.md's TokenLighten MCP section / the advertised
     // schema itself — a loose smoke check that the call shapes named here
     // are real advertised properties, not invented ones.
-    expect(VSCODE_TOOL_DESCRIPTIONS.read_file).toContain("task:{epoch:\"new\"}");
-    expect(VSCODE_TOOL_DESCRIPTIONS.read_file).toContain("targets:[{path|handle, range}]");
-    expect(VSCODE_TOOL_DESCRIPTIONS.edit_file).toContain("edits[]");
-    expect(VSCODE_TOOL_DESCRIPTIONS.edit_file).toContain("precondition:\"unique-match\"");
-    expect(VSCODE_TOOL_DESCRIPTIONS.edit_file).toContain("cwd");
-    expect(VSCODE_TOOL_DESCRIPTIONS.search_files).toContain('action:"find"');
-    expect(VSCODE_TOOL_DESCRIPTIONS.search_files).toContain("scope.path");
+    expect(VSCODE_TOOL_DESCRIPTIONS.tl_read_file).toContain("task:{epoch:\"new\"}");
+    expect(VSCODE_TOOL_DESCRIPTIONS.tl_read_file).toContain("targets:[{path|handle, range}]");
+    expect(VSCODE_TOOL_DESCRIPTIONS.tl_edit_file).toContain("edits[]");
+    expect(VSCODE_TOOL_DESCRIPTIONS.tl_edit_file).toContain("precondition:\"unique-match\"");
+    expect(VSCODE_TOOL_DESCRIPTIONS.tl_edit_file).toContain("cwd");
+    expect(VSCODE_TOOL_DESCRIPTIONS.tl_search_files).toContain('action:"find"');
+    expect(VSCODE_TOOL_DESCRIPTIONS.tl_search_files).toContain("scope.path");
   });
 });
 
@@ -170,15 +186,15 @@ describe("clientAdvertisement: baseServerInstructionsForClient / toolDescription
   });
 
   it.each(NON_VSCODE_CLIENT_NAMES)("clientId %j gets no tool-description override (undefined)", (name) => {
-    expect(toolDescriptionForClient(name, "read_file")).toBeUndefined();
-    expect(toolDescriptionForClient(name, "edit_file")).toBeUndefined();
-    expect(toolDescriptionForClient(name, "search_files")).toBeUndefined();
+    expect(toolDescriptionForClient(name, "tl_read_file")).toBeUndefined();
+    expect(toolDescriptionForClient(name, "tl_edit_file")).toBeUndefined();
+    expect(toolDescriptionForClient(name, "tl_search_files")).toBeUndefined();
   });
 
   it.each(VSCODE_CLIENT_NAMES)("clientId %j gets the VS Code override for all three tools", (name) => {
-    expect(toolDescriptionForClient(name, "read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.read_file);
-    expect(toolDescriptionForClient(name, "edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.edit_file);
-    expect(toolDescriptionForClient(name, "search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.search_files);
+    expect(toolDescriptionForClient(name, "tl_read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_read_file);
+    expect(toolDescriptionForClient(name, "tl_edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_edit_file);
+    expect(toolDescriptionForClient(name, "tl_search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_search_files);
   });
 
   it("an unrecognized tool name yields undefined even for a VS Code client", () => {
@@ -198,35 +214,35 @@ describe("clientAdvertisement: baseServerInstructionsForClient / toolDescription
 });
 
 describe("clientAdvertisement: advertisedTools(clientId) description override", () => {
-  it("bare advertisedTools() (no clientId) is unaffected — default descriptions, unchanged", () => {
+  it("bare advertisedTools() (no clientId) gets the shared routing description", () => {
     const bare = advertisedTools() as Array<{ name: string; description: string }>;
     const explicit = advertisedTools(undefined) as Array<{ name: string; description: string }>;
     expect(bare).toEqual(explicit);
     const byName = new Map(bare.map((t) => [t.name, t.description]));
-    expect(byName.get("read_file")).toBe("Read via query/qref or targets[].");
-    expect(byName.get("edit_file")).toBe("Edit via edits[] or artifact.");
-    expect(byName.get("search_files")).toBe("Find/reference/diff/tree via queries[].");
+    expect(byName.get("tl_read_file")).toBe("FIRST source lookup/read: query = entire request verbatim; unknown paths: omit targets. Or batch targets[].");
+    expect(byName.get("tl_edit_file")).toBe("Edit via edits[] or artifact.");
+    expect(byName.get("tl_search_files")).toBe("Find/reference/diff/tree via queries[].");
   });
 
   it.each(NON_VSCODE_CLIENT_NAMES)("advertisedTools(%j) keeps the default descriptions", (name) => {
     const tools = advertisedTools(name) as Array<{ name: string; description: string }>;
     const byName = new Map(tools.map((t) => [t.name, t.description]));
-    expect(byName.get("read_file")).toBe("Read via query/qref or targets[].");
-    expect(byName.get("edit_file")).toBe("Edit via edits[] or artifact.");
-    expect(byName.get("search_files")).toBe("Find/reference/diff/tree via queries[].");
+    expect(byName.get("tl_read_file")).toBe("FIRST source lookup/read: query = entire request verbatim; unknown paths: omit targets. Or batch targets[].");
+    expect(byName.get("tl_edit_file")).toBe("Edit via edits[] or artifact.");
+    expect(byName.get("tl_search_files")).toBe("Find/reference/diff/tree via queries[].");
   });
 
   it.each(VSCODE_CLIENT_NAMES)("advertisedTools(%j) swaps in the VS Code descriptions", (name) => {
     const tools = advertisedTools(name) as Array<{ name: string; description: string }>;
     const byName = new Map(tools.map((t) => [t.name, t.description]));
-    expect(byName.get("read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.read_file);
-    expect(byName.get("edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.edit_file);
-    expect(byName.get("search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.search_files);
+    expect(byName.get("tl_read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_read_file);
+    expect(byName.get("tl_edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_edit_file);
+    expect(byName.get("tl_search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_search_files);
   });
 
-  it("advertised tool count and names stay exactly {edit_file, read_file, search_files} for VS Code too", () => {
+  it("advertised tool count and names stay exactly {tl_edit_file, tl_read_file, tl_search_files} for VS Code too", () => {
     const tools = advertisedTools("Visual Studio Code") as Array<{ name: string }>;
-    expect(tools.map((t) => t.name).sort()).toEqual(["edit_file", "read_file", "search_files"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["tl_edit_file", "tl_read_file", "tl_search_files"]);
   });
 
   it("input schemas, annotations, and _meta are IDENTICAL between the default and VS Code variant — only description differs", () => {
@@ -242,7 +258,7 @@ describe("clientAdvertisement: advertisedTools(clientId) description override", 
       expect(vsCodeTool["_meta"], `${name}._meta`).toEqual(defaultTool["_meta"]);
       // The one field that IS allowed (and, for these three tools, expected)
       // to differ.
-      expect(vsCodeTool["description"]).toBe(VSCODE_TOOL_DESCRIPTIONS[name as "read_file" | "edit_file" | "search_files"]);
+      expect(vsCodeTool["description"]).toBe(VSCODE_TOOL_DESCRIPTIONS[name as "tl_read_file" | "tl_edit_file" | "tl_search_files"]);
     }
   });
 });
@@ -264,9 +280,9 @@ describe("clientAdvertisement: end-to-end through handleRequest's initialize cas
     // handleRequest's own "tools/list" case uses.
     const tools = advertisedTools() as Array<{ name: string; description: string }>;
     const byName = new Map(tools.map((t) => [t.name, t.description]));
-    expect(byName.get("read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.read_file);
-    expect(byName.get("edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.edit_file);
-    expect(byName.get("search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.search_files);
+    expect(byName.get("tl_read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_read_file);
+    expect(byName.get("tl_edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_edit_file);
+    expect(byName.get("tl_search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_search_files);
   });
 
   it("after a VS Code initialize, a later bare advertisedTools() call in the SAME process stays VS Code-aware (documents the existing capturedClientId lifetime — reset explicitly between unrelated tests, matching clientIdCapture.spec.ts's established pattern)", async () => {
@@ -276,7 +292,7 @@ describe("clientAdvertisement: end-to-end through handleRequest's initialize cas
     const byName = new Map(tools.map((t) => [t.name, t.description]));
     // After the reset, behavior reverts to default — proving the override is
     // driven by capturedClientId, not some other sticky state.
-    expect(byName.get("read_file")).toBe("Read via query/qref or targets[].");
+    expect(byName.get("tl_read_file")).toBe("FIRST source lookup/read: query = entire request verbatim; unknown paths: omit targets. Or batch targets[].");
   });
 
   it("TOKENLIGHTEN_CLIENT_ID=vscode yields the VS Code instructions and tool descriptions even when initialize carries an unrelated clientInfo name", async () => {
@@ -287,9 +303,9 @@ describe("clientAdvertisement: end-to-end through handleRequest's initialize cas
       expect(result["instructions"]).toBe(VSCODE_SERVER_INSTRUCTIONS);
       const tools = advertisedTools() as Array<{ name: string; description: string }>;
       const byName = new Map(tools.map((t) => [t.name, t.description]));
-      expect(byName.get("read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.read_file);
-      expect(byName.get("edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.edit_file);
-      expect(byName.get("search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.search_files);
+      expect(byName.get("tl_read_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_read_file);
+      expect(byName.get("tl_edit_file")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_edit_file);
+      expect(byName.get("tl_search_files")).toBe(VSCODE_TOOL_DESCRIPTIONS.tl_search_files);
     } finally {
       if (previousOverride === undefined) delete process.env["TOKENLIGHTEN_CLIENT_ID"];
       else process.env["TOKENLIGHTEN_CLIENT_ID"] = previousOverride;

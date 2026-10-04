@@ -5,10 +5,10 @@
 //   successful edit_code — the "never-read decoy" killer. Session
 //   read-side guards (concern_note) only cover files the agent PARTIALLY
 //   read; a file never opened at all is invisible to them.
-// Feature 2: concern-token harvest from search_files find, so Guard 2 /
+// Feature 2: concern-token harvest from tl_search_files find, so Guard 2 /
 //   Feature 1 can arm even in a pack-less session (buildTaskPack's own
 //   concernAnchorTokens harvest never ran when zero task_packs were called).
-// Feature 3: Guard 2 coverage for read_file mode=small_file outline/defer
+// Feature 3: Guard 2 coverage for tl_read_file mode=small_file outline/defer
 //   serves — the slice path already had concern_note; the outline/defer
 //   serve itself did not.
 // Feature 4: idle-TTL (24h) session eviction so a long-lived server doesn't
@@ -185,18 +185,18 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
 
     // Harvest concern tokens (task_pack query — same mechanism Guard 2 uses).
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
     });
 
     // Read + edit ONLY the decoy — mirrors the never-read-decoy shape: the
     // real bug file is never opened at all.
     await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "src/math/pid.cpp" },
     });
     const editRes = await srv.rpc(4, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/math/pid.cpp", search: "decoy_value = 1", replace: "decoy_value = 2" },
     });
     const data = parseToolResult(editRes);
@@ -222,11 +222,11 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     servers.push(srv);
     await srv.initialize();
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
     });
     const editRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/math/pid.cpp", search: before, replace: after },
     });
     const data = parseToolResult(editRes);
@@ -249,11 +249,11 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     servers.push(srv);
     await srv.initialize();
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
     });
     const data = parseToolResult(await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/math/pid.cpp", search: before, replace: after },
     }));
     expect(typeof data["unread_note"]).toBe("string");
@@ -267,11 +267,11 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     servers.push(srv);
     await srv.initialize();
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
     });
     const data = parseToolResult(await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         path: "src/math/pid.cpp",
         search: "GAIN_CONTROLLER_MAGIC = 1",
@@ -295,11 +295,11 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     servers.push(srv);
     await srv.initialize();
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/a.cpp" },
     });
     const data = parseToolResult(await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { edits: [
         { path: "src/math/a.cpp", search: beforeA, replace: afterA },
         { path: "src/math/b.cpp", search: beforeB, replace: afterB },
@@ -323,12 +323,12 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
     });
 
     const first = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/math/pid.cpp", search: "decoy_value = 1", replace: "decoy_value = 2" },
     });
     const firstData = parseToolResult(first);
@@ -338,7 +338,7 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     // A DIFFERENT edit, same session — would otherwise still qualify (the
     // real sibling is still unread), but the note has already fired once.
     const second = await srv.rpc(4, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/math/pid.cpp", search: "decoy_value = 2", replace: "decoy_value = 3" },
     });
     const secondData = parseToolResult(second);
@@ -357,7 +357,7 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
 
     // No task_pack/locate/find call at all this session — concernTokens stays empty.
     const editRes = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/math/pid.cpp", search: "decoy_value = 1", replace: "decoy_value = 2" },
     });
     const data = parseToolResult(editRes);
@@ -375,18 +375,18 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
     });
 
     // Read BOTH files this time — the agent actually opened the real one.
     await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "src/control/gain_controller.cpp" },
     });
 
     const editRes = await srv.rpc(4, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { path: "src/math/pid.cpp", search: "decoy_value = 1", replace: "decoy_value = 2" },
     });
     const data = parseToolResult(editRes);
@@ -404,14 +404,14 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/math/pid.cpp" },
     });
 
     // No `path` — a workspace-wide rename, whose result carries
     // `changed_files` rather than a top-level `path`/`files`.
     const renameRes = await srv.rpc(3, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: { mode: "rename", from: "decoyValue", to: "decoyValue2", lang: "cpp" },
     });
     const data = parseToolResult(renameRes);
@@ -425,10 +425,10 @@ describe("Feature 1 — unread-sibling note on the session's first edit_code", (
 });
 
 // ---------------------------------------------------------------------------
-// Feature 2 — concern-token harvest from search_files find
+// Feature 2 — concern-token harvest from tl_search_files find
 // ---------------------------------------------------------------------------
 
-describe("Feature 2 — search_files find harvests concern-anchor tokens", () => {
+describe("Feature 2 — tl_search_files find harvests concern-anchor tokens", () => {
   it("single query find, then a partial slice elsewhere -> concern_note now fires", async () => {
     const wsDir = mkDir("f2-query");
     writeFile(wsDir, "src/gain_controller.ts", buildConcernFixture());
@@ -441,13 +441,13 @@ describe("Feature 2 — search_files find harvests concern-anchor tokens", () =>
     // meant recordConcernTokens never ran and Guard 2 stayed structurally
     // dormant for the rest of the session (12b2 forensics).
     const findRes = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", query: "integral clamp" },
     });
     expect(findRes.result.isError).toBeFalsy();
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
     });
     const data = parseToolResult(res);
@@ -466,13 +466,13 @@ describe("Feature 2 — search_files find harvests concern-anchor tokens", () =>
     await srv.initialize();
 
     const findRes = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "find", queries: ["integral", "clamp"] },
     });
     expect(findRes.result.isError).toBeFalsy();
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
     });
     const data = parseToolResult(res);
@@ -497,12 +497,12 @@ describe("Feature 3 — concern_note on a small_file outline serve that hides a 
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/gain_controller.ts" },
     });
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "small_file", path: "src/gain_controller.ts", content: "outline" },
     });
     const data = parseToolResult(res);
@@ -527,12 +527,12 @@ describe("Feature 3 — concern_note on a small_file outline serve that hides a 
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/clamp_util.ts" },
     });
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "small_file", path: "src/clamp_util.ts", content: "outline" },
     });
     const data = parseToolResult(res);
@@ -552,12 +552,12 @@ describe("Feature 3 — concern_note on a small_file outline serve that hides a 
     await srv.initialize();
 
     await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "task_pack", query: "integral clamp", path: "src/gain_controller.ts" },
     });
 
     const sliceRes = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "slice", path: "src/gain_controller.ts", range: "1-70" },
     });
     const sliceData = parseToolResult(sliceRes);
@@ -578,7 +578,7 @@ describe("Feature 3 — concern_note on a small_file outline serve that hides a 
     // The outline path shares the once-per-(session,file) dedupe with the
     // slice path — no second note for the same file.
     const outlineRes = await srv.rpc(4, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "small_file", path: "src/gain_controller.ts", content: "outline" },
     });
     const outlineData = parseToolResult(outlineRes);

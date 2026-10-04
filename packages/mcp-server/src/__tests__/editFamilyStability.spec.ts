@@ -30,7 +30,7 @@ import { kindForCall } from "../protocol/envelope.js";
 
 type Body = Record<string, unknown>;
 
-const CTX = { tool: "edit_file" } as const;
+const CTX = { tool: "tl_edit_file" } as const;
 
 describe("editFamilyStability — kindForCall's WRITE_TOOLS branch (PQ2)", () => {
   it("(a) an applied-shaped body with refusal-ish fields is NOT reclassified as refusal, under either transport flag", () => {

@@ -137,7 +137,7 @@ function pickSample(manifest: SourceIndexManifestV1, candidates: string[], maxFi
  * shortcut (indexStore.ts) demonstrably serves stale symbol data
  * indefinitely, within one long-lived server process, for a same-stat
  * (size+mtime) external write that skips invalidateCachedWorkspaceFiles —
- * reproduced end-to-end against the real server via search_files
+ * reproduced end-to-end against the real server via tl_search_files
  * action=symbols (the one production loadOrBuildSourceIndex call site);
  * see faultInjection.spec.ts and consistencyScan.spec.ts for the pinned
  * regression shape. Cost is bounded (maxFiles/maxDurationMs below) and

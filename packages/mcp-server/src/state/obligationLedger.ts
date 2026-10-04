@@ -7,8 +7,8 @@
  * must derive frontier/gaps/missing from this ledger rather than retaining a
  * last-pack-only copy.
  *
- * A-F4 (2026-08-28): THE API IS TOTAL. Every mutator lives on the read_file /
- * search_files hot path, so a rejected mutation is reported by RETURN VALUE and
+ * A-F4 (2026-08-28): THE API IS TOTAL. Every mutator lives on the tl_read_file /
+ * tl_search_files hot path, so a rejected mutation is reported by RETURN VALUE and
  * never by an exception — a thrown ledger error there is an RPC error handed to
  * a live agent, which is what `TL_DECISION_INVARIANT_STRICT` exists to keep out
  * of production. Two throws had already become reachable:

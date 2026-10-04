@@ -13,10 +13,10 @@
  * agent re-issuing an identical `task_pack` query one turn later, with no
  * `qref`.
  *
- *   read_file { query: <generic pricing change>, budget: { bytes: 9000 } }
+ *   tl_read_file { query: <generic pricing change>, budget: { bytes: 9000 } }
  *     → read.task_pack, limit.cause:"capped"; one row ships its body in
  *       full (small enough to survive Phase E), two others ship none
- *   read_file { query: <same>, task: { profile: "generic" } }   ← plain re-ask
+ *   tl_read_file { query: <same>, task: { profile: "generic" } }   ← plain re-ask
  *     → BEFORE THE FIX: every bodyless row — including the two that never
  *       shipped a body on the FIRST call either — carries `prior`, falsely
  *       asserting the caller holds bytes it was never sent.
@@ -236,7 +236,7 @@ describe("FX-M4 P1: a plain pack-unchanged re-serve never claims `prior` for a n
     try {
       await srv.initialize();
 
-      const first = await srv.call("read_file", {
+      const first = await srv.call("tl_read_file", {
         query: QUERY,
         task: { profile: "generic", epoch: "new" },
         budget: { bytes: BUDGET_BYTES },
@@ -267,7 +267,7 @@ describe("FX-M4 P1: a plain pack-unchanged re-serve never claims `prior` for a n
       // qref replay. This is `tryServeCachedPack`'s exact-fingerprint path,
       // the one revalidateRecordToReceipt call site the historical
       // isQueryRefReplay guard never covered.
-      const second = await srv.call("read_file", {
+      const second = await srv.call("tl_read_file", {
         query: QUERY,
         task: { profile: "generic" },
         budget: { bytes: BUDGET_BYTES },

@@ -44,8 +44,8 @@ import * as path from "node:path";
 const SRC = path.resolve(__dirname, "..");
 
 /**
- * The modules whose output can become a `read_file` / `search_files` /
- * `edit_file` response body. A module added here inherits the rule; a module
+ * The modules whose output can become a `tl_read_file` / `tl_search_files` /
+ * `tl_edit_file` response body. A module added here inherits the rule; a module
  * NOT here is out of scope for this guard and must not read file bytes for the
  * wire (the three tool dispatchers all live in this list).
  */

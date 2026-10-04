@@ -54,7 +54,7 @@ describe("tl logs summary scoping", () => {
     workspaceId,
     sessionId: "session",
     client: "claude-code",
-    tool: "read_file",
+    tool: "tl_read_file",
     outcome: "ok",
     durationMs: 1,
     responseBytes: 40,
@@ -72,7 +72,7 @@ describe("tl logs summary scoping", () => {
   const toolEvent = (
     workspaceId: string,
     index: number,
-    tool: "read_file" | "search_files" | "edit_file",
+    tool: "tl_read_file" | "tl_search_files" | "tl_edit_file",
     responseBytes: number,
   ) => ({
     schemaVersion: 1,
@@ -99,7 +99,7 @@ describe("tl logs summary scoping", () => {
     measurementUnavailableReason?: string;
     totalResponseBytes: number;
     estimatedResponseTokens: number;
-    byTool: Record<"read_file" | "search_files" | "edit_file", number>;
+    byTool: Record<"tl_read_file" | "tl_search_files" | "tl_edit_file", number>;
     method: "file-bytes";
     measurementDisplay: {
       wire: { status: string; calls: number; events: number };
@@ -174,10 +174,10 @@ describe("tl logs summary scoping", () => {
     const toolWsId = usageWorkspaceId(toolRoot, logDirectory);
     expect(toolWsId).not.toBeNull();
     const rows = [
-      toolEvent(toolWsId!, 0, "read_file", 40),
-      toolEvent(toolWsId!, 1, "read_file", 60),
-      toolEvent(toolWsId!, 2, "search_files", 100),
-      toolEvent(toolWsId!, 3, "edit_file", 200),
+      toolEvent(toolWsId!, 0, "tl_read_file", 40),
+      toolEvent(toolWsId!, 1, "tl_read_file", 60),
+      toolEvent(toolWsId!, 2, "tl_search_files", 100),
+      toolEvent(toolWsId!, 3, "tl_edit_file", 200),
     ];
     writeFileSync(
       join(logDirectory, "usage-2026-08-11.ndjson"),
@@ -189,7 +189,7 @@ describe("tl logs summary scoping", () => {
     expect(json.eventCount).toBe(4);
     expect(json.totalResponseBytes).toBe(400);
     expect(json.estimatedResponseTokens).toBe(100);
-    expect(json.byTool).toEqual({ read_file: 2, search_files: 1, edit_file: 1 });
+    expect(json.byTool).toEqual({ tl_read_file: 2, tl_search_files: 1, tl_edit_file: 1 });
     expect(json.method).toBe("file-bytes");
     expect(json.measurementDisplay.wire).toMatchObject({ status: "measured", calls: 4, events: 4 });
     expect(json.measurementDisplay.mcpResponse.status).toBe("estimated");
@@ -205,7 +205,7 @@ describe("tl logs summary scoping", () => {
     expect(text).toContain("TL response measurement method: file-bytes\n");
     expect(text).toContain("Context avoided: unavailable (unavailable; basis:");
     expect(text).toContain("Session net: -600 tokens (estimated; basis:");
-    expect(text).toContain("By tool: read_file 2, search_files 1, edit_file 1\n");
+    expect(text).toContain("By tool: tl_read_file 2, tl_search_files 1, tl_edit_file 1\n");
     // The measured block above comes only from local TL usage events, never
     // from AI-provider session logs, so it renders even though this fresh
     // workspace root cannot match any real provider session and the
@@ -222,7 +222,7 @@ describe("tl logs summary scoping", () => {
     const workspaceId = usageWorkspaceId(root, logDirectory)!;
     const rows = [
       {
-        ...toolEvent(workspaceId, 0, "read_file", 400),
+        ...toolEvent(workspaceId, 0, "tl_read_file", 400),
         schemaVersion: 2,
         taskRef: "q-task",
         estimatedResponseTokens: 100,
@@ -245,7 +245,7 @@ describe("tl logs summary scoping", () => {
         estimatedSavedTokens: 400,
       },
       {
-        ...toolEvent(workspaceId, 3, "read_file", 200),
+        ...toolEvent(workspaceId, 3, "tl_read_file", 200),
         schemaVersion: 2,
         taskRef: "q-unanchored",
         estimatedResponseTokens: 50,
@@ -277,7 +277,7 @@ describe("tl logs summary scoping", () => {
     expect(json.eventCount).toBe(0);
     expect(json.totalResponseBytes).toBe(0);
     expect(json.estimatedResponseTokens).toBe(0);
-    expect(json.byTool).toEqual({ read_file: 0, search_files: 0, edit_file: 0 });
+    expect(json.byTool).toEqual({ tl_read_file: 0, tl_search_files: 0, tl_edit_file: 0 });
 
     writes.length = 0;
     await expect(runLogs(["summary"])).resolves.toBeUndefined();
@@ -285,6 +285,6 @@ describe("tl logs summary scoping", () => {
     expect(text).toContain("MCP calls: 0\n");
     expect(text).toContain("TL response bytes: 0\n");
     expect(text).toContain("TL response tokens: ~0 (est.)\n");
-    expect(text).toContain("By tool: read_file 0, search_files 0, edit_file 0\n");
+    expect(text).toContain("By tool: tl_read_file 0, tl_search_files 0, tl_edit_file 0\n");
   });
 });

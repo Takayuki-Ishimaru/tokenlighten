@@ -132,7 +132,7 @@ function shallowerTree(payload: ShedPayload, context: ShedContext): ToolCall | u
   // implementation rather than re-derived per family.
   const sanctioned = sanctionSearchContinuation(call, { absentTerms: NO_ABSENT_TERMS });
   if (sanctioned === undefined) return undefined;
-  return emittableToolCall({ tool: "search_files", arguments: sanctioned });
+  return emittableToolCall({ tool: "tl_search_files", arguments: sanctioned });
 }
 
 export const SEARCH_TREE_SHEDDER: Shedder = {

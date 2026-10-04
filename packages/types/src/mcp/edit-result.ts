@@ -33,7 +33,7 @@ import type { ProtocolVersion, WorkspaceMarker } from "./protocol.js";
  * THE ONE SHED THESE KINDS PERFORM (§4.2.1(4)). Per-edit ranges, `sha`s,
  * `brace_delta`, `enclosing_symbol` and the per-item recovery advisory move
  * server-side and the response carries a RECOVERY HANDLE in their place,
- * fetchable with `read_file` like any other handle. The field is `ledger`. It
+ * fetchable with `tl_read_file` like any other handle. The field is `ledger`. It
  * never touches `core`.
  */
 export type SideEffectCore = {
@@ -157,6 +157,57 @@ export type AppliedEntry = {
    * top-level receipt carries the first marked row's status once.
    */
   frontier_status?: "read-only" | "not-in-frontier" | "answer-decision";
+  /**
+   * PEW — the post-edit verification window (v0.15.0, additive/optional,
+   * §1.4(a)): the construct as it now reads on disk, wide enough that a
+   * caller does not have to spend a `tl_read_file` turn confirming its own
+   * edit. Distinct from `range`/`code`/`head`, which stay exactly as they
+   * are — this is a SECOND, WIDER window, not a replacement:
+   *
+   *   `range`/`code`/`head`  the compact proof (±8 lines / 2 KiB, `code`
+   *      gated to review/safety triggers by W2's "compact by default" rule
+   *      — see `protocol/editFamily.ts`'s `fullAppliedEchoRequested`).
+   *   `after`                the wide, UNCONDITIONAL courtesy window
+   *      (±20 lines / enclosing symbol, capped per-hunk and per-response
+   *      by `server.ts`'s `AFTER_ENTRY_CAP_BYTES`/`AFTER_TOTAL_CAP_BYTES`),
+   *      present whenever a caller/host ceiling and the local caps leave
+   *      room for it.
+   *
+   * Never emitted on `EditRolledBack`/`EditStateUnknown`: both use
+   * `RollbackFileState`, a different type with no `after` member, so the
+   * exclusion §4.2.1(1) requires ("a failure report claims nothing about
+   * post-write disk state") holds BY CONSTRUCTION, not by a runtime check.
+   */
+  after?: PostEditWindow;
+};
+
+/**
+ * PEW (v0.15.0). The wide post-edit window `AppliedEntry.after` carries.
+ *
+ * `range`/`body` are the ONE window this response shows for the file —
+ * always the merged window that CONTAINS `AppliedEntry.range` when the file
+ * took several hunks whose padded windows overlapped or touched; a hunk far
+ * enough away that its window did not merge is named, not shown, in
+ * `remaining`. `body` is verbatim disk text, sha-bound the same way
+ * `slice_sha` is (server.ts books it in the served-range ledger under the
+ * file's post-edit sha), so it is safe to treat as ALREADY IN CONTEXT for a
+ * later read or edit this epoch.
+ */
+export type PostEditWindow = {
+  /** Post-edit line span `body` covers, `"N-M"`. */
+  range: string;
+  /** Verbatim post-edit disk text for `range`. Never present without `range`,
+   *  and never partial-without-saying-so: a window trimmed for a cap or a
+   *  tighter caller/host ceiling shrinks `range` to match what `body` still
+   *  covers rather than truncating `body` silently. */
+  body: string;
+  /**
+   * Other post-edit spans this file's edit touched that this response could
+   * not also show — a merged-but-distant hunk, or a window shed for budget
+   * (own cap or ceiling) — named as `"N-M"`, in file order, never dropped
+   * without a name. Each is an ordinary ranged `tl_read_file` away.
+   */
+  remaining?: string[];
 };
 
 /**

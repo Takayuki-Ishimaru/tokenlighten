@@ -1,6 +1,6 @@
 {
   "name": "@tokenlighten/agents-md",
-  "version": "0.14.4",
+  "version": "0.15.0",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/index.js",
@@ -22,6 +22,10 @@
     "./guideProfileDefault": {
       "import": "./dist/guideProfileDefault.js",
       "types": "./dist/guideProfileDefault.d.ts"
+    },
+    "./copilotGuide": {
+      "import": "./dist/copilotGuide.js",
+      "types": "./dist/copilotGuide.d.ts"
     }
   },
   "engines": {

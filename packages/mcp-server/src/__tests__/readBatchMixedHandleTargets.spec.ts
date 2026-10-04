@@ -1,6 +1,6 @@
 // readBatchMixedHandleTargets.spec.ts — FX-M1/E1 (= INV-C F4 / INV-E E1).
 //
-// A `read_file targets:[...]` batch that MIXES a bare `{handle}` target (no
+// A `tl_read_file targets:[...]` batch that MIXES a bare `{handle}` target (no
 // `path`) with a `{path}` target used to silently lose the handle-only
 // target: `server.ts`'s canonical->legacy request projection
 // (`normalizeCanonicalRequest`) only preserves handles when the WHOLE batch
@@ -67,7 +67,7 @@ function parse(res: { content: Array<{ text: string }>; isError?: boolean }): {
 
 /** Mints a real, round-trippable handle for `relPath` via an ordinary full read. */
 async function mintHandle(ws: string, relPath: string): Promise<string> {
-  const res = parse(await callTool("read_file", { targets: [{ path: relPath }], content: "full", cwd: ws }));
+  const res = parse(await callTool("tl_read_file", { targets: [{ path: relPath }], content: "full", cwd: ws }));
   expect(res.isError, JSON.stringify(res.body)).toBe(false);
   const entries = res.body["entries"] as Array<Record<string, unknown>> | undefined;
   const handle = entries !== undefined
@@ -85,14 +85,14 @@ afterEach(() => {
   }
 });
 
-describe("FX-M1/E1: mixed targets:[{handle},{path}] read_file batch — content:\"full\"", () => {
+describe("FX-M1/E1: mixed targets:[{handle},{path}] tl_read_file batch — content:\"full\"", () => {
   it("both targets are served — the handle-only target is never silently dropped", async () => {
     const ws = mkWs("full-both-served");
     write(ws, "src/big.ts", "export function big() {\n  return 1;\n}\n");
     write(ws, "src/other.ts", "export function other() {\n  return 2;\n}\n");
     const bigHandle = await mintHandle(ws, "src/big.ts");
 
-    const res = parse(await callTool("read_file", {
+    const res = parse(await callTool("tl_read_file", {
       targets: [{ handle: bigHandle }, { path: "src/other.ts" }],
       content: "full",
       cwd: ws,
@@ -122,7 +122,7 @@ describe("FX-M1/E1: mixed targets:[{handle},{path}] read_file batch — content:
     write(ws, "src/other.ts", "export function other() {\n  return 2;\n}\n");
     const bigHandle = await mintHandle(ws, "src/big.ts");
 
-    const res = parse(await callTool("read_file", {
+    const res = parse(await callTool("tl_read_file", {
       targets: [{ path: "src/other.ts" }, { handle: bigHandle }],
       content: "full",
       cwd: ws,
@@ -143,7 +143,7 @@ describe("FX-M1/E1: mixed targets:[{handle},{path}] read_file batch — content:
     const aHandle = await mintHandle(ws, "src/a.ts");
     const bHandle = await mintHandle(ws, "src/b.ts");
 
-    const res = parse(await callTool("read_file", {
+    const res = parse(await callTool("tl_read_file", {
       targets: [{ handle: aHandle }, { handle: bHandle }, { path: "src/c.ts" }],
       content: "full",
       cwd: ws,
@@ -158,14 +158,14 @@ describe("FX-M1/E1: mixed targets:[{handle},{path}] read_file batch — content:
   });
 });
 
-describe("FX-M1/E1: mixed targets:[{handle},{path}] read_file batch — content:\"outline\"", () => {
+describe("FX-M1/E1: mixed targets:[{handle},{path}] tl_read_file batch — content:\"outline\"", () => {
   it("both targets are served as skeletons — the handle-only target is never silently dropped", async () => {
     const ws = mkWs("outline-both-served");
     write(ws, "src/big.ts", "export function bigFn() {\n  return 1;\n}\n");
     write(ws, "src/other.ts", "export function otherFn() {\n  return 2;\n}\n");
     const bigHandle = await mintHandle(ws, "src/big.ts");
 
-    const res = parse(await callTool("read_file", {
+    const res = parse(await callTool("tl_read_file", {
       targets: [{ handle: bigHandle }, { path: "src/other.ts" }],
       content: "outline",
       cwd: ws,
@@ -184,7 +184,7 @@ describe("FX-M1/E1: an unresolvable handle in a mixed batch is disclosed, never 
     const ws = mkWs("unknown-handle");
     write(ws, "src/other.ts", "export function other() {\n  return 2;\n}\n");
 
-    const res = parse(await callTool("read_file", {
+    const res = parse(await callTool("tl_read_file", {
       targets: [{ handle: "hdoesnotexist000" }, { path: "src/other.ts" }],
       content: "full",
       cwd: ws,
@@ -227,7 +227,7 @@ describe("FX-M1/E1: mixed handle+path batch with no explicit `content` (mode-uns
     write(ws, "src/other.ts", "export function otherFn() {\n  return 2;\n}\n");
     const bigHandle = await mintHandle(ws, "src/big.ts");
 
-    const res = parse(await callTool("read_file", {
+    const res = parse(await callTool("tl_read_file", {
       targets: [{ handle: bigHandle }, { path: "src/other.ts" }],
       cwd: ws,
       task: { epoch: "new" },

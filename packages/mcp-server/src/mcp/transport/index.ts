@@ -4,10 +4,13 @@
 // (DESIGN-v0.10-expansion-plan-v1.3.md §4.5 "MCP 2026-07-28 compatibility
 // boundary"; DESIGN-v0.10-expansion-plan-reconciliation.md §4 alpha.1 item 4).
 //
-//   legacy  2025-era compatibility  — @modelcontextprotocol/sdk v1 `Server` +
-//                                     `StdioServerTransport`, hand-rolled
-//                                     JSON-RPC fallback beneath it. Exactly
-//                                     today's path, byte-identical.
+//   legacy  2025-era compatibility  — the hand-rolled stdio JSON-RPC 2.0
+//                                     transport (legacyStdio.ts), started
+//                                     directly. It is the whole legacy leg:
+//                                     the @modelcontextprotocol/sdk v1 leg
+//                                     that used to be tried first never
+//                                     worked and is gone (see legacyStdio.ts's
+//                                     header). Byte-identical on the wire.
 //   modern  2026-07-28              — TypeScript SDK v2 server package.
 //
 // The era is a STARTUP choice, resolved once from the environment; domain
@@ -78,13 +81,10 @@ export async function runTransport(
     );
   }
 
-  // Legacy: try SDK first; fall back to hand-rolled if SDK unavailable.
-  const { tryRunWithSdk } = await import("./legacyStdio.js");
-  const sdkOk = await tryRunWithSdk();
-  if (!sdkOk) {
-    const { runStdioFallback } = await import("./fallbackStdio.js");
-    runStdioFallback();
-  }
+  // Legacy era: the hand-rolled stdio JSON-RPC transport, started directly —
+  // there is no SDK leg to try first (see legacyStdio.ts's header).
+  const { runLegacyStdio } = await import("./legacyStdio.js");
+  runLegacyStdio();
   return "legacy";
 }
 

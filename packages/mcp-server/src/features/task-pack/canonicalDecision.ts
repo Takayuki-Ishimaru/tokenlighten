@@ -580,7 +580,7 @@ export function reapplySemanticFrontierDecision(result: TaskPackResult): void {
 // (`bookShippedPackServeState`), off one `shippedSurfaces` projection over the
 // pack that ships. FX-K (round-15 finding 1) made that pass UNCONDITIONAL:
 // FX-J had left the flag-off path booking pre-trim, and one production
-// `budget:{bytes}` read plus one `edit_file` proved that grants write
+// `budget:{bytes}` read plus one `tl_edit_file` proved that grants write
 // authority over a file the response sent no bytes for. There is now exactly
 // one booking position in both flag states.
 // `sfBookingOrderFence.spec.ts` holds the ordering by parsing
@@ -849,7 +849,7 @@ function applySemanticFrontierNextArbitration(
     continuation: undefined,
     // SF-6: batch FOLDING is the turn-economy read-batching lever
     // (`TL_BATCH_HINTS`), not the edit-frontier batching one — folding several
-    // concerns' addresses into one `read_file` is a read-side transform and
+    // concerns' addresses into one `tl_read_file` is a read-side transform and
     // has nothing to do with `TL_BATCH_EDIT_FRONTIER`'s prepared-phase
     // multi-target edit fence.
     batchFold: { enabled: batchHintsEnabled(), maxTargets: DISCOVERY_BUNDLE_PATH_CAP },
@@ -1039,7 +1039,7 @@ export function unservedAddressableRepack(result: TaskPackResult): ToolCall | un
     targets.push({ handle });
     if (targets.length >= UNSERVED_ADDRESSABLE_REPACK_CAP) break;
   }
-  return targets.length === 0 ? undefined : { tool: "read_file", arguments: { targets } };
+  return targets.length === 0 ? undefined : { tool: "tl_read_file", arguments: { targets } };
 }
 const UNSERVED_ADDRESSABLE_REPACK_CAP = 6;
 
@@ -1157,7 +1157,7 @@ export function discoveryBundleNext(
     // this response could name already amounts to a whole-file serve.
     if (!hasUnservedRelatedNode) return undefined;
   }
-  return paths.length < 2 ? undefined : { tool: "read_file", arguments: { mode: "task_pack", qref: result.qref, paths } };
+  return paths.length < 2 ? undefined : { tool: "tl_read_file", arguments: { mode: "task_pack", qref: result.qref, paths } };
 }
 
 export function discoveryBundleAdvisory(result: TaskPackResult): string | undefined {
@@ -1187,7 +1187,7 @@ export interface CanonicalTaskDecision {
 function isReadOnlyCall(value: unknown): value is ContinuationCall {
   if (value === null || typeof value !== "object") return false;
   const call = value as Partial<ContinuationCall>;
-  return (call.tool === "read_file" || call.tool === "search_files")
+  return (call.tool === "tl_read_file" || call.tool === "tl_search_files")
     && call.arguments !== null
     && typeof call.arguments === "object";
 }
@@ -1233,7 +1233,7 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
     typeof value === "string" && !servedZoomSuppressed(result, handle, value),
   );
   if (range === undefined) return undefined;
-  return { tool: "read_file", arguments: { handle, range } };
+  return { tool: "tl_read_file", arguments: { handle, range } };
 }
 /**
  * P0a §6.1: a prepared decision is bound to a certificate either by carrying
@@ -1284,7 +1284,7 @@ function unservedPriorPackObligationZoom(result: TaskPackResult): ContinuationCa
     const match = UNSERVED_PRIOR_PACK_OBLIGATION_RE.exec(entry);
     const obligationPath = match?.[1];
     if (obligationPath !== undefined && obligationPath.length > 0) {
-      return { tool: "read_file", arguments: { path: obligationPath } };
+      return { tool: "tl_read_file", arguments: { path: obligationPath } };
     }
   }
   return undefined;
@@ -1322,13 +1322,13 @@ function unservedEpochContractZoom(result: TaskPackResult): ContinuationCall | u
       // The epoch's SOURCE query, restored from the marker — never this
       // narrowed call's own text, which is what let the universe shrink.
       return {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: { mode: "task_pack", query: role[2]!, surfaceRoles: [role[3]!] },
       };
     }
     const concern = UNCOVERED_EPOCH_CONCERN_RE.exec(entry);
     if (concern !== null) {
-      return { tool: "search_files", arguments: { action: "find", query: concern[1]! } };
+      return { tool: "tl_search_files", arguments: { action: "find", query: concern[1]! } };
     }
   }
   return undefined;
@@ -1430,7 +1430,7 @@ function requiredAnswerDocumentZoom(result: TaskPackResult): ContinuationCall | 
   );
   if (range === undefined) return undefined;
   return {
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: { handle: surface.handle, range },
   };
 }
@@ -1559,7 +1559,7 @@ export function decisionGradeLiteralAbsenceSubject(
  * still re-requested, from its handle's own full range.
  */
 const CALLER_RANGED_BUNDLE_CAP = 8;
-const DROPPED_BY_BYTE_BUDGET_RE = /^dropped-by-byte-budget:.*? \(re-request via read_file targets=\[\{handle:"([^"]+)"\}\]\)/;
+const DROPPED_BY_BYTE_BUDGET_RE = /^dropped-by-byte-budget:.*? \(re-request via tl_read_file targets=\[\{handle:"([^"]+)"\}\]\)/;
 
 /**
  * TL-01 (2026-09-21): `minTargets` exists so the F2 seat above keeps its
@@ -1623,7 +1623,7 @@ function unservedCallerRangedTargetsNext(result: TaskPackResult, minTargets = 2)
   const qref = typeof result.qref === "string" && result.qref !== "" ? result.qref : undefined;
   return targets.length < minTargets
     ? undefined
-    : { tool: "read_file", arguments: { ...(qref !== undefined ? { qref } : {}), targets } };
+    : { tool: "tl_read_file", arguments: { ...(qref !== undefined ? { qref } : {}), targets } };
 }
 
 /**
@@ -1682,7 +1682,7 @@ function deriveCanonicalTaskDecisionRaw(result: TaskPackResult): CanonicalTaskDe
    * symbol; the decision layer still answered `discover` for it, because a
    * discovery `next` was available — and the only thing it could propose was a
    * repository-wide find for that same verb
-   * (`Increase it to 5.` -> `search_files{queries:["increase"]}`). That is a
+   * (`Increase it to 5.` -> `tl_search_files{queries:["increase"]}`). That is a
    * dead end dressed as progress: no amount of grep closes a request whose
    * object was never stated.
    *
@@ -1982,7 +1982,7 @@ function clearDiscoveryProjection(result: TaskPackResult, contract: TaskExecutio
     };
   }
   delete result.continuation;
-  if (result.next?.tool === "read_file" || result.next?.tool === "search_files") {
+  if (result.next?.tool === "tl_read_file" || result.next?.tool === "tl_search_files") {
     delete result.next;
   }
 }
@@ -2030,7 +2030,7 @@ function applyDiscoverDecision(
     };
   }
   result.route = {
-    action: call.tool === "read_file" ? "inspect_handles" : "locate_missing_surfaces",
+    action: call.tool === "tl_read_file" ? "inspect_handles" : "locate_missing_surfaces",
     reason: decision.reason,
     max_additional_tl_calls: 1,
   };

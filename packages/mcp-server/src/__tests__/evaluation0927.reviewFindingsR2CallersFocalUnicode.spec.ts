@@ -71,7 +71,7 @@ async function ask(ws: string, query: string, hopCap = 20): Promise<ChainResult>
   const s = await spawnedServer(ws);
   return followNextToEnd(
     s,
-    { tool: "read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
+    { tool: "tl_read_file", arguments: { query, task: { epoch: "new", profile: "answer" }, cwd: ws } },
     { cwd: ws, hopCap },
   );
 }
@@ -285,7 +285,7 @@ describe("P1-7 — more than 24 known call sites keep discovering (open/next) un
 
 // ---------------------------------------------------------------------------
 // P1-9 end-to-end: a Unicode (non-ASCII, non-CJK) identifier is found by
-// name, by callers, and by search_files references -- a FRESH script
+// name, by callers, and by tl_search_files references -- a FRESH script
 // (Turkish/French-accented) never used by the reviewer's own fixtures.
 // ---------------------------------------------------------------------------
 describe("P1-9 — a Latin-with-diacritics identifier resolves like any ASCII one", () => {
@@ -309,12 +309,12 @@ describe("P1-9 — a Latin-with-diacritics identifier resolves like any ASCII on
     expect(JSON.stringify(lastBody)).not.toContain("neither an identifier");
   });
 
-  it("search_files references finds a Latin-with-diacritics symbol instead of refusing it as invalid input", async () => {
+  it("tl_search_files references finds a Latin-with-diacritics symbol instead of refusing it as invalid input", async () => {
     const ws = makeWorkspace("p19-refs");
     writeFile(ws, "package.json", '{ "name": "p19refs", "private": true, "type": "module" }\n');
     writeFile(ws, "src/étage.ts", "export function étage(n: number): number {\n  return n + 1;\n}\nexport const résultat = étage(2);\n");
     const s = await spawnedServer(ws);
-    const r = await s.callTool("search_files", { action: "references", scope: { symbol: "étage" }, cwd: ws });
+    const r = await s.callTool("tl_search_files", { action: "references", scope: { symbol: "étage" }, cwd: ws });
     expect(r.body["kind"]).toBe("search.references");
     expect(r.body["code"]).not.toBe("invalid-input");
     const refs = (r.body["references"] as Array<Record<string, unknown>> | undefined) ?? [];

@@ -1041,7 +1041,7 @@ export async function loadOrBuildSourceIndex(
     // mcp-server's buildFileScoresFromManifest) that must stay neutral to
     // doc/config prose. Content is already in hand here — sniff .h files
     // for C++ signals instead of trusting the static extension-only "c"
-    // answer, so the PERSISTED index that search_files action=symbols
+    // answer, so the PERSISTED index that tl_search_files action=symbols
     // reads from doesn't lock in the wrong grammar for genuinely-C++ .h
     // files. See graph.ts's languageForPathWithContent doc comment.
     const language = f.textOnly

@@ -13,15 +13,24 @@
  * All paths are workspace-relative POSIX paths.
  */
 
-import { handleTable, shaOfText } from "../util/handles.js";
+import { HANDLE_ID_LENGTH, handleTable, shaOfText, shortSha } from "../util/handles.js";
 import { getSymbolWithContext } from "./getSymbolWithContext.js";
 import { locateTaskContext } from "../features/locator/locateTaskContext.js";
-import { languageForPathWithContent } from "../util/languages.js";
+import { languageForPath, languageForPathWithContent } from "../util/languages.js";
 import { countLines, sliceLinesToText } from "../util/countLines.js";
 import { collectSymbols, type CollectedSymbol } from "../symbols/collectSymbols.js";
-import { getConcernTokens, hasConcernNoteFired, markConcernNoteFired, recordReadPath, isClosureSatisfied } from "../state/session.js";
+import { getConcernTokens, hasConcernNoteFired, markConcernNoteFired, recordReadPath, isClosureSatisfied, servedRangeReceipt } from "../state/session.js";
 import { isMarkdownPath, parseMarkdownHeadings, selectMarkdownSections } from "../util/markdownSections.js";
 import { estimateBytesFromTokens } from "../protocol/budget/wireBudget.js";
+import { measureResponseBytes } from "../protocol/budget/measure.js";
+// BCF2 (eval-0929 §9, DESIGN-v0.14-plan.md §16.6 residual): the SAME
+// wire-accurate per-line estimator `choosePage`/`truncateResolvedItemToFit`
+// (server.ts) already use, reused here so resolveSlice/resolveSliceRanges can
+// size a slice to a caller's real `budget.bytes` instead of always cutting on
+// RAW bytes at a fixed constant (see the "BCF2 / FX1" block below).
+import { wireLineCostBytes } from "../state/readRequestStore.js";
+import { ELISION_MARKER_RE, compressFormat, elideDocCommentsForDisplay } from "../util/formatCompress.js";
+import { batchHintsEnabled } from "../util/flags.js";
 import type { TreeSitterPaths } from "../skeleton/types.js";
 import type {
   ReadCodeMapOutput,
@@ -32,7 +41,7 @@ import type {
   ToolCall,
 } from "@tokenlighten/types";
 import { MCP_LANGS } from "@tokenlighten/types";
-import { canonicalToolCall } from "../protocol/envelope.js";
+import { canonicalToolCall, protocolCallContext } from "../protocol/envelope.js";
 
 // ---------------------------------------------------------------------------
 // Byte caps
@@ -776,17 +785,17 @@ function sliceInvalidRemedyNext(filePath: string, totalLines: number, requested:
     if (fixed !== undefined && !remedied.includes(fixed)) remedied.push(fixed);
   }
   if (remedied.length === 0) {
-    return canonicalToolCall("read_file", {
+    return canonicalToolCall("tl_read_file", {
       path: filePath,
       range: `1-${Math.min(200, totalLines)}`,
     });
   }
   return requested.length > 1
-    ? canonicalToolCall("read_file", {
+    ? canonicalToolCall("tl_read_file", {
         targets: [{ path: filePath, ranges: remedied }],
         content: "auto",
       })
-    : canonicalToolCall("read_file", { path: filePath, range: remedied[0] });
+    : canonicalToolCall("tl_read_file", { path: filePath, range: remedied[0] });
 }
 
 // ---------------------------------------------------------------------------
@@ -955,12 +964,444 @@ export function buildSmallFileConcernNote(
   return note;
 }
 
+// ---------------------------------------------------------------------------
+// BCF2 / FX1 — size a slice to the caller's declared budget by MEASURING the
+// response it rides in, never by a flat reserve.
+//
+// A caller-declared `budget.bytes` narrower than READ_SYMBOL_CAP_BYTES used to
+// leave the emit-time shed ladder's geometric-halving rung to cut a slice back
+// down (measured live: 80 lines / ~7.2 KB under a 6144 B budget landed at
+// 3808 B, a 0.62 fill), so BCF2 sized the slice HERE instead. Its first
+// version reserved `pageEnvelopeReserve + 350` B (~930 B) for the envelope
+// BEFORE asking whether a continuation was needed at all. At the small budgets
+// an agent actually declares (0.6-1 KiB) that reserve is larger than the
+// budget, so a 20-line window that fits WHOLE in 612 B under a 620 B budget
+// was narrowed to one line (self-fulfilling), the `note` naming a "serve byte
+// cap" nobody had hit cost ~70 B v0.14.4 never spent, and 560-600 B budgets
+// that v0.14.4 served were refused (eval-0929 full-suite finding FX1).
+//
+// The order of decisions is therefore:
+//
+//   1. WHOLE FIRST. If the response that carries the WHOLE window (no
+//      continuation) fits the budget, the slice is left exactly as v0.14.4
+//      built it — the fixed-cap logic below runs untouched.
+//   2. Otherwise NARROW by whole lines, the continuation's REAL bytes counted
+//      once (`sliceWireEnvelopeBytes`: the same shape `readFamily.ts`
+//      projects, with the real cursor call the emit tail will install),
+//      plus `SLICE_SIZING_MARGIN_BYTES` of headroom. No prose at all: the
+//      `limit.cause:"wire"` + `remaining` + `next` already say what was cut,
+//      and the ladder's first rung (`shedders/readText.ts`) sheds `note` and
+//      `concern_note` before it cuts a single line, so a narrowed serve
+//      carries neither (and leaves the one-shot concern guard unfired for a
+//      later page) — the same order v0.14.4 produced.
+//   3. Where this module cannot predict the wire (doc-comment elision rewrites
+//      the body and adds a note; a markdown slice carries a heading index;
+//      `TL_BATCH_HINTS` adds a serial-slice hint), it does NOT guess: it serves
+//      the window exactly as v0.14.4 did and lets the emit-time ladder — which
+//      measures the real bytes — shrink it. Precision is an optimisation,
+//      never a reason to refuse.
+//
+// Every estimate on the WHOLE side is a LOWER bound (an unmodelled member can
+// only make the real response larger, and then the ladder narrows it exactly
+// as it did before this module existed); every estimate on the NARROWING side
+// is an upper bound plus margin.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire length (chars) of one `tlh_rreq_v1_` read cursor: a 12-char prefix + the
+ * base64url of a 61-byte header, a 16-byte MAC and a 64-hex binding `aad`
+ * (`ceil(141*4/3)` = 188) — `state/searchRequestStore.ts`'s
+ * `SEARCH_CURSOR_TOKEN_BYTES_ESTIMATE` derives the same figure for the search
+ * cursor, which shares the codec. Only a trial placeholder is this long: the
+ * real token is minted by the emit tail, and it is the same length to the
+ * byte (`evaluation0929.sliceWireModel.spec.ts` pins the model against a
+ * minted one).
+ */
+const READ_CURSOR_TOKEN_CHARS = 200;
+
+/**
+ * Headroom added on top of the measured narrowed envelope. Same order as the
+ * slack `state/readRequestStore.ts`'s `PAGE_ENVELOPE_RESERVE_BYTES` carries
+ * over what it measured (~66 B, "the direction that matters"): a hop-0 page
+ * and every later cursor page then fill alike. It covers the few bytes a
+ * producer cannot see from here (a server-composed re-resolve or ledger note,
+ * a tool-surface difference in the cursor call) — the members this module DOES
+ * know (`invalid_ranges`, a fired `concern_note`, the cursor call's own
+ * `cwd`/`lane`/`task`) are counted exactly, not margined.
+ */
+export const SLICE_SIZING_MARGIN_BYTES = 64;
+
+/**
+ * What ONE serve's body costs on the wire, in UTF-8 bytes, INCLUDING the
+ * body string's own two quotes — the same per-line estimator
+ * `choosePage`/`truncateResolvedItemToFit` use (`wireLineCostBytes`, the
+ * `JSON.stringify`-escaped length). Each line is charged its own quotes,
+ * which are exactly what its `\n` separator costs once escaped inside the one
+ * JSON string, so the sum is the wire cost of `text` as a single body value,
+ * not an approximation of it.
+ */
+function bodyWireBytes(text: string): number {
+  let total = 0;
+  for (const line of text.split("\n")) total += wireLineCostBytes(line);
+  return total;
+}
+
+/** The shape of one `read.text` response a slice serve rides in. */
+export interface SliceEnvelopeShape {
+  path: string;
+  /** `total_lines` rides every range serve (single window and ranges[] batch); a symbol serve carries none. */
+  totalLines?: number;
+  /** One `range` string per evidence row, in wire order (worst-case digit widths are the caller's business). */
+  rowRanges: readonly string[];
+  /** A single-window serve carries the short `sha` of what it served; the ranges[] batch shape has no top-level `sha`. */
+  withSha: boolean;
+  /**
+   * Present iff a continuation rides this response: the first row's
+   * `remaining` and the `limit.next` cursor call the emit tail installs in
+   * place of the producer's own `next` (`readRequestContinuation.ts`).
+   */
+  continuation?: {
+    remaining: readonly string[];
+    cwd?: string;
+    lane?: string;
+    taskHandle?: string;
+  };
+  /** Exact bytes of the members a serve adds beside the ones above (`note`, `concern_note`, `invalid_ranges`), commas included. */
+  extraBytes?: number;
+}
+
+/**
+ * The wire bytes of the `read.text` response for `shape`, BESIDES its
+ * bodies: every row is measured with an empty body (2 B), so a caller adds
+ * `bodyWireBytes(body) - 2` per row. Built from the very keys
+ * `readFamily.ts`'s `textEvidence`/`projectText`/`limitFrom` emit and the
+ * `{cwd, cursor, lane, task}` arguments `cursorCall` builds — a model, not a
+ * projector, so `evaluation0929.sliceWireModel.spec.ts` compares it against
+ * real responses and fails loudly the day either side drifts.
+ *
+ * The cursor call is written out literally instead of going through
+ * `canonicalToolCall`: that function records a minted ranged continuation as a
+ * side effect, and a size trial must not mint anything. The surface/lean
+ * rewrites it would apply only ever REMOVE arguments, so the literal is the
+ * larger (safe) side.
+ */
+export function sliceWireEnvelopeBytes(shape: SliceEnvelopeShape): number {
+  const handle = "h".padEnd(HANDLE_ID_LENGTH, "0");
+  const rows = shape.rowRanges.map((range, index) => ({
+    handle,
+    path: shape.path,
+    range,
+    body: "",
+    ...(index === 0 && shape.continuation !== undefined ? { remaining: [...shape.continuation.remaining] } : {}),
+  }));
+  const envelope: Record<string, unknown> = { v: 1, kind: "read.text", evidence: rows };
+  if (shape.withSha) envelope["sha"] = shortSha(`sha256:${"0".repeat(64)}`);
+  if (shape.totalLines !== undefined) envelope["total_lines"] = shape.totalLines;
+  if (shape.continuation !== undefined) {
+    const { cwd, lane, taskHandle } = shape.continuation;
+    envelope["limit"] = {
+      cause: "wire",
+      omitted: ["evidence"],
+      next: {
+        tool: "tl_read_file",
+        arguments: {
+          ...(cwd !== undefined && cwd !== "" ? { cwd } : {}),
+          cursor: `tlh_rreq_v1_${"x".repeat(READ_CURSOR_TOKEN_CHARS - "tlh_rreq_v1_".length)}`,
+          ...(lane !== undefined && lane !== "" ? { lane } : {}),
+          ...(taskHandle !== undefined && taskHandle !== "" ? { task: { handle: taskHandle } } : {}),
+        },
+      },
+    };
+  }
+  // The model measures a hypothetical RESPONSE, so it goes through the one
+  // sanctioned response-level counter (G8's fence; `protocol/budget/measure.ts`)
+  // rather than a second ad-hoc byte count of a serialized response.
+  return measureResponseBytes(JSON.stringify(envelope)) + (shape.extraBytes ?? 0);
+}
+
+/**
+ * The cursor call's identity members as the emit tail will render them: the
+ * staged request's own echo when this call staged one (`stageReadRequestForServe`
+ * runs BEFORE every serve site in server.ts), otherwise the workspace as
+ * `cwd` — the larger, safe side.
+ */
+export function trialContinuationEcho(workspace: string): { cwd?: string; lane?: string; taskHandle?: string } {
+  const context = protocolCallContext();
+  const echo = context?.readRequest?.echo;
+  if (echo === undefined) return { cwd: workspace };
+  const cwd = echo.cwd !== undefined && echo.cwd !== ""
+    ? echo.cwd
+    : context?.continuationWorkspace ?? context?.workspace;
+  return {
+    ...(cwd !== undefined && cwd !== "" ? { cwd } : {}),
+    ...(echo.lane !== undefined ? { lane: echo.lane } : {}),
+    ...(echo.taskHandle !== undefined ? { taskHandle: echo.taskHandle } : {}),
+  };
+}
+
+/** Bytes of one extra top-level member (`,"key":"value"`). */
+function memberBytes(key: string, value: string): number {
+  return Buffer.byteLength(`,${JSON.stringify(key)}:${JSON.stringify(value)}`, "utf8");
+}
+
+/** `[start, end]` of a canonical `N-M` range string, or undefined. */
+function spanOf(range: string): [number, number] | undefined {
+  const match = /^(\d+)-(\d+)$/.exec(range);
+  return match === null ? undefined : [Number(match[1]), Number(match[2])];
+}
+
+/**
+ * True iff what the wire carries for `text` may DIFFER from what
+ * `sliceWireEnvelopeBytes` + `bodyWireBytes` model — the things this module
+ * cannot see from here:
+ *
+ *   - `server.ts` renders every slice through `elideDocCommentsForDisplay` (a
+ *     multi-line comment block becomes a `doc elided` marker AND a ~140 B note
+ *     rides beside it) unless the caller kept comments, which this module is
+ *     not told. Assuming elision (the default) can only make this answer
+ *     "may differ" too often, which costs precision, never correctness.
+ *   - a markdown slice carries a heading index.
+ *   - `TL_BATCH_HINTS` (default OFF everywhere, and not a `TL_TURN_ECONOMY`
+ *     member) attaches a serial-slice `hint` to a second read of a file.
+ *
+ * In each case the caller serves the window exactly as v0.14.4 did and the
+ * emit-time ladder — which measures the real bytes — shrinks it.
+ */
+function wireMayDifferFromModel(filePath: string, text: string, startLine: number): boolean {
+  if (isMarkdownPath(filePath) || batchHintsEnabled()) return true;
+  const display = elideDocCommentsForDisplay(text, languageForPath(filePath), false, startLine);
+  return display.content !== text || display.note !== undefined || ELISION_MARKER_RE.test(display.content);
+}
+
+/**
+ * R2-R1 (P1-5): true iff the lines `startLine..endLine` of `content` were ALREADY
+ * served in this session at this exact file sha — the ledger's own receipt test
+ * (`servedRangeReceipt`, the decision `server.ts`'s `code-unchanged` receipt is
+ * made from), read-only. A window in that state must reach the server WHOLE, not
+ * narrowed by the caller's budget: the server answers it with the receipt
+ * (`read.receipt code-unchanged`, as v0.14.4 did), whereas a budget-narrowed
+ * prefix carries `remaining_ranges`, which bypasses that receipt gate — and the
+ * request tail then finds D empty (everything is held), strips the continuation
+ * and ships a re-sent PARTIAL page that reads as complete (review P1-5: an
+ * identical 1-500 request after its chain finished returned 1-126 with no
+ * `limit`). Not consulted under `task.force_serve` — the caller asked for the
+ * bytes, and the server does not answer a forced serve with a receipt.
+ */
+function windowAlreadyHeld(
+  workspace: string,
+  filePath: string,
+  content: string,
+  startLine: number,
+  endLine: number,
+  totalLines: number,
+): boolean {
+  if (protocolCallContext()?.args?.["force_serve"] === true) return false;
+  return servedRangeReceipt(workspace, filePath, shaOfText(content), startLine, endLine, totalLines) !== undefined;
+}
+
+/**
+ * The byte cap a caller-declared budget puts on ONE window's body, or
+ * `undefined` when the window must be served exactly as v0.14.4 served it
+ * (no explicit budget, a budget at/above the fixed cap, the whole window
+ * already fits, or the wire body cannot be predicted — see the header).
+ *
+ * `wholeExtraBytes` counts the members the WHOLE response certainly carries
+ * (the clamp/boundary `note`); `narrowExtraBytes` those a NARROWED one still
+ * carries once the ladder's rung-1 prose is gone (none, for a single window).
+ */
+function budgetedSliceCapBytes(input: {
+  budgetBytes: number | undefined;
+  filePath: string;
+  workspace: string;
+  text: string;
+  startLine: number;
+  totalLines: number | undefined;
+  rowRange: string;
+  wholeExtraBytes: number;
+  narrowExtraBytes: number;
+}): number | undefined {
+  const { budgetBytes, filePath, workspace, text, rowRange } = input;
+  if (budgetBytes === undefined || !Number.isFinite(budgetBytes) || budgetBytes >= READ_SYMBOL_CAP_BYTES) return undefined;
+  if (text === "") return undefined;
+  const budget = Math.floor(budgetBytes);
+  const base = {
+    path: filePath,
+    ...(input.totalLines !== undefined ? { totalLines: input.totalLines } : {}),
+    rowRanges: [rowRange],
+    withSha: true,
+  };
+  const wholeBytes = sliceWireEnvelopeBytes({ ...base, extraBytes: input.wholeExtraBytes }) - 2 + bodyWireBytes(text);
+  if (wholeBytes <= budget) return undefined;
+  if (wireMayDifferFromModel(filePath, text, input.startLine)) return undefined;
+  const span = spanOf(rowRange);
+  const lastLine = span === undefined ? rowRange : String(span[1]);
+  const continuedBytes = sliceWireEnvelopeBytes({
+    ...base,
+    continuation: { remaining: [`${lastLine}-${lastLine}`], ...trialContinuationEcho(workspace) },
+    extraBytes: input.narrowExtraBytes,
+  }) - 2;
+  return Math.max(1, budget - SLICE_SIZING_MARGIN_BYTES - continuedBytes);
+}
+
+/**
+ * How a whole-file `content:"full"` serve is sized to a caller-declared budget.
+ * `whole`: the response that carries the WHOLE file fits — serve it complete, no
+ * continuation, exactly as v0.14.4. `head`: serve the first `lines` LINES of the
+ * file (whole lines, at least one) with the continuation's real bytes counted
+ * once and no note.
+ */
+export type FullServePlan = { kind: "whole" } | { kind: "head"; lines: number };
+
+/** The wire size of `text` as ONE JSON string (its own quotes included). */
+function jsonStringBytes(text: string): number {
+  return measureResponseBytes(JSON.stringify(text));
+}
+
+/**
+ * R2-R1 (P0-2 + FX1 chip 1) — the whole-file counterpart of
+ * `budgetedSliceCapBytes`: size a `content:"full"` serve to the caller's
+ * declared budget by MEASURING the response, never by a flat reserve.
+ *
+ * The v0.14.4-plus-BCF sizing reserved `pageEnvelopeReserve + 400` B and cut the
+ * head on RAW bytes. Both were wrong in ways that cost real answers: a 597 B
+ * file under a 1-1.5 KiB budget was narrowed to 1-19 lines with a "single-serve
+ * cap" note (it fits whole); a 500-line file under 6144 B got a 126-line head
+ * whose cursor swap plus ~170 B note overshot the budget, so the FIRST call was
+ * refused with a moving `required_min_bytes` and the chain then skipped lines
+ * (review P0-2). Raw bytes also under-count: every quote is escaped and every
+ * newline costs two wire bytes.
+ *
+ * Decided in this order, from exact bytes (`sliceWireEnvelopeBytes`, the body
+ * measured AFTER `compressFormat` — the transform the serve applies — through
+ * `jsonStringBytes`):
+ *   1. WHOLE FIRST — the complete response fits => `{kind:"whole"}`.
+ *   2. Otherwise the LARGEST head of whole lines whose response (continuation,
+ *      cursor and `remaining` included, counted once) fits the budget minus
+ *      `SLICE_SIZING_MARGIN_BYTES` — never fewer than one line (a budget that
+ *      cannot hold even that is refused by the emit funnel with the exact
+ *      floor, before anything is booked). No note: the emit ladder sheds one
+ *      first anyway, and `limit` + `remaining` + `next` already say what was cut.
+ *
+ * Returns `undefined` — serve exactly as v0.14.4 did (the fixed
+ * FULL_SERVE_CHUNK_BYTES chunk, the ladder measuring the real bytes) — for no
+ * explicit budget, a budget at/above the fixed chunk, `allowFull`, an empty
+ * file, and every case where the wire body cannot be predicted from here:
+ * doc-comment elision (a `whole` display that differs from the raw file, or that
+ * carries its own note), markdown (heading index) and `TL_BATCH_HINTS`.
+ */
+export function planBudgetedFullServe(input: {
+  callerBudgetBytes: number | undefined;
+  allowFull: boolean;
+  filePath: string;
+  workspace: string;
+  content: string;
+  keepComments: boolean;
+  /** The whole file's display exactly as the serve composes it (elision applied unless comments are kept). */
+  whole: { content: string; note?: string };
+  /** FULL_SERVE_CHUNK_BYTES: budgets at/above it are the fixed-chunk path. */
+  fixedChunkBytes: number;
+}): FullServePlan | undefined {
+  const { callerBudgetBytes, filePath, workspace, content, whole } = input;
+  if (input.allowFull || callerBudgetBytes === undefined || !Number.isFinite(callerBudgetBytes)) return undefined;
+  if (callerBudgetBytes >= input.fixedChunkBytes || content === "") return undefined;
+  if (isMarkdownPath(filePath) || batchHintsEnabled()) return undefined;
+  if (whole.note !== undefined || (!input.keepComments && whole.content !== content)) return undefined;
+  const budget = Math.floor(callerBudgetBytes);
+  const totalLines = countLines(content);
+  if (totalLines < 1) return undefined;
+
+  // 1. WHOLE FIRST. The complete full-serve response has no `total_lines`, and
+  // its row range names the lines of the body the serve actually ships.
+  const wholeBody = compressFormat(whole.content);
+  const wholeBytes = sliceWireEnvelopeBytes({
+    path: filePath,
+    rowRanges: [`1-${Math.max(1, countLines(wholeBody))}`],
+    withSha: true,
+  }) - 2 + jsonStringBytes(wholeBody);
+  if (wholeBytes <= budget || totalLines < 2) return { kind: "whole" };
+
+  // 2. The largest head of whole lines that fits. The head is cut exactly the
+  // way `serveGovernedFullHead` cuts (`\r\n`/`\r` normalized, one trailing
+  // newline dropped, lines joined by `\n`); its cost is monotone in `lines`.
+  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const bodyLines = (normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized).split("\n");
+  const echo = trialContinuationEcho(workspace);
+  const headBytes = (lines: number): number => sliceWireEnvelopeBytes({
+    path: filePath,
+    totalLines,
+    rowRanges: [`1-${lines}`],
+    withSha: true,
+    continuation: { remaining: [`${lines + 1}-${totalLines}`], ...echo },
+  }) - 2 + jsonStringBytes(compressFormat(bodyLines.slice(0, lines).join("\n")));
+  let low = 1;
+  let high = Math.min(totalLines - 1, bodyLines.length);
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (headBytes(mid) + SLICE_SIZING_MARGIN_BYTES <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return { kind: "head", lines: low };
+}
+
+/**
+ * Byte-precise greedy whole-line fill under `capBytes`, using the SAME
+ * wire-cost estimator `choosePage`/`truncateResolvedItemToFit` use
+ * (`wireLineCostBytes` — the `JSON.stringify`-escaped length, so a
+ * quote/backslash-heavy line is not under-counted the way a raw
+ * `Buffer.byteLength` compare is). Returns the largest whole-line PREFIX of
+ * `text` whose wire cost fits `capBytes`, and whether that prefix is the
+ * WHOLE text (nothing cut). Mirrors `truncateResolvedItemToFit`'s own
+ * "never zero lines" convention (`keep = Math.max(1, keep)`), not
+ * `choosePage`'s "refuse below the first line" one — resolveSlice's own
+ * callers already document "never refuses on cap" for the symbol branch,
+ * and this preserves that for the range branch too.
+ */
+function greedySliceLineFill(text: string, capBytes: number): { text: string; whole: boolean } {
+  const lines = text.split("\n");
+  let used = 0;
+  let keep = 0;
+  for (const line of lines) {
+    const cost = wireLineCostBytes(line);
+    if (used + cost > capBytes) break;
+    used += cost;
+    keep += 1;
+  }
+  // A window that reaches EOF ends in "\n" (`sliceLinesToText`), which
+  // `split` reports as one extra empty element. Every REAL line fitting means
+  // the window is whole: the trailing separator is 2 wire bytes, inside the
+  // sizing margin, and calling the cut "truncated" with nothing left to
+  // continue would be a disclosure about lines that do not exist.
+  const realLines = lines.length > 1 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+  if (keep >= realLines) return { text, whole: true };
+  // Pathological case (mirrors truncateResolvedItemToFit's own
+  // `keep = Math.max(1, keep)`): even the FIRST line alone exceeds
+  // `capBytes` (keep === 0). Force it through anyway — "no content" is not an
+  // option this function offers. With the note gone, that one line is the
+  // same response v0.14.4's ladder produced at this budget, so the tail either
+  // fits it (as before) or fails closed exactly as before.
+  keep = Math.max(1, keep);
+  // The floor can itself make the cut whole (a one-line window whose single
+  // line exceeds the cap): then nothing was cut and nothing is owed.
+  if (keep >= realLines) return { text, whole: true };
+  return { text: lines.slice(0, keep).join("\n"), whole: false };
+}
+
 export async function resolveSlice(
   workspace: string,
   filePath: string,
   content: string,
   symbolName?: string,
   rangeStr?: string,
+  /**
+   * BCF2 / FX1: a caller's explicit `budget.bytes`/`budget.tokens`-derived
+   * byte figure — never a calibrated default (see each call site's own
+   * comment for how this is computed). `undefined` (every call site that
+   * does not pass it, and every call with no declared budget) reproduces
+   * v0.14.4's fixed `READ_SYMBOL_CAP_BYTES` raw-byte-truncation behavior
+   * exactly, as does a budget the WHOLE window's response already fits
+   * (`budgetedSliceCapBytes`).
+   */
+  callerBudgetBytes?: number,
 ): Promise<ResolveSliceResult> {
   // R1 doc-navigation (2026-07-25 live forensics): markdown has NO code
   // symbols. A symbol tag on a .md handle is either an anchor-focus regex
@@ -1008,7 +1449,23 @@ export async function resolveSlice(
     const symRangeEnd = symResult.data.range.end;
     const symRangeStr = String(symRangeStart) + "-" + String(symRangeEnd);
 
-    if (sliceBytes > READ_SYMBOL_CAP_BYTES) {
+    // BCF2 / FX1: NARROW ONLY, and only when the WHOLE symbol does not fit the
+    // caller's declared budget — `budgetedSliceCapBytes` is `undefined` (so
+    // this condition and the raw-truncate branch below are byte-identical to
+    // v0.14.4) for no budget, a budget at/above READ_SYMBOL_CAP_BYTES, a symbol
+    // whose whole response fits, and a body the wire may rewrite.
+    const symBudgetCapBytes = budgetedSliceCapBytes({
+      budgetBytes: callerBudgetBytes,
+      filePath,
+      workspace,
+      text: sliceContent,
+      startLine: 1,
+      totalLines: undefined,
+      rowRange: symRangeStr,
+      wholeExtraBytes: 0,
+      narrowExtraBytes: 0,
+    });
+    if (symBudgetCapBytes !== undefined || sliceBytes > READ_SYMBOL_CAP_BYTES) {
       // DESIGN-v0.9 §4.2: serve a TRIMMED HEAD instead of the old bare
       // cap-exceeded refusal. This branch is reachable via `mode=slice symbol=`
       // (server.ts) and the `handles=[...]` batch (a symbol-kind handle) — the
@@ -1025,9 +1482,22 @@ export async function resolveSlice(
       // to fit could still refuse — structurally unreachable here (the head is
       // trimmed to <= cap bytes and a non-empty symbol always yields one line),
       // so this branch never refuses on cap.
-      let head = Buffer.from(sliceContent, "utf8").slice(0, READ_SYMBOL_CAP_BYTES).toString("utf8");
-      const lastNl = head.lastIndexOf("\n");
-      if (lastNl > 0) head = head.slice(0, lastNl);
+      //
+      // BCF2 / FX1: when the caller's narrower budget is what triggered this
+      // branch (`symBudgetCapBytes` defined), the head is sized by the SAME
+      // byte-precise greedy per-line fill `choosePage`/
+      // `truncateResolvedItemToFit` use, against the budget minus the
+      // continuation's measured bytes, instead of a raw `Buffer.slice` at the
+      // fixed constant — otherwise byte-identical (raw-truncate at
+      // READ_SYMBOL_CAP_BYTES, trimmed to the last whole line).
+      let head: string;
+      if (symBudgetCapBytes !== undefined) {
+        head = greedySliceLineFill(sliceContent, symBudgetCapBytes).text;
+      } else {
+        head = Buffer.from(sliceContent, "utf8").slice(0, READ_SYMBOL_CAP_BYTES).toString("utf8");
+        const lastNl = head.lastIndexOf("\n");
+        if (lastNl > 0) head = head.slice(0, lastNl);
+      }
       const headSha = shaOfText(head);
       const dgHandle = handleTable.upsert({
         kind: "symbol",
@@ -1064,7 +1534,7 @@ export async function resolveSlice(
           assembled: true,
           downgraded_from: "symbol",
           remaining_ranges: [symRangeStr],
-          next: canonicalToolCall("read_file", { handle: resumeHandle.id, range: symRangeStr }),
+          next: canonicalToolCall("tl_read_file", { handle: resumeHandle.id, range: symRangeStr }),
         },
       };
     }
@@ -1220,8 +1690,57 @@ export async function resolveSlice(
 
     let truncated = false;
     let truncatedAtLineBoundary = false;
+    // BCF2 / FX1: true iff THIS serve was cut to fit the caller's declared
+    // budget rather than the fixed serve cap. Such a cut carries no `note`
+    // (see the truncNote block below).
+    let budgetNarrowed = false;
     let finalContent = sliceContent;
-    if (sliceBytes > READ_SYMBOL_CAP_BYTES) {
+    // BCF2 / FX1: NARROW ONLY, and only when the WHOLE window's response does
+    // not fit the caller's declared budget — see `budgetedSliceCapBytes`.
+    // `undefined` (no explicit budget, a budget at/above READ_SYMBOL_CAP_BYTES,
+    // a window that fits whole, a body the wire may rewrite) leaves the
+    // fixed-cap branch below exactly as v0.14.4 had it.
+    //
+    // The WHOLE side counts the clamp/boundary `note` this window certainly
+    // carries (the response v0.14.4 served whole is judged WITH it); the
+    // NARROWED side counts nothing, because a budget cut ships no prose at all
+    // (see the servedNote block below). A `concern_note` that might ride is
+    // never charged to the whole side either: whether it fires depends on the
+    // served range, and it must not make a whole-fitting window look too big.
+    const knownNote = [clampNote, note].filter((part): part is string => part !== undefined).join("; ");
+    const knownNoteBytes = knownNote === "" ? 0 : memberBytes("note", knownNote);
+    let rangeBudgetCapBytes = budgetedSliceCapBytes({
+      budgetBytes: callerBudgetBytes,
+      filePath,
+      workspace,
+      text: sliceContent,
+      startLine,
+      totalLines,
+      rowRange: rangeStr,
+      wholeExtraBytes: knownNoteBytes,
+      narrowExtraBytes: 0,
+    });
+    // R2-R1 (P1-5): a window the session already holds is left whole so the
+    // server can answer it with the `code-unchanged` receipt — see
+    // `windowAlreadyHeld`. Consulted only once the plan would have narrowed.
+    if (rangeBudgetCapBytes !== undefined && windowAlreadyHeld(workspace, filePath, content, startLine, endLine, totalLines)) {
+      rangeBudgetCapBytes = undefined;
+    }
+    if (rangeBudgetCapBytes !== undefined) {
+      // Byte-precise greedy whole-line fill against the budget minus the
+      // continuation's measured bytes — the same estimator
+      // `choosePage`/`truncateResolvedItemToFit` use (see
+      // `greedySliceLineFill`). Downstream (`servedLines`/`servedEnd`/
+      // `remainingRange` below) recomputes purely from `finalContent`'s own
+      // line count, so it is agnostic to which strategy produced it.
+      const fill = greedySliceLineFill(sliceContent, rangeBudgetCapBytes);
+      if (!fill.whole) {
+        finalContent = fill.text;
+        truncated = true;
+        truncatedAtLineBoundary = true;
+        budgetNarrowed = true;
+      }
+    } else if (sliceBytes > READ_SYMBOL_CAP_BYTES) {
       // Truncate to cap.
       const encoder = Buffer.from(sliceContent, "utf8");
       finalContent = encoder.slice(0, READ_SYMBOL_CAP_BYTES).toString("utf8");
@@ -1261,7 +1780,13 @@ export async function resolveSlice(
       }
       endLine = servedEnd;
       rangeStr = `${startLine}-${endLine}`;
-      truncNote = `requested range ${startLine}-${requestedEndLine} exceeds the serve byte cap; served ${rangeStr}`;
+      // BCF2 / FX1: the "serve byte cap" note is only TRUE when the fixed cap
+      // bound this serve. A cut to the caller's own budget is already
+      // disclosed by `remaining_ranges`/`next` (`limit.cause:"wire"` on the
+      // wire), and the ~70 B note was a cost v0.14.4 never paid on this path.
+      if (!budgetNarrowed) {
+        truncNote = `requested range ${startLine}-${requestedEndLine} exceeds the serve byte cap; served ${rangeStr}`;
+      }
     }
 
     const sha = shaOfText(finalContent);
@@ -1280,7 +1805,7 @@ export async function resolveSlice(
     // were the dominant residual turn cost).
     let next: ToolCall | undefined;
     if (remainingRange !== undefined) {
-      next = canonicalToolCall("read_file", { handle: handleEntry.id, range: remainingRange });
+      next = canonicalToolCall("tl_read_file", { handle: handleEntry.id, range: remainingRange });
     }
     // C2 (2026-07-24): the fully-doc-comment slice case (DEFECT B, bench
     // 2026-07-09e) no longer manufactures a comments=keep round-trip hint here.
@@ -1295,7 +1820,17 @@ export async function resolveSlice(
     // doc-elision note (or neither) can co-occur with a concern_note, since
     // it warns about a DIFFERENT dimension (content missing outside the
     // served window, not a structural cut of the served window itself).
-    const concernNote = buildConcernNote(workspace, filePath, lines, startLine, endLine);
+    //
+    // BCF2 / FX1: NOT for a serve cut to the caller's budget. The emit-time
+    // ladder's first rung sheds decorative prose (`note`, `concern_note`, ...)
+    // before it cuts a single body line (`shedders/readText.ts`, rung 1), so a
+    // budget-narrowed serve carries none of it — and `buildConcernNote` is
+    // one-shot per (session, path): composing it here and then dropping it
+    // would spend the caller's only warning on a note nobody receives. Left
+    // unfired, it can ride a later page.
+    const concernNote = budgetNarrowed
+      ? undefined
+      : buildConcernNote(workspace, filePath, lines, startLine, endLine);
 
     // Feature 1 (2026-07-12b2): a successful range slice IS a content-bearing
     // read of this file — record it (even a partial/truncated range: the
@@ -1306,7 +1841,16 @@ export async function resolveSlice(
     // The EOF-clamp / byte-cap notes compose with (never replace) a
     // boundary-cut or doc-elision note — they warn about different dimensions
     // of the serve.
-    const servedNoteParts = [clampNote, truncNote, note].filter((part): part is string => part !== undefined);
+    //
+    // BCF2 / FX1: a budget cut ships none of them (same rung-1 argument as the
+    // concern note above): `range` + `remaining_ranges`/`next` — `limit` and
+    // `remaining` on the wire — already state what was served and what is
+    // owed, including the EOF clamp, which the narrowed `range` and the
+    // clamped `remaining` make explicit. v0.14.4's ladder shed the same prose
+    // when it narrowed this response.
+    const servedNoteParts = budgetNarrowed
+      ? []
+      : [clampNote, truncNote, note].filter((part): part is string => part !== undefined);
     const servedNote = servedNoteParts.length > 0 ? servedNoteParts.join("; ") : undefined;
 
     return {
@@ -1343,7 +1887,7 @@ export async function resolveSlice(
 // A2 — ranges[] batching: several windows of ONE file in ONE call.
 //
 // Live defect (2026-07-30 T14 forensics): reading one spec file (CONTRACT.md)
-// cost FOUR separate slice round trips because read_file could address only a
+// cost FOUR separate slice round trips because tl_read_file could address only a
 // single `range` per call. Every one of those calls re-read the same file off
 // disk, re-paid a turn, and re-paid the caller's whole resident context. The
 // windows were known up front — they were listed in the file's own heading
@@ -1383,7 +1927,7 @@ export type ResolveSliceRangesResult =
          * Its sha is over the raw file text, which is exactly what the anchor-edit
          * CAS compares for a range-less handle (applyEditsMulti's
          * servedScopeTextEntry / EditEntry.anchorShaRange) — so
-         * `edit_file edits=[{handle, range:<a served segment>, content}]` is valid
+         * `tl_edit_file edits=[{handle, range:<a served segment>, content}]` is valid
          * against every segment in this response without a re-read.
          */
         handle: string;
@@ -1410,6 +1954,132 @@ export type ResolveSliceRangesResult =
     };
 
 /**
+ * The ranges[] batch's counterpart of `budgetedSliceCapBytes`: fit the
+ * assembled segments of ONE file to a caller-declared budget.
+ *
+ * Every window has ALREADY been resolved at the fixed caps, exactly as v0.14.4
+ * did, so this only decides what SHIPS. Returns `undefined` — ship the
+ * segments as resolved — when there is no explicit budget, the response that
+ * carries every segment fits it, or the wire may rewrite a body
+ * (`wireMayDifferFromModel`); in each case the emit-time ladder sees exactly
+ * what it saw before this module sized anything.
+ *
+ * Otherwise the fill is IN CALLER ORDER and never reorders (server.ts has
+ * already put the windows carrying the most unserved lines first): whole
+ * windows are admitted while the response — measured with the continuation's
+ * real bytes, once — stays under the budget minus `SLICE_SIZING_MARGIN_BYTES`.
+ * The first window that does not fit whole ends the fill by shipping a
+ * whole-line prefix of itself (at least one line if it is the FIRST window,
+ * otherwise only if a line fits) and its tail is named in `tail`; every later
+ * window is deferred WHOLE, never split across the budget. `deferred` names
+ * those windows for `remaining_ranges`. No note is minted: the deferral is
+ * already disclosed by `remaining_ranges`/`next`, and the emit tail names the
+ * cut window's own tail from the staged request.
+ */
+function fitSegmentsToBudget(input: {
+  segments: readonly SliceRangeSegment[];
+  filePath: string;
+  workspace: string;
+  /** The whole file's text: the ledger's held-window test is keyed by its sha. */
+  content: string;
+  totalLines: number;
+  budgetBytes: number | undefined;
+  /** Windows the fixed caps already deferred — a continuation rides this response whatever the fit does. */
+  deferredByFixedCap: readonly string[];
+  /** Exact bytes of the extra members this response certainly carries. */
+  wholeExtraBytes: number;
+  /** ...plus the ones that may ride once the response is continued. */
+  narrowExtraBytes: number;
+}): { segments: SliceRangeSegment[]; deferred: string[]; tail?: string } | undefined {
+  const { segments, filePath, workspace, totalLines, budgetBytes, deferredByFixedCap } = input;
+  if (budgetBytes === undefined || !Number.isFinite(budgetBytes) || budgetBytes >= SLICE_RANGES_TOTAL_CAP_BYTES) return undefined;
+  if (segments.length === 0) return undefined;
+  const budget = Math.floor(budgetBytes);
+
+  const bytesFor = (
+    rows: readonly SliceRangeSegment[],
+    continuation: SliceEnvelopeShape["continuation"],
+    extraBytes: number,
+  ): number => sliceWireEnvelopeBytes({
+    path: filePath,
+    totalLines,
+    rowRanges: rows.map((row) => row.range),
+    withSha: false,
+    ...(continuation !== undefined ? { continuation } : {}),
+    extraBytes,
+  }) + rows.reduce((sum, row) => sum + bodyWireBytes(row.code) - 2, 0);
+
+  // 1. WHOLE FIRST.
+  const echo = trialContinuationEcho(workspace);
+  const truncatedRanges = segments.filter((segment) => segment.truncated === true).map((segment) => segment.range);
+  const wholeContinuation = deferredByFixedCap.length > 0 || truncatedRanges.length > 0
+    ? { remaining: [...deferredByFixedCap, ...truncatedRanges], ...echo }
+    : undefined;
+  if (bytesFor(segments, wholeContinuation, input.wholeExtraBytes) <= budget) return undefined;
+
+  // R2-R1 (P1-5): every window already held => the server collapses the whole
+  // batch to ONE `code-unchanged` receipt (as v0.14.4 did); a budget-narrowed
+  // set would carry `remaining_ranges` and bypass that gate.
+  const fileSha = shaOfText(input.content);
+  if (protocolCallContext()?.args?.["force_serve"] !== true
+    && segments.every((segment) => {
+      const span = spanOf(segment.range);
+      return segment.truncated !== true
+        && span !== undefined
+        && servedRangeReceipt(workspace, filePath, fileSha, span[0], span[1], totalLines) !== undefined;
+    })) return undefined;
+
+  // 3. A body the wire may rewrite cannot be sized here: leave it to the ladder.
+  if (isMarkdownPath(filePath)) return undefined;
+  for (const segment of segments) {
+    const span = spanOf(segment.range);
+    if (wireMayDifferFromModel(filePath, segment.code, span === undefined ? 1 : span[0])) return undefined;
+  }
+
+  // 2. NARROW, in caller order. `remaining` names every window (worst-case
+  // digits, and one window string more than the real D holds).
+  const continuation = { remaining: [...segments.map((segment) => segment.range), ...deferredByFixedCap], ...echo };
+  const limit = budget - SLICE_SIZING_MARGIN_BYTES;
+  const admitted: SliceRangeSegment[] = [];
+  let consumed = 0;
+  let tail: string | undefined;
+  for (const segment of segments) {
+    if (bytesFor([...admitted, segment], continuation, input.narrowExtraBytes) <= limit) {
+      admitted.push(segment);
+      consumed += 1;
+      continue;
+    }
+    // The first window that does not fit whole ends the fill. It contributes
+    // a whole-line PREFIX — the room the whole windows before it left over
+    // would otherwise go unused (measured: 0.65 fill where v0.14.4's ladder
+    // reached 0.95) — provided at least one of its lines fits; the FIRST
+    // window is never refused a line ("a cap may bound a batch, never zero
+    // it"). Windows after it are deferred WHOLE.
+    const capBytes = limit - bytesFor([...admitted, { ...segment, code: "" }], continuation, input.narrowExtraBytes) + 2;
+    const firstLineFits = wireLineCostBytes(segment.code.split("\n")[0]!) <= capBytes;
+    if (admitted.length === 0 || firstLineFits) {
+      const fill = greedySliceLineFill(segment.code, capBytes);
+      const span = spanOf(segment.range);
+      if (!fill.whole && span !== undefined) {
+        const servedEnd = span[0] + fill.text.split("\n").length - 1;
+        admitted.push({ ...segment, range: `${span[0]}-${servedEnd}`, code: fill.text, sha: shaOfText(fill.text), truncated: true });
+        if (servedEnd < span[1]) tail = `${servedEnd + 1}-${span[1]}`;
+      } else {
+        admitted.push(segment);
+      }
+      consumed += 1;
+    }
+    break;
+  }
+  if (consumed >= segments.length && tail === undefined) return undefined;
+  return {
+    segments: admitted,
+    deferred: segments.slice(consumed).map((segment) => segment.range),
+    ...(tail !== undefined ? { tail } : {}),
+  };
+}
+
+/**
  * Serve every requested range of ONE file in a single response.
  *
  * Per-segment semantics are resolveSlice's, unchanged. Response-level rules:
@@ -1422,15 +2092,25 @@ export type ResolveSliceRangesResult =
  *    The FIRST segment always rides (a cap may bound a batch, never zero it);
  *    later ones that do not fit are dropped WHOLE into `remaining_ranges` with a
  *    `next` that re-requests exactly those in one call.
+ *  - a caller-declared budget narrower than that cap is applied last, once, to
+ *    the assembled set (`fitSegmentsToBudget`): whole-first, then in caller
+ *    order, with no note of its own.
  */
 export async function resolveSliceRanges(
   workspace: string,
   filePath: string,
   content: string,
   requested: readonly string[],
+  /** BCF2 / FX1: same contract as `resolveSlice`'s own trailing parameter — an
+   *  explicit caller budget, never a calibrated default; `undefined`
+   *  reproduces v0.14.4's fixed `SLICE_RANGES_TOTAL_CAP_BYTES` aggregate cap
+   *  exactly. It is NOT threaded into the per-window `resolveSlice` calls:
+   *  each window resolves at the fixed caps and `fitSegmentsToBudget` decides,
+   *  once, what of the assembled set the budget lets ship. */
+  callerBudgetBytes?: number,
 ): Promise<ResolveSliceRangesResult> {
   const totalLines = countLines(content);
-  const wholeFileRangeHint = canonicalToolCall("read_file", {
+  const wholeFileRangeHint = canonicalToolCall("tl_read_file", {
     path: filePath,
     range: `1-${totalLines}`,
   });
@@ -1458,13 +2138,18 @@ export async function resolveSliceRanges(
     };
   }
 
-  const segments: SliceRangeSegment[] = [];
+  let segments: SliceRangeSegment[] = [];
   const invalidRanges: Array<{ range: string; error: string }> = [];
-  const remaining: string[] = [...overflowRequests];
+  let remaining: string[] = [...overflowRequests];
   let concernNote: string | undefined;
   let usedBytes = 0;
   let capFilled = false;
 
+  // BCF2 / FX1: every window is resolved BUDGET-BLIND, at the fixed caps,
+  // exactly as v0.14.4 did — whether the caller's declared budget then cuts
+  // the assembled response is decided ONCE, on the whole set, by
+  // `fitSegmentsToBudget` below (a per-window budget could not know how much
+  // of it the sibling windows and the one continuation already consume).
   for (const range of wanted) {
     if (capFilled) {
       remaining.push(range);
@@ -1527,19 +2212,61 @@ export async function resolveSliceRanges(
     sha: shaOfText(content),
   });
 
-  const notes: string[] = [];
-  if (remaining.length > 0) {
-    notes.push(
-      `served ${segments.length} of ${segments.length + remaining.length} requested ranges`
-      + ` (response cap ${SLICE_RANGES_TOTAL_CAP_BYTES}B`
-      + (overflowRequests.length > 0 ? `, max ${MAX_SLICE_RANGES} ranges/call` : "")
-      + `); remaining_ranges names the rest`,
-    );
+  // The disclosures the FIXED caps (aggregate response cap, MAX_SLICE_RANGES)
+  // already made in v0.14.4. A window the caller's own budget defers is
+  // disclosed by `remaining_ranges`/`next` alone (see `fitSegmentsToBudget`).
+  const fixedCapDeferrals = remaining.length;
+  const noteFor = (windowsLeft: number, served: number): string[] => {
+    const parts: string[] = [];
+    if (fixedCapDeferrals > 0) {
+      parts.push(
+        `served ${served} of ${served + windowsLeft} requested ranges`
+        + ` (response cap ${SLICE_RANGES_TOTAL_CAP_BYTES}B`
+        + (overflowRequests.length > 0 ? `, max ${MAX_SLICE_RANGES} ranges/call` : "")
+        + `); remaining_ranges names the rest`,
+      );
+    }
+    if (invalidRanges.length > 0) {
+      parts.push(`${invalidRanges.length} requested range(s) could not be served — see invalid_ranges`);
+    }
+    return parts;
+  };
+
+  // BCF2 / FX1: fit the assembled response to the caller's declared budget.
+  // The extra members it carries are counted exactly, not margined. `note`
+  // (decorative prose the emit-time ladder sheds before it cuts a line) is
+  // judged on the WHOLE side only: a budget cut ships no note (see below).
+  // `invalid_ranges` is a fact, and `concern_note` was already fired — and so
+  // consumed — by the per-window resolves above, so both ride either way.
+  const preNotes = noteFor(remaining.length, segments.length);
+  const keptMembersBytes = (invalidRanges.length > 0
+      ? Buffer.byteLength(`,"invalid_ranges":${JSON.stringify(invalidRanges)}`, "utf8")
+      : 0)
+    + (concernNote !== undefined ? memberBytes("concern_note", concernNote) : 0);
+  const fit = fitSegmentsToBudget({
+    segments,
+    filePath,
+    workspace,
+    content,
+    totalLines,
+    budgetBytes: callerBudgetBytes,
+    deferredByFixedCap: remaining,
+    wholeExtraBytes: keptMembersBytes + (preNotes.length > 0 ? memberBytes("note", preNotes.join("; ")) : 0),
+    narrowExtraBytes: keptMembersBytes,
+  });
+  if (fit !== undefined) {
+    segments = fit.segments;
+    remaining = [...fit.deferred, ...remaining];
   }
-  if (invalidRanges.length > 0) {
-    notes.push(`${invalidRanges.length} requested range(s) could not be served — see invalid_ranges`);
-  }
-  const truncated = remaining.length > 0 || segments.some((segment) => segment.truncated === true);
+  // The first window's own tail (a whole-line prefix of it shipped) belongs
+  // in front of what was deferred, so the producer's own `next` covers
+  // everything even when no read request is staged to derive it.
+  const owed = fit?.tail !== undefined ? [fit.tail, ...remaining] : remaining;
+
+  // A budget cut carries no note: `remaining_ranges`/`next` (`limit` +
+  // `remaining` on the wire) already disclose what was deferred.
+  const notes = fit !== undefined ? [] : noteFor(remaining.length, segments.length);
+  const truncated = owed.length > 0 || segments.some((segment) => segment.truncated === true);
 
   return {
     ok: true,
@@ -1549,14 +2276,14 @@ export async function resolveSliceRanges(
       path: filePath,
       total_lines: totalLines,
       segments,
-      ...(remaining.length > 0 ? { remaining_ranges: remaining } : {}),
+      ...(owed.length > 0 ? { remaining_ranges: owed } : {}),
       ...(invalidRanges.length > 0 ? { invalid_ranges: invalidRanges } : {}),
       ...(truncated ? { truncated: true as const } : {}),
       ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
-      ...(remaining.length > 0
+      ...(owed.length > 0
         ? {
-            next: canonicalToolCall("read_file", {
-              targets: [{ handle: handle.id, ranges: remaining }],
+            next: canonicalToolCall("tl_read_file", {
+              targets: [{ handle: handle.id, ranges: owed }],
               content: "auto",
             }),
           }

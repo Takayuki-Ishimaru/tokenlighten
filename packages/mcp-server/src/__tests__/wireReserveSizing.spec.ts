@@ -164,7 +164,7 @@ describe("P3a S4 / erratum E2 — SideEffectCore reserve sizing (measured, not e
       for (const n of PATH_COUNTS) {
         it(`${kind} at n=${n} paths (${label}, ${len} B/path): core.paths has length ${n}, and bytes are measured`, () => {
           const body = build(n, len);
-          const { data, text, isError: gotError } = finalize("edit_file", body, isError);
+          const { data, text, isError: gotError } = finalize("tl_edit_file", body, isError);
 
           expect(data["kind"]).toBe(kind);
           expect(gotError).toBe(isError);
@@ -334,7 +334,7 @@ describe("Gate G9 — startup misconfiguration check (validateStartupBudgets)", 
 // ---------------------------------------------------------------------------
 // Gate G9 — ONE spawn smoke test. Proves the check is wired into the path
 // bin.ts's real entry point executes (server.ts's `run()`, strictly before
-// `tryRunWithSdk()` / `runStdioFallback()`), not merely defined and unit
+// `runTransport()` starts a stdio transport), not merely defined and unit
 // tested in isolation. Harness trimmed from `editFamily.spec.ts` /
 // `replayCorpus.spec.ts`'s shared `startServer` pattern — kept to the one
 // cheap call the recon recommended.
@@ -429,14 +429,14 @@ describe("Gate G9 — spawn smoke (the real bin.ts, the real production budget t
     servers.push(srv);
 
     // If `assertStartupBudgetsAreSane()` had thrown, `run()`'s promise would
-    // reject before `tryRunWithSdk()` ever starts the transport, and this
+    // reject before `runTransport()` ever starts the transport, and this
     // `initialize` call would time out against a dead process (its stderr
     // would show `[tl-mcp] fatal: ...`, exit 1, zero stdout) rather than
     // resolve — so a resolved `initialize` IS the proof this call needs.
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "search_files",
+      name: "tl_search_files",
       arguments: { action: "tree", path: "." },
     });
 

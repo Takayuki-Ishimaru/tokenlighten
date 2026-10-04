@@ -331,7 +331,7 @@ describe("WS3 artifact_build task profile", () => {
       .filter(isArtifactTaskPackSurface);
     expect(artifacts).toHaveLength(1);
     expect(artifacts[0]?.extract).toBe(
-      'read_file {targets:[{path:"docs/rate-table.xlsx"}]}',
+      'tl_read_file {targets:[{path:"docs/rate-table.xlsx"}]}',
     );
     expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(16_384);
   });
@@ -591,6 +591,6 @@ describe("OOXML preflight on the artifact_build extraction path", () => {
     expect(serialized).not.toContain("item-0");
     // The artifact `extract` hint, in its canonical spelling (WP-S11 Part B).
     // Quote-free fragment: the assertion runs against the RAW JSON text.
-    expect(serialized).toContain("read_file {targets:[{path:");
+    expect(serialized).toContain("tl_read_file {targets:[{path:");
   });
 });

@@ -258,19 +258,19 @@ async function runSequence(srv: ServerHandle, cwd: string): Promise<{
   supporting: WireRow | undefined;
   edit: RawResponse;
 }> {
-  const demotePack = await srv.call("read_file", {
+  const demotePack = await srv.call("tl_read_file", {
     query: DEMOTE_QUERY,
     task: { profile: "answer", epoch: "new" },
     cwd,
   });
   const supporting = rowsOf(demotePack).find((row) => row.path === SUPPORTING);
-  await srv.call("read_file", {
+  await srv.call("tl_read_file", {
     query: EDIT_QUERY,
     targets: [{ path: PRIMARY }],
     task: { profile: "generic" },
     cwd,
   });
-  const edit = await srv.call("edit_file", {
+  const edit = await srv.call("tl_edit_file", {
     edits: [{
       handle: supporting?.handle ?? "h-missing",
       search: "supporting lexical context",
@@ -351,7 +351,7 @@ describe("FX-I-A: a demoted row's handle never becomes an editable target (spawn
     const srv = startServer(ws, spawnEnv(true));
     try {
       await srv.initialize();
-      const pack = await srv.call("read_file", {
+      const pack = await srv.call("tl_read_file", {
         query: DEMOTE_QUERY,
         task: { profile: "answer", epoch: "new" },
         cwd: ws,
@@ -359,7 +359,7 @@ describe("FX-I-A: a demoted row's handle never becomes an editable target (spawn
       const row = rowsOf(pack).find((entry) => entry.path === SUPPORTING);
       expect(row?.body).toBeUndefined();
 
-      const zoom = await srv.call("read_file", {
+      const zoom = await srv.call("tl_read_file", {
         targets: [{ handle: row!.handle!, range: row!.remaining![0]! }],
         cwd: ws,
       });
@@ -397,7 +397,7 @@ describe("FX-I-A: the edit admissibility union is booked from the SHIPPED pack",
   });
 
   async function packThrough(ws: string, args: Record<string, unknown> = {}): Promise<WireRow[]> {
-    const res = await callTool("read_file", {
+    const res = await callTool("tl_read_file", {
       query: DEMOTE_QUERY,
       task: { profile: "answer", epoch: "new" },
       cwd: ws,
@@ -503,7 +503,7 @@ describe("FX-I-A: the edit admissibility union is booked from the SHIPPED pack",
     // Serve the supporting file on its own first — the ledger now PROVES the
     // caller holds it, which disqualifies it from demotion for the rest of
     // the epoch.
-    await callTool("read_file", { targets: [{ path: SUPPORTING }], content: "full", cwd: ws });
+    await callTool("tl_read_file", { targets: [{ path: SUPPORTING }], content: "full", cwd: ws });
     const rows = await packThrough(ws);
     const held = rows.find((row) => row.path === SUPPORTING);
     expect(held, "the already-held path must still appear").toBeDefined();

@@ -274,7 +274,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
 
     it("two-file ranged batch: content:\"full\" delivers exactly the 150 requested lines, never the whole 400-line files", async () => {
       const { hops, capped } = await followToEnd(server, {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           targets: [
             { path: "data/alpha.txt", range: "11-90" },
@@ -303,7 +303,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
     }, 180000);
 
     it("a code file with a doc comment: range + content:\"full\" comes back UNELIDED, unlike the same range with content:\"auto\"", async () => {
-      const autoRes = await server.call("read_file", {
+      const autoRes = await server.call("tl_read_file", {
         targets: [{ path: "src/commented.ts", range: "1-13" }],
         content: "auto",
         cwd: ws,
@@ -313,7 +313,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
         `precondition: content:"auto" must actually elide this comment block, or the fixture is not exercising elision: ${autoRes.text.slice(0, 400)}`,
       ).not.toContain("this exact sentence must survive verbatim");
 
-      const fullRes = await server.call("read_file", {
+      const fullRes = await server.call("tl_read_file", {
         targets: [{ path: "src/commented.ts", range: "1-13" }],
         content: "full",
         task: { epoch: "new" },
@@ -327,7 +327,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
     }, 180000);
 
     it("ranges:[] (plural) on one target + content:\"full\": both windows unelided, never widened to the whole file", async () => {
-      const res = await server.call("read_file", {
+      const res = await server.call("tl_read_file", {
         targets: [{ path: "src/many.ts", ranges: ["1-5", "36-40"] }],
         content: "full",
         task: { epoch: "new" },
@@ -344,7 +344,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
 
     it("mixed batch: one ranged target serves ONLY its range, the un-ranged sibling serves its whole file", async () => {
       const { hops, capped } = await followToEnd(server, {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: {
           targets: [
             { path: "data/ranged.txt", range: "10-20" },
@@ -398,7 +398,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
       const server = startServer(ws, configEnv);
       try {
         await server.initialize();
-        const tiny = await server.call("read_file", {
+        const tiny = await server.call("tl_read_file", {
           targets: [
             { path: "data/alpha.txt", range: "11-90" },
             { path: "data/beta.txt", range: "31-100" },
@@ -445,7 +445,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
       const server = startServer(ws, configEnv);
       try {
         await server.initialize();
-        const first = await server.call("read_file", {
+        const first = await server.call("tl_read_file", {
           targets: [{ path: "data/alpha.txt", range: "11-90" }],
           content: "full",
           budget: { bytes: 900 },
@@ -453,8 +453,8 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
           cwd: ws,
         });
         const next = extractNext(first.body);
-        if (next?.tool === "read_file" && typeof next.arguments["cursor"] === "string") {
-          const tinyCursor = await server.call("read_file", { ...next.arguments, budget: { bytes: 1 } });
+        if (next?.tool === "tl_read_file" && typeof next.arguments["cursor"] === "string") {
+          const tinyCursor = await server.call("tl_read_file", { ...next.arguments, budget: { bytes: 1 } });
           if (tinyCursor.body["kind"] === "refusal") {
             expect(tinyCursor.body["code"], JSON.stringify(tinyCursor.body).slice(0, 300)).toBe("budget-below-minimum");
             expect(typeof tinyCursor.body["required_min_bytes"]).toBe("number");
@@ -474,7 +474,7 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
       const server = startServer(ws, configEnv);
       try {
         await server.initialize();
-        const first = await server.call("read_file", {
+        const first = await server.call("tl_read_file", {
           targets: [
             { path: "data/alpha.txt", range: "11-90" },
             { path: "data/beta.txt", range: "31-100" },
@@ -527,12 +527,12 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
       const server = startServer(ws, configEnv);
       try {
         await server.initialize();
-        const auto1 = await server.call("read_file", { targets: [{ path: "src/proj.ts", range: "1-13" }], cwd: ws });
+        const auto1 = await server.call("tl_read_file", { targets: [{ path: "src/proj.ts", range: "1-13" }], cwd: ws });
         expect(auto1.body["kind"]).toBe("read.text");
-        const auto2 = await server.call("read_file", { targets: [{ path: "src/proj.ts", range: "1-13" }], cwd: ws });
+        const auto2 = await server.call("tl_read_file", { targets: [{ path: "src/proj.ts", range: "1-13" }], cwd: ws });
         expect(auto2.body["kind"], "precondition: a plain repeat really is held").toBe("read.receipt");
 
-        const full = await server.call("read_file", {
+        const full = await server.call("tl_read_file", {
           targets: [{ path: "src/proj.ts", range: "1-13" }], content: "full", cwd: ws,
         });
         expect(
@@ -550,8 +550,8 @@ for (const [configName, configEnv] of Object.entries(CONFIG_ENV)) {
       const server = startServer(ws, configEnv);
       try {
         await server.initialize();
-        await server.call("read_file", { targets: [{ path: "src/plain.ts" }], cwd: ws });
-        const withFull = await server.call("read_file", { targets: [{ path: "src/plain.ts" }], content: "full", cwd: ws });
+        await server.call("tl_read_file", { targets: [{ path: "src/plain.ts" }], cwd: ws });
+        const withFull = await server.call("tl_read_file", { targets: [{ path: "src/plain.ts" }], content: "full", cwd: ws });
         expect(withFull.body["kind"], JSON.stringify(withFull.body).slice(0, 300)).toBe("read.receipt");
       } finally {
         server.kill();

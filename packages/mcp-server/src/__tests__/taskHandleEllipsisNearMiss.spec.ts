@@ -2,7 +2,7 @@
 // r11 / SF13-estimator-telemetry-continuation-a_tl_sf_cheap3-r0): end-to-end,
 // SPAWNED-SERVER regression for the exact incident. The solver held a live
 // task handle and, after several calls, sent
-//   read_file {targets:[{path:"…/vehicle_state.hpp"}], task:{handle:"tlh_task_v1_AQGWsSsvzBv-...Jp05WU"}}
+//   tl_read_file {targets:[{path:"…/vehicle_state.hpp"}], task:{handle:"tlh_task_v1_AQGWsSsvzBv-...Jp05WU"}}
 // — a DISPLAY-ABBREVIATED copy of the live handle (some upstream rendering
 // collapsed it to `prefix...suffix`), not the opaque token itself. Before
 // this fix the reply was `handle-unknown` with `remaining:"no working set
@@ -134,7 +134,7 @@ describe("E1 — a display-abbreviated task.handle recovers instead of dead-endi
 
   async function mintLiveTaskHandle(query: string): Promise<string> {
     const opened = parseToolResult(
-      await call("read_file", { query, cwd, lane: LANE, task: { epoch: "new" } }),
+      await call("tl_read_file", { query, cwd, lane: LANE, task: { epoch: "new" } }),
     );
     expect(opened["kind"], JSON.stringify(opened)).not.toBe("refusal");
     const task = opened["task"] as Record<string, unknown> | undefined;
@@ -148,7 +148,7 @@ describe("E1 — a display-abbreviated task.handle recovers instead of dead-endi
     const abbreviated = abbreviate(live, "...", 24, 5);
 
     const refused = parseToolResult(
-      await call("read_file", {
+      await call("tl_read_file", {
         targets: [{ path: "src/vehicle_state.hpp" }],
         task: { handle: abbreviated },
         cwd,
@@ -169,7 +169,7 @@ describe("E1 — a display-abbreviated task.handle recovers instead of dead-endi
     const abbreviated = abbreviate(live, "…", 24, 5);
 
     const refused = parseToolResult(
-      await call("read_file", {
+      await call("tl_read_file", {
         targets: [{ path: "src/vehicle_state.hpp" }],
         task: { handle: abbreviated },
         cwd,
@@ -187,7 +187,7 @@ describe("E1 — a display-abbreviated task.handle recovers instead of dead-endi
     const notAnAbbreviation = `${live.slice(0, 24)}...ZZZZZ`;
 
     const refused = parseToolResult(
-      await call("read_file", {
+      await call("tl_read_file", {
         targets: [{ path: "src/vehicle_state.hpp" }],
         task: { handle: notAnAbbreviation },
         cwd,
@@ -205,7 +205,7 @@ describe("E1 — a display-abbreviated task.handle recovers instead of dead-endi
     const abbreviated = abbreviate(live, "...", 24, 5);
 
     const refused = parseToolResult(
-      await call("read_file", {
+      await call("tl_read_file", {
         targets: [{ path: "src/vehicle_state.hpp" }],
         task: { handle: abbreviated },
         cwd,
@@ -215,7 +215,7 @@ describe("E1 — a display-abbreviated task.handle recovers instead of dead-endi
     expect(refused["did_you_mean"]).toBe(live);
 
     const recovered = parseToolResult(
-      await call("read_file", {
+      await call("tl_read_file", {
         targets: [{ path: "src/vehicle_state.hpp" }],
         task: { handle: refused["did_you_mean"] },
         cwd,

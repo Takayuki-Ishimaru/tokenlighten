@@ -1,5 +1,5 @@
 /**
- * preconditions.ts — edit_file precondition enforcement for v0.6.
+ * preconditions.ts — tl_edit_file precondition enforcement for v0.6.
  *
  * Exported function: enforcePreconditions
  *
@@ -137,7 +137,7 @@ async function resolveEditTargetRange(
 }
 
 /**
- * Enforce preconditions for an edit_file operation.
+ * Enforce preconditions for an tl_edit_file operation.
  *
  * @param args           - The raw args from the MCP call.
  * @param effectivePath  - The workspace-relative path that will be edited.
@@ -326,7 +326,7 @@ export async function enforcePreconditions(
 
   // -------------------------------------------------------------------------
   // "unique-match": enforced at the call site for single-file exact edits
-  // (see server.ts edit_file branch).  Nothing further to check here.
+  // (see server.ts tl_edit_file branch).  Nothing further to check here.
   // "references-reviewed": advisory flag for rename operations — no fail-closed.
   // -------------------------------------------------------------------------
 

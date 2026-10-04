@@ -7,7 +7,7 @@
 // hand-rolled JSON-RPC dispatcher (server.ts `handleRequest`, the
 // `"initialize"` case) but is used ONLY to write a startup log line to
 // stderr -- it is never stored anywhere a later `tools/call` can reach
-// (confirmed: `search_files find query:"clientInfo"` over server.ts shows
+// (confirmed: `tl_search_files find query:"clientInfo"` over server.ts shows
 // exactly that one read site, and no module holds a "last seen client"
 // anywhere; `TOKENLIGHTEN_CLIENT_ID` is confirmed absent from the whole
 // tree). `ProtocolCallContext.clientId` (protocol/envelope.ts) is therefore
@@ -33,6 +33,13 @@
 // end-to-end proof. The paragraph above is kept for its still-true framing
 // (why an unresolved id falls back to UNKNOWN_CLIENT_PROFILE) but its
 // "nothing sets it yet" claim is historical, not current.
+//
+// UPDATE (2026-10-02): `handleRequest` is the handler of the legacy-era stdio
+// transport (mcp/transport/legacyStdio.ts), and that transport serves EVERY
+// legacy-era connection — the @modelcontextprotocol/sdk v1 leg once assumed to
+// sit above it never ran — so the capture covers all of them. Only the modern
+// SDK v2 leg, whose `initialize` the SDK answers itself, still depends on the
+// TOKENLIGHTEN_CLIENT_ID override.
 // ---------------------------------------------------------------------------
 
 /** A versioned, compatibility-scoped view of one MCP client. */
@@ -102,7 +109,7 @@ const KNOWN_CLIENT_PROFILES: ReadonlyMap<string, ClientProfile> = new Map([
       lastValidated: "2026-08-21",
       // tl-raw-1 round-trips deterministically for any client that reads
       // `TextContent.text` as an opaque UTF-8 string and lets THIS SAME
-      // server's `read_file`/`edit_file` continuation decode it -- already
+      // server's `tl_read_file`/`tl_edit_file` continuation decode it -- already
       // round-trip-proven by policy.ts's evaluateCandidates before
       // selection ever runs, independent of which client is asking.
       allowedCodecIds: ["tl-raw-1/1"],

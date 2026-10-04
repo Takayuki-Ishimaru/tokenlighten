@@ -4,6 +4,7 @@ import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
 import { formatDelta, formatLines } from "../util/lineDelta.js";
 import { safeResolveForWrite, resolveReal, isWithin, statReadTargetSync } from "../util/safePath.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 import { countLines } from "../util/countLines.js";
 
@@ -111,7 +112,7 @@ export async function applyAppendEnumMember(
   if (!symbolName) return {
     ok: false,
     reason: "intent-unsupported",
-    next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+    next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
   };
   if (!IDENT_RE.test(target)) return { ok: false, reason: "intent-unsupported", detail: "target must be an enum identifier" };
   if (looksLikeSecretFile(relPath)) return { ok: false, reason: "intent-unsupported" };
@@ -142,6 +143,11 @@ export async function applyAppendEnumMember(
   const after = appendEnumMember(before, symbolName, target, lang);
   if (after === "DUPLICATE") return { ok: false, reason: "intent-unsupported", detail: "enum member already present" };
   if (!after || after === before) return { ok: false, reason: "intent-unsupported", detail: "enum declaration not found" };
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the new
+  // text is built and every guard above has passed; the write below is the
+  // first byte this intent puts on the disk.
+  throwIfRequestCancelled();
 
   // Mode preservation: see writeExistingFileAtomic's doc comment
   // (2026-08-07 chmod-reset incident).

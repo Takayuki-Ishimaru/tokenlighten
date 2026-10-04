@@ -269,7 +269,7 @@ describe("pathlessExactEdit / pathlessSymbolEdit — workspace-boundary post-che
     expect(result.workspace).toBe(repo);
     expect(result.paths).toEqual(["wt/agent-exact/src/nested.ts"]);
     expect(result.next).toEqual({
-      tool: "edit_file",
+      tool: "tl_edit_file",
       arguments: {
         cwd: agent,
         edits: [{
@@ -341,7 +341,7 @@ describe("pathlessExactEdit / pathlessSymbolEdit — workspace-boundary post-che
     expect(result.workspace).toBe(repo);
     expect(result.paths).toEqual(["wt/agent-symbol/src/nestedFn.ts"]);
     expect(result.next).toEqual({
-      tool: "edit_file",
+      tool: "tl_edit_file",
       arguments: {
         cwd: agent,
         edits: [{

@@ -195,13 +195,13 @@ export function projectTaskReasoningIR(input: ProjectReasoningIrInput): TaskReas
   // --- allowed next (grounded: route + pack continuation only) ---
   const allowedNext: TaskReasoningIR["allowedNext"] = [];
   if (result.route !== undefined) {
-    const tool = result.route.action === "edit_from_handles" ? "edit_file"
-      : result.route.action === "locate_missing_surfaces" ? "search_files"
-        : "read_file";
+    const tool = result.route.action === "edit_from_handles" ? "tl_edit_file"
+      : result.route.action === "locate_missing_surfaces" ? "tl_search_files"
+        : "tl_read_file";
     allowedNext.push({ tool, reason: result.route.action });
   }
   if (result.next !== undefined && canonical?.kind === "discover") {
-    allowedNext.push({ tool: "read_file", reason: "continue-discovery" });
+    allowedNext.push({ tool: "tl_read_file", reason: "continue-discovery" });
   }
 
   // --- constraints (grounded rows only — nothing invented) ---

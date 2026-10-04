@@ -82,7 +82,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     write(ws, "NOTES.md", md);
     expect(Buffer.byteLength(md, "utf8")).toBeGreaterThan(3000);
 
-    const res = await callTool("read_file", { path: "NOTES.md", mode: "auto", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "NOTES.md", mode: "auto", cwd: ws });
     const body = parse(res);
     const evidence = body["evidence"] as Array<Record<string, unknown>>;
 
@@ -95,7 +95,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     expect(body["limit"]).toBeDefined();
     const limit = body["limit"] as Record<string, unknown>;
     const next = limit["next"] as Record<string, unknown> | undefined;
-    expect(next?.["tool"]).toBe("read_file");
+    expect(next?.["tool"]).toBe("tl_read_file");
     const nextArgs = next?.["arguments"] as Record<string, unknown> | undefined;
     const nextTarget = (nextArgs?.["targets"] as Array<Record<string, unknown>> | undefined)?.[0];
     // Remainder form (2026-07-09c): the continuation names the WHOLE rest of
@@ -115,7 +115,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const oneLine = "lorem ipsum single-line payload ".repeat(512); // 16384 bytes, zero newlines
     write(ws, "notes.txt", oneLine);
 
-    const res = await callTool("read_file", { path: "notes.txt", mode: "auto", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "notes.txt", mode: "auto", cwd: ws });
     const body = parse(res);
     const evidence = body["evidence"] as Array<Record<string, unknown>>;
 
@@ -148,7 +148,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const oneLine = "trailing newline single-line xs ".repeat(512) + "\n";
     write(ws, "notes.txt", oneLine);
 
-    const res = await callTool("read_file", { path: "notes.txt", mode: "auto", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "notes.txt", mode: "auto", cwd: ws });
     const body = parse(res);
 
     // Rule T: response-level truncation is `limit`, which appears only when
@@ -173,7 +173,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const tail = Array.from({ length: 100 }, (_, i) => `tail line ${i} with enough prose to matter.`);
     write(ws, "notes.txt", head + "\n" + tail.join("\n") + "\n");
 
-    const res = await callTool("read_file", { path: "notes.txt", mode: "auto", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "notes.txt", mode: "auto", cwd: ws });
     const body = parse(res);
 
     // Rule T: response-level truncation is `limit`, which appears only when
@@ -191,7 +191,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const md = bigMarkdown();
     write(ws, "NOTES.md", md);
 
-    const res = await callTool("read_file", { path: "NOTES.md", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "NOTES.md", cwd: ws });
     const body = parse(res);
     const evidence = body["evidence"] as Array<Record<string, unknown>>;
 
@@ -218,7 +218,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     ].join("\n");
     write(ws, "GUIDE.markdown", md);
 
-    const res = await callTool("read_file", { path: "GUIDE.markdown", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "GUIDE.markdown", cwd: ws });
     const body = parse(res);
     const headings = body["headings"] as Array<Record<string, unknown>>;
 
@@ -234,7 +234,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     write(ws, "data.json", json);
     expect(Buffer.byteLength(json, "utf8")).toBeGreaterThan(3000);
 
-    const res = await callTool("read_file", { path: "data.json", mode: "auto", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "data.json", mode: "auto", cwd: ws });
     const body = parse(res);
     const evidence = body["evidence"] as Array<Record<string, unknown>>;
 
@@ -249,7 +249,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const md = bigMarkdown();
     write(ws, "NOTES.md", md);
 
-    const res = await callTool("read_file", { path: "NOTES.md", mode: "auto", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "NOTES.md", mode: "auto", cwd: ws });
     const body = parse(res);
     const evidence = body["evidence"] as Array<Record<string, unknown>>;
     const content = evidence[0]?.["body"] as string;
@@ -268,7 +268,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     write(ws, "big.ts", ts);
     expect(Buffer.byteLength(ts, "utf8")).toBeGreaterThan(8192);
 
-    const res = await callTool("read_file", { path: "big.ts", mode: "auto", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "big.ts", mode: "auto", cwd: ws });
     const body = parse(res);
 
     // Rule K: a skeleton is `read.map`'s "signatures" form (A.5.3); its own
@@ -298,7 +298,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     ].join("\n");
     write(ws, "big.spec.ts", ts);
 
-    const res = await callTool("read_file", {
+    const res = await callTool("tl_read_file", {
       path: "big.spec.ts",
       mode: "auto",
       query: "find the exact execution_contract structured next_call regression test",
@@ -336,7 +336,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     }, null, 2);
     write(ws, "result.json", json);
 
-    const res = await callTool("read_file", {
+    const res = await callTool("tl_read_file", {
       path: "result.json",
       mode: "auto",
       query: "report the paired billing cost ratio A over B",
@@ -359,7 +359,7 @@ describe("read_code mode=auto — large non-code file returns capped content (S1
     const md = bigMarkdown();
     write(ws, "NOTES.md", md);
 
-    const res = await callTool("read_file", { path: "NOTES.md", mode: "skeleton", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "NOTES.md", mode: "skeleton", cwd: ws });
     const body = parse(res);
 
     // The doc-content branch never runs for explicit mode=skeleton — this
@@ -395,7 +395,7 @@ function generatedHeadingsMarkdown(sectionCount: number): string {
   return lines.join("\n") + "\n";
 }
 
-describe("read_file markdown headings envelope caps (md_4800kb regression)", () => {
+describe("tl_read_file markdown headings envelope caps (md_4800kb regression)", () => {
   beforeEach(() => { resetAll(); handleTable.reset(); });
   afterEach(() => {
     for (const d of dirs.splice(0)) {
@@ -408,7 +408,7 @@ describe("read_file markdown headings envelope caps (md_4800kb regression)", () 
     const sectionCount = 1500; // 1501 headings total incl. the leading H1
     write(ws, "REVIEW.md", generatedHeadingsMarkdown(sectionCount));
 
-    const res = await callTool("read_file", { path: "REVIEW.md", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "REVIEW.md", cwd: ws });
     const body = parse(res);
 
     // Rule T: response-level truncation is `limit`, which appears only when
@@ -447,7 +447,7 @@ describe("read_file markdown headings envelope caps (md_4800kb regression)", () 
     const sectionCount = 1500;
     write(ws, "REVIEW.md", generatedHeadingsMarkdown(sectionCount));
 
-    const res = await callTool("read_file", { path: "REVIEW.md", mode: "overview", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "REVIEW.md", mode: "overview", cwd: ws });
     const body = parse(res);
 
     // v1 (A.5.3 + Rule K, 2026-08-14): `mode=overview` on a markdown path used
@@ -473,7 +473,7 @@ describe("read_file markdown headings envelope caps (md_4800kb regression)", () 
     const ws = mkWs("md-headings-control");
     write(ws, "NOTES.md", bigMarkdown()); // 3 headings, well under both caps
 
-    const res = await callTool("read_file", { path: "NOTES.md", cwd: ws });
+    const res = await callTool("tl_read_file", { path: "NOTES.md", cwd: ws });
     const body = parse(res);
 
     const headings = body["headings"] as Array<Record<string, unknown>>;

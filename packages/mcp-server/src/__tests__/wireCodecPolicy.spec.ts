@@ -218,7 +218,7 @@ describe("pipeline -- malformed/unexpected error always falls back to json", () 
     const payload = { v: 1, kind: "search.matches", items };
     const text = JSON.stringify(payload);
     const poisonedContext = {
-      tool: "search_files",
+      tool: "tl_search_files",
       get workspace(): string {
         throw new Error("boom -- simulated pipeline failure");
       },

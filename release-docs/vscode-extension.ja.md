@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、�
 
 ## ビルドせずにインストールする
 
-v0.14.4のGitHub Releaseから**[tokenlighten-vscode-extension-0.14.4.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.14.4/tokenlighten-vscode-extension-0.14.4.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
+v0.15.0のGitHub Releaseから**[tokenlighten-vscode-extension-0.15.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.0/tokenlighten-vscode-extension-0.15.0.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
 2. **VSIXからのインストール…**を選びます。
@@ -14,10 +14,10 @@ v0.14.4のGitHub Releaseから**[tokenlighten-vscode-extension-0.14.4.vsix](http
 4. 求められた場合はVS Codeを再読み込みします。
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.14.4.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.0.vsix
 ~~~
 
-ソースからビルドする場合:
+ソースからVSIXを作成する場合はNode.js 22以降を使用してください:
 
 ~~~bash
 npm install
@@ -34,11 +34,32 @@ npm run package -w tokenlighten-vscode-extension
 
 v0.13.0ではMCP provider versionにschema stampを含めます。advertiseされるtool schemaが変わるとVS Codeがcache済み定義を自動更新するため、手動でprovider名を変えたりcacheを消したりする必要はありません。
 
-`tokenlighten.toolSurface`設定（既定`full`）はadvertiseされるtool schemaを選びます: `full`は全能力、`code`はコード・プレーンテキスト・設定向けの`read_file`/`edit_file`/`search_files`のみ — より小さいschemaで、Office/archive/credential系の入力は単に拒否されるのではなくadvertised schema自体から除去されます。詳細は[MCPツール](mcp-tools.md#tool-surface)を参照してください。変更は上記と同じくschemaに影響する変更なので、VS Codeは同じ仕組みで自動更新します。
+`tokenlighten.toolSurface`設定（既定`full`）はadvertiseされるtool schemaを選びます: `full`は全能力、`code`はコード・プレーンテキスト・設定向けの`tl_read_file`/`tl_edit_file`/`tl_search_files`のみ — より小さいschemaで、Office/archive/credential系の入力は単に拒否されるのではなくadvertised schema自体から除去されます。詳細は[MCPツール](mcp-tools.md#tool-surface)を参照してください。変更は上記と同じくschemaに影響する変更なので、VS Codeは同じ仕組みで自動更新します。
 
 `tokenlighten.guideProfile`設定は、セットアップ時にAGENTS.md/CLAUDE.mdへ書き込むguideのサイズを選びます: `full`／`medium`／`compact`のいずれかです。未設定でツールサーフェスが`full`の場合、セットアップ時にフルガイドとCopilot専用ワークスペース向けのコンパクトガイドを選べます。選択を閉じた場合はフルガイドを維持します。`tokenlighten.toolSurface`が`code`の場合は、選択を表示せず`compact`になります。同じフォルダーでCodexやClaude Codeを使う場合、それらも同じガイドを読み込みます。`tokenlighten.guideProfile`を明示的に設定すると、このデフォルトより常に優先されます。
 
-v0.14.3へアップグレードした後は、**このワークスペースをセットアップ**を再実行し、MCPクライアントを再接続してください。管理ガイドとCopilot向けの設定を更新できます。応答をインラインに保持する設定とCLIでの変更回避オプションは、[既存ワークスペースの更新](getting-started.md#refresh-an-existing-workspace-after-upgrading)を参照してください。
+コードの質問や変更作業には通常のCopilot **Agent**チャットを使えます。
+**tokenlighten-explore**は、TokenLightenの読取・検索ツールだけを使用する
+読み取り専用の選択肢として引き続き利用できます。
+
+セットアップは短い自己完結型のCopilotガイドを作成します。安全に変更できる
+場合はTokenLighten専用ガイドの重複添付を避け、ご自身の指示と設定を保持します。
+`tokenlighten.copilotGuide`設定で`standalone`（既定）または`agents-md`を
+選べます。CLIでは`--copilot-guide keep`で既存構成を維持できます。
+
+VS Codeのセットアップは、新しいローカルAgentチャット向けのSessionStart
+ヒントも作成します。信頼済みワークスペース、有効な`chat.useHooks`、PATH上の
+`node`が必要です。既存フックとユーザー編集を保持し、ツールの権限は変更しません。
+`tl workspace setup --clients vscode --copilot-session-context keep`で
+既存のフック構成を維持できます。無効化またはnative切替時には、TokenLightenが
+管理するCopilotガイドも無効になります。
+
+v0.15.0へアップグレードした後は、**このワークスペースをセットアップ**を
+再実行し、新しいエージェントセッションを開始するかMCPクライアントを再接続
+してください。管理ガイド、Copilot設定、接頭辞付きツール名を更新できます。
+応答をインラインに保持する設定とCLIの変更回避オプションは、
+[既存ワークスペースの更新](getting-started.md#refresh-an-existing-workspace-after-upgrading)
+を参照してください。
 
 ## アンインストール
 
@@ -73,6 +94,7 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 | `tokenlighten.updateCheck.enabled` | `true` | 起動時に新しいVSIXの公開を確認します。インストールには常にユーザー操作が必要です。 |
 | `tokenlighten.language` | `auto` | VS Codeの表示言語を自動使用するか、英語／日本語を選択します。 |
 | `tokenlighten.toolSurface` | `full` | advertiseされるMCP tool surface: `full`（全能力）または`code`（コード・プレーンテキスト・設定のみ、より小さいtool schema）。変更には再接続が必要です。 |
+| `tokenlighten.copilotGuide` | `standalone` | Copilotガイドの形式：短い自己完結型、共通AGENTS.md、または既存構成の維持。 |
 | `tokenlighten.guideProfile` | `full` | セットアップ時に書き込むguideのサイズ: `full`／`medium`／`compact`。未設定の場合、`tokenlighten.toolSurface`が`code`のときは`full`ではなく`compact`を書き込みます。明示的に設定した値は常にこのデフォルトより優先されます。 |
 
-デスクトップアプリケーションは公開v0.14.4リリースに含まれません。
+デスクトップアプリケーションは公開v0.15.0リリースに含まれません。

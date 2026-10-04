@@ -262,7 +262,7 @@ function setFlags(on: boolean): void {
 
 /** The in-process half of the r14_m sequence: the question pack, then the same-epoch change pack. */
 async function inProcessSequence(ws: string): Promise<{ supporting: WireRow | undefined; primary: WireRow | undefined }> {
-  const first = await callTool("read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
+  const first = await callTool("tl_read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
   const body = JSON.parse(first.content[0]?.text ?? "{}") as { evidence?: WireRow[] };
   const rows = Array.isArray(body.evidence) ? body.evidence : [];
   return {
@@ -289,7 +289,7 @@ describe("FX-J: the cumulative served-surface log books only what shipped", () =
 
     // PRODUCER 2 — what the log feeds: the NEXT same-epoch certificate's
     // action_frontier, which `guardExecutionEdit` admits handles from.
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       query: EDIT_QUERY,
       targets: [{ path: PRIMARY }],
       task: { profile: "generic" },
@@ -319,7 +319,7 @@ describe("FX-J: the cumulative served-surface log books only what shipped", () =
     expect(logged).toContain(PRIMARY);
     expect(logged).toContain(SUPPORTING);
 
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       query: EDIT_QUERY,
       targets: [{ path: PRIMARY }],
       task: { profile: "generic" },
@@ -341,12 +341,12 @@ describe("FX-J: a demoted handle is not editable one call later (spawned server)
     const srv = startServer(ws, spawnEnv(true));
     try {
       await srv.initialize();
-      const first = await srv.call("read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
+      const first = await srv.call("tl_read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
       const supporting = rowsOf(first).find((row) => row.path === SUPPORTING);
       expect(supporting, "the supporting row must ship").toBeDefined();
       expect(supporting!.body, "precondition: demoted").toBeUndefined();
 
-      const second = await srv.call("read_file", {
+      const second = await srv.call("tl_read_file", {
         query: EDIT_QUERY,
         targets: [{ path: PRIMARY }],
         task: { profile: "generic" },
@@ -355,7 +355,7 @@ describe("FX-J: a demoted handle is not editable one call later (spawned server)
       expect((second.body["decision"] as { kind?: string } | undefined)?.kind).toBe("act.edit");
 
       // THE ASSERTION (round-14 finding 1). Pre-fix: `edit.applied`.
-      const byHandle = await srv.call("edit_file", {
+      const byHandle = await srv.call("tl_edit_file", {
         edits: [{
           handle: supporting!.handle,
           search: "supporting lexical context",
@@ -371,7 +371,7 @@ describe("FX-J: a demoted handle is not editable one call later (spawned server)
       // The path form was already refused pre-fix — it is the control that
       // isolates the mechanism (only `fence.actionFrontier` could have
       // admitted the handle).
-      const byPath = await srv.call("edit_file", {
+      const byPath = await srv.call("tl_edit_file", {
         edits: [{
           path: SUPPORTING,
           search: "continuation relation",
@@ -385,7 +385,7 @@ describe("FX-J: a demoted handle is not editable one call later (spawned server)
       expect(byPath.body["code"]).toBe("execution-typestate");
 
       // A file that appeared in NO pack — proves the fence is live at all.
-      const control = await srv.call("edit_file", {
+      const control = await srv.call("tl_edit_file", {
         edits: [{
           path: UNPACKED,
           search: "export const L1 = 1;",
@@ -400,7 +400,7 @@ describe("FX-J: a demoted handle is not editable one call later (spawned server)
 
       // And the discriminating half: the file this server DID serve is still
       // editable, so the fix is a narrowing to what shipped, not a lockout.
-      const served = await srv.call("edit_file", {
+      const served = await srv.call("tl_edit_file", {
         edits: [{
           path: PRIMARY,
           search: "semantic-frontier-engagement-witness",
@@ -426,17 +426,17 @@ describe("FX-J: a demoted handle is not editable one call later (spawned server)
     const srv = startServer(ws, spawnEnv(false));
     try {
       await srv.initialize();
-      const first = await srv.call("read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
+      const first = await srv.call("tl_read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
       const supporting = rowsOf(first).find((row) => row.path === SUPPORTING);
       expect(typeof supporting?.body, "flag off: the body ships").toBe("string");
 
-      await srv.call("read_file", {
+      await srv.call("tl_read_file", {
         query: EDIT_QUERY,
         targets: [{ path: PRIMARY }],
         task: { profile: "generic" },
         cwd: ws,
       });
-      const byHandle = await srv.call("edit_file", {
+      const byHandle = await srv.call("tl_edit_file", {
         edits: [{
           handle: supporting!.handle,
           search: "supporting lexical context",
@@ -449,7 +449,7 @@ describe("FX-J: a demoted handle is not editable one call later (spawned server)
       expect(byHandle.body["kind"], `flag off this is a legitimate edit: ${byHandle.text.slice(0, 300)}`)
         .toBe("edit.applied");
       // The never-packed control still refuses, so the fence is live here too.
-      const control = await srv.call("edit_file", {
+      const control = await srv.call("tl_edit_file", {
         edits: [{
           path: UNPACKED,
           search: "export const L1 = 1;",
@@ -476,7 +476,7 @@ describe("FX-J: a withheld body stays reachable for READS", () => {
 
     // Nothing booked those bytes, so the zoom must SERVE them rather than
     // answer `prior:"task_pack 1-1"` (the FX-H residual this replaces).
-    const zoom = await callTool("read_file", {
+    const zoom = await callTool("tl_read_file", {
       targets: [{ handle: supporting!.handle }],
       content: "full",
       cwd: ws,
@@ -494,7 +494,7 @@ describe("FX-J: a withheld body stays reachable for READS", () => {
     setFlags(true);
     const ws = mkWorkspace("qref");
 
-    const first = await callTool("read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
+    const first = await callTool("tl_read_file", { query: QUESTION, task: { epoch: "new" }, cwd: ws });
     const firstBody = JSON.parse(first.content[0]?.text ?? "{}") as {
       evidence?: WireRow[]; task?: { replay?: string };
     };
@@ -505,14 +505,14 @@ describe("FX-J: a withheld body stays reachable for READS", () => {
 
     // The change pack is what leaves a certificate behind; its working set is
     // PRIMARY alone, because the demoted row contributes nothing to it.
-    await callTool("read_file", {
+    await callTool("tl_read_file", {
       query: EDIT_QUERY,
       targets: [{ path: PRIMARY }],
       task: { profile: "generic" },
       cwd: ws,
     });
 
-    const replay = await callTool("read_file", {
+    const replay = await callTool("tl_read_file", {
       qref,
       targets: [{ path: SUPPORTING }],
       task: { force_serve: true },
@@ -537,7 +537,7 @@ describe("FX-K: a CAP-OVERFLOWING pack books only what it shipped, flag off", ()
    * E) was still booked as served. Gap (o) deferred the repair partly on
    * "Phase-E-on-survivor is unreachable from the production entrance";
    * round-15 falsified that with a one-call `budget:{bytes:6144}` read whose
-   * follow-up `edit_file` landed `edit.applied` against a file the response
+   * follow-up `tl_edit_file` landed `edit.applied` against a file the response
    * sent no bytes for, with a never-packed control refusing at the same fence.
    *
    * The ruling: the default path books only what it shipped. This case pins
@@ -554,7 +554,7 @@ describe("FX-K: a CAP-OVERFLOWING pack books only what it shipped, flag off", ()
     fs.writeFileSync(path.join(ws, "src/paymentApi.ts"), body("paymentApi", 26), "utf8");
 
     const query = "Update the payment checkout handler across the payment and checkout modules.";
-    const res = await callTool("read_file", {
+    const res = await callTool("tl_read_file", {
       query,
       targets: [{ path: "src/payment.ts" }, { path: "src/checkout.ts" }, { path: "src/paymentApi.ts" }],
       task: { profile: "generic", epoch: "new" },

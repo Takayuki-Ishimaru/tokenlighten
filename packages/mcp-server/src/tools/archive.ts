@@ -279,7 +279,7 @@ export function archiveTaskDecision(pack: ArchiveTaskPack): TaskDecision {
   return {
     kind: "discover",
     next: {
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "archive", archive: { path: pack.archive.path } },
     },
   };

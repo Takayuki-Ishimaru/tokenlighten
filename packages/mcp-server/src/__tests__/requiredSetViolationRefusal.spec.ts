@@ -39,7 +39,7 @@ describe("required-set violation refusal (MX-B group 1)", () => {
     expect(process.env["TL_DECISION_INVARIANT_STRICT"]).toBeTruthy();
     let emitted: ReturnType<typeof emitFinalizedPayload> | undefined;
     expect(() => {
-      emitted = emitFinalizedPayload(violatingReadTextPayload(), "read.text", { tool: "read_file" });
+      emitted = emitFinalizedPayload(violatingReadTextPayload(), "read.text", { tool: "tl_read_file" });
     }).not.toThrow();
     expect(emitted).toBeDefined();
     expect(emitted!.isError).toBe(true);
@@ -61,7 +61,7 @@ describe("required-set violation refusal (MX-B group 1)", () => {
       // violating payload shipped unmodified — `evidence:[]` and all,
       // exactly the shape `scratchpad/matrix-B-inventory.md` group 1
       // measured reaching a real client silently.
-      const emitted = emitFinalizedPayload(violatingReadTextPayload(), "read.text", { tool: "read_file" });
+      const emitted = emitFinalizedPayload(violatingReadTextPayload(), "read.text", { tool: "tl_read_file" });
       expect(emitted.isError).toBe(true);
       const body = JSON.parse((emitted.content as Array<{ text: string }>)[0]!.text) as Record<string, unknown>;
       expect(body["kind"]).toBe("refusal");
@@ -80,7 +80,7 @@ describe("required-set violation refusal (MX-B group 1)", () => {
     // `emitSideEffectViolationRefusal` (the sibling this fix's function is
     // modeled on) already handled edit.* kinds correctly in every mode; this
     // pins that the new general branch did not accidentally swallow it.
-    const emitted = emitFinalizedPayload({ v: 1, kind: "edit.applied" }, "edit.applied", { tool: "edit_file" });
+    const emitted = emitFinalizedPayload({ v: 1, kind: "edit.applied" }, "edit.applied", { tool: "tl_edit_file" });
     expect(emitted.isError).toBe(true);
     const body = JSON.parse((emitted.content as Array<{ text: string }>)[0]!.text) as Record<string, unknown>;
     expect(body["kind"]).toBe("refusal");

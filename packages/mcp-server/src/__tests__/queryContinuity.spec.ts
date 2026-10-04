@@ -193,7 +193,7 @@ describe("D1 — a `next` hint carries the whole task query", () => {
     );
     expect(result.coverage_reason).toBe("missing-roles");
     expect(result.next).toBeDefined();
-    expect(result.next!.tool).toBe("read_file");
+    expect(result.next!.tool).toBe("tl_read_file");
     const replayed = (result.next!.arguments as { query?: string }).query;
     expect(replayed).toBe(continuationQuery(ROLE_GAP_QUERY));
     // The intent-bearing tail is the whole point: a 60/80-char slice lost it.
@@ -221,7 +221,7 @@ describe("D1 — a `next` hint carries the whole task query", () => {
    * optional task-binding companion (`state/session.ts`'s
    * `resolveTaskQueryRefBinding`) must survive the exact same restart/
    * reconnect boundary the query text itself already does — it is what lets
-   * a handleless `read_file {qref}` re-pack recover the SAME executed-next
+   * a handleless `tl_read_file {qref}` re-pack recover the SAME executed-next
    * ledger partition an earlier, `task.handle`-carrying execution of this
    * task's own `next` was recorded under (see `util/packServeLog.ts`'s
    * `hasExecutedNextBoundOrUnbound`). `resetAllSessions()` clears every
@@ -291,7 +291,7 @@ describe("D1 — a `next` hint carries the whole task query", () => {
    * `recordTaskPackExecution`'s own `attachTaskQueryRefBinding` call
    * immediately re-persists the SAME binding/handle again. This proves the
    * coalescing directly against the durable journal — the same file the
-   * reviewer's own count ("6 purpose:qref journal records for 5 read_file
+   * reviewer's own count ("6 purpose:qref journal records for 5 tl_read_file
    * calls") was taken from: a fresh mint plus its late-bound fingerprint still
    * costs two writes (the binding genuinely is not known until after the
    * qref itself is minted), but REPEATING both calls for an UNCHANGED task
@@ -406,12 +406,12 @@ describe("D2 — a narrowed continuation cannot certify against a shrunken unive
 
     certified.missing = [
       `unserved-required-role:ui (required by an earlier pack in this task;`
-      + ` re-request via read_file mode=task_pack query="${continuationQuery(BROAD_QUERY)}" surfaceRoles=["ui"])`,
+      + ` re-request via tl_read_file mode=task_pack query="${continuationQuery(BROAD_QUERY)}" surfaceRoles=["ui"])`,
     ];
     const decision = deriveCanonicalTaskDecision(certified);
     expect(decision?.kind).toBe("discover");
     expect(decision?.next_call).toEqual({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: {
         mode: "task_pack",
         query: continuationQuery(BROAD_QUERY),
@@ -433,12 +433,12 @@ describe("D2 — a narrowed continuation cannot certify against a shrunken unive
     certified.execution_contract = buildTaskExecutionContract(certified, "generic", NARROWED_QUERY);
     certified.missing = [
       "uncovered-concern:schedulerMutex (named by an earlier pack in this task;"
-      + " re-request via search_files action=find query=schedulerMutex)",
+      + " re-request via tl_search_files action=find query=schedulerMutex)",
     ];
     const decision = deriveCanonicalTaskDecision(certified);
     expect(decision?.kind).toBe("discover");
     expect(decision?.next_call).toEqual({
-      tool: "search_files",
+      tool: "tl_search_files",
       arguments: { action: "find", query: "schedulerMutex" },
     });
   });

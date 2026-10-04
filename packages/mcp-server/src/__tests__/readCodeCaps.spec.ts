@@ -145,7 +145,7 @@ describe("read_code hard read caps (Phase 4)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "small.ts" },
     });
 
@@ -183,7 +183,7 @@ describe("read_code hard read caps (Phase 4)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "large.ts" },
     });
 
@@ -216,12 +216,12 @@ describe("read_code hard read caps (Phase 4)", () => {
     await srv.initialize();
 
     // First read: succeeds directly (see (b) above — no C5 needed anymore).
-    const firstRes = await srv.rpc(2, "tools/call", { name: "read_file", arguments: { mode: "full", path: "large.ts" } });
+    const firstRes = await srv.rpc(2, "tools/call", { name: "tl_read_file", arguments: { mode: "full", path: "large.ts" } });
     const firstData = parseFirstContentText(firstRes);
     const firstHandle = (firstData["evidence"] as Array<Record<string, unknown>>)[0]!["handle"] as string;
 
     const res = await srv.rpc(3, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "large.ts" },
     });
 
@@ -263,7 +263,7 @@ describe("read_code hard read caps (Phase 4)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "large.ts", allowFull: true },
     });
 
@@ -289,7 +289,7 @@ describe("read_code hard read caps (Phase 4)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "full", path: "huge.ts", allowFull: true },
     });
 
@@ -307,7 +307,7 @@ describe("read_code hard read caps (Phase 4)", () => {
     expect(data["limit"]).toBeDefined();
     const limit = data["limit"] as Record<string, unknown>;
     const next = limit["next"] as Record<string, unknown>;
-    expect(next["tool"]).toBe("read_file");
+    expect(next["tool"]).toBe("tl_read_file");
     const nextArgs = next["arguments"] as Record<string, unknown>;
     // allowFull was already supplied and still exceeded — it cannot help
     // further, so the recovery call is a plain slice, never an allowFull retry.
@@ -338,7 +338,7 @@ describe("read_code hard read caps (Phase 4)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "auto", path: "large.ts" },
     });
 
@@ -378,7 +378,7 @@ describe("read_code hard read caps (Phase 4)", () => {
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { mode: "symbol", path: "big.ts", symbol: "bigFn" },
     });
 

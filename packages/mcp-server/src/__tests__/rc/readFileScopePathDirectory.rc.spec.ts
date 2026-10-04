@@ -3,11 +3,11 @@
  * dead-turn fix), real-server reproduction.
  *
  * MEASURED DEFECT (live on HEAD before this fix):
- * `read_file {query:"…", task:{epoch:"new",profile:"answer"}, scope:{path:"<dir>"}}`
+ * `tl_read_file {query:"…", task:{epoch:"new",profile:"answer"}, scope:{path:"<dir>"}}`
  * refused `is-a-directory`, with a `detail` recommending LEGACY syntax
  * (`paths=[...]`, `path=...`) that the server itself refuses by default
- * (`TL_LEGACY_INPUT` defaults to `refuse`). `search_files` documents
- * `scope.path` as "root path to search under", and `read_file` advertises
+ * (`TL_LEGACY_INPUT` defaults to `refuse`). `tl_search_files` documents
+ * `scope.path` as "root path to search under", and `tl_read_file` advertises
  * the same shared `scope` object, so a caller reasonably scopes a task-pack
  * query to a subtree with `scope:{path:<dir>}}` instead of
  * `targets:[{path:<dir>}]`. The SAME shape with a FILE path silently dropped
@@ -16,18 +16,18 @@
  *
  * Root cause: `mapCanonicalScope` copies `scope.path` onto the top-level
  * `args["path"]` unconditionally for every canonical tool, but
- * `normalizeCanonicalRequest`'s read_file branch only promotes a call to
+ * `normalizeCanonicalRequest`'s tl_read_file branch only promotes a call to
  * `mode:"task_pack"` (or any other targets-derived mode) when `targets` is
  * non-empty — a query/qref scoped ONLY via `scope.path` (no `targets`) fell
  * through as an ordinary single-FILE path read.
  *
  * Fix: `normalizeCanonicalRequest` now synthesizes `targets:[{path:<scope.path>}]`
- * for a read_file call that has a `query`/`qref`, no explicit `targets`, and
+ * for a tl_read_file call that has a `query`/`qref`, no explicit `targets`, and
  * a `scope.path` that is not also an archive selector — treating it exactly
  * like the equivalent explicit `targets:[{path:<scope.path>}]` call. The
  * `is-a-directory` refusal text (hit directly via a bare path with no query)
- * now advises the canonical `read_file {query:"...", targets:[{path:"..."}]}`
- * / `search_files {action:"tree", scope:{path:"..."}}` shapes instead of the
+ * now advises the canonical `tl_read_file {query:"...", targets:[{path:"..."}]}`
+ * / `tl_search_files {action:"tree", scope:{path:"..."}}` shapes instead of the
  * legacy `paths=[...]`/`path=...` dialect.
  *
  * Harness copied from fenceServesUnservedScope.rc.spec.ts (repo convention:
@@ -157,7 +157,7 @@ afterAll(() => {
   }
 });
 
-describe("S1-A2 — read_file query/qref + scope.path (directory or file)", () => {
+describe("S1-A2 — tl_read_file query/qref + scope.path (directory or file)", () => {
   it("a directory scope.path builds a directory-scoped pack instead of refusing is-a-directory", async () => {
     const ws = scopeWorkspace();
     tmpDirs.push(ws);
@@ -165,7 +165,7 @@ describe("S1-A2 — read_file query/qref + scope.path (directory or file)", () =
     await server.initialize();
 
     const dirScope = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does order logging work in this module",
         scope: { path: "src/util" },
@@ -194,7 +194,7 @@ describe("S1-A2 — read_file query/qref + scope.path (directory or file)", () =
     await server.initialize();
 
     const fileScope = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does run() format its order log line",
         scope: { path: "src/main.ts" },
@@ -220,7 +220,7 @@ describe("S1-A2 — read_file query/qref + scope.path (directory or file)", () =
     // A caller that ALREADY names an explicit target keeps today's behavior —
     // scope.path here (redundant with the target) must not be reinterpreted.
     const explicitTargets = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: {
         query: "how does order logging work",
         targets: [{ path: "src/main.ts" }],
@@ -240,7 +240,7 @@ describe("S1-A2 — read_file query/qref + scope.path (directory or file)", () =
     expect(server.alive()).toBe(true);
   }, SPAWN_TIMEOUT_MS);
 
-  it("the is-a-directory refusal itself now advises canonical read_file/search_files syntax", async () => {
+  it("the is-a-directory refusal itself now advises canonical tl_read_file/tl_search_files syntax", async () => {
     const ws = scopeWorkspace();
     tmpDirs.push(ws);
     const server = startServer(ws);
@@ -249,7 +249,7 @@ describe("S1-A2 — read_file query/qref + scope.path (directory or file)", () =
     // No query/qref here — a bare path with no addressing still reaches the
     // pre-existing single-file auto-mode route and its is-a-directory check.
     const refusal = bodyOf(await server.rpc(2, "tools/call", {
-      name: "read_file",
+      name: "tl_read_file",
       arguments: { path: "src/util", cwd: ws },
     }));
     expect(refusal["code"], JSON.stringify(refusal).slice(0, 500)).toBe("is-a-directory");

@@ -96,7 +96,7 @@ function contractWith(
       kind: "missing-evidence",
       recoverable: true,
       reason: "the behavior body for postLedgerEntry has not been served yet",
-      next_call: { tool: "search_files", arguments: { action: "find", query: "postLedgerEntry" } },
+      next_call: { tool: "tl_search_files", arguments: { action: "find", query: "postLedgerEntry" } },
     }],
     ...overrides,
   } as TaskExecutionContract;
@@ -128,7 +128,7 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
     // that is precisely the "protocol whose shape changes with an env var"
     // the freeze exists to forbid.
     process.env["TL_LEAN_CONTRACT"] = "0";
-    const wire = body(await callTool("read_file", {
+    const wire = body(await callTool("tl_read_file", {
       mode: "task_pack",
       query: "Explain QuoteOrchestrator transition behavior",
       symbol: "QuoteOrchestrator",
@@ -169,7 +169,7 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
       const gaps = lean["capability_gaps"] as Array<Record<string, unknown>> | undefined;
       expect(gaps, `${phase} dropped capability_gaps`).toBeDefined();
       expect(gaps![0]!["next_call"], `${phase} gap has no actionable next_call`).toEqual({
-        tool: "search_files",
+        tool: "tl_search_files",
         arguments: { action: "find", query: "postLedgerEntry" },
       });
     },
@@ -177,7 +177,7 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
 
   it("gives a gap with no next_call of its own the contract's bounded call rather than dropping it", () => {
     const contract = contractWith("discovery", {
-      next_call: { tool: "read_file", arguments: { handle: "h-fallback", range: "1-40" } },
+      next_call: { tool: "tl_read_file", arguments: { handle: "h-fallback", range: "1-40" } },
       capability_gaps: [{
         kind: "missing-evidence",
         recoverable: true,
@@ -186,12 +186,12 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
     });
     const lean = projectLeanExecutionContract(contract) as unknown as Record<string, unknown>;
     const gaps = lean["capability_gaps"] as Array<Record<string, unknown>>;
-    expect(gaps[0]!["next_call"]).toEqual({ tool: "read_file", arguments: { handle: "h-fallback", range: "1-40" } });
+    expect(gaps[0]!["next_call"]).toEqual({ tool: "tl_read_file", arguments: { handle: "h-fallback", range: "1-40" } });
   });
 
   it("emits nothing extra when the full contract carries neither signal", () => {
     const bare = contractWith("discovery", {
-      next_call: { tool: "read_file", arguments: { handle: "h1" } },
+      next_call: { tool: "tl_read_file", arguments: { handle: "h1" } },
     });
     delete (bare as { semantic_closure?: unknown }).semantic_closure;
     delete (bare as { capability_gaps?: unknown }).capability_gaps;
@@ -208,7 +208,7 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
     // is exactly what this spec is for: it must fail if the signal disappears
     // without a replacement, and pass when the replacement is real.
     delete process.env["TL_LEAN_CONTRACT"];
-    const wire = body(await callTool("read_file", {
+    const wire = body(await callTool("tl_read_file", {
       mode: "task_pack",
       query: "Explain QuoteOrchestrator transition behavior",
       symbol: "QuoteOrchestrator",
@@ -253,13 +253,13 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
       [{ mode: "skeleton", path: "src/ledger.ts", cwd: workspace("envelope-map") }, "read.map"],
     ];
     for (const [args, kind] of cases) {
-      const wire = body(await callTool("read_file", args));
+      const wire = body(await callTool("tl_read_file", args));
       expect(wire["v"], JSON.stringify(args)).toBe(1);
       expect(wire["kind"], JSON.stringify(args)).toBe(kind);
       // D6: body `ok` is deleted; `kind` is the outcome.
       expect(wire, JSON.stringify(args)).not.toHaveProperty("ok");
     }
-    const tree = body(await callTool("search_files", { action: "tree", cwd: workspace("envelope-tree") }));
+    const tree = body(await callTool("tl_search_files", { action: "tree", cwd: workspace("envelope-tree") }));
     expect(tree["v"]).toBe(1);
     expect(tree["kind"]).toBe("search.tree");
   }, 30_000);
@@ -270,7 +270,7 @@ describe("wire-emission parity — guide-referenced fields reach the default wir
     // asserted where it now lives: the emitted lean contract must carry the
     // decision signals the projection is required to preserve, on a real pack.
     const query = "wire up postLedgerEntry into the QuoteOrchestrator transition path";
-    const lean = body(await callTool("read_file", {
+    const lean = body(await callTool("tl_read_file", {
       mode: "task_pack",
       query,
       taskProfile: "generic",

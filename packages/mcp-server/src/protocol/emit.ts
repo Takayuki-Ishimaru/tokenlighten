@@ -72,11 +72,14 @@ import {
   type ProtocolCallContext,
 } from "./envelope.js";
 import { buildRefusal } from "./refusal.js";
-import { settleServedCallBookings } from "../state/session.js";
+import { recordFullServeCompleteness, settleServedCallBookings } from "../state/session.js";
 import {
   applyReadRequestContinuation,
   demoteActAfterShed,
+  fitStagedReadToBudget,
+  shrinkLargestBatchEntryByOneLine,
   shrinkLargestEvidenceByOneLine,
+  stagedReadFloorBytes,
 } from "./readRequestContinuation.js";
 import {
   applySearchRequestContinuation,
@@ -128,7 +131,7 @@ import { trace, isTraceEnabled } from "../util/trace.js";
  * Bytes reserved for the R2 read-request cursor a staged read's tail installs.
  *
  * MEASURED, not guessed: the cursor call is
- * `{"tool":"read_file","arguments":{"cwd":<path>,"cursor":<200 chars>}}` and it
+ * `{"tool":"tl_read_file","arguments":{"cwd":<path>,"cursor":<200 chars>}}` and it
  * REPLACES a `{"targets":[{"handle":"h…","range":"a-b"}],"content":"auto"}`
  * next of about 70 B, so the swap costs ~200-240 B net (the `remaining` array
  * collapsing from one entry per shed pass to a single window gives some back).
@@ -137,6 +140,29 @@ import { trace, isTraceEnabled } from "../util/trace.js";
  * fewer.
  */
 export const READ_CURSOR_NEXT_RESERVE_BYTES = 256;
+
+/**
+ * How far over its INHERITED budget a resumed page may be and still be trimmed
+ * to fit it (see the pre-settle fit in `emitFinalizedPayload`): the measured
+ * per-row estimation error of a multi-window page tops out near 11%; anything
+ * past 25% is structural overhead the fit must not "correct" line by line.
+ */
+const RESUME_TRIM_SLACK = 1.25;
+
+/**
+ * The byte budget a staged request carries: its `bytes`, its `tokens` converted
+ * through the funnel's own ratio (`estimateBytesFromTokens`), the tighter of the
+ * two when both are set — the same rule `declaredMaxBytesRaw` applies to a
+ * budget declared on the call itself. `undefined` when the request declared none.
+ */
+function requestBudgetBytes(budget: { bytes?: number; tokens?: number } | undefined): number | undefined {
+  if (budget === undefined) return undefined;
+  const bytes = typeof budget.bytes === "number" && Number.isFinite(budget.bytes) && budget.bytes > 0
+    ? Math.floor(budget.bytes)
+    : undefined;
+  const tokenBytes = estimateBytesFromTokens(budget.tokens);
+  return bytes !== undefined && tokenBytes !== undefined ? Math.min(bytes, tokenBytes) : (bytes ?? tokenBytes);
+}
 
 export function emitFinalizedPayload(
   payload: ShedPayload,
@@ -287,6 +313,11 @@ export function emitFinalizedPayload(
   let text = ladder.text;
   let used = ladder.used;
   let onWire = kind;
+  // R2-R1: the exact floor of a staged read the ladder failed closed on (see below).
+  let refusalFloorBytes: number | undefined;
+  // ... and whether the refused response was a multi-target `read.batch` (its floor is the smallest
+  // whole-ENTRY batch, so its recovery stays the cursor — see `applyReadRequestContinuation`).
+  let refusalOfBatch = false;
 
   // STILL OVER BUDGET AFTER THE LADDER — §4.3's tail, three outcomes and no
   // fourth. Unreachable at the calibrated table; reachable through
@@ -329,6 +360,9 @@ export function emitFinalizedPayload(
   // caller that only ever runs `next` verbatim (never reconstructing "same
   // call, higher budget" by hand) still recovers in one hop.
   if (used > limit) {
+    // R2-R1: `used` is the ladder's own floor here (the smallest response it
+    // could make); the conversion below overwrites it with the refusal's size.
+    const ladderFloorBytes = used;
     const readBatchContinuation = ladder.continuation ?? existingNextOf(payload);
     const converted = kind === "read.batch"
       ? budgetBelowMinimumRefusal(context, readBatchRequiredMinBytes(used), readBatchContinuation, current)
@@ -336,8 +370,75 @@ export function emitFinalizedPayload(
     if (converted !== undefined) {
       current = converted;
       onWire = "refusal";
+      refusalOfBatch = kind === "read.batch";
       text = JSON.stringify(current);
       used = measureResponseBytes(text);
+      // R2-R1 (FX1 chip 3): a `cap-exceeded` names no floor, so the request tail
+      // could only give it a cursor that re-runs the very page that just did not
+      // fit at the very budget that just refused it. A retry succeeds only when
+      // BOTH gates pass: the ladder (which cannot make the response smaller than
+      // `ladderFloorBytes` — a markdown page it cannot cut is 840 B whatever the
+      // budget) and the funnel's own fit (the smallest response after the cursor
+      // swap, measured from the ladder's last honest, still-over-budget state).
+      // The refusal's `next` raises the budget to the larger of the two.
+      //
+      // ...and to a FIXED POINT of them. The retry is a NEW call: the ladder,
+      // given more room, keeps members a tighter budget shed (a markdown page's
+      // heading index, measured: 2273 B at the refusal, 2648 B at the retry), so
+      // the floor is re-derived at the candidate budget — the ladder re-run over
+      // the same producer payload exactly as the retry will run it — until that
+      // budget holds what the ladder keeps there. Bounded; never lowers a floor.
+      if (context.readRequest !== undefined && (kind === "read.text" || kind === "read.batch")) {
+        const measureCandidate = (candidate: ShedPayload): number => measureResponseBytes(JSON.stringify(candidate));
+        let floor = Math.max(
+          ladderFloorBytes,
+          stagedReadFloorBytes({
+            payload: ladder.payload,
+            staged: context.readRequest,
+            claim: { budgetDeclared: declaredMaxBytes !== undefined, shed: ladder.records.length > 0 },
+            measure: measureCandidate,
+          }) ?? 0,
+        );
+        if (!stableEditKind && opts?.budgetOverrideBytes === undefined) {
+          const ladderAt = (budget: number): ReturnType<typeof runLadder> => {
+            let simulated = runLadder({
+              payload,
+              kind,
+              budget: withReserve(calibratedLimit),
+              context: ladderContext,
+              validate: (candidate) => validateShedCandidate(candidate, kind),
+              canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
+            });
+            if (budget < calibratedLimit && simulated.used > budget) {
+              const reentered = runLadder({
+                payload: simulated.payload,
+                kind,
+                budget: withReserve(budget),
+                context: ladderContext,
+                validate: (candidate) => validateShedCandidate(candidate, kind),
+                canonicalize: (candidate) => canonicalizeBudgetDemotion(candidate),
+              });
+              if (reentered.used < simulated.used) simulated = reentered;
+            }
+            return simulated;
+          };
+          for (let round = 0; round < 6; round += 1) {
+            const retry = ladderAt(floor);
+            const needed = Math.max(
+              retry.used > floor ? retry.used : 0,
+              stagedReadFloorBytes({
+                payload: retry.payload,
+                staged: context.readRequest,
+                claim: { budgetDeclared: true, shed: retry.records.length > 0 },
+                measure: measureCandidate,
+              }) ?? 0,
+            );
+            if (needed <= floor) break;
+            floor = needed;
+          }
+        }
+        refusalFloorBytes = floor;
+      }
     }
   }
 
@@ -379,7 +480,7 @@ export function emitFinalizedPayload(
   // `finishEdit`, the EDIT dispatch. So this half — the half `envelope.ts`'s
   // F-A1-6 fix was written to feed ("a refusal projects `{unattributed:false,
   // windows:[]}` so `settleServedRanges` then retracts every pending span for
-  // this call") — was dead for every `read_file`/`search_files` response ever
+  // this call") — was dead for every `tl_read_file`/`tl_search_files` response ever
   // emitted. Round-16 finding 1 is what that cost: a byte-free
   // `refusal/cap-exceeded` left its provisional span standing, and the next
   // slice of the same file was answered `read.receipt{code-unchanged,
@@ -427,6 +528,86 @@ export function emitFinalizedPayload(
     used = measureResponseBytes(text);
   }
 
+  // R2-R1 (P0-2, review 2026-09-30): DECIDE THE FINAL PAYLOAD BEFORE ANYTHING
+  // IS BOOKED. The ledger half and the request half below settle against
+  // `current`; the post-rewrite budget net further down used to run AFTER
+  // both, so a line it dropped (or a page it replaced by a refusal) had
+  // already been booked as served and `D = Q - (C u S)` never owed it again —
+  // the chain skipped those lines for good (reviewer: lines 76-126 of a
+  // 500-line whole-file read at 6144 B; FX1 chip 2: a window's last line).
+  // A staged read is therefore sized HERE with a dry run of its own
+  // continuation (`fitStagedReadToBudget`: the real cursor, the real D), shed
+  // exactly as the ladder orders it (prose, then whole lines), and — when even
+  // one line does not fit — refused with the EXACT floor before a single span
+  // is booked. Only `read.text` / `read.batch` are touched: a receipt or a
+  // closure is emitted regardless (see `failClosed`).
+  // A RESUMED CURSOR DECLARES NO BUDGET ON ITS OWN CALL: it rides the request
+  // (§5.2 "原要求のbudgetは状態で継承する"). `server.ts` restores it onto the
+  // dispatcher's private copy of the arguments, which never reaches
+  // `context.args` (the INBOUND arguments), so `declaredMaxBytes` is undefined
+  // here and the limit is the calibrated ceiling: a page `choosePage` sized
+  // from a flat envelope reserve shipped over the very budget the request
+  // carries (multi-window pages, +1..11% measured). The request's own budget
+  // bounds the pre-settle fit — the fit drops a line BEFORE anything is booked,
+  // so `D` re-owes it and the chain stays exact-once.
+  //
+  // BEST EFFORT, NEVER A NEW REFUSAL AND NEVER A STRUCTURAL CUT: the fit trims
+  // ESTIMATION error, not fixed overhead. A resumed page that overshoots its
+  // inherited budget by up to `RESUME_TRIM_SLACK` (`choosePage` under-counts a
+  // multi-window page's per-row overhead: +1..11% measured over 2-6 windows) is
+  // trimmed by a line or two; one that overshoots by more, or that not even ONE
+  // line can make fit, ships as `choosePage` chose it, exactly as v0.14.4 did.
+  // Its overshoot is then a fixed overhead the ladder cannot shed — a markdown
+  // page's heading index (~2 KB for a 40-heading document) — and enforcing the
+  // budget there would answer a 1.5 KB request with one-line pages that each
+  // re-carry that index (measured: 6 pages became 100+).
+  const inheritedBudgetBytes = declaredMaxBytes === undefined && context.readRequest?.mode === "resume"
+    ? requestBudgetBytes(context.readRequest.state.budget)
+    : undefined;
+  const trimToInherited = inheritedBudgetBytes !== undefined && used <= inheritedBudgetBytes * RESUME_TRIM_SLACK;
+  if (context.readRequest !== undefined && (onWire === "read.text" || onWire === "read.batch")) {
+    const fit = fitStagedReadToBudget({
+      payload: current,
+      staged: context.readRequest,
+      claim: { budgetDeclared: declaredMaxBytes !== undefined || inheritedBudgetBytes !== undefined, shed: ladder.records.length > 0 },
+      limit: inheritedBudgetBytes !== undefined && trimToInherited ? Math.min(limit, inheritedBudgetBytes) : limit,
+      measure: (candidate) => measureResponseBytes(JSON.stringify(candidate)),
+    });
+    if (fit.ok) {
+      if (fit.payload !== current) {
+        const usedBeforeFit = used;
+        current = fit.payload;
+        text = JSON.stringify(current);
+        used = measureResponseBytes(text);
+        // A LINE the fit dropped is shedding like any rung's, and the ledger
+        // half below must know it: it is recorded in the ladder's OWN shed
+        // record (ruling (aa): the settlement's shed signal is derived from
+        // that record and nowhere else), so `wasShed` is true and the
+        // settlement can never widen a corroborated window back out over the
+        // lines that were cut. Prose peeled alone is not a window change.
+        if (fit.shrunk) ladder.records.push({ rung: 4, bytes: usedBeforeFit - used });
+      }
+    } else if (inheritedBudgetBytes === undefined) {
+      // (A resumed page whose INHERITED budget not even one line fits is NOT refused: see below.)
+      const forTool = advertisedTool(context.tool);
+      if (forTool !== undefined) {
+        current = canonicalizeEmittedToolCalls({
+          ...buildRefusal(forTool, {
+            code: "budget-below-minimum",
+            field: "budget",
+            detail: "raise budget.bytes to at least required_min_bytes and re-issue the same call",
+            required_min_bytes: fit.requiredMinBytes,
+            retry: "call",
+          }),
+        }) as ShedPayload;
+        refusalOfBatch = onWire === "read.batch";
+        onWire = "refusal";
+        text = JSON.stringify(current);
+        used = measureResponseBytes(text);
+      }
+    }
+  }
+
   const settlementRoot = context.workspace !== undefined && context.workspace !== ""
     ? context.workspace
     : context.readServeWorkspace;
@@ -466,17 +647,44 @@ export function emitFinalizedPayload(
   const continued = applyReadRequestContinuation(current, context.readRequest, {
     budgetDeclared: declaredMaxBytes !== undefined,
     shed: ladder.records.length > 0,
+    ...(refusalFloorBytes !== undefined ? { refusalFloorBytes } : {}),
+    ...(refusalOfBatch ? { refusalOfBatch: true } : {}),
   });
   if (continued !== current) {
     current = continued;
     text = JSON.stringify(current);
     used = measureResponseBytes(text);
   }
+  // R2-R1 (P1-5, `comments:"keep"`): a `content:"full"` request that has just been
+  // delivered COMPLETE by its own pages proves the whole file was served under
+  // that representation. The ledger alone cannot say so for `keep` (it records no
+  // representation), so the full-serve completeness marker that gates the
+  // `code-unchanged` receipt was left at "partial" by the head and stayed there:
+  // the identical request after the chain re-served a head with no continuation —
+  // a partial page presented as complete. Cleared ONLY when nothing was held at
+  // open time (every line came from this request's own keep-representation pages).
+  if (context.readRequest !== undefined && current["kind"] !== "refusal") {
+    const request = context.readRequest;
+    for (const target of request.state.targets) {
+      const whole = target.requested.length === 1
+        && target.requested[0]!.start === 1
+        && target.requested[0]!.end === target.total_lines;
+      if (
+        target.representation.content === "full"
+        && target.representation.comments === "keep"
+        && whole
+        && target.remaining.length === 0
+        && (request.state.ledger_baseline?.[target.path] ?? []).length === 0
+      ) {
+        recordFullServeCompleteness(request.workspaceRoot, target.path, target.sha, true, true);
+      }
+    }
+  }
 
   // ---------------------------------------------------------------------
   // DESIGN-v0.15 §6.1 (R3), THE SEARCH REQUEST HALF — a SEPARATE, ADDITIVE
   // block after the read-request block above (never inside it): a staged
-  // `search_files find` request's `delivered` prefix is settled from this
+  // `tl_search_files find` request's `delivered` prefix is settled from this
   // SAME finalized payload, for the same reason R2's settle runs here rather
   // than at dispatch time — the ladder has already run, so this reflects
   // exactly what THIS response carries. `applySearchRequestContinuation`
@@ -527,8 +735,13 @@ export function emitFinalizedPayload(
     && used > limit
     && current["kind"] !== "refusal"
   ) {
+    // BCF2: a `read.batch` payload has no top-level `evidence[]`, so the
+    // evidence-shaped shrink always returns `undefined` for one — try the
+    // `entries[]`-shaped sibling next. Exactly one of the two ever applies to
+    // a given payload (the two shapes are mutually exclusive kinds), so the
+    // order is immaterial; evidence first only because it was here first.
     const shrunk = context.readRequest !== undefined
-      ? shrinkLargestEvidenceByOneLine(current)
+      ? shrinkLargestEvidenceByOneLine(current) ?? shrinkLargestBatchEntryByOneLine(current)
       : shrinkLastSearchMatchGroup(current);
     if (shrunk !== undefined) {
       let reRewritten: ShedPayload;
@@ -587,7 +800,7 @@ export function emitFinalizedPayload(
   // FINAL kind/bytes that actually ship are known -- see
   // ProtocolCallContext.postReadyDiscovery's doc comment for the fire
   // condition. `workspace` is edit-only on this context; `codecTraceWorkspace`
-  // is the one read_file/search_files dispatch always publishes (D1/F-C2a).
+  // is the one tl_read_file/tl_search_files dispatch always publishes (D1/F-C2a).
   const postReadyWorkspace = context.workspace ?? context.codecTraceWorkspace;
   if (context.postReadyDiscovery !== undefined && postReadyWorkspace !== undefined && isTraceEnabled()) {
     trace(
@@ -767,13 +980,13 @@ function readBatchRequiredMinBytes(used: number): number {
 /**
  * R-A5: the `next` a `read.batch` `budget-below-minimum` refusal carries,
  * when `continuation` (the ladder's own accumulated union of every
- * undelivered window — see `wireLimit.ts`'s no-trim rule) is read_file-
+ * undelivered window — see `wireLimit.ts`'s no-trim rule) is tl_read_file-
  * shaped — the SAME windows, with `budget.bytes` raised to the exact floor
  * this refusal names, so a caller that runs `next` verbatim (AGENTS.md:
  * "never as a template") need not reconstruct "same call, higher budget"
  * itself. `undefined` when `continuation` is absent or not a plain
- * `read_file` call (defensive; every `read.batch` continuation this tree
- * mints is `read_file`-shaped by construction) — the refusal then carries no
+ * `tl_read_file` call (defensive; every `read.batch` continuation this tree
+ * mints is `tl_read_file`-shaped by construction) — the refusal then carries no
  * `next` at all, exactly like the task-pack / read-cursor `budget-below-
  * minimum` refusals, which rely on `retry:"call"` alone.
  *
@@ -803,7 +1016,7 @@ function budgetBelowMinimumNext(
   draft: ShedPayload,
   context: ProtocolCallContext,
 ): ToolCall | undefined {
-  const continuationArgs = continuation !== undefined && continuation.tool === "read_file"
+  const continuationArgs = continuation !== undefined && continuation.tool === "tl_read_file"
     && continuation.arguments !== null && typeof continuation.arguments === "object"
     && !Array.isArray(continuation.arguments)
     ? continuation.arguments as Record<string, unknown>
@@ -811,11 +1024,11 @@ function budgetBelowMinimumNext(
   const targets = unionRefusalTargets(draft, continuationArgs);
   if (targets.length === 0) {
     if (continuationArgs === undefined) return undefined;
-    return { tool: "read_file", arguments: { ...continuationArgs, budget: { bytes: requiredMinBytes } } } as ToolCall;
+    return { tool: "tl_read_file", arguments: { ...continuationArgs, budget: { bytes: requiredMinBytes } } } as ToolCall;
   }
   const base: Record<string, unknown> = continuationArgs ?? pickDefined(context.args, ["cwd", "lane", "content"]);
   return {
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: { ...base, targets, budget: { bytes: requiredMinBytes } },
   } as ToolCall;
 }
@@ -891,10 +1104,10 @@ function budgetBelowMinimumRefusal(
 ): ShedPayload | undefined {
   const forTool = advertisedTool(context.tool);
   if (forTool === undefined) return undefined;
-  // Finding 13: only for a read_file shortfall — `read.batch` (the only kind
-  // that reaches this function) is exclusively a `read_file` response kind,
+  // Finding 13: only for a tl_read_file shortfall — `read.batch` (the only kind
+  // that reaches this function) is exclusively a `tl_read_file` response kind,
   // but the guard stays explicit rather than assumed.
-  const next = context.tool === "read_file"
+  const next = context.tool === "tl_read_file"
     ? budgetBelowMinimumNext(continuation, requiredMinBytes, draft, context)
     : undefined;
   return canonicalizeEmittedToolCalls({
@@ -980,7 +1193,7 @@ function canonicalizeBudgetDemotion(candidate: ShedPayload): ShedPayload {
 
 /** `context.tool` narrowed to A.1's three advertised names, or `undefined`. */
 function advertisedTool(tool: string): ToolName | undefined {
-  return tool === "read_file" || tool === "edit_file" || tool === "search_files" ? tool : undefined;
+  return tool === "tl_read_file" || tool === "tl_edit_file" || tool === "tl_search_files" ? tool : undefined;
 }
 
 function isSideEffectKind(kind: Kind): boolean {

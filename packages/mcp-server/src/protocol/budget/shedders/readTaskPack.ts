@@ -413,7 +413,7 @@ function shedEvidenceEntry(payload: ShedPayload): ShedOutcome | undefined {
  */
 export function sliceCall(handle: string, ranges: readonly string[]): ToolCall | undefined {
   const call = emittableToolCall({
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: ranges.length === 1
       ? { mode: "slice", handle, range: ranges[0] }
       : { mode: "slice", handle, ranges: [...ranges] },

@@ -104,7 +104,7 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     const ws = mkWs("overlap");
     write(ws, "src/plain.ts", plainFile());
 
-    const first = parse(await callTool("read_file", {
+    const first = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "1-40", cwd: ws,
     }));
     expect(first.isError).toBe(false);
@@ -113,7 +113,7 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     // Overlaps 1-40 on 30-40; 41-55 is genuinely new. A different task epoch
     // so P0's same-task fence cannot answer this from a certificate instead of
     // the served-range ledger this test is about.
-    const second = parse(await callTool("read_file", {
+    const second = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "30-55", cwd: ws, taskEpoch: "new",
     }));
     expect(second.isError).toBe(false);
@@ -143,9 +143,9 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     const ws = mkWs("full-after-slices");
     write(ws, "src/plain.ts", plainFile());
 
-    await callTool("read_file", { mode: "slice", path: "src/plain.ts", range: "1-30", cwd: ws });
+    await callTool("tl_read_file", { mode: "slice", path: "src/plain.ts", range: "1-30", cwd: ws });
 
-    const full = parse(await callTool("read_file", {
+    const full = parse(await callTool("tl_read_file", {
       mode: "full", path: "src/plain.ts", cwd: ws, taskEpoch: "new",
     }));
     expect(full.isError).toBe(false);
@@ -163,8 +163,8 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     const ws = mkWs("identical");
     write(ws, "src/plain.ts", plainFile());
 
-    await callTool("read_file", { mode: "slice", path: "src/plain.ts", range: "1-20", cwd: ws });
-    const repeat = parse(await callTool("read_file", {
+    await callTool("tl_read_file", { mode: "slice", path: "src/plain.ts", range: "1-20", cwd: ws });
+    const repeat = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "1-20", cwd: ws, taskEpoch: "new",
     }));
 
@@ -180,16 +180,16 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
 
   it("an edit on the path then re-read => a full serve (the sha moved, so nothing is covered)", async () => {
     // In-process `callTool` always runs write-disabled (only a spawned child
-    // with --allow-write can exercise edit_file — see canonicalSurface.spec.ts
+    // with --allow-write can exercise tl_edit_file — see canonicalSurface.spec.ts
     // /closureSatisfiedEditGate.spec.ts). What this test is actually about —
     // coverageReceiptFor's honesty rule (1), "the sha the caller computed from
     // the bytes on disk RIGHT NOW" — does not care WHO changed the bytes, only
     // that they changed, so writing the file directly (an external edit) is
-    // the same fact the ledger must react to as a TL-mediated edit_file would.
+    // the same fact the ledger must react to as a TL-mediated tl_edit_file would.
     const ws = mkWs("edited");
     write(ws, "src/plain.ts", plainFile());
 
-    const first = parse(await callTool("read_file", {
+    const first = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "1-20", cwd: ws,
     }));
     const handle = String(
@@ -199,7 +199,7 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
 
     write(ws, "src/plain.ts", plainFile().replace("export const L1 = 1;", "export const L1 = 999;"));
 
-    const reread = parse(await callTool("read_file", {
+    const reread = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "1-20", cwd: ws, taskEpoch: "new",
     }));
     expect(reread.isError).toBe(false);
@@ -219,9 +219,9 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     write(wsA, "src/plain.ts", plainFile());
     write(wsB, "src/plain.ts", plainFile()); // byte-identical content/sha
 
-    await callTool("read_file", { mode: "slice", path: "src/plain.ts", range: "1-40", cwd: wsA });
+    await callTool("tl_read_file", { mode: "slice", path: "src/plain.ts", range: "1-40", cwd: wsA });
 
-    const inOther = parse(await callTool("read_file", {
+    const inOther = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "30-55", cwd: wsB,
     }));
     expect(inOther.isError).toBe(false);
@@ -239,9 +239,9 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     const ws = mkWs("force-serve");
     write(ws, "src/plain.ts", plainFile());
 
-    await callTool("read_file", { mode: "slice", path: "src/plain.ts", range: "1-40", cwd: ws });
+    await callTool("tl_read_file", { mode: "slice", path: "src/plain.ts", range: "1-40", cwd: ws });
 
-    const forced = parse(await callTool("read_file", {
+    const forced = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "30-55", cwd: ws,
       taskEpoch: "new", force_serve: true,
     }));
@@ -259,9 +259,9 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     const ws = mkWs("batch-mixed");
     write(ws, "src/plain.ts", plainFile());
 
-    await callTool("read_file", { mode: "slice", path: "src/plain.ts", range: "1-20", cwd: ws });
+    await callTool("tl_read_file", { mode: "slice", path: "src/plain.ts", range: "1-20", cwd: ws });
 
-    const batch = parse(await callTool("read_file", {
+    const batch = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", ranges: ["1-20", "40-60"], cwd: ws, taskEpoch: "new",
     }));
     expect(batch.isError, JSON.stringify(batch.body)).toBe(false);
@@ -289,7 +289,7 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     write(ws, "src/wide.ts", wideLinesFile(2000));
 
     // Seed: a small head range, fully served and well under the byte cap.
-    const seed = parse(await callTool("read_file", {
+    const seed = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/wide.ts", range: "1-50", cwd: ws,
     }));
     expect(seed.isError, JSON.stringify(seed.body).slice(0, 400)).toBe(false);
@@ -297,7 +297,7 @@ describe("W-WIRE-2A: coverageReceiptFor wired into mode=slice (flag ON)", () => 
     // Re-ask a range that (a) OVERLAPS the already-served head — partial
     // coverage — and (b) is itself far too large for one serve's byte cap, so
     // the RESOLVED window sliceData describes is only a prefix of this ask.
-    const second = parse(await callTool("read_file", {
+    const second = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/wide.ts", range: "1-2000", cwd: ws, taskEpoch: "new",
     }));
     expect(second.isError, JSON.stringify(second.body).slice(0, 400)).toBe(false);
@@ -328,8 +328,8 @@ describe("W-WIRE-2A: flag OFF stays byte-identical to pre-2A behavior", () => {
     const ws = mkWs("flag-off");
     write(ws, "src/plain.ts", plainFile());
 
-    await callTool("read_file", { mode: "slice", path: "src/plain.ts", range: "1-40", cwd: ws });
-    const overlap = parse(await callTool("read_file", {
+    await callTool("tl_read_file", { mode: "slice", path: "src/plain.ts", range: "1-40", cwd: ws });
+    const overlap = parse(await callTool("tl_read_file", {
       mode: "slice", path: "src/plain.ts", range: "30-55", cwd: ws, taskEpoch: "new",
     }));
 

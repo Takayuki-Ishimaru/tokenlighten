@@ -38,7 +38,7 @@
   "decision": {
     "kind": "discover",
     "next": {
-      "tool": "search_files",
+      "tool": "tl_search_files",
       "arguments": {
         "cwd": "$WS",
         "action": "tree",

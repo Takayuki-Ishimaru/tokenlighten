@@ -21,7 +21,7 @@ async function excelModule() {
   return candidate.Workbook ? candidate : candidate.default!;
 }
 
-describe("edit_file encrypted artifact integration", () => {
+describe("tl_edit_file encrypted artifact integration", () => {
   let workspace: string;
   let originalArgv: string[];
   let originalRoot: string | undefined;
@@ -58,7 +58,7 @@ describe("edit_file encrypted artifact integration", () => {
 
   it("resolves both credential refs, edits, verifies, and rotates encryption", async () => {
     const { callTool } = await import("../server.js");
-    const result = await callTool("edit_file", {
+    const result = await callTool("tl_edit_file", {
       path: "locked.xlsx",
       credentialRef: "input-docs",
       outputCredentialRef: "output-docs",

@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.14.4",
+  "version": "0.15.0",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -44,6 +44,10 @@
       {
         "command": "tokenlighten.uninstallMachine",
         "title": "%command.uninstallMachine%"
+      },
+      {
+        "command": "tokenlighten.copilotGuide.applyToWorkspaceFile",
+        "title": "%command.copilotGuide.applyToWorkspaceFile%"
       },
       {
         "command": "tokenlighten.session.native",
@@ -120,6 +124,20 @@
           "scope": "resource",
           "description": "Guide profile injected during workspace setup."
         },
+        "tokenlighten.copilotGuide": {
+          "type": "string",
+          "enum": [
+            "standalone",
+            "agents-md"
+          ],
+          "enumDescriptions": [
+            "GitHub Copilot reads a compact TokenLighten guide from .github/copilot-instructions.md; setup stops Copilot attaching AGENTS.md while it holds only TokenLighten's block (Codex and Claude Code keep the full guide). In a window opened through a .code-workspace file, the setting goes into the workspace file after you confirm.",
+            "GitHub Copilot attaches AGENTS.md and reads the TokenLighten guide there."
+          ],
+          "default": "standalone",
+          "scope": "resource",
+          "description": "Which TokenLighten guide GitHub Copilot reads, applied by workspace setup."
+        },
         "tokenlighten.toolSurface": {
           "type": "string",
           "enum": [
@@ -157,7 +175,7 @@
     "@tokenlighten/mcp-server": "*",
     "@types/node": "^20",
     "@types/vscode": "^1.105.0",
-    "@vscode/vsce": "^3.9.2",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.6.3",
     "vitest": "^4.1.11"

@@ -3,7 +3,7 @@
  * round-17 finding 7a / INV-G row 14).
  *
  * THE MEASURED DEFECT (`r16_w.mts`, re-run at round-17 HEAD): `find BEFORE
- * [["src/pricing_5.ts",false]]` -> a `read_file` on that path sheds to a
+ * [["src/pricing_5.ts",false]]` -> a `tl_read_file` on that path sheds to a
  * ZERO-BYTE `refusal/cap-exceeded` -> `find AFTER [["src/pricing_5.ts",true]]`.
  * `servedFindEscalation.ts`'s per-file `served_this_session` flag was sourced
  * purely from `getReadPaths` (`state/session.ts`'s `readPaths` Set), which

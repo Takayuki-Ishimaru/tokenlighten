@@ -35,6 +35,7 @@
 
 import type { Kind, Limit, OmittedClass, ToolCall } from "@tokenlighten/types";
 
+import { emittableToolCall } from "../refusal.js";
 import type { ShedRecord, ShedRung } from "./wireBudget.js";
 
 // ---------------------------------------------------------------------------
@@ -184,13 +185,13 @@ export type WireLimitDecision = { readonly limit: Limit } | undefined;
 // unioned rather than one standing in for both.
 // ---------------------------------------------------------------------------
 
-/** Structurally a plain, non-array object — the shape a `read_file` `arguments` value and every `targets[]` entry takes. */
+/** Structurally a plain, non-array object — the shape a `tl_read_file` `arguments` value and every `targets[]` entry takes. */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /**
- * Every window a `read_file` continuation addresses, as `targets[]`-shaped
+ * Every window a `tl_read_file` continuation addresses, as `targets[]`-shaped
  * descriptors — regardless of which shape this tree's own continuation
  * producers use: the canonical `{targets:[...]}` array (`readBatch.ts`'s
  * `truncateRangedEntries`, `readFamily.ts`'s `deriveNext` ranged-omission
@@ -204,12 +205,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * practice; the bare form is handled anyway so this function does not depend
  * on that ordering).
  *
- * `undefined` means "not a read_file addressing shape this function
+ * `undefined` means "not a tl_read_file addressing shape this function
  * recognises" — every caller below treats that as "cannot safely union",
  * never as "addresses nothing".
  */
 function extractReadFileTargets(call: ToolCall): Array<Record<string, unknown>> | undefined {
-  if (call.tool !== "read_file" || !isPlainRecord(call.arguments)) return undefined;
+  if (call.tool !== "tl_read_file" || !isPlainRecord(call.arguments)) return undefined;
   const args = call.arguments;
   const rawTargets = args["targets"];
   if (Array.isArray(rawTargets)) {
@@ -324,10 +325,32 @@ export function unionBatchContinuations(
   // break `rangeFullBatchContinuation.spec.ts`'s own "auto, not merely
   // absent" pin once a union (rather than a single dropped entry) started
   // reaching that pin's own call site.
-  return {
-    tool: "read_file",
+  const raw = {
+    tool: "tl_read_file",
     arguments: { targets: merged, content: contentFull ? "full" : "auto" },
   } as ToolCall;
+  // WP-L item 2 (eval-0929 §9, 2026-09-29): canonicalize the merged call
+  // through the SAME boundary every OTHER continuation in this pipeline
+  // already passes through — `emittableToolCall` -> `canonicalToolCall` ->
+  // `attributedContinuationArguments` -> `inheritCallerResponseBudget`
+  // (protocol/envelope.ts). The raw literal above carries ONLY `targets`/
+  // `content`: no `budget`, `cwd`, `lane` or task continuity, because it is
+  // hand-built from two ALREADY-canonicalized inputs (`previous`/`incoming`,
+  // both minted via `emittableToolCall` by `shedBatchEntry`/
+  // `truncateRangedEntries`) instead of being re-canonicalized itself — the
+  // one seam in this whole subsystem that skipped it. Measured live: a
+  // handle-addressed two-target ranged batch (`targets:[{handle,range},
+  // {handle,range}]`) under a small declared `budget.bytes` unions a
+  // construction-time drop with a rung's own cut, and the caller who then
+  // ran THIS continuation verbatim (AGENTS.md) got a response re-opened to
+  // the calibrated server ceiling instead of the budget it had just declared
+  // (a 900 B caller budget followed by a ~19.7 KB next hop — about 22x over,
+  // and the dropped target's OWN window was otherwise undisclosed anywhere
+  // else on the wire: no `entries[]` item, no top-level omission). Falls
+  // back to the raw literal only if canonicalization itself rejects the
+  // merged call — defense in depth, never a silent drop of the whole
+  // continuation.
+  return emittableToolCall(raw) ?? raw;
 }
 
 /**

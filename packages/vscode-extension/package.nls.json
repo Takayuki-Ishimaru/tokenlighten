@@ -5,6 +5,7 @@
   "command.usage.show": "TokenLighten: Show This Workspace's Usage and Savings",
   "command.logs.export": "TokenLighten: Export This Workspace's Usage Logs",
   "command.uninstallMachine": "TokenLighten: Uninstall TokenLighten from This Machine",
+  "command.copilotGuide.applyToWorkspaceFile": "TokenLighten: Apply Copilot guide to workspace file",
   "view.controlCenter": "Workspace",
   "config.enabled": "Enable TokenLighten in this workspace.",
   "config.language": "Display language for all TokenLighten extension UI.",

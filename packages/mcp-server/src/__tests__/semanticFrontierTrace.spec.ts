@@ -30,7 +30,7 @@ async function readTaskPack(args: Record<string, unknown>): Promise<Record<strin
   const { callTool } = await import("../server.js") as unknown as {
     callTool: (name: string, args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
   };
-  const response = await callTool("read_file", args);
+  const response = await callTool("tl_read_file", args);
   return JSON.parse(response.content[0]!.text) as Record<string, unknown>;
 }
 
@@ -59,9 +59,9 @@ function traceSeed(tag: string, extra: Record<string, unknown> = {}, guardEnable
 }
 
 function finalTrace(root: string, kind: string, text: string, seed: SemanticFrontierTraceSeed): string {
-  return runWithProtocolCall({ tool: "read_file", kind: kind as "read.task_pack", workspace: root }, () => {
+  return runWithProtocolCall({ tool: "tl_read_file", kind: kind as "read.task_pack", workspace: root }, () => {
     noteSemanticFrontierTraceSeed(seed);
-    return finalizeProtocolResponse("read_file", { content: [{ type: "text", text }] }).content[0]!.text;
+    return finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text }] }).content[0]!.text;
   });
 }
 
@@ -74,7 +74,7 @@ const minimalTaskPack = (): string => JSON.stringify({
 
 function decisionContract(nextPath: string): any {
   return {
-    next_call: { tool: "read_file", arguments: { targets: [{ path: nextPath, range: "1-1" }] } },
+    next_call: { tool: "tl_read_file", arguments: { targets: [{ path: nextPath, range: "1-1" }] } },
     capability_gaps: [],
   };
 }
@@ -85,7 +85,7 @@ function projectDecisionWithTrace(
   result: Record<string, unknown>,
   guardEnabled = true,
 ): Record<string, unknown> {
-  return runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root }, () => {
+  return runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root }, () => {
     noteSemanticFrontierTraceSeed(traceSeed(tag, {}, guardEnabled));
     const decision = projectTaskDecision({
       result,
@@ -93,7 +93,7 @@ function projectDecisionWithTrace(
       canonicalKind: "discover",
       evidence: [],
     });
-    finalizeProtocolResponse("read_file", { content: [{ type: "text", text: JSON.stringify({
+    finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: JSON.stringify({
       task: { id: "task-trace", coverage: "complete" }, profile: "generic", evidence: [], decision,
     }) }] });
     return decision as unknown as Record<string, unknown>;
@@ -269,12 +269,12 @@ describe("semantic frontier final attestation", () => {
     const tracePath = getTracePath(root);
     setTraceEnabledForTest(true);
     await Promise.all(["alpha", "beta"].map(async (tag) =>
-      runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root }, async () => {
+      runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root }, async () => {
         noteSemanticFrontierTraceSeed(traceSeed(tag));
-        const next = { tool: "read_file", arguments: { handle: `h-${tag}`, range: "1-1" } };
+        const next = { tool: "tl_read_file", arguments: { handle: `h-${tag}`, range: "1-1" } };
         noteSemanticFrontierDecisionSuppression(tag, next);
         await new Promise<void>((resolve) => setTimeout(resolve, tag === "alpha" ? 4 : 1));
-        finalizeProtocolResponse("read_file", { content: [{ type: "text", text: JSON.stringify({
+        finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: JSON.stringify({
           task: { id: `task-${tag}`, coverage: "complete" }, profile: "generic", evidence: [],
           decision: { kind: "discover", next },
         }) }] });
@@ -290,13 +290,13 @@ describe("semantic frontier final attestation", () => {
     const root = workspace("nested");
     const tracePath = getTracePath(root);
     setTraceEnabledForTest(true);
-    runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root }, () => {
+    runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root }, () => {
       noteSemanticFrontierTraceSeed(traceSeed("outer"));
-      runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root }, () => {
+      runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root }, () => {
         noteSemanticFrontierTraceSeed(traceSeed("inner"));
-        finalizeProtocolResponse("read_file", { content: [{ type: "text", text: minimalTaskPack() }] });
+        finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: minimalTaskPack() }] });
       });
-      finalizeProtocolResponse("read_file", { content: [{ type: "text", text: minimalTaskPack() }] });
+      finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: minimalTaskPack() }] });
     });
     const events = recordsAfter(tracePath, 0).filter((record) => record["event"] === "semantic_frontier_attestation");
     expect(events.map((event) => event["origin_id"]).sort()).toEqual(["sha256:inner", "sha256:outer"]);
@@ -407,9 +407,9 @@ describe("semantic frontier final attestation", () => {
         ];
         annotateSemanticFrontierContinuation({ mode: "task_pack", coverage: "complete", missing: [], surfaces }, "contract", true);
         const before = fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8").trim().split("\n").filter(Boolean).length : 0;
-        const result = runWithProtocolCall({ tool: "read_file", kind: "read.task_pack", workspace: root, args: { maxBytes } }, () => {
+        const result = runWithProtocolCall({ tool: "tl_read_file", kind: "read.task_pack", workspace: root, args: { maxBytes } }, () => {
           noteSemanticFrontierTraceSeed(traceSeed(`shed-${guardEnabled}`, {}, guardEnabled));
-          return finalizeProtocolResponse("read_file", { content: [{ type: "text", text: JSON.stringify({
+          return finalizeProtocolResponse("tl_read_file", { content: [{ type: "text", text: JSON.stringify({
             task: { id: "task-shed", coverage: "complete" }, profile: "generic",
             evidence: projectEvidence(surfaces), decision: { kind: "done" },
           }) }] });
@@ -424,9 +424,10 @@ describe("semantic frontier final attestation", () => {
     setTraceEnabledForTest(true);
     // At this cap, rung 5 removes the optional `style` entry. The pre-wire
     // projection observed a suppression, but it must not attest to a row that
-    // never reached the caller.
-    const on = emit(true, 450);
-    const off = emit(false, 450);
+    // never reached the caller. (455, not 450: since the tools took the `tl_`
+    // prefix, 2026-10-02, the shed pack is 453 B and 450 B is refused.)
+    const on = emit(true, 455);
+    const off = emit(false, 455);
     const onPacket = JSON.parse(on.text) as { evidence: Array<{ handle: string; remaining?: string[] }> };
     const offPacket = JSON.parse(off.text) as { evidence: Array<{ handle: string; remaining?: string[] }> };
     expect(on.text).toBe(off.text);
@@ -480,7 +481,7 @@ describe("semantic frontier final attestation", () => {
 // arm by construction, regardless of what the treatment actually did.
 //
 // These call `finalizeSemanticFrontierAttestation` directly (unit-level,
-// bypassing the full read_file pipeline) so both arms' env shape is
+// bypassing the full tl_read_file pipeline) so both arms' env shape is
 // explicit and isolated: `guard_enabled: true` reproduces the LEGACY arm
 // exactly as before (byte-identical — same witness-based signal, same
 // result), and `guard_enabled: false` with `demoted_count` reproduces the

@@ -366,7 +366,7 @@ describe("V11-04 projection — deriveEditClosureOps (A1-pre edit-driven closure
       }),
       taskId: "t",
     });
-    // A single batched edits[] call landed BOTH files in one edit_file success.
+    // A single batched edits[] call landed BOTH files in one tl_edit_file success.
     const ops = deriveEditClosureOps(projected, ["src/a.ts", "src/b.ts"]);
     expect(new Set(ops.map((op) => (op as { id: string }).id))).toEqual(new Set(["pack:o1", "pack:o2"]));
   });
@@ -537,7 +537,7 @@ describe("V11-04 dispatch seam — flags-off wire byte identity", () => {
     return text.replace(/"id":"tlh_task_[A-Za-z0-9_-]+"/, '"id":"<task-handle>"');
   }
 
-  it("a real read_file task_pack response is byte-identical with the flag on and off", async () => {
+  it("a real tl_read_file task_pack response is byte-identical with the flag on and off", async () => {
     const ws = mkWs("bytes");
     write(ws, "src/rate.ts", "export function rate(n: number): number {\n  return n * 2;\n}\n");
     write(ws, "src/use.ts", "import { rate } from './rate.js';\nexport const x = rate(2);\n");
@@ -546,11 +546,11 @@ describe("V11-04 dispatch seam — flags-off wire byte identity", () => {
 
     delete process.env["TL_REASONING_IR_V2"];
     freshSession(ws);
-    const off = (await callTool("read_file", args)) as { content: Array<{ text: string }> };
+    const off = (await callTool("tl_read_file", args)) as { content: Array<{ text: string }> };
 
     process.env["TL_REASONING_IR_V2"] = "1";
     freshSession(ws);
-    const on = (await callTool("read_file", args)) as { content: Array<{ text: string }> };
+    const on = (await callTool("tl_read_file", args)) as { content: Array<{ text: string }> };
 
     // Guard against the normalization hiding an absence.
     expect(off.content[0]!.text).toContain("tlh_task_");
@@ -581,7 +581,7 @@ describe("V11-04 dispatch seam — recordReasoningIrV2ClosureFromEdit (A1-pre)",
     if (!loadedAfterPack.ok) return;
     expect(loadedAfterPack.state.obligations[0]).toMatchObject({ id: "pack:o1", state: "open" });
 
-    // 2) edit_file: the certificate's own path (src/a.ts) lands.
+    // 2) tl_edit_file: the certificate's own path (src/a.ts) lands.
     recordReasoningIrV2ClosureFromEdit({ workspaceRoot: ws, lane: "", taskId: "q-1", editedPaths: ["src/a.ts"] });
     expect(traceEvents(ws)).toContain("reasoning_ir_v2_edit_closure");
     const loadedAfterEdit = loadIrState(ws, key);

@@ -24,7 +24,7 @@ describe("ObligationLedger", () => {
 
     expect(ledger.snapshot().obligations).toEqual([{ ...obligation, proof: { type: "served", witness: "h-tax" } }]);
     // RE-PIN (A-F4, 2026-08-28): these two were `.toThrow(...)`. Both throws sat
-    // on the read_file / search_files hot path, and the conflicting re-prove is
+    // on the tl_read_file / tl_search_files hot path, and the conflicting re-prove is
     // reached by the P0-2 repair flow itself — taskContractStore proves the
     // open-universe obligation with an `explicit-gap` capability witness and a
     // later prescribed absence re-proves it as `authoritative-absent`. The
@@ -79,8 +79,8 @@ describe("ObligationLedger", () => {
   });
 
   /**
-   * A-F4 hot-path totality. Both throws were reachable from read_file /
-   * search_files dispatch; a thrown ledger error there becomes an RPC error
+   * A-F4 hot-path totality. Both throws were reachable from tl_read_file /
+   * tl_search_files dispatch; a thrown ledger error there becomes an RPC error
    * handed to a live agent. This drives the exact P0-2 repair sequence — cap
    * exhaustion, then a conflicting re-prove of an already-gapped obligation —
    * and asserts the API is total.

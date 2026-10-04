@@ -145,7 +145,7 @@ describe("allowPathFallbackApplied — stale handle, allowPathFallback:true", ()
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle: STALE_HANDLE,
         path: "src/a.ts",
@@ -173,7 +173,7 @@ describe("allowPathFallbackApplied — stale handle, allowPathFallback:true", ()
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle: STALE_HANDLE,
         path: "src/a.ts",
@@ -196,7 +196,7 @@ describe("allowPathFallbackApplied — stale handle, allowPathFallback:true", ()
     await srv.initialize();
 
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle: STALE_HANDLE,
         path: "src/a.ts",
@@ -222,7 +222,7 @@ describe("allowPathFallbackApplied — stale handle, allowPathFallback:true", ()
 
     const before = readFile(wsDir, "src/dup.ts");
     const res = await srv.rpc(2, "tools/call", {
-      name: "edit_file",
+      name: "tl_edit_file",
       arguments: {
         handle: STALE_HANDLE,
         path: "src/dup.ts",

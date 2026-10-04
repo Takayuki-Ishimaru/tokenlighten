@@ -192,7 +192,7 @@
   "limit": {
     "cause": "wire",
     "next": {
-      "tool": "search_files",
+      "tool": "tl_search_files",
       "arguments": {
         "cwd": "$WS",
         "budget": {

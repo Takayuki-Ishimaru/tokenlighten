@@ -79,7 +79,7 @@ const TARGET_FILES: readonly { target?: StubTargetId; file: string }[] = [
   { file: "AGENTS.md" },
   // "copilot-agent" is deliberately excluded: it renders a VS Code Copilot
   // Chat custom-agent file whose whole point is to point a live MCP server
-  // registration's tools (`tokenlighten/read_file` etc., tied to this
+  // registration's tools (`tokenlighten/tl_read_file` etc., tied to this
   // repo's own `.vscode/mcp.json`) at a runSubagent child. `injectForTarget`
   // only drops generic guide TEXT into a foreign repo (no MCP config, no
   // notion of "this repo uses VS Code") via one shared body for every

@@ -166,7 +166,7 @@ function calibratedSummary(
       workspaceId: "workspace",
       sessionId: "session",
       client,
-      tool: "read_file" as const,
+      tool: "tl_read_file" as const,
       outcome: "ok" as const,
       durationMs: 1,
       responseBytes: 0,
@@ -270,7 +270,7 @@ describe("AI log workspace attribution", () => {
       message: {
         id,
         model: "claude-test",
-        content: [{ type: "tool_use", name: "mcp__tokenlighten__read_file" }],
+        content: [{ type: "tool_use", name: "mcp__tokenlighten__tl_read_file" }],
         usage: {
           input_tokens: 10,
           cache_creation_input_tokens: 2,
@@ -309,7 +309,7 @@ describe("AI log workspace attribution", () => {
         type: "response_item",
         payload: {
           type: "function_call",
-          name: "mcp__tokenlighten__read_file",
+          name: "mcp__tokenlighten__tl_read_file",
         },
       },
       {
@@ -382,7 +382,7 @@ describe("privacy-preserving usage recording", () => {
         sessionId: "session",
       });
       recorder.record({
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 12,
         responseBytes: 400,
@@ -398,7 +398,7 @@ describe("privacy-preserving usage recording", () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       client: "codex",
-      tool: "read_file",
+      tool: "tl_read_file",
       estimatedResponseTokens: 100,
       estimatedSavedTokens: 400,
     });
@@ -443,7 +443,7 @@ describe("privacy-preserving usage recording", () => {
           directory,
           sessionId: `session-${client}`,
         }).record({
-          tool: "read_file",
+          tool: "tl_read_file",
           outcome: "ok",
           durationMs: 1,
           responseBytes: 40,
@@ -492,7 +492,7 @@ describe("privacy-preserving usage recording", () => {
         sessionId: "overhead-session",
       });
       recorder.record({
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 5,
         responseBytes: 400,
@@ -549,7 +549,7 @@ describe("privacy-preserving usage recording", () => {
       workspaceId: "workspace",
       sessionId: "same-session",
       client: "claude-code" as const,
-      tool: "read_file" as const,
+      tool: "tl_read_file" as const,
       outcome: "ok" as const,
       durationMs: 1,
       baselineMethod: "file-bytes" as const,
@@ -604,7 +604,7 @@ describe("privacy-preserving usage recording", () => {
       workspaceId: "workspace",
       sessionId: "session",
       client: "claude-code",
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       durationMs: 1,
       responseBytes: 500,
@@ -638,7 +638,7 @@ describe("privacy-preserving usage recording", () => {
         sessionId: "task-group-session",
       });
       recorder.record({
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 5,
         responseBytes: 8_155,
@@ -647,7 +647,7 @@ describe("privacy-preserving usage recording", () => {
         taskRef: "q-recorder-task",
       });
       recorder.record({
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 5,
         responseBytes: 16_082,
@@ -694,7 +694,7 @@ describe("privacy-preserving usage recording", () => {
         workspaceId: "workspace",
         sessionId: "v1-session",
         client: "codex",
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 12,
         responseBytes: 400,
@@ -725,6 +725,42 @@ describe("privacy-preserving usage recording", () => {
     });
   });
 
+  it("reads a line written before the tl_ rename (tool \"read_file\") as tl_read_file and keeps counting it", () => {
+    const directory = join(tmpdir(), `tokenlighten-usage-pre-rename-${randomUUID()}`);
+    mkdirSync(directory, { recursive: true });
+    const occurredAt = "2026-10-01T00:00:00.000Z";
+    const line = (eventId: string, tool: string): string => `${JSON.stringify({
+      schemaVersion: 2,
+      eventId,
+      occurredAt,
+      workspaceId: "workspace",
+      sessionId: "pre-rename-session",
+      client: "vscode",
+      tool,
+      outcome: "ok",
+      durationMs: 3,
+      responseBytes: 400,
+      estimatedResponseTokens: 100,
+      baselineTokens: null,
+      estimatedSavedTokens: null,
+      baselineMethod: null,
+      writeEnabled: true,
+      taskRef: null,
+    })}\n`;
+    appendFileSync(
+      join(directory, `usage-${occurredAt.slice(0, 10)}.ndjson`),
+      line("old-read", "read_file") + line("old-edit", "edit_file") + line("new-read", "tl_read_file") + line("stranger", "read_code"),
+    );
+
+    const events = readUsageEvents(directory);
+    expect(events.map((event) => [event.eventId, event.tool])).toEqual([
+      ["old-read", "tl_read_file"],
+      ["old-edit", "tl_edit_file"],
+      ["new-read", "tl_read_file"],
+    ]);
+    expect(summarizeUsage(events).byTool).toEqual({ tl_read_file: 2, tl_search_files: 0, tl_edit_file: 1 });
+  });
+
   it("reads a directory mixing schemaVersion:1 and schemaVersion:2 lines together", () => {
     const directory = join(tmpdir(), `tokenlighten-usage-mixed-${randomUUID()}`);
     mkdirSync(directory, { recursive: true });
@@ -737,7 +773,7 @@ describe("privacy-preserving usage recording", () => {
       workspaceId: "workspace",
       sessionId: "mixed-session-1",
       client: "codex",
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       durationMs: 1,
       responseBytes: 40,
@@ -852,7 +888,7 @@ describe("privacy-preserving usage recording", () => {
       occurredAt: "2026-08-10T00:00:00.000Z",
       workspaceId: "workspace",
       sessionId: "session",
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       durationMs: 1,
       baselineMethod: "file-bytes",
@@ -907,7 +943,7 @@ describe("privacy-preserving usage recording", () => {
           payload: {
             type: "mcp_tool_call_begin",
             server: "tokenlighten",
-            tool: "read_file",
+            tool: "tl_read_file",
           },
         },
         {
@@ -936,7 +972,7 @@ describe("privacy-preserving usage recording", () => {
             model: "claude-sonnet-4-20250514",
             content: [{
               type: "tool_use",
-              name: "mcp__tokenlighten__search_files",
+              name: "mcp__tokenlighten__tl_search_files",
             }],
             usage: {
               input_tokens: 10,
@@ -999,7 +1035,7 @@ describe("privacy-preserving usage recording", () => {
       workspaceId: "workspace",
       sessionId: "session",
       client: "codex",
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       durationMs: 1,
       responseBytes: 800,
@@ -1259,7 +1295,7 @@ describe("privacy-preserving usage recording", () => {
       workspaceId: "workspace-id",
       sessionId: "session",
       client: "claude-code",
-      tool: "read_file",
+      tool: "tl_read_file",
       durationMs: 1,
       responseBytes: 0,
       estimatedResponseTokens: 0,
@@ -1353,7 +1389,7 @@ describe("privacy-preserving usage recording", () => {
       occurredAt: "2026-08-11T00:00:00.000Z",
       sessionId: "session",
       client: "claude-code",
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       durationMs: 1,
       baselineMethod: "file-bytes",
@@ -1403,7 +1439,7 @@ describe("privacy-preserving usage recording", () => {
       workspaceId: "workspace",
       sessionId: "session",
       client: "codex",
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       durationMs: 1,
       responseBytes: 40,
@@ -1477,7 +1513,7 @@ describe("privacy-preserving usage recording", () => {
           payload: {
             type: "mcp_tool_call_begin",
             server: "tokenlighten",
-            tool: "read_file",
+            tool: "tl_read_file",
           },
         },
         {
@@ -1522,7 +1558,7 @@ describe("privacy-preserving usage recording", () => {
             model: "claude-sonnet-4-20250514",
             content: [{
               type: "tool_use",
-              name: "mcp__tokenlighten__search_files",
+              name: "mcp__tokenlighten__tl_search_files",
             }],
             usage: {
               input_tokens: 10,
@@ -1574,7 +1610,7 @@ describe("privacy-preserving usage recording", () => {
         workspaceId: "opaque",
         sessionId: "opaque",
         client: "other",
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 1,
         responseBytes: 4,
@@ -1612,7 +1648,7 @@ describe("privacy-preserving usage recording", () => {
         workspaceId: "opaque",
         sessionId: "opaque",
         client: "other",
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 1,
         responseBytes: 4,
@@ -1640,7 +1676,7 @@ describe("privacy-preserving usage recording", () => {
         workspaceId: "opaque",
         sessionId: "opaque",
         client: "other",
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 1,
         responseBytes: 4,
@@ -1674,7 +1710,7 @@ describe("createUsageRecorder — diagnostics ring integration", () => {
         serverVersion: "9.9.9-test",
       });
       recorder.record({
-        tool: "search_files",
+        tool: "tl_search_files",
         outcome: "error",
         durationMs: 7,
         responseBytes: 0,
@@ -1697,7 +1733,7 @@ describe("createUsageRecorder — diagnostics ring integration", () => {
     expect(ring?.server_version).toBe("9.9.9-test");
     expect(ring?.calls).toEqual([
       expect.objectContaining({
-        tool: "search_files",
+        tool: "tl_search_files",
         mode: "tree",
         kind: "refusal",
         ok: false,
@@ -1715,7 +1751,7 @@ describe("createUsageRecorder — diagnostics ring integration", () => {
     // Gate 1: default test NODE_ENV (no override) disables the recorder entirely.
     const testGated = createUsageRecorder({ workspaceRoot, directory, diagDirectory });
     testGated.record({
-      tool: "read_file",
+      tool: "tl_read_file",
       outcome: "ok",
       durationMs: 1,
       responseBytes: 1,
@@ -1734,7 +1770,7 @@ describe("createUsageRecorder — diagnostics ring integration", () => {
     try {
       const envGated = createUsageRecorder({ workspaceRoot, directory, diagDirectory });
       envGated.record({
-        tool: "read_file",
+        tool: "tl_read_file",
         outcome: "ok",
         durationMs: 1,
         responseBytes: 1,

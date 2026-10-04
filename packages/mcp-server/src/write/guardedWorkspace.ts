@@ -168,7 +168,7 @@ export function guardCwd(
  * Stage 2 — run the routing/boundary guard for a WRITE-capable call.
  *
  * Mirrors the dispatch's own `if (ALLOW_WRITE) { … }` gate: on a read-only
- * server edit_file must keep reporting that writes are disabled rather than a
+ * server tl_edit_file must keep reporting that writes are disabled rather than a
  * routing refusal for a write it would never perform, so the guard is skipped
  * and the pass is still issued.
  */

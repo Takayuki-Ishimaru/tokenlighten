@@ -509,7 +509,7 @@ export async function collectSymbolsChecked(
  * will ATTEMPT a real tree-sitter parse for `language` (a WASM grammar can
  * still fail to load at runtime — see `CollectSymbolsAttempt.parserAvailable`
  * for that half). Exported so callers that route by "does a collector exist
- * for this language" (PI-06's parser-fed `search_files action=symbols`
+ * for this language" (PI-06's parser-fed `tl_search_files action=symbols`
  * integration) don't hand-duplicate `COLLECTOR_LANGS` and drift from it.
  */
 export function symbolCollectorSupports(language: string): boolean {

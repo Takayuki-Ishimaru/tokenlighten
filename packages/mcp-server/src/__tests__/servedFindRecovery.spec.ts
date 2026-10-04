@@ -311,15 +311,15 @@ describe("L2 — repeated all-served find escalates to protocol", () => {
     // unconditional since D10, 2026-08-14).
     const unlock = body["unlock"] as Record<string, unknown>;
     const transitions = unlock["accepted_transitions"] as string[];
-    expect(transitions).toContain(`edit_file handle=${editHandle}`);
+    expect(transitions).toContain(`tl_edit_file handle=${editHandle}`);
     expect(transitions).toContain("challenge");
     expect(transitions).toContain("taskEpoch:new");
-    expect(transitions.some((t) => t.startsWith("search_files action=find path="))).toBe(true);
+    expect(transitions.some((t) => t.startsWith("tl_search_files action=find path="))).toBe(true);
     expect(unlock["challenge"]).toBeDefined();
 
     // …and one executable next_call, marked as the template it is.
     const nextCall = body["next_call"] as Record<string, unknown>;
-    expect(nextCall["tool"]).toBe("edit_file");
+    expect(nextCall["tool"]).toBe("tl_edit_file");
     expect((nextCall["arguments"] as Record<string, unknown>)["handle"]).toBe(editHandle);
     expect(body["next_call_is_template"]).toBe(true);
   });
@@ -406,8 +406,8 @@ describe("L2 — repeated all-served find escalates to protocol", () => {
 
   // C1 (2026-09-03, INV-C F1): the certificate-armed tests above proved the
   // ladder for the task-pack path; this pins the SAME ladder for a session
-  // that never opens a task pack at all — plain `read_file targets:[...]` +
-  // `search_files find` (INV-C's own repro: 4 byte-identical repeats of a
+  // that never opens a task pack at all — plain `tl_read_file targets:[...]` +
+  // `tl_search_files find` (INV-C's own repro: 4 byte-identical repeats of a
   // fully-served find, forever answered with a bare, ignorable
   // `all_served:true` and no `all_served_occurrence`, no unlock, no receipt).
   // `PLAIN_MODE_LADDER_ID` (servedFindEscalation.ts) now gives that mode its

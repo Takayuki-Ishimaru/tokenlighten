@@ -16,7 +16,7 @@
  * reproduction. This file is independent, more exhaustive coverage focused
  * on the mechanism's edges: append/rewrite/shrink, and — most importantly —
  * the four required NO-FALSE-ALARM controls (unchanged file, this session's
- * own `edit_file`, a genuinely new task epoch, another lane), which R04
+ * own `tl_edit_file`, a genuinely new task epoch, another lane), which R04
  * itself does not exercise.
  *
  * Reuses `helpers/qualityFirstScenarios.ts`'s server-spawn/config machinery
@@ -74,7 +74,7 @@ function freshWorkspace(config: ConfigName, tag: string): { ws: string; server: 
 
 /** First hop of the confirmed R04 multitarget-mix shape (plan §4 payload). */
 async function firstMultiTargetHop(server: ServerHandle, ws: string): Promise<any> {
-  const { body } = await server.callTool("read_file", {
+  const { body } = await server.callTool("tl_read_file", {
     targets: [{ path: "mix/alpha.txt", range: "11-90" }, { path: "mix/beta.txt", range: "31-100" }],
     content: "auto",
     budget: { bytes: 6500 },
@@ -138,7 +138,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       expect(all.some((r) => r?.["kind"] === "refusal"), `unexpected refusal on an untouched file: ${JSON.stringify(all)}`).toBe(false);
     }, 60_000);
 
-    it("CONTROL: this session's OWN edit_file between hops is never mistaken for an external change", async () => {
+    it("CONTROL: this session's OWN tl_edit_file between hops is never mistaken for an external change", async () => {
       const { ws, server } = freshWorkspace(config, "self-edit");
       await server.initialize();
       writeSelfIdFile(ws, "mix/alpha.txt", 200, "csOld", 120);
@@ -147,11 +147,11 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       const first = await firstMultiTargetHop(server, ws);
       const { next } = extractNext(first);
       if (!next) return;
-      // A same-length, in-range edit via THIS session's own edit_file — the
+      // A same-length, in-range edit via THIS session's own tl_edit_file — the
       // ledger threads the post-edit sha through in place (session.ts's
       // `transformServedRangesAcrossServerEdit`), so this must never trip
       // the staleness refusal the mutation tests above require.
-      const editRes = await server.callTool("edit_file", {
+      const editRes = await server.callTool("tl_edit_file", {
         edits: [{ path: "mix/alpha.txt", search: "csOld-0015", replace: "csOld-0015" }],
         cwd: ws,
       });
@@ -180,7 +180,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         // this is the exact false-alarm shape a fresh epoch must not trip.
         writeSelfIdFile(ws, "mix/alpha.txt", 200, "csNew", 120);
       }
-      const fresh = await server.callTool("read_file", {
+      const fresh = await server.callTool("tl_read_file", {
         targets: [{ path: "mix/alpha.txt", range: "11-90" }],
         content: "auto",
         budget: { bytes: 6500 },
@@ -199,7 +199,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       writeSelfIdFile(ws, "mix/alpha.txt", 200, "csOld", 120);
       writeSelfIdFile(ws, "mix/beta.txt", 200, "csBeta", 120);
 
-      const laneAFirst = await server.callTool("read_file", {
+      const laneAFirst = await server.callTool("tl_read_file", {
         targets: [{ path: "mix/alpha.txt", range: "11-90" }, { path: "mix/beta.txt", range: "31-100" }],
         content: "auto",
         budget: { bytes: 6500 },
@@ -212,7 +212,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
       // A DIFFERENT lane's first-ever touch of the identical path must never
       // be judged against lane A's served-range ledger.
-      const laneBFirst = await server.callTool("read_file", {
+      const laneBFirst = await server.callTool("tl_read_file", {
         targets: [{ path: "mix/alpha.txt", range: "11-90" }],
         content: "auto",
         budget: { bytes: 6500 },
@@ -232,7 +232,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       writeSelfIdFile(ws, "hb1.txt", 200, "csHone", 120);
       writeSelfIdFile(ws, "hb2.txt", 200, "csHtwo", 120);
 
-      const mint = await server.callTool("read_file", {
+      const mint = await server.callTool("tl_read_file", {
         targets: [{ path: "hb1.txt", range: "1-5" }, { path: "hb2.txt", range: "1-5" }],
         content: "auto",
         task: { epoch: "new" },
@@ -247,7 +247,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         throw new Error(`could not mint two handles from: ${JSON.stringify(mint.body)}`);
       }
 
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         targets: [{ handle: h1, range: "11-90" }, { handle: h2, range: "31-100" }],
         content: "auto",
         budget: { bytes: 6500 },
@@ -278,7 +278,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       await server.initialize();
       writeSelfIdFile(ws, "solo.txt", 200, "csSolo", 120);
 
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         targets: [{ path: "solo.txt", range: "1-150" }],
         content: "auto",
         budget: { bytes: 3000 },
@@ -301,7 +301,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       await server.initialize();
       writeSelfIdFile(ws, "wholefile.txt", 200, "csFull", 55);
 
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         targets: [{ path: "wholefile.txt" }],
         content: "full",
         budget: { bytes: 2500 },
@@ -357,7 +357,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       // 2000 lines * 120 B >> READ_SYMBOL_CAP_BYTES (24576 B).
       writeSelfIdFile(ws, "bignative.txt", 2000, "csNat", 120);
 
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         targets: [{ path: "bignative.txt", range: "1-2000" }],
         content: "auto",
         budget: { bytes: 200000 }, // comfortably above the 24576 B per-call cap
@@ -385,7 +385,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       await server.initialize();
       writeSelfIdFile(ws, "bigranges.txt", 2000, "csRp", 120);
 
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         targets: [{ path: "bigranges.txt", ranges: ["1-50", "500-2000"] }],
         content: "auto",
         budget: { bytes: 200000 },
@@ -445,7 +445,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       await server.initialize();
       writeSelfIdFile(ws, "solo2.txt", 50, "csSolo2", 60);
 
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         targets: [{ path: "solo2.txt", range: "1-50" }],
         content: "auto",
         task: { epoch: "new" },
@@ -460,7 +460,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       writeSelfIdFile(ws, "solo2.txt", 50, "csSolo2New", 60);
       // Same lane, same (implicit, continuing) epoch, no task binding on
       // EITHER call — an independent re-read, not a followed `next`.
-      const second = await server.callTool("read_file", {
+      const second = await server.callTool("tl_read_file", {
         targets: [{ path: "solo2.txt", range: "1-50" }],
         content: "auto",
         cwd: ws,
@@ -502,7 +502,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         content: "auto",
         cwd: ws,
       };
-      const first = await server.callTool("read_file", { ...mixedRequest, task: { epoch: "new" } });
+      const first = await server.callTool("tl_read_file", { ...mixedRequest, task: { epoch: "new" } });
       expect(
         (first.body as Record<string, unknown>)?.["kind"],
         `expected the S6 mixed-batch dispatch: ${JSON.stringify(first.body).slice(0, 400)}`,
@@ -511,7 +511,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       writeSelfIdFile(ws, "sixa.txt", 50, "csSixNew", 60);
       // Same lane, same (implicit, continuing) epoch, no task binding on
       // EITHER call — an independent re-read, not a followed `next`.
-      const second = await server.callTool("read_file", mixedRequest);
+      const second = await server.callTool("tl_read_file", mixedRequest);
       expect(
         (second.body as Record<string, unknown>)?.["kind"],
         `an independent re-read via the mixed symbol/path batch must serve fresh, not refuse: ${JSON.stringify(second.body).slice(0, 500)}`,
@@ -540,7 +540,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
       // Hop 1: a plain, complete ask for 1-40 — nothing left undelivered, so
       // nothing is minted as a continuation for this path.
-      const first = await server.callTool("read_file", {
+      const first = await server.callTool("tl_read_file", {
         targets: [{ path: "grow.txt", range: "1-40" }],
         content: "auto",
         task: { epoch: "new" },
@@ -555,7 +555,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
         writeSelfIdFile(ws, "grow.txt", 200, newTag, 40); // simulate an external, native-tool edit
         const lo = 41 + cycle * 40;
         const hi = lo + 39;
-        const resp = await server.callTool("read_file", {
+        const resp = await server.callTool("tl_read_file", {
           targets: [{ path: "grow.txt", range: `${lo}-${hi}` }],
           content: "auto",
           cwd: ws,
@@ -596,7 +596,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
       writeSelfIdFile(ws, "mix/alpha.txt", 200, "csNew", 120);
       // Independently CONSTRUCTED — not the literal `next` object (no shared
       // budget/cwd-cache/task fields) — naming the SAME window BY PATH.
-      const reissue = await server.callTool("read_file", {
+      const reissue = await server.callTool("tl_read_file", {
         targets: [{ path: "mix/alpha.txt", range: alphaRange }],
         content: "auto",
         cwd: ws,
@@ -627,7 +627,7 @@ for (const config of CONFIG_NAMES as readonly ConfigName[]) {
 
       writeSelfIdFile(ws, "mix/alpha.txt", 200, "csNew", 120);
       // Overlaps the minted window's start but reaches well past its end too.
-      const partial = await server.callTool("read_file", {
+      const partial = await server.callTool("tl_read_file", {
         targets: [{ path: "mix/alpha.txt", range: `${lo}-${hi + 50}` }],
         content: "auto",
         cwd: ws,

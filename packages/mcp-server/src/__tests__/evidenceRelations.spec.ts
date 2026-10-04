@@ -481,7 +481,7 @@ describe("task_pack — repository-grounded evidence relations", () => {
     const query = "Fix transmitPacket when sampleSignal returns the wrong boolean";
     const baseline = await buildTaskPack({ query }, makeWorkspace("same-name-baseline", names));
     const workspace = makeWorkspace("same-name-decoy", names, true, true);
-    const response = await callTool("read_file", {
+    const response = await callTool("tl_read_file", {
       mode: "task_pack",
       query,
       cwd: workspace,
@@ -525,7 +525,7 @@ describe("task_pack — repository-grounded evidence relations", () => {
       consumerCallsSource: true,
       consumerImportsSource: true,
     });
-    const response = await callTool("read_file", {
+    const response = await callTool("tl_read_file", {
       mode: "task_pack",
       query: unlinkedQuery(names),
       paths: ["src"],
@@ -580,7 +580,7 @@ describe("task_pack — repository-grounded evidence relations", () => {
       consumerSymbol: "transmitPacket",
     };
     const workspace = makeUnlinkedWorkspace("exact-call", names);
-    const response = await callTool("read_file", {
+    const response = await callTool("tl_read_file", {
       mode: "task_pack",
       query: unlinkedQuery(names),
       paths: ["src"],
@@ -830,7 +830,7 @@ describe("task_pack — repository-grounded evidence relations", () => {
       taskProfile: "wiring",
     }, makeUnlinkedWorkspace("comment-baseline", names));
     const workspace = makeUnlinkedWorkspace("comment-decoy", names, { commentDecoy: true });
-    const response = await callTool("read_file", {
+    const response = await callTool("tl_read_file", {
       mode: "task_pack",
       query,
       paths: ["src"],

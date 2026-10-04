@@ -19,7 +19,7 @@
  *     union on any cap-overflowing pack (round-14 finding 2).
  *   - FX-J kept a SECOND, flag-selected booking site on the default path, over
  *     the pre-trim surface list. One production `budget:{bytes}` call plus one
- *     `edit_file` turned that into `edit.applied` against a file whose bytes
+ *     `tl_edit_file` turned that into `edit.applied` against a file whose bytes
  *     the response never sent (round-15 finding 1). FX-K collapsed the two
  *     sites into one unconditional post-trim pass.
  *
@@ -198,6 +198,23 @@ const PRODUCERS: readonly ProducerSpec[] = [
           + "is never claimed resident on a later call.",
       },
     ],
+  },
+  {
+    // 2026-10-04: captureServedPack's record write, split out so that a request
+    // buildTaskPackCore rewrote with its own named project scope also gets the
+    // record under the request as the caller sent it.
+    name: "writeServedPackRecord",
+    kind: "booking",
+    sites: [{
+      enclosing: "captureServedPack",
+      count: 2,
+      reason:
+        "the served-pack record a receipt re-serves from, written for the request "
+        + "captureServedPack was handed and, when buildTaskPackCore rewrote that request with "
+        + "its own named project scope (TaskPackArgs.namedScopeRequest), once more under the "
+        + "request as the caller sent it: a CACHE RE-KEY of the same pack, whose ledger "
+        + "booking just above runs once for both.",
+    }],
   },
   {
     name: "recordPackServedRanges",

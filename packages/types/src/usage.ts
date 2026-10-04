@@ -12,7 +12,7 @@ export type TokenLightenClient =
   | "desktop"
   | "other";
 
-export type TokenLightenTool = "read_file" | "search_files" | "edit_file";
+export type TokenLightenTool = "tl_read_file" | "tl_search_files" | "tl_edit_file";
 
 export interface TokenLightenUsageEvent {
   /**

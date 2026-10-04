@@ -11,6 +11,10 @@ import {
   type WorkspaceMcpSettings,
 } from "./workspaceState.js";
 import { TOKENLIGHTEN_SCHEMA_STAMP } from "./generated/schemaStamp.js";
+// The window-scoped off switch for a server VS Code launches from a managed
+// `.vscode/mcp.json` (see hostActivation.ts). It reads the bypass flag back
+// from this file; both sides use the other's binding only inside functions.
+import { syncHostActivationOverrides } from "./hostActivation.js";
 
 /**
  * Safe defaults for a "never-set-up" workspace's fallback definition
@@ -41,7 +45,8 @@ export type HostMcpActivationState =
   | "native-bypass"
   | "not-configured"
   | "host-unsupported"
-  | "file-managed";
+  | "file-managed"
+  | "disabled";
 
 let nativeSessionBypass = false;
 let definitionsChanged: vscode.EventEmitter<void> | undefined;
@@ -58,6 +63,10 @@ export function setNativeSessionBypass(enabled: boolean): void {
     "tokenlighten.mcpActivation",
     enabled ? "native-bypass" : "auto",
   );
+  // The provider above can only stop a server it launched itself. One VS Code
+  // launches from a managed `.vscode/mcp.json` learns of the bypass from the
+  // per-folder override file this writes (or, on resume, removes).
+  syncHostActivationOverrides();
 }
 
 function observeActivation(state: HostMcpActivationState): void {
@@ -136,6 +145,25 @@ export function registerMcpProvider(context: vscode.ExtensionContext): void {
         const root = vscode.workspace.workspaceFolders?.[0];
         if (!root) {
           observeActivation("not-configured");
+          return [];
+        }
+        // 2026-10-02: `tokenlighten.enabled = false` used to be only LISTENED to
+        // (the change listener above re-polls this provider) but never READ
+        // here, so a never-set-up workspace kept its provider-launched server
+        // after the user turned TokenLighten off. Resource-scoped, read fresh on
+        // every call like toolSurface below. Only a literal `false` disables: an
+        // unreadable setting never switches TokenLighten off on a guess. (A
+        // managed `.vscode/mcp.json` server is stopped through
+        // hostActivation.ts's override file instead; this provider has no
+        // definition for it either way.)
+        let enabled: unknown = true;
+        try {
+          enabled = vscode.workspace.getConfiguration("tokenlighten", root.uri).get<boolean>("enabled", true);
+        } catch {
+          // an odd host without a configuration service: leave it enabled
+        }
+        if (enabled === false) {
+          observeActivation("disabled");
           return [];
         }
         // DESIGN-v0.14-mcp-only-install.md §4.6 C5: VS Code identifies a

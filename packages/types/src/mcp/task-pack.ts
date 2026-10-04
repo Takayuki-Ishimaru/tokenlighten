@@ -17,7 +17,7 @@ import type { ToolCall } from "./protocol.js";
 // ---------------------------------------------------------------------------
 export interface ContinuationCall {
   /** One of the 3 advertised tools. */
-  tool: "read_file" | "edit_file" | "search_files";
+  tool: "tl_read_file" | "tl_edit_file" | "tl_search_files";
   /** Arguments schema-valid for `tool`. */
   arguments: Record<string, unknown>;
   /** Optional purpose (<=60 chars); decorative — first to shed under the byte budget. */
@@ -78,7 +78,7 @@ export interface ReadCodeTaskPackSurface {
    * P1-3(e) (hands-on report, 2026-09): where to look/act next for THIS
    * surface, without a second discovery call. `target` was retired — the
    * hint is fully described by `kind` + `handle` + `confidence`; a legacy
-   * prose dialect string (e.g. `"read_file mode=slice handle=..."`) never
+   * prose dialect string (e.g. `"tl_read_file mode=slice handle=..."`) never
    * rides the wire (AGENTS.md: "never emit" that dialect). Present only on
    * the primary/required surface; see readCodeTaskPack.ts's buildLikelyEdits
    * for the two `kind`s it currently emits ("inspect-slice",
@@ -605,8 +605,9 @@ export interface TaskDecisionEvidenceModel {
  *
  * OB-GAP (A.9.2 rows 15 + 24, discharged in P2 / C2-7b): `kind` was SEVEN
  * values and is now FIVE (now SIX — DESIGN-v0.15 R1, 2026-09-07, adds
- * `request-item-absent`; see `CapabilityGap["code"]`'s own doc comment for
- * why it is additive, not a re-narrowing). `permission-required` and
+ * `request-item-absent`; SEVEN — R2-T2, 2026-09-30, adds
+ * `request-item-undetermined`; see `CapabilityGap["code"]`'s own doc comment for
+ * why each is additive, not a re-narrowing). `permission-required` and
  * `external-execution-required`
  * are DELETED — the §3.4 E2 pass found zero emitters and zero readers for both,
  * and neither is a `RefusalCode` either, so nothing in this server constructs
@@ -621,7 +622,8 @@ export interface TaskCapabilityGap {
     | "invalid-request"
     | "unsupported-operation"
     | "workspace-changed"
-    | "request-item-absent";
+    | "request-item-absent"
+    | "request-item-undetermined";
   recoverable: boolean;
   reason: string;
   obligation_ids?: string[];
@@ -707,7 +709,7 @@ export interface TaskExecutionContract {
 
 /**
  * Server-proved edit shortcut for one exact replacement in one existing
- * workspace-bound file. It is guidance only: clients still call edit_file and
+ * workspace-bound file. It is guidance only: clients still call tl_edit_file and
  * the server still enforces --allow-write and unique-match at that boundary.
  */
 export interface TaskPackSingleSiteUniqueMatchFastPath {
@@ -786,7 +788,7 @@ export interface ReadCodeTaskPackOutput {
    * DESIGN-v0.9 §4.6b: internal-execution manifest — one
    * "surface-body:<handle>" entry per code-less surface body the server
    * inlined in this same response (up to the §4.8 must-fetch budget) instead
-   * of prompting a `read_file handles=[...]` round trip. Every named handle is
+   * of prompting a `tl_read_file handles=[...]` round trip. Every named handle is
    * verified content-bearing here. Omitted when nothing was inlined.
    */
   inlined?: string[];
@@ -829,7 +831,7 @@ export interface ReadCodeClosureOutput {
   /**
    * DESIGN-v0.9 §6 (WS-P3): compact session summary served instead of bare
    * ceremony on checkless/all-closed closure calls — edited-file ledger data
-   * only (`edits`/`files` count distinct edit_file-edited files; native-only
+   * only (`edits`/`files` count distinct tl_edit_file-edited files; native-only
    * writes are invisible to this ledger by construction).
    */
   summary?: { edits: number; files: string[]; checks_closed: number; checks_open: number };

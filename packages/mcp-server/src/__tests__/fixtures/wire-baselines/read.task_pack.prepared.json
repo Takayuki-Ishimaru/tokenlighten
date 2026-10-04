@@ -34,7 +34,7 @@
   "decision": {
     "kind": "discover",
     "next": {
-      "tool": "read_file",
+      "tool": "tl_read_file",
       "arguments": {
         "cwd": "$WS",
         "query": "explain how OrderFlow sequences payment inventory shipping in its lifecycle",

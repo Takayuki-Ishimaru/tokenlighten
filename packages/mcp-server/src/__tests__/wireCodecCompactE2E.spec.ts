@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // V10-11 env=compact end-to-end -- the in-process callTool idiom
 // (server.ts's exported `callTool`, the same one every __tests__/*.spec.ts
-// E2E case uses) against a REAL search_files action=find call over a >=10
+// E2E case uses) against a REAL tl_search_files action=find call over a >=10
 // matched-file fixture, comparing the default (json) response to the
 // TOKENLIGHTEN_RESPONSE_FORMAT=compact response: decode-equality against the
 // json baseline, plus the measured byte reduction.
@@ -91,7 +91,7 @@ function decodeWireText(text: string): { payload: Record<string, unknown>; codec
 describe("V10-11 env=compact -- E2E via callTool", () => {
   it("decodes back to the json baseline and measurably reduces wire bytes for a >=10-row search.matches result", async () => {
     delete process.env["TOKENLIGHTEN_RESPONSE_FORMAT"];
-    const baseline = await callTool("search_files", { action: "find", query: NEEDLE, cwd: workspace });
+    const baseline = await callTool("tl_search_files", { action: "find", query: NEEDLE, cwd: workspace });
     const baselineFirst = baseline.content[0];
     expect(baselineFirst?.type).toBe("text");
     const baselineText = baselineFirst!.text;
@@ -104,7 +104,7 @@ describe("V10-11 env=compact -- E2E via callTool", () => {
 
     resetServerState(); // an independent call must not carry the first call's "repeated single-token find" session memory
     process.env["TOKENLIGHTEN_RESPONSE_FORMAT"] = "compact";
-    const compact = await callTool("search_files", { action: "find", query: NEEDLE, cwd: workspace });
+    const compact = await callTool("tl_search_files", { action: "find", query: NEEDLE, cwd: workspace });
     const compactFirst = compact.content[0];
     expect(compactFirst?.type).toBe("text");
     const compactText = compactFirst!.text;
@@ -131,11 +131,11 @@ describe("V10-11 env=compact -- E2E via callTool", () => {
 
   it("default (no env set) is byte-identical to explicit TOKENLIGHTEN_RESPONSE_FORMAT=json", async () => {
     delete process.env["TOKENLIGHTEN_RESPONSE_FORMAT"];
-    const implicitDefault = await callTool("search_files", { action: "find", query: NEEDLE, cwd: workspace });
+    const implicitDefault = await callTool("tl_search_files", { action: "find", query: NEEDLE, cwd: workspace });
 
     resetServerState();
     process.env["TOKENLIGHTEN_RESPONSE_FORMAT"] = "json";
-    const explicitJson = await callTool("search_files", { action: "find", query: NEEDLE, cwd: workspace });
+    const explicitJson = await callTool("tl_search_files", { action: "find", query: NEEDLE, cwd: workspace });
 
     expect(explicitJson.content[0]!.text).toBe(implicitDefault.content[0]!.text);
   });

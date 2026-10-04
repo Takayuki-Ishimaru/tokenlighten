@@ -97,7 +97,7 @@ const RECEIPT_LINES_PER_FILE = 12;
  * C1 (2026-09-03 plain-mode ladder). `recordAllServedFind`'s ledger is keyed
  * purely on whatever string it is given — it has no idea whether that string
  * names a real task-pack certificate. Before this fix, a session that had
- * NEVER opened a task pack (plain `read_file targets:[...]` + `search_files
+ * NEVER opened a task pack (plain `tl_read_file targets:[...]` + `tl_search_files
  * find`, no certificate ever minted) left `certificateId` `undefined` inside
  * `applyServedFindProtocol`, which took a dead-end branch that returned
  * `all_served:true` unconditionally and NEVER called `recordAllServedFind` —
@@ -208,9 +208,9 @@ function zoomTransition(
       workspaceRoot: workspace,
     }).id;
     return {
-      transition: `read_file mode=slice handle=${handle} range=${start}-${end}`,
+      transition: `tl_read_file mode=slice handle=${handle} range=${start}-${end}`,
       nextCall: {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: { mode: "slice", handle, range: `${start}-${end}`, cwd: workspace },
       },
     };
@@ -428,7 +428,7 @@ function buildEscalation(
   // Always last, always available: the caller may still search — just not over
   // scope it has already been served. This is the clause that keeps the
   // escalation an escalation rather than a wall.
-  acceptedTransitions.push("search_files action=find path=<a scope this session has NOT served>");
+  acceptedTransitions.push("tl_search_files action=find path=<a scope this session has NOT served>");
 
   // The prescription order encodes what actually finishes the task. An
   // edit-terminal certificate with a named write target is the productive move
@@ -438,7 +438,7 @@ function buildEscalation(
   const editHandle = unlock?.editTargetHandle;
   const nextCall = editHandle !== undefined
     ? {
-        tool: "edit_file",
+        tool: "tl_edit_file",
         arguments: {
           handle: editHandle,
           search: EDIT_SEARCH_PLACEHOLDER,
@@ -447,7 +447,7 @@ function buildEscalation(
         },
       }
     : zoom?.nextCall ?? {
-        tool: "search_files",
+        tool: "tl_search_files",
         arguments: {
           action: "find",
           query: "<one identifier you have NOT already been served>",
@@ -513,7 +513,7 @@ function buildEscalation(
         : "find over already-served scope is refused for this certificate; take a transition above — zoom an UNSERVED window, edit through the frontier, `challenge` if new evidence changes the certified decision, or search unserved scope",
     },
     next_call: nextCall,
-    ...(nextCall.tool === "edit_file" || nextCall.tool === "search_files"
+    ...(nextCall.tool === "tl_edit_file" || nextCall.tool === "tl_search_files"
       ? { next_call_is_template: true }
       : {}),
   };

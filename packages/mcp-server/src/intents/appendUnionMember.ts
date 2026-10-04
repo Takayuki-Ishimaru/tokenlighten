@@ -20,6 +20,7 @@ import { writeExistingFileAtomic } from "../write/atomicWrite.js";
 import { looksLikeSecretFile } from "../write/secretScan.js";
 import { computeLineDelta, formatDelta, formatLines } from "../util/lineDelta.js";
 import { safeResolveForWrite, resolveReal, isWithin, statReadTargetSync } from "../util/safePath.js";
+import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import type { GuardedWorkspaceRoot } from "../write/guardedWorkspace.js";
 
 export type AppendUnionMemberResult =
@@ -123,13 +124,13 @@ export async function applyAppendUnionMember(
 
   // TypeScript only.
   if (lang && lang !== "ts" && lang !== "js") {
-    return { ok: false, reason: "intent-lang-unsupported", detail: "Use edit_file with an exact search/replace edit for this language." };
+    return { ok: false, reason: "intent-lang-unsupported", detail: "Use tl_edit_file with an exact search/replace edit for this language." };
   }
   // For non-TS extension files when lang is not specified, check the extension.
   if (relPath && !lang) {
     const ext = relPath.split(".").pop()?.toLowerCase();
     if (ext && ext !== "ts" && ext !== "tsx" && ext !== "js" && ext !== "jsx" && ext !== "mts" && ext !== "cts") {
-      return { ok: false, reason: "intent-lang-unsupported", detail: "Use edit_file with an exact search/replace edit for this language." };
+      return { ok: false, reason: "intent-lang-unsupported", detail: "Use tl_edit_file with an exact search/replace edit for this language." };
     }
   }
 
@@ -137,7 +138,7 @@ export async function applyAppendUnionMember(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
   if (!target || target.trim() === "") {
@@ -173,7 +174,7 @@ export async function applyAppendUnionMember(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -182,7 +183,7 @@ export async function applyAppendUnionMember(
     return {
       ok: false,
       reason: "intent-unsupported",
-      next: { tool: "read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
+      next: { tool: "tl_read_file", arguments: { targets: [{ handle: handleId }], content: "auto" } },
     };
   }
 
@@ -200,6 +201,11 @@ export async function applyAppendUnionMember(
   const newMember = ` | ${quote}${target}${quote}`;
   const newMatch = match.slice(0, semiOffset) + newMember + match.slice(semiOffset);
   const newContent = raw.slice(0, startIdx) + newMatch + raw.slice(startIdx + match.length);
+
+  // COMMIT POINT (client cancellation, util/requestCancellation.ts): the new
+  // text is built and every guard above has passed; the write below is the
+  // first byte this intent puts on the disk.
+  throwIfRequestCancelled();
 
   // Mode preservation: see writeExistingFileAtomic's doc comment
   // (2026-08-07 chmod-reset incident).

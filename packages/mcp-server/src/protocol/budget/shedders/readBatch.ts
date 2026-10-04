@@ -103,7 +103,7 @@ function shedEntryProse(payload: ShedPayload): ShedOutcome | undefined {
  * TL-05 defect (a), adopted 2026-09-21 (plan-0143 §7.1/§10 C01): a dropped
  * entry that carries its own `range` (the "handle"/"range" BatchEntry forms,
  * A.5.4) is a WINDOW of the file, not the whole thing. The old unconditional
- * `read_file mode=full paths:[…]` continuation widened it back to the whole
+ * `tl_read_file mode=full paths:[…]` continuation widened it back to the whole
  * file and lost the window — measured live: a dropped `range:"49-100"` entry
  * came back as `{path:"data/beta.txt"}` with no range at all. A "handle"-form
  * entry now recovers by its own handle+range (mirrors `readText.ts`'s rung-4
@@ -174,10 +174,10 @@ function shedBatchEntry(payload: ShedPayload, context: ShedContext): ShedOutcome
   const keepFull = range !== undefined && requestedRangeContentFull(context);
   const continuation = emittableToolCall(
     range === undefined
-      ? { tool: "read_file", arguments: { mode: "full", paths: [path] } }
+      ? { tool: "tl_read_file", arguments: { mode: "full", paths: [path] } }
       : handle !== undefined
-        ? { tool: "read_file", arguments: { mode: "slice", handle, range, ...(keepFull ? { content: "full" } : {}) } }
-        : { tool: "read_file", arguments: { path, range, ...(keepFull ? { content: "full" } : {}) } },
+        ? { tool: "tl_read_file", arguments: { mode: "slice", handle, range, ...(keepFull ? { content: "full" } : {}) } }
+        : { tool: "tl_read_file", arguments: { path, range, ...(keepFull ? { content: "full" } : {}) } },
   );
   if (continuation === undefined) return undefined;
 
@@ -367,7 +367,7 @@ function truncateRangedEntries(payload: ShedPayload, context: ShedContext): Shed
     }
     const unkeptRange = `${cutStart}-${unkeptEnd}`;
     const entryContinuation = emittableToolCall({
-      tool: "read_file",
+      tool: "tl_read_file",
       arguments: { mode: "slice", handle, range: unkeptRange, ...(keepFull ? { content: "full" } : {}) },
     });
     // E5: no constructible per-entry continuation means no shed of THIS
@@ -390,7 +390,7 @@ function truncateRangedEntries(payload: ShedPayload, context: ShedContext): Shed
   if (targets.length === 0) return undefined;
 
   const continuation = emittableToolCall({
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: { targets, ...(keepFull ? { content: "full" } : {}) },
   });
   if (continuation === undefined) return undefined;

@@ -147,7 +147,7 @@ describe("concurrent-agent session lanes: state partitioning", () => {
     // Agent A holds no fence: its discovery is unfenced and unrefused.
     expect(runWithSessionLane("agent-a", () => getExecutionFence(ROOT))).toBeUndefined();
     const decision = runWithSessionLane("agent-a", () =>
-      guardExecutionDiscovery(ROOT, "read_file", { mode: "slice", handle: "h-a" }));
+      guardExecutionDiscovery(ROOT, "tl_read_file", { mode: "slice", handle: "h-a" }));
     expect(decision.allowed).toBe(true);
 
     // The lane-less default session is untouched by either agent.
@@ -160,7 +160,7 @@ describe("concurrent-agent session lanes: state partitioning", () => {
       recordExecutionContract(ROOT, "task b", laneCert("cert-b2", "h-b2", "src/b2.ts")));
 
     const reset = runWithSessionLane("agent-a", () =>
-      guardExecutionDiscovery(ROOT, "read_file", { taskEpoch: "new", query: "totally different task" }));
+      guardExecutionDiscovery(ROOT, "tl_read_file", { taskEpoch: "new", query: "totally different task" }));
     expect(reset).toEqual({ allowed: true, resetForNewTask: true });
 
     expect(runWithSessionLane("agent-b", () => getExecutionFence(ROOT))?.certificateId).toBe("cert-b2");
@@ -192,7 +192,7 @@ describe("concurrent-agent session lanes: state partitioning", () => {
 });
 
 describe("concurrent-agent session lanes: callTool dispatch", () => {
-  it("read_file with lane lands its session state in that lane only", async () => {
+  it("tl_read_file with lane lands its session state in that lane only", async () => {
     // An arbitrary tmpdir is not an admissible cwd (root containment allows
     // only the pinned workspace / registered worktrees), so this exercises
     // the pinned root itself — exactly the shared-root topology the mixing
@@ -200,7 +200,7 @@ describe("concurrent-agent session lanes: callTool dispatch", () => {
     const resolved = realpathSync(process.cwd());
 
     const { callTool } = await import("../server.js");
-    const result = await callTool("read_file", { path: "package.json", mode: "full", lane: "agent-a" }) as ToolResult;
+    const result = await callTool("tl_read_file", { path: "package.json", mode: "full", lane: "agent-a" }) as ToolResult;
     expect(result.isError, result.content[0]!.text).not.toBe(true);
 
     // Mode-agnostic session footprint: which counters a given read mode
@@ -214,13 +214,13 @@ describe("concurrent-agent session lanes: callTool dispatch", () => {
     expect(footprint(defaultSession)).toBe(0);
   });
 
-  it("edit_file accepts lane as a declared argument (never unknown-arguments)", async () => {
+  it("tl_edit_file accepts lane as a declared argument (never unknown-arguments)", async () => {
     const ws = mkdtempSync(path.join(tmpdir(), "tl-lanes-"));
     writeFileSync(path.join(ws, "alpha.txt"), "hello lane\n");
     const resolved = realpathSync(ws);
 
     const { callTool } = await import("../server.js");
-    const result = await callTool("edit_file", {
+    const result = await callTool("tl_edit_file", {
       path: "alpha.txt",
       search: "hello",
       replace: "goodbye",
@@ -240,7 +240,7 @@ describe("concurrent-agent session lanes: callTool dispatch", () => {
 
     const { callTool } = await import("../server.js");
     for (const badLane of [7, { agent: "a" }, "x".repeat(65)]) {
-      const result = await callTool("read_file", { path: "alpha.txt", cwd: resolved, lane: badLane }) as ToolResult;
+      const result = await callTool("tl_read_file", { path: "alpha.txt", cwd: resolved, lane: badLane }) as ToolResult;
       expect(result.isError).toBe(true);
       const body = JSON.parse(result.content[0]!.text) as Record<string, unknown>;
       expect(body["code"]).toBe("invalid-lane");
@@ -485,7 +485,7 @@ describe("FX-P1 / INV-I-2: handle write authority is lane-scoped", () => {
       "`capped` is the byte-budget diagnosis; a lane refusal must not borrow it",
     ).toBeUndefined();
     const next = refused.refusal["next_call"] as { tool: string; arguments: Record<string, unknown> };
-    expect(next.tool, "not refuse-only: lane B is told how to earn the bytes").toBe("read_file");
+    expect(next.tool, "not refuse-only: lane B is told how to earn the bytes").toBe("tl_read_file");
     expect(next.arguments["targets"]).toEqual([{ path: "src/shared.ts" }]);
     expect(next.arguments["content"], "the re-read must BOOK what it serves").toBe("full");
   });
@@ -545,7 +545,7 @@ describe("FX-P1 / INV-I-2: handle write authority is lane-scoped", () => {
  * `range` in full — not merely whether SOME part of the file shipped. A
  * whole-file handle (no `range` on its table entry) needs whole-file
  * coverage. `recordServedRange` is the ledger's real writer (what an honest
- * `read_file` serve — including the cross-lane refusal's own `content:"full"`
+ * `tl_read_file` serve — including the cross-lane refusal's own `content:"full"`
  * recovery — actually calls), so these tests use it directly instead of the
  * coarser `recordServedEditAdmissibility` helper the retired test used.
  *

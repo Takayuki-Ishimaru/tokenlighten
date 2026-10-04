@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// protocol v1 — the `read_file` response family (A.5.1–A.5.7).
+// protocol v1 — the `tl_read_file` response family (A.5.1–A.5.7).
 //
 // NORMATIVE SOURCE: DESIGN-v0.10 §10.3 Appendix A (Revision 4, approved
 // 2026-08-13). Implements the A.9.1 `read-result.ts` row. §2.2: this file is

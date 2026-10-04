@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// protocol v1 — the `read_file` response family, authored (C2-3).
+// protocol v1 — the `tl_read_file` response family, authored (C2-3).
 //
 // NORMATIVE SOURCE: DESIGN-v0.10-protocol-v1-contract-freeze.md §10.3 Appendix A
 // (Revision 4, user-approved 2026-08-13) A.4, A.5.1–A.5.7, A.2.7, A.8, plus
@@ -60,7 +60,7 @@ import { clientAcknowledgedPrior } from "../state/contextAttestation.js";
 // is default OFF, so `verifyClosureGate` returns `undefined` on its FIRST LINE for
 // every call on the default path — the same dead-code-by-default property, and the
 // structural reason flag-off is byte-identical rather than merely tested to be.
-import { receiptCoverageEnabled, sfVerifyFirstEnabled } from "../util/flags.js";
+import { effEditNoteEnabled, effPlanTrimEnabled, receiptCoverageEnabled, sfRelationPacketsEnabled, sfVerifyFirstEnabled } from "../util/flags.js";
 import { recordedVerifyObligations } from "../state/session.js";
 import type { CoveredSpan } from "./coverageReceipt.js";
 // FX-OH F2: the demote pass's own withholding marks — the ONLY driver of
@@ -219,7 +219,7 @@ function truncatedMember(body: Body): boolean {
 
 /**
  * §2.1.2 (F5): a `next` is executable or it is not emitted. Prose `next`
- * strings (`"read_file mode=slice handle=h1 ranges=[...]"`) are the dominant
+ * strings (`"tl_read_file mode=slice handle=h1 ranges=[...]"`) are the dominant
  * shape in the read family, so they are PARSED rather than dropped — dropping
  * them would leave a `wire` limit with no continuation, which E-5 forbids.
  *
@@ -259,7 +259,7 @@ function deriveNext(body: Body): ToolCall | undefined {
   const handle = str(body["handle"]);
   const remaining = stringArray(body["remaining_ranges"]);
   if (handle !== undefined && remaining.length > 0) {
-    return { tool: "read_file", arguments: { mode: "slice", handle, ranges: remaining.slice(0, 8) } };
+    return { tool: "tl_read_file", arguments: { mode: "slice", handle, ranges: remaining.slice(0, 8) } };
   }
   const omitted = body["omitted"];
   if (Array.isArray(omitted)) {
@@ -307,7 +307,7 @@ function deriveNext(body: Body): ToolCall | undefined {
       // used to `.slice(0, 8)` both arrays — a silent truncation that lost
       // windows 9+ for a verbatim follower, with nothing else in the chain
       // ever re-addressing them (the same class of loss this whole file's
-      // R-A3 banner elsewhere describes). The advertised `read_file` schema
+      // R-A3 banner elsewhere describes). The advertised `tl_read_file` schema
       // (`server.ts`'s `ALL_TOOLS` `targets` property) declares no
       // `maxItems` on `targets`, so plan §4's rule applies directly: name
       // EVERY undelivered window and let the response budget decide how
@@ -321,7 +321,7 @@ function deriveNext(body: Body): ToolCall | undefined {
         ...wholeFilePaths.map((path) => ({ path })),
       ];
       return {
-        tool: "read_file",
+        tool: "tl_read_file",
         arguments: { targets, ...(contentFull ? { content: "full" } : {}) },
       };
     }
@@ -329,7 +329,7 @@ function deriveNext(body: Body): ToolCall | undefined {
       // R-A3: same no-cap rule as the `rangedTargets` bundle above — see its
       // own comment. `mode:"full"` + `paths:[]` is the ONE shape this legacy
       // rung uses, and the schema imposes no length limit on `paths` either.
-      return { tool: "read_file", arguments: { mode: "full", paths: wholeFilePaths } };
+      return { tool: "tl_read_file", arguments: { mode: "full", paths: wholeFilePaths } };
     }
   }
   return undefined;
@@ -568,7 +568,7 @@ function withheldSomething(body: Body): boolean {
 function toolCallFrom(value: unknown): ToolCall | undefined {
   const direct = emittableToolCall(value);
   if (direct !== undefined) return direct;
-  // The prose dialect (`"read_file mode=slice handle=h1 ranges=[…]"`) is what
+  // The prose dialect (`"tl_read_file mode=slice handle=h1 ranges=[…]"`) is what
   // several serve paths put on `next`; `emittableToolCall` re-validates the
   // parse, so a prose call this server would refuse is still not emitted.
   const text = str(value);
@@ -616,11 +616,11 @@ function epochResetCall(context: ReadProjectionContext | undefined): ToolCall | 
   // `preparedDiscoveryReceipt` uses for its own mismatch `next_call` - turns
   // a QUERY-ONLY call (see the comment on `targets` below) from "start over,
   // blind" into "here is your question, freshly scoped". A call in any OTHER
-  // mode, or a `search_files` call (no `mode` at all), has no comparable
+  // mode, or a `tl_search_files` call (no `mode` at all), has no comparable
   // free-text field to echo, so `query` is simply absent there (E-1).
   const query = str(args["mode"]) === "task_pack" ? str(args["query"]) : undefined;
   return emittableToolCall({
-    tool: "read_file",
+    tool: "tl_read_file",
     arguments: {
       mode: "task_pack",
       taskEpoch: "new",
@@ -676,7 +676,7 @@ function receiptHasContinuation(receipt: Receipt): boolean {
   // args, which re-armed the fence with a fresh certificate on every
   // discovery call it stopped. Measured: 27 such re-packs / 290 KB in one
   // bench run (T09 rep1 alone: 8 receipts -> 8 re-packs). Ordinary
-  // read_file/search_files discovery no longer reaches this receipt at all
+  // tl_read_file/tl_search_files discovery no longer reaches this receipt at all
   // (`state/session.ts`'s `guardExecutionDiscovery` now serves it directly);
   // what remains is a `task_pack` re-ask a live certificate declined for
   // cause (partial surface, changed file) — a query MISMATCH is its own
@@ -797,8 +797,8 @@ export function receiptOf(body: Body, workspaceRoot?: string): Receipt | undefin
       }
       const replay = str((task as Body)["replay"]);
       const earlier = replay !== undefined
-        ? `read_file mode=task_pack qref=${replay}`
-        : "read_file mode=task_pack (earlier in this session)";
+        ? `tl_read_file mode=task_pack qref=${replay}`
+        : "tl_read_file mode=task_pack (earlier in this session)";
       const prior = evidence
         .filter(isRecord)
         .filter((entry) => str(entry["handle"]) !== undefined && str(entry["body"]) === undefined)
@@ -970,7 +970,7 @@ const KEPT_ON_RECEIPT = ["verification", "concern_note"] as const;
  * `kind:"refusal"` before `receiptOf`/`projectReceipt` ever run, and
  * `protocol/refusal.ts`'s `retryOf` gives that refusal `retry:"new-task"`
  * plus its own executable `next`. Confirmed live, not just by reading both
- * files: a `read_file mode=task_pack` call whose query trips
+ * files: a `tl_read_file mode=task_pack` call whose query trips
  * `state/session.ts`'s `newTaskQueryMismatch` comes back as `kind:"refusal"`
  * with a followable `next`, never as a bare `read.receipt`. So a
  * `decision-unchanged` RECEIPT carrying `required_action:"re-pack-new-epoch"`
@@ -1040,7 +1040,7 @@ function projectReceipt(
  * Each row states the guide-bound capability the deletion would lose:
  *
  *  - `sha`         the hash a caller pins an edit to (`precondition:
- *                  "expected-hash"`, and `edit_file`'s own `expectedSha`).
+ *                  "expected-hash"`, and `tl_edit_file`'s own `expectedSha`).
  *                  `Evidence` has no sha field, so there is nowhere else for it.
  *  - `total_lines` the EOF-honesty field the 2026-08-08 X-wave added after
  *                  read-back silence was measured as an availability defect.
@@ -1622,7 +1622,7 @@ function artifactContent(body: Body): Body | undefined {
     // TWO EMITTER DIALECTS FOR ONE FACT, both projected onto A.5.5's single
     // `inlined` slot. An explicit `mode=artifact` with no `sheet` flattens the
     // picked sheet onto the body (`inlined_sheet` + top-level range/columns/
-    // rows); the IMPLICIT route — a bare `read_file path=x.xlsx`, §4.6d's
+    // rows); the IMPLICIT route — a bare `tl_read_file path=x.xlsx`, §4.6d's
     // known-artifact-section execution — nests the same table under `section`
     // and stamps `inlined:["artifact-section:<path>#<sheet>"]`. Reading only
     // the first dialect dropped the entire inlined table on the implicit
@@ -1883,7 +1883,7 @@ function carriedVerifyObligations(body: Body): VerifyObligation[] | undefined {
  *
  * SERVING IS NOT RUNNING: nothing in this pass can promote an obligation to
  * `observed`. Only a TL-OBSERVABLE FACT does that (§3.2), and re-reading a test
- * file is not one — a later `read_file` that serves the same test leaves a
+ * file is not one — a later `tl_read_file` that serves the same test leaves a
  * `served-untested` obligation exactly where it was.
  */
 function ageServed(obligation: VerifyObligation, freshlyServed: boolean): VerifyObligation {
@@ -1898,7 +1898,7 @@ function ageServed(obligation: VerifyObligation, freshlyServed: boolean): Verify
  * so the kit itself says which edited file each referencing test covers. An
  * edited file no test surface references has NO referencing-test evidence at
  * all, which §3.1(4) files as `unproven` — carried as a `diff-review`
- * obligation, the evidence class whose proof (a `search_files action=diff` or a
+ * obligation, the evidence class whose proof (a `tl_search_files action=diff` or a
  * re-edit) TL CAN observe.
  */
 /**
@@ -2007,7 +2007,7 @@ function verifyGapLine(obligation: VerifyObligation): string {
   } else if (obligation.kind === "referencing-test") {
     proof = "no referencing-test body has been served — read the test, or add one, then run it";
   } else if (obligation.kind === "diff-review") {
-    proof = "no referencing test covers this edit — prove it with a diff review (search_files action=diff) or add a test";
+    proof = "no referencing test covers this edit — prove it with a diff review (tl_search_files action=diff) or add a test";
   } else if (obligation.kind === "compile-facts") {
     proof = "compile facts were not compared across the edit — re-request them, then rebuild";
   } else {
@@ -2214,7 +2214,7 @@ const PLAN_MEMBERS = [
   // additively (§1.4(a)); it does not become a seventh top-level field (§3.0)".
   // `concerns[]` is the multi-concern decomposition — rare by construction, and
   // guide-bound ("batch every ready independent concern in exactly ONE
-  // `edit_file` `edits[]` call"). `TaskRef.coverage_reason:"concerns-uncovered"`
+  // `tl_edit_file` `edits[]` call"). `TaskRef.coverage_reason:"concerns-uncovered"`
   // refers to it, so deleting it would leave a coverage reason naming a
   // structure the response no longer carries.
   "concerns",
@@ -2265,6 +2265,26 @@ const PLAN_MEMBERS = [
   // §0.2's forbidden class here; the alias is additive (§1.4(a)) and reversible
   // before publication.
   "section",
+  // V15-NBR (2026-09-29, `TL_NEIGHBOUR_INDEX`, default OFF): same A.6.1 rule
+  // again. `neighbours` is a small, BODYLESS, relevance-ranked list (path +
+  // handle + why) of workspace files the served files import/include/
+  // reference or pair with and this response has not already named — an aid
+  // for the caller's NEXT batched read, never a claim this pack covers them. It is never evidence and no obligation ever
+  // cites it, so it is not part of the A.5.1 `evidence`/`decision` pair this
+  // list exists beside; landing it under `plan` keeps that separation
+  // explicit rather than growing `evidence[]` (which would make it look
+  // cited) or `frontier_index` (a different, SF-owned complete-working-set
+  // claim this is not). Absent with the flag off (E-1: the attach hook never
+  // runs) and absent whenever no candidate resolves.
+  "neighbours",
+  // V15-FUI (2026-09-29, `TL_USAGE_INVENTORY`, default OFF): same A.6.1 rule.
+  // `usages` is a lexical (never "callers") match inventory for up to 6
+  // identifiers ranked by relevance to the request (named by it, matching its
+  // terms, or referenced/declared by the served code), from the same scanner
+  // `tl_search_files find` uses, scoped to the served file's project (`scope`).
+  // Rare by construction (flag default OFF), so it lands here rather than
+  // becoming an eighth top-level field.
+  "usages",
 ] as const;
 
 /**
@@ -2403,6 +2423,15 @@ function projectTaskPack(body: Body): Body {
 
   const plan: Body = {};
   keep(plan, body, PLAN_MEMBERS);
+  // EFF (TL_EFF_PLAN_TRIM, default OFF): `wiring.evidence_graph` is a node and
+  // relation index of paths/handles/ranges the pack's own evidence already
+  // carries (4.3 KB per T13 pack, 2026-10-01). Server-side consumers read it
+  // from the internal result before this projection, so dropping it here
+  // changes no decision or `next`; TL_SF_RELATION_PACKETS keeps it.
+  if (effPlanTrimEnabled() && !sfRelationPacketsEnabled() && isRecord(plan["wiring"]) && "evidence_graph" in plan["wiring"]) {
+    const { evidence_graph: _evidenceGraph, ...wiring } = plan["wiring"];
+    plan["wiring"] = wiring;
+  }
   if (Object.keys(plan).length > 0) projected["plan"] = plan;
 
   const limit = limitFrom(body, withheldSomething(body));
@@ -2416,8 +2445,26 @@ function projectTaskPack(body: Body): Body {
     keptOnTaskPack = keptOnTaskPack.filter((member) => member !== "profile_binding");
   }
   keep(projected, body, keptOnTaskPack);
+  // EFF (TL_EFF_EDIT_NOTE, default OFF): at the act.edit decision point, say
+  // why tl_edit_file is the cheaper write path. Rides the existing `advisory`
+  // member (appended to any advisory already there); no new kind or field.
+  const decision = projected["decision"];
+  if (
+    effEditNoteEnabled()
+    && isRecord(decision)
+    && decision["kind"] === "act.edit"
+    && Array.isArray(decision["frontier"])
+    && decision["frontier"].length > 0
+  ) {
+    const existing = typeof projected["advisory"] === "string" ? projected["advisory"] : "";
+    projected["advisory"] = existing ? `${existing}; ${EDIT_PATH_ADVISORY}` : EDIT_PATH_ADVISORY;
+  }
   return projected;
 }
+
+/** TL_EFF_EDIT_NOTE's advisory sentence (see effEditNoteEnabled). */
+export const EDIT_PATH_ADVISORY =
+  "make these edits with tl_edit_file on the frontier handles, every edit in one edits[] call: a native Edit first needs a whole-file native Read of each file, tl_edit_file needs none";
 
 // ---------------------------------------------------------------------------
 // The dispatcher

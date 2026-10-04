@@ -196,9 +196,9 @@ function startServer(cwd: string, env: NodeJS.ProcessEnv): ServerHandle {
       child.stdin!.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
     },
     call: async (args: Record<string, unknown>) => {
-      const res = await rpc(toolCallId++, "tools/call", { name: "read_file", arguments: args });
+      const res = await rpc(toolCallId++, "tools/call", { name: "tl_read_file", arguments: args });
       const text: string = res?.result?.content?.[0]?.text;
-      expect(typeof text, `read_file returned no text content: ${JSON.stringify(res)}`).toBe("string");
+      expect(typeof text, `tl_read_file returned no text content: ${JSON.stringify(res)}`).toBe("string");
       return { body: JSON.parse(text) as Record<string, unknown>, bytes: Buffer.byteLength(text, "utf8"), text };
     },
     kill: async () => {
@@ -352,7 +352,7 @@ async function followChain(
 ): Promise<ChainResult> {
   const hops: ChainHop[] = [];
   const cumulative = new Map<string, Set<number>>();
-  let call: ToolCallShape | undefined = { tool: "read_file", arguments: first };
+  let call: ToolCallShape | undefined = { tool: "tl_read_file", arguments: first };
   let index = 0;
 
   while (call !== undefined && index < hopCap) {

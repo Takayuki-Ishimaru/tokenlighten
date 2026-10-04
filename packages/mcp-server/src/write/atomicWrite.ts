@@ -112,7 +112,7 @@ export function makeTmpPath(target: string): string {
 /**
  * Write `content` to `target`, replacing an EXISTING file on disk, while
  * preserving the original file's permission bits. This is THE write
- * aggregation point for edit_file's existing-file paths (single
+ * aggregation point for tl_edit_file's existing-file paths (single
  * search/replace, edits[] batch — including its mid-batch rollback restore —
  * and handle+range content/search-replace); every one of them funnels its
  * actual disk write through here instead of calling writeFileSync+
@@ -123,7 +123,7 @@ export function makeTmpPath(target: string): string {
  * resets the file to the process's default create mode (0o666 & ~umask) on
  * every edit: renameSync() replaces the whole inode, so whatever mode the
  * brand-new temp file was created with becomes the target's mode too — an
- * executable script edited through edit_file silently came back 100644
+ * executable script edited through tl_edit_file silently came back 100644
  * (2026-08-07 incident, caught only via `git diff`'s old-mode/new-mode
  * lines; the fixture's own +x bit was restored by hand).
  *

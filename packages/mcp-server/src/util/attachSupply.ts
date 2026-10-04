@@ -206,14 +206,14 @@ function normalizeInlined(raw: unknown, result: Record<string, unknown>): string
  * server.ts's toolStructuredError, which is how MOST refusals actually leave
  * the server — they return `toolStructuredError(...)` directly and never
  * reach attachSupply at all (2026-07-16a review round 2, DEFECT A; live
- * repro pre-fix: `read_file mode=slice path=package.json` with no
+ * repro pre-fix: `tl_read_file mode=slice path=package.json` with no
  * range/symbol refused with a bare path, no next, no alternatives).
  */
 /**
  * M2: `invalid-input` producers across server.ts spell the missing-argument
  * message several ways (`error`, `detail`, or a bare `reason`), and most of
  * them already set an explicit `field` at the call site — this only fills the
- * gap for the ones that do not (measured: `read_file {}` / `edit_file {}`'s
+ * gap for the ones that do not (measured: `tl_read_file {}` / `tl_edit_file {}`'s
  * shared "path is required" refusal, which carries neither). Deliberately
  * NARROW: each pattern requires the OTHER two candidate field names to be
  * ABSENT from the same text, so an ambiguous message naming two fields at
@@ -382,7 +382,7 @@ export function supplyRefusalGuidance(result: Record<string, unknown>): Record<s
       return refused;
     }
     if (firstCandidate !== undefined && hasPath) {
-      refused["next"] = canonicalToolCall("read_file", {
+      refused["next"] = canonicalToolCall("tl_read_file", {
         mode: "symbol",
         path: pathRaw,
         symbol: firstCandidate,
@@ -390,9 +390,9 @@ export function supplyRefusalGuidance(result: Record<string, unknown>): Record<s
     } else if (hasPath) {
       // A refusal that names a known file but no candidates still gets one
       // executable default read of that exact path.
-      refused["next"] = canonicalToolCall("read_file", { path: pathRaw });
+      refused["next"] = canonicalToolCall("tl_read_file", { path: pathRaw });
     } else if (typeof handleRaw === "string" && handleRaw.length > 0) {
-      refused["next"] = canonicalToolCall("read_file", { mode: "slice", handle: handleRaw });
+      refused["next"] = canonicalToolCall("tl_read_file", { mode: "slice", handle: handleRaw });
     } else {
       // Last resort: nothing in the refusal names a file or a handle. IL-W5b
       // (DESIGN-v0.15-sf-intent-layers.md §11.4): `next` is the only
@@ -409,7 +409,7 @@ export function supplyRefusalGuidance(result: Record<string, unknown>): Record<s
       // exists to catch, and a caught `next` is DELETED, not degraded
       // (`emittableToolCall` returns `undefined`). Every refusal that fell
       // through to this branch therefore shipped with NO `next` at all — the
-      // measured `read_file {}` / `edit_file {}` "path is required" refusal
+      // measured `tl_read_file {}` / `tl_edit_file {}` "path is required" refusal
       // among them. `taskPackRecoveryFor` (server.ts) already fixed the exact
       // same defect for task_pack's own qref/task_handle refusals (G2); reuse
       // it here rather than re-deriving a second placeholder-avoidance rule.
@@ -442,8 +442,8 @@ export function supplyRefusalGuidance(result: Record<string, unknown>): Record<s
       //       `remaining` prose (never a placeholder `next`) — the shape the
       //       original M2 fix was for, e.g. `toolError("boom")`'s bare
       //       `{ok:false,error:"boom"}` or `{ok:false,reason:"handle-unknown"}`
-      //       (a legacy `reason` alias, not `code`). NOTE: `read_file {}` /
-      //       `edit_file {}`'s "path is required" refusal is NOT bare — M2's
+      //       (a legacy `reason` alias, not `code`). NOTE: `tl_read_file {}` /
+      //       `tl_edit_file {}`'s "path is required" refusal is NOT bare — M2's
       //       `inferMissingField` names `field:"path"` first, so it classifies
       //       as `call` with no `remaining` (corpus ilw5brf2/ilw5brf3).
       //
@@ -541,7 +541,7 @@ export function attachSupply(result: Record<string, unknown>, _workspace?: strin
         && nextCall !== undefined
       ) {
         const tool = (nextCall as { tool?: unknown }).tool;
-        if (tool !== "read_file" && tool !== "search_files") {
+        if (tool !== "tl_read_file" && tool !== "tl_search_files") {
           throw new Error(`task-pack invariant: discovery continuation must be read-only, got ${String(tool)}`);
         }
         contract["next_call"] = nextCall;

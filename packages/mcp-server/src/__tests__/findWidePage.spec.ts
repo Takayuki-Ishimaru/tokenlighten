@@ -1,15 +1,20 @@
 /**
- * findWidePage.spec.ts — TL_FIND_WIDE_PAGE (F5, 2026-09-19).
+ * findWidePage.spec.ts — TL_FIND_WIDE_PAGE (F5, 2026-09-19; promoted to (S)
+ * supported, DEFAULT ON for every client by SPC, 2026-09-29).
  *
  * NORMATIVE SOURCE: this wave's own evidence — a live-session measurement
- * showing a 7-file/50-match `search_files find` result truncated at the
+ * showing a 7-file/50-match `tl_search_files find` result truncated at the
  * 4096-byte snippet-section cap (`findText.ts`'s `MAX_RESPONSE_BYTES`) came
  * back as four separate follow-up calls (3084 B + 1681 B + 1499 B + …), one
- * full priced model turn per ~1.5-3 KB page. TL_FIND_WIDE_PAGE (default OFF)
- * widens that cap to 16384 bytes via the new `findResponseCapBytes()`
- * accessor (and the companion `findInventoryCapBytes()` for the
- * whole-response-with-inventory ceiling) — see util/flags.ts's "F5
- * addendum" and each accessor's own doc comment in findText.ts.
+ * full priced model turn per ~1.5-3 KB page. TL_FIND_WIDE_PAGE (default ON
+ * since SPC; explicit "0"/"false"/"no"/"off" is the rollback path) widens
+ * that cap to 16384 bytes via the new `findResponseCapBytes()` accessor (and
+ * the companion `findInventoryCapBytes()` for the whole-response-with-
+ * inventory ceiling) — see util/flags.ts's "F5"/"SPC addendum" blocks and
+ * each accessor's own doc comment in findText.ts. Every "OFF" case below
+ * sets the env var explicitly to exercise the rollback path — see
+ * flags.spec.ts's own `findWidePageEnabled` block for the default-ON pin
+ * itself.
  *
  * Fixture shape: ~12 files, each with several (6) literal matches on a
  * unique camelCase token — deliberately camelCase (no `-`/`_`) so
@@ -134,18 +139,19 @@ function totalShownLines(result: FindResponse): number {
 // ---------------------------------------------------------------------------
 
 describe("findResponseCapBytes / findInventoryCapBytes — accessor pinning", () => {
-  it("OFF (default, unset) returns the unchanged pre-F5 constants", () => {
+  it("unset (the default, since SPC 2026-09-29) returns the WIDENED constants", () => {
     delete process.env["TL_FIND_WIDE_PAGE"];
+    expect(findResponseCapBytes()).toBe(FIND_WIDE_PAGE_RESPONSE_BYTES);
+    expect(findResponseCapBytes()).toBe(16384);
+    expect(findInventoryCapBytes()).toBe(36864);
+  });
+
+  it("explicit \"0\" is the rollback path to the pre-F5 constants", () => {
+    process.env["TL_FIND_WIDE_PAGE"] = "0";
     expect(findResponseCapBytes()).toBe(MAX_RESPONSE_BYTES);
     expect(findResponseCapBytes()).toBe(4096);
     expect(findInventoryCapBytes()).toBe(MAX_INVENTORY_RESPONSE_BYTES);
     expect(findInventoryCapBytes()).toBe(24576);
-  });
-
-  it("explicit \"0\" is still off, same as unset", () => {
-    process.env["TL_FIND_WIDE_PAGE"] = "0";
-    expect(findResponseCapBytes()).toBe(MAX_RESPONSE_BYTES);
-    expect(findInventoryCapBytes()).toBe(MAX_INVENTORY_RESPONSE_BYTES);
   });
 
   it("ON widens the snippet cap to 16384 and the inventory ceiling by the same +12288 delta (36864), preserving inventory headroom", () => {
@@ -165,9 +171,9 @@ describe("findResponseCapBytes / findInventoryCapBytes — accessor pinning", ()
 // ---------------------------------------------------------------------------
 
 describe("buildFindResponse — TL_FIND_WIDE_PAGE OFF vs ON", () => {
-  it("OFF: snippet section stays within the legacy 4096-byte cap and the response is truncated", () => {
+  it("OFF (explicit \"0\"): snippet section stays within the legacy 4096-byte cap and the response is truncated", () => {
     const { workspace, expectedMatches } = buildFixture("off-unit");
-    delete process.env["TL_FIND_WIDE_PAGE"];
+    process.env["TL_FIND_WIDE_PAGE"] = "0";
 
     const result = buildFindResponse({ query: QUERY }, workspace);
 
@@ -183,7 +189,7 @@ describe("buildFindResponse — TL_FIND_WIDE_PAGE OFF vs ON", () => {
   it("ON: the same query shows strictly more shown lines in ONE call, within the wider 16384-byte cap, with identical totals", () => {
     const { workspace, expectedMatches } = buildFixture("on-unit");
 
-    delete process.env["TL_FIND_WIDE_PAGE"];
+    process.env["TL_FIND_WIDE_PAGE"] = "0";
     const off = buildFindResponse({ query: QUERY }, workspace);
 
     process.env["TL_FIND_WIDE_PAGE"] = "1";
@@ -217,7 +223,7 @@ describe("buildFindResponse — TL_FIND_WIDE_PAGE OFF vs ON", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Wire level — search_files find dispatch, following limit.next to exhaustion
+// Wire level — tl_search_files find dispatch, following limit.next to exhaustion
 // ---------------------------------------------------------------------------
 
 interface ToolCallShape { tool: string; arguments: Record<string, unknown> }
@@ -249,7 +255,7 @@ function matchesBlockOf(body: Record<string, unknown>): Record<string, unknown> 
 }
 
 async function invokeFind(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const response = await callTool("search_files", args);
+  const response = await callTool("tl_search_files", args);
   const first = (response as { content: Array<{ type: string; text?: string }> }).content[0];
   const text = first?.type === "text" && typeof first.text === "string" ? first.text : "{}";
   return JSON.parse(text) as Record<string, unknown>;
@@ -286,7 +292,7 @@ async function runFindToCompletion(firstArgs: Record<string, unknown>, cap: numb
   for (let i = 0; i < cap; i++) {
     const next = nextCallOf(body);
     if (!next) break;
-    expect(next.tool, "find continuation must stay inside search_files").toBe("search_files");
+    expect(next.tool, "find continuation must stay inside tl_search_files").toBe("tl_search_files");
     body = await invokeFind(next.arguments);
     callsMade += 1;
     pages.push(body);
@@ -295,12 +301,12 @@ async function runFindToCompletion(firstArgs: Record<string, unknown>, cap: numb
   return { pages, paths, totalFiles, totalMatches, callsMade };
 }
 
-describe("search_files find dispatch — TL_FIND_WIDE_PAGE wire-level continuation", () => {
+describe("tl_search_files find dispatch — TL_FIND_WIDE_PAGE wire-level continuation", () => {
   it("OFF needs at least one follow-up call; ON needs no more calls than OFF; both runs converge on the identical file union", async () => {
     const off = buildFixture("off-wire");
     const on = buildFixture("on-wire");
 
-    delete process.env["TL_FIND_WIDE_PAGE"];
+    process.env["TL_FIND_WIDE_PAGE"] = "0";
     const offRun = await runFindToCompletion({ action: "find", query: QUERY, cwd: off.workspace }, 20);
 
     process.env["TL_FIND_WIDE_PAGE"] = "1";

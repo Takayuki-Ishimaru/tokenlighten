@@ -97,7 +97,7 @@ const NUL = String.fromCharCode(0);
 // (not a safety leak: both cells below refuse, and the on-disk bytes are
 // byte-identical before/after in every run). For a NUL-bearing fixture
 // LARGER than roughly 4 KiB (`nul-past-4kib`, `nul-past-surface-cap`), the
-// edit_file write-guard's refusal uses a DIFFERENT, generic message
+// tl_edit_file write-guard's refusal uses a DIFFERENT, generic message
 // ("write-error": "content contains a raw NUL character, the signature of a
 // UTF-16 (or otherwise non-UTF-8) file misread as UTF-8 upstream ... this
 // write was blocked to avoid corrupting the file") instead of the read
@@ -463,7 +463,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
       itFor(`r1-full-single__${encId}`)(`full-single serves ${encId} byte-faithfully or discloses it`, async () => {
         const lane = freshLane("r1");
         const rel = relPathFor(encId);
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: rel }],
           content: "full",
           cwd: ws,
@@ -519,7 +519,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
         const lane = freshLane("r1budget");
         const args: Record<string, unknown> = { targets: [{ path: relPathFor("nul-sparse") }], content: "full", cwd: ws, lane };
         if (budget) args["budget"] = budget;
-        const { response, raw } = await srv.callRaw(id(), "read_file", args);
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", args);
         assertStructuredResponse(response, `r1-budget/${label}`);
         assertNoWireNul(raw, `r1-budget/${label}`);
         expect(saysNulStripped(response), `r1-budget/${label}: strip statement must survive the budget`).toBe(true);
@@ -533,7 +533,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
       itFor(`r2-outline-single__${encId}`)(`outline-single serves ${encId} without leaking a NUL`, async () => {
         const lane = freshLane("r2");
         const rel = relPathFor(encId);
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: rel }],
           content: "outline",
           cwd: ws,
@@ -563,7 +563,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     ] as const) {
       itFor(`r2-outline-single-budget__nul-sparse__${label}`)(`outline-single states the strip under ${label}`, async () => {
         const lane = freshLane("r2budget");
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: relPathFor("nul-sparse") }],
           content: "outline",
           budget,
@@ -582,7 +582,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     for (const encId of ENCODING_IDS) {
       itFor(`r3-outline-batch__${encId}`)(`outline-batch serves ${encId} beside a clean decoy without leaking a NUL`, async () => {
         const lane = freshLane("r3");
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: "src/decoy.css" }, { path: relPathFor(encId) }],
           content: "outline",
           cwd: ws,
@@ -627,7 +627,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
       itFor(`r4-handle-single__${encId}`)(`a minted handle for ${encId} re-reads without leaking a NUL`, async () => {
         const lane = freshLane("r4");
         const rel = relPathFor(encId);
-        const mint = await srv.callRaw(id(), "read_file", { targets: [{ path: rel, range: "1-1" }], cwd: ws, lane });
+        const mint = await srv.callRaw(id(), "tl_read_file", { targets: [{ path: rel, range: "1-1" }], cwd: ws, lane });
         assertStructuredResponse(mint.response, `r4-mint/${encId}`);
         assertNoWireNul(mint.raw, `r4-mint/${encId}`);
         const evidence = mint.response["evidence"];
@@ -640,7 +640,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
           recordVerdict(encId, "r4-handle-single", "undecodable");
           return;
         }
-        const { response, raw } = await srv.callRaw(id(), "read_file", { targets: [{ handle }], cwd: ws, lane, task: { force_serve: true } });
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", { targets: [{ handle }], cwd: ws, lane, task: { force_serve: true } });
         assertStructuredResponse(response, `r4/${encId}`);
         assertNoWireNul(raw, `r4/${encId}`);
         const expected = EXPECTED_VERDICT[encId];
@@ -655,15 +655,15 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
 
     itFor("r5-handle-batch__nul-sparse+latin1-invalid")("a two-handle batch mixing a stripped and an undecodable fixture leaks no NUL", async () => {
       const lane = freshLane("r5");
-      const a = await srv.callRaw(id(), "read_file", { targets: [{ path: relPathFor("nul-sparse"), range: "1-1" }], cwd: ws, lane });
-      const b = await srv.callRaw(id(), "read_file", { targets: [{ path: relPathFor("utf8-valid"), range: "1-1" }], cwd: ws, lane });
+      const a = await srv.callRaw(id(), "tl_read_file", { targets: [{ path: relPathFor("nul-sparse"), range: "1-1" }], cwd: ws, lane });
+      const b = await srv.callRaw(id(), "tl_read_file", { targets: [{ path: relPathFor("utf8-valid"), range: "1-1" }], cwd: ws, lane });
       assertNoWireNul(a.raw, "r5-mint-a");
       assertNoWireNul(b.raw, "r5-mint-b");
       const handleA = Array.isArray(a.response["evidence"]) ? bodyValue((a.response["evidence"] as unknown[])[0])["handle"] : undefined;
       const handleB = Array.isArray(b.response["evidence"]) ? bodyValue((b.response["evidence"] as unknown[])[0])["handle"] : undefined;
       expect(typeof handleA, "r5: expected a handle for the stripped fixture").toBe("string");
       expect(typeof handleB, "r5: expected a handle for the clean fixture").toBe("string");
-      const { response, raw } = await srv.callRaw(id(), "read_file", { targets: [{ handle: handleA }, { handle: handleB }], cwd: ws, lane, task: { force_serve: true } });
+      const { response, raw } = await srv.callRaw(id(), "tl_read_file", { targets: [{ handle: handleA }, { handle: handleB }], cwd: ws, lane, task: { force_serve: true } });
       assertStructuredResponse(response, "r5");
       assertNoWireNul(raw, "r5");
       expect(saysNulStripped(a.response) || saysNulStripped(response), "r5: the stripped half of the batch must state the strip somewhere in the chain").toBe(true);
@@ -675,7 +675,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     for (const encId of ENCODING_IDS) {
       itFor(`r6-range__${encId}`)(`a line-range read of ${encId} leaks no NUL`, async () => {
         const lane = freshLane("r6");
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: relPathFor(encId), range: "1-3" }],
           cwd: ws,
           lane,
@@ -706,7 +706,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     for (const encId of ENCODING_IDS) {
       itFor(`r7-symbol__${encId}`)(`a symbol-scoped read of ${encId} leaks no NUL`, async () => {
         const lane = freshLane("r7");
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: relPathFor(encId), symbol: matrixIdentifier(encId) }],
           cwd: ws,
           lane,
@@ -730,7 +730,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     for (const encId of ENCODING_IDS) {
       itFor(`r8-pathless-seeded__${encId}`)(`a pathless query with ${encId} seeded via targets never leaks a NUL`, async () => {
         const lane = freshLane("r8");
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           query: "Describe what this workspace contains.",
           targets: [{ path: "src/decoy.css" }, { path: relPathFor(encId) }],
           task: { epoch: "new" },
@@ -767,7 +767,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
       itFor(`r9-query-named__${encId}`)(`a query naming ${encId} by path (no identifier) never leaks a NUL`, async () => {
         const lane = freshLane("r9");
         const rel = relPathFor(encId);
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           query: `Describe what ${rel} contains.`,
           task: { epoch: "new" },
           cwd: ws,
@@ -798,7 +798,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
       itFor(`r10-literal-first__${encId}`)(`a query naming ${encId}'s own unique identifier never leaks a NUL`, async () => {
         const lane = freshLane("r10");
         const rel = relPathFor(encId);
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           query: `Explain ${matrixIdentifier(encId)} in ${rel}.`,
           task: { epoch: "new" },
           cwd: ws,
@@ -830,7 +830,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
         const lane = freshLane("r11");
         const cleanRel = counterexampleCleanPathFor(encId);
         const identifier = counterexampleIdentifierFor(encId);
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           query: `Explain ${identifier} in ${cleanRel}.`,
           task: { epoch: "new" },
           cwd: ws,
@@ -860,12 +860,12 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     }
   });
 
-  // -- R12: search_files find snippets -------------------------------------
-  describe("R12 search_files find snippets", () => {
+  // -- R12: tl_search_files find snippets -------------------------------------
+  describe("R12 tl_search_files find snippets", () => {
     for (const encId of ENCODING_IDS) {
       itFor(`r12-search-find__${encId}`)(`find snippets for ${encId}'s identifier leak no NUL`, async () => {
         const lane = freshLane("r12");
-        const { response, raw } = await srv.callRaw(id(), "search_files", {
+        const { response, raw } = await srv.callRaw(id(), "tl_search_files", {
           action: "find",
           queries: [matrixIdentifier(encId)],
           cwd: ws,
@@ -885,7 +885,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     for (const encId of REPRESENTATIVE_IDS) {
       itFor(`r13-map-directory__${encId}`)(`a directory outline containing ${encId} leaks no NUL`, async () => {
         const lane = freshLane("r13");
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: "src/enc" }],
           content: "outline",
           cwd: ws,
@@ -903,7 +903,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     for (const encId of REPRESENTATIVE_IDS) {
       itFor(`r14-markdown-outline__${encId}`)(`a markdown outline of ${encId}'s bytes leaks no NUL`, async () => {
         const lane = freshLane("r14");
-        const { response, raw } = await srv.callRaw(id(), "read_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_read_file", {
           targets: [{ path: relMarkdownPathFor(encId) }],
           content: "outline",
           cwd: ws,
@@ -928,7 +928,7 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
     for (const encId of REPRESENTATIVE_IDS) {
       itFor(`r15-cursor-continuation__${encId}`)(`a paginated find for ${encId} leaks no NUL across a cursor hop`, async () => {
         const lane = freshLane("r15");
-        const first = await srv.callRaw(id(), "search_files", {
+        const first = await srv.callRaw(id(), "tl_search_files", {
           action: "find",
           queries: [matrixIdentifier(encId)],
           budget: { items: 1 },
@@ -973,12 +973,12 @@ describe("MX-B served-bytes wire matrix (read-only routes)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Wire matrix — edit_file read-back, ONE spawned server with --allow-write,
+// Wire matrix — tl_edit_file read-back, ONE spawned server with --allow-write,
 // a SEPARATE workspace (never shares mutable state with the read-only
 // matrix above).
 // ---------------------------------------------------------------------------
 
-describe("MX-B served-bytes wire matrix (edit_file read-back, --allow-write)", () => {
+describe("MX-B served-bytes wire matrix (tl_edit_file read-back, --allow-write)", () => {
   let ws: string;
   let srv: ServerHandle;
   let nextId = 200;
@@ -997,7 +997,7 @@ describe("MX-B served-bytes wire matrix (edit_file read-back, --allow-write)", (
     if (ws) { try { fs.rmSync(ws, { recursive: true, force: true }); } catch { /* best effort */ } }
   });
 
-  describe("R16 edit_file read-back (applied[].code)", () => {
+  describe("R16 tl_edit_file read-back (applied[].code)", () => {
     for (const encId of ENCODING_IDS) {
       itFor(`r16-edit-readback__${encId}`)(`editing ${encId} either refuses cleanly or read-back leaks no NUL`, async () => {
         const lane = freshLane("r16");
@@ -1017,7 +1017,7 @@ describe("MX-B served-bytes wire matrix (edit_file read-back, --allow-write)", (
         const verdictBefore = readServedText(bytesBefore);
         const hasNul = verdictBefore.kind === "stripped" || (verdictBefore.kind === "undecodable" && verdictBefore.reason === "nul-dense");
 
-        const { response, raw } = await srv.callRaw(id(), "edit_file", {
+        const { response, raw } = await srv.callRaw(id(), "tl_edit_file", {
           edits: [{
             path: rel,
             search: `export const ${identifier} = () => {};`,
@@ -1057,7 +1057,7 @@ describe("MX-B served-bytes wire matrix (edit_file read-back, --allow-write)", (
           // (already checked above) and never silently reports success.
           return;
         }
-        expect(response["kind"], `r16/${encId}: unexpected edit_file response kind`).toBe("edit.applied");
+        expect(response["kind"], `r16/${encId}: unexpected tl_edit_file response kind`).toBe("edit.applied");
         const applied = response["applied"];
         if (!Array.isArray(applied)) return;
         for (const entry of applied) {

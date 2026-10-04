@@ -7,7 +7,7 @@
  * server replace it from `ALL_TOOLS` during bootstrap. This makes the live
  * allowlist follow the declaration rather than a second hand-maintained list.
  */
-const FALLBACK_TOOL_NAMES = new Set(["read_file", "edit_file", "search_files"]);
+const FALLBACK_TOOL_NAMES = new Set(["tl_read_file", "tl_edit_file", "tl_search_files"]);
 let currentToolNames: ReadonlySet<string> = FALLBACK_TOOL_NAMES;
 
 export function setAdvertisedToolNames(names: Iterable<string>): void {

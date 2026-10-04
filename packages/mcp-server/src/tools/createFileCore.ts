@@ -8,7 +8,7 @@
  * Phase 1) had no notion of "this item's target is SUPPOSED to be absent"
  * and forced every item through the existing-file `fs.statSync` check.
  *
- * Factored out of createFile.ts (the single edit_file `create:true` path) so
+ * Factored out of createFile.ts (the single tl_edit_file `create:true` path) so
  * the batch edits[] create path (applyEditsMulti.ts) shares the EXACT same
  * security/no-replace guarantees instead of re-deriving them and risking
  * drift. createFile.ts and applyEditsMulti.ts each keep their own call-site

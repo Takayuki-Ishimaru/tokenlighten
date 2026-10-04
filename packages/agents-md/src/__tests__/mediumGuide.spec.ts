@@ -14,7 +14,7 @@ describe("medium guide profile (E8)", () => {
   it("keeps the exercised v75 rules", () => {
     const medium = renderMediumBlock();
     for (const rule of [
-      "read_file {query",
+      "tl_read_file {query",
       "decision.kind",
       "refusal",
       "retry",
@@ -54,7 +54,7 @@ describe("medium guide profile (E8)", () => {
   it("JP: keeps the same protocol-directive vocabulary as EN medium (translation parity, not identical text)", () => {
     const mediumJp = renderMediumBlock("jp");
     for (const rule of [
-      "read_file {query",
+      "tl_read_file {query",
       "decision.kind",
       "next",
       "read.receipt",
