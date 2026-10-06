@@ -90,6 +90,26 @@ export interface FacetPlanEntry {
   readonly facet: RequestFacet;
   /** `FacetRequirement.clause`, verbatim — the join key with a re-extracted requirement. */
   readonly clause: string;
+  /**
+   * 2026-10-06 independent review (P1-4): set on the entries a requirement
+   * naming SEVERAL subjects adds beside its primary one — the subject (the
+   * declaration's name) this entry's focal answers. "Explain retryDelay and
+   * calculateTotal, including … callers" plans retryDelay's callers (no
+   * `subject`) and calculateTotal's (`subject: "calculateTotal"`) under the
+   * same (facet, clause); the gate requires every one of them. Absent on the
+   * primary entry and on every single-subject requirement.
+   */
+  readonly subject?: string;
+  /**
+   * 2026-10-06 independent review (P1-1/P1-2): true on the `value` entries
+   * readCodeTaskPack.ts's `runAnswerDependencyClosure` records for a callable
+   * an answer pack serves whole — the constants its body reads, whatever the
+   * question's wording asked. Never a query clause's entry: `clause` is a
+   * fixed marker no requirement or request item matches, and the gate checks
+   * these entries on their own (an unserved window keeps the pack open; a
+   * covered or empty one adds nothing to the wire).
+   */
+  readonly dependency?: boolean;
   readonly resolution: "resolved" | "no-focal" | "budget-exhausted";
   /** `callable:false` = the focal is a type (class / interface / enum / struct …): its served declaration IS the value evidence, and the callable-only "reads no constant, holds no literal" emptiness never applies. Absent = callable. */
   readonly focal?: { readonly path: string; readonly name: string; readonly start: number; readonly end: number; readonly callable?: boolean };
@@ -248,6 +268,73 @@ export function recordFacetPlan(workspaceKey: string, plan: FacetPlan): void {
   clearUndeliveredFacetLines(workspaceKey, plan.query);
 }
 
+// ---------------------------------------------------------------------------
+// Dependency entries (2026-10-06 independent review, P1-1/P1-2) — the
+// constants a callable an answer pack served whole reads
+// (readCodeTaskPack.ts `runAnswerDependencyClosure`). Kept apart from the
+// query-clause plan on purpose: `recordFacetPlan` re-plans the clauses on
+// every pack of a task, but what a callable served on an EARLIER hop reads
+// stays owed until it is delivered, whether or not a later hop serves that
+// callable again. Measured: a 152-line table read by `priceFor` was paged over
+// hops, and the second hop (a ranged read of the table alone) dropped the
+// entry and certified with 32 of its lines never served. One record per
+// callable (path + name), replaced when that callable is closed again; a
+// record whose own files changed since is ignored, never merged.
+// ---------------------------------------------------------------------------
+
+/** Dependency records remembered per (workspace, query); the oldest leave first. */
+export const MAX_FACET_DEPENDENCY_RECORDS = 32;
+
+export interface FacetDependencyRecord {
+  readonly entry: FacetPlanEntry;
+  /** sha of the focal's file and of every window's file, when the record was made. */
+  readonly fileShas: Readonly<Record<string, string>>;
+}
+
+const dependencyRecords = new Map<string, Map<string, FacetDependencyRecord[]>>();
+
+function dependencyKey(entry: FacetPlanEntry): string {
+  return `${entry.focal?.path ?? ""}\u0000${entry.focal?.name ?? entry.subject ?? ""}`;
+}
+
+/** Records `records` for `query`, each replacing the record of the same callable. */
+export function recordFacetDependencyEntries(
+  workspaceKey: string,
+  query: string,
+  records: readonly FacetDependencyRecord[],
+): void {
+  if (records.length === 0) return;
+  let byQuery = dependencyRecords.get(workspaceKey);
+  if (byQuery === undefined) {
+    if (dependencyRecords.size >= MAX_FACET_PLAN_WORKSPACES) {
+      const oldest = dependencyRecords.keys().next().value;
+      if (oldest !== undefined) dependencyRecords.delete(oldest);
+    }
+    byQuery = new Map();
+    dependencyRecords.set(workspaceKey, byQuery);
+  }
+  const replaced = new Set(records.map((record) => dependencyKey(record.entry)));
+  const kept = (byQuery.get(query) ?? []).filter((record) => !replaced.has(dependencyKey(record.entry)));
+  byQuery.delete(query); // re-insert = newest
+  if (byQuery.size >= MAX_FACET_PLANS_PER_WORKSPACE) {
+    const oldest = byQuery.keys().next().value;
+    if (oldest !== undefined) byQuery.delete(oldest);
+  }
+  byQuery.set(query, [...kept, ...records].slice(-MAX_FACET_DEPENDENCY_RECORDS));
+}
+
+/** The dependency entries recorded for `query` whose files are all unchanged (`currentSha` as in `facetPlanFor`). */
+export function facetDependencyEntriesFor(
+  workspaceKey: string,
+  query: string,
+  currentSha: (path: string) => string | undefined,
+): FacetPlanEntry[] {
+  const records = dependencyRecords.get(workspaceKey)?.get(query) ?? [];
+  return records
+    .filter((record) => Object.entries(record.fileShas).every(([path, sha]) => currentSha(path) === sha))
+    .map((record) => record.entry);
+}
+
 /**
  * The plan recorded for `query`, or `undefined` when none was recorded or any
  * file it names changed since (`currentSha` returns the file's sha NOW, or
@@ -269,6 +356,7 @@ export function facetPlanFor(
 export function resetFacetPlansForTest(): void {
   facetPlans.clear();
   undeliveredLines.clear();
+  dependencyRecords.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +698,35 @@ function conceptGrounded(terms: readonly string[], focal: NonNullable<FacetPlanE
   const name = focal.name.toLowerCase();
   const body = (ctx.fileLines(focal.path) ?? []).slice(Math.max(0, focal.start - 1), focal.end).join("\n").toLowerCase();
   return usable.some((term) => name.includes(term) || body.includes(term));
+}
+
+/**
+ * 2026-10-06 independent review (P1-4): one requirement's facts across every
+ * subject it planned — its primary entry plus each `FacetPlanEntry.subject`
+ * entry, evaluated one by one. Open when any subject is open (their unserved
+ * windows together, so one `next` reads them all); otherwise undetermined
+ * when any is; otherwise covered when any is (a verified-empty sibling keeps
+ * its own disclosure); empty only when every subject is. One subject is
+ * returned unchanged.
+ */
+export function combineSubjectFacetFacts(all: readonly FacetFacts[]): FacetFacts {
+  if (all.length <= 1) return all[0]!;
+  const servedWindows = all.flatMap((facts) => facts.servedWindows);
+  const open = all.filter((facts) => facts.kind === "open");
+  if (open.length > 0) {
+    const seen = new Set<string>();
+    const openTargets = open.flatMap((facts) => facts.openTargets).filter((target) => {
+      const key = `${target.path}\u0000${target.start}-${target.end}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return { ...open[0]!, servedWindows, openTargets, reason: open.map((facts) => facts.reason).join("; ") };
+  }
+  const undetermined = all.find((facts) => facts.kind === "undetermined");
+  if (undetermined !== undefined) return { ...undetermined, servedWindows };
+  const covered = all.find((facts) => facts.kind === "covered");
+  return { ...(covered ?? all[0]!), servedWindows, reason: all.map((facts) => facts.reason).join("; ") };
 }
 
 /**

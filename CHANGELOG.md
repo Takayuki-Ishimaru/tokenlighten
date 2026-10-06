@@ -2,6 +2,30 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.15.1
+
+- Answer packs include constants read by the complete functions relevant to
+  the question, following imports, aliases and re-exports. Missing evidence
+  is requested or disclosed as unresolved.
+- Explicit function names take precedence over similar identifiers, and
+  caller questions retain each named subject, including same-file callers.
+- Explanation phrases such as “edge cases” and 「金額」 no longer become
+  false missing-code reports; commas in function arguments do not split topics.
+- Task-pack discovery does not read imports or symlinks outside the workspace.
+- An `operation_id` replay returns the recorded post-edit text without
+  repeating the edit. `current` indicates whether the files still match it;
+  a returned `next` reads files that changed. Older outcomes retain their
+  previous format.
+
+- Updated runtime and build dependencies to include upstream fixes. The
+  document-conversion command uses a newer argument parser without the
+  affected formatting dependency.
+
+Upgrade the archive or VSIX, re-run workspace setup and reconnect the client.
+Request fields and tool names are unchanged from v0.15.0. See the
+[v0.15.1 release notes](release-docs/github-release-v0.15.1.md) for details
+and limitations.
+
 ## 0.15.0
 
 - A value reached through an alias, a re-export, or a rename

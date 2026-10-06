@@ -1,6 +1,6 @@
 # TokenLighten release documentation
 
-This directory contains the public documentation for TokenLighten v0.15.0.
+This directory contains the public documentation for TokenLighten v0.15.1.
 
 ## Start here
 
@@ -13,7 +13,10 @@ This directory contains the public documentation for TokenLighten v0.15.0.
 - [Language support](language-support.md) — languages, formats, and limits.
 - [Privacy, security, and support](privacy-security-support.md).
 - [Licensing](licensing.md).
-- [GitHub Release v0.15.0](github-release-v0.15.0.md) — answers backed by
+- [GitHub Release v0.15.1](github-release-v0.15.1.md) — more complete
+  evidence for calculations and callers, exact function-name selection,
+  workspace-bounded task-pack reads, and visible results on edit retries.
+- [Historical GitHub Release v0.15.0](github-release-v0.15.0.md) — answers backed by
   the evidence they depend on (values behind aliases and renames), edit
   results that return the edited text, budget-filling reads and search
   pages, prefixed tool names, and updated Copilot and shared agent guides.
@@ -42,7 +45,7 @@ This directory contains the public documentation for TokenLighten v0.15.0.
 
 ## Release scope
 
-The v0.15.0 public release includes four platform install archives (CLI,
+The v0.15.1 public release includes four platform install archives (CLI,
 MCP server and a bundled Node.js runtime), the CLI and MCP server as source
 with selected developer tests, and the VS Code extension. The desktop
 application is not included.

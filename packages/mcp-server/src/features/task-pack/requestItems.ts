@@ -19,7 +19,13 @@
  * existing behaviour never changes (wave1-contract.md §3.4).
  */
 
-import { isNegatedInstructionClause, isFacetDescriptorTerm, callShapedNamesIn } from "./requestFacets.js";
+import {
+  isNegatedInstructionClause,
+  isFacetDescriptorTerm,
+  callShapedNamesIn,
+  maskCallArgumentPunctuation,
+  maskExplanationAspectPhrases,
+} from "./requestFacets.js";
 import { isProseAcronym } from "./concernRecovery.js";
 import { JA_GLOSSARY } from "../retrieval/jaGlossary.js";
 import { KATAKANA_RUN_RE } from "../../util/cjkSpans.js";
@@ -441,7 +447,9 @@ const IN_WHAT_ORDER_IDIOM_RE = /\bin\s+what\s+order\b/giu;
 const HOW_X_HANDLES_IDIOM_RE = /\b(how)\b([^.?!]*?)\b(handles?)\b/giu;
 
 function maskPhrasingIdiomSpans(text: string): string {
-  let out = text;
+  // 2026-10-06 independent review (P2-1): "edge cases" and its kin name the
+  // kind of answer, never a searchable word (requestFacets.ts).
+  let out = maskExplanationAspectPhrases(text);
   for (const re of [STEP_BY_STEP_IDIOM_RE, END_TO_END_IDIOM_RE, IN_ITS_LIFECYCLE_IDIOM_RE, IN_WHAT_ORDER_IDIOM_RE]) {
     out = out.replace(re, (m) => " ".repeat(m.length));
   }
@@ -3958,8 +3966,19 @@ function splitEnumerated(text: string): string[] {
     // acceptable cost next to fabricating nonsense items/search queries.
     .replace(/および|及び|並びに|また|そして/gu, "、")
     .replace(/(?:^|\n)[ \t]*(?:[-*•]|\(?\d{1,2}[.)]|[①-⑳])[ \t]+/gu, "\n");
-  const primary = normalized
-    .split(/[,、，\n]+/u)
+  // 2026-10-06 independent review (P2-1): a comma between a call's arguments
+  // (`calculateTotal(4800, 0)`) is never a list boundary — see
+  // requestFacets.ts `maskCallArgumentPunctuation`. Cut points are found in
+  // the guarded copy and the ORIGINAL text is sliced.
+  const guarded = maskCallArgumentPunctuation(normalized, ",、，");
+  const pieces: string[] = [];
+  let cursor = 0;
+  for (const match of guarded.matchAll(/[,、，\n]+/gu)) {
+    pieces.push(normalized.slice(cursor, match.index));
+    cursor = (match.index ?? cursor) + match[0].length;
+  }
+  pieces.push(normalized.slice(cursor));
+  const primary = pieces
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   const out: string[] = [];

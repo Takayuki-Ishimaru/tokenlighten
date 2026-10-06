@@ -6,7 +6,7 @@ Security fixes are provided for the latest released version of TokenLighten. Old
 
 ## Dependency updates
 
-v0.14.4 updated the transitive runtime dependency `ip-address` and the packaging dependency `undici` to include upstream fixes for published advisories. v0.14.0 and v0.14.3 also included dependency updates; v0.14.1 and v0.14.2 declared no dependency changes. v0.15.0 updates transitive runtime dependencies and the VSIX packaging tool to include upstream fixes. Advisory information can change after release. Users and contributors can run `npm audit --omit=dev` and, for source development, `npm audit` against the exact release or checkout they use.
+v0.14.4 updated the transitive runtime dependency `ip-address` and the packaging dependency `undici` to include upstream fixes for published advisories. v0.14.0 and v0.14.3 also included dependency updates; v0.14.1 and v0.14.2 declared no dependency changes. v0.15.0 updates transitive runtime dependencies and the VSIX packaging tool to include upstream fixes. v0.15.1 prevents task-pack evidence reads through imports or symlinks outside the workspace and updates runtime and build dependencies to include upstream fixes. Advisory information can change after release. Users and contributors can run `npm audit --omit=dev` and, for source development, `npm audit` against the exact release or checkout they use.
 
 ## Reporting a vulnerability
 

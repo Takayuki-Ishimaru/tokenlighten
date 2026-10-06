@@ -64,7 +64,7 @@ Every response has a `kind`. Follow an executable `next` exactly when present. S
 
 A `read.receipt` means the relevant content or decision is already current; it is not a request to repeat discovery. A receipt carries a `next` only when the request it answers still has undelivered content. A full read is deduplicated by its requested projection: an identical repeat under the same `select:{comments:"keep"|"elide"}` choice returns a receipt, and a different projection serves the body again. `content:"full"` requests an unelided view of the selected content and does not force a resend, and neither does `budget.allowFull:true` — it only raises the full-read size cap. `task.force_serve:true` is the explicit resend switch for a client that genuinely lost previously served context. Every `evidence[]` `body` is verbatim source of that item's own `path` and `range` — never an outline, a pointer to an earlier response, or lines from elsewhere in the file. `prior` stands for content that was actually sent earlier in the session, and `remaining` names the windows of that item that were not sent.
 
-Replay-safe writes use `operation_id`. Reusing the same identifier returns the recorded result instead of applying the mutation twice. Since v0.13 the server stores compact replay v2 outcomes while keeping old retry keys fail-safe.
+Replay-safe writes use `operation_id`. Reusing the same identifier returns the recorded result instead of applying the mutation twice. Since v0.13 the server stores compact replay v2 outcomes while keeping old retry keys fail-safe. Since v0.15.1, a replay includes the original `applied[].after` window and `current` (`unchanged` or `changed`). If files changed after the edit, a returned `next` reads their current contents; the saved window still describes the original edit. Outcomes recorded before v0.15.1 retain their earlier format.
 
 ## Read and search
 
@@ -112,8 +112,25 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
+## v0.15.1 evidence selection
+
+For an answer that explains behaviour or computes a value, complete returned
+functions relevant to the question also bring their referenced constants,
+including imports, aliases and re-exports. Unserved evidence keeps a
+continuation open, and unresolved declarations are disclosed. Questions that
+only locate code or ask about relationships do not gather these extra values.
+An explicitly named function such as “the retry function” or “retry 関数”
+selects that identifier. Caller requests retain each named subject and include
+same-file call sites. Explanation wording such as “edge cases” and 「金額」
+is not treated as a missing source term, and function-argument commas do not
+split a request into separate points.
+
+Task-pack discovery does not read imports or symlinks that resolve outside
+the workspace; values depending on them are disclosed as unresolved.
+
 ## Known limitations
 
+- A question with multiple subjects can require a continuation. Values used only by code that was not returned may require an explicit question naming that code or value.
 - A single multi-target read that mixes plain files with archive or artifact members is refused with a recovery path rather than routed per target; issue those reads as separate calls.
 - In a rare wire-budget fallback path the server can still return a generic JSON-RPC error instead of a structured refusal; retry with a larger `budget` or a narrower target.
 - When the built-in parser cannot resolve a declaration in a file, a decision that depends on that file closes only after the whole file has been served at its current hash; the returned `next` names the unserved range.

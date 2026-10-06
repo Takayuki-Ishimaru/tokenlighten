@@ -56,25 +56,41 @@ import { CONFIG_NAMES, startDevServer, type ConfigName, type ServerHandle } from
 
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
 
-const QUERY = "Explain parseConfigHeader and finalizeShutdownSequence in pipelineConfig.ts.";
+const QUERY = "Explain parseConfigHeader, flushStageTelemetry and finalizeShutdownSequence in pipelineConfig.ts.";
 const ZOOM_RANGE = "77-82";
 const ZOOM_IDENTIFIER = "finalizeShutdownSequence";
 
 /**
- * ONE file, two identifiers far apart: `parseConfigHeader` near the top
- * (small enough that a 6,200-byte budget embeds a window around it directly)
- * and `finalizeShutdownSequence` at the very tail, past ~60 filler lines —
- * far enough that hop 0 cannot also embed it under the same budget and must
- * leave it for a follow-up (`next` proposes `tl_search_files find` for it; the
- * evidence row's own `remaining` already names the tail span that contains
- * it, which is exactly what a caller impatient enough to zoom by handle would
- * jump to instead of running `next` verbatim).
+ * ONE file, three identifiers far apart: `parseConfigHeader` near the top
+ * (small enough that a 6,200-byte budget embeds a window around it directly),
+ * `flushStageTelemetry` in the middle of ~60 filler lines, and
+ * `finalizeShutdownSequence` at the very tail, each more than one probe
+ * window (±18 lines) from the others. Hop 0 serves the first as its focus;
+ * the readiness-falsification pass inlines at most ONE more window of a file
+ * — the earliest-line candidate on a score tie, so `flushStageTelemetry` —
+ * which leaves `finalizeShutdownSequence` for a follow-up (`next` locates it;
+ * the evidence row's own `remaining` already names the tail span that
+ * contains it, which is exactly what a caller impatient enough to zoom by
+ * handle would jump to instead of running `next` verbatim). With only the
+ * first two identifiers, hop 0 closes: since the probe matches whole
+ * identifiers (2026-10-06) it inlines the tail function itself, where a
+ * substring hit used to steer it to the `PipelineConfigHeader` interface.
  */
 function buildZoomFixtureWorkspace(root: string): void {
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
   const filler = Array.from(
     { length: 60 },
     (_, i) => `// filler line ${String(i + 1).padStart(3, "0")} describing unrelated pipeline bookkeeping detail number ${i + 1}`,
+  );
+  // File lines 45-50 (filler 30-35): the middle function. The line count is
+  // unchanged, so the tail function keeps ZOOM_RANGE.
+  filler.splice(29, 6,
+    "/** Flushes the per-stage telemetry buffer before the next stage starts. */",
+    "export function flushStageTelemetry(buffer: string[]): number {",
+    "  const flushed = buffer.length;",
+    "  buffer.length = 0;",
+    "  return flushed;",
+    "}",
   );
   const content = [
     "// pipelineConfig.ts -- parses pipeline configuration and finalizes shutdown.",

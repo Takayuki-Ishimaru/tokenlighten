@@ -6,7 +6,7 @@ TokenLighten (TL) helps coding agents use fewer input tokens by giving them prec
 
 The TokenLighten Workspace view is for developers using GitHub Copilot, the VS Code Codex extension, or Claude Code in VS Code. It provides only workspace-scoped controls and data:
 
-- One-click setup for VS Code, GitHub Copilot, Codex, and Claude Code in the current workspace — this installs TokenLighten as a machine-scoped MCP server that other detected hosts on the machine pick up too, not only VS Code.
+- One-click setup for VS Code and managed AI instructions in the current workspace. It creates or repairs the machine installation; registering other hosts such as Codex or Claude Code is a separate, explicit step with `tl clients activate` or an archive's `tl-setup`.
 - A workspace switch for enabling or temporarily disabling TokenLighten.
 - Automatic re-enabling when workspace setup is run again.
 - An uninstall command that removes the machine install and managed host registrations without leaving VS Code.
@@ -81,4 +81,4 @@ npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](../../README.md) and [public release documentation](../../release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.1/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.1/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.

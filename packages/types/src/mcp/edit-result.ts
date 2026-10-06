@@ -7,7 +7,7 @@
 // A.9.1 `edit-result.ts` row.
 // ---------------------------------------------------------------------------
 
-import type { ProtocolVersion, WorkspaceMarker } from "./protocol.js";
+import type { ProtocolVersion, ToolCall, WorkspaceMarker } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // A.5.11–A.5.14 preamble — the §4.2.1(3) minimal core, as a type
@@ -300,12 +300,28 @@ export type EditApplied = {
   /**
    * OPERATION REPLAY MARKER (2026-08-27 field-eval T4, additive/optional —
    * protocol v1's frozen kind set is unaffected, this is a field, not a new
-   * member). `true` iff this exact response is a BYTE-IDENTICAL replay of an
-   * earlier `operation_id` apply (`state/stateStore.ts`'s operation ledger;
-   * see `editFamily.ts`'s `markReplayed`) rather than a fresh dispatch.
-   * Absent on every fresh apply — never emitted as `false`.
+   * member). `true` iff this response replays the RECORDED outcome of an
+   * earlier `operation_id` apply (`state/stateStore.ts`'s operation ledger)
+   * rather than a fresh dispatch: nothing was written by this call. Absent on
+   * every fresh apply — never emitted as `false`.
    */
   replayed?: boolean;
+  /**
+   * 2026-10-06 independent review (P2-2), replay only. Whether every file the
+   * recorded apply touched still holds exactly the bytes that apply left:
+   * `"unchanged"` — each `applied[].after` (the edited lines with a little
+   * context, taken from the post-edit window that apply's own reply showed,
+   * every other range named in `remaining`) is also the file's current text;
+   * `"changed"` — a file was edited, reverted or removed since, so
+   * `applied[].after` (when present) is still the apply's own recorded
+   * window, never the file's current text, and
+   * `next` reads the current state. Absent on a fresh apply and on the replay
+   * of an outcome recorded before this field existed (no basis for either
+   * claim).
+   */
+  current?: "unchanged" | "changed";
+  /** 2026-10-06 (P2-2): with `current: "changed"` only — the read that returns the changed files' current text. */
+  next?: ToolCall;
   normalization?: NormalizationReceipt;
   /** A.5.12 as a receipt (ruling 2). Emitted iff the execution fence re-typed
    *  this call from `answer` to `edit` before it wrote. */

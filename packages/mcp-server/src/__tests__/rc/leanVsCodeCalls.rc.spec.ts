@@ -256,12 +256,16 @@ describe("WP-V1 — leaned tl_read_file/tl_search_files continuations replay ide
       const body = bodyOf(await server.rpc(2, "tools/call", {
         name: "tl_read_file",
         arguments: {
-          // Naming TWO identifiers (one served, one not) is what reliably
-          // leaves this pack mid-investigation with a real `decision.next`
-          // (a `tl_search_files` symbol lookup for the unserved one) instead of
-          // closing outright — verified empirically; a single-identifier
-          // query against this same fixture closes as `act.answer`.
-          query: "how does reserveInventory reserve stock and what happens on cancelReservation",
+          // THREE named methods, each more than one probe window (±18 lines)
+          // from the others, leave this pack mid-investigation with a real
+          // `decision.next`: the pack anchors one of them, and the readiness-
+          // falsification pass inlines at most ONE more window of a file (the
+          // earliest-line candidate on a score tie), so the third is left for
+          // the follow-up. Two named methods no longer do: since a probe only
+          // matches whole identifiers (2026-10-06) it inlines the second one
+          // instead of a near-miss such as `cancelReservationVariant1`, and
+          // the pack closes as `act.answer`.
+          query: "how does reserveInventory reserve stock, and what happens on refundOrderVariant3 and on auditShipmentVariant7",
           targets: [{ path: "src/OrderOperationsService.java" }],
           task: { epoch: "new", profile: "answer" },
           cwd: ws,

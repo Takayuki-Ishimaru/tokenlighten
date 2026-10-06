@@ -11087,7 +11087,185 @@ interface RecordedOperationOutcomeV2 {
   isError?: true;
 }
 
-type ParsedRecordedOperation = { text: string; isError?: true; requestDigest?: string };
+/**
+ * One applied entry as a v2 record keeps it. `path`/`range` are the address
+ * every v2 record has carried. 2026-10-06 independent review (P2-2):
+ * `post_sha` (32 hex of sha256 over the file's bytes as this apply left them)
+ * and `after` (the part of the post-edit window the first reply showed that
+ * covers the edited lines, `replayAfterWindow`; its text dropped when the
+ * record would otherwise exceed OPERATION_REPLAY_MAX_BYTES) let a replay
+ * return that verified result to a client that lost the first reply, and say
+ * whether the file still holds it. A record written before that fix
+ * has neither and replays address-only, with no `current` claim.
+ */
+interface RecordedAppliedEntry {
+  path: string;
+  range: string;
+  post_sha?: string;
+  after?: { range: string; body?: string; remaining?: string[] };
+}
+
+type ParsedRecordedOperation = {
+  text: string;
+  isError?: true;
+  requestDigest?: string;
+  /** v2 records only: the applied entries, internal fields included (`operationReplayText` projects them). */
+  applied?: RecordedAppliedEntry[];
+};
+
+function recordedAfterWindow(raw: unknown): RecordedAppliedEntry["after"] {
+  if (!isRecordLike(raw) || typeof raw["range"] !== "string") return undefined;
+  const remaining = Array.isArray(raw["remaining"]) && raw["remaining"].length > 0 && raw["remaining"].every((r) => typeof r === "string")
+    ? (raw["remaining"] as string[])
+    : undefined;
+  return {
+    range: raw["range"],
+    ...(typeof raw["body"] === "string" && raw["body"] !== "" ? { body: raw["body"] } : {}),
+    ...(remaining !== undefined ? { remaining } : {}),
+  };
+}
+
+function recordedAppliedEntries(raw: unknown): RecordedAppliedEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item): RecordedAppliedEntry[] => {
+    if (!isRecordLike(item) || typeof item["path"] !== "string" || typeof item["range"] !== "string") return [];
+    const after = recordedAfterWindow(item["after"]);
+    return [{
+      path: item["path"],
+      range: item["range"],
+      ...(typeof item["post_sha"] === "string" ? { post_sha: item["post_sha"] } : {}),
+      ...(after !== undefined ? { after } : {}),
+    }];
+  });
+}
+
+/** Context lines a replay's `after` keeps on each side of the edited span (P2-2): enough to see the edit, not the first reply's whole verification window. */
+const REPLAY_AFTER_CONTEXT_LINES = 3;
+/** Largest `after` text one replay entry carries: past it only the edited span itself, past that no text (its range still rides). */
+const REPLAY_AFTER_MAX_BYTES = 2048;
+/** Largest `after` text one replay carries in all: a many-file batch names the rest by path and range only. */
+const REPLAY_AFTER_TOTAL_MAX_BYTES = 8192;
+
+/**
+ * The post-edit window a replay keeps for one entry: the part of the first
+ * reply's `after` covering `edited` padded by REPLAY_AFTER_CONTEXT_LINES (or
+ * the edited span alone when that exceeds REPLAY_AFTER_MAX_BYTES), as `after`
+ * showed it — the same text, never re-read — with every line it cuts named
+ * in `remaining` beside the first reply's own `remaining`, so no edited line is
+ * hidden. Under the default slim edit window this IS the first reply's window.
+ * `undefined` when nothing fits or the window does not reach the edited span.
+ */
+function replayAfterWindow(
+  after: { range: string; body: string; remaining?: string[] },
+  edited: { start: number; end: number },
+): RecordedAppliedEntry["after"] {
+  const bounds = /^(\d+)-(\d+)$/.exec(after.range);
+  if (bounds === null) return undefined;
+  const windowStart = Number(bounds[1]);
+  const windowEnd = Number(bounds[2]);
+  const lines = after.body.split("\n");
+  for (const pad of [REPLAY_AFTER_CONTEXT_LINES, 0]) {
+    const start = Math.max(windowStart, edited.start - pad);
+    const end = Math.min(windowEnd, edited.end + pad);
+    if (start > end) return undefined;
+    // A window reaching `after`'s own last line keeps the final newline `after` carried.
+    const tail = end === windowEnd ? lines.slice(end - windowStart + 1) : [];
+    const body = [...lines.slice(start - windowStart, end - windowStart + 1), ...tail].join("\n");
+    if (body === "" || Buffer.byteLength(body, "utf8") > REPLAY_AFTER_MAX_BYTES) continue;
+    const remaining = [
+      ...(start > windowStart ? [`${windowStart}-${start - 1}`] : []),
+      ...(end < windowEnd ? [`${end + 1}-${windowEnd}`] : []),
+      ...(after.remaining ?? []),
+    ].sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0]));
+    return { range: `${start}-${end}`, body, ...(remaining.length > 0 ? { remaining } : {}) };
+  }
+  return undefined;
+}
+
+/** 32 hex of sha256 over `relPath`'s current bytes, or `undefined` when it is unreadable or resolves outside `workspace`. */
+function operationFileSha(workspace: string, relPath: string): string | undefined {
+  try {
+    const root = realpathSync(workspace);
+    const abs = realpathSync(path.resolve(root, relPath));
+    const rel = path.relative(root, abs);
+    if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return undefined;
+    // served-bytes: not-served (a sha256 of the whole file, compared with the recorded post-edit sha)
+    return createHash("sha256").update(readFileSync(abs)).digest("hex").slice(0, 32);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Lines `range` of `relPath` as an `after` window carries them (attachAppliedReadback's own slicing: the final newline rides a window that reaches the last line). */
+function operationWindowText(workspace: string, relPath: string, range: string): string | undefined {
+  const bounds = /^(\d+)-(\d+)$/.exec(range);
+  if (bounds === null) return undefined;
+  // served-bytes: readServedText
+  const text = servedTextOrUndefined(path.join(workspace, relPath));
+  if (text === undefined) return undefined;
+  const lines = text.split("\n");
+  const hasPhantom = lines.length > 1 && lines[lines.length - 1] === "";
+  const lineCount = hasPhantom ? lines.length - 1 : lines.length;
+  const start = Number(bounds[1]);
+  const end = Number(bounds[2]);
+  if (start < 1 || end < start || end > lineCount) return undefined;
+  return lines.slice(start - 1, hasPhantom && end >= lineCount ? end + 1 : end).join("\n");
+}
+
+/**
+ * 2026-10-06 independent review (P2-2): the wire text of an operation replay.
+ * A client re-sends an `operation_id` because it lost or doubted the first
+ * reply, and an address-only receipt left it no way to see what the edit
+ * produced. So the replay carries each recorded post-edit window again, and
+ * `current` says whether the files still hold what the edit wrote:
+ *   "unchanged" — every path hashes to its recorded post-edit bytes, so each
+ *     `after` is the edit's own window AND the file's current text (a window
+ *     whose text the record dropped for size is re-read from that same file);
+ *   "changed" — some path no longer does: each `after` is still the edit's own
+ *     recorded window, never the file's current text, and `next` reads the
+ *     changed files' current state.
+ * A record without `post_sha` (written before this fix) replays address-only
+ * with no `current`, exactly as before.
+ */
+function operationReplayText(replay: ParsedRecordedOperation, workspace: string): string {
+  const applied = replay.applied ?? [];
+  if (!applied.some((entry) => entry.post_sha !== undefined)) return markReplayed(replay.text);
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(replay.text);
+    if (!isRecordLike(parsed)) return markReplayed(replay.text);
+    body = parsed;
+  } catch {
+    return markReplayed(replay.text);
+  }
+  const changed: string[] = [];
+  let afterBytes = 0;
+  const entries = applied.map((entry) => {
+    const unchanged = entry.post_sha !== undefined && operationFileSha(workspace, entry.path) === entry.post_sha;
+    if (!unchanged && !changed.includes(entry.path)) changed.push(entry.path);
+    const out: Record<string, unknown> = { path: entry.path, range: entry.range };
+    const window = afterBytes < REPLAY_AFTER_TOTAL_MAX_BYTES ? entry.after : undefined;
+    const text = window === undefined
+      ? undefined
+      : window.body ?? (unchanged ? operationWindowText(workspace, entry.path, window.range) : undefined);
+    const textBytes = text === undefined ? 0 : Buffer.byteLength(text, "utf8");
+    if (window !== undefined && text !== undefined && afterBytes + textBytes <= REPLAY_AFTER_TOTAL_MAX_BYTES) {
+      afterBytes += textBytes;
+      out["after"] = { range: window.range, body: text, ...(window.remaining !== undefined ? { remaining: window.remaining } : {}) };
+    }
+    return out;
+  });
+  const replayed: Record<string, unknown> = {
+    ...body,
+    applied: entries,
+    replayed: true,
+    current: changed.length === 0 ? "unchanged" : "changed",
+  };
+  if (changed.length > 0) {
+    replayed["next"] = canonicalToolCall("tl_read_file", { targets: changed.map((changedPath) => ({ path: changedPath })), content: "full", cwd: workspace });
+  }
+  return JSON.stringify(replayed);
+}
 
 function parseRecordedOperation(raw: string): ParsedRecordedOperation | undefined {
   try {
@@ -11105,16 +11283,21 @@ function parseRecordedOperation(raw: string): ParsedRecordedOperation | undefine
     for (const key of ["counts", "paths", "sha", "checkpoint", "read_back", "applied", "core", "applied_note", "delta", "handle", "lines", "path", "verification"]) {
       if (record[key] !== undefined) body[key] = record[key];
     }
+    // The address-only projection stays the replay text of a record with no
+    // post-edit facts; `applied` carries them for `operationReplayText`.
+    const applied = recordedAppliedEntries(record["applied"]);
+    if (applied.length > 0) body["applied"] = applied.map((entry) => ({ path: entry.path, range: entry.range }));
     return {
       text: JSON.stringify(body),
       ...(typeof record["request_digest"] === "string" ? { requestDigest: record["request_digest"] } : {}),
+      ...(applied.length > 0 ? { applied } : {}),
     };
   } catch {
     return undefined;
   }
 }
 
-function structuredOperationRecord(text: string, requestDigest: string): string {
+function structuredOperationRecord(text: string, requestDigest: string, workspace: string): string {
   let body: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(text);
@@ -11123,29 +11306,61 @@ function structuredOperationRecord(text: string, requestDigest: string): string 
     // Keep a valid compact record even when an upstream emitter returned opaque text.
   }
   const applied = Array.isArray(body["applied"]) ? body["applied"] : [];
-  const compactApplied = applied.flatMap((entry) => {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return [];
-    const appliedEntry = entry as Record<string, unknown>;
-    const entryPath = appliedEntry["path"];
-    const entryRange = appliedEntry["range"];
-    return typeof entryPath === "string" && typeof entryRange === "string"
-      ? [{ path: entryPath, range: entryRange }]
-      : [];
+  // 2026-10-06 independent review (P2-2): each entry also keeps the file's
+  // post-edit sha (read now, right after the apply) and the part of the
+  // post-edit window the reply showed around the edited lines — see
+  // `RecordedAppliedEntry` and `replayAfterWindow`.
+  const compactApplied = applied.flatMap((entry): RecordedAppliedEntry[] => {
+    if (!isRecordLike(entry)) return [];
+    const entryPath = entry["path"];
+    const entryRange = entry["range"];
+    if (typeof entryPath !== "string" || typeof entryRange !== "string") return [];
+    const postSha = operationFileSha(workspace, entryPath);
+    const shown = recordedAfterWindow(entry["after"]);
+    const editedSpan = /^(\d+)(?:-(\d+))?$/.exec(typeof entry["lines"] === "string" ? entry["lines"] : entryRange);
+    const after = shown?.body === undefined || editedSpan === null
+      ? undefined
+      : replayAfterWindow(
+        { range: shown.range, body: shown.body, ...(shown.remaining !== undefined ? { remaining: shown.remaining } : {}) },
+        { start: Number(editedSpan[1]), end: Number(editedSpan[2] ?? editedSpan[1]) },
+      );
+    return [{
+      path: entryPath,
+      range: entryRange,
+      ...(postSha !== undefined ? { post_sha: postSha } : {}),
+      ...(after !== undefined ? { after } : {}),
+    }];
   });
-  const record: RecordedOperationOutcomeV2 = {
-    v: 2,
-    kind: "edit.applied",
-    replay_format: OPERATION_REPLAY_V2_MARKER,
-    outcome_hash: createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32),
-    request_digest: requestDigest,
-    // The v2 replay projection is deliberately the smallest required-set
-    // subset: address-only applied entries. `outcome_hash` stays in the
-    // journal for record validation but is intentionally not sent on replay;
-    // the first edit.applied response remains the source for counts, read_back,
-    // verification, handles and other explanatory payloads.
-    ...(compactApplied.length > 0 ? { applied: compactApplied } : {}),
+  const recordWith = (entries: readonly RecordedAppliedEntry[]): string => {
+    const record: RecordedOperationOutcomeV2 = {
+      v: 2,
+      kind: "edit.applied",
+      replay_format: OPERATION_REPLAY_V2_MARKER,
+      outcome_hash: createHash("sha256").update(text, "utf8").digest("hex").slice(0, 32),
+      request_digest: requestDigest,
+      // The v2 replay projection is the required-set subset plus the
+      // post-edit facts a replay needs (`operationReplayText`). `outcome_hash`
+      // stays in the journal for record validation but is never sent on
+      // replay; the first edit.applied response remains the source for
+      // counts, read_back, verification, handles and other explanatory payloads.
+      ...(entries.length > 0 ? { applied: [...entries] } : {}),
+    };
+    return JSON.stringify(record);
   };
-  return JSON.stringify(record);
+  const fits = (record: string): boolean => Buffer.byteLength(record, "utf8") <= OPERATION_REPLAY_MAX_BYTES;
+  const full = recordWith(compactApplied);
+  if (fits(full)) return full;
+  // Too large with the windows' text: keep the windows' ranges and the shas —
+  // a replay of an unchanged file re-reads that text — rather than lose the
+  // replay to the oversize marker.
+  const withoutText = recordWith(compactApplied.map(({ after, ...rest }) => after === undefined
+    ? rest
+    : { ...rest, after: { range: after.range, ...(after.remaining !== undefined ? { remaining: after.remaining } : {}) } }));
+  if (fits(withoutText)) return withoutText;
+  // Still too large (a batch of hundreds of files): the address-only record
+  // every batch that fits 16 KiB replayed before this change, with no
+  // `current` claim, never the oversize refusal.
+  return recordWith(compactApplied.map(({ path: entryPath, range }) => ({ path: entryPath, range })));
 }
 
 /**
@@ -11157,9 +11372,9 @@ function structuredOperationRecord(text: string, requestDigest: string): string 
  *   - `isError` is stamped by the funnel (§2.5: every refusal carries it), so
  *     inside the funnel a refusal is indistinguishable from an apply and a
  *     failed attempt would claim the key forever;
- *   - the recorded text is then the FINAL wire text, so a replay is
- *     byte-identical rather than a second projection of the same body through
- *     a workspace marker that has moved since (the edit itself moves it).
+ *   - the recorded outcome is then projected from the FINAL wire text, never
+ *     from a second projection of the same body through a workspace marker
+ *     that has moved since (the edit itself moves it).
  *
  * The contract, in order:
  *  1. a repeat whose operation ALREADY APPLIED replays the recorded outcome
@@ -11298,7 +11513,7 @@ async function runEditWithOperationId(
       // THE IDEMPOTENT REPLAY. No dispatch, so no second disk apply.
       // v2 records carry only the side-effect identity and required replay
       // fields; the original response body is never re-read from the journal.
-      const replayText = markReplayed(replay.text);
+      const replayText = operationReplayText(replay, workspace);
       recordServedBytes({
         workspaceRoot: workspace,
         epoch: typeof args["taskEpoch"] === "string" ? args["taskEpoch"] : undefined,
@@ -11344,7 +11559,7 @@ async function runEditWithOperationId(
   const isError = "isError" in result && result.isError === true;
   if (!isError) {
     const text = result.content.map((item) => item.text).join("");
-    const payload = structuredOperationRecord(text, requestDigest);
+    const payload = structuredOperationRecord(text, requestDigest, workspace);
     const v2Value = Buffer.byteLength(payload, "utf8") <= OPERATION_REPLAY_MAX_BYTES ? payload : OPERATION_OVERSIZE_MARKER;
     // Dual-write (B-F1). The legacy key is UNCONDITIONALLY the oversize
     // marker — never the real record — so an old server's exact-match

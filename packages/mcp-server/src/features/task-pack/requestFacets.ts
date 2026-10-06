@@ -526,12 +526,15 @@ const VALUE_COMPUTED_IMPERATIVE_EN_RE = new RegExp(
     + `(?:(?:results?|outputs?|totals?|values?)\\s+(?:of|for|from)\\s+(?:(?:calling|running|evaluating|executing)\\s+)?${VALUE_COMPUTED_CODE_SUBJECT}`
     + `|${VALUE_COMPUTED_CODE_SUBJECT}(?:'s)?\\s+(?:results?|outputs?|totals?|values?)\\b`
     + `|${VALUE_COMPUTED_CODE_SUBJECT}\\s+(?:for|with|given)\\b`
+    // 2026-10-06 independent review (P1-1): the call alone as the object,
+    // the clause ending with it -- "Calculate invoiceAmount(1000)."
+    + `|${VALUE_COMPUTED_CODE_SUBJECT}(?=\\s*(?:[.?!;:。？！]|$))`
     + `|(?:what|the\\s+(?:[\\w-]+\\s+){0,4}?(?:that|which))\\s+${VALUE_COMPUTED_SUBJECT}(?:\\s+${VALUE_COMPUTED_SUBJECT}){0,3}?`
     + `\\s+(?:returns?|gives?|yields?|produces?|outputs?|hands?\\s+back|evaluates?\\s+to)\\b)`,
   "i",
 );
 const VALUE_COMPUTED_JA_RE =
-  /何を返|計算結果(?:は|を(?:教えて|知りたい|求めて|出して))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*の(?:計算)?(?:結果|出力)(?:[はと](?![^。？?]*(?:使われ|使って|呼ば|参照|表示|渡さ|受け取))|を(?:具体的に)?(?:教えて|知りたい|求めて|計算))/u;
+  /何を返|計算結果(?:は|を(?:教えて|知りたい|求めて|出して))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*の(?:計算)?(?:結果|出力)(?:[はと](?![^。？?]*(?:使われ|使って|呼ば|参照|表示|渡さ|受け取))|を(?:具体的に)?(?:教えて|知りたい|求めて|計算))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*(?:を(?:具体的に)?(?:計算|算出|求め)|[はが](?:いくら|何円|何になる))/u;
 
 function isValueClause(guardedClause: string): boolean {
   return VALUE_BARE_EN_RE.test(guardedClause)
@@ -1090,6 +1093,15 @@ const ANSWER_KIND_DESCRIPTORS_JA: ReadonlySet<string> = new Set([
   // FLOW_JA_RE keeps 経路/流れ bare-gated (a shipping 経路 is not a flow
   // question), but as the head of 「Xの流れ/経路/手順/順序」 they name the kind.
   "流れ", "経路", "手順", "順序",
+  // 2026-10-06 independent review (P2-1): the result-kind and aspect nouns
+  // of 「X(4800, 0) の金額」「X の戻り値/計算結果」「X のエッジケース/境界条件」 ask
+  // for what the code computes or which inputs it treats specially — the
+  // kind of answer, never a word the workspace spells (金額 was disclosed
+  // `request-item-undetermined:金額` beside a pack that served the whole
+  // computation). 回数/条件/値/上限 already leave through the facet nouns.
+  "金額", "合計", "合計金額", "結果", "計算結果", "実行結果", "戻り値", "返り値", "返却値",
+  "出力", "出力値", "計算式", "エッジケース", "コーナーケース", "境界条件", "境界値",
+  "特殊ケース", "例外ケース", "異常系", "正常系", "目的", "意味", "違い", "関係", "影響", "概要", "詳細", "説明",
 ]);
 
 function anchoredWhole(re: RegExp): RegExp {
@@ -1270,6 +1282,79 @@ export function callShapedNamesIn(clause: string): string[] {
   return out;
 }
 
+// 2026-10-06 independent review (P1-3): a plain word the question itself
+// frames as a code entity — "the retry function", "function retry", "retry
+// in src/retry.js", "retry 関数". `explicitIdentifiersIn` rejects every
+// plain lowercase word (it cannot tell the function `retry` from the verb),
+// so "Explain the retry function, including the exact maximum number of
+// attempts." named no subject at all: the answer focus went to whichever
+// declaration matched the most query words by SUBSTRING (`retryDelay`, which
+// contains "retry") and the value closure chased retryDelay's constants
+// instead of retry's attempt limit. The frame is the question's own
+// statement that the word is a name. A candidate only: callers accept it on
+// an EXACT declaration match, never as proof of anything.
+//
+// The noun BEFORE which a plain word is a name is kept to the unambiguous
+// "function"/"method" family: "request handler", "error callback" and
+// "retry helper" are as often compound nouns as names. AFTER the noun, a word
+// is a name only where prose would not continue with it as a verb ("this
+// function handles errors"): before "(", punctuation, the end, or an
+// auxiliary ("what does function retry do?").
+const FRAMED_NAME_BEFORE_NOUN_RE = /(?<![\w$./-])([A-Za-z_$][\w$]*)\s+(?:function|func|method|routine|procedure|subroutine|constructor)s?\b/giu;
+const FRAMED_NAME_AFTER_NOUN_RE = /\b(?:function|func|fn|def|method|routine|procedure|subroutine|class)\s+`?([A-Za-z_$][\w$]*)`?(?=\s*(?:\(|[,.;:?!)\]]|$)|\s+(?:do|does|did|work|works|return|returns|mean|means)\b)/giu;
+const FRAMED_NAME_IN_FILE_RE = /(?<![\w$./-])([A-Za-z_$][\w$]*)`?\s+(?:in|from|inside|within|of)\s+`?(?:\.{0,2}\/)?(?:[\w.-]+\/)*[\w-]+(?:\.[\w-]+)*\.[A-Za-z][A-Za-z0-9]{0,5}`?(?![\w/])/giu;
+const FRAMED_NAME_JA_RE = /(?<![\w$./-])([A-Za-z_$][\w$]*)`?\s*(?:関数|メソッド|クラス|コンストラクター?)/gu;
+/** Words a frame captures that are never a declaration's name: grammar, modifiers and declaration keywords ("the async function", "function that"). */
+const FRAMED_NAME_STOPWORDS = new Set([
+  "a", "an", "as", "at", "be", "by", "if", "in", "is", "it", "no", "of", "on", "or", "so", "to", "up",
+  "our", "your", "their", "his", "her", "my", "these", "those", "same", "other", "another", "such", "some",
+  "every", "both", "only", "also", "then", "here", "where", "why", "whose", "one", "new", "old", "own",
+  "async", "await", "export", "exported", "static", "public", "private", "protected", "abstract", "const", "let",
+  "var", "pub", "fn", "func", "def", "function", "functions", "method", "methods", "class", "classes",
+  "anonymous", "arrow", "pure", "recursive", "inner", "outer", "nested", "helper", "utility", "wrapper",
+  "factory", "entry", "whole", "entire", "given", "named", "following", "above", "below", "related",
+  "relevant", "corresponding", "respective", "specific", "particular", "existing", "current", "original",
+  "internal", "external", "local", "global", "defined", "declared", "implemented", "that", "which",
+  "code", "file", "files", "line", "lines", "logic", "part", "section", "change", "changes", "bug", "error",
+]);
+
+/**
+ * Plain words `clause` frames as a code entity (see FRAMED_NAME_* above), in
+ * order, deduplicated case-insensitively. Never a code-shaped token's job:
+ * those are already explicit; this only adds words nothing else would name.
+ */
+export function framedCodeNamesIn(clause: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const re of [FRAMED_NAME_BEFORE_NOUN_RE, FRAMED_NAME_AFTER_NOUN_RE, FRAMED_NAME_IN_FILE_RE, FRAMED_NAME_JA_RE]) {
+    for (const match of clause.matchAll(re)) {
+      const name = match[1]!;
+      const key = name.toLowerCase();
+      if (name.length < 2 || seen.has(key)) continue;
+      if (FRAMED_NAME_STOPWORDS.has(key) || EN_CONCEPT_STOPWORDS.has(key) || FACET_TRIGGER_VERB_STOPWORDS.has(key)) continue;
+      // "the purpose of src/a.ts", "the request flow function": an answer-kind
+      // or facet noun names the kind of answer, never a declaration.
+      if (isFacetDescriptorTerm(name)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+/** The names a clause writes as a callable it asks about: call syntax first (`callShapedNamesIn`), then code-entity frames (`framedCodeNamesIn`). */
+export function subjectCallableNamesIn(clause: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of [...callShapedNamesIn(clause), ...framedCodeNamesIn(clause)]) {
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
 /**
  * P0-1 (eval-0927 review-r3 #1, qualifiedTsMethod/qualifiedTsService/
  * qualifiedPyMethod/tsDecoratorSameLine): a clause naming "A.b" / "A::b" /
@@ -1356,8 +1441,28 @@ const FACET_IN_ITS_LIFECYCLE_IDIOM_RE = /\bin\s+(?:its|their|his|her|the)\s+life
 const FACET_IN_WHAT_ORDER_IDIOM_RE = /\bin\s+what\s+order\b/giu;
 const FACET_HOW_X_HANDLES_IDIOM_RE = /\b(how)\b([^.?!]*?)\b(handles?|sequences?|sequenced)\b/giu;
 
+/**
+ * 2026-10-06 independent review (P2-1): explanation-aspect phrases — "edge
+ * cases", "corner cases", "boundary conditions", "failure modes" — name the
+ * KIND of answer (which inputs the code treats specially), never a word the
+ * workspace must contain. Split word by word, "Explain retryDelay and
+ * calculateTotal, including their constants, edge cases, and callers."
+ * certified `request-item-absent:edge` and minted an
+ * `enumerated-item:…:cases` obligation for a fixture that (correctly) spells
+ * neither. Masked length-preserving like the sequencing idioms below, and
+ * shared with requestItems.ts (`salientWords`) and readCodeTaskPack.ts (the
+ * enumerated-item parser) so the three derivations of one query agree.
+ */
+// Never inside a path or a hyphenated name: `src/edge-cases.ts` and
+// `test/error-cases.spec.ts` name files, whose words the item must keep.
+export const EXPLANATION_ASPECT_PHRASE_RE = /(?<![\w./-])(?:(?:edge|corner|boundary|border|base|special|error|failure|negative|degenerate|pathological)[\s-]+cases?|boundary[\s-]+(?:conditions?|values?)|corner[\s-]+conditions?|failure[\s-]+modes?)(?![\w-]|\.\w)/giu;
+
+export function maskExplanationAspectPhrases(text: string): string {
+  return text.replace(EXPLANATION_ASPECT_PHRASE_RE, (m) => " ".repeat(m.length));
+}
+
 function maskFacetPhrasingIdiomSpans(text: string): string {
-  let out = text;
+  let out = maskExplanationAspectPhrases(text);
   for (const re of [FACET_STEP_BY_STEP_IDIOM_RE, FACET_END_TO_END_IDIOM_RE, FACET_IN_ITS_LIFECYCLE_IDIOM_RE, FACET_IN_WHAT_ORDER_IDIOM_RE]) {
     out = out.replace(re, (m) => " ".repeat(m.length));
   }
@@ -1451,8 +1556,47 @@ function maskBacktickPunctuation(text: string, chars: string): string {
   return out;
 }
 
+/** Longest call argument list `maskCallArgumentPunctuation` protects; a longer "(" run is prose, not a call. */
+const CALL_ARGUMENT_MAX_CHARS = 120;
+
+/**
+ * 2026-10-06 independent review (P2-1): `text` with every character of
+ * `chars` that sits inside a CALL's argument list — `calculateTotal(4800, 0)`
+ * — replaced by `replacement` (one UTF-16 unit, so offsets into the original
+ * stay valid). A comma between call arguments is never a clause or list
+ * boundary: splitting there cut "src/order.js の calculateTotal(4800, 0) と
+ * calculateTotal(5000, 0) の金額を" into "…(4800" / "0) と…(5000" / "0) の金額を",
+ * and the last piece, naming no identifier, disclosed 金額 as an undetermined
+ * source term. Only a parenthesis opened directly after an identifier
+ * counts (a prose parenthetical keeps its own commas); a group that is not
+ * closed on the same line within CALL_ARGUMENT_MAX_CHARS is left alone.
+ */
+export function maskCallArgumentPunctuation(text: string, chars: string, replacement = "_"): string {
+  if (!text.includes("(")) return text;
+  const out = text.split("");
+  for (let open = text.indexOf("("); open >= 0; open = text.indexOf("(", open + 1)) {
+    if (open === 0 || !/[\w$]/u.test(text[open - 1]!)) continue;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < text.length && i - open <= CALL_ARGUMENT_MAX_CHARS; i += 1) {
+      const ch = text[i]!;
+      if (ch === "\n") break;
+      if (ch === "(") depth += 1;
+      else if (ch === ")" && --depth === 0) {
+        close = i;
+        break;
+      }
+    }
+    if (close < 0) continue;
+    for (let i = open + 1; i < close; i += 1) {
+      if (chars.includes(text[i]!)) out[i] = replacement;
+    }
+  }
+  return out.join("");
+}
+
 function splitProtectingBackticks(text: string, delimiterRe: RegExp, maskedChars: string): string[] {
-  const masked = maskBacktickPunctuation(text, maskedChars);
+  const masked = maskCallArgumentPunctuation(maskBacktickPunctuation(text, maskedChars), maskedChars);
   const re = new RegExp(delimiterRe.source, delimiterRe.flags.includes("g") ? delimiterRe.flags : `${delimiterRe.flags}g`);
   const cuts: number[] = [0];
   let match: RegExpExecArray | null;
@@ -1611,7 +1755,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
   const leadIdentifiers = explicitIdentifiersIn(sentences[0]!);
   const leadTerms = conceptTermsIn(sentences[0]!);
   const leadQualifiedMembers = qualifiedMemberPairsIn(sentences[0]!);
-  const leadCallables = callShapedNamesIn(sentences[0]!);
+  const leadCallables = subjectCallableNamesIn(sentences[0]!);
 
   const requirements: FacetRequirement[] = [];
   for (const sentence of sentences) {
@@ -1637,7 +1781,7 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       const subjectIdentifiers = inheritedFromLead ? leadIdentifiers : identifiers;
       const subjectTerms = inheritedFromLead ? [...new Set([...ownTerms, ...leadTerms])] : ownTerms;
       const qualifiedMembers = inheritedFromLead ? leadQualifiedMembers : ownQualifiedMembers;
-      const ownCallables = callShapedNamesIn(declawed);
+      const ownCallables = subjectCallableNamesIn(declawed);
       const subjectCallables = ownCallables.length > 0 ? ownCallables : inheritedFromLead ? leadCallables : [];
       // P1-8: a weak candidate is never dropped from concept terms either —
       // folded into `subjectTerms` (lowercased, deduped) so a downstream
@@ -1657,4 +1801,32 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
     }
   }
   return requirements;
+}
+
+// Wording that asks where code is or how pieces of it connect.
+const STRUCTURAL_REQUEST_EN_RE = /\b(?:find|locate[sd]?|where|trac(?:e[sd]?|ing)|relations?|relationships?|imports?|imported|references?|referenced|usages?|uses\s+of|used\s+(?:by|in|from)|consum(?:e[sd]?|ers?|ing)|callers?|call(?:s|ed|ing)?|call\s+sites?|connect(?:s|ed|ing|ions?)?|wir(?:e[sd]?|ing)|depend(?:s|ed|ing|ency|encies|ents?)|defined|definitions?|declared|declarations?)\b/iu;
+const STRUCTURAL_REQUEST_JA_RE = /どこ|場所|定義|宣言|参照|呼び出|呼ばれ|使われ|使用箇所|利用箇所|関係|関連|接続|依存|インポート|追跡|辿/u;
+// Wording that asks what code does or computes, or for a value it uses.
+const BEHAVIOUR_REQUEST_EN_RE = /\b(?:explain(?:s|ed|ing)?|explanation|describe[sd]?|description|walk\s+(?:me\s+)?through|calculat(?:e[sd]?|ing|ions?)|comput(?:e[sd]?|ing|ations?)|evaluat(?:e[sd]?|ing|ions?)|returns?|returned|results?|outputs?|values?|constants?|limits?|caps?|thresholds?|defaults?|rates?|maximum|minimum|max|min|behaviou?rs?|behave[sd]?|works?|why|how\s+(?:does|do|did|is|are|was|were|many|much|long|often)|what\s+(?:does|do|did|happens))\b/iu;
+const BEHAVIOUR_REQUEST_JA_RE = /説明|解説|計算|算出|求め|挙動|振る舞|振舞|仕組み|動作|処理|いくら|何回|何円|何秒|何件|戻り値|返り値|返す|結果|値|定数|上限|下限|最大|最小|閾値|しきい値|なぜ|どのように|どうやって/u;
+
+/**
+ * 2026-10-06 (semantic-frontier bench, after the review's P1-1/P1-2 fix): does
+ * the request only LOCATE code or RELATE pieces of it — find / locate / where /
+ * trace, the relation, imports, references, usages, callers or dependencies
+ * between named code — and ask nothing about what that code does or computes?
+ * Such an answer needs no value the code computes with, so the answer
+ * dependency closure (readCodeTaskPack.ts `runAnswerDependencyClosure`) adds
+ * none: it served the template constant `renderInvoice` reads for "Find
+ * InvoiceSchema invoice_schema.gen.ts renderInvoice relation consumed generated
+ * schema.", a file the bench's sealed qrels score irrelevant to that question.
+ * Any wording about behaviour or values (explain, calculate, what does …
+ * return, how many, the constants / limits it uses …) or a value or condition
+ * facet makes the request about behaviour, so an ambiguous question keeps the
+ * closure: only a clearly structural one goes without it.
+ */
+export function isStructuralOnlyRequest(query: string): boolean {
+  if (!STRUCTURAL_REQUEST_EN_RE.test(query) && !STRUCTURAL_REQUEST_JA_RE.test(query)) return false;
+  if (BEHAVIOUR_REQUEST_EN_RE.test(query) || BEHAVIOUR_REQUEST_JA_RE.test(query)) return false;
+  return !extractFacetRequirements(query).some((requirement) => requirement.facet === "value" || requirement.facet === "condition");
 }

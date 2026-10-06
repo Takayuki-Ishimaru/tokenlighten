@@ -861,12 +861,13 @@ export function projectEditBody(kind: Kind, body: Body, root: string | undefined
 
 /**
  * `tl_edit_file`'s `operation_id` replay (server.ts, beside `state/stateStore.ts`'s
- * operation ledger) returns the FINAL, already-`projectEditBody`-projected wire
- * text verbatim on a repeat call — byte-identical to the first apply's
- * response, by design, because dispatch (and this module's own projectors)
- * never run a second time. That leaves the caller with no way to tell a
- * replay from an independent second apply without re-deriving it from
- * `operation_id` bookkeeping it may not have kept.
+ * operation ledger) answers a repeat call from the RECORDED outcome — dispatch
+ * (and this module's own projectors) never run a second time. Without a tell
+ * the caller could not distinguish a replay from an independent second apply
+ * without re-deriving it from `operation_id` bookkeeping it may not have
+ * kept. (A record carrying post-edit facts is rebuilt by server.ts's
+ * `operationReplayText`, which sets the same field itself; this function
+ * marks the address-only replay of an older record.)
  *
  * `markReplayed` is the single place that adds the tell: an additive,
  * optional, top-level `replayed: true`, injected ONLY into the replayed copy.

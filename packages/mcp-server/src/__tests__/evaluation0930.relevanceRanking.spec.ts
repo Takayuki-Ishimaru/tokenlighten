@@ -2224,7 +2224,7 @@ describe("bounded work on a 2,000+ file tree", () => {
 // ===========================================================================
 
 describe("wire: plan.neighbours and plan.usages over a nested TS + Python fixture, both flags ON", () => {
-  // Each pack serves ONE function (no import head); the import the request is about is the LAST statement of its file.
+  // Each pack serves ONE function (no import head) and, since 2026-10-06, the constant it reads; the import the request is about is the LAST statement of its file.
   const CHECKOUT = [
     'import { logger } from "./logger.js";',
     'import { loadConfig } from "./config.js";',
@@ -2308,11 +2308,17 @@ describe("wire: plan.neighbours and plan.usages over a nested TS + Python fixtur
 
     const neighbours = body.plan?.neighbours;
     expect(Array.isArray(neighbours)).toBe(true);
-    // ranked, not in statement order: the request's own word ("retry") lifts the last import; the two used ones follow in file order;
-    // the imports the request never touches and the slice never uses are not offered
-    expect(neighbours!.map((r) => r.path)).toEqual(["web/src/retryPolicy.ts", "web/src/auditTrail.ts", "web/src/heap.ts"]);
-    expect(neighbours![0]!.why).toBe('imported by web/src/checkout.ts:5 (matches "retry")');
-    expect(neighbours![1]!.why).toBe("imported by web/src/checkout.ts:3");
+    // 2026-10-06 independent review (P1-1): the loop's bound is a value the
+    // served submitOrder reads, so MAX_RETRIES' declaration rides the pack as
+    // evidence and is no longer offered as a neighbour (the request-word lift
+    // that ranked it first is pinned by the unit cases above). The two used
+    // imports follow in file order; the imports the request never touches
+    // and the slice never uses are not offered.
+    expect(served.has("web/src/retryPolicy.ts")).toBe(true);
+    expect((body.evidence ?? []).some((e) => e.path === "web/src/retryPolicy.ts" && String((e as { body?: unknown }).body ?? "").includes("MAX_RETRIES = 3"))).toBe(true);
+    expect(neighbours!.map((r) => r.path)).toEqual(["web/src/auditTrail.ts", "web/src/heap.ts"]);
+    expect(neighbours![0]!.why).toBe("imported by web/src/checkout.ts:3");
+    expect(neighbours![1]!.why).toBe("imported by web/src/checkout.ts:4");
     for (const row of neighbours!) {
       expect(served.has(row.path)).toBe(false); // never evidence, never a served file
       expect(row.handle.length).toBeGreaterThan(0);
@@ -2335,8 +2341,10 @@ describe("wire: plan.neighbours and plan.usages over a nested TS + Python fixtur
     const body = (await ask("e2e-py", "Explain the retry loop in submit_order.", true)) as Wire;
     const served = new Set((body.evidence ?? []).map((e) => e.path));
     expect(served.has("svc/app/worker.py")).toBe(true);
-    expect(body.plan?.neighbours?.map((r) => r.path)).toEqual(["svc/app/retry.py", "svc/app/audit.py", "svc/app/heap.py"]);
-    expect(body.plan?.neighbours?.[0]?.why).toBe('imported by svc/app/worker.py:3 (matches "retry")');
+    // 2026-10-06 (P1-1): MAX_RETRIES = 5 is served as the loop's bound, so retry.py is evidence, not a neighbour.
+    expect(served.has("svc/app/retry.py")).toBe(true);
+    expect(body.plan?.neighbours?.map((r) => r.path)).toEqual(["svc/app/audit.py", "svc/app/heap.py"]);
+    expect(body.plan?.neighbours?.[0]?.why).toBe("imported by svc/app/worker.py:2");
     const usages = body.plan?.usages;
     expect(usages?.[0]?.symbol).toBe("MAX_RETRIES");
     expect(usages?.every((u) => u.scope === "svc")).toBe(true);

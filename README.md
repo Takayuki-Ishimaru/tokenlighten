@@ -17,28 +17,22 @@
 
 It exposes exactly three tools: `tl_read_file`, `tl_search_files`, and `tl_edit_file`.
 
-## v0.15.0 release
+## v0.15.1 release
 
-**Public Beta.** TokenLighten v0.15.0 makes answers to read-only questions more dependable and reduces repeated source discovery and reading: values behind aliased imports are returned or disclosed, edits return the text they produced, budgeted reads and searches fill their pages, and the advertised tool definition is smaller. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.15.1 improves evidence for code explanations and calculations, keeps task-pack discovery inside the workspace, and makes edit retries show their recorded result. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main changes in v0.15.0 are:
+The main changes in v0.15.1 are:
 
-- a value reached through an alias, a re-export, or a rename (`import { A as B }`, CommonJS destructuring, Python `as`, Go package constants) is returned, or disclosed as undetermined, instead of the answer being marked ready without it;
-- naming a file in a question focuses the answer on it without dropping the constants its code reads, and a ready answer is checked against the bytes actually sent, including under a host size limit;
-- explanatory words such as "conditions" or "callers" are never reported as "not found", a second topic in a question is kept as its own point, and same-name functions are told apart by path and imports;
-- a successful edit returns the text around the change (`applied[].after`), so a confirming read is usually unnecessary;
-- budgeted reads and search pages fill the budget or host limit, so they take fewer follow-up calls; and
-- the tool definition advertised to every client is smaller.
+- answer packs follow constants read by the complete functions relevant to your question, including imports, aliases and re-exports;
+- an explicitly named function such as `retry` takes precedence over a similar name such as `retryDelay`;
+- questions about the callers of multiple functions retain every named subject;
+- explanation phrases such as “edge cases” no longer produce false missing-code reports;
+- task-pack reads refuse imports and symlinks that lead outside the workspace; and
+- retrying an edit with the same `operation_id` returns the original post-edit window and indicates whether the files still match it.
 
-VS Code setup also updates the short Copilot guide and adds a SessionStart hint for normal local **Agent** chats; the optional **tokenlighten-explore** agent remains available for read-only work. The hint requires a trusted workspace, enabled `chat.useHooks`, and `node` on PATH. Setup preserves existing hooks and user edits. Use `tl workspace setup --clients vscode --copilot-session-context keep` to retain your hook configuration.
+The public release includes four platform install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime, source code with public package tests, and a self-contained VS Code VSIX. The desktop application is not included.
 
-The public release includes:
-
-- four install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime;
-- the TokenLighten CLI and MCP server as source code with public package tests for developers; and
-- a self-contained VS Code extension distributed as a VSIX.
-
-**Compatibility:** upgrade the runtime or VSIX to use v0.15.0. Re-run `tl workspace setup` or **Set up this workspace**, then start a new agent session or reconnect the MCP client to load the updated guides and tool names. Custom clients must use `tl_read_file`, `tl_search_files`, and `tl_edit_file`; the previous unprefixed names are refused. These changes are enabled by default: `TL_LEAN_SCHEMA=0` restores the previous advertised tool definition and `TL_FIND_WIDE_PAGE=0` restores the previous find page size. Responses add `applied[].after` to edit results and a `request-item-undetermined` entry to `decision.gaps`. Legacy v0.12/v0.13 request fields remain refused by default, with `TL_LEGACY_INPUT=accept` available as a temporary server-side migration bridge. See the [v0.15.0 release notes](release-docs/github-release-v0.15.0.md) for upgrade steps and known limitations.
+**Upgrade:** install the v0.15.1 archive or VSIX, re-run `tl workspace setup` or **Set up this workspace**, then start a new agent session or reconnect your MCP client. The canonical request fields and tool names are unchanged from v0.15.0. See the [v0.15.1 release notes](release-docs/github-release-v0.15.1.md) for upgrade steps and known limitations.
 
 ## Why TokenLighten
 
@@ -55,6 +49,8 @@ TokenLighten is designed to deliver its largest advantage when an agent must ide
 Symbol and reference search can return relevant definitions and call sites directly. Document readers can extract structured content from spreadsheets and other supported formats without loading each entire file. Together, these capabilities can reduce repeated search and rereading while the agent gathers the context required for repository-wide or cross-document work.
 
 ### Indicative savings (v0.15.0)
+
+These observations are from v0.15.0; they are not new measurements of v0.15.1.
 
 #### Sonnet comparison
 
@@ -113,7 +109,7 @@ Prefer VS Code's own extension instead? See the next section.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.15.0.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.0/tokenlighten-vscode-extension-0.15.0.vsix)** from the v0.15.0 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.15.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.1/tokenlighten-vscode-extension-0.15.1.vsix)** from the v0.15.1 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -124,7 +120,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.15.0.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.1.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required. This performs the same machine install as the archive above (`tl install --from-extension`) and sets up the current workspace, but leaves other hosts on the machine — Claude Code, Codex — unregistered (`--clients none`); register them separately with `tl clients activate`, or with an archive's `tl-setup`.

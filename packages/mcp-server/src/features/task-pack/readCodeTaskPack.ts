@@ -322,7 +322,17 @@ import {
 } from "./callerExpansion.js";
 // FIX-C1 (2026-09-27, eval-0927 P0-1/P0-2): the two new pure modules the
 // facet-closure hook (below) drives.
-import { extractFacetRequirements, type FacetRequirement, type RequestFacet } from "./requestFacets.js";
+import {
+  extractFacetRequirements,
+  framedCodeNamesIn,
+  isFacetDescriptorTerm,
+  isStructuralOnlyRequest,
+  maskCallArgumentPunctuation,
+  maskExplanationAspectPhrases,
+  subjectCallableNamesIn,
+  type FacetRequirement,
+  type RequestFacet,
+} from "./requestFacets.js";
 import {
   calleeNamesIn,
   COMMON_BUILTIN_CALLEES,
@@ -365,17 +375,21 @@ import { attachUsageInventory } from "./usageInventory.js";
 // FIX-G (2026-09-27, eval-0927 P0): the answer-sufficiency gate over the
 // facet-closure plan the hook records (see `buildFacetReadiness`).
 import {
+  combineSubjectFacetFacts,
   evaluateFacetRequirement,
   facetClauseMatchesItem,
   facetPlanFor,
   focalRequiredSpan,
   MAX_REQUIRED_CALL_SITES,
   MAX_UNCLASSIFIED_MENTION_LINES,
+  facetDependencyEntriesFor,
   noteUndeliveredFacetLines,
+  recordFacetDependencyEntries,
   recordFacetPlan,
   undeliveredFacetSpans,
   unservedSubSpans as unservedFacetSubSpans,
   type FacetCallSite,
+  type FacetDependencyRecord,
   type FacetFacts,
   type FacetLineSpan,
   type FacetMentionLine,
@@ -960,8 +974,10 @@ export class FileReadCache {
     if (hit !== undefined) return hit === READ_FAILED ? undefined : hit;
     let raw: string | typeof READ_FAILED;
     try {
+      const abs = workspaceBodyPath(workspace, relPath);
+      if (abs === undefined) throw new Error(`${relPath} resolves outside the workspace`);
       // served-bytes: readServedText
-      const verdict = readServedText(fs.readFileSync(path.join(workspace, relPath)));
+      const verdict = readServedText(fs.readFileSync(abs));
       this.verdicts.set(relPath, verdict);
       raw = verdict.kind === "undecodable" ? READ_FAILED : verdict.text;
     } catch {
@@ -1042,6 +1058,20 @@ export class FileReadCache {
 }
 
 /**
+ * 2026-10-06 (independent review follow-up, security): the absolute path of a
+ * task-pack body read, or `undefined` when `relPath` resolves outside
+ * `workspace` — lexically (a `../` an import resolution kept) or through a
+ * symlink. A constant closure following `import … from "../../shared/x.js"`
+ * served that file's text as answer evidence, while `tl_read_file` refuses the
+ * same path `not-found`. Every read behind a task-pack body goes through here.
+ */
+function workspaceBodyPath(workspace: string, relPath: string): string | undefined {
+  const abs = safeResolve(relPath, workspace);
+  if (abs === undefined) return undefined;
+  return isWithin(resolveReal(abs), resolveReal(workspace)) ? abs : undefined;
+}
+
+/**
  * Read `relPath` under `workspace`, using `cache` when supplied. Returns
  * undefined on I/O error or content the serve-side decode policy refuses.
  *
@@ -1051,8 +1081,10 @@ export class FileReadCache {
  */
 function readCached(workspace: string, relPath: string, cache?: FileReadCache): string | undefined {
   if (cache) return cache.read(workspace, relPath);
+  const abs = workspaceBodyPath(workspace, relPath);
+  if (abs === undefined) return undefined;
   // served-bytes: readServedText
-  return servedTextOrUndefined(path.join(workspace, relPath));
+  return servedTextOrUndefined(abs);
 }
 
 // ---------------------------------------------------------------------------
@@ -5035,7 +5067,7 @@ async function buildTaskPackCore(
       // advisory check line as a token-less record (never reported open by
       // closure tracking), so the diff flow still populates session checks.
       const diffRecords: PackCheckRecord[] = (diffPack.checks ?? []).map((desc) => ({ id: deriveCheckId({ desc }), desc }));
-      const diffFinal = dedupeTrimAndPersist(workspace, diffPack, { query, checkRecords: diffRecords, args });
+      const diffFinal = await dedupeTrimAndPersist(workspace, diffPack, { query, checkRecords: diffRecords, args });
       // V15-NBR/FUI (2026-09-29): symptom/bug-shaped queries route through
       // buildDiffTaskPack's drift surfaces — same default-OFF prototypes.
       attachPlanAids(diffFinal, workspace, query);
@@ -5368,7 +5400,7 @@ async function buildTaskPackCore(
 
   attachPartialTree(result, workspace);
   const evidenceExpansion = await importEvidenceExpansion(workspace, locateResult.primary, locatingQuery, surfaces);
-  const finalResult = dedupeTrimAndPersist(workspace, result, {
+  const finalResult = await dedupeTrimAndPersist(workspace, result, {
     ...(protectedSurfaces.size > 0 ? { protectedSurfaces } : {}),
     query,
     checkRecords,
@@ -6498,7 +6530,7 @@ async function buildAnswerTaskPack(
   );
   // WP-O: before the certificate is built (inside dedupeTrimAndPersist).
   recordSameNameSubjects(result, sameNameSubjects);
-  const finalResult = dedupeTrimAndPersist(workspace, result, { args, evidenceExpansion });
+  const finalResult = await dedupeTrimAndPersist(workspace, result, { args, evidenceExpansion });
   // WP-B (eval-0929 §5/§8): what the certificate was issued over, read BEFORE
   // any post-certification pass below can change the surface set — see
   // `enforceCertificateWireInvariant`.
@@ -8667,13 +8699,13 @@ function literalSourceUniverseProved(
   );
 }
 
-function literalFirstSafeguardPack(
+async function literalFirstSafeguardPack(
   args: TaskPackArgs,
   query: string,
   workspace: string,
   literal: LiteralFirstMeasurement,
   selectedPaths: readonly string[] = [],
-): TaskPackResult {
+): Promise<TaskPackResult> {
   const collision = literal.destinationCollision === true;
   const overCap = literal.sourcePaths > literalSourceRarityLimit(literal.universePaths);
   const overSurfaceCap = literal.sourcePaths > MAX_SURFACES_DISTINCT;
@@ -8723,7 +8755,7 @@ function literalFirstSafeguardPack(
       },
     } : {}),
   };
-  const persisted = dedupeTrimAndPersist(workspace, result, { query, args });
+  const persisted = await dedupeTrimAndPersist(workspace, result, { query, args });
   // The generic shrinker derives a next hint from missing *roles* and does
   // not know that an exact literal cohort is an indivisible obligation. Put
   // this capability-relative continuation back after shrinking, and make the
@@ -9262,7 +9294,7 @@ async function buildMultiConcernTaskPack(
     }
   }
 
-  const persisted = dedupeTrimAndPersist(workspace, result, {
+  const persisted = await dedupeTrimAndPersist(workspace, result, {
     protectedSurfaces: new Set(surfaces),
     args,
   });
@@ -9977,7 +10009,7 @@ async function buildArtifactTaskPack(
     };
   }
 
-  const finalResult = dedupeTrimAndPersist(workspace, result, {
+  const finalResult = await dedupeTrimAndPersist(workspace, result, {
     protectedSurfaces: new Set(codeSurfaces),
     args,
     artifactSurfacesAlreadyAttached: true,
@@ -11989,7 +12021,7 @@ async function buildSeededTaskPack(
   // last point before `dedupeTrimAndPersist` hands this exact object to
   // `trimToCap`, whose `fitsInCap` -> `capForResult` chain is the only reader.
   if (seededGenerousBudgetTier) markSeededGenerousPack(result, seededGenerousTierBytes);
-  const finalResult = dedupeTrimAndPersist(workspace, result, {
+  const finalResult = await dedupeTrimAndPersist(workspace, result, {
     ...(protectedSurfaces.size > 0 ? { protectedSurfaces } : {}),
     query,
     checkRecords,
@@ -14125,7 +14157,7 @@ async function buildPartialPack(
   }
 
   attachPartialTree(result, workspace);
-  const finalResult = dedupeTrimAndPersist(workspace, result, {
+  const finalResult = await dedupeTrimAndPersist(workspace, result, {
     ...(protectedSurfaces.size > 0 ? { protectedSurfaces } : {}),
     query,
     checkRecords,
@@ -15568,6 +15600,32 @@ function dropWeakCrossRootAndNonSourceAnswerCandidates(
 }
 
 /**
+ * 2026-10-06 independent review (P1-3): the function / method / class in
+ * `content` whose name is one the question frames as a code entity
+ * (`framedCodeNamesIn`), from the file's parsed declarations, scored with
+ * selectAnchorFocus's own score when it ranked it. A name declared more than once in the
+ * file (overloads, two classes' same-named methods) is left to the ordinary
+ * ranking — a frame names a word, not which of several declarations.
+ */
+async function framedDeclarationFocus(
+  content: string,
+  relPath: string,
+  framed: ReadonlySet<string>,
+  focus: AnchorFocusResult | undefined,
+  cache: FileReadCache,
+): Promise<{ name: string; range: string; score: number } | undefined> {
+  const substantive = (kind: string | undefined): boolean => kind === "function" || kind === "method" || kind === "class";
+  const lang = languageForPath(relPath);
+  const parsed = lang ? await cache.parsedSymbols(content, lang, relPath) : null;
+  const declared = (parsed ?? []).filter((symbol) => substantive(symbol.kind) && framed.has(symbol.name.toLowerCase()));
+  if (declared.length !== 1) return undefined;
+  const symbol = declared[0]!;
+  const range = `${symbol.startLine}-${symbol.endLine}`;
+  const scored = focus === undefined ? undefined : [focus.best, ...focus.runnerUps].find((item) => item.name === symbol.name && item.range === range);
+  return { name: symbol.name, range, score: scored?.score ?? 0 };
+}
+
+/**
  * A locator abstain still carries useful filename-level candidates. For an
  * answer task, inspect only those bounded candidate files and re-rank their
  * symbols against the whole question. This turns a weak MAX_* filename hit
@@ -15588,6 +15646,12 @@ async function rankAnswerEvidenceCandidates(
   // .explicitNamedPath`'s own doc for why this is checked once, after the
   // main loop, rather than folded into `answerEvidencePathPenalty` above.
   const namedPaths = new Set(queryNamedWorkspaceFiles(query, workspace, candidates.map((c) => c.path)));
+  // 2026-10-06 independent review (P1-3): plain words the question frames as
+  // a code entity ("the retry function", "retry in src/retry.js") — see
+  // `framedCodeNamesIn`. Tried after the explicit identifiers, before the
+  // query-evidence sort, whose substring count let `retryDelay` (3 matched
+  // words, "retry" inside its name) beat the `retry` the question named.
+  const framed = new Set(framedCodeNamesIn(query).map((name) => name.toLowerCase()));
 
   for (const candidate of candidates) {
     const content = readCached(workspace, candidate.path, cache);
@@ -15632,6 +15696,29 @@ async function rankAnswerEvidenceCandidates(
         score: exactFocus.score + (evidence?.score ?? 0) - answerEvidencePathPenalty(candidate, query),
         exactIdentifier: true,
         strongEvidence,
+      });
+      continue;
+    }
+    const framedFocus = framed.size === 0 || content === undefined
+      ? undefined
+      : await framedDeclarationFocus(content, candidate.path, framed, focus, cache);
+    if (framedFocus !== undefined) {
+      if (focusedPaths.has(candidate.path)) continue;
+      focusedPaths.add(candidate.path);
+      const startLine = Number.parseInt(framedFocus.range.split("-", 1)[0] ?? "1", 10);
+      ranked.push({
+        candidate: {
+          ...candidate,
+          line: Number.isFinite(startLine) ? startLine : candidate.line,
+          range: framedFocus.range,
+          symbol: framedFocus.name,
+          why: "answer-query-evidence-symbol-focus",
+          confidence: Math.max(candidate.confidence, 0.95),
+          handle: undefined,
+        },
+        score: framedFocus.score + (evidence?.score ?? 0) - answerEvidencePathPenalty(candidate, query),
+        exactIdentifier: false,
+        strongEvidence: true,
       });
       continue;
     }
@@ -22682,7 +22769,7 @@ async function flowWindowsForFocal(
 
 /** The enclosing-symbol (or bounded-margin) window of one ranked call site — same rule `recoverCallerExpansionCandidates` applies to its own sites above. */
 async function windowForCallSite(
-  site: CallerSiteCandidate,
+  site: { readonly path: string; readonly line: number },
   workspace: string,
   cache: FileReadCache,
 ): Promise<{ start: number; end: number; symbolName?: string }> {
@@ -22721,8 +22808,11 @@ async function windowForCallSite(
  * entry point elsewhere), but a callers question is answered only by EVERY
  * caller: a sibling function in the same module that calls the focal is one.
  * Same masking and declaration exclusions as `plainFunctionCallerSites`.
- * Plan-only: these sites are required by the gate, never served by the hook
- * (serving stays FIX-C1's), so an unserved one becomes a ranged `next`.
+ * 2026-10-06 (independent review follow-up): served by the hook like a
+ * cross-file site — they used to be plan-only, required by the gate yet never
+ * served, so every same-module callers question ("… and callers" of
+ * `retryDelay`, called by `retry` beside it) paid one more hop for a ranged
+ * `next` the first pack could have carried.
  *
  * MENTION GUARD (R5-A1): also returns same-file `mentions`/`mentionsCapped`
  * — a raw mention the classifier's own masking pre-filter above hides (e.g.
@@ -22886,6 +22976,59 @@ function facetPlanWorkspaceKey(workspace: string): string {
  * `request-item-undetermined` (P1) -- never a silent pass, never `empty`.
  */
 export const FACET_CLOSURE_EMERGENCY_BUDGET_MS = 20_000;
+
+/** Most subjects one facet requirement resolves beside its primary focal (P1-4). */
+const MAX_ADDITIONAL_FACET_SUBJECTS = 3;
+
+/**
+ * 2026-10-06 independent review (P1-4): every OTHER subject a requirement
+ * names that resolves to its own workspace declaration, beside the primary
+ * focal `resolveFacetFocal` settled on. "Explain retryDelay and
+ * calculateTotal, including their constants, edge cases, and callers." is ONE
+ * callers requirement whose two subjects are both functions; the primary
+ * resolution stops at the first identifier that settles, so only retryDelay's
+ * callers were planned and the gate certified "callers" with calculateTotal's
+ * caller (`checkout`) never served. Exact-declaration tiers only: a name the
+ * question carries as data (a constant passed as an argument, an env key)
+ * never becomes a focal of its own here, and an ambiguous name is skipped —
+ * the primary resolution keeps its own disclosure for that shape.
+ */
+async function additionalFacetSubjectFocals(
+  requirement: FacetRequirement,
+  primary: ResolvedFacetFocal,
+  selected: readonly ImpactCandidate[],
+  args: TaskPackArgs,
+  workspace: string,
+  cache: FileReadCache,
+  allowTestPaths: boolean,
+  deadline: number,
+  priorFocalPaths: ReadonlySet<string>,
+): Promise<ResolvedFacetFocal[]> {
+  const qualifiedOwners = new Set((requirement.qualifiedMembers ?? []).map((pair) => pair.owner));
+  const names = new Set([normIdent(primary.name)]);
+  const taken = new Set([`${primary.path}\u0000${primary.name}\u0000${primary.startLine}`]);
+  const subjects = [...new Set([...(requirement.subjectCallables ?? []), ...requirement.subjectIdentifiers])];
+  const out: ResolvedFacetFocal[] = [];
+  for (const identifier of subjects) {
+    if (out.length >= MAX_ADDITIONAL_FACET_SUBJECTS || Date.now() >= deadline) break;
+    if (qualifiedOwners.has(identifier) || names.has(normIdent(identifier))) continue;
+    let found: ResolvedFacetFocal | undefined;
+    if (requirement.facet === "value" || requirement.facet === "condition") {
+      found = await findDeclaredCallableAmong(selected, identifier, args, priorFocalPaths, workspace, cache);
+      if (found !== undefined && !allowTestPaths) found = withoutTestDeclarations(found);
+    } else {
+      const { settled, allCandidates, capped } = await resolveCallerCandidateForName(identifier, selected, args, workspace, cache, allowTestPaths, deadline);
+      found = settled ?? (allCandidates.length > 0 && !capped ? allCandidates[0] : undefined);
+    }
+    if (found === undefined || found.ambiguousWith !== undefined || normIdent(found.name) !== normIdent(identifier)) continue;
+    const key = `${found.path}\u0000${found.name}\u0000${found.startLine}`;
+    if (taken.has(key)) continue;
+    taken.add(key);
+    names.add(normIdent(identifier));
+    out.push(found);
+  }
+  return out;
+}
 
 /**
  * The facet-closure additions for one answer pack, for the caller to MERGE
@@ -23096,10 +23239,19 @@ async function recoverFacetClosureCandidates(
   // would disqualify `limits.ts` from winning ITS OWN disambiguation --
   // exactly backwards.
   const priorFocalPaths = new Set<string>();
-  for (const requirement of requirements) {
+  // 2026-10-06 independent review (P1-4): a work queue rather than a plain
+  // loop over `requirements` — a requirement naming several subjects
+  // ("Explain retryDelay and calculateTotal, including … callers") queues
+  // one item per OTHER subject that resolves to its own declaration
+  // (`additionalFacetSubjectFocals`) right behind it, each closed and planned
+  // exactly like the primary focal, under its own `subject`.
+  const work: Array<{ requirement: FacetRequirement; focal?: ResolvedFacetFocal }> = requirements.map((requirement) => ({ requirement }));
+  for (let workIndex = 0; workIndex < work.length; workIndex += 1) {
+    const { requirement, focal: queuedFocal } = work[workIndex]!;
+    const subjectKey = queuedFocal === undefined ? {} : { subject: queuedFocal.name };
     if (Date.now() >= deadline) {
-      outcomes.push({ facet: requirement.facet, clause: requirement.clause, subject: subjectLabel(requirement), focal: [], windows: [], reason: "budget-exhausted" });
-      planEntries.push({ facet: requirement.facet, clause: requirement.clause, resolution: "budget-exhausted", windows: [] });
+      outcomes.push({ facet: requirement.facet, clause: requirement.clause, subject: queuedFocal?.name ?? subjectLabel(requirement), focal: [], windows: [], reason: "budget-exhausted" });
+      planEntries.push({ facet: requirement.facet, clause: requirement.clause, ...subjectKey, resolution: "budget-exhausted", windows: [] });
       continue;
     }
     // Copilot retest (2026-10-02): the same ceiling the answer pack's merge of
@@ -23108,11 +23260,15 @@ async function recoverFacetClosureCandidates(
     const servingOpen = !planOnly && additions.length < MAX_SURFACES_WITH_FACET_CLOSURE;
     const serve = (path: string, start: number, end: number, why: string): boolean =>
       servingOpen && tryAddWindow(path, start, end, why);
-    const focal = await resolveFacetFocal(requirement, selected, args, workspace, cache, allowTestPaths, deadline, priorFocalPaths);
+    const focal = queuedFocal ?? await resolveFacetFocal(requirement, selected, args, workspace, cache, allowTestPaths, deadline, priorFocalPaths);
     if (focal === undefined) {
       outcomes.push({ facet: requirement.facet, clause: requirement.clause, subject: subjectLabel(requirement), focal: [], windows: [], reason: "no-focal" });
       planEntries.push({ facet: requirement.facet, clause: requirement.clause, resolution: "no-focal", windows: [] });
       continue;
+    }
+    if (queuedFocal === undefined && focal.ambiguousWith === undefined) {
+      const others = await additionalFacetSubjectFocals(requirement, focal, selected, args, workspace, cache, allowTestPaths, deadline, priorFocalPaths);
+      work.splice(workIndex + 1, 0, ...others.map((other) => ({ requirement, focal: other })));
     }
     // WP-F (eval-0929 §7 bullet 3 / §8 row 4): >= 2 same-named declarations
     // were visible and neither rule (a) nor rule (b) told `resolveFacetFocal`
@@ -23251,7 +23407,9 @@ async function recoverFacetClosureCandidates(
       const siteWhy = `closure:callers ${focal.name}`;
       const firstAddition = additions.length;
       let servedSites = 0;
-      for (const site of sites.slice(0, MAX_REQUIRED_CALL_SITES)) {
+      const { sites: sameFile, mentions: sameFileMentions, mentionsCapped: sameFileMentionsCapped } = sameFileFacetCallSites(focal, workspace, cache);
+      const servable: Array<{ readonly path: string; readonly line: number }> = [...sites, ...sameFile];
+      for (const site of servable.slice(0, MAX_REQUIRED_CALL_SITES)) {
         if (additions.length >= MAX_SURFACES_DISTINCT) break;
         const window = await windowForCallSite(site, workspace, cache);
         const served = serve(site.path, window.start, window.end, siteWhy);
@@ -23270,11 +23428,10 @@ async function recoverFacetClosureCandidates(
       for (const addition of additions.slice(firstAddition)) {
         if (addition.why === siteWhy) {
           addition.why = mixedAttribution
-            ? `${siteWhy} (${servedSites} of ${sites.length} call sites; attribution mixed with a same-named declaration elsewhere)${defaultExportNote}`
-            : `${siteWhy} (${servedSites} of ${sites.length} call sites)${defaultExportNote}`;
+            ? `${siteWhy} (${servedSites} of ${servable.length} call sites; attribution mixed with a same-named declaration elsewhere)${defaultExportNote}`
+            : `${siteWhy} (${servedSites} of ${servable.length} call sites)${defaultExportNote}`;
         }
       }
-      const { sites: sameFile, mentions: sameFileMentions, mentionsCapped: sameFileMentionsCapped } = sameFileFacetCallSites(focal, workspace, cache);
       const allSites: FacetCallSite[] = [...sites.map((site) => ({ path: site.path, line: site.line })), ...sameFile];
       planTotalSites = allSites.length;
       // MENTION GUARD (R5-A1): merge cross-file and same-file unclassified
@@ -23341,6 +23498,7 @@ async function recoverFacetClosureCandidates(
     planEntries.push({
       facet: requirement.facet,
       clause: requirement.clause,
+      ...subjectKey,
       resolution: "resolved",
       focal: {
         path: focal.path,
@@ -27448,7 +27606,7 @@ function gateAnswerQueryEvidenceFocusOnNamedPathRelation(
     const matchedIdentifier = explicitIdentifiers.find((identifier) => containsWholeIdentifier(content, identifier, { caseInsensitive: true }));
     const referencesPrimarySymbol = matchedIdentifier === undefined
       && primarySymbol !== undefined
-      && hasIdentifierSegment(content, primarySymbol);
+      && containsWholeIdentifier(content, primarySymbol, { caseInsensitive: true });
     // Fallback (2026-09-14, GATE-B — see the `primaryPath` comment above):
     // no identifier/symbol mention, but the candidate still states one of
     // TL142-05's own relation kinds to the primary surface — the same bar
@@ -27579,6 +27737,17 @@ export function capExtraEvidenceRelativeToNamedPaths(
       // `namedPaths.includes`/`required===true` already apply to a
       // literally-named file, extended to a literally-named IDENTIFIER.
       if (surf.why === "answer-explicit-symbol-focus" || surf.why === "answer-explicit-identifier-recovery") continue;
+      // 2026-10-06 (semantic-frontier `flag` case, after the review's P1-4
+      // fix): a facet-closure window (`closure:<facet> …` — a call site, a
+      // focal body, a constant it reads) closes a facet the QUESTION asked
+      // for and was budgeted by MAX_CLOSURE_BYTES_PER_PACK when served — never
+      // incidental extra context. The certificate cites it only while its
+      // facet is proved, so a facet disclosed undetermined (one of its
+      // subjects resolved to nothing) lost the other subjects' call sites
+      // here: "Trace INVOICE_V2_FLAG invoiceVersion renderInvoice
+      // src/feature_flags.ts relation …" kept render_invoice.ts's imports and
+      // dropped the call `invoiceVersion(flagValue)` itself.
+      if ((surf.why ?? "").startsWith("closure:")) continue;
       if (typeof surf.code !== "string") continue;
       const relationVerified = RELATION_VERIFIED_EXTRA_WHY_RE.test(surf.why ?? "");
       if (relationVerified !== requireRelationVerified) continue;
@@ -33549,7 +33718,11 @@ interface EnumeratedQueryItem {
  * deny, or needs-review` entry, which then could never prove.
  */
 function enumerationItemFacet(item: string, pick: "longest" | "last" = "longest"): string | undefined {
-  const phrase = item.trim().replace(ENUMERATION_LEADING_DETERMINER_RE, "");
+  // 2026-10-06 independent review (P2-1): an explanation aspect ("edge
+  // cases") or a facet / answer-kind noun ("callers", "cases") names the KIND
+  // of answer, never a word a served body must spell — as an item it minted
+  // `enumerated-item:…:cases`, provable only by accident.
+  const phrase = maskExplanationAspectPhrases(item).trim().replace(ENUMERATION_LEADING_DETERMINER_RE, "");
   if (phrase.length === 0 || phrase.length > ENUMERATED_ITEM_MAX_CHARS) return undefined;
   if (phrase.split(/\s+/).length > ENUMERATED_ITEM_MAX_WORDS) return undefined;
   // Internal hyphens are part of the token: "needs-review" is one enumerated
@@ -33560,7 +33733,8 @@ function enumerationItemFacet(item: string, pick: "longest" | "last" = "longest"
     .filter((token) =>
       token.length >= ENUMERATED_FACET_MIN_CHARS
       && !ENUMERATED_ITEM_STOPWORDS.has(token)
-      && !READINESS_PROBE_GENERIC_TOKENS.has(token));
+      && !READINESS_PROBE_GENERIC_TOKENS.has(token)
+      && !isFacetDescriptorTerm(token));
   if (tokens.length === 0) return undefined;
   return pick === "last"
     ? tokens[tokens.length - 1]!
@@ -33586,7 +33760,10 @@ function currentEnumeratedQueryItems(query: string): EnumeratedQueryItem[] {
   const split = new RegExp(`${ENUMERATION_LIST_MARKER_RE.source}|${ENUMERATION_SEPARATOR_RE.source}`, "giu");
   const segments: Array<{ text: string; start: number; end: number }> = [];
   let cursor = 0;
-  for (const match of cleaned.matchAll(split)) {
+  // 2026-10-06 independent review (P2-1): a call's own argument commas
+  // (`calculateTotal(4800, 0)`) are never item separators; cut points come
+  // from the guarded copy, text from `cleaned`.
+  for (const match of maskCallArgumentPunctuation(cleaned, ",;、，・").matchAll(split)) {
     const index = match.index ?? cursor;
     const raw = cleaned.slice(cursor, index);
     const leftTrim = raw.length - raw.trimStart().length;
@@ -34201,7 +34378,18 @@ function runInternalReadinessFalsification(
     // unserved remainder below instead (`servedSpans`).
     const lower = stripCommentOnlyLines(masked.text).toLowerCase();
     const queryTokenHits = queryTokens.filter((token) => lower.includes(token)).length;
-    const matchedIdentifiers = explicitIdentifiers.filter((identifier) => lower.includes(identifier));
+    // A named identifier hits only as a WHOLE identifier (WP-N's rule), for
+    // all three of its uses below: the gate on an already-served file, the
+    // probe query that picks its window, and `strong`. A substring hit
+    // admitted the semantic-frontier bench's decoy note (`invoiceVersionNote`,
+    // `INVOICE_V2_FLAG_NOTE` merely contain the query's `invoiceVersion` /
+    // `INVOICE_V2_FLAG`) as a required counterexample, and steered the window
+    // of a served file to a near-miss: "Explain parseConfigHeader and
+    // finalizeShutdownSequence in pipelineConfig.ts." inlined the
+    // `PipelineConfigHeader` interface ("pipelineconfig" from the file name)
+    // instead of the named `finalizeShutdownSequence`, and so needed two more
+    // calls to answer.
+    const matchedIdentifiers = explicitIdentifiers.filter((identifier) => containsWholeIdentifier(lower, identifier));
     const identifierHit = matchedIdentifiers.length > 0;
     const endpointHit = endpointTokens.some((token) => lower.includes(token.toLowerCase()));
     // Once a file already contributes an action surface, generic lexical
@@ -34391,8 +34579,10 @@ function runInternalReadinessFalsification(
     // gap and the composite-query closure; see ric-notes.md.
     let counterexampleWhy: string = "readiness-falsification-counterexample";
     const primarySymbol = existing.find((s) => s.required === true)?.symbol ?? existing[0]?.symbol;
+    // "Naming" the primary symbol means the whole identifier, never a longer
+    // one that merely starts or ends with it (`invoiceVersionNote`).
     const referencesPrimarySymbol = primarySymbol !== undefined
-      && hasIdentifierSegment(candidate.content, primarySymbol);
+      && containsWholeIdentifier(candidate.content, primarySymbol, { caseInsensitive: true });
     const identifierGrounded = candidate.strong || referencesPrimarySymbol;
     if (namedPaths.length > 0) {
       // FIX-ORIG: `fullContent` is already hoisted above (it now also feeds
@@ -40483,8 +40673,10 @@ function buildRequestItemReadiness(
 const FACET_OBLIGATION_ID_PREFIX = `${REQUEST_ITEM_OBLIGATION_PREFIX}facet-`;
 
 interface FacetReadinessEntry {
-  /** 1-based position in `extractFacetRequirements(query)`. */
-  readonly index: number;
+  /** The id's own part: `<n>`, the 1-based position in `extractFacetRequirements(query)`, or `dependency:<callable>` for a dependency entry (`dependency`). */
+  readonly label: string;
+  /** 2026-10-06 (P1-1/P1-2): an entry for the constants a served callable reads (`FacetPlanEntry.dependency`), present only while it is open or disclosed. Never owns a request item, never grounds `analysis-source`. */
+  readonly dependency?: true;
   readonly requirement: FacetRequirement;
   readonly facts: FacetFacts;
   readonly status: ConcernStatus;
@@ -40573,12 +40765,19 @@ function buildFacetReadiness(
   // Same two terminal proof shapes `buildRequestItemReadiness` leaves alone.
   if (result.create_target !== undefined || result.literal_source_absence !== undefined) return undefined;
   const requirements = extractFacetRequirements(query);
-  // No facet → nothing here runs: every ordinary pack stays byte-identical.
-  if (requirements.length === 0) return undefined;
   const plan = facetPlanFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
     const content = readCached(workspace, relPath);
     return content === undefined ? undefined : shaOfText(content);
   });
+  // 2026-10-06 independent review (P1-1/P1-2): the constants a served
+  // callable reads (`runAnswerDependencyClosure`) are checked whether or not
+  // the question names a facet.
+  const dependencyEntries = facetDependencyEntriesFor(facetPlanWorkspaceKey(workspace), query, (relPath) => {
+    const content = readCached(workspace, relPath);
+    return content === undefined ? undefined : shaOfText(content);
+  });
+  // No facet and no dependency → nothing here runs: every ordinary pack stays byte-identical.
+  if (requirements.length === 0 && dependencyEntries.length === 0) return undefined;
   // Served = bytes THIS response ships (`code`) plus the session's sha-gated
   // served-range ledger (earlier hops of this epoch). A `code_unchanged`
   // restatement ("already served, resident in your context") is a CLAIM about
@@ -40634,10 +40833,15 @@ function buildFacetReadiness(
   const openTargets: Array<{ path: string; range: string }> = [];
   const seenTargets = new Set<string>();
   const disclosures: Array<{ id: string; term: string; word: "request-item-empty" | "request-item-undetermined"; reason: string }> = [];
-  requirements.forEach((requirement, position) => {
-    const index = position + 1;
-    const entry = plan?.entries.find((candidate) => candidate.facet === requirement.facet && candidate.clause === requirement.clause);
-    const facts = evaluateFacetRequirement(requirement, entry, { servedSpans, fileLines, undeliveredSpans });
+  const ctx = { servedSpans, fileLines, undeliveredSpans };
+  const admit = (
+    label: string,
+    requirement: FacetRequirement,
+    subjectFacts: readonly FacetFacts[],
+    entry: FacetPlanEntry | undefined,
+    dependency: boolean,
+  ): void => {
+    const facts = combineSubjectFacetFacts(subjectFacts);
     const coveringSurfaces = evidence
       .filter((surface) => facts.servedWindows.some((window) => window.path === surface.path))
       .map((surface) => narrowSurfaceToFacetWindows(surface, facts.servedWindows));
@@ -40649,7 +40853,7 @@ function buildFacetReadiness(
       : { kind: "indeterminate", reason: facts.reason };
     const verdict = decideConcernStatus([facts.term], coverage, outcome);
     const obligation: TaskReadinessObligation = {
-      id: `${FACET_OBLIGATION_ID_PREFIX}${index}:${requirement.facet}`,
+      id: `${FACET_OBLIGATION_ID_PREFIX}${label}:${requirement.facet}`,
       kind: "concern",
       status: verdict.status === "open" ? "uncovered" : "proved",
       required: true,
@@ -40670,8 +40874,10 @@ function buildFacetReadiness(
         openTargets.push({ path: target.path, range });
       }
     }
-    if (facts.disclosure !== undefined && verdict.status !== "open") {
-      disclosures.push({ id: `facet-${index}`, term: facts.term, word: facts.disclosure.word, reason: facts.disclosure.reason });
+    if (verdict.status !== "open") {
+      for (const subject of subjectFacts) {
+        if (subject.disclosure !== undefined) disclosures.push({ id: `facet-${label}`, term: subject.term, word: subject.disclosure.word, reason: subject.disclosure.reason });
+      }
     }
     if (isTraceEnabled()) {
       trace("facet_gate_status", {
@@ -40684,8 +40890,50 @@ function buildFacetReadiness(
         served: facts.servedWindows.length,
       }, workspace);
     }
-    entries.push({ index, requirement, facts, status: verdict.status, obligation, servedEvidence: coveringSurfaces.map(readinessEvidence).slice(0, 6) });
+    entries.push({
+      label, ...(dependency ? { dependency: true as const } : {}), requirement, facts, status: verdict.status, obligation,
+      servedEvidence: coveringSurfaces.map(readinessEvidence).slice(0, 6),
+    });
+  };
+  requirements.forEach((requirement, position) => {
+    // 2026-10-06 independent review (P1-4): a requirement naming several
+    // subjects planned one entry per resolved subject (`FacetPlanEntry
+    // .subject`); every one of them is required.
+    const matching = plan?.entries.filter((candidate) => candidate.dependency !== true
+      && candidate.facet === requirement.facet && candidate.clause === requirement.clause) ?? [];
+    const entry = matching.find((candidate) => candidate.subject === undefined) ?? matching[0];
+    const subjectFacts = [
+      evaluateFacetRequirement(requirement, entry, ctx),
+      ...matching
+        .filter((candidate) => candidate !== entry && candidate.subject !== undefined)
+        .map((candidate) => evaluateFacetRequirement({ ...requirement, subjectIdentifiers: [candidate.subject!], inheritedFromLead: false }, candidate, ctx)),
+    ];
+    admit(String(position + 1), requirement, subjectFacts, entry, false);
   });
+  // 2026-10-06 independent review (P1-1/P1-2): each served callable's own
+  // dependency values. Covered (the values are on the wire) or empty (it
+  // reads none) adds nothing — no obligation, no disclosure; only an open or
+  // undetermined one is said, so a pack whose evidence is complete stays
+  // byte-identical.
+  for (const entry of dependencyEntries) {
+    // A callable this epoch has not delivered whole owes no dependency yet:
+    // its own continuation comes first. Measured (ceilingFallbackHonesty,
+    // a 120-branch focal under an 8 KB ceiling): the shed body's constants
+    // took the `next`, and the follow-up certified with no branch delivered.
+    const focal = entry.focal;
+    if (focal === undefined) continue;
+    const focalSpan = focalRequiredSpan(focal.start, focal.end, fileLines(focal.path)) ?? { start: focal.start, end: focal.end };
+    if (unservedFacetSubSpans(focalSpan, servedSpans(focal.path)).length > 0) continue;
+    const subject = entry.subject ?? focal.name;
+    // The callable's own name is the clause a disclosure names ("value:priceFor").
+    const requirement: FacetRequirement = { facet: "value", clause: subject, subjectIdentifiers: [subject], subjectTerms: [], inheritedFromLead: false };
+    const facts = evaluateFacetRequirement(requirement, entry, ctx);
+    if (facts.kind === "covered" || facts.kind === "empty") continue;
+    admit(`dependency:${subject}`, requirement, [facts], entry, true);
+  }
+  // Nothing to say (no facet, every dependency covered): exactly as if this
+  // gate had not run.
+  if (requirements.length === 0 && entries.length === 0) return undefined;
   return { entries, openTargets, disclosures };
 }
 
@@ -40748,7 +40996,7 @@ function reconcileRequestItemsWithFacets(
   query: string,
 ): ReadonlySet<string> {
   const ownedIds = new Set<string>();
-  const resolved = facets.entries.filter((entry) => entry.facts.focalResolved);
+  const resolved = facets.entries.filter((entry) => entry.facts.focalResolved && entry.dependency !== true);
   if (resolved.length === 0) return ownedIds;
   const items = extractRequestItems(query);
   for (const item of items) {
@@ -40819,7 +41067,7 @@ function reconcileAnalysisSourceFromFacets(
 ): void {
   const stale = otherObligations.find((obligation) => obligation.id === "analysis-source" && obligation.status !== "proved");
   if (stale === undefined) return;
-  const grounded = facets.entries.find((entry) => entry.facts.focalResolved && entry.facts.servedWindows.length > 0);
+  const grounded = facets.entries.find((entry) => entry.dependency !== true && entry.facts.focalResolved && entry.facts.servedWindows.length > 0);
   if (grounded === undefined) return;
   stale.status = "proved";
   stale.evidence = [...grounded.servedEvidence];
@@ -40848,7 +41096,7 @@ function mergeFacetGap(
   workspace: string | undefined,
 ): RequestItemReadiness["gap"] {
   if (facets === undefined || facets.openTargets.length === 0 || workspace === undefined) return gap;
-  const openIds = facets.entries.filter((entry) => entry.status === "open").map((entry) => `facet-${entry.index}`);
+  const openIds = facets.entries.filter((entry) => entry.status === "open").map((entry) => `facet-${entry.label}`);
   const baseTargets = ((gap?.next_call.arguments as { targets?: unknown } | undefined)?.targets as Array<{ path: string; range?: string }> | undefined) ?? [];
   const keyOf = (target: { path: string; range?: string }): string => `${target.path}\u0000${target.range ?? ""}`;
   const seen = new Set(baseTargets.map(keyOf));
@@ -53985,7 +54233,181 @@ function enforceCeilingCertificateInvariant(
   return true;
 }
 
-function dedupeTrimAndPersist(
+/** Most served callables one answer pack chases dependency values for (2026-10-06 review, P1-1/P1-2); past it each one is disclosed, never dropped. */
+const MAX_DEPENDENCY_FOCALS = 12;
+/** The plan clause a dependency entry carries — never a query clause, so no facet requirement or request item ever matches it. */
+const DEPENDENCY_VALUE_CLAUSE = "(values the served code reads)";
+
+/**
+ * 2026-10-06 independent review (P1-1, P1-2): the values an answer computes
+ * with are part of its evidence, whatever the question's wording — unless the
+ * question only locates code or relates pieces of it (`isStructuralOnlyRequest`:
+ * "Find X … renderInvoice relation consumed …" asks about no value
+ * `renderInvoice` reads, and the semantic-frontier bench's sealed qrels score
+ * that constant's file irrelevant).
+ *
+ * "Calculate invoiceAmount(1000)." served `invoiceAmount`'s body and was
+ * certified `act.answer` without the imported SALES_TAX it multiplies by: the
+ * facet closure chases constants only for a clause that SAYS value / rate /
+ * default / limit, and this one said "calculate" ("Explain invoiceAmount and
+ * the sales tax it uses" said neither). "retryDelay の待機時間 … 最大リトライ
+ * 回数も示してください" served the caller `retry` — added by the falsification
+ * pass AFTER the facet closure ran — without the LIMIT it loops to, an alias
+ * of MAX_RETRIES = 4.
+ *
+ * So, once every surface is final: each callable the pack serves WHOLE that
+ * the answer is about — a surface's own symbol (the answer focus, a
+ * falsification counterexample) or a callable the question names — and that
+ * no value/condition requirement already planned, gets the constant closure
+ * that requirement would get (`constantClosureForFocal`: the free identifiers
+ * of its body classified as parameters, locals, built-ins or module
+ * constants, imports and alias chains followed to the declaration). Each
+ * window is served here within MAX_CLOSURE_BYTES_PER_PACK and recorded on the
+ * facet plan as a `dependency` entry the gate checks like a value facet: an
+ * unserved window keeps the pack open with a ranged `next`; a read with no
+ * resolvable declaration is disclosed `request-item-undetermined`; a callable
+ * that reads no constant adds nothing. One pass reaches the fixed point — a
+ * constant window adds no callable, and initializer/alias chains are chased
+ * inside the closure itself. Returns how many surfaces it added.
+ */
+async function runAnswerDependencyClosure(
+  result: TaskPackResult,
+  query: string,
+  workspace: string,
+  cache: FileReadCache | undefined,
+): Promise<number> {
+  if (isStructuralOnlyRequest(query)) return 0;
+  const fileCache = cache ?? new FileReadCache();
+  const workspaceKey = facetPlanWorkspaceKey(workspace);
+  const shaOf = (relPath: string): string | undefined => {
+    const content = readCached(workspace, relPath, fileCache);
+    return content === undefined ? undefined : shaOfText(content);
+  };
+  const plan = facetPlanFor(workspaceKey, query, shaOf);
+  const planned = new Set((plan?.entries ?? [])
+    .filter((entry) => entry.dependency !== true && (entry.facet === "value" || entry.facet === "condition") && entry.focal !== undefined)
+    .map((entry) => `${entry.focal!.path}\u0000${entry.focal!.name}`));
+  const named = new Set([...explicitCodeIdentifiers(query), ...subjectCallableNamesIn(query)].map((name) => name.toLowerCase()));
+  // A test's own fixture constants are no part of an answer about the code
+  // unless the question is about tests (the facet closure's own rule).
+  const allowTestPaths = queryMentionsTests(query);
+  const servedSurfaces = codeTaskPackSurfaces(result.surfaces)
+    .filter((surface) => (surface.code?.length ?? 0) > 0 && (allowTestPaths || !isTestConcernPath(surface.path)));
+  const servedOf = (relPath: string): LineSpan[] => servedLineSpansOf(
+    codeTaskPackSurfaces(result.surfaces).filter((surface) => surface.path === relPath && (surface.code?.length ?? 0) > 0),
+  );
+
+  const focals: ResolvedFacetFocal[] = [];
+  const seen = new Set<string>();
+  for (const surface of servedSurfaces) {
+    const content = readCached(workspace, surface.path, fileCache);
+    const lang = languageForPath(surface.path);
+    if (content === undefined || !lang) continue;
+    const lines = content.split(/\r?\n/);
+    const served = servedOf(surface.path);
+    const parsed = (await fileCache.parsedSymbols(content, lang, surface.path)) ?? [];
+    const typeName = callerExpansionTypeNameFor(parsed, surface.path);
+    for (const symbol of parsed) {
+      if (symbol.kind !== "function" && symbol.kind !== "method") continue;
+      const name = unqualifiedSymbolTail(symbol.name);
+      if (name !== surface.symbol && !named.has(name.toLowerCase())) continue;
+      const body = focalRequiredSpan(symbol.startLine, symbol.endLine, lines) ?? { start: symbol.startLine, end: symbol.endLine };
+      if (!lineSpansCover(served, body)) continue;
+      const key = `${surface.path}\u0000${name}`;
+      if (planned.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      focals.push({
+        path: surface.path,
+        name,
+        startLine: symbol.startLine,
+        endLine: symbol.endLine,
+        typeName: unqualifiedSymbolTail(symbol.enclosingSymbol?.name ?? typeName),
+        hasRealType: symbolIsRealMember(symbol, surface.path),
+        kind: symbol.kind,
+      });
+    }
+  }
+
+  const deadline = Date.now() + FACET_CLOSURE_EMERGENCY_BUDGET_MS;
+  const records: FacetDependencyRecord[] = [];
+  const shasOf = (paths: readonly string[]): Record<string, string> => {
+    const shas: Record<string, string> = {};
+    for (const relPath of paths) {
+      const sha = shaOf(relPath);
+      if (sha !== undefined) shas[relPath] = sha;
+    }
+    return shas;
+  };
+  let bytesUsed = 0;
+  let added = 0;
+  for (const [index, focal] of focals.entries()) {
+    const focalEntry = { path: focal.path, name: focal.name, start: focal.startLine, end: focal.endLine };
+    // Past the per-pack cap or the emergency deadline a callable is never
+    // silently left out: it is recorded as not resolved, and the gate
+    // discloses it (the facet closure's own rule for a budget stop).
+    if (index >= MAX_DEPENDENCY_FOCALS || Date.now() >= deadline) {
+      records.push({
+        entry: { facet: "value", clause: DEPENDENCY_VALUE_CLAUSE, subject: focal.name, dependency: true, resolution: "budget-exhausted", focal: focalEntry, windows: [] },
+        fileShas: shasOf([focal.path]),
+      });
+      continue;
+    }
+    // The callable's OWN reads only — its module constants and, for a method,
+    // the constants its `this.x` reads are assigned from — never a callee's
+    // (an empty callee list skips that walk): a callee's constants mean
+    // nothing without the callee's body, which a value facet requires too,
+    // and were attributed as "LIMIT (read by checkout)" to a `checkout` that
+    // never mentions LIMIT.
+    const closure = await constantClosureForFocal(focal, workspace, fileCache, deadline, []);
+    const ownWindows = closure.windows;
+    const windows: FacetPlanWindow[] = [];
+    for (const win of ownWindows) {
+      windows.push({ kind: "constant", path: win.path, start: win.start, end: win.end, name: win.name, ...(win.truncated ? { truncated: true } : {}) });
+      if (lineSpansCover(servedOf(win.path), { start: win.start, end: win.end })) continue;
+      const range = `${win.start}-${win.end}`;
+      const slice = centeredSliceForCap(workspace, win.path, range, fileCache, win.start);
+      // A window that does not fit whole is left to the gate's ranged `next`.
+      if (slice === undefined || slice.remaining_ranges.length > 0) continue;
+      const bytes = Buffer.byteLength(slice.code, "utf8");
+      if (bytesUsed + bytes > MAX_CLOSURE_BYTES_PER_PACK) continue;
+      bytesUsed += bytes;
+      const handle = handleTable.upsert({ kind: "range", path: win.path, range, workspaceRoot: workspace, sha: shaOfText(slice.code) });
+      (result.surfaces as TaskPackResultSurface[]).push({
+        role: classifySurface(win.path),
+        handle: handle.id,
+        path: win.path,
+        range,
+        required: true,
+        why: `closure:value ${win.name} (read by ${focal.name})`,
+        code: slice.code,
+      });
+      added += 1;
+    }
+    records.push({
+      entry: {
+        facet: "value",
+        clause: DEPENDENCY_VALUE_CLAUSE,
+        subject: focal.name,
+        dependency: true,
+        resolution: "resolved",
+        focal: focalEntry,
+        windows,
+        ...(closure.unresolved.length > 0 ? { unresolvedConstants: closure.unresolved } : {}),
+        ...(Object.keys(closure.unresolvedPackages).length > 0 ? { unresolvedConstantPackages: closure.unresolvedPackages } : {}),
+        ...(Object.keys(closure.unresolvedConstantCandidates).length > 0 ? { unresolvedConstantCandidates: closure.unresolvedConstantCandidates } : {}),
+        ...(Object.keys(closure.unresolvedDependencies).length > 0 ? { unresolvedDependencies: closure.unresolvedDependencies } : {}),
+        ...(closure.complete ? {} : { constantsComplete: false }),
+      },
+      fileShas: shasOf([focal.path, ...ownWindows.map((win) => win.path)]),
+    });
+  }
+  // One record per callable closed HERE; a callable an earlier hop of this
+  // task closed keeps its record (facetGate.ts `recordFacetDependencyEntries`).
+  recordFacetDependencyEntries(workspaceKey, query, records);
+  return added;
+}
+
+async function dedupeTrimAndPersist(
   workspace: string,
   result: TaskPackResult,
   opts?: {
@@ -54015,7 +54437,7 @@ function dedupeTrimAndPersist(
     /** artifact_build already attached its ranked discovery surfaces. */
     artifactSurfacesAlreadyAttached?: boolean;
   },
-): TaskPackResult {
+): Promise<TaskPackResult> {
   const effectiveQuery = opts?.query
     ?? opts?.args?.query
     ?? opts?.args?.symbol
@@ -54393,6 +54815,21 @@ function dedupeTrimAndPersist(
     // API/header was provisionally chosen as the endpoint. Rebuild all
     // derived frontiers before certifying the enriched evidence set.
     refreshAfterRecursiveClosure(result, profile, effectiveQuery, workspace, opts?.cache);
+  }
+  // 2026-10-06 independent review (P1-1/P1-2): the constants every served
+  // callable reads — the counterexamples just admitted included — before
+  // anything below certifies this evidence set. No frontier refresh after
+  // it: a constant window changes no role, wiring or concern frontier, and
+  // `refreshAfterRecursiveClosure`'s re-derivation of `missing` for an answer
+  // pack turned a progressing ranged `next` into a closure tree search that
+  // re-served the same pack forever (concernStatusPolicyMatrix readme-only).
+  if (
+    profile === "answer"
+    && effectiveQuery.length > 0
+    && result.literal_source_absence === undefined
+    && result.create_target === undefined
+  ) {
+    await runAnswerDependencyClosure(result, effectiveQuery, workspace, opts?.cache);
   }
   if (
     falsificationAdded > 0
