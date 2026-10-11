@@ -175,13 +175,25 @@ describe("FIX-FC2 residual 1: VS Code config never claims prior for bytes this t
     const violations = priorClaimsForNeverShippedBytes(hops);
     expect(violations, `prior claimed for bytes this chain never shipped: ${JSON.stringify(violations)}`).toEqual([]);
 
-    // Recall control: the counterexample surface must reach the caller as a
-    // real body somewhere in the chain — never only as a body-less `prior`
-    // claim (the failure mode the no-false-prior check above also catches;
-    // restated for this one named path so a regression names it directly).
+    // Recall control: the chain ships real bytes (the answer's own windows),
+    // and the counterexample surface is never a body-less `prior` claim it did
+    // not first ship (the failure mode the no-false-prior check above also
+    // catches; restated for this one named path so a regression names it
+    // directly). v0.15.1 runtime review (2026-10-06): `src/config.ts` is the
+    // file the question names and the locator's one primary, so the pack is a
+    // focused answer and a bare-qref replay restates it as `prior` — it no
+    // longer re-confirms a candidate list by widening to the whole file plus
+    // `httpClient.ts`, which is how this chain used to put that surface on
+    // the wire at all.
+    expect(
+      hops.some((body) => evidenceOf(body).some((e) => e["path"] === "src/config.ts" && typeof e["body"] === "string" && e["body"].includes("timeoutMs: 5000"))),
+      "the chain never shipped the default timeout's own window",
+    ).toBe(true);
     const shippedHttpClient = hops.some((body) =>
       evidenceOf(body).some((e) => e["path"] === "src/httpClient.ts" && typeof e["body"] === "string"));
-    expect(shippedHttpClient, "httpClient.ts never shipped a real body in the chain").toBe(true);
+    const claimedHttpClient = hops.some((body) =>
+      evidenceOf(body).some((e) => e["path"] === "src/httpClient.ts" && e["prior"] !== undefined));
+    expect(!claimedHttpClient || shippedHttpClient, "httpClient.ts was claimed prior without ever shipping a body").toBe(true);
   }, 60_000);
 });
 

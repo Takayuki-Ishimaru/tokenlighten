@@ -27,6 +27,8 @@ import { persistQueryRef, rehydrateQueryRef, rehydrateQueryRefBinding, rehydrate
 // module (imports `util/laneKey.js` only), so this is a one-directional edge
 // — no cycle.
 import { clearServedSurfaces } from "../util/packServeLog.js";
+// TL-REVIEW-2: pure window arithmetic (formatCompress.ts has no imports — no cycle).
+import { spansExcludingWindows } from "../util/formatCompress.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -7003,6 +7005,21 @@ export function servedRangeReceipt(
   startLine: number,
   endLine: number,
   totalLines: number,
+  /**
+   * TL-REVIEW-2 (2026-10-06): the comment windows the REQUEST'S OWN
+   * representation elides — `elideDocCommentsForDisplay(wholeFile, lang,
+   * false).elided` for a default-policy (`comments:"elide"`) whole-file read,
+   * and nothing else. Such a request never delivers those lines (they are
+   * disclosed as `elided`, protocol/sourceFidelity.ts), so "the caller holds
+   * everything this request would serve" means every OTHER line of the window
+   * is held; without this, the identical repeat of a default full read found
+   * the comment blocks unheld and re-served them raw. The windows are never
+   * themselves claimed as held: a window with no line outside them returns
+   * `undefined`, so a zoom INTO a comment block still serves real bytes
+   * (replay corpus seh1/seh4). Omit for every other caller — the default is
+   * the historical elision-blind probe.
+   */
+  policyElided?: ReadonlyArray<readonly [number, number]>,
 ): ServedRangeLedgerReceipt | undefined {
   const state = getSession(workspaceRoot).servedRangeLedger.get(filePath);
   if (state === undefined || state.fileSha !== fileSha) return undefined;
@@ -7011,11 +7028,20 @@ export function servedRangeReceipt(
   const covered = mergeServedRanges(
     state.spans.map((span) => [span.start, span.end] as [number, number]),
   );
-  const subsumed = covered.some(
-    ([rangeStart, rangeEnd]) => rangeStart <= start && rangeEnd >= end,
-  );
+  const owed = policyElided === undefined || policyElided.length === 0
+    ? [[start, end] as [number, number]]
+    : spansExcludingWindows(start, end, policyElided);
+  if (owed.length === 0) return undefined;
+  const subsumed = owed.every(([owedStart, owedEnd]) => covered.some(
+    ([rangeStart, rangeEnd]) => rangeStart <= owedStart && rangeEnd >= owedEnd,
+  ));
   if (!subsumed) return undefined;
-  const unserved = unservedServedRanges(state.ranges, totalLines);
+  const unserved = unservedServedRanges(
+    policyElided === undefined || policyElided.length === 0
+      ? state.ranges
+      : mergeServedRanges([...state.ranges, ...policyElided.map(([a, b]) => [a, b] as [number, number])]),
+    totalLines,
+  );
   const servedBy = servedByLabel(state, start, end);
   return {
     sha: fileSha.slice(0, 12),
@@ -7581,6 +7607,17 @@ export interface ServeCorroboration {
   unattributed: boolean;
   /** Body-bearing line windows the serialized payload declared. */
   windows: ReadonlyArray<{ path: string; start: number; end: number }>;
+  /**
+   * TL-REVIEW-2 (2026-10-06): comment windows the serialized payload DISCLOSED
+   * as policy-elided (`Evidence.elided`). Since bodies became source-faithful
+   * an elided block is no longer inside any body's `range`, so these stand in
+   * for the part of the old range the marker covered: they confirm a staged
+   * elision-gap candidate (FX-V1), and they complete a shipped span that a
+   * body window of the same response already reached. They never corroborate
+   * a span on their own — a response that shipped no byte of a span keeps
+   * none of it.
+   */
+  elidedWindows?: ReadonlyArray<{ path: string; start: number; end: number }>;
 }
 
 function _settleSessionServeBookings(
@@ -7668,7 +7705,22 @@ function _settleSessionServeBookings(
     // outright, exactly as before.
     const matchingWindows = windows.filter((window) =>
       _servePathsMatch(window.path, span.path));
-    const covered = _coveredPiecesOfSpan(span, matchingWindows);
+    let covered = _coveredPiecesOfSpan(span, matchingWindows);
+    // TL-REVIEW-2 (2026-10-06): a span some body of this response carried is
+    // judged against that response's disclosed `elided` windows too. Before
+    // bodies became source-faithful, the comment block a marker stood for sat
+    // INSIDE that body's `range`, so a producer that books its whole semantic
+    // window — the task pack (`packServedSpans`: "that marker still addresses
+    // the omitted source lines") — had it corroborated; the same body now
+    // ships as faithful segments plus `elided`, and the union of the two is
+    // exactly the range the body used to declare. Only ever a span a BODY
+    // window already reached: a response that shipped no byte of the span
+    // corroborates none of it, as before (FX-N/A).
+    if (covered.length > 0 && corroboration.elidedWindows !== undefined) {
+      const disclosed = corroboration.elidedWindows.filter((window) =>
+        _servePathsMatch(window.path, span.path));
+      if (disclosed.length > 0) covered = _coveredPiecesOfSpan(span, [...matchingWindows, ...disclosed]);
+    }
     if (covered.length > 0) shippedPaths.add(span.path);
     if (covered.length === 1 && covered[0]!.start === span.start && covered[0]!.end === span.end) {
       continue; // fully carried — unchanged, byte-identical to the old rule's outcome here.
@@ -7735,7 +7787,9 @@ function _settleSessionServeBookings(
     for (const candidate of pendingElided) {
       let confirmed = false;
       if (!corroboration.unattributed) {
-        const matchingWindows = windows.filter((window) =>
+        // TL-REVIEW-2: a disclosed `elided` window reaches the gap it names
+        // exactly as the body that used to carry its marker did.
+        const matchingWindows = [...windows, ...(corroboration.elidedWindows ?? [])].filter((window) =>
           _servePathsMatch(window.path, candidate.path));
         const covered = _coveredPiecesOfSpan(candidate, matchingWindows);
         confirmed = covered.length === 1
@@ -8817,11 +8871,25 @@ export function servedRangeCoverage(
   filePath: string,
   fileSha: string,
   totalLines: number,
+  /**
+   * TL-REVIEW-2 (2026-10-06): the windows a default-policy WHOLE-FILE request
+   * elides by its own representation (see `servedRangeReceipt`'s parameter of
+   * the same name). They count toward `unserved`/`complete` as delivered-by-
+   * representation and NEVER toward `served`: `served` stays the honest list
+   * of shipped clusters, which is what a difference projection builds its
+   * `prior` claims from.
+   */
+  policyElided?: ReadonlyArray<readonly [number, number]>,
 ): { served: Array<[number, number]>; unserved: string[]; complete: boolean } | undefined {
   const state = getSession(workspaceRoot).servedRangeLedger.get(filePath);
   if (state === undefined || state.fileSha !== fileSha) return undefined;
   const served = state.ranges.map(([start, end]) => [start, end] as [number, number]);
-  const unserved = unservedServedRanges(state.ranges, totalLines);
+  const unserved = unservedServedRanges(
+    policyElided === undefined || policyElided.length === 0
+      ? state.ranges
+      : mergeServedRanges([...state.ranges, ...policyElided.map(([a, b]) => [a, b] as [number, number])]),
+    totalLines,
+  );
   return { served, unserved, complete: unserved.length === 0 };
 }
 

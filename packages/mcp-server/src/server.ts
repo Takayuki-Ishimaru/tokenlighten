@@ -52,11 +52,11 @@ import { inspectRangeEditTarget, replaceAllInRange, replaceRangeContent } from "
 import { compressFormat, elideDocComments, elideDocCommentsForDisplay, elideDocCommentsWithWindows, ELISION_MARKER_RE, TL_SYNTHETIC_MARKER_RE, spansExcludingWindows } from "./util/formatCompress.js";
 import { languageForPath } from "./util/languages.js";
 import { readCodePack } from "./tools/readCodePack.js";
-import { buildCompactTree } from "./tools/exploreTree.js";
+import { buildTreeResponse } from "./tools/exploreTree.js";
 import {
   archivePathFromTaskPaths,
   archiveTaskDecision,
-  archiveTree,
+  archiveTreeListing,
   buildArchiveManifest,
   buildArchiveTaskPack,
   findInArchive,
@@ -66,6 +66,7 @@ import {
   splitArchiveVirtualPath,
   virtualArchivePath,
 } from "./tools/archive.js";
+import { admitArchiveTreeCursor, buildArchiveTreePage, type ArchiveTreeAdmission, type ArchiveTreeRequest } from "./tools/archiveTreePage.js";
 import { admitTaskPackBudget, autoBoundTaskProfile, buildTaskPack, canServeCachedTaskPackReceipt, clearPackDedupeForWorkspace, concernAnchorTokens, concernHarvestText, filterConcernQueryEntries, recordReadOnlyServedRangedServe, repairSuppressedNextCall } from "./features/task-pack/readCodeTaskPack.js";
 import { rescueStringifiedCanonicalFields as rescueCanonicalDialectFields } from "./mcp/transport/canonicalDialectRescue.js";
 function taskPackAdmission(
@@ -505,6 +506,7 @@ import { attachClosure, computeClosureStateSafe, CLOSURE_SATISFIED_NOTE } from "
 import { getFunctionalValidationObligation, clearFunctionalValidationObligation, forgetExecutedNext, hasExecutedNextBoundOrUnbound, hasPrescribedSearchTerm, normalizeContractLane, recordExecutedLocate, recordExecutedNext, recordExecutedSearch, recordExecutedSearchResult, recordPrescribedSearchTerms, recordServedBytes, recordServedWindow, stashIndependentRangeStalenessNote, consumeIndependentRangeStalenessNote, type ExecutedSearchAbsence, type ExecutedSearchHit } from "./util/packServeLog.js";
 import { currentSessionLane, laneScopedKey } from "./util/laneKey.js";
 import { RequestCancelledError } from "./util/requestCancellation.js";
+import { noteToolCallStarted, scheduleStartupWarmup } from "./util/startupWarmup.js";
 // DESIGN-v0.15 §5 (R2): the read-request continuation store. Q/D live here, not
 // in a handle payload and not in a second store (§10 item 3).
 import {
@@ -580,11 +582,18 @@ import {
 // of truth stays ALL_TOOLS below and there is no import cycle.
 import {
   PENDING_C6_ADJUDICATION,
+  findInvalidValues,
   findUnknownProperties,
+  invalidValueRefusal,
+  nearestAdvertisedKey,
+  nearestAllowedValue,
   requestShapeRefusal,
   unknownPropertyRefusal,
   withinRefusalBudget,
+  type AlternativeValueType,
+  type InvalidValueViolation,
   type SchemaNode,
+  type UnknownPropertyViolation,
 } from "./validation/requestShape.js";
 import { MCP_LANGS, TOOL_SURFACE_VALUES, isToolSurface, renamedToolName, type LineWindow, type McpLang, type RefusalCode, type TaskDecision, type TaskExecutionContract, type TaskProfileRequest, type TaskRef, type TaskVerifyObligation, type ToolCall, type ToolSurface } from "@tokenlighten/types";
 import {
@@ -2928,6 +2937,119 @@ function flatRenameItemRewrite(rawEntry: unknown): Record<string, unknown> | und
   };
 }
 
+/**
+ * Whether one `edits[]` item must pass `enforcePreconditions` before the
+ * batch is applied. `unique-match` alone is enforced by applyEditsMulti
+ * against the in-memory file state; every other precondition — and, since
+ * the 2026-10-10 review, any `expectedSha`/`scopeHandle` the item (or the
+ * call) carries, whatever its precondition — is checked per item before any
+ * write, keeping the batch all-or-nothing.
+ */
+function batchItemNeedsPreconditionCheck(precondition: unknown, guardArgs: Record<string, unknown>): boolean {
+  if (precondition !== undefined && precondition !== "unique-match") return true;
+  return (typeof guardArgs["expectedSha"] === "string" && guardArgs["expectedSha"] !== "")
+    || (typeof guardArgs["scopeHandle"] === "string" && guardArgs["scopeHandle"] !== "");
+}
+
+/**
+ * The arguments one `edits[]` item's guards are checked against: the call's
+ * arguments overlaid by the item's own, with the item's EFFECTIVE
+ * precondition. A call-level `expectedSha`/`scopeHandle` belongs to the
+ * call-level precondition, so an item that names a different precondition of
+ * its own does not inherit it (argMatrix.spec.ts "per-item unique-match
+ * overrides a failing call-level expected-hash"); the item's OWN guard fields
+ * always apply.
+ */
+function batchItemGuardArgs(
+  args: Record<string, unknown>,
+  entry: Record<string, unknown>,
+  precondition: unknown,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...args, ...entry, precondition };
+  if (entry["expectedSha"] === undefined && precondition !== "expected-hash") delete merged["expectedSha"];
+  if (entry["scopeHandle"] === undefined && precondition !== "scope-handle") delete merged["scopeHandle"];
+  return merged;
+}
+
+/**
+ * P1 (2026-10-10 review), dispatch backstop: the VALUES of the post-projection
+ * tl_edit_file arguments. Canonical requests were already value-checked
+ * against the advertised schema in `callToolOnce` (`canonicalRequestRefusal`,
+ * with `edits[N].…` paths); this covers the flat shapes that never pass
+ * through a canonical carrier — a top-level `{path, search, replace,
+ * precondition}` call, or a legacy-dialect caller under
+ * `TL_LEGACY_INPUT=accept` — so no shape runs an edit with an out-of-enum
+ * guard, a non-string replacement, or a string `"true"` where a boolean
+ * decides what is written. A flat `intent` kind is left to dispatch, which
+ * already refuses an unknown one (`intent-unknown`) or one combined with
+ * `edits[]` (`intent-incompatible-with-batch`).
+ */
+const EDIT_FILE_STRING_ARGS: readonly string[] = [
+  "path", "handle", "search", "replace", "content", "from", "symbol", "lang", "to", "operation_id",
+  "expectedSha", "scopeHandle", "directoryHandle", "task_handle", "taskEpoch",
+  "credentialRef", "outputCredentialRef",
+];
+const EDIT_FILE_BOOLEAN_ARGS: readonly string[] = ["create", "review", "allowPathFallback", "includeComments", "force_serve"];
+const EDIT_FILE_PRECONDITIONS: readonly string[] = ["unique-match", "expected-hash", "scope-handle", "references-reviewed"];
+const EDIT_FILE_FLAT_VALUE_SCHEMA: Record<string, SchemaNode> = {
+  ...Object.fromEntries(EDIT_FILE_STRING_ARGS.map((name) => [name, { type: "string" }])),
+  ...Object.fromEntries(EDIT_FILE_BOOLEAN_ARGS.map((name) => [name, { type: "boolean" }])),
+  precondition: { type: "string", enum: EDIT_FILE_PRECONDITIONS },
+  target: { type: "string", enum: ["all"] },
+  expected_state_version: { type: "number" },
+};
+
+/** The flat intent dialect's `target` is the intent's own text (the member to append), not the `"all"` flag. */
+const EDIT_FILE_FLAT_INTENT_VALUE_SCHEMA: Record<string, SchemaNode> = {
+  ...EDIT_FILE_FLAT_VALUE_SCHEMA,
+  target: { type: "string" },
+};
+
+function editFileValueRefusal(args: Record<string, unknown>): Record<string, unknown> | null {
+  const flatSchema = args["intent"] !== undefined || args["mode"] !== undefined
+    ? EDIT_FILE_FLAT_INTENT_VALUE_SCHEMA
+    : EDIT_FILE_FLAT_VALUE_SCHEMA;
+  const violations: InvalidValueViolation[] = findInvalidValues("tl_edit_file", flatSchema, args);
+  const edits = args["edits"];
+  if (Array.isArray(edits)) {
+    edits.forEach((raw, index) => {
+      const item = asCanonicalObject(raw);
+      if (item === undefined) {
+        violations.push({ field: `edits[${index}]`, structPath: "tl_edit_file.edits[]", expected: "an object" });
+        return;
+      }
+      const itemSchema = item["intent"] !== undefined || item["mode"] !== undefined
+        ? EDIT_FILE_FLAT_INTENT_VALUE_SCHEMA
+        : EDIT_FILE_FLAT_VALUE_SCHEMA;
+      for (const violation of findInvalidValues("tl_edit_file", itemSchema, item)) {
+        violations.push({ ...violation, field: `edits[${index}].${violation.field}` });
+      }
+    });
+  }
+  const refusal = invalidValueRefusal("tl_edit_file", violations);
+  if (refusal !== null) return refusal;
+  if (args["create"] === true && args["expectedSha"] !== undefined && args["expectedSha"] !== null) {
+    return {
+      ok: false,
+      code: "invalid-input",
+      field: "expectedSha",
+      retry: "call",
+      error: "expectedSha guards an existing file's current content, and create:true names a new file — drop expectedSha, or drop create to edit the existing file under that guard",
+    };
+  }
+  const scopeHandle = args["scopeHandle"];
+  if (args["precondition"] === "scope-handle" && (typeof scopeHandle !== "string" || scopeHandle === "")) {
+    return {
+      ok: false,
+      code: "invalid-input",
+      field: "scopeHandle",
+      retry: "call",
+      error: "precondition:\"scope-handle\" needs scopeHandle=<a handle id this session already holds> naming the scope the edit must stay inside",
+    };
+  }
+  return null;
+}
+
 function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<string, unknown> | null {
   // §1.3.1(1) wants ONE recursive engine, so the detection lives in
   // validation/requestShape.ts and this function keeps only the RENDERING.
@@ -2979,11 +3101,19 @@ function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<s
   // §1.3.1(4)(5) + CONDITION ②. `keys` is weighed against the bytes THIS
   // payload actually emits, not the shared renderer's shorter body.
   const shape = unknownPropertyRefusal("tl_edit_file", violations)!;
+  // P3 (2026-10-10 review): a TOP-LEVEL offender is named against the
+  // advertised top-level keys, not the flattened legacy dispatch set this
+  // walk ran on (which listed `includeComments`/`symbol`/`to` — `edits[]`
+  // item and intent fields — as if they were top-level arguments).
+  const topLevelHint = first.parentPath === "tl_edit_file"
+    ? publicTopLevelKeyHint("tl_edit_file", first.field)
+    : undefined;
+  const firstDidYouMean = topLevelHint !== undefined
+    ? topLevelHint.didYouMean ?? misnestedDidYouMean
+    : shape.did_you_mean ?? misnestedDidYouMean;
   const pathQualified = {
     field: shape.field,
-    ...((shape.did_you_mean ?? misnestedDidYouMean) !== undefined
-      ? { did_you_mean: (shape.did_you_mean ?? misnestedDidYouMean)! }
-      : {}),
+    ...(firstDidYouMean !== undefined ? { did_you_mean: firstDidYouMean } : {}),
     retry: shape.retry,
   };
 
@@ -3177,8 +3307,49 @@ function editFileUnknownArgumentRefusal(args: Record<string, unknown>): Record<s
   // `TL_LEGACY_INPUT=refuse` would itself refuse `legacy-input` (see
   // `advertisedKeysForRefusal`'s doc comment). `shape.keys` (unfiltered) still
   // gates whether a key list exists at all / fit the refusal's own budget.
-  const withKeys = { ...refusal, keys: advertisedKeysForRefusal(shape.keys ?? []) };
+  const withKeys = {
+    ...refusal,
+    keys: topLevelHint !== undefined ? topLevelHint.keys : advertisedKeysForRefusal(shape.keys ?? []),
+  };
   return shape.keys !== undefined && withinRefusalBudget(withKeys) ? withKeys : refusal;
+}
+
+/**
+ * P3 (2026-10-10 review): the recovery key list and suggestion for an unknown
+ * TOP-LEVEL argument. The strict walks run on the post-projection legacy
+ * dialect (`dispatchPropertiesFor`), whose top level flattens every carrier
+ * (`maxRows`, `as`, `path`, …), so the refusal used to hand back internal
+ * names that are not in `tools/list` and no `did_you_mean` for a misspelled
+ * carrier (`budjet` is far from every legacy key and one edit from the
+ * advertised `budget`). The list is the advertised top-level names; under
+ * `TL_LEGACY_INPUT=accept` the legacy spellings that mode accepts ride too.
+ */
+function publicTopLevelKeyHint(tool: string, key: string): { keys: string[]; didYouMean?: string } {
+  const advertised = Object.keys(advertisedPropertiesFor(tool)).sort();
+  const legacyAccepted = process.env["TL_LEGACY_INPUT"] === "accept"
+    ? Object.keys(dispatchPropertiesFor(tool)).filter((name) => !advertised.includes(name)).sort()
+    : [];
+  const didYouMean = nearestAdvertisedKey(key, advertised) ?? nearestAdvertisedKey(key, legacyAccepted);
+  return { keys: [...advertised, ...legacyAccepted], ...(didYouMean !== undefined ? { didYouMean } : {}) };
+}
+
+/**
+ * The recovery `keys`/`did_you_mean` of a dispatch-level unknown-argument
+ * refusal: the public top-level names for a top-level offender
+ * (`publicTopLevelKeyHint`), the legacy-filtered nested list otherwise
+ * (FX-R3, `advertisedKeysForRefusal`).
+ */
+function withPublicRecoveryKeys<T extends { field: string; keys?: string[]; did_you_mean?: string }>(tool: string, refusal: T): T {
+  if (/[.[]/.test(refusal.field)) {
+    return refusal.keys !== undefined ? { ...refusal, keys: advertisedKeysForRefusal(refusal.keys) } : refusal;
+  }
+  const hint = publicTopLevelKeyHint(tool, refusal.field);
+  const didYouMean = hint.didYouMean ?? refusal.did_you_mean;
+  return {
+    ...refusal,
+    ...(didYouMean !== undefined ? { did_you_mean: didYouMean } : {}),
+    ...(refusal.keys !== undefined ? { keys: hint.keys } : {}),
+  };
 }
 
 /**
@@ -6605,16 +6776,21 @@ function buildFullServePayload(args: {
   extra?: Record<string, unknown>;
 }): Record<string, unknown> {
   const { workspace, filePath, content, handleId, sha, keepComments, allowFull, callerBudgetBytes, extra } = args;
+  const language = languageForPath(filePath);
+  // 2026-07-16a bench forensics: fall back to raw content + a note instead of
+  // serving an elided-empty doc-only file — see elideDocCommentsForDisplay.
+  const whole = elideDocCommentsForDisplay(content, language, keepComments);
   // DESIGN-v0.15 §5.1 (R2): a `content:"full"` request's Q is the WHOLE FILE,
   // in file coordinates, and it stays the request's scope even when the wire
   // budget later cuts the body down to a handful of lines. Staged here — the
   // one place that knows the file, its revision and its real line count —
   // rather than at the dispatcher, which knows none of the three.
-  stageFullReadRequest(workspace, filePath, content, sha, keepComments);
-  const language = languageForPath(filePath);
-  // 2026-07-16a bench forensics: fall back to raw content + a note instead of
-  // serving an elided-empty doc-only file — see elideDocCommentsForDisplay.
-  const whole = elideDocCommentsForDisplay(content, language, keepComments);
+  // TL-REVIEW-2 (2026-10-06): "§5.1: Q includes the representation" — under
+  // `comments:"elide"` the comment blocks this serve elides (`whole.elided`,
+  // the renderer's own windows) are disclosed, never owed, so they are not
+  // part of Q. Otherwise a fully delivered read kept them in D, and a budgeted
+  // one paged them back raw through cursors cut mid-block.
+  stageFullReadRequest(workspace, filePath, content, sha, keepComments, whole.elided);
   // R2-R1 (P0-2 + FX1 chip 1): a caller-declared budget narrower than the
   // fixed chunk sizes this serve from the MEASURED response (whole first, then
   // the largest head of whole lines with the continuation counted once, no
@@ -6715,7 +6891,17 @@ function buildFullServePayload(args: {
     };
   }
 
-  const chunk = elideDocCommentsForDisplay(head, language, keepComments);
+  // TL-REVIEW-2: the head is a WINDOW of the file (line 1 onward), so an
+  // all-comment head is a comment-only window, never a "doc-only file".
+  const chunk = elideDocCommentsForDisplay(head, language, keepComments, 1, "window");
+  // TL-REVIEW-2 (2026-10-06): the whole-file comment windows past the head are
+  // excluded from this request's Q (`stageFullReadRequest` above), so no
+  // cursor page will ever serve — or mention — them. Disclose them here, with
+  // the head (whose own windows the source-fidelity projection discloses);
+  // a block the cut lands inside is disclosed from the first line past it.
+  const elidedPastHead = whole.elided
+    .filter(([, windowEnd]) => windowEnd > servedLines)
+    .map(([windowStart, windowEnd]) => `${Math.max(windowStart, servedLines + 1)}-${windowEnd}`);
   // F1 (2026-08-02 serve-honesty): "what went on the wire" also excludes any
   // comment block the head's OWN display collapsed to a `doc elided` marker.
   // Book the surviving spans of `chunk.content`, not the flat 1..servedLines
@@ -6756,6 +6942,7 @@ function buildFullServePayload(args: {
     language: filePath.split(".").pop() ?? "unknown",
     next: canonicalToolCall("tl_read_file", { handle: handleId, range: remainingRange }),
     ...(composedNote !== undefined ? { note: composedNote } : {}),
+    ...(elidedPastHead.length > 0 ? { elided_windows: elidedPastHead } : {}),
     ...(extra ?? {}),
   };
 }
@@ -6836,9 +7023,19 @@ function buildLedgerDifferenceFullPayload(args: {
   range?: readonly [number, number];
   /** Coverage observed before a helper resolves a full expansion. */
   priorCoverage?: ReturnType<typeof servedRangeCoverage>;
+  /**
+   * TL-REVIEW-2 (2026-10-06): the comment windows THIS request's own
+   * representation elides (a default-policy whole-file read: the whole-file
+   * rendering's `elided`). An unheld gap lying inside one is not re-served —
+   * not even raw through the doc-only fallback, which is how the reviewer's
+   * identical repeat read got three JSDoc blocks back labelled "doc-only
+   * file" — it is disclosed instead, as `elided_windows` (projected onto the
+   * first evidence entry's `elided`). Omitted/empty for `comments:"keep"`.
+   */
+  policyElided?: ReadonlyArray<readonly [number, number]>;
 }): Record<string, unknown> | undefined {
   const totalLines = countLines(args.content);
-  const coverage = args.priorCoverage ?? servedRangeCoverage(args.workspace, args.filePath, args.sha, totalLines);
+  const coverage = args.priorCoverage ?? servedRangeCoverage(args.workspace, args.filePath, args.sha, totalLines, args.policyElided);
   if (coverage === undefined || coverage.complete) return undefined;
 
   const requestedStart = args.range?.[0] ?? 1;
@@ -6846,6 +7043,7 @@ function buildLedgerDifferenceFullPayload(args: {
   const lines = args.content.split(/\r?\n/);
   const segments: Array<Record<string, unknown>> = [];
   const notes: string[] = [];
+  const elidedWindows: Array<[number, number]> = [];
   const serveCall = beginServeCall(args.workspace);
 
   const appendFresh = (start: number, end: number): void => {
@@ -6870,12 +7068,29 @@ function buildLedgerDifferenceFullPayload(args: {
     }
   };
 
+  // TL-REVIEW-2: an unheld gap is served only where the request's own
+  // representation would serve it; the parts inside `policyElided` windows
+  // are disclosed (`elided_windows`), never re-served.
+  const appendGap = (start: number, end: number): void => {
+    const policy = args.keepComments ? [] : (args.policyElided ?? []);
+    let at = start;
+    for (const [windowStart, windowEnd] of policy) {
+      const from = Math.max(at, windowStart);
+      const to = Math.min(end, windowEnd);
+      if (to < from) continue;
+      if (from > at) appendFresh(at, from - 1);
+      elidedWindows.push([from, to]);
+      at = to + 1;
+    }
+    if (at <= end) appendFresh(at, end);
+  };
+
   let cursor = requestedStart;
   for (const [servedStartRaw, servedEndRaw] of coverage.served) {
     const servedStart = Math.max(requestedStart, servedStartRaw);
     const servedEnd = Math.min(requestedEnd, servedEndRaw);
     if (servedEnd < cursor || servedStart > requestedEnd) continue;
-    if (cursor < servedStart) appendFresh(cursor, servedStart - 1);
+    if (cursor < servedStart) appendGap(cursor, servedStart - 1);
     const priorStart = Math.max(cursor, servedStart);
     const receipt = servedRangeReceipt(
       args.workspace,
@@ -6892,7 +7107,7 @@ function buildLedgerDifferenceFullPayload(args: {
     });
     cursor = servedEnd + 1;
   }
-  if (cursor <= requestedEnd) appendFresh(cursor, requestedEnd);
+  if (cursor <= requestedEnd) appendGap(cursor, requestedEnd);
 
   if (!segments.some((segment) => typeof segment["code"] === "string")) return undefined;
   return {
@@ -6903,6 +7118,11 @@ function buildLedgerDifferenceFullPayload(args: {
     total_lines: totalLines,
     segments,
     ...(notes.length > 0 ? { note: notes.join("; ") } : {}),
+    // TL-REVIEW-2: internal carrier, projected by readFamily.ts's
+    // `textEvidence` onto the first evidence entry's wire `elided`.
+    ...(elidedWindows.length > 0
+      ? { elided_windows: elidedWindows.map(([start, end]) => `${start}-${end}`) }
+      : {}),
   };
 }
 
@@ -9878,11 +10098,17 @@ function bookShippedPostEditWindows(
  * inline "doc elided L..-.." markers as TRUNCATION and re-fetched the same
  * range twice chasing "missing" content. Say explicitly that markers replace
  * comments only.
+ *
+ * TL-REVIEW-2 (2026-10-06): the markers no longer reach the wire — the
+ * source-fidelity projection (protocol/sourceFidelity.ts) ships the code lines
+ * as faithful ranges and lists each collapsed block in evidence `elided` — so
+ * the sentence now names where the blocks went instead of a marker the caller
+ * never sees. Counted on this producer's own display text, as before.
  */
 function elisionMarkerNote(content: string): string | undefined {
   const count = (content.match(/(?:\/\*|#)\s*doc elided L\d+/g) ?? []).length;
   if (count === 0) return undefined;
-  return `${count} 'doc elided' marker(s) replace COMMENT blocks only — code lines are complete, nothing is truncated; pass comments:"keep" to see them`;
+  return `${count} multi-line comment block(s) elided (listed in evidence \`elided\`) — code lines are complete, nothing is truncated; pass select.comments:"keep" to read them`;
 }
 
 /**
@@ -10148,6 +10374,14 @@ function stageSearchRequestForFind(input: {
     ...(itemsBudget !== undefined ? { items: itemsBudget } : {}),
     ...(declaredMaxTokens !== undefined ? { tokens: declaredMaxTokens } : {}),
   };
+  // SPB (2026-10-10): what the page built below carries besides `files[]` and
+  // the envelope — handed to the store as well, so the page is sized against
+  // these exact bytes (`OpenSearchRequestInput.openPageExtras`).
+  const openPageExtras: Record<string, unknown> = {
+    ...(Array.isArray(input.body["matched_terms"]) ? { matched_terms: input.body["matched_terms"] } : {}),
+    ...(Array.isArray(input.body["term_results"]) ? { term_results: input.body["term_results"] } : {}),
+    ...(scan.omitted !== undefined ? { omitted: scan.omitted } : {}),
+  };
 
   const staged = openSearchRequest({
     workspaceRoot: input.workspace,
@@ -10161,17 +10395,22 @@ function stageSearchRequestForFind(input: {
       ...(taskHandle !== undefined ? { taskHandle } : {}),
     },
     scan,
+    openPageExtras,
   });
 
-  const reserve = searchPageEnvelopeReserve({
+  const reserveInput = {
     queries: input.queries,
     path: input.path,
     lang: input.lang,
     cwd,
     lane: lane !== "" ? lane : undefined,
     budgetBytes: declaredMaxBytes,
-  });
-  const choice = chooseSearchPage(staged.state, scan.readLine, budgetBytes, reserve, itemsBudget);
+  };
+  const reserve = searchPageEnvelopeReserve(reserveInput);
+  // SPB (2026-10-10): the page that ends the request carries no `limit`; a
+  // result that fits beside that smaller envelope is one page.
+  const completeReserve = searchPageEnvelopeReserve({ ...reserveInput, complete: true });
+  const choice = chooseSearchPage(staged.state, scan.readLine, budgetBytes, reserve, itemsBudget, completeReserve);
   if (!choice.ok) {
     // finding 9: name the floor instead of falling back to the producer's
     // own (oversized, for this budget) body — mirrors the read cursor's
@@ -10206,10 +10445,8 @@ function stageSearchRequestForFind(input: {
     total_files: staged.state.total_files ?? 0,
     total_matches: staged.state.total_matches ?? 0,
     truncated,
+    ...openPageExtras,
   };
-  if (Array.isArray(input.body["matched_terms"])) newBody["matched_terms"] = input.body["matched_terms"];
-  if (Array.isArray(input.body["term_results"])) newBody["term_results"] = input.body["term_results"];
-  if (scan.omitted !== undefined) newBody["omitted"] = scan.omitted;
   return { kind: "body", body: newBody };
 }
 
@@ -10366,20 +10603,28 @@ async function serveSearchCursorPage(
 
   const lineTextOf = (p: string, l: number): string | undefined => lineCache.get(p)?.[l - 1];
   const declaredMaxBytes = typeof args["maxBytes"] === "number" ? (args["maxBytes"] as number) : undefined;
-  const budgetBytes = declaredMaxBytes !== undefined && declaredMaxBytes > 0
+  const declaredBudgetBytes = declaredMaxBytes !== undefined && declaredMaxBytes > 0
     ? declaredMaxBytes
     : staged.state.budget?.bytes ?? DEFAULT_SEARCH_FIND_PAGE_BUDGET_BYTES;
+  // SPB (2026-10-10): this resume's own `budget.tokens` binds the funnel as
+  // well (`emit.ts` measures against the tighter of bytes/tokens), so it binds
+  // the page it fills; the ORIGINAL request's tokens are applied by
+  // `effectiveSearchPageBudgetBytes` from `state.budget`.
+  const resumeTokenBytes = estimateBytesFromTokens(args["maxTokens"]);
+  const budgetBytes = resumeTokenBytes !== undefined ? Math.min(declaredBudgetBytes, resumeTokenBytes) : declaredBudgetBytes;
   const itemsBudget = typeof args["limit"] === "number" && (args["limit"] as number) > 0
     ? Math.floor(args["limit"] as number)
     : undefined;
-  const reserve = searchPageEnvelopeReserve({
+  const reserveInput = {
     queries: candidateQueries,
     path: candidatePath,
     lang: candidateLang,
     cwd: cursorCwd,
     lane: cursorLane !== "" ? cursorLane : undefined,
     budgetBytes: declaredMaxBytes,
-  });
+  };
+  const reserve = searchPageEnvelopeReserve(reserveInput);
+  const completeReserve = searchPageEnvelopeReserve({ ...reserveInput, complete: true });
 
   let files: FindFileGroup[];
   const existingPage = staged.state.pages.find((p) => p.cursor_state_version === resolvedCursor.cursorVersion);
@@ -10387,7 +10632,7 @@ async function serveSearchCursorPage(
     staged.page = existingPage;
     files = withMoreLines(staged.state, renderPageFiles(staged.state, existingPage, lineTextOf), existingPage.end);
   } else {
-    const choice = chooseSearchPage(staged.state, lineTextOf, budgetBytes, reserve, itemsBudget);
+    const choice = chooseSearchPage(staged.state, lineTextOf, budgetBytes, reserve, itemsBudget, completeReserve);
     if (!choice.ok) {
       if (choice.reason === "budget-below-minimum") {
         return toolStructuredError({
@@ -10484,7 +10729,8 @@ function closureSessionSummary(workspace: string, checksClosed: number): Record<
 // in tools/exploreTree.ts (buildCompactTree); the inline copy that used to sit
 // here — buildTreeFromFiles/renderTreeLines/buildExploreTree plus its inline
 // TREE_CAP_BYTES/TREE_DEFAULT_DEPTH and the O(n^2) pop-and-rejoin cap trim —
-// was removed (G3). Dispatch goes straight through buildCompactTree.
+// was removed (G3). Dispatch goes straight through buildCompactTree's paged
+// sibling, buildTreeResponse (TPB, 2026-10-10).
 // ---------------------------------------------------------------------------
 
 // D11: the CANON rewrite table (read_code -> tl_read_file, edit_code ->
@@ -12241,6 +12487,229 @@ function cursorCoInputRefusal(
   return undefined;
 }
 
+// ---------------------------------------------------------------------------
+// 2026-10-10 v0.15.1 runtime review (P1 + P3): validate the CANONICAL request
+// against the advertised schema before it is projected onto the legacy
+// dispatch dialect.
+// ---------------------------------------------------------------------------
+//
+// The strict name fence in dispatch runs AFTER `projectCanonicalRequest`, and
+// the projection copies only the carrier members it knows, so a misspelled
+// member of a carrier vanished before any fence saw it:
+// `targets:[{path, rnage:"1-1"}]` read the whole file, `budget:{byte:100}`
+// served uncapped, `task:{epcoh:"new"}` kept the old task. A misspelled
+// top-level carrier did reach the fence, but was named against the flattened
+// legacy key set (`maxRows`, `as`, …) with no suggestion. And no VALUE was
+// checked anywhere: an out-of-enum `precondition` ran an edit with no guard.
+//
+// This runs once per call on the prepared canonical input (stringified
+// carriers already parsed, EFF near-miss rewrites already applied):
+//  - member names of the canonical carriers listed below, against the
+//    advertised shape — `targets[]`/`budget`/`scope`/`select`/`task` on the
+//    read tools, `task`/`credentials` on tl_edit_file, whose `edits[]` items
+//    and top level keep their own fence with its incident rewrites;
+//  - top-level names that are neither advertised nor an accepted legacy
+//    spelling (read tools only — tl_edit_file's fence owns its top level);
+//  - every advertised value: enums, primitive types, and the dependent
+//    fields of an `edits[]` item.
+// Absent and `null` values are not checked (see `findInvalidValues`).
+
+/** Canonical carriers whose member names are validated before projection. */
+const CANONICAL_NAME_CHECKED_CARRIERS: Readonly<Record<string, readonly string[]>> = {
+  tl_read_file: ["targets", "budget", "scope", "select", "task"],
+  tl_search_files: ["budget", "scope", "task"],
+  tl_edit_file: ["task", "credentials"],
+};
+
+/** Per-tool value-validation options (see `ValueValidationOptions`). */
+// The near-miss shapes `normalizeWireArgs` repairs on purpose (replay corpus
+// group c2, "field-reported tolerant wire shapes") stay accepted: a digit
+// string for a budget/depth number, a boolean-like string for `regex`, a lone
+// string for `queries`. Only a value dispatch would IGNORE or MISREAD is
+// refused here.
+// `cwd` and `lane` keep their own, more specific refusals (`invalid-cwd`,
+// `invalid-lane`), which dispatch raises before touching any state.
+const DISPATCH_VALIDATED_SCALARS = (tool: string): ReadonlySet<string> => new Set([`${tool}.cwd`, `${tool}.lane`]);
+const TOLERATED_BUDGET_NUMBERS = (tool: string): Record<string, readonly AlternativeValueType[]> => ({
+  [`${tool}.budget.bytes`]: ["numeric-string"],
+  [`${tool}.budget.tokens`]: ["numeric-string"],
+  [`${tool}.budget.items`]: ["numeric-string"],
+  [`${tool}.scope.depth`]: ["numeric-string"],
+  [`${tool}.scope.regex`]: ["boolean-string"],
+});
+const CANONICAL_VALUE_OPTIONS: Readonly<Record<string, Parameters<typeof findInvalidValues>[3]>> = {
+  tl_read_file: {
+    // `content:"defer"` is the compatibility spelling of the small-file read
+    // (`projectCanonicalRequest` maps it to mode small_file;
+    // canonicalSurface.spec.ts pins the route).
+    compatibilityValues: { "tl_read_file.content": ["defer"] },
+    alternativeTypes: {
+      ...TOLERATED_BUDGET_NUMBERS("tl_read_file"),
+      // Their readers stringify each entry (`.map(String)`): a page, slide,
+      // column or numbering-token section sent as a number keeps working.
+      "tl_read_file.select.pages[]": ["number"],
+      "tl_read_file.select.slides[]": ["number"],
+      "tl_read_file.select.columns[]": ["number"],
+      "tl_read_file.select.sections[]": ["number"],
+    },
+    skipPaths: DISPATCH_VALIDATED_SCALARS("tl_read_file"),
+  },
+  tl_search_files: {
+    alternativeTypes: { ...TOLERATED_BUDGET_NUMBERS("tl_search_files"), "tl_search_files.queries": ["string"] },
+    // dispatch resolves its own action aliases (grep/search/list/def/…,
+    // symbols, locate) and refuses an unknown one with the full list.
+    skipPaths: new Set([...DISPATCH_VALIDATED_SCALARS("tl_search_files"), "tl_search_files.action"]),
+  },
+  // tl_edit_file's `edits[].target` value set depends on the item kind and is
+  // checked in `editItemTargetViolations`.
+  tl_edit_file: { skipPaths: DISPATCH_VALIDATED_SCALARS("tl_edit_file") },
+};
+
+function canonicalRequestRefusal(
+  canonical: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const advertised = advertisedPropertiesFor(canonical);
+  const carriers = CANONICAL_NAME_CHECKED_CARRIERS[canonical] ?? [];
+  // Top-level names dispatch still accepts: the legacy flat spellings (its
+  // own fence and value tolerance own them), plus W-BATCH-HINT's flag-gated
+  // `ledger` (added to the read fence only while the flag is on).
+  const legacyAccepted = canonical === "tl_edit_file"
+    ? undefined
+    : new Set([
+        ...Object.keys(dispatchPropertiesFor(canonical)),
+        ...(canonical === "tl_read_file" && batchHintsEnabled() ? ["ledger"] : []),
+      ]);
+
+  const nameViolations: UnknownPropertyViolation[] = [];
+  const advertisedOnly: Record<string, unknown> = {};
+  for (const key of Object.keys(input)) {
+    const node = advertised[key];
+    if (node !== undefined) {
+      advertisedOnly[key] = input[key];
+      if (carriers.includes(key)) {
+        nameViolations.push(...findUnknownProperties(canonical, { [key]: node }, { [key]: input[key] }));
+      }
+      continue;
+    }
+    if (legacyAccepted === undefined || legacyAccepted.has(key)) continue;
+    const hint = publicTopLevelKeyHint(canonical, key);
+    nameViolations.push({
+      field: key,
+      parentPath: canonical,
+      advertisedKeysAtPath: hint.keys,
+      ...(hint.didYouMean !== undefined ? { didYouMean: hint.didYouMean } : {}),
+    });
+  }
+  const nameRefusal = unknownPropertyRefusal(canonical, nameViolations.map((violation) => misnestedCarrierHint(advertised, violation)));
+  if (nameRefusal !== null) return nameRefusal;
+
+  const valueViolations = findInvalidValues(canonical, advertised, advertisedOnly, CANONICAL_VALUE_OPTIONS[canonical]);
+  if (canonical === "tl_edit_file") valueViolations.push(...editItemTargetViolations(input));
+  const valueRefusal = invalidValueRefusal(canonical, sortByEditItem(valueViolations));
+  if (valueRefusal !== null) return valueRefusal;
+
+  return canonical === "tl_edit_file" ? editItemDependencyRefusal(input) : undefined;
+}
+
+/**
+ * An unknown member of one carrier that is a member of ANOTHER carrier
+ * (`targets[0].sections` — `sections` lives in `select`) names that home as
+ * its suggestion, `select.sections`, when no same-carrier name is close.
+ */
+function misnestedCarrierHint(
+  advertised: Record<string, SchemaNode>,
+  violation: UnknownPropertyViolation,
+): UnknownPropertyViolation {
+  if (violation.didYouMean !== undefined) return violation;
+  const key = /\.([^.[\]]+)$/.exec(violation.field)?.[1];
+  if (key === undefined) return violation;
+  for (const [carrier, node] of Object.entries(advertised)) {
+    if (node.properties !== undefined && key in node.properties && !violation.field.startsWith(`${carrier}.`)) {
+      return { ...violation, didYouMean: `${carrier}.${key}` };
+    }
+  }
+  return violation;
+}
+
+/**
+ * `edits[].target` is advertised as `"all": replace every match.`; any other
+ * value used to be ignored, leaving a single-site replace. An intent item's
+ * `target` is the flat intent dialect's member text (intents/index.ts), not
+ * this flag, so intent items are left alone.
+ */
+function editItemTargetViolations(input: Record<string, unknown>): InvalidValueViolation[] {
+  const edits = input["edits"];
+  if (!Array.isArray(edits)) return [];
+  const violations: InvalidValueViolation[] = [];
+  edits.forEach((raw, index) => {
+    const item = asCanonicalObject(raw);
+    const target = item?.["target"];
+    if (item === undefined || item["intent"] !== undefined || typeof target !== "string" || target === "all") return;
+    const suggestion = nearestAllowedValue(target, ["all"]);
+    violations.push({
+      field: `edits[${index}].target`,
+      structPath: "tl_edit_file.edits[].target",
+      expected: "one of \"all\" (or omit it to replace exactly the one match)",
+      allowed: ["all"],
+      ...(suggestion !== undefined ? { didYouMean: suggestion } : {}),
+    });
+  });
+  return violations;
+}
+
+/** Stable order by `edits[N]` item index, so a batch's refusal names its first bad item first. */
+function sortByEditItem(violations: InvalidValueViolation[]): InvalidValueViolation[] {
+  const indexOf = (violation: InvalidValueViolation): number => {
+    const match = /^edits\[(\d+)\]/.exec(violation.field);
+    return match === null ? -1 : Number(match[1]);
+  };
+  return violations
+    .map((violation, order) => ({ violation, order }))
+    .sort((a, b) => indexOf(a.violation) - indexOf(b.violation) || a.order - b.order)
+    .map(({ violation }) => violation);
+}
+
+/**
+ * The dependent fields of a canonical `edits[]` item (P1, 2026-10-10 review).
+ * Value-level checks the schema cannot state:
+ *  - `precondition:"scope-handle"` names its scope in `scopeHandle`; without
+ *    one this used to refuse `scope-violation` with `retry:"new-task"`, a
+ *    task reset for a missing argument;
+ *  - `expectedSha` guards an EXISTING file's bytes, so on a `create:true`
+ *    item it guarded nothing and was ignored while the file was created;
+ *  - `target:"all"` (every match) contradicts `precondition:"unique-match"`
+ *    (exactly one) — the batch path refused this already; the shared check
+ *    now covers every item shape the same way.
+ */
+function editItemDependencyRefusal(input: Record<string, unknown>): Record<string, unknown> | undefined {
+  const edits = input["edits"];
+  if (!Array.isArray(edits)) return undefined;
+  const refuse = (index: number, field: string, error: string): Record<string, unknown> => ({
+    ok: false,
+    code: "invalid-input",
+    field: `edits[${index}].${field}`,
+    retry: "call",
+    failed_item: { index },
+    error,
+  });
+  for (const [index, raw] of edits.entries()) {
+    const item = asCanonicalObject(raw);
+    if (item === undefined) continue;
+    const scopeHandle = item["scopeHandle"];
+    if (item["precondition"] === "scope-handle" && (typeof scopeHandle !== "string" || scopeHandle === "")) {
+      return refuse(index, "scopeHandle", `edits[${index}] precondition:"scope-handle" needs scopeHandle=<a handle id this session already holds> naming the scope the edit must stay inside`);
+    }
+    if (item["create"] === true && item["expectedSha"] !== undefined && item["expectedSha"] !== null) {
+      return refuse(index, "expectedSha", `edits[${index}] expectedSha guards an existing file's current content, and a create:true item names a new file — drop expectedSha, or drop create to edit the existing file under that guard`);
+    }
+    if (item["target"] === "all" && item["precondition"] === "unique-match") {
+      return refuse(index, "precondition", `edits[${index}] carries both target:"all" (replace every occurrence) and precondition:"unique-match" (require exactly one) — these are contradictory; drop one and retry`);
+    }
+  }
+  return undefined;
+}
+
 /** Canonical-only projection of the caller's own input, minus call scoping. */
 function canonicalOriginalReadInput(raw: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -12279,20 +12748,33 @@ function stageFullReadRequest(
   content: string,
   fileSha: string,
   keepComments: boolean,
+  /**
+   * TL-REVIEW-2 (2026-10-06): the comment windows THIS serve's representation
+   * elides (the renderer's own `elided`), excluded from Q — disclosed as
+   * `elided`, never owed. Only a serve that actually elides passes it
+   * (`buildFullServePayload`); the governed W1 head ships raw lines and keeps
+   * the whole file as its Q.
+   */
+  policyElided: ReadonlyArray<readonly [number, number]> = [],
 ): void {
   const context = protocolCallContext();
   if (context === undefined || context.args === undefined) return;
   const totalLines = countLines(content);
   if (totalLines <= 0) return;
+  const elided = keepComments ? [] : policyElided.map(([start, end]) => ({ start, end }));
+  const requested = (keepComments ? [[1, totalLines] as [number, number]] : spansExcludingWindows(1, totalLines, policyElided))
+    .map(([start, end]) => ({ start, end }));
+  if (requested.length === 0) return;
   stageReadRequestForServe({
     workspace,
     relPath: filePath,
     fileSha,
     totalLines,
-    requested: [{ start: 1, end: totalLines }],
+    requested,
     content: "full",
     keepComments,
     args: context.args as Record<string, unknown>,
+    elided,
   });
 }
 
@@ -12305,6 +12787,13 @@ function stageReadRequestForServe(input: {
   content: "full" | "auto" | "outline";
   keepComments: boolean;
   args: Record<string, unknown>;
+  /**
+   * TL-REVIEW-2 (2026-10-06): the comment windows excluded from `requested`
+   * because this representation elides them — recorded on the target so
+   * every continuation page restates them as `elided` (readRequestStore.ts's
+   * `ReadRequestTargetState.elided`).
+   */
+  elided?: LineWindow[];
 }): void {
   if (input.totalLines <= 0 || input.requested.length === 0) return;
   const context = protocolCallContext();
@@ -12323,6 +12812,7 @@ function stageReadRequestForServe(input: {
       totalLines: input.totalLines,
       representation: { content: input.content, comments: input.keepComments ? "keep" : "elide" },
       requested: input.requested,
+      ...(input.elided !== undefined && input.elided.length > 0 ? { elided: input.elided } : {}),
     });
     return;
   }
@@ -12368,6 +12858,7 @@ function stageReadRequestForServe(input: {
       totalLines: input.totalLines,
       representation: { content: input.content, comments: input.keepComments ? "keep" : "elide" },
       requested: input.requested,
+      ...(input.elided !== undefined && input.elided.length > 0 ? { elided: input.elided } : {}),
     }],
   });
   if (staged !== undefined) context.readRequest = staged;
@@ -12565,6 +13056,19 @@ function tolerateNearMissInput(canonical: string, input: Record<string, unknown>
 }
 
 export function normalizeCanonicalRequest(canonical: string, input: Record<string, unknown>): Record<string, unknown> {
+  return projectCanonicalRequest(canonical, prepareCanonicalInput(canonical, input));
+}
+
+/**
+ * The input-repair half of `normalizeCanonicalRequest`: everything that turns
+ * what the caller sent into the canonical shape it meant, and nothing that
+ * projects it onto the legacy dispatch dialect. `callToolOnce` validates the
+ * prepared input against the advertised schema (`canonicalRequestRefusal`)
+ * between the two halves, so a stringified `budget` is validated as the
+ * object it carries and a tolerated near-miss as the shape it was rewritten
+ * to. Idempotent.
+ */
+export function prepareCanonicalInput(canonical: string, input: Record<string, unknown>): Record<string, unknown> {
   // FX-2: rescue JSON-stringified canonical fields BEFORE `hasCanonicalShape`
   // (below) or anything else inspects them — `hasCanonicalShape` itself is
   // one of the string-blind checks this rescues (`Array.isArray(input["edits"])`
@@ -12581,6 +13085,10 @@ export function normalizeCanonicalRequest(canonical: string, input: Record<strin
   // and lenientEditAliases.
   if (effTolerantInputEnabled()) input = tolerateNearMissInput(canonical, input);
   if (canonical === "tl_edit_file" && effLenientEditEnabled()) input = lenientEditAliases(input);
+  return input;
+}
+
+function projectCanonicalRequest(canonical: string, input: Record<string, unknown>): Record<string, unknown> {
   // `queries` is the shared legacy/canonical find carrier. A bare legacy
   // find batch must reach the dispatcher unchanged, including its content-first
   // did_you_mean session state. Non-find canonical search actions use queries
@@ -13381,11 +13889,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       if (unknownArgsRefusalRead !== null) {
         // FX-R3: strip legacy-only keys from the disclosed recovery list —
         // see `advertisedKeysForRefusal`'s doc comment.
-        return toolStructuredError(
-          unknownArgsRefusalRead.keys !== undefined
-            ? { ...unknownArgsRefusalRead, keys: advertisedKeysForRefusal(unknownArgsRefusalRead.keys) }
-            : unknownArgsRefusalRead,
-        );
+        return toolStructuredError(withPublicRecoveryKeys("tl_read_file", unknownArgsRefusalRead));
       }
       // W-BATCH-HINT (c): validate/bound the declared ledger once, up front —
       // referenced later by the mode=slice branch's cross-check against this
@@ -16514,18 +17018,39 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             : resolvedRange !== undefined ? parseWindows([resolvedRange]) : [];
           if (requestedWindows.length > 0) {
             const sliceTotalLines = countLines(content);
+            const clamped = requestedWindows.map((window) => ({
+              start: Math.min(window.start, Math.max(1, sliceTotalLines)),
+              end: Math.min(window.end, Math.max(1, sliceTotalLines)),
+            }));
+            // TL-REVIEW-2 (2026-10-06): under `comments:"elide"` each window's
+            // OWN rendering decides which comment blocks it discloses as
+            // `elided` instead of serving; those are not owed (§5.1's Q
+            // includes the representation). A window that is nothing but a
+            // comment block still serves raw (the doc-only fallback reports
+            // no windows), so it stays in Q.
+            const contentLines = effectiveKeepComments ? [] : content.split(/\r?\n/);
+            const windowElided = effectiveKeepComments
+              ? []
+              : clamped.map((window) => elideDocCommentsForDisplay(
+                  contentLines.slice(window.start - 1, window.end).join("\n"),
+                  languageForPath(slicePath),
+                  false,
+                  window.start,
+                ).elided);
+            const requested = effectiveKeepComments
+              ? clamped
+              : clamped.flatMap((window, index) => spansExcludingWindows(window.start, window.end, windowElided[index]!)
+                .map(([start, end]) => ({ start, end })));
             stageReadRequestForServe({
               workspace,
               relPath: slicePath,
               fileSha: shaOfText(content),
               totalLines: sliceTotalLines,
-              requested: requestedWindows.map((window) => ({
-                start: Math.min(window.start, Math.max(1, sliceTotalLines)),
-                end: Math.min(window.end, Math.max(1, sliceTotalLines)),
-              })),
+              requested,
               content: "auto",
               keepComments: effectiveKeepComments,
               args,
+              elided: windowElided.flat().map(([start, end]) => ({ start, end })),
             });
           }
         }
@@ -18952,7 +19477,18 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           && (!wasFullyServed(workspace, filePath, fullSha, keepComments) || fullIsTinyForDedup)
         ) {
           const fullTotalLines = countLines(content);
-          const fullCoverage = servedRangeCoverage(workspace, filePath, fullSha, fullTotalLines);
+          // TL-REVIEW-2 (2026-10-06): a default-policy (`comments:"elide"`)
+          // whole-file read never delivers the comment blocks its own
+          // rendering elides — it discloses them as `elided` — so they are not
+          // part of what "already holds this file" has to prove. Without this
+          // the identical repeat of such a read found those blocks unheld and
+          // re-served all of them raw (each labelled "doc-only file") instead
+          // of answering `read.receipt`. Empty for `comments:"keep"`, whose
+          // gate below is unchanged.
+          const fullPolicyElided = keepComments
+            ? []
+            : elideDocCommentsForDisplay(content, languageForPath(filePath), false).elided;
+          const fullCoverage = servedRangeCoverage(workspace, filePath, fullSha, fullTotalLines, fullPolicyElided);
           if (fullCoverage !== undefined && !fullCoverage.complete && fullDelta?.decision !== "full") {
             const partial = await resolveFullReadForPath(
               workspace,
@@ -18976,6 +19512,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
                 keepComments,
                 mode: "full",
                 priorCoverage: fullCoverage,
+                policyElided: fullPolicyElided,
               });
               if (difference !== undefined) {
                 recordReadPath(workspace, filePath);
@@ -19020,7 +19557,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // above is unchanged for that case.
           const fullLedger = keepComments && !wasFullyServed(workspace, filePath, fullSha, true)
             ? undefined
-            : servedRangeReceipt(workspace, filePath, fullSha, 1, fullTotalLines, fullTotalLines);
+            : servedRangeReceipt(workspace, filePath, fullSha, 1, fullTotalLines, fullTotalLines, fullPolicyElided);
           if (fullLedger !== undefined) {
             const fullHandle = handleTable.upsert({
               kind: "file",
@@ -19387,6 +19924,12 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           ? unknownArgsRefusalEdit
           : { ...unknownArgsRefusalEdit, detail: advisory });
       }
+      // P1 (2026-10-10 review): an out-of-enum guard, a non-string
+      // replacement or a string where a boolean decides the write refuses
+      // here, before any cwd/handle resolution or write — see
+      // editFileValueRefusal.
+      const valueRefusalEdit = editFileValueRefusal(args);
+      if (valueRefusalEdit !== null) return toolStructuredError(valueRefusalEdit);
       // B5.1: fail loud on an invalid/nonexistent cwd instead of silently
       // resolving against the pinned root (see checkCwdOrRefuse doc comment).
       // Stage 1 of the guard stack (write/guardedWorkspace.ts): its pass token
@@ -20909,9 +21452,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             if (!hEntry.path) {
               return toolStructuredError({ ok: false, reason: "handle-unknown" });
             }
-            if (entryPrecondition !== undefined && entryPrecondition !== "unique-match") {
+            const guardArgs = batchItemGuardArgs(args, entry, entryPrecondition);
+            if (batchItemNeedsPreconditionCheck(entryPrecondition, guardArgs)) {
               const preCheck = await enforcePreconditions(
-                { ...args, ...entry, precondition: entryPrecondition },
+                guardArgs,
                 hEntry.path,
                 workspace,
                 readFileSafeOpt,
@@ -21094,9 +21638,10 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // that actually exists. Deliberately NOT a new create/whole-file-
           // replace path: this only changes which error a bad shape gets.
           const bareEntryPath = String(entry["path"] ?? "");
-          if (entryPrecondition !== undefined && entryPrecondition !== "unique-match") {
+          const guardArgs = batchItemGuardArgs(args, entry, entryPrecondition);
+          if (batchItemNeedsPreconditionCheck(entryPrecondition, guardArgs)) {
             const preCheck = await enforcePreconditions(
-              { ...args, ...entry, precondition: entryPrecondition },
+              guardArgs,
               bareEntryPath,
               workspace,
               readFileSafeOpt,
@@ -22112,11 +22657,7 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
       if (unknownArgsRefusalSearch !== null) {
         // FX-R3: strip legacy-only keys from the disclosed recovery list —
         // see `advertisedKeysForRefusal`'s doc comment.
-        return toolStructuredError(
-          unknownArgsRefusalSearch.keys !== undefined
-            ? { ...unknownArgsRefusalSearch, keys: advertisedKeysForRefusal(unknownArgsRefusalSearch.keys) }
-            : unknownArgsRefusalSearch,
-        );
+        return toolStructuredError(withPublicRecoveryKeys("tl_search_files", unknownArgsRefusalSearch));
       }
       const action = String(args["action"] ?? "");
       // protocol v1 (D4): A.5.8-A.5.10 map the four match actions onto
@@ -22183,6 +22724,45 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         if (archiveSearchSurfaceRefusal !== undefined) {
           return toolStructuredError({ ok: false, code: archiveSearchSurfaceRefusal.code, error: archiveSearchSurfaceRefusal.error });
         }
+        // ATP (2026-10-10): an archive-scoped tree pages its member listing to
+        // the caller's `budget.bytes`/`budget.tokens` (the legacy 200-member
+        // page when neither is declared) — tools/archiveTreePage.ts. A page
+        // that stops short carries a cursor continuation, and a `cursor` is
+        // authenticated and held to THIS call's archive path and prefix before
+        // the archive is read.
+        let archiveTreeRequest: ArchiveTreeRequest | undefined;
+        let archiveTreeAdmission: ArchiveTreeAdmission | undefined;
+        if (action === "tree") {
+          const callerCwd = typeof args["cwd"] === "string" ? args["cwd"] : "";
+          const treeLane = currentSessionLane();
+          archiveTreeRequest = {
+            outerPath: archiveSearchPath,
+            ...(archivePrefix !== undefined ? { prefix: archivePrefix } : {}),
+            ...(typeof args["cursor"] === "string" && args["cursor"] !== "" ? { cursor: args["cursor"] } : {}),
+            budget: {
+              ...(typeof args["maxBytes"] === "number" ? { bytes: args["maxBytes"] } : {}),
+              ...(typeof args["maxTokens"] === "number" ? { tokens: args["maxTokens"] } : {}),
+            },
+            ...(credential.credentialRef !== undefined ? { credentialRef: credential.credentialRef } : {}),
+            // Priced at the longer of the caller's cwd and the resolved root,
+            // as the workspace tree prices it.
+            echo: {
+              cwd: callerCwd.length > workspace.length ? callerCwd : workspace,
+              ...(treeLane !== "" ? { lane: treeLane } : {}),
+              ...(typeof args["task_handle"] === "string" ? { taskHandle: args["task_handle"] } : {}),
+            },
+            fields: archiveSelector !== undefined
+              ? {
+                  path: "scope.archive.path",
+                  prefix: archiveSelector.prefix === undefined && archiveSelector.member !== undefined
+                    ? "scope.archive.member"
+                    : "scope.archive.prefix",
+                }
+              : { path: "scope.path", prefix: "scope.path" },
+          };
+          archiveTreeAdmission = admitArchiveTreeCursor(workspace, archiveTreeRequest);
+          if (!archiveTreeAdmission.ok) return toolStructuredError(archiveTreeAdmission.refusal);
+        }
         // served-bytes: not-served (archive search container bytes: the member gate lives in readArchiveMember)
         const archiveBytes = await readBytesSafe(archiveSearchPath, workspace);
         if (archiveBytes === null) {
@@ -22192,21 +22772,28 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             error: `File not found or outside workspace: ${archiveSearchPath}`,
           });
         }
-        if (action === "tree") {
-          const treeResult = await archiveTree(
+        if (archiveTreeRequest !== undefined) {
+          const treeListing = await archiveTreeListing(
             archiveBytes,
             archiveSearchPath,
             workspace,
             archivePrefix,
             credential.password,
           );
+          if (!treeListing.ok) return toolStructuredError(treeListing as unknown as Record<string, unknown>);
+          const treePage = buildArchiveTreePage(
+            workspace,
+            archiveTreeRequest,
+            treeListing.data,
+            archiveTreeAdmission?.ok === true ? archiveTreeAdmission.resume : undefined,
+          );
           // D4 / A.5.10 (C2-4): the `mode:"tree"` stamp is DELETED. `kind` is
           // the sole discrimination contract, and this response's kind is
           // `search.tree`; a second, differently-spelled discriminator is the
           // probe-by-field-presence D4 exists to remove.
-          return treeResult.ok
-            ? toolOk({ ...treeResult.data })
-            : toolStructuredError(treeResult as unknown as Record<string, unknown>);
+          return treePage.kind === "body"
+            ? toolOk({ ...treePage.body })
+            : toolStructuredError(treePage.refusal);
         }
         const archiveQuery = args["query"] !== undefined
           ? String(args["query"])
@@ -22911,11 +23498,35 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         return toolOk(locateResult);
       }
       if (action === "tree") {
-        // Compact file inventory — tools/exploreTree.ts buildCompactTree
-        // (subdir-rooted, byte-capped, symlink-escape-guarded).
+        // Compact file inventory — tools/exploreTree.ts buildTreeResponse
+        // (subdir-rooted, symlink-escape-guarded). TPB (2026-10-10): paged to
+        // the caller's `budget.bytes`/`budget.tokens` (the legacy default page
+        // when neither is declared); a page that stops short carries a cursor
+        // continuation, and a `cursor` call resumes the same listing.
         const treePath = args["path"] !== undefined ? String(args["path"]) : undefined;
         const treeDepth = typeof args["depth"] === "number" ? args["depth"] : undefined;
-        const result = buildCompactTree(workspace, treePath, treeDepth);
+        const treeCursor = typeof args["cursor"] === "string" && args["cursor"] !== "" ? args["cursor"] : undefined;
+        const treeLane = currentSessionLane();
+        const treeTaskHandle = typeof args["task_handle"] === "string" ? args["task_handle"] : undefined;
+        const callerCwd = typeof args["cwd"] === "string" ? args["cwd"] : "";
+        const treeResponse = buildTreeResponse(workspace, {
+          ...(treePath !== undefined ? { subPath: treePath } : {}),
+          ...(treeDepth !== undefined ? { depth: treeDepth } : {}),
+          ...(treeCursor !== undefined ? { cursor: treeCursor } : {}),
+          budget: {
+            ...(typeof args["maxBytes"] === "number" ? { bytes: args["maxBytes"] } : {}),
+            ...(typeof args["maxTokens"] === "number" ? { tokens: args["maxTokens"] } : {}),
+          },
+          // The envelope attributes the resolved workspace root as the
+          // continuation's `cwd`; priced at the longer of it and the caller's.
+          echo: {
+            cwd: callerCwd.length > workspace.length ? callerCwd : workspace,
+            ...(treeLane !== "" ? { lane: treeLane } : {}),
+            ...(treeTaskHandle !== undefined ? { taskHandle: treeTaskHandle } : {}),
+          },
+        });
+        if (treeResponse.kind === "refusal") return toolStructuredError(treeResponse.refusal);
+        const result = treeResponse.body;
         // P1-d (2026-08-28): a directory listing carries no concern-token to
         // prove/disprove, but a tree call the server itself prescribed (the
         // alternative-progress-axis fallback, and readCodeTaskPack.ts's own
@@ -24152,6 +24763,9 @@ export async function callTool(
   // non-null lookup and die with a TypeError instead of the same "Tool not
   // found" (with the replacement for a pre-`tl_` name) the transports send.
   if (!ALL_TOOLS.some((tool) => tool.name === name)) throw new Error(unknownToolMessage("Tool not found", name));
+  // The startup warm-up (util/startupWarmup.ts) runs no further step once a
+  // call has begun: from here the call's own first use takes over.
+  noteToolCallStarted();
   const result = await callToolOnce(name, args, requestMeta);
   if (name === "tl_search_files" && effFindPhraseEnabled()) {
     return (await findPhraseTokens(result, args, requestMeta)) ?? result;
@@ -24392,7 +25006,18 @@ async function callToolOnce(
       () => finalizeProtocolResponse(name, toolStructuredError(cursorRefusal)),
     );
   }
-  const legacyArgs = normalizeCanonicalRequest(name, args);
+  // 2026-10-10 review (P1 + P3): the canonical request is validated against
+  // the advertised schema between repair and projection — see
+  // `canonicalRequestRefusal`.
+  const prepared = prepareCanonicalInput(name, args);
+  const shapeRefusal = canonicalRequestRefusal(name, prepared);
+  if (shapeRefusal !== undefined) {
+    return runWithProtocolCall(
+      { tool: name, kind: "refusal" },
+      () => finalizeProtocolResponse(name, toolStructuredError(shapeRefusal)),
+    );
+  }
+  const legacyArgs = projectCanonicalRequest(name, prepared);
   // The canonical original, for the restart `next` a `cursor-stale` refusal and
   // a stored request record owe (see `CANONICAL_ORIGINAL_INPUT`).
   if (name === "tl_read_file") {
@@ -24762,6 +25387,10 @@ export async function handleRequest(req: RpcRequest): Promise<RpcResponse | null
     }
 
     case "notifications/initialized":
+      // The handshake is complete and the `initialize` result already sent:
+      // the idle time before the first tools/call pre-pays that call's
+      // one-time costs (util/startupWarmup.ts; TL_STARTUP_WARMUP=0 disables).
+      scheduleStartupWarmup(activeRoot);
       return null; // notification — no response
 
     case "tools/list": {

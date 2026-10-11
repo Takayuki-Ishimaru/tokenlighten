@@ -27,10 +27,17 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import type { ToolCall } from "@tokenlighten/types";
+import type { JsonValue, ToolCall } from "@tokenlighten/types";
 import { walkCodeFiles, createWalkOmissions, type WalkOmissions } from "./walkRepo.js";
 import { FIND_ACTION_EXTRA_BASENAMES, FIND_ACTION_EXTRA_EXTS } from "../features/search/find/findText.js";
 import { resolveReal, isWithin } from "../util/safePath.js";
+// TPB (2026-10-10): the paged tree's continuation cursor is a self-contained
+// `continuation` handle — the same signed, workspace-bound, expiring token
+// `findReferences.ts`'s legacy cursor uses — and its page is sized against the
+// `search.tree` wire row and the funnel's tokens->bytes ratio.
+import { mintContinuationHandle, resolveContinuationHandle } from "../state/stateHandles.js";
+import { shaOfText } from "../util/handles.js";
+import { budgetFor, estimateBytesFromTokens } from "../protocol/budget/wireBudget.js";
 
 /** Byte cap for the rendered tree line list (before the mode/root wrapper). */
 export const TREE_CAP_BYTES = 2048;
@@ -176,20 +183,30 @@ function renderTreeLines(node: TreeDirNode, depth: number, indent: string, out: 
   }
 }
 
+/** Appended to the `tree` text of a page that stops short of the end of the listing. */
+const TRUNC_MARKER = "\n… (truncated)";
+
 /**
  * Accumulate rendered lines into a single string up to `capBytes` in ONE
  * forward pass (no quadratic pop-and-rejoin). Stops at the first line that
  * would push the joined result past the cap and appends a truncation marker.
  * Always keeps at least the first line, even if that single line already
  * exceeds the cap, so the result is never empty for a non-empty tree.
+ *
+ * TPB (2026-10-10): starts at `offset` (a continuation page resumes the same
+ * listing there) and reports `end`, the first line it did NOT keep.
  */
-function accumulateUntilCap(lines: string[], capBytes: number): { tree: string; truncated: boolean } {
-  if (lines.length === 0) return { tree: "", truncated: false };
-  const TRUNC_MARKER = "\n… (truncated)";
+function accumulateUntilCap(
+  lines: string[],
+  capBytes: number,
+  offset = 0,
+): { tree: string; truncated: boolean; end: number } {
+  if (lines.length <= offset) return { tree: "", truncated: false, end: lines.length };
   const kept: string[] = [];
   let bytes = 0;
   let truncated = false;
-  for (let i = 0; i < lines.length; i++) {
+  let end = offset;
+  for (let i = offset; i < lines.length; i++) {
     const line = lines[i]!;
     // Byte cost of adding this line: the line itself plus one "\n" separator
     // for every line after the first.
@@ -200,9 +217,10 @@ function accumulateUntilCap(lines: string[], capBytes: number): { tree: string; 
     }
     kept.push(line);
     bytes += addition;
+    end = i + 1;
   }
   const tree = truncated ? kept.join("\n") + TRUNC_MARKER : kept.join("\n");
-  return { tree, truncated };
+  return { tree, truncated, end };
 }
 
 export interface CompactTree {
@@ -236,6 +254,14 @@ export interface CompactTree {
   did_you_mean?: { path: string; children: string[] };
   /** Present only alongside reason:"not-a-directory": the tl_read_file call that actually serves subPath. */
   next?: ToolCall;
+  /**
+   * TPB (2026-10-10): present only on a page `buildTreeResponse` cut short —
+   * the `tl_search_files` call that serves the rest of the SAME listing from
+   * the line this page stopped at (`cursor`), with the scope and the budget
+   * this call declared. `protocol/searchFamily.ts`'s `projectTree` folds it
+   * into `limit:{cause:"wire",next}`.
+   */
+  next_call?: ToolCall;
   /**
    * Present only when the requested path exists and IS a directory but is
    * empty (tree is legitimately "", as opposed to the not-found case above
@@ -460,6 +486,40 @@ function directoryHasAnyEntry(absDir: string): boolean {
   }
 }
 
+/** The nesting depth a tree call renders at: the caller's, else TREE_DEFAULT_DEPTH. */
+function effectiveTreeDepth(depth?: number): number {
+  return typeof depth === "number" && depth >= 0 ? Math.floor(depth) : TREE_DEFAULT_DEPTH;
+}
+
+/**
+ * TPB (2026-10-10): the WHOLE rendered listing of one `(root, depth)` — what
+ * `buildCompactTree` caps once and `buildTreeResponse` pages through.
+ */
+interface TreeListing {
+  /** The root as a response names it: the normalized subPath, or "." for the workspace. */
+  root: string;
+  /** The normalized subPath ("" for the workspace root) — what a tree cursor is bound to. */
+  normalizedSub: string;
+  /** The nesting depth the listing was rendered at. */
+  depth: number;
+  /** Every rendered line, in listing order. */
+  lines: string[];
+  /** The walk's own accounting, for `scope_report`. */
+  omissions: WalkOmissions;
+  returned: number;
+  /** The root's realpath, for the empty-tree note. */
+  containedAbs: string;
+}
+
+type PreparedTreeListing = { ok: true; listing: TreeListing } | { ok: false; result: CompactTree };
+
+/** The note an EXISTING directory with an empty listing carries — see `buildCompactTree`. */
+function emptyTreeNote(containedAbs: string): string {
+  return directoryHasAnyEntry(containedAbs)
+    ? "empty after walk filters (.tokenlightenignore, built-in defaults, or unsupported file types); tl_read_file({path}) on a known path still works"
+    : "empty directory";
+}
+
 /**
  * Build a compact, byte-capped file inventory rooted at `subPath` (or the
  * whole workspace when omitted). Directories beyond `depth` collapse to a
@@ -476,8 +536,38 @@ export function buildCompactTree(
   depth?: number,
   capBytes: number = TREE_CAP_BYTES,
 ): CompactTree {
-  const effectiveDepth =
-    typeof depth === "number" && depth >= 0 ? Math.floor(depth) : TREE_DEFAULT_DEPTH;
+  const prepared = prepareTreeListing(workspace, subPath, depth);
+  if (!prepared.ok) return prepared.result;
+  const { listing } = prepared;
+
+  const { tree, truncated } = accumulateUntilCap(listing.lines, capBytes);
+  const scope_report = buildScopeReport(listing.omissions, listing.returned, truncated);
+
+  // Existing directory, but the rendered tree is empty. Two different causes
+  // read very differently to an agent, so they get different notes:
+  //   - genuinely 0 entries on disk -> "empty directory" (nothing to find).
+  //   - >=1 entries on disk, all filtered by the shared walk exclusions
+  //     (DEFAULT_IGNORE / .tokenlightenignore) -> a distinct note, since
+  //     "empty directory" would misleadingly read as "nothing here" when
+  //     content exists but is merely out of walk scope.
+  // scope_report is built from the SAME omissions/files/truncated triple as
+  // both branches below, so a fully-filtered tree's counts (returned:0,
+  // excluded>0) and its "empty after walk filters" note always agree — PI-08
+  // item 4.
+  if (tree === "") {
+    return { root: listing.root, depth: listing.depth, tree, truncated, note: emptyTreeNote(listing.containedAbs), scope_report };
+  }
+
+  return { root: listing.root, depth: listing.depth, tree, truncated, scope_report };
+}
+
+/**
+ * Validate `subPath`, walk it and render every line — everything
+ * `buildCompactTree` did before its cap, unchanged. `ok:false` carries the
+ * early not-found / not-a-directory / symlink-escape answer as-is.
+ */
+function prepareTreeListing(workspace: string, subPath?: string, depth?: number): PreparedTreeListing {
+  const effectiveDepth = effectiveTreeDepth(depth);
   const normalizedSub = normalizeSubPath(workspace, subPath);
 
   // Nonexistent subPath: an agent that guessed a wrong directory name
@@ -497,13 +587,16 @@ export function buildCompactTree(
     }
     if (stat === undefined) {
       return {
-        root: normalizedSub,
-        depth: effectiveDepth,
-        tree: "",
-        truncated: false,
         ok: false,
-        reason: "not-found",
-        did_you_mean: buildDidYouMean(workspace, requestedAbs),
+        result: {
+          root: normalizedSub,
+          depth: effectiveDepth,
+          tree: "",
+          truncated: false,
+          ok: false,
+          reason: "not-found",
+          did_you_mean: buildDidYouMean(workspace, requestedAbs),
+        },
       };
     }
     // 2026-08-01: subPath exists but isn't a directory (a real file, most
@@ -511,14 +604,17 @@ export function buildCompactTree(
     // different name when the fix is simply the right tool (tl_read_file).
     if (!stat.isDirectory()) {
       return {
-        root: normalizedSub,
-        depth: effectiveDepth,
-        tree: "",
-        truncated: false,
         ok: false,
-        reason: "not-a-directory",
-        did_you_mean: buildDidYouMean(workspace, requestedAbs),
-        next: { tool: "tl_read_file", arguments: { targets: [{ path: normalizedSub }], content: "auto" } },
+        result: {
+          root: normalizedSub,
+          depth: effectiveDepth,
+          tree: "",
+          truncated: false,
+          ok: false,
+          reason: "not-a-directory",
+          did_you_mean: buildDidYouMean(workspace, requestedAbs),
+          next: { tool: "tl_read_file", arguments: { targets: [{ path: normalizedSub }], content: "auto" } },
+        },
       };
     }
   }
@@ -526,7 +622,7 @@ export function buildCompactTree(
   // G4: refuse a subPath whose realpath escapes the workspace (symlink escape).
   const containedAbs = containedSubPath(workspace, normalizedSub);
   if (containedAbs === undefined) {
-    return { root: normalizedSub || ".", depth: effectiveDepth, tree: "", truncated: false, refused: true };
+    return { ok: false, result: { root: normalizedSub || ".", depth: effectiveDepth, tree: "", truncated: false, refused: true } };
   }
 
   const omissions = createWalkOmissions();
@@ -554,26 +650,423 @@ export function buildCompactTree(
   const lines: string[] = [];
   renderTreeLines(treeRoot, effectiveDepth, "", lines);
 
-  const { tree, truncated } = accumulateUntilCap(lines, capBytes);
-  const scope_report = buildScopeReport(omissions, files.length, truncated);
+  return {
+    ok: true,
+    listing: {
+      root: normalizedSub || ".",
+      normalizedSub,
+      depth: effectiveDepth,
+      lines,
+      omissions,
+      returned: files.length,
+      containedAbs,
+    },
+  };
+}
 
-  // Existing directory, but the rendered tree is empty. Two different causes
-  // read very differently to an agent, so they get different notes:
-  //   - genuinely 0 entries on disk -> "empty directory" (nothing to find).
-  //   - >=1 entries on disk, all filtered by the shared walk exclusions
-  //     (DEFAULT_IGNORE / .tokenlightenignore) -> a distinct note, since
-  //     "empty directory" would misleadingly read as "nothing here" when
-  //     content exists but is merely out of walk scope.
-  // scope_report is built from the SAME omissions/files/truncated triple as
-  // both branches below, so a fully-filtered tree's counts (returned:0,
-  // excluded>0) and its "empty after walk filters" note always agree — PI-08
-  // item 4.
-  if (tree === "") {
-    const note = directoryHasAnyEntry(containedAbs)
-      ? "empty after walk filters (.tokenlightenignore, built-in defaults, or unsupported file types); tl_read_file({path}) on a known path still works"
-      : "empty directory";
-    return { root: normalizedSub || ".", depth: effectiveDepth, tree, truncated, note, scope_report };
+// ---------------------------------------------------------------------------
+// TPB (2026-10-10 independent runtime review): `search.tree` honours
+// `budget.bytes`, and a truncated tree carries an executable continuation.
+//
+// THE MEASURED DEFECT. `tl_search_files {action:"tree"}` ignored the caller's
+// budget. Every call cut the rendered listing at TREE_CAP_BYTES (2048 B of
+// text): `budget.bytes:4000`, `16000` and `64000` all returned the same
+// 2.5 KB page, and a cut listing said `limit:{cause:"capped"}` with no
+// `next`, so the rest of it was reachable only by guessing a subdirectory.
+// Below the default page a declared budget fared no better: the wire ladder
+// halved the text and named a SHALLOWER tree (not the remainder), and at
+// `depth:1` it had nothing to name at all — `refusal{cap-exceeded}`, no
+// `next` (`depth:1`, `budget.bytes:1000`, a 1.1 KB listing).
+//
+// THE FIX — one listing, paged (`buildTreeResponse`):
+//  - a page is the listing's lines `[offset, end)`. With no declared budget it
+//    is the legacy TREE_CAP_BYTES of text, so the default page is unchanged;
+//    with `budget.bytes`/`budget.tokens` it is as many whole lines as keep the
+//    RESPONSE within the tighter of the two (tokens at the funnel's own ratio)
+//    and the `search.tree` wire row — the `tree` value priced as the JSON
+//    string the wire carries, the envelope around it measured (`fitTreePage`,
+//    `treePageEnvelopeBytes`). A budget that cannot hold one line beside the
+//    envelope is refused `budget-below-minimum`, the floor named;
+//  - a page that stops short carries `next_call`: the same scope, the budget
+//    this call declared, and a cursor naming the line it stopped at.
+//    `projectTree` (protocol/searchFamily.ts) folds it into
+//    `limit:{cause:"wire",next}`;
+//  - the cursor is a self-contained `continuation` handle (MAC'd, workspace-
+//    bound, expiring — `state/stateHandles.ts`), bound to the root and depth it
+//    was minted for and to a digest of the WHOLE listing. A resume re-walks and
+//    serves the next lines only while that digest is unchanged; otherwise it is
+//    refused `cursor-stale` with the restart call as its `next` — pages of one
+//    listing are never mixed across a changed walk.
+// `projectTree`'s [R5-9] note held that a continuation would have to name a
+// SUBTREE, a choice only the caller can make. The cursor names the rest of the
+// SAME listing instead, which needs no choice at all.
+//
+// ATP (2026-10-10): the archive-scoped tree (`tools/archiveTreePage.ts`) pages
+// its member listing with the same pieces — `fitTreePage`,
+// `searchTreePageEnvelopeBytes`/`searchTreePageBytes`, `declaredTreePageBytes`,
+// `treeBudgetArguments`, `digest16` — so both variants of `search.tree` cut,
+// price and continue a page one way (and the two G8 measurement sites below
+// serve both).
+// ---------------------------------------------------------------------------
+
+/**
+ * Bytes added to every measured page envelope. Over-reserving only ends a page
+ * one line early; under-reserving would hand the page to the wire ladder,
+ * whose tree rung trims lines and names a shallower tree instead.
+ */
+const TREE_PAGE_ENVELOPE_SAFETY_MARGIN_BYTES = 64;
+
+/** A string's bytes inside the JSON the wire carries, without its two quotes. */
+function jsonStringBodyBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), "utf8") - 2;
+}
+
+/** One "\n" between two lines of a page: two bytes once JSON-escaped. */
+const TREE_LINE_SEPARATOR_JSON_BYTES = 2;
+
+export type TreePageFit =
+  | { ok: true; end: number; truncated: boolean }
+  | { ok: false; requiredTextBytes: number };
+
+/** How `fitTreePage` cuts a page; the defaults are the workspace tree's. */
+export interface TreePageFitOptions {
+  /**
+   * JSON bytes a page that stops short appends to its text — the workspace
+   * tree's TRUNC_MARKER (the default). The archive tree appends none: its
+   * lines are member paths, and `limit` alone says the page stopped short.
+   */
+  markerBytes?: number;
+  /** At most this many lines per page (the archive tree's legacy 200-member page); unbounded by default. */
+  maxLines?: number;
+}
+
+/**
+ * Cut a page from `offset` for a declared budget, on whole lines. The `tree`
+ * value is priced as its JSON string, quotes included. `completeRoom` is the
+ * room for it when the page ends the listing (no `limit` rides that page);
+ * `truncatedRoom` the room when it does not (the `limit.next` envelope is
+ * larger, and the text grows the truncation marker). A page that cannot take
+ * even one line never ships empty — that would advance nothing and name the
+ * same cursor again — and names, for the caller's `budget-below-minimum`
+ * floor, the text bytes the LONGEST remaining line needs: every later page of
+ * the listing carries the same envelope, so a caller who re-issues at that
+ * floor pages through the rest without being refused again.
+ */
+export function fitTreePage(
+  lines: readonly string[],
+  offset: number,
+  completeRoom: number,
+  truncatedRoom: number,
+  options: TreePageFitOptions = {},
+): TreePageFit {
+  if (offset >= lines.length) return { ok: true, end: lines.length, truncated: false };
+  const cost = (i: number): number =>
+    jsonStringBodyBytes(lines[i]!) + (i > offset ? TREE_LINE_SEPARATOR_JSON_BYTES : 0);
+  const pageEnd = options.maxLines === undefined ? lines.length : Math.min(lines.length, offset + options.maxLines);
+
+  // The whole remainder as one complete page? Pricing stops the moment it
+  // cannot be, so a long listing is never priced past one page's worth.
+  if (pageEnd === lines.length) {
+    let whole = 2;
+    let next = offset;
+    while (next < lines.length && whole <= completeRoom) whole += cost(next++);
+    if (next === lines.length && whole <= completeRoom) return { ok: true, end: lines.length, truncated: false };
   }
 
-  return { root: normalizedSub || ".", depth: effectiveDepth, tree, truncated, scope_report };
+  // Otherwise as many whole lines as fit beside the continuation.
+  const markerBytes = options.markerBytes ?? jsonStringBodyBytes(TRUNC_MARKER);
+  let used = 2 + markerBytes;
+  let end = offset;
+  while (end < pageEnd) {
+    const lineCost = cost(end);
+    if (used + lineCost > truncatedRoom) break;
+    used += lineCost;
+    end += 1;
+  }
+  if (end > offset) return { ok: true, end, truncated: end < lines.length };
+
+  let longest = 0;
+  for (let i = offset; i < lines.length; i++) longest = Math.max(longest, cost(i));
+  return { ok: false, requiredTextBytes: 2 + markerBytes + longest };
+}
+
+/**
+ * The bytes a `search.tree` page carries besides its `tree` text: `{v, kind,
+ * tree:"", ...fields}` — `fields` being the page's other wire members (the
+ * workspace tree's `root`/`depth`/`scope_report`, the archive tree's
+ * `root`/`archive`) — and, on a page that stops short, `limit:{cause, omitted,
+ * next}` with the continuation's arguments as the wire will show them —
+ * measured in ONE trial serialization, a Class-C pre-shed admission
+ * measurement of the page being built (`wireBudgetG8Fence.spec.ts`), never of
+ * an already-decided response. Includes TREE_PAGE_ENVELOPE_SAFETY_MARGIN_BYTES.
+ */
+export function searchTreePageEnvelopeBytes(
+  fields: Readonly<Record<string, unknown>>,
+  nextArguments?: Record<string, unknown>,
+): number {
+  const envelope: Record<string, unknown> = { v: 1, kind: "search.tree", ...fields, tree: "" };
+  if (nextArguments !== undefined) {
+    envelope["limit"] = {
+      cause: "wire",
+      omitted: ["results"],
+      next: { tool: "tl_search_files", arguments: nextArguments },
+    };
+  }
+  return Buffer.byteLength(JSON.stringify(envelope), "utf8") + TREE_PAGE_ENVELOPE_SAFETY_MARGIN_BYTES;
+}
+
+/**
+ * The exact bytes of a COMPLETE `search.tree` page `{v, kind, ...fields,
+ * tree:text}` — no `limit`, no safety margin. The archive tree uses it to keep
+ * its no-budget answer byte-identical to the unpaged one wherever that answer
+ * fitted the wire row (`tools/archiveTreePage.ts`).
+ */
+export function searchTreePageBytes(fields: Readonly<Record<string, unknown>>, text: string): number {
+  return searchTreePageEnvelopeBytes(fields) - TREE_PAGE_ENVELOPE_SAFETY_MARGIN_BYTES + jsonStringBodyBytes(text);
+}
+
+/** The workspace tree's page envelope — `{root, depth, scope_report}` around the text. */
+function treePageEnvelopeBytes(input: {
+  listing: TreeListing;
+  scopeReport: TreeScopeReport;
+  nextArguments?: Record<string, unknown>;
+}): number {
+  return searchTreePageEnvelopeBytes(
+    { root: input.listing.root, depth: input.listing.depth, scope_report: input.scopeReport },
+    input.nextArguments,
+  );
+}
+
+/** A caller-declared tree budget — the canonical `budget.bytes`/`budget.tokens`. */
+export interface TreeBudget {
+  bytes?: number;
+  tokens?: number;
+}
+
+/** The tighter of the two declared ceilings, tokens at the funnel's ratio; `undefined` when neither was declared. */
+export function declaredTreePageBytes(budget: TreeBudget): number | undefined {
+  const bytes = typeof budget.bytes === "number" && Number.isFinite(budget.bytes) && budget.bytes > 0
+    ? Math.floor(budget.bytes)
+    : undefined;
+  const tokenBytes = estimateBytesFromTokens(budget.tokens);
+  if (bytes === undefined) return tokenBytes;
+  return tokenBytes === undefined ? bytes : Math.min(bytes, tokenBytes);
+}
+
+/** The `budget` a tree continuation echoes: the caller's positive `bytes`/`tokens` as declared, or `undefined`. */
+export function treeBudgetArguments(budget: TreeBudget): Record<string, JsonValue> | undefined {
+  const declared: Record<string, JsonValue> = {};
+  if (typeof budget.bytes === "number" && budget.bytes > 0) declared["bytes"] = budget.bytes;
+  if (typeof budget.tokens === "number" && budget.tokens > 0) declared["tokens"] = budget.tokens;
+  return Object.keys(declared).length > 0 ? declared : undefined;
+}
+
+/** The canonical `tl_search_files` tree call for `(root, depth)` under `budget` — a continuation adds `cursor`. */
+function treeCallArguments(root: string, depth: number, budget: TreeBudget): Record<string, JsonValue> {
+  const declared = treeBudgetArguments(budget);
+  return {
+    action: "tree",
+    scope: { path: root, depth },
+    ...(declared !== undefined ? { budget: declared } : {}),
+  };
+}
+
+/** The first 16 hex digits of a sha256 — a binding digest, not a content address. */
+export function digest16(text: string): string {
+  return shaOfText(text).slice("sha256:".length, "sha256:".length + 16);
+}
+
+/** What a tree cursor's authenticated (not encrypted) tail carries — no path, no content. */
+interface TreeCursorPayload {
+  v: 1;
+  t: "tree";
+  /** Digest of the normalized root the listing was rendered for. */
+  r: string;
+  /** The depth the listing was rendered at. */
+  d: number;
+  /** Digest of the whole listing. */
+  s: string;
+  /** The first listing line the next page serves. */
+  o: number;
+}
+
+/** `listingDigest` is `digest16` of the whole listing, computed once per call. */
+function treeCursorPayload(listing: TreeListing, listingDigest: string, offset: number): TreeCursorPayload {
+  return {
+    v: 1,
+    t: "tree",
+    r: digest16(`tree-root\u0000${listing.normalizedSub}`),
+    d: listing.depth,
+    s: listingDigest,
+    o: offset,
+  };
+}
+
+function readTreeCursorPayload(value: unknown): TreeCursorPayload | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const p = value as Record<string, unknown>;
+  if (p["v"] !== 1 || p["t"] !== "tree") return undefined;
+  if (typeof p["r"] !== "string" || typeof p["s"] !== "string") return undefined;
+  if (typeof p["d"] !== "number" || !Number.isInteger(p["d"]) || p["d"] < 0) return undefined;
+  if (typeof p["o"] !== "number" || !Number.isInteger(p["o"]) || p["o"] < 1) return undefined;
+  return { v: 1, t: "tree", r: p["r"], d: p["d"], s: p["s"], o: p["o"] };
+}
+
+/** One `tl_search_files action:"tree"` call, as `server.ts`'s dispatcher resolved it. */
+export interface TreeRequest {
+  subPath?: string;
+  depth?: number;
+  /** The `cursor` this call presented — a resume of an earlier page. */
+  cursor?: string;
+  /** The caller's declared `budget.bytes`/`budget.tokens`. */
+  budget: TreeBudget;
+  /**
+   * What the emitted continuation will carry besides its scope, budget and
+   * cursor — `cwd` (the envelope attributes the resolved workspace root),
+   * `lane`, `task.handle` — priced into the page's envelope.
+   */
+  echo: { cwd: string; lane?: string; taskHandle?: string };
+}
+
+export type TreeResponse =
+  | { kind: "body"; body: CompactTree }
+  | { kind: "refusal"; refusal: Record<string, unknown> };
+
+/**
+ * TPB: serve one `search.tree` page — a fresh call's first page, or the page a
+ * `cursor` resumes. See the section header above for the paging rules.
+ * `kind:"body"` also carries the early not-found / not-a-directory /
+ * symlink-escape answers unchanged (the funnel turns them into refusals).
+ */
+export function buildTreeResponse(workspace: string, request: TreeRequest): TreeResponse {
+  const restart = (root: string, depth: number): ToolCall => ({
+    tool: "tl_search_files",
+    arguments: treeCallArguments(root, depth, request.budget),
+  });
+
+  let resume: TreeCursorPayload | undefined;
+  if (request.cursor !== undefined) {
+    const resolved = resolveContinuationHandle<unknown>(request.cursor, workspace);
+    resume = resolved.ok ? readTreeCursorPayload(resolved.payload) : undefined;
+    if (resume === undefined) {
+      return {
+        kind: "refusal",
+        refusal: {
+          ok: false,
+          code: "cursor-invalid",
+          field: "cursor",
+          error: "this tree cursor is not usable here",
+          detail: `${resolved.ok ? "wrong-purpose" : resolved.outcome}; re-issue the original tree call`,
+          retry: "call",
+          next: restart(normalizeSubPath(workspace, request.subPath) || ".", effectiveTreeDepth(request.depth)),
+        },
+      };
+    }
+  }
+
+  const prepared = prepareTreeListing(workspace, request.subPath, request.depth);
+  if (!prepared.ok) return { kind: "body", body: prepared.result };
+  const { listing } = prepared;
+  const { lines } = listing;
+  const listingDigest = digest16(lines.join("\n"));
+
+  let offset = 0;
+  if (resume !== undefined) {
+    const current = treeCursorPayload(listing, listingDigest, resume.o);
+    const changed = current.r !== resume.r ? "scope.path" : current.d !== resume.d ? "scope.depth" : undefined;
+    if (changed !== undefined) {
+      return {
+        kind: "refusal",
+        refusal: {
+          ok: false,
+          code: "invalid-input",
+          field: changed,
+          error: `tree cursor continuation cannot change '${changed}'`,
+          detail: "a tree cursor continuation accepts only budget overrides; re-issue the original tree call to change its scope",
+          retry: "call",
+        },
+      };
+    }
+    if (current.s !== resume.s || resume.o >= lines.length) {
+      return {
+        kind: "refusal",
+        refusal: {
+          ok: false,
+          code: "cursor-stale",
+          field: "cursor",
+          error: "the listing under this tree cursor changed",
+          detail: "pages of one tree listing are never mixed across a changed walk; restart the original tree call",
+          retry: "call",
+          next: restart(listing.root, listing.depth),
+        },
+      };
+    }
+    offset = resume.o;
+  }
+
+  let tree: string;
+  let truncated: boolean;
+  let end: number;
+  const declared = declaredTreePageBytes(request.budget);
+  if (declared === undefined) {
+    // The default page is the legacy one: TREE_CAP_BYTES of raw text.
+    ({ tree, truncated, end } = accumulateUntilCap(lines, TREE_CAP_BYTES, offset));
+  } else {
+    const limit = Math.min(declared, budgetFor("search.tree"));
+    // A placeholder cursor at the largest offset this listing can name, so
+    // the measured continuation is never shorter than the real one.
+    const placeholderCursor = mintContinuationHandle(workspace, treeCursorPayload(listing, listingDigest, lines.length)) ?? "";
+    const completeEnvelope = treePageEnvelopeBytes({
+      listing,
+      scopeReport: buildScopeReport(listing.omissions, listing.returned, false),
+    });
+    const truncatedEnvelope = treePageEnvelopeBytes({
+      listing,
+      scopeReport: buildScopeReport(listing.omissions, listing.returned, true),
+      nextArguments: {
+        cwd: request.echo.cwd,
+        ...(request.echo.lane !== undefined && request.echo.lane !== "" ? { lane: request.echo.lane } : {}),
+        ...(request.echo.taskHandle !== undefined ? { task: { handle: request.echo.taskHandle } } : {}),
+        ...treeCallArguments(listing.root, listing.depth, request.budget),
+        cursor: placeholderCursor,
+      },
+    });
+    const fit = fitTreePage(lines, offset, limit - completeEnvelope, limit - truncatedEnvelope);
+    if (!fit.ok) {
+      return {
+        kind: "refusal",
+        refusal: {
+          ok: false,
+          code: "budget-below-minimum",
+          field: "budget",
+          error: `budget ${limit} B cannot hold one whole tree line plus its envelope`,
+          detail: "raise budget.bytes to at least required_min_bytes (enough for every remaining page of this listing) and re-issue this tree call",
+          required_min_bytes: truncatedEnvelope + fit.requiredTextBytes,
+          retry: "call",
+        },
+      };
+    }
+    ({ end, truncated } = fit);
+    const pageText = lines.slice(offset, end).join("\n");
+    tree = truncated ? pageText + TRUNC_MARKER : pageText;
+  }
+
+  const scope_report = buildScopeReport(listing.omissions, listing.returned, truncated);
+  if (tree === "") {
+    return {
+      kind: "body",
+      body: { root: listing.root, depth: listing.depth, tree, truncated, note: emptyTreeNote(listing.containedAbs), scope_report },
+    };
+  }
+  const body: CompactTree = { root: listing.root, depth: listing.depth, tree, truncated, scope_report };
+  if (truncated) {
+    const cursor = mintContinuationHandle(workspace, treeCursorPayload(listing, listingDigest, end));
+    if (cursor !== undefined) {
+      body.next_call = {
+        tool: "tl_search_files",
+        arguments: { ...treeCallArguments(listing.root, listing.depth, request.budget), cursor },
+      };
+    }
+  }
+  return { kind: "body", body };
 }

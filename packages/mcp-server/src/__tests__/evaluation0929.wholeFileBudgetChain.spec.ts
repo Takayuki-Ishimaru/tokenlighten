@@ -551,7 +551,12 @@ describe("chip 3 (markdown sections) and the multi-target batch: a refusal's rec
     for (const budget of [500, 700, 1200, 2000]) {
       const rel = `src/sections-${String(budget).padStart(4, "0")}.md`;
       fs.writeFileSync(path.join(ws, rel), doc, "utf8");
-      const first: ToolCallShape = { tool: "tl_read_file", arguments: { targets: [{ path: rel, sections: ["Section 3", "Section 17"] }], budget: { bytes: budget }, cwd: ws } };
+      // This chain has always been a WHOLE-FILE markdown read under a budget:
+      // it used to send `sections` inside the target object, which is not a
+      // target member (`select.sections` is), and the canonical projection
+      // dropped it silently. The 2026-10-10 request validation refuses that
+      // member as unknown, so the call now states the read it always made.
+      const first: ToolCallShape = { tool: "tl_read_file", arguments: { targets: [{ path: rel }], budget: { bytes: budget }, cwd: ws } };
       const { hops, capped } = await runChain(server, first, { hopCap: 40 });
       const where = `budget ${budget}: ${hops.map((hop) => `${hop.body["kind"]}${hop.body["code"] ? ":" + hop.body["code"] : ""} ${hop.bytes}B`).join(" -> ")}`;
       expect(capped, `a refusal loop — ${where}`).toBe(false);

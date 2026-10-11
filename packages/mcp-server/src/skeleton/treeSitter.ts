@@ -225,10 +225,20 @@ function resolveGrammarDir(paths: TreeSitterPaths): string {
 async function ensureInit(runtimeWasm: string): Promise<void> {
   if (!initPromise) {
     const Parser = await getParserCtor();
-    initPromise = Parser.init({ locateFile: (name: string) => name === 'tree-sitter.wasm' ? runtimeWasm : name });
+    // Re-checked after the await: two first callers in flight at once (the
+    // startup warm-up, util/startupWarmup.ts, and a real call; or two calls)
+    // both passed the check above, and the runtime must be initialised once.
+    initPromise ??= Parser.init({ locateFile: (name: string) => name === 'tree-sitter.wasm' ? runtimeWasm : name });
   }
   await initPromise;
 }
+
+/**
+ * One in-flight grammar load per language, so a second first caller waits
+ * for the same compile instead of compiling the grammar again. A failed load
+ * leaves no entry behind: the next call retries, as it always has.
+ */
+const langLoads = new Map<string, Promise<unknown>>();
 
 async function loadLanguage(key: string, paths: TreeSitterPaths): Promise<unknown | undefined> {
   try {
@@ -236,13 +246,22 @@ async function loadLanguage(key: string, paths: TreeSitterPaths): Promise<unknow
     await ensureInit(runtimeWasm);
     const cached = langCache.get(key);
     if (cached) return cached;
-    const Parser = await getParserCtor();
     const grammar = GRAMMARS[key];
     if (!grammar) return undefined;
-    const wasmPath = join(resolveGrammarDir(paths), `tree-sitter-${grammar}.wasm`);
-    const lang = await Parser.Language.load(wasmPath);
-    langCache.set(key, lang);
-    return lang;
+    let pending = langLoads.get(key);
+    if (pending === undefined) {
+      const wasmPath = join(resolveGrammarDir(paths), `tree-sitter-${grammar}.wasm`);
+      const load: Promise<unknown> = getParserCtor().then((Parser) => Parser.Language.load(wasmPath));
+      pending = load;
+      langLoads.set(key, load);
+      load.then(
+        (lang) => { langCache.set(key, lang); },
+        () => { /* the awaiting caller reports it */ },
+      ).finally(() => {
+        if (langLoads.get(key) === load) langLoads.delete(key);
+      });
+    }
+    return await pending;
   } catch {
     return undefined;
   }

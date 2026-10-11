@@ -799,6 +799,17 @@ export function receiptOf(body: Body, workspaceRoot?: string): Receipt | undefin
       const earlier = replay !== undefined
         ? `tl_read_file mode=task_pack qref=${replay}`
         : "tl_read_file mode=task_pack (earlier in this session)";
+      // v0.15.1 runtime review (2026-10-06): a row with an UNSERVED window
+      // (`remaining` — FX-M4's mark for a row the ledger cannot prove was
+      // shipped, `compactReceiptFromRecord`) is not held, so a response
+      // carrying one is not "the exact prior pack re-issued". Defaulting its
+      // `prior` to `earlier` below put back the very claim FX-M4 removed: a
+      // pack whose 6 KB cap withheld `src/anchor.ts` was answered, one re-ask
+      // later, with `anchor.ts 1-4` "prior" to bytes no call ever sent. The
+      // response ships as the task pack it is, the row keeping `remaining`.
+      if (evidence.some((entry) => isRecord(entry)
+        && str(entry["body"]) === undefined
+        && Array.isArray(entry["remaining"]) && entry["remaining"].length > 0)) return undefined;
       const prior = evidence
         .filter(isRecord)
         .filter((entry) => str(entry["handle"]) !== undefined && str(entry["body"]) === undefined)
@@ -1258,6 +1269,16 @@ function textEvidence(body: Body): Evidence[] {
   if (remaining.length > 0 && evidence.length > 0) {
     evidence[0] = { ...evidence[0]!, remaining };
   }
+  // TL-REVIEW-2 (2026-10-06): comment windows a producer elided OUTSIDE any
+  // body it ships (a ledger-difference gap that is one comment block, the
+  // whole-file blocks past a governed head) ride the internal
+  // `elided_windows` carrier; like `remaining` they are a per-handle fact, so
+  // they land on the first entry's `elided`. Elided windows INSIDE a shipped
+  // body are added by protocol/sourceFidelity.ts, which merges with these.
+  const elidedWindows = stringArray(body["elided_windows"]);
+  if (elidedWindows.length > 0 && evidence.length > 0) {
+    evidence[0] = { ...evidence[0]!, elided: elidedWindows };
+  }
   // E-8 (A.8.2) — `!body` implies `prior` or `remaining` — holds by
   // construction for every dialect above: a fresh segment/window carries
   // `content` or `code`, a held one carries `code_unchanged` -> `prior`, and a
@@ -1485,6 +1506,10 @@ function batchEntry(raw: Body): Body | undefined {
       const blank = blankLineBody(raw, range);
       if (blank !== undefined) entry["content"] = blank;
     }
+    // TL-REVIEW-2: the `elided_windows` carrier (see `textEvidence`), on the
+    // `handle` form a chunked whole-file batch item takes.
+    const elidedWindows = stringArray(raw["elided_windows"]);
+    if (elidedWindows.length > 0) entry["elided"] = elidedWindows;
     return entry;
   }
 

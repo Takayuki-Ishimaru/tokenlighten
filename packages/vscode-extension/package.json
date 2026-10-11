@@ -1,7 +1,7 @@
 {
   "name": "tokenlighten-vscode-extension",
   "displayName": "TokenLighten",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "private": true,
   "description": "%extension.description%",
   "publisher": "tokenlighten",
@@ -120,7 +120,7 @@
             "medium",
             "compact"
           ],
-          "default": "full",
+          "default": "compact",
           "scope": "resource",
           "description": "Guide profile injected during workspace setup."
         },
@@ -131,7 +131,7 @@
             "agents-md"
           ],
           "enumDescriptions": [
-            "GitHub Copilot reads a compact TokenLighten guide from .github/copilot-instructions.md; setup stops Copilot attaching AGENTS.md while it holds only TokenLighten's block (Codex and Claude Code keep the full guide). In a window opened through a .code-workspace file, the setting goes into the workspace file after you confirm.",
+            "GitHub Copilot reads a compact TokenLighten guide from .github/copilot-instructions.md; setup stops Copilot attaching AGENTS.md while it holds only TokenLighten's block. Codex and Claude Code read the selected AGENTS.md profile (compact by default). In a window opened through a .code-workspace file, the setting goes into the workspace file after you confirm.",
             "GitHub Copilot attaches AGENTS.md and reads the TokenLighten guide there."
           ],
           "default": "standalone",

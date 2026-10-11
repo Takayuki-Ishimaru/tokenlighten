@@ -27,7 +27,7 @@ Subcommands:
   update [--targets <id,...>]   Alias: tl agents-md write
          [--root <dir>]         Targets: claude, copilot, cursor, cline, continue
          [--locale en|jp]       (windsurf and roo read AGENTS.md natively — no stub needed)
-         [--profile full|medium|compact] Guide profile (default: full)
+         [--profile full|medium|compact] Guide profile (default: compact)
          [--force] [--check]    --root: repo root to inject into (default: cwd)
                                  --locale: template language (default: en)
                                  --force: overwrite even if manual edits detected

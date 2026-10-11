@@ -367,6 +367,7 @@ function registrationPayload(
   if (client === "claude-code") {
     const payload = JSON.stringify({
       type: "stdio",
+      alwaysLoad: true,
       command: launcher.command,
       args: [...launcher.argsPrefix, ...MCP_ARGS_PREFIX, ...postureArgs],
       env,
@@ -1243,7 +1244,7 @@ export function buildClientSnippet(
 
   switch (client) {
     case "claude-code": {
-      const entry = { type: "stdio", command: launcher.command, args, env: snippetEnv("claude-code", launcher) };
+      const entry = { type: "stdio", alwaysLoad: true, command: launcher.command, args, env: snippetEnv("claude-code", launcher) };
       return {
         client,
         mechanism: "vendor-cli",
@@ -1256,7 +1257,7 @@ export function buildClientSnippet(
       return {
         client,
         mechanism: "vendor-cli",
-        json: { mcp_servers: { [SERVER_ID]: entry } },
+        json: { mcp_optional_startup_grace_ms: 0, mcp_servers: { [SERVER_ID]: entry } },
         addCommand: registrationPayload("codex", launcher, writePosture).manualCommand,
       };
     }
@@ -1310,6 +1311,8 @@ export function buildClientSnippet(
     case "codex-user": {
       const env = snippetEnv("codex", launcher);
       const toml = [
+        "mcp_optional_startup_grace_ms = 0",
+        "",
         `[mcp_servers.${SERVER_ID}]`,
         `command = ${JSON.stringify(launcher.command)}`,
         `args = ${JSON.stringify(args)}`,

@@ -16,9 +16,12 @@
  *       when it fits the refusal's own budget.
  *   (5) the offending property is named by its FULL PATH (`edits[2].serch`)
  *       in a typed slot, not buried in prose.
- *   (6) VALUE validation is untouched. This module validates property NAMES
- *       only. `lang` stays a bare string validated by dispatch
- *       (`server.ts` parseMcpLang, pinned by `schemaSize.spec.ts:249-260`).
+ *   (6) VALUE validation was originally left to dispatch. Since the
+ *       2026-10-10 review (an out-of-enum `precondition` ran an edit with no
+ *       guard) `findInvalidValues` below checks every declared `enum` and
+ *       primitive `type` too, before dispatch; open strings such as `lang`
+ *       stay bare strings validated by dispatch (`server.ts` parseMcpLang,
+ *       pinned by `schemaSize.spec.ts:249-260`).
  *
  * Why strict at all: must-ignore turns `{"preconditon":"unique-match"}` into an
  * edit executed WITHOUT its precondition — the protocol silently discards the
@@ -461,4 +464,226 @@ export function requestShapeRefusal(
   args: Record<string, unknown>,
 ): UnknownPropertyRefusal | null {
   return unknownPropertyRefusal(tool, findUnknownProperties(tool, properties, args));
+}
+
+// ---------------------------------------------------------------------------
+// Value validation (2026-10-10 v0.15.1 runtime review, P1)
+// ---------------------------------------------------------------------------
+//
+// Rule (6) above left VALUES to dispatch, and dispatch only checked the
+// values it branched on. Everything else was compared with `===` and an
+// unmatched value fell through to the default: the reviewer's
+// `precondition:"expected-sha"` (not one of the four advertised values) ran
+// the edit with NO guard and answered `edit.applied`; `target:"every"`,
+// `create:"true"`, `content:"fulll"`, `scope.kind:"symbols"` and
+// `task.pull:"closures"` were likewise ignored, and `replace:20` was
+// stringified into the file. A value the schema does not allow is now
+// refused, before any side effect, with the offending path, the allowed
+// values and at most one suggestion — the same recovery contract as an
+// unknown property name.
+
+/** One property whose VALUE is outside its declared type or value set. */
+export interface InvalidValueViolation {
+  /** Full wire path, as for `UnknownPropertyViolation.field`. */
+  field: string;
+  /** Structural path of the property itself (`tl_edit_file.edits[].precondition`). */
+  structPath: string;
+  /** What the property accepts, in words: `a string`, `one of "a", "b"`. */
+  expected: string;
+  /** The closed value set, when there is one (advertised values only). */
+  allowed?: readonly string[];
+  /** <= 1 allowed value close to the one sent. */
+  didYouMean?: string;
+}
+
+export interface ValueValidationOptions {
+  /**
+   * Closed value sets for string properties whose advertised schema states
+   * the set in prose rather than as an `enum` (`edits[].target`: "\"all\"").
+   * Keyed by structural path.
+   */
+  readonly extraEnums?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Values dispatch still accepts for compatibility although the advertised
+   * enum omits them (`content:"defer"`). Accepted, never suggested. Keyed by
+   * structural path.
+   */
+  readonly compatibilityValues?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Value shapes accepted at a path IN ADDITION to the declared type, because
+   * dispatch's tolerant-wire layer (`server.ts` normalizeWireArgs) repairs
+   * them on purpose (field-reported near-misses, replay corpus group c2):
+   *  - `"number"`: a finite number where a string is declared (the artifact
+   *    reader stringifies `select.pages[]` / `select.slides[]`);
+   *  - `"numeric-string"`: a decimal digit string where a number is declared
+   *    (`"8000"` for `budget.bytes`);
+   *  - `"boolean-string"`: `"true"`/`"false"`/`"1"`/`"0"`/`"yes"`/`"no"`
+   *    where a boolean is declared (`scope.regex`);
+   *  - `"string"`: a lone string where an array of strings is declared
+   *    (`queries:"needle"` is one query).
+   * Keyed by structural path.
+   */
+  readonly alternativeTypes?: Readonly<Record<string, readonly AlternativeValueType[]>>;
+  /** Structural paths dispatch validates itself with its own aliases (skipped here). */
+  readonly skipPaths?: ReadonlySet<string>;
+}
+
+export type AlternativeValueType = "number" | "numeric-string" | "boolean-string" | "string";
+
+const BOOLEAN_STRINGS: ReadonlySet<string> = new Set(["true", "false", "1", "0", "yes", "no"]);
+
+function matchesAlternative(value: unknown, alternative: AlternativeValueType): boolean {
+  switch (alternative) {
+    case "number": return typeof value === "number" && Number.isFinite(value);
+    case "numeric-string": return typeof value === "string" && /^\d+$/.test(value.trim());
+    case "boolean-string": return typeof value === "string" && BOOLEAN_STRINGS.has(value.trim().toLowerCase());
+    case "string": return typeof value === "string";
+  }
+}
+
+function typesOf(node: SchemaNode): readonly string[] | undefined {
+  if (typeof node.type === "string") return [node.type];
+  if (Array.isArray(node.type)) return node.type as readonly string[];
+  if (node.properties !== undefined) return ["object"];
+  if (node.items !== undefined) return ["array"];
+  return undefined;
+}
+
+function matchesType(value: unknown, type: string): boolean {
+  switch (type) {
+    case "string": return typeof value === "string";
+    case "number": return typeof value === "number" && Number.isFinite(value);
+    case "integer": return typeof value === "number" && Number.isInteger(value);
+    case "boolean": return typeof value === "boolean";
+    case "array": return Array.isArray(value);
+    case "object": return isPlainObject(value);
+    default: return true;
+  }
+}
+
+const TYPE_WORDS: Readonly<Record<string, string>> = {
+  string: "a string", number: "a number", integer: "an integer", boolean: "a boolean (true/false)",
+  array: "an array", object: "an object",
+};
+
+/**
+ * The allowed value closest to `value`: an exact case-insensitive match
+ * first, then the nearest by Damerau-Levenshtein within a length-scaled
+ * threshold — the larger of DID_YOU_MEAN_MAX_DISTANCE and a quarter of the
+ * value's length (3 for the 12-character `expected-sha`, which is 3 edits
+ * from `expected-hash`). Undefined when nothing qualifies.
+ */
+export function nearestAllowedValue(value: unknown, allowed: readonly string[]): string | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  const lower = value.toLowerCase();
+  const folded = allowed.find((candidate) => candidate.toLowerCase() === lower);
+  if (folded !== undefined) return folded;
+  const threshold = Math.max(DID_YOU_MEAN_MAX_DISTANCE, Math.floor(value.length / 4));
+  let best: string | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of allowed) {
+    const distance = damerauLevenshtein(lower, candidate.toLowerCase());
+    if (distance > threshold) continue;
+    if (distance < bestDistance || (distance === bestDistance && best !== undefined && candidate < best)) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * Recursive VALUE validation over the same declared shapes
+ * `findUnknownProperties` walks. Absent (`undefined`) and `null` values are
+ * skipped — a client that serialises an unset optional property as `null`
+ * means "not given", which is what dispatch already reads it as. Keys the
+ * shape does not declare are skipped too (name validation owns them), and a
+ * value with the wrong type is not descended into.
+ */
+export function findInvalidValues(
+  tool: string,
+  properties: Record<string, SchemaNode>,
+  args: Record<string, unknown>,
+  options: ValueValidationOptions = {},
+): InvalidValueViolation[] {
+  const violations: InvalidValueViolation[] = [];
+  const walk = (node: SchemaNode, value: unknown, wirePath: string, structPath: string): void => {
+    if (value === undefined || value === null) return;
+    if (options.skipPaths?.has(structPath) === true) return;
+    if ((options.alternativeTypes?.[structPath] ?? []).some((alternative) => matchesAlternative(value, alternative))) return;
+    const declaredEnum = options.extraEnums?.[structPath]
+      ?? (node.enum?.every((member) => typeof member === "string") ? node.enum as readonly string[] : undefined);
+    if (declaredEnum !== undefined) {
+      const compatible = options.compatibilityValues?.[structPath] ?? [];
+      if (typeof value === "string" && (declaredEnum.includes(value) || compatible.includes(value))) return;
+      const suggestion = nearestAllowedValue(value, declaredEnum);
+      violations.push({
+        field: wirePath,
+        structPath,
+        expected: `one of ${declaredEnum.map((member) => JSON.stringify(member)).join(", ")}`,
+        allowed: declaredEnum,
+        ...(suggestion !== undefined ? { didYouMean: suggestion } : {}),
+      });
+      return;
+    }
+    const types = typesOf(node);
+    if (types !== undefined) {
+      if (!types.some((type) => matchesType(value, type))) {
+        violations.push({
+          field: wirePath,
+          structPath,
+          expected: types.map((type) => TYPE_WORDS[type] ?? type).join(" or "),
+        });
+        return;
+      }
+    }
+    if (Array.isArray(value)) {
+      const items = node.items;
+      if (items === undefined) return;
+      value.forEach((entry, index) => walk(items, entry, `${wirePath}[${index}]`, `${structPath}[]`));
+      return;
+    }
+    if (isPlainObject(value) && node.properties !== undefined) {
+      for (const key of Object.keys(value)) {
+        const child = node.properties[key];
+        if (child === undefined) continue;
+        walk(child, value[key], wirePath.length > 0 ? `${wirePath}.${key}` : key, `${structPath}.${key}`);
+      }
+    }
+  };
+  for (const key of Object.keys(args)) {
+    const child = properties[key];
+    if (child === undefined) continue;
+    walk(child, args[key], key, `${tool}.${key}`);
+  }
+  return violations;
+}
+
+/**
+ * The refusal for a non-empty value-violation list. `code:"invalid-input"`
+ * is the A.7.1 request-shape member every other value refusal already uses
+ * (an unknown `action`, `comments must be elide or keep`); `keys` carries the
+ * allowed values when the property has a closed set — the same slot the
+ * unknown-`action` refusal fills with the action list.
+ */
+export function invalidValueRefusal(
+  tool: string,
+  violations: readonly InvalidValueViolation[],
+): Record<string, unknown> | null {
+  if (violations.length === 0) return null;
+  const first = violations[0]!;
+  return {
+    ok: false,
+    code: "invalid-input",
+    field: first.field,
+    // `fields` is the refusal's typed list slot (the unknown-property refusal
+    // fills it the same way): every invalid path, so a batch is fixed in one
+    // retry rather than one round trip per item.
+    ...(violations.length > 1 ? { fields: violations.map((violation) => violation.field) } : {}),
+    ...(first.didYouMean !== undefined ? { did_you_mean: first.didYouMean } : {}),
+    ...(first.allowed !== undefined ? { keys: [...first.allowed] } : {}),
+    retry: "call",
+    error: `${first.field} must be ${first.expected}`,
+    detail: `${tool} refused this value before running (an out-of-schema value is never ignored); re-issue with a valid one`,
+  };
 }

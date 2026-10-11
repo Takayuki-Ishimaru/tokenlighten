@@ -186,7 +186,12 @@
  *       trace-only: no wire kind, no wire field, no tool argument, and the
  *       seam is wrapped so any IR failure degrades to a trace line. With the
  *       flag unset the seam is not entered at all, so the pack bytes are
- *       identical).
+ *       identical),
+ *       TL_EFF_LIGHT_ANSWER (2026-10-10, small-task cost: a fresh answer
+ *       question about one small, self-contained file skips the pathless
+ *       locator and is built by the seeded builder and certification tail a
+ *       caller-supplied target takes; its one evidence row omits `why` and
+ *       `symbol`. No kind, field or tool argument; unset, byte-identical).
  *
  *       v0.15 W-CORE-FLAGS (2026-09-02): the Semantic Frontier v2 program's
  *       ten registered flags -- TL_SF_STATEFUL, TL_SF_DEMOTE,
@@ -208,6 +213,10 @@
  *       TL_UNREAD_NOTE_MAX_HUNK_LINES. The W15 variables tune established
  *       read/edit response content within the frozen v1 families; defaults are
  *       the supported production posture and explicit overrides are operational.
+ *       TL_STARTUP_WARMUP (2026-10-10, default ON; `0` disables) is the
+ *       post-handshake startup warm-up (util/startupWarmup.ts): process-local
+ *       CPU work in idle time that reads no request, writes nothing and
+ *       prints nothing, so no response byte depends on it.
  *
  *   (C) elsewhere in the tree, recorded here so the inventory is complete:
  *       TL_INDEX_CONSISTENCY_SCAN (v0.11.0, V11-09: skeleton-engine's
@@ -739,6 +748,21 @@ export function traceEnabled(): boolean {
 }
 
 /**
+ * D10 (C): startup warm-up (util/startupWarmup.ts), default ON. Once the
+ * client has completed the MCP handshake, the server uses the idle time
+ * before its first tools/call to pre-pay the one-time costs of a first task
+ * pack: the tree-sitter runtime, the grammars of the workspace's most common
+ * source languages, and the first run of the request analyses every task
+ * pack performs. Operational only: it reads no request, writes no state,
+ * store, journal, ledger, handle, usage record or file, prints nothing, and
+ * stops at the first tools/call, so no response byte depends on it. Explicit
+ * `0`/`off` disables it.
+ */
+export function startupWarmupEnabled(): boolean {
+  return parseBool(process.env["TL_STARTUP_WARMUP"], true);
+}
+
+/**
  * v0.13 proof-carrying completion is a correctness fence, so it defaults on.
  * OFF remains a short-lived incident escape hatch and an ON/OFF parity seam.
  */
@@ -1050,6 +1074,7 @@ export function activeExperimentFlags(): readonly string[] {
   if (effFindPhraseEnabled()) active.push("TL_EFF_FIND_PHRASE");
   if (effHubWholeEnabled()) active.push("TL_EFF_HUB_WHOLE");
   if (effEditNoteEnabled()) active.push("TL_EFF_EDIT_NOTE");
+  if (effLightAnswerEnabled()) active.push("TL_EFF_LIGHT_ANSWER");
   return active;
 }
 
@@ -2348,4 +2373,22 @@ export function effHubWholeEnabled(): boolean {
  */
 export function effEditNoteEnabled(): boolean {
   return parseBool(process.env["TL_EFF_EDIT_NOTE"], false);
+}
+
+/**
+ * TL_EFF_LIGHT_ANSWER (2026-10-10, small-task cost): the light answer path.
+ * An answer question about ONE small file — a fresh `task.epoch:"new"` call
+ * naming exactly one existing file (one `targets[]` path, or one directory-
+ * qualified path in the query) of at most 4 KiB and 120 lines, in TypeScript,
+ * JavaScript, Python, Go, Rust or Ruby, that names no other module and asks one
+ * thing about code the file itself contains — skips the pathless locator and
+ * is built by the seeded builder and certification tail a caller-supplied
+ * target takes; the response leaves out the evidence row's `why` and `symbol`.
+ * The decision, certificate and every frozen member are the shared tail's own.
+ * Anything else, and everything with the flag OFF (the default), takes the full
+ * pipeline byte-for-byte. See features/task-pack/lightAnswer.ts and
+ * readCodeTaskPack.ts `lightAnswerTarget`.
+ */
+export function effLightAnswerEnabled(): boolean {
+  return parseBool(process.env["TL_EFF_LIGHT_ANSWER"], false);
 }

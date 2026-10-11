@@ -250,7 +250,13 @@ describe.each([
     const entry = commentedEntry(res);
     expect(entry, JSON.stringify(res)).toBeDefined();
     const content = entry!["content"] as string;
-    expect(ELISION_MARKER_RE.test(content), `precondition: this fixture really does elide by default: ${content}`).toBe(true);
+    // TL-REVIEW-2 (2026-10-06): the default serve DOES elide the doc comment —
+    // it is disclosed in the entry's `elided` window, and the content is the
+    // symbol's faithful code lines (no marker, no comment text).
+    const elided = entry!["elided"];
+    expect(Array.isArray(elided) && elided.length > 0, `precondition: this fixture really does elide by default: ${JSON.stringify(entry)}`).toBe(true);
+    expect(ELISION_MARKER_RE.test(content)).toBe(false);
+    expect(content).not.toContain("doc comment content line 0");
   });
 
   it("CONTROL — comments:\"keep\" alone (no content:\"full\") already worked and must keep working", async () => {

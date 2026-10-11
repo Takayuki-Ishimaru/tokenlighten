@@ -35,7 +35,7 @@ describe("tl-agents CLI argument parsing", () => {
     expect(parseArgs(["node", "cli.js", "update", "--profile", "medium"]).profile).toBe("medium");
   });
 
-  it("leaves profile undefined when the flag is omitted (injectAll applies the full default)", () => {
+  it("leaves profile undefined when the flag is omitted (injectAll applies the compact default)", () => {
     expect(parseArgs(["node", "cli.js", "update"]).profile).toBeUndefined();
   });
 

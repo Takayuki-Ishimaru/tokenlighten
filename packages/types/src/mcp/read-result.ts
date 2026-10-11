@@ -325,9 +325,16 @@ export type BatchEntry =
       purpose?: string;
       content: string;
       truncated: boolean;
+      /** TL-REVIEW-2: comment-only windows elided by the default comment policy — see `Evidence.elided`. */
+      elided?: string[];
     }
 
-  /** today's mode=handles — `ReadCodeHandlesBatchResponseItem` (read-edit.ts:59-66) */
+  /**
+   * today's mode=handles — `ReadCodeHandlesBatchResponseItem` (read-edit.ts:59-66).
+   * TL-REVIEW-2 (2026-10-06): also the form a whole-file (`file`) entry takes
+   * once comment blocks are elided — one entry per faithful source range on
+   * the file's handle, `content` always equal to the source lines of `range`.
+   */
   | {
       form: "handle";
       handle: string;
@@ -336,6 +343,8 @@ export type BatchEntry =
       content: string;
       truncated: boolean;
       sha: string;
+      /** TL-REVIEW-2: comment-only windows elided by the default comment policy — see `Evidence.elided`. */
+      elided?: string[];
     }
 
   /** today's mode=full batch, SUCCESS arm — the fields a single-path

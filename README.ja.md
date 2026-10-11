@@ -17,22 +17,22 @@
 
 公開するツールは`tl_read_file`、`tl_search_files`、`tl_edit_file`の3つです。
 
-## v0.15.1 リリース
+## v0.15.2 リリース
 
-**パブリックベータ。** TokenLighten v0.15.1では、コードの説明や計算に必要な根拠の収集を改善し、タスクパックの探索をワークスペース内に限定し、編集の再送時にも記録済みの結果を返します。MCPツールは引き続き3つで、サーバーはデフォルトで読み取り専用です。フィードバックに応じて、インターフェースや対応ワークフローが変更される場合があります。
+**パブリックベータ。** TokenLighten v0.15.2では、セットアップ時のガイドを短くし、ソース行の正確さ、日本語の質問解釈、検索の継続取得を改善しました。MCPツールは引き続き3つで、サーバーはデフォルトで読み取り専用です。フィードバックに応じて、インターフェースや対応ワークフローが変更される場合があります。
 
-v0.15.1の主な変更点は次のとおりです。
+v0.15.2の主な変更点は次のとおりです。
 
-- 回答パックが質問に関係する関数の本体を全体で返すとき、その関数が読む定数もimport・別名・再エクスポートの先まで追跡します。
-- `retry`のように関数名を明示した質問では、`retryDelay`のような似た名前と取り違えません。
-- 複数の関数の呼び出し元を尋ねた場合、名前を挙げた各対象を保持します。
-- 「edge cases」や「金額」のような説明の観点を、見つからないコードとして誤報しません。
-- ワークスペース外へ向かうimportやシンボリックリンクを、タスクパックが読み取りません。
-- 同じ`operation_id`で編集を再送すると、元の編集後テキストと、ファイルがその結果と今も一致するかを返します。
+- Claude Code・Codex・GitHub Copilot向けセットアップで、共通ガイドの既定を`compact`にしました。明示的なガイド選択は優先します。
+- Claude CodeはTokenLightenを起動時に読み込み、Codexの生成設定は初回のツール一覧取得を待ちます。
+- コメントを省略した場合もソース行と範囲が一致し、再読取では指定したコメント表示を尊重します。
+- 日本語の説明・戻り値の質問で、コードが見つからないという誤報を減らしました。
+- テキスト検索・ワークスペース一覧・アーカイブ内一覧を、指定した予算に応じて継続取得できます。
+- 不正なリクエストは、編集やタスク状態の更新前に拒否します。
 
 公開リリースには、CLI・MCPサーバー・Node.jsランタイムを同梱した4種類のインストール用アーカイブ（win-x64、darwin-arm64、darwin-x64、linux-x64）、ソースコードと公開パッケージテスト、単体で動作するVSIX形式のVS Code拡張機能が含まれます。デスクトップアプリケーションは含まれません。
 
-**更新手順：** v0.15.1のアーカイブまたはVSIXを導入し、`tl workspace setup`または**このワークスペースをセットアップ**を再実行してください。その後、新しいエージェントセッションを開始するかMCPクライアントを再接続してください。正式なリクエスト項目とツール名はv0.15.0から変更ありません。更新手順と既知の制限は、[v0.15.1リリースノート](release-docs/github-release-v0.15.1.md)を参照してください。
+**更新手順：** v0.15.2のアーカイブまたはVSIXを導入し、`tl workspace setup`または**このワークスペースをセットアップ**を再実行してください。その後、新しいエージェントセッションを開始するかMCPクライアントを再接続してください。正式なリクエスト項目とツール名はv0.15.1から変更ありません。更新手順と既知の制限は、[v0.15.2リリースノート](release-docs/github-release-v0.15.2.md)を参照してください。
 
 ## TokenLightenを使う理由
 
@@ -50,7 +50,7 @@ TokenLightenは、複数のファイル、パッケージ、文書形式にま�
 
 ### 削減効果の目安（v0.15.0）
 
-以下はv0.15.0での観察結果であり、v0.15.1を新たに測定した結果ではありません。
+以下はv0.15.0での観察結果であり、v0.15.2を新たに測定した結果ではありません。
 
 #### Sonnetでの比較
 
@@ -109,7 +109,7 @@ VS Code拡張機能を使いたい場合は、次の節を参照してくださ�
 
 ## VS Code拡張機能をインストールする（ビルド不要）
 
-v0.15.1のGitHub Releaseから[tokenlighten-vscode-extension-0.15.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.1/tokenlighten-vscode-extension-0.15.1.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
+v0.15.2のGitHub Releaseから[tokenlighten-vscode-extension-0.15.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.2/tokenlighten-vscode-extension-0.15.2.vsix)をダウンロードしてください。Node.jsの導入やソースからのビルドは不要です。このリリースにはOS固有のネイティブバイナリが含まれないため、Windows、macOS、Linuxで同じVSIXを使用します。
 
 インストール手順は次のとおりです。
 
@@ -120,7 +120,7 @@ v0.15.1のGitHub Releaseから[tokenlighten-vscode-extension-0.15.1.vsix](https:
 ターミナルからインストールすることもできます。
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.15.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.2.vsix
 ```
 
 信頼済みのプロジェクトフォルダを開き、TokenLightenビューから**このワークスペースをセットアップ**を選択します。VSIXにはCLI、MCPサーバー、パーサー、必要なアセットが含まれるため、別途グローバルインストールする必要はありません。この操作は、上記のアーカイブと同じマシン単位のインストール（`tl install --from-extension`）を実行し、現在のワークスペースをセットアップしますが、このマシン上のClaude CodeやCodexなど他のホストは登録しません（`--clients none`）。これらを登録するには、`tl clients activate`を実行するか、アーカイブの`tl-setup`を使用してください。
@@ -156,7 +156,7 @@ tl workspace setup
 
 `tl workspace setup`は、ワークスペースのMCP設定とAGENTS.md/CLAUDE.md内のTokenLightenガイドブロックを管理します。対応エージェントがセッションをまたいで現在のツール操作手順を参照できるよう、ガイドブロックを残してください。詳しい設定方法と、`tl clients activate`によるマシン全体へのクライアント登録は、[はじめに](release-docs/getting-started.md#set-up-a-workspace)を参照してください。
 
-共通ガイドは、依頼全文を`tl_read_file`へ渡し、所在不明のファイルを探索して、取得済みの本文を再利用する手順をCodex・Claude Codeへ提供します。CodexはAGENTS.mdの管理ブロック、Claude CodeはCLAUDE.mdの参照経路を使います。実行環境を更新した後、対象クライアントの`tl workspace setup`を再実行し、新しいセッションを開始してください。削減効果はタスク、クライアント、モデルにより異なります。
+共通ガイドは、すべてのツールサーフェスで`compact`を既定とします。依頼全文を`tl_read_file`へ渡し、所在不明のファイルを探索して、取得済みの本文を再利用する手順をCodex・Claude Codeへ提供します。長いガイドを使う場合は`--guide-profile full`または`medium`を明示してください。CodexはAGENTS.mdの管理ブロック、Claude CodeはCLAUDE.mdの参照経路を使います。実行環境を更新した後、対象クライアントの`tl workspace setup`を再実行し、新しいセッションを開始してください。削減効果はタスク、クライアント、モデルにより異なります。
 
 VS Code向けセットアップは、通常のAgentの新規ローカルチャットへTLの初回読取・再読回避手順を渡すSessionStartフックも作成します。信頼済みワークスペースで`chat.useHooks`が有効、かつ`node`がPATH上にあることが条件です。ツールや承認設定は変更せず、既存フックとユーザー編集を保持します。フックを作成・更新しない場合は`tl workspace setup --clients vscode --copilot-session-context keep`を使ってください。
 

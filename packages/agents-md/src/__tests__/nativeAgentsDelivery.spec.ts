@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 describe("native AGENTS.md delivery", () => {
-  it("writes the full canonical guide to the autoloaded primary file without stubs", async () => {
+  it("writes the default compact guide to the autoloaded primary file without stubs", async () => {
     const repo = makeTempRepo();
 
     const result = await injectAll({
@@ -30,6 +30,6 @@ describe("native AGENTS.md delivery", () => {
     });
 
     expect(result.wrote).toEqual(["AGENTS.md"]);
-    expect(readFileSync(join(repo, "AGENTS.md"), "utf8")).toBe(renderCanonicalBlock());
+    expect(readFileSync(join(repo, "AGENTS.md"), "utf8")).toBe(renderCanonicalBlock("en", undefined, "compact"));
   });
 });

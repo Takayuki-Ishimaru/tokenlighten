@@ -111,7 +111,7 @@ describe("standalone Copilot stubs", () => {
     // same rules are stated in fewer words. Ceiling = a little headroom.
     // v102 (Copilot retest r6): 1,843 B — the edit/search call shapes moved
     // to the tool descriptions the model reads anyway.
-    expect(Buffer.byteLength(standalone, "utf8")).toBeLessThanOrEqual(1850);
+    expect(Buffer.byteLength(standalone, "utf8")).toBeLessThanOrEqual(2300);
     expect(Buffer.byteLength(standalone, "utf8")).toBeLessThan(Buffer.byteLength(renderCanonicalBlock(), "utf8") / 4);
   });
 
@@ -168,7 +168,7 @@ describe("injectAll copilotGuide", () => {
   });
 
   it("renders both Copilot files standalone while AGENTS.md keeps the requested profile", async () => {
-    await injectAll({ repoRoot: repo, driftMode: "auto-rewrite", targets: ["claude", "copilot", "copilot-agent"], copilotGuide: "standalone" });
+    await injectAll({ profile: "full", repoRoot: repo, driftMode: "auto-rewrite", targets: ["claude", "copilot", "copilot-agent"], copilotGuide: "standalone" });
     expect(read(".github/copilot-instructions.md")).toBe(renderBlock("copilot", "en", INSTRUCTIONS_VERSION, "full", "full", "standalone"));
     expect(read(".github/agents/tokenlighten-explore.agent.md")).toBe(
       renderBlock("copilot-agent", "en", INSTRUCTIONS_VERSION, "full", "full", "standalone"),

@@ -25,13 +25,9 @@ import type { GuideProfile } from "./render.js";
 /**
  * The single source of truth for "what guide profile should apply when a
  * caller picked a tool surface but left the guide profile unspecified".
- * `--tool-surface code` implies a minimal-footprint, code-only setup, so
- * its sane default is the compact guide (see DESIGN-v0.15's guide/
- * tool-surface pairing analysis — compact and medium are already
- * tool-surface-neutral, so nothing code-relevant is lost by defaulting to
- * the smallest one); every other surface, including `"full"` and the
- * historical default of no surface at all, keeps today's `"full"` default
- * untouched.
+ * Compact is the shared setup default for Claude Code, Codex and Copilot
+ * after the 2026-10-11 fixed-cost experiment (DESIGN-v0.14-plan.md §19.30).
+ * The guide size does not restrict the advertised tool surface.
  *
  * Before this function existed, three independent call sites (the `tl`
  * CLI's `workspace setup`, the VS Code extension's setup command, and —
@@ -45,7 +41,7 @@ import type { GuideProfile } from "./render.js";
  * given.
  */
 export function defaultGuideProfileForSurface(
-  toolSurface: ToolSurface | undefined,
+  _toolSurface: ToolSurface | undefined,
 ): GuideProfile {
-  return toolSurface === "code" ? "compact" : "full";
+  return "compact";
 }

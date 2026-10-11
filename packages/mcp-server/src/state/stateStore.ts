@@ -200,6 +200,12 @@ export class WorkspaceStateStore {
   private _records = new Map<string, StoredRecord>();
   private _operations = new Map<string, { value: string; atMs: number }>();
   private _journalLines = 0;
+  /**
+   * The on-disk fingerprint (`_diskFingerprint`) this instance's in-memory
+   * state is known to match, or undefined when unknown. See `_resyncLocked`.
+   */
+  private _diskStamp: string | undefined;
+  private _fullLoads = 0;
 
   private constructor(dir: string) {
     this.dir = dir;
@@ -280,6 +286,9 @@ export class WorkspaceStateStore {
     for (const name of [SNAPSHOT_FILE, JOURNAL_FILE]) this._preserve(name);
     this._epoch = randomBytes(4).toString("hex");
     this._writeMeta();
+    // Only ever called under the writer lock: the fresh, empty disk state is
+    // exactly the in-memory one.
+    this._diskStamp = this._diskFingerprint();
   }
 
   private _writeMeta(): void {
@@ -304,6 +313,12 @@ export class WorkspaceStateStore {
    * on this single-threaded call stack between the failure and the reset.
    */
   private _tryPlainLoad(): boolean {
+    this._fullLoads += 1;
+    // Taken BEFORE reading: a lock-free load that races a writer then holds
+    // at least the stamped state, so the next resync reloads rather than
+    // trusting a stamp newer than what was read.
+    const stamp = this._diskFingerprint();
+    this._diskStamp = undefined;
     let epoch: string | undefined;
     try {
       // served-bytes: not-served (TokenLighten's OWN session meta file, never a caller's file)
@@ -329,7 +344,42 @@ export class WorkspaceStateStore {
       return false;
     }
     this._expireNow();
+    this._diskStamp = stamp;
     return true;
+  }
+
+  /**
+   * meta.json's CONTENT plus dev:ino:size:mtime of snapshot and journal (`-`
+   * when absent). Every mutation any instance makes changes it: an append
+   * grows the journal, a compaction renames a new snapshot into place (new
+   * inode) and truncates the journal, a reset moves the snapshot/journal aside
+   * and rewrites meta under a new epoch. Meta is compared by content because
+   * `_writeMeta` rewrites it IN PLACE at a fixed size: on a filesystem with
+   * coarse mtimes a reset of a store with no snapshot or journal yet would
+   * otherwise leave every stat field unchanged (EVO-X2 review, 2026-10-10).
+   */
+  private _diskFingerprint(): string {
+    let meta: string;
+    try {
+      // served-bytes: not-served (TokenLighten's OWN session meta file, never a caller's file)
+      meta = readFileSync(this._path(META_FILE), "utf8");
+    } catch {
+      meta = "-";
+    }
+    const stats = [SNAPSHOT_FILE, JOURNAL_FILE].map((name) => {
+      try {
+        const stat = lstatSync(this._path(name), { bigint: true });
+        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+      } catch {
+        return "-";
+      }
+    });
+    return [meta, ...stats].join("|");
+  }
+
+  /** Test hook: how many full disk loads this instance has run. */
+  get fullLoadsForTests(): number {
+    return this._fullLoads;
   }
 
   /** True when META_FILE currently holds a well-formed `{v:1, epoch}`. Used
@@ -385,7 +435,24 @@ export class WorkspaceStateStore {
    * failure at this point is real corruption, never another writer's
    * torn-in-flight append.
    */
+  /**
+   * Pull in every other instance's committed writes before a locked mutation.
+   *
+   * 2026-10-10 (v0.15.1 review, local processing time): this used to re-read
+   * meta + snapshot + the WHOLE journal on every put/delete, so a write cost
+   * grew with the journal (measured 0.5 ms per put at 50 lines to 5.4 ms at
+   * 500, the compaction threshold) and a task_pack call makes about a dozen
+   * of them. Under the writer lock nobody else can be writing, so when the
+   * disk fingerprint still equals the one this instance last synced (its own
+   * load, append, compaction or reset), the in-memory state IS the disk
+   * state and only expiry needs to run; any foreign write, compaction or
+   * reset changes the fingerprint and takes the full reload as before.
+   */
   private _resyncLocked(): void {
+    if (this._diskStamp !== undefined && this._diskStamp === this._diskFingerprint()) {
+      this._expireNow();
+      return;
+    }
     if (this._tryPlainLoad()) return;
     this._resetToEmpty();
   }
@@ -653,16 +720,23 @@ export class WorkspaceStateStore {
   private _appendRaw(line: JournalLine): boolean {
     try {
       const payload = `${JSON.stringify(line)}\n`;
+      // Every caller holds the writer lock and has just resynced, so a
+      // defined stamp is the current disk state and this append is the only
+      // change to it; an undefined one stays undefined (the next resync
+      // reloads).
+      const synced = this._diskStamp !== undefined;
       appendFileSync(
         this._path(JOURNAL_FILE),
         this._journalMissingTrailingNewline() ? `\n${payload}` : payload,
         { encoding: "utf8", mode: FILE_MODE },
       );
       this._journalLines += 1;
+      this._diskStamp = synced ? this._diskFingerprint() : undefined;
       return true;
     } catch {
       // A store that cannot be written is a store that must stop claiming to
       // remember anything.
+      this._diskStamp = undefined;
       this._available = false;
       return false;
     }
@@ -719,7 +793,11 @@ export class WorkspaceStateStore {
       renameSync(tmp, this._path(SNAPSHOT_FILE));
       writeFileSync(this._path(JOURNAL_FILE), "", { encoding: "utf8", mode: FILE_MODE });
       this._journalLines = 0;
+      // Built from a resynced `_records` under the lock (see the doc above),
+      // so the published snapshot plus the empty journal is this memory.
+      this._diskStamp = this._diskFingerprint();
     } catch {
+      this._diskStamp = undefined;
       try {
         rmSync(tmp, { force: true });
       } catch {

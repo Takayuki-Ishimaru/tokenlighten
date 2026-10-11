@@ -28,7 +28,7 @@ OPTIONS (for update)
                      Valid values: ${VALID_TARGETS.join(", ")}
                      Default: all 5 targets
   --locale <locale>  Template language: ${VALID_LOCALES.join(" (default) or ")}
-  --profile <profile> Guide profile: ${VALID_PROFILES.join(", ")} (default: full)
+  --profile <profile> Guide profile: ${VALID_PROFILES.join(", ")} (default: compact)
   --force            Overwrite even when manual edits detected inside the block
   --check            Use fail-build drift mode (same as \`tl-agents check\`)
 

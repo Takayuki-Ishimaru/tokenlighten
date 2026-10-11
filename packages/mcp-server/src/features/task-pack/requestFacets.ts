@@ -72,6 +72,7 @@
 
 import { isProseAcronym } from "./concernRecovery.js";
 import { stripPathSpans } from "../../util/queryShape.js";
+import { languageForPath } from "../../util/languages.js";
 import { JA_GLOSSARY } from "../retrieval/jaGlossary.js";
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,16 @@ export interface FacetRequirement {
    * carries as data (Copilot retest r2, 2026-10-02).
    */
   readonly subjectCallables?: readonly string[];
+  /**
+   * 2026-10-10 (false flow gaps): the `subjectTerms` entries that name no
+   * POINT of the clause — a word only the paths it names contribute, the verb
+   * of its "how … work(s)" frame, a flow / explanation-kind noun or a
+   * declaration-kind noun (see `nonPointTermsIn`). Present on a `flow`
+   * requirement only, and read only by the flow facet's member grounding over
+   * a type (readCodeTaskPack.ts `flowStepWindowsForNonCallableFocal`); every
+   * other reader of `subjectTerms` is unchanged. Absent = none.
+   */
+  readonly nonPointTerms?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -394,8 +405,11 @@ const VALUE_PERCENTAGE_RATE_RE = /\bwhat(?:'s|\s+is)\s+the\b(?:\s+\w+){0,3}?\s+(
 // TIMEOUT") named no value facet at all, because 既定 was never bare and
 // "既定タイムアウト" contains no 値. Bare, exactly like デフォルト/上限/下限
 // already are, closes the same gap for any noun that follows.
+// 2026-10-10: 数を教えて counts only as its own word — not the tail of 関数 /
+// 引数 / 変数 (「retry 関数を教えて」 asks for the function, and minted a value
+// facet whose emptiness was then disclosed).
 const VALUE_BARE_JA_RE =
-  /既定値|既定|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最大|最小値|最小|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|数を教えて|率/;
+  /既定値|既定|デフォルト値|デフォルト|初期値|設定値|上限|下限|最大値|最大|最小値|最小|しきい値|閾値|回数|件数|秒数|いくつ|値|ステータスコード|設定されている|設定されてる|いくら|割り当てられている|割り当てられてる|(?<![関引変])数を教えて|率/;
 // WP-C (2026-09-29, eval-0929 §8, orchestrator chip adopted from WP-B): a
 // relative clause "AがBする<value-shaped noun>" ("the <noun> that A does B
 // to/with") asks about that noun as A's own value/parameter -- the JA
@@ -537,11 +551,61 @@ const VALUE_COMPUTED_JA_RE =
   /何を返|計算結果(?:は|を(?:教えて|知りたい|求めて|出して))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*の(?:計算)?(?:結果|出力)(?:[はと](?![^。？?]*(?:使われ|使って|呼ば|参照|表示|渡さ|受け取))|を(?:具体的に)?(?:教えて|知りたい|求めて|計算))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*(?:を(?:具体的に)?(?:計算|算出|求め)|[はが](?:いくら|何円|何になる))/u;
 
 function isValueClause(guardedClause: string): boolean {
-  return VALUE_BARE_EN_RE.test(guardedClause)
-    || VALUE_COMPUTED_WHAT_DOES_EN_RE.test(guardedClause)
+  return isComputedValueClause(guardedClause) || isValueNounClause(guardedClause);
+}
+
+/** The computed-value frames: what a named callable returns / computes / outputs for the asker. */
+function isComputedValueClause(guardedClause: string): boolean {
+  return VALUE_COMPUTED_WHAT_DOES_EN_RE.test(guardedClause)
     || VALUE_COMPUTED_RESULT_OF_EN_RE.test(guardedClause)
     || VALUE_COMPUTED_IMPERATIVE_EN_RE.test(guardedClause)
-    || VALUE_COMPUTED_JA_RE.test(guardedClause)
+    || VALUE_COMPUTED_JA_RE.test(guardedClause);
+}
+
+// 2026-10-10 re-run: the computed-value frames that ask for a callable's result
+// as such — "What does add return?", "What is the result of f(x)?", 「add は何を
+// 返しますか」 — as opposed to one that names a value of its own in the object
+// slot ("What exact delay sequence does retrySchedule return", "Compute the
+// idle timeout that getStandbyDuration() returns"). See `asksForCallableResult`.
+const VALUE_COMPUTED_PLAIN_WHAT_DOES_EN_RE = new RegExp(
+  `\\bwhat\\s+(?:(?:exactly|precisely|actually|really|else)\\s+)?(?:does|do|did|will|would|should|can|could)\\s+${VALUE_COMPUTED_SUBJECT}(?:\\s+${VALUE_COMPUTED_SUBJECT}){0,3}?`
+    + `\\s+(?:return|compute|output|produce|yield|emit|give(?:\\s+back)?|hand\\s+back)\\b`,
+  "i",
+);
+const VALUE_COMPUTED_NAMED_OBJECT_EN_RE = new RegExp(
+  `\\bthe\\s+(?:[\\w-]+\\s+){1,4}?(?:that|which)\\s+${VALUE_COMPUTED_SUBJECT}(?:\\s+${VALUE_COMPUTED_SUBJECT}){0,3}?`
+    + `\\s+(?:returns?|gives?|yields?|produces?|outputs?|hands?\\s+back|evaluates?\\s+to)\\b`,
+  "i",
+);
+
+/**
+ * 2026-10-10 re-run (FIX for the value facet's `request-item-empty`
+ * disclosure on a return question): true when `clause` asks what a callable
+ * RETURNS or computes as such — "What does the add function return?",
+ * 「src/math.ts の add 関数は何を返しますか？」, "What is the output of
+ * `f(x)`?", "Calculate invoiceAmount(1000)." — and names no value of its own:
+ * no value noun anywhere (default, limit, threshold, value, 既定値, 上限, 回数 …:
+ * every non-computed value frame of `isValueClause`), and no object noun in the
+ * frame's own slot ("What exact delay SEQUENCE does …", "the idle TIMEOUT that
+ * … returns"). The answer to such a question is the callable's served body —
+ * its return expression — so facetGate.ts never discloses "reads no module
+ * constant and holds no literal" for it when that body returns an
+ * expression, while a genuine value question ("What is the timeout value used
+ * by X?", "What is the default value returned by requestTimeout?") still does.
+ * Detection is unchanged: such a clause is still a value facet, so its
+ * closure still fetches the callees and constants the result depends on.
+ */
+export function asksForCallableResult(clause: string): boolean {
+  const guarded = stripGuardedSpans(clause, ALL_NEGATIVE_GUARDS);
+  if (!isComputedValueClause(guarded) || isValueNounClause(guarded)) return false;
+  if (VALUE_COMPUTED_WHAT_DOES_EN_RE.test(guarded) && !VALUE_COMPUTED_PLAIN_WHAT_DOES_EN_RE.test(guarded)) return false;
+  if (VALUE_COMPUTED_NAMED_OBJECT_EN_RE.test(guarded)) return false;
+  return true;
+}
+
+/** Every value frame that names the value it asks for — all of `isValueClause` but the computed-value frames. */
+function isValueNounClause(guardedClause: string): boolean {
+  return VALUE_BARE_EN_RE.test(guardedClause)
     || VALUE_WHICH_WHAT_RE.test(guardedClause)
     || VALUE_ALLOWED_VALID_SUPPORTED_RE.test(guardedClause)
     || VALUE_SET_OR_RESOLVE_EN_RE.test(guardedClause)
@@ -832,17 +896,33 @@ const CALLERS_IMPORT_JA_MIX_RE = /\bimport\b\s*(?:して|してる|している)
 // by any 箇所-qualified or bare-progressive entry above.
 const CALLERS_JA_RE = /呼び出し元|呼び出し箇所|呼び出している箇所|呼んでいる箇所|呼ぶ箇所|使用箇所|使用している箇所|利用箇所|参照箇所|参照元|呼ばれている|呼び出されている|どこから呼ばれ|どこで使われ|どの箇所で使用されて|どこで参照されて|どこでアクセスされて|呼び出すのはどこ|呼び出しているのは|呼ぶのは|呼んでいるのは|依存している|インポートしている|参照している|参照してる|呼び出している|呼び出してる|購読している|購読してる|使っている|使ってる|使用している|使用してる|受け取っている|受け取ってる/;
 
+// v0.15.1 runtime review (2026-10-06): "<value noun> … used by <X>" is the
+// value's PASSIVE AGENT — it names X as the code that uses the value (the
+// value facet reads it exactly so, VALUE_NOUN_PASSIVE_AGENT_EN_RE) — and asks
+// nothing about who calls X. "Explain the timeout and maximum response size
+// used by fetchLatestRelease in src/updateChecker.ts." minted a callers facet
+// for fetchLatestRelease and certified a `request-item-undetermined:callers`
+// gap the question never asked about. Only the agent phrase is blanked, and
+// only for this callers test: "where is X used by …"/"used by which modules"
+// keep their trigger.
+const VALUE_QUANTITY_NOUN_EN = "(?:timeouts?|sizes?|durations?|delays?|intervals?|thresholds?|defaults?|constants?|maximums?|minimums?|caps?|rates?|counts?|amounts?|lengths?|budgets?|retries|attempts?|quotas?|capacit(?:y|ies))";
+const CALLERS_VALUE_AGENT_SPAN_RE = new RegExp(
+  `(\\b(?:${VALUE_NOUN_CLASS}|${VALUE_QUANTITY_NOUN_EN})\\b(?:[^.?!]){0,20}?)\\b(?:used|read|checked|consulted|referenced)\\s+(?:by|from)\\b(?!\\s+(?:which|what|whom?|any|every|all)\\b)`,
+  "gi",
+);
+
 function isCallersClause(guardedClause: string): boolean {
-  return CALLERS_PHRASE_EN_RE.test(guardedClause)
-    || CALLERS_WHO_VERB_RE.test(guardedClause)
-    || CALLERS_WHERE_RE.test(guardedClause)
-    || matchesInCallersDirection(guardedClause, CALLERS_WHICH_VERB_RE)
-    || CALLERS_ANYONE_RE.test(guardedClause)
-    || CALLERS_ROLE_NOUN_EN_RE.test(guardedClause)
-    || isCallersReadClause(guardedClause)
-    || CALLERS_IMPORT_JA_MIX_RE.test(guardedClause)
-    || WHEN_CALLERS_VERB_RE.test(guardedClause)
-    || CALLERS_JA_RE.test(guardedClause);
+  const clause = guardedClause.replace(CALLERS_VALUE_AGENT_SPAN_RE, (span: string, lead: string) => lead + "□".repeat(span.length - lead.length));
+  return CALLERS_PHRASE_EN_RE.test(clause)
+    || CALLERS_WHO_VERB_RE.test(clause)
+    || CALLERS_WHERE_RE.test(clause)
+    || matchesInCallersDirection(clause, CALLERS_WHICH_VERB_RE)
+    || CALLERS_ANYONE_RE.test(clause)
+    || CALLERS_ROLE_NOUN_EN_RE.test(clause)
+    || isCallersReadClause(clause)
+    || CALLERS_IMPORT_JA_MIX_RE.test(clause)
+    || WHEN_CALLERS_VERB_RE.test(clause)
+    || CALLERS_JA_RE.test(clause);
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1167,10 @@ const ANSWER_KIND_DESCRIPTORS_EN: ReadonlySet<string> = new Set([
   // `request-item-absent:impact`).
   "impact", "impacts", "effect", "effects", "influence", "influences", "consequence", "consequences",
   "implication", "implications",
+  // v0.15.1 runtime review TL-REVIEW-4: how a computation treats fractions
+  // ("the rounding of calculateTotal") is an aspect of the answer the served
+  // body shows (`Math.floor(...)`), not a word the source must spell.
+  "rounding", "truncation", "precision",
 ]);
 const ANSWER_KIND_DESCRIPTORS_JA: ReadonlySet<string> = new Set([
   "実装", "一覧", "仕組み", "動作", "挙動", "ロジック", "種類",
@@ -1102,6 +1186,14 @@ const ANSWER_KIND_DESCRIPTORS_JA: ReadonlySet<string> = new Set([
   "金額", "合計", "合計金額", "結果", "計算結果", "実行結果", "戻り値", "返り値", "返却値",
   "出力", "出力値", "計算式", "エッジケース", "コーナーケース", "境界条件", "境界値",
   "特殊ケース", "例外ケース", "異常系", "正常系", "目的", "意味", "違い", "関係", "影響", "概要", "詳細", "説明",
+  // v0.15.1 runtime review TL-REVIEW-4 (2026-10-06): how a computation treats
+  // fractions — 端数処理, 丸め, 切り捨て/切り上げ, 四捨五入 — is an aspect of
+  // the answer the served body shows (`Math.floor(...)`), never a word the
+  // workspace spells: 「billing.ts の calculateTotal の金額計算と端数処理を説明
+  // してください。」 disclosed `request-item-undetermined:端数処理` beside a pack
+  // that served the whole function.
+  "端数", "端数処理", "端数の処理", "端数の扱い", "丸め", "丸め処理", "丸め方", "切り捨て", "切捨て", "切り上げ", "切上げ",
+  "四捨五入", "小数点", "小数点以下", "精度",
 ]);
 
 function anchoredWhole(re: RegExp): RegExp {
@@ -1461,8 +1553,106 @@ export function maskExplanationAspectPhrases(text: string): string {
   return text.replace(EXPLANATION_ASPECT_PHRASE_RE, (m) => " ".repeat(m.length));
 }
 
+// ---------------------------------------------------------------------------
+// 2026-10-10 re-run of the v0.15.1 review questions in Japanese — a REQUEST or
+// POLITENESS PREDICATE closing a clause (「…を教えてください」「…を説明して」
+// 「…を知りたいです」「…について教えて」「…とは何ですか」「…をお願いします」)
+// asks the reader to do something. It never names workspace content and is
+// never part of the point it closes, in any facet kind.
+//
+// Measured: 「WorkspaceWatcherの保存デバウンス時間と監視言語を教えてください。」
+// split into the points 保存デバウンス時間 and 監視言語, and `salientWords`
+// (requestItems.ts) peeled only the inflection 「ください」, so the te-form
+// 教えて survived as a second topic word of the 監視言語 point. A point whose
+// words all reach code through the JA bridge needs two of them evidenced, 教えて
+// is spelled nowhere, and the certificate disclosed
+// `request-item-undetermined:監視言語/教えて` beside a pack that served both
+// constants — while 「…を説明してください」 (a peeled 〜して of a generic noun)
+// and the bare noun phrase certified clean. 「…を知りたいです」/「…について
+// 教えて」 glued the predicate into the noun itself (監視言語を知りたいです), and
+// a facet clause carried it into its subject terms the same way: a flow
+// question about a class disclosed "の処理の流れを教えてください … matches no
+// member of OrderFlow", and 「…を確認してください」 bridged the request verb 確認
+// to the concept "confirm".
+//
+// One closed vocabulary, masked length-preserving (spaces) wherever a clause's
+// SUBJECT words are derived — requestItems.ts `salientWords`/`glossarySeeds`
+// and this module's `conceptTermsIn`/`weakSubjectCandidatesIn` — and never
+// where a facet or an intent is DETECTED: several detectors read the predicate
+// itself (計算結果を教えて, 手順を教えて, 数を教えて), and an item's text stays
+// the verbatim span. A predicate is masked only where it CLOSES its clause
+// (nothing Japanese follows before punctuation, an ASCII token or the end) and
+// only after a particle / topic marker or a non-Japanese boundary, so a
+// compound that merely ends in the same characters (the 示して of 指示して) is
+// never cut out of it, and a predicate inside an explicitly quoted span
+// (TL142-04: a quoted string is verbatim) is left alone.
+// ---------------------------------------------------------------------------
+const JA_SCRIPT_CHARS = "\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}ー々";
+/** What hands a point to its predicate: a case particle or a topic marker (〜について, 〜とは, 〜のことを). */
+const JA_PREDICATE_LEAD = "(?:について(?:は|も)?|に関して(?:は|も)?|とは|って|のこと(?:を|は|が)?|[をはがも])";
+/** Manner adverbs a request verb commonly takes (「…を詳しく教えて」「…をそれぞれ説明して」). */
+const JA_REQUEST_ADVERB = "(?:詳しく|詳細に|簡単に|簡潔に|具体的に|丁寧に|手短に|ざっくり(?:と)?|ざっと|まとめて|すべて|全て|全部|それぞれ|ひとつずつ|一つずつ|順番に|順に|一覧で|改めて|もう一度)";
+/**
+ * Read-request verbs in a request form: the te-form or imperative of
+ * 教える/述べる/調べる/見せる/知らせる/聞かせる/挙げる/示す/読む, and the
+ * suru-nouns of explaining, checking, listing and analysing (a superset of
+ * requestItems.ts's READ_VERB_JA_* lead roots, which decide read leads and are
+ * deliberately narrower).
+ */
+const JA_REQUEST_VERB = "(?:(?:教え|述べ|調べ|見せ|知らせ|聞かせ|挙げ)(?:て|ろ)|示(?:して|せ)|読んで|(?:説明|解説|確認|列挙|紹介|案内|記述|要約|整理|提示|図示|例示|特定|調査|分析|比較|診断|検証|報告)(?:して|しろ|せよ|しなさい))";
+/** What a request te-form takes after it: a polite or benefactive ending, optionally a question and a softener. */
+const JA_REQUEST_ENDING = "(?:くださ(?:い|いませ)|下さい|ほしい|欲しい|もら(?:える|えます|えません|いたい|えない)|いただ(?:ける|けます|けません|きたい)|頂(?:ける|けます|けません|きたい)|くれ(?:る|ます|ません|ない)?|ちょうだい)?(?:です)?(?:か)?(?:と(?:助かります|幸いです|嬉しいです|うれしいです|ありがたいです))?";
+/** "I want to know / understand / see …" (〜を知りたいです). */
+const JA_DESIRE_PREDICATE = "(?:知り|理解し|把握し|確認し|調べ|見|聞き|教わり)たい(?:の|ん)?(?:です|と思います|と思っています)?(?:が|けど)?";
+/** A read request's continuative joining the next clause (「…の役割を確認し、…」). */
+const JA_REQUEST_CONTINUATIVE = "(?:説明|解説|確認|列挙|紹介|整理|調査|分析|比較)し(?=\\s*[、,，])";
+/** The interrogative closing a question (「…は何ですか」「…はいくつありますか」「…は何をしますか」). */
+const JA_QUESTION_PREDICATE = "(?:(?:何|なに|なん|いくつ|いくら|どれ|どこ|どちら|いつ|どう|どのよう|どんな(?:もの)?|どういう(?:もの|こと|意味)?|なぜ|何故)(?:な)?(?:の|ん)?(?:です|でしょう|だ|あります|ある)?(?:か)?|何を(?:する|します|している|しています)(?:の|ん)?(?:です)?(?:か)?)";
+/** A request made with a noun object (「…の説明をお願いします」「…をください」). */
+const JA_ASK_PREDICATE = "(?:(?:の(?:説明|解説|詳細|一覧))?(?:を|が)?お願い(?:します|いたします|致します|できますか|できませんか)?|(?:の(?:説明|解説|詳細|一覧))?を(?:くださ(?:い|いませ)|下さい))";
+const JA_REQUEST_PREDICATE_RE = new RegExp(
+  "(?:"
+    // A request verb, a desire or a continuative — after a lead, or at a non-Japanese boundary.
+    + `(?:${JA_PREDICATE_LEAD}\\s*(?:${JA_REQUEST_ADVERB}\\s*)?|(?<![${JA_SCRIPT_CHARS}])(?:${JA_REQUEST_ADVERB}\\s*)?)`
+    + `(?:${JA_REQUEST_VERB}${JA_REQUEST_ENDING}|${JA_DESIRE_PREDICATE}|${JA_REQUEST_CONTINUATIVE})`
+    // A question's interrogative — after a topic/case particle, or at a non-Japanese boundary.
+    + `|(?:(?:とは|って|は|が)\\s*|(?<![${JA_SCRIPT_CHARS}]))${JA_QUESTION_PREDICATE}`
+    + `|${JA_ASK_PREDICATE}`
+    // A polite question copula, or a topic marker, left closing its clause.
+    + "|(?:です|でしょう)か|(?:について|に関して)(?:は|も)?|とは"
+    + `)(?:ね|よ)?(?=\\s*(?:[^\\s${JA_SCRIPT_CHARS}]|$))`,
+  "gu",
+);
+/** Quoted spans (ASCII quotes and 「」/『』) — verbatim, never masked (TL142-04). */
+const JA_PREDICATE_QUOTED_SPAN_RE = /[`"']([^`"']{2,})[`"']|「([^」]{2,})」|『([^』]{2,})』/gu;
+const JA_PREDICATE_TEST_RE = /[ぁ-んァ-ヶー一-鿿]/u;
+
+/**
+ * `text` with every Japanese request / politeness predicate that closes a
+ * clause replaced by spaces of the same length (see the section comment
+ * above). A stacked predicate peels whole (「…についての説明をお願いします」:
+ * the ask, then the topic marker it leaves closing the clause). Text without
+ * Japanese is returned unchanged.
+ */
+export function maskJapaneseRequestPredicates(text: string): string {
+  if (!JA_PREDICATE_TEST_RE.test(text)) return text;
+  const quoted = [...text.matchAll(JA_PREDICATE_QUOTED_SPAN_RE)].map((m) => ({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
+  let out = text;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = out.replace(JA_REQUEST_PREDICATE_RE, (m: string, ...rest: unknown[]) => {
+      const offset = rest[rest.length - 2] as number;
+      if (m.trim().length === 0) return m;
+      if (quoted.some((span) => offset < span.end && offset + m.length > span.start)) return m;
+      return " ".repeat(m.length);
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 function maskFacetPhrasingIdiomSpans(text: string): string {
-  let out = maskExplanationAspectPhrases(text);
+  let out = maskJapaneseRequestPredicates(maskExplanationAspectPhrases(text));
   for (const re of [FACET_STEP_BY_STEP_IDIOM_RE, FACET_END_TO_END_IDIOM_RE, FACET_IN_ITS_LIFECYCLE_IDIOM_RE, FACET_IN_WHAT_ORDER_IDIOM_RE]) {
     out = out.replace(re, (m) => " ".repeat(m.length));
   }
@@ -1470,7 +1660,7 @@ function maskFacetPhrasingIdiomSpans(text: string): string {
   return out;
 }
 
-/** Concept words in `clause`: EN lowercase stems (length >= 3, minus the grammatical stoplist), plus every jaGlossary.ts term that occurs in `clause` as a substring (its stems). Never proof by themselves — see FacetRequirement's own doc. */
+/** Concept words in `clause`: EN lowercase stems (length >= 3, minus the grammatical stoplist), plus every jaGlossary.ts term that occurs in `clause` as a substring (its stems) outside a request predicate (「…を確認してください」 bridges no "confirm"). Never proof by themselves — see FacetRequirement's own doc. */
 export function conceptTermsIn(clause: string): string[] {
   const out = new Set<string>();
   const masked = maskFacetPhrasingIdiomSpans(clause);
@@ -1480,7 +1670,7 @@ export function conceptTermsIn(clause: string): string[] {
     out.add(stemEn(word));
   }
   for (const [term, stems] of JA_GLOSSARY) {
-    if (!clause.includes(term)) continue;
+    if (!masked.includes(term)) continue;
     for (const stem of stems) out.add(stem);
   }
   return [...out];
@@ -1530,6 +1720,113 @@ export function weakSubjectCandidatesIn(clause: string, explicitIdentifiers: rea
     out.push(token);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-10 (false flow gaps) — the words of a flow clause that name no POINT
+// of the flow.
+//
+// A flow question about a TYPE is judged by the type's members that account
+// for the clause's subject words (readCodeTaskPack.ts
+// `flowStepWindowsForNonCallableFocal`): a word no member carries is disclosed
+// as `request-item-undetermined:flow:<Type> (<words> … match no member of
+// <Type> this pack could serve)`. Measured: 「src/uploader.ts の Uploader クラス
+// の処理の流れを説明してください。」 disclosed "src, flow, クラスの処理の流れ", and
+// "Explain the flow of the Uploader class in src/uploader.ts." disclosed
+// "flow, class, src", beside a pack that served the whole class — every one a
+// word about the QUESTION (the flow descriptor, the declaration kind, the file
+// it is about), none a point of the flow.
+//
+// Three kinds of word name no point, and only these:
+//   - a word only a FILE the request names contributes — a path span's
+//     directories, basename and extension (`stripPathSpans`), or a bare file
+//     name with a known extension — and the verb of a "how … work(s)" frame.
+//     Both are blanked and the clause re-derived, so the same word written
+//     anywhere else in the request stays a point;
+//   - a closed vocabulary of flow / explanation-kind nouns (flow, lifecycle,
+//     steps, logic, 流れ, 処理の流れ, 動き …) and declaration-kind nouns (class,
+//     method, function, クラス, メソッド, 関数 …). A Japanese noun run counts only
+//     when nothing but such nouns and particles is left of it: 「クラスの処理の
+//     流れ」 names no point, 「のアップロード処理の流れ」 still does.
+// Every other subject word stays a point a member must account for — "retry"
+// in "Explain the flow of Uploader.retry in src/uploader.ts." is still
+// disclosed when Uploader has no such member. A clause left with no point word
+// asks for the type's whole flow: every direct member is then a required step
+// (readCodeTaskPack.ts), never "nothing required". The value, condition and
+// callers facets, and every other reader of `subjectTerms`, are unchanged.
+// ---------------------------------------------------------------------------
+
+/** The flow facet's own kind nouns (FLOW_PHRASE_EN_RE's heads) and the explanation-kind nouns (ANSWER_KIND_DESCRIPTORS_EN) a flow question wraps its subject in — "the flow / lifecycle / steps / logic of X". `conceptTermsIn` stems plurals; a weak candidate keeps its own spelling, so both forms are listed. */
+const FLOW_DESCRIPTOR_WORDS_EN: ReadonlySet<string> = new Set([
+  "flow", "flows", "lifecycle", "lifecycles", "sequence", "sequences", "step", "steps",
+  "implementation", "implementations", "behavior", "behaviors", "behaviour", "behaviours",
+  "logic", "mechanism", "mechanisms", "overview",
+]);
+/** The nouns naming which KIND of declaration the subject is ("the Uploader class", "the retry method"). `constructor` is deliberately absent: it is also the name of the member it means. */
+const DECLARATION_KIND_WORDS_EN: ReadonlySet<string> = new Set([
+  "class", "classes", "interface", "interfaces", "struct", "structs", "enum", "enums", "trait", "traits",
+  "method", "methods", "function", "functions", "func", "def", "routine", "routines",
+  "procedure", "procedures", "subroutine", "subroutines",
+]);
+/** JA mirror of FLOW_DESCRIPTOR_WORDS_EN (流れ/手順/順序/動作/挙動/仕組み/実装/概要 as in ANSWER_KIND_DESCRIPTORS_JA, plus 動き, the bare loanword フロー and the bare 処理 a 「…の処理」 flow leaves). */
+const FLOW_DESCRIPTOR_WORDS_JA: ReadonlySet<string> = new Set([
+  "流れ", "フロー", "動き", "動き方", "動作", "挙動", "仕組み", "手順", "順序", "実装", "概要", "処理",
+]);
+/** JA mirror of DECLARATION_KIND_WORDS_EN (コンストラクタ absent for the same reason). */
+const DECLARATION_KIND_WORDS_JA: ReadonlySet<string> = new Set([
+  "クラス", "メソッド", "関数", "インターフェース", "インタフェース", "構造体", "列挙型", "トレイト",
+]);
+/** FLOW_JA_RE's phrases (処理の流れ, 処理フロー, 一連の処理 …), every occurrence. */
+const FLOW_JA_PHRASE_ALL_RE = new RegExp(FLOW_JA_RE.source, "gu");
+/** The particles a Japanese noun run is glued with (「クラスの処理の流れ」「動きと流れ」). */
+const JA_RUN_PARTICLES_RE = /[\sのをはがともでにへや]+/u;
+const CJK_TEXT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+/** True when `term` is a flow / explanation-kind or declaration-kind word — for a Japanese run, when nothing but such nouns and particles is left of it. */
+function isNonPointWord(term: string): boolean {
+  if (CJK_TEXT_RE.test(term)) {
+    return term.replace(FLOW_JA_PHRASE_ALL_RE, " ").split(JA_RUN_PARTICLES_RE).filter((segment) => segment.length > 0)
+      .every((segment) => FLOW_DESCRIPTOR_WORDS_JA.has(segment) || DECLARATION_KIND_WORDS_JA.has(segment));
+  }
+  const lower = term.toLowerCase();
+  return FLOW_DESCRIPTOR_WORDS_EN.has(lower) || DECLARATION_KIND_WORDS_EN.has(lower);
+}
+
+/** A bare file name (no directory) — `uploader.ts`, `upload_service.py`; kept only when `languageForPath` knows its extension. */
+const BARE_FILE_NAME_RE = /(?<![\w$./\\-])[A-Za-z0-9_][\w-]*(?:\.[\w-]+)*\.[A-Za-z][A-Za-z0-9]{0,9}(?![\w$/\\-])/gu;
+/** The verb of a "how … work(s)" frame ("how Uploader works", "how does Uploader work"), within one sentence: the LAST work(s) after "how", so the noun of "how the work queue works" stays. */
+const HOW_WORKS_FRAME_RE = /\b(how)\b([^.?!。？！]*)\b(works?)\b/giu;
+
+/**
+ * `text` with every span that names a file blanked — `stripPathSpans`'s path
+ * spans, and a bare file name with a known extension unless it reads as
+ * `Owner.member` (an upper-case owner and one dot: `Runner.go` may be a
+ * method) — and the verb of every "how … work(s)" frame.
+ */
+function blankNonPointSpans(text: string): string {
+  return stripPathSpans("", text)
+    .replace(BARE_FILE_NAME_RE, (name: string) =>
+      languageForPath(name) === undefined || /^[A-Z][^.]*\.[^.]+$/u.test(name) ? name : " ".repeat(name.length))
+    .replace(HOW_WORKS_FRAME_RE, (_m: string, how: string, mid: string, verb: string) => `${how}${mid}${" ".repeat(verb.length)}`);
+}
+
+/**
+ * The entries of `subjectTerms` (derived from `texts`: a clause, plus the lead
+ * sentence it inherited from) that name no point of the clause — see this
+ * section's header. A word survives as a point when re-deriving `texts` with
+ * every file span and "how … work(s)" verb blanked still yields it, in either
+ * form a subject term takes (`conceptTermsIn`'s stem, or a weak candidate's
+ * lowercase token), and it is no flow / explanation-kind or declaration-kind
+ * word.
+ */
+export function nonPointTermsIn(subjectTerms: readonly string[], texts: readonly string[]): string[] {
+  const prose = new Set<string>();
+  for (const text of texts) {
+    const blanked = blankNonPointSpans(text);
+    for (const term of conceptTermsIn(blanked)) prose.add(term);
+    for (const token of maskFacetPhrasingIdiomSpans(blanked).match(SCRIPT_AWARE_IDENTIFIER_TOKEN_RE) ?? []) prose.add(token.toLowerCase());
+  }
+  return subjectTerms.filter((term) => !prose.has(term.toLowerCase()) || isNonPointWord(term));
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,6 +2032,16 @@ function splitClauses(sentence: string): string[] {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+// v0.15.1 runtime review: a clause that only narrows or widens what an
+// earlier clause asked for ("including …", "especially …", "in particular …",
+// 「…も含めて」). 「…を含む」 is left out: it as often means "containing".
+const QUALIFIER_CLAUSE_EN_RE = /^\s*(?:and\s+)?(?:including|includes|incl\.|especially|particularly|in\s+particular|notably|even)\b/i;
+const QUALIFIER_CLAUSE_JA_RE = /も含(?:め|む|んで)/u;
+
+function isQualifierClause(clause: string): boolean {
+  return QUALIFIER_CLAUSE_EN_RE.test(clause) || QUALIFIER_CLAUSE_JA_RE.test(clause);
+}
+
 /**
  * Every (facet, subject) pair `query` asks an answer to show, one entry per
  * (clause, facet) — a clause naming two facets ("limits, who calls it, and
@@ -1753,7 +2060,12 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
   const sentences = splitSentences(trimmed);
   if (sentences.length === 0) return [];
   const leadIdentifiers = explicitIdentifiersIn(sentences[0]!);
-  const leadTerms = conceptTermsIn(sentences[0]!);
+  // v0.15.1 runtime review: a qualifier clause's words ("including same-file
+  // …") describe the facet, never the subject, so they are no lead term a
+  // facet-only clause inherits.
+  const leadSubjectText = splitClauses(sentences[0]!).filter((clause) => !isQualifierClause(clause)).join(" ");
+  const leadTermsSource = leadSubjectText.length > 0 ? leadSubjectText : sentences[0]!;
+  const leadTerms = conceptTermsIn(leadTermsSource);
   const leadQualifiedMembers = qualifiedMemberPairsIn(sentences[0]!);
   const leadCallables = subjectCallableNamesIn(sentences[0]!);
 
@@ -1775,6 +2087,20 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       const facets = detectFacets(declawed);
       if (facets.length === 0) continue;
       const identifiers = explicitIdentifiersIn(declawed);
+      // v0.15.1 runtime review (2026-10-06): a QUALIFIER clause — "including
+      // same-file callers", 「同じファイル内の呼び出し元も含めて」 — names no
+      // subject of its own and only refines a facet an earlier clause already
+      // asked for. Kept as a facet of its own, its generic words ("including",
+      // "same", "file") became the subject: "Explain retry and all of its
+      // callers, including same-file callers." bound the second callers facet
+      // to `loadProfile` ("pro-FILE") and disclosed a false "0 call sites"
+      // gap for it. The earlier requirement already covers the refinement
+      // (same-file call sites are served with the callers).
+      if (
+        identifiers.length === 0
+        && isQualifierClause(declawed)
+        && facets.every((facet) => requirements.some((earlier) => earlier.facet === facet))
+      ) continue;
       const ownTerms = conceptTermsIn(declawed);
       const ownQualifiedMembers = qualifiedMemberPairsIn(declawed);
       const inheritedFromLead = identifiers.length === 0;
@@ -1791,11 +2117,18 @@ export function extractFacetRequirements(query: string): FacetRequirement[] {
       const subjectTermsWithWeak = weakCandidates.length === 0
         ? subjectTerms
         : [...new Set([...subjectTerms, ...weakCandidates.map((w) => w.toLowerCase())])];
+      // 2026-10-10 (false flow gaps): which of those words name no point of a
+      // flow (see `nonPointTermsIn`) — derived from the same texts the terms
+      // came from.
+      const nonPointTerms = facets.includes("flow")
+        ? nonPointTermsIn(subjectTermsWithWeak, inheritedFromLead ? [declawed, leadTermsSource] : [declawed])
+        : [];
       for (const facet of facets) {
         requirements.push({
           facet, clause, subjectIdentifiers, subjectTerms: subjectTermsWithWeak, inheritedFromLead,
           qualifiedMembers, subjectWeakCandidates: weakCandidates,
           ...(subjectCallables.length > 0 ? { subjectCallables } : {}),
+          ...(facet === "flow" && nonPointTerms.length > 0 ? { nonPointTerms } : {}),
         });
       }
     }

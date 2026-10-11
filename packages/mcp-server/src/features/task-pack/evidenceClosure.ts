@@ -1460,6 +1460,16 @@ export function hasValuePositionOccurrence(
    * pre-existing behaviour).
    */
   objectKeyLangPath?: string,
+  /**
+   * OPTIONAL (v0.15.1 runtime review, 2026-10-06): when true, an occurrence
+   * that only OWNS a member access (`name.member`, `name?.member`) is not a
+   * read of `name` itself — unless the member is constant-shaped
+   * (`limits.MAX_RETRIES`), which reads a value through the alias. For a
+   * package namespace alias that is the honest reading: `https.get(...)` /
+   * `vscode.workspace.workspaceFolders` use an external API through the
+   * alias; no value of the alias is computed with.
+   */
+  memberOwnerIsNotRead = false,
 ): boolean {
   if (name.length === 0) return false;
   const skipObjectKeys = objectKeyLangPath !== undefined && OBJECT_KEY_LANG_RE.test(objectKeyLangPath);
@@ -1477,6 +1487,10 @@ export function hasValuePositionOccurrence(
       const after = masked.slice(at + name.length);
       if (/^\s*\(/.test(after)) continue; // name( / new name( -- invoked, not read
       if (RECEIVER_CALL_RE.test(after) && isBareReceiverStatement(masked, at)) continue; // name.method(...) discarded
+      if (memberOwnerIsNotRead) {
+        const member = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(after)?.[1];
+        if (member !== undefined && !/^[A-Z][A-Z0-9_]*$/.test(member)) continue; // name.member -- an API, not a value of name
+      }
       return true;
     }
   }

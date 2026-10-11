@@ -73,9 +73,10 @@ Setup creates AI rules and project-scoped MCP settings. Status verifies one
 workspace without changing it. List reports every
 workspace registered by setup on this machine for desktop-wide management.
 TokenLighten write tools and local privacy-preserving usage logging are enabled
-by default. With --tool-surface code and no explicit --guide-profile, the
-guide profile defaults to compact instead of full (an explicit
---guide-profile always wins). With --clients including vscode,
+by default. The guide profile defaults to compact for all clients and tool
+surfaces (an explicit --guide-profile always wins). Claude Code loads the
+TokenLighten server upfront; Codex waits for its initial MCP tool catalog.
+Existing explicit startup settings are preserved. With --clients including vscode,
 --copilot-inline-results raise (default) raises GitHub Copilot's inline
 tool-result limit in the workspace's .vscode/settings.json so Copilot can
 read TokenLighten's answers; pass keep to leave that file untouched.
@@ -84,7 +85,7 @@ GitHub Copilot attaches AGENTS.md in full to every request:
 TokenLighten guide in .github/copilot-instructions.md instead and, in
 .vscode/settings.json, turns off chat.useAgentsMdFile while AGENTS.md holds
 nothing but TokenLighten's block (a file with your own content stays
-attached); AGENTS.md keeps the full guide for Codex and Claude Code. agents-md
+attached); Codex and Claude Code read the selected AGENTS.md profile. agents-md
 has Copilot read AGENTS.md again (removing only the setting TokenLighten turned
 off); keep touches no setting, and is the default under
 --copilot-inline-results keep (that file stays untouched). A folder opened
@@ -838,16 +839,8 @@ export function formatCopilotGuideLine(
   }
 }
 
-// GitHub Copilot Chat fixed-overhead reduction (WP-C1 §3): defaultGuideProfileForSurface's
-// default must not change — AGENTS.md is a shared file, and Codex/Claude Code can be
-// registered machine-wide with no per-workspace record, so TL cannot know a workspace is
-// "VS Code only", and silently writing the compact block would change what those clients
-// read too. This only makes the existing explicit opt-in (--guide-profile compact /
-// tokenlighten.guideProfile) discoverable, in the human-readable setup summary alone —
-// never in --json, which has no free-text notes field for it, and never a warning (the
-// full profile is not wrong, just costlier for a Copilot-only workspace). Copilot
-// standard-setup evaluation (2026-10-02): never printed when Copilot reads the standalone
-// guide — it then never attaches AGENTS.md, whatever its profile.
+// Advice applies only to an explicitly selected full profile when Copilot
+// attaches AGENTS.md. Compact is now the common default for every client.
 export function formatGuideProfileAdviceLine(
   clients: readonly TokenLightenSetupClient[],
   effectiveGuideProfile: GuideProfile,
@@ -857,8 +850,8 @@ export function formatGuideProfileAdviceLine(
   if (copilotGuide?.status === "standalone") return undefined;
   return "note: GitHub Copilot attaches AGENTS.md in full to every request (~3k tokens for "
     + "the full TokenLighten block); a Copilot-only workspace may pass --guide-profile "
-    + "compact (VS Code setting tokenlighten.guideProfile); Codex and Claude Code users "
-    + "should keep full.";
+    + "compact (VS Code setting tokenlighten.guideProfile); Codex and Claude Code "
+    + "also support the compact guide.";
 }
 
 /**
@@ -1039,8 +1032,16 @@ function configureClaude(
   const document = readJsonObject(target);
   const servers = objectMember(document, "mcpServers");
   const portable = portableIdentityFor(launcher, "mcp-json", installHomeDefault, platform);
+  const previous = servers["tokenlighten"];
+  const alwaysLoad = previous && typeof previous === "object" && !Array.isArray(previous)
+    && typeof (previous as Record<string, unknown>)["alwaysLoad"] === "boolean"
+    ? (previous as Record<string, unknown>)["alwaysLoad"]
+    : true;
   servers["tokenlighten"] = {
     type: "stdio",
+    // This is a Claude CLIENT setting: a server env variable cannot make
+    // the host wait. Only TL loads upfront; other servers stay deferred.
+    alwaysLoad,
     ...serverConfig(root, "claude-code", portable, schemaStamp, toolSurface),
   };
   writeJsonAtomic(root, target, document);
@@ -1058,6 +1059,11 @@ function configureCodex(
   assertNotSymlink(target);
   assertNotSymlink(dirname(target));
   const document = readConfig(target);
+  // Codex's native startup control, rather than Claude-only server env.
+  // Zero waits up to each server's startup timeout; it is not an infinite wait.
+  if (document["mcp_optional_startup_grace_ms"] === undefined) {
+    document["mcp_optional_startup_grace_ms"] = 0;
+  }
   setNestedKey(document, "mcp_servers.tokenlighten", {
     command: launcher.command,
     args: [
@@ -1091,11 +1097,8 @@ export async function setupWorkspace(options: {
   rulesOnly?: boolean;
   /**
    * Guide profile to inject. Omitted defers to
-   * `defaultGuideProfileForSurface(options.toolSurface)`: "full" unless
-   * `toolSurface` is "code", in which case it is "compact" (P2-3(1),
-   * v0.14.1 hands-on report — `--tool-surface code` used to still write the
-   * full 12 KB guide because nothing coupled the two flags). An explicit
-   * value here always wins over that default.
+   * `defaultGuideProfileForSurface(options.toolSurface)`: "compact" for
+   * every client/tool surface. An explicit value always wins.
    */
   guideProfile?: GuideProfile;
   /**

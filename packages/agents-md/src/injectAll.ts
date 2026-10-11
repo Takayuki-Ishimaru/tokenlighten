@@ -16,6 +16,7 @@ import type { GuideProfile, Locale } from "./render.js";
 import { copilotGuideModeForWorkspace, type CopilotGuideMode } from "./copilotGuide.js";
 import { migrateLegacyTargetPath } from "./migrateLegacyTarget.js";
 import { assertSafeWriteTarget, ensureSafeWriteParent } from "./safeWritePath.js";
+import { defaultGuideProfileForSurface } from "./guideProfileDefault.js";
 
 /** Maximum file size to parse (5 MB). Files larger than this are refused. */
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -26,7 +27,7 @@ const BACKUP_DIR = ".tokenlighten/backups";
 export interface InjectAllConfig {
   /** Absolute path to the repo root. */
   repoRoot: string;
-  /** Guide profile to inject: "full" (default) | "medium" | "compact". */
+  /** Guide profile to inject: "full" | "medium" | "compact" (default). */
   profile?: GuideProfile;
   /**
    * Which guide GitHub Copilot reads (copilotGuide.ts): "agents-md" renders
@@ -93,7 +94,7 @@ export interface InjectAllConfig {
 export async function injectAll(config: InjectAllConfig): Promise<GenerateResult> {
   const {
     repoRoot,
-    profile = "full",
+    profile = defaultGuideProfileForSurface(config.toolSurface),
     toolSurface = "full",
     driftMode = "auto-rewrite",
     targets,

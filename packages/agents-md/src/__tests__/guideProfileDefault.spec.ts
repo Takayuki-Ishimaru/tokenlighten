@@ -16,12 +16,12 @@ describe("defaultGuideProfileForSurface", () => {
     expect(defaultGuideProfileForSurface("code")).toBe("compact");
   });
 
-  it('returns "full" for the full tool surface', () => {
-    expect(defaultGuideProfileForSurface("full")).toBe("full");
+  it('returns "compact" for the full tool surface', () => {
+    expect(defaultGuideProfileForSurface("full")).toBe("compact");
   });
 
-  it('returns "full" when no tool surface was selected (undefined)', () => {
-    expect(defaultGuideProfileForSurface(undefined)).toBe("full");
+  it('returns "compact" when no tool surface was selected (undefined)', () => {
+    expect(defaultGuideProfileForSurface(undefined)).toBe("compact");
   });
 
   it("is re-exported unchanged from render.js and index.js (single source of truth)", () => {

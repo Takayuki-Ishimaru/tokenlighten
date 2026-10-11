@@ -1236,6 +1236,19 @@ function servedDocumentZoom(result: TaskPackResult): ContinuationCall | undefine
   return { tool: "tl_read_file", arguments: { handle, range } };
 }
 /**
+ * v0.15.1 runtime review TL-REVIEW-3 (2026-10-06): true for a surface `why`
+ * naming SUPPORT for the pack's target rather than a candidate target of its
+ * own — the facet and answer-dependency closures (`closure:<facet> …`) and the
+ * readiness falsification pass (`… (readiness-falsification-counterexample)`).
+ * Such a window is evidence for the answer, never an alternative the question
+ * could mean, so neither the contract's pending choice nor the wire's
+ * `candidates[]` counts it.
+ */
+export function isSupportingEvidenceWhy(why: string | undefined): boolean {
+  return why !== undefined && (why.startsWith("closure:") || why.includes("readiness-falsification-counterexample"));
+}
+
+/**
  * P0a §6.1: a prepared decision is bound to a certificate either by carrying
  * the full proof or by naming its id in the typestate. The compact
  * `pack_unchanged` receipt is the second form — it re-serves a decision whose

@@ -39,7 +39,7 @@ import type { TaskExecutionContract, TaskCapabilityGap } from "@tokenlighten/typ
 import type { TaskPackResult } from "../features/task-pack/model.js";
 
 import { emittableToolCall } from "./refusal.js";
-import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow } from "../features/task-pack/canonicalDecision.js";
+import { decisionGradeLiteralAbsenceSubject, discoveryBundleAdvisory, discoveryBundleNext, unservedAddressableRepack, semanticFrontierNextAllowed, sanitizeSemanticFrontierNext, isSemanticFrontierDemotionEligible, sfAwaitInputCandidatePathsFor, parseLedgerMissingRow, isSupportingEvidenceWhy } from "../features/task-pack/canonicalDecision.js";
 import { semanticFrontierGuardEnabled, sfDemoteEnabled } from "../util/flags.js";
 import { ELISION_MARKER_RE } from "../util/formatCompress.js";
 import { isSemanticFrontierContinuationOptional } from "../features/task-pack/semanticFrontier.js";
@@ -1149,9 +1149,19 @@ function projectCandidates(
     }
     return chosen;
   }
+  // v0.15.1 runtime review TL-REVIEW-3 (2026-10-06): a window the pack
+  // serves as SUPPORT for its target — a closure constant, a falsification
+  // counterexample — is evidence for the answer, never an alternative the
+  // question could mean. Listing each served row made 「http.ts の retry 関数
+  // について…」 ask the caller to choose between http.ts and the settings.ts
+  // constants retry reads. One row per path: two windows of one file are
+  // one target.
+  const supporting = supportingEvidenceHandles(result);
   const candidates: Candidate[] = [];
+  const seenPaths = new Set<string>();
   for (const entry of evidence) {
-    if (entry.path === undefined) continue;
+    if (entry.path === undefined || supporting.has(entry.handle) || seenPaths.has(entry.path)) continue;
+    seenPaths.add(entry.path);
     candidates.push({
       path: entry.path,
       handle: entry.handle,
@@ -1159,6 +1169,20 @@ function projectCandidates(
     });
   }
   return candidates;
+}
+
+/** Handles of `result`'s supporting surfaces — see `isSupportingEvidenceWhy`. */
+function supportingEvidenceHandles(result: Record<string, unknown>): Set<string> {
+  const handles = new Set<string>();
+  const surfaces = result["surfaces"];
+  if (!Array.isArray(surfaces)) return handles;
+  for (const surface of surfaces) {
+    if (surface === null || typeof surface !== "object") continue;
+    const record = surface as Record<string, unknown>;
+    if (typeof record["handle"] !== "string") continue;
+    if (isSupportingEvidenceWhy(typeof record["why"] === "string" ? record["why"] : undefined)) handles.add(record["handle"]);
+  }
+  return handles;
 }
 
 // ---------------------------------------------------------------------------
@@ -2125,6 +2149,26 @@ export function projectTaskDecision(input: DecisionProjectionInput): TaskDecisio
   // A dead end — {await_input ∧ no candidates ∧ no next} for a pack that
   // claimed a choice — is unreachable from here in either direction.
   // -------------------------------------------------------------------------
+  // v0.15.1 runtime review TL-REVIEW-3: ONE candidate is not a choice either.
+  // The reviewer's four-file fixture answered 「http.ts の retry 関数について…」
+  // with `choose-candidate` and "1 candidate target(s) match this request;
+  // name the intended one" — the caller could only re-name the file it had
+  // already named. With a grounded call left, the honest shape is the
+  // `discover` that fetches what the certificate still lacks; without one,
+  // the single served candidate stays the answer to the question it asks.
+  const singleCandidateRestoring = awaitCode === "choose-candidate" && candidates.length === 1
+    ? nextForDecision() ?? restoringZoom()
+    : undefined;
+  if (singleCandidateRestoring !== undefined) {
+    const gaps = projectGaps(contract);
+    const advisory = discoveryBundleAdvisory(result as never);
+    return {
+      kind: "discover",
+      next: singleCandidateRestoring,
+      ...(advisory !== undefined ? { advisory } : {}),
+      ...(gaps.length > 0 ? { gaps } : {}),
+    };
+  }
   if (awaitCode === "choose-candidate" && candidates.length === 0) {
     const restoring = nextForDecision() ?? restoringZoom();
     if (restoring !== undefined) {

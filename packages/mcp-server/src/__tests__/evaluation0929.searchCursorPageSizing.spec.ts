@@ -20,6 +20,19 @@
  * lines/hop throughout, while a request whose caller declared a small
  * budget stays correctly narrowed to 8 on every hop, not just the first.
  *
+ * SPB (2026-10-10 independent runtime review) RE-POINTED cases 1, 3 and 4.
+ * The per-file line cap this spec pinned (8, or 64 past the legacy floor) is
+ * gone from staged pages: a page is a PREFIX of the path-major snapshot, so
+ * that cap never brought another file onto it — it only ended the page early
+ * (a 4.2 KB, 120-line result took 2 calls at any budget, 15 at
+ * `budget.bytes:2000`). A staged page is now filled to its byte budget — the
+ * caller's `budget.bytes`, else the host ceiling, else the 16 KiB default
+ * page — on EVERY hop. What these cases prove is unchanged in kind (the
+ * budget the original call resolved still governs every resume, not only
+ * page 1); what they measure is now bytes per page, with fixtures large
+ * enough that a filled page still leaves something for a resume. See
+ * `searchPagingBudget1010.spec.ts` for the review's own fixture.
+ *
  * Every case here drives a REAL stdio server (`startDevServer`) and follows
  * `next`/`cursor` verbatim, exactly as AGENTS.md instructs a caller to.
  */
@@ -42,7 +55,11 @@ import {
   writeSelfIdFile,
   type ServerHandle,
 } from "./helpers/qualityFirstScenarios.js";
-import { FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE, MAX_LINES_PER_FILE } from "../features/search/find/findText.js";
+import {
+  FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE,
+  FIND_WIDE_PAGE_RESPONSE_BYTES,
+} from "../features/search/find/findText.js";
+import { resolveClientProfile } from "../protocol/codec/clientProfile.js";
 
 const HOME = process.env["HOME"] ?? process.env["USERPROFILE"] ?? os.homedir();
 
@@ -102,6 +119,25 @@ function countTagOccurrences(responses: readonly unknown[], tag: string): number
   return count;
 }
 
+/** `walkHops`, plus each response's raw wire size (SPB: pages are judged in bytes). */
+async function walkHopsMeasured(
+  server: ServerHandle,
+  args: Record<string, unknown>,
+  hopCap: number,
+): Promise<{ responses: unknown[]; bytes: number[]; capped: boolean }> {
+  const responses: unknown[] = [];
+  const bytes: number[] = [];
+  let call: { tool: string; arguments: Record<string, unknown> } | undefined = { tool: "tl_search_files", arguments: args };
+  while (call !== undefined) {
+    if (responses.length >= hopCap) return { responses, bytes, capped: true };
+    const { body, textBytes } = await server.callTool(call.tool, call.arguments);
+    responses.push(body);
+    bytes.push(textBytes);
+    call = extractNext(body).next;
+  }
+  return { responses, bytes, capped: false };
+}
+
 /** Every response must be a `tl_search_files find` continuation — never a mode
  *  escalation into a different tool/action. */
 function assertNoEscalation(responses: readonly unknown[]): void {
@@ -116,46 +152,38 @@ function assertNoEscalation(responses: readonly unknown[]): void {
 }
 
 // ---------------------------------------------------------------------------
-// 1. A single 200-line file — cursor hops past page 1 keep the wide cap.
+// 1. A single 200-line file — every hop is filled to the default page.
 // ---------------------------------------------------------------------------
 
 const WIDE_TAG = "cursorWideFileTag";
 const WIDE_TOTAL_LINES = 200;
 
-describe("single-file cursor pagination follows the wide per-file cap, not just page 1", () => {
-  it("every hop (including resumes) shows at most FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE lines, and at least one resume exceeds the legacy 8", async () => {
+describe("single-file cursor pagination fills the default page on every hop, not just page 1", () => {
+  it("no declared budget: every hop fits the 16 KiB default page, and page 1 is filled far past the old 64-line cap", async () => {
     const ws = freshWorkspace("wide-single");
     const server = startDevServer(ws, "default");
     servers.push(server);
     await server.initialize();
+    // ~85 B lines (the helper pads to 24 B with an 80 B filler): ~16 KB of
+    // snippets, just over one default page, so a resume still happens.
     writeSelfIdFile(ws, "src/big.ts", WIDE_TOTAL_LINES, WIDE_TAG, 24);
 
-    const chain = await walkHops(
-      server,
-      { tool: "tl_search_files", arguments: { action: "find", queries: [WIDE_TAG], scope: { path: "src" }, cwd: ws } },
-      10,
-    );
+    const chain = await walkHopsMeasured(server, { action: "find", queries: [WIDE_TAG], scope: { path: "src" }, cwd: ws }, 10);
     expect(chain.capped, `chain never completed: ${JSON.stringify(chain.responses).slice(0, 500)}`).toBe(false);
     assertNoEscalation(chain.responses);
     const refusals = chain.responses.filter((r) => (r as Record<string, unknown>)["kind"] === "refusal");
     expect(refusals, JSON.stringify(refusals).slice(0, 300)).toEqual([]);
 
-    // BEFORE THIS FIX, every hop (page 1 included) capped at MAX_LINES_PER_
-    // FILE(8) regardless of headroom — this fixture needed ~25 hops. The fix
-    // must show a hop wider than that legacy cap; a genuinely wide-open
-    // request (no declared budget, no tight host ceiling) should reach the
-    // full FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE(64) on at least one hop.
+    // SPC2 stopped every hop at 64 lines (4 hops here; ~25 before SPC2). SPB
+    // fills each hop to the default page instead (measured: 176 + 24 lines,
+    // 16.2 KB + 2.3 KB) — and never past it.
     const perHopLineCounts = chain.responses.map((r) => firstFileOf(r as Record<string, unknown>)?.lines.length ?? 0);
-    for (const count of perHopLineCounts) {
-      expect(count, `a page showed more than the wide cap: ${JSON.stringify(perHopLineCounts)}`)
-        .toBeLessThanOrEqual(FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE);
+    for (const bytes of chain.bytes) {
+      expect(bytes, `a page exceeded the default page: ${JSON.stringify(chain.bytes)}`).toBeLessThanOrEqual(FIND_WIDE_PAGE_RESPONSE_BYTES);
     }
-    expect(
-      perHopLineCounts.some((count) => count > MAX_LINES_PER_FILE),
-      `no hop exceeded the legacy 8-line cap: ${JSON.stringify(perHopLineCounts)}`,
-    ).toBe(true);
-    // Far fewer hops than the pre-fix worst case (200/8 = 25).
-    expect(chain.responses.length).toBeLessThanOrEqual(6);
+    expect(perHopLineCounts[0], JSON.stringify(perHopLineCounts)).toBeGreaterThan(2 * FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE);
+    expect(chain.bytes[0], JSON.stringify(chain.bytes)).toBeGreaterThanOrEqual(0.9 * FIND_WIDE_PAGE_RESPONSE_BYTES);
+    expect(chain.responses.length, JSON.stringify(perHopLineCounts)).toBe(2);
 
     // Exact-once delivery across the whole chain: every one of the 200 lines
     // served, none missing, none duplicated.
@@ -233,43 +261,33 @@ describe("many-file cursor pagination stays exact under the dynamic per-file cap
 });
 
 // ---------------------------------------------------------------------------
-// 3. Budget-inherited cursor — a small declared budget stays narrowed to the
-//    legacy cap on EVERY hop, not only the first.
+// 3. Budget-inherited cursor — a small declared budget sizes EVERY hop, not
+//    only the first.
 // ---------------------------------------------------------------------------
 
 const NARROW_TAG = "cursorNarrowBudgetTag";
-const NARROW_TOTAL_LINES = 80;
+// 27 B lines (the tag is past the 24 B target, so no filler): ~100 lines fit
+// one 4096 B page, so 320 lines take four hops — three of them resumes.
+const NARROW_TOTAL_LINES = 320;
+const NARROW_BUDGET_BYTES = 4096;
 
-describe("a small caller-declared budget narrows every cursor hop, not just the first", () => {
-  it("every hop stays at MAX_LINES_PER_FILE(8) once the effective ceiling clamps to the legacy floor", async () => {
+describe("a small caller-declared budget sizes every cursor hop, not just the first", () => {
+  it("every hop is filled to the declared 4096 B and never past it; every resume re-sends that budget", async () => {
     const ws = freshWorkspace("narrow-budget");
     const server = startDevServer(ws, "default");
     servers.push(server);
     await server.initialize();
     writeSelfIdFile(ws, "src/narrow.ts", NARROW_TOTAL_LINES, NARROW_TAG, 24);
 
-    // budget.bytes AT the legacy floor (MAX_RESPONSE_BYTES=4096): the
-    // effective ceiling clamps to exactly 4096, so `ceiling > 4096` is FALSE
-    // and the per-file cap stays the legacy 8 — but 4096 B of ROOM is ample
-    // to actually REACH that 8-line boundary each hop (unlike a much smaller
-    // budget, where room alone — not the cap — would be the limiter), so
-    // this isolates the cap decision specifically. `state.budget` (the
-    // ORIGINAL call's declared value, inherited verbatim by every resume —
-    // see SearchRequestState.budget's own doc comment) is what every later
-    // `chooseSearchPage` call reads; this is the ONE thing this test proves
-    // stays true past hop 1.
-    const chain = await walkHops(
+    // `state.budget` (the ORIGINAL call's declared value, inherited verbatim
+    // by every resume — see SearchRequestState.budget's own doc comment) is
+    // what every later `chooseSearchPage` call reads; this is the ONE thing
+    // this test proves stays true past hop 1. Before SPB a 4096 B budget also
+    // clamped the per-file cap to 8 lines (~1 KB of a 4 KB page, 40 hops for
+    // this fixture).
+    const chain = await walkHopsMeasured(
       server,
-      {
-        tool: "tl_search_files",
-        arguments: {
-          action: "find",
-          queries: [NARROW_TAG],
-          scope: { path: "src" },
-          budget: { bytes: 4096 },
-          cwd: ws,
-        },
-      },
+      { action: "find", queries: [NARROW_TAG], scope: { path: "src" }, budget: { bytes: NARROW_BUDGET_BYTES }, cwd: ws },
       20,
     );
     expect(chain.capped, `chain never completed: ${JSON.stringify(chain.responses).slice(0, 500)}`).toBe(false);
@@ -277,15 +295,18 @@ describe("a small caller-declared budget narrows every cursor hop, not just the 
     const refusals = chain.responses.filter((r) => (r as Record<string, unknown>)["kind"] === "refusal");
     expect(refusals, JSON.stringify(refusals).slice(0, 300)).toEqual([]);
 
-    // At least one genuine cursor resume happened (this is the point: prior
-    // to the fix, ONLY page 1 was ever observed directly — this proves the
-    // clamp survives a resume too).
-    expect(chain.responses.length).toBeGreaterThanOrEqual(3);
-
-    const perHopLineCounts = chain.responses.map((r) => firstFileOf(r as Record<string, unknown>)?.lines.length ?? 0);
-    for (const count of perHopLineCounts) {
-      expect(count, `a page exceeded the clamped legacy cap: ${JSON.stringify(perHopLineCounts)}`)
-        .toBeLessThanOrEqual(MAX_LINES_PER_FILE);
+    // At least two genuine cursor resumes happened (this is the point: the
+    // budget survives a resume, not only page 1).
+    expect(chain.responses.length, JSON.stringify(chain.bytes)).toBeGreaterThanOrEqual(3);
+    expect(chain.responses.length, JSON.stringify(chain.bytes)).toBeLessThanOrEqual(5);
+    for (const bytes of chain.bytes) {
+      expect(bytes, `a page exceeded the declared budget: ${JSON.stringify(chain.bytes)}`).toBeLessThanOrEqual(NARROW_BUDGET_BYTES);
+    }
+    chain.bytes.slice(0, -1).forEach((bytes) => {
+      expect(bytes, `a page was left mostly empty: ${JSON.stringify(chain.bytes)}`).toBeGreaterThanOrEqual(0.85 * NARROW_BUDGET_BYTES);
+    });
+    for (const response of chain.responses.slice(0, -1)) {
+      expect(extractNext(response).next?.arguments["budget"]).toEqual({ bytes: NARROW_BUDGET_BYTES });
     }
 
     const served = new Map<string, Set<number>>();
@@ -296,50 +317,44 @@ describe("a small caller-declared budget narrows every cursor hop, not just the 
 });
 
 // ---------------------------------------------------------------------------
-// 4. VS Code client env — the host-ceiling tier resolves on a cursor resume
-//    (no declared budget) exactly as it does on the first page.
+// 4. VS Code client env — the host-ceiling tier sizes a cursor resume (no
+//    declared budget) exactly as it does the first page.
 // ---------------------------------------------------------------------------
 
 const VSCODE_TAG = "cursorVscodeHostCeilingTag";
-const VSCODE_TOTAL_LINES = 200;
+// 32 B lines: ~350 lines fill one 14336 B page, so 1000 lines take three
+// hops and the middle one is a FULL resume page.
+const VSCODE_TOTAL_LINES = 1000;
 
 describe("host-ceiling tier under the vscode client env reaches cursor resumes too", () => {
-  it("with no declared budget, a vscode-config cursor chain still widens past the legacy 8-line cap on resume", async () => {
-    // VS Code's own known ceiling (14336 B, clientProfile.ts) clears
-    // MAX_RESPONSE_BYTES(4096) the same way the flat 16 KB default does, so
-    // this cannot show a NUMERICALLY different cap from test 1's default
-    // config — no known host ceiling is at or below the legacy floor today.
-    // What this DOES prove: the host-ceiling branch of
-    // effectiveSearchPageLineCap (state.budget undefined, so it falls
-    // through to hostSearchPageByteCeiling()) resolves correctly and grants
-    // the SAME wide allowance on a cursor RESUME under this client env,
-    // rather than silently reverting to the legacy 8 the way it did before
-    // this fix (which never consulted any ceiling at all).
+  it("with no declared budget, a vscode-config cursor resume is filled to the host ceiling, not the 16 KiB default", async () => {
+    // VS Code's own known ceiling (14336 B, clientProfile.ts) sits below the
+    // flat 16 KiB default page, so a resume sized from the wrong tier would
+    // show up here as a page over the host ceiling. What this proves: the
+    // host-ceiling branch of `defaultSearchPageBudgetBytes` (state.budget
+    // undefined, so it falls through to hostSearchPageByteCeiling()) sizes a
+    // cursor RESUME under this client env exactly as it sizes page 1.
+    const hostCeiling = resolveClientProfile("vscode").responseByteCeiling;
+    expect(hostCeiling).toBeLessThan(FIND_WIDE_PAGE_RESPONSE_BYTES);
     const ws = freshWorkspace("vscode-host-ceiling");
     const server = startDevServer(ws, "vscode");
     servers.push(server);
     await server.initialize();
     writeSelfIdFile(ws, "src/big.ts", VSCODE_TOTAL_LINES, VSCODE_TAG, 24);
 
-    const chain = await walkHops(
-      server,
-      { tool: "tl_search_files", arguments: { action: "find", queries: [VSCODE_TAG], scope: { path: "src" }, cwd: ws } },
-      10,
-    );
+    const chain = await walkHopsMeasured(server, { action: "find", queries: [VSCODE_TAG], scope: { path: "src" }, cwd: ws }, 10);
     expect(chain.capped, `chain never completed: ${JSON.stringify(chain.responses).slice(0, 500)}`).toBe(false);
     assertNoEscalation(chain.responses);
     const refusals = chain.responses.filter((r) => (r as Record<string, unknown>)["kind"] === "refusal");
     expect(refusals, JSON.stringify(refusals).slice(0, 300)).toEqual([]);
 
-    const perHopLineCounts = chain.responses.map((r) => firstFileOf(r as Record<string, unknown>)?.lines.length ?? 0);
-    for (const count of perHopLineCounts) {
-      expect(count).toBeLessThanOrEqual(FIND_WIDE_PAGE_MAX_LINE_NUMBERS_PER_FILE);
+    expect(chain.responses.length, JSON.stringify(chain.bytes)).toBe(3);
+    for (const bytes of chain.bytes) {
+      expect(bytes, `a page exceeded the vscode host ceiling: ${JSON.stringify(chain.bytes)}`).toBeLessThanOrEqual(hostCeiling!);
     }
-    expect(
-      perHopLineCounts.some((count) => count > MAX_LINES_PER_FILE),
-      `no hop exceeded the legacy 8-line cap under vscode: ${JSON.stringify(perHopLineCounts)}`,
-    ).toBe(true);
-    expect(chain.responses.length).toBeLessThanOrEqual(6);
+    // Page 1 and the full resume page are both filled to the host ceiling.
+    expect(chain.bytes[0], JSON.stringify(chain.bytes)).toBeGreaterThanOrEqual(0.9 * hostCeiling!);
+    expect(chain.bytes[1], JSON.stringify(chain.bytes)).toBeGreaterThanOrEqual(0.9 * hostCeiling!);
 
     const served = new Map<string, Set<number>>();
     for (const r of chain.responses) unionInto(served, extractServedIds(r, [VSCODE_TAG]));

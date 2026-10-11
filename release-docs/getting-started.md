@@ -78,7 +78,7 @@ Removes the machine install (staged runtime and app files) and TokenLighten-mana
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.15.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.1/tokenlighten-vscode-extension-0.15.1.vsix)** from the v0.15.1 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.15.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.2/tokenlighten-vscode-extension-0.15.2.vsix)** from the v0.15.2 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. This runs the same machine install described above (`tl install --from-extension --clients none`), using VS Code's own Node.js runtime instead of a bundled one: it stages the extension's bundled CLI as the machine install and sets up the current workspace, all in one operation — it does not register other hosts on the machine (Claude Code, Codex); do that separately with `tl clients activate`, or with an archive's `tl-setup`. Remove it with **TokenLighten: Uninstall TokenLighten from This Machine** from the command palette, or the absolute `tl install --uninstall` invocation described in [Uninstall](#uninstall) below.
 
@@ -140,9 +140,8 @@ tl mcp start --stdio --allow-write --workspace /path/to/project
 
 Re-run `tl workspace setup` or the extension's **Set up this workspace** to
 refresh TokenLighten-managed instructions and client configuration, then
-restart or reconnect your MCP client. This is needed to adopt v0.15.0's
-updated tool names, shared guides, and Copilot setup; installing a new binary alone does not refresh the
-workspace files.
+restart or reconnect your MCP client. This adopts the current guide defaults and client startup settings;
+installing a new binary alone does not refresh the workspace files.
 
 For VS Code, setup raises the inline tool-result threshold to 65,536 bytes
 unless it is already sufficient or writing results to disk is disabled.
@@ -173,10 +172,9 @@ Custom clients must refresh the tool list and use `tl_read_file`,
 `tl_search_files`, and `tl_edit_file`. The old unprefixed names are refused;
 `TL_LEGACY_INPUT=accept` only bridges legacy argument fields.
 
-For a Copilot-only workspace, `--guide-profile compact` selects a shorter
-shared guide. This also changes the guide read by Codex and Claude Code in
-the same workspace; keep the full guide if they need the detailed
-instructions.
+Setup defaults to the compact shared guide for Claude Code, Codex and
+Copilot on both tool surfaces. Use `--guide-profile full` or `medium` for
+longer instructions; an explicit profile takes precedence.
 
 ## Choose a tool surface (optional)
 
@@ -188,17 +186,41 @@ tl mcp start --stdio --tool-surface code --workspace /path/to/project
 
 `tl workspace setup --tool-surface code` writes the same choice into generated client configuration. See [MCP tools](mcp-tools.md#tool-surface) for what each surface advertises and when to choose it. Choose `code` for source code, text, documentation, configuration, and logs; keep `full` if the workspace may contain Office documents, zip archives, or encrypted artifacts. `TL_LEAN_SCHEMA=0` restores the fuller advertised tool definition for clients that need it.
 
-With `--tool-surface code` and no explicit `--guide-profile`, `tl workspace setup` writes the **compact** guide instead of the full one — a code-only server has nothing to gain from the full guide's Office/archive/credential instructions, and the compact guide is the smaller default footprint. Pass `--guide-profile full` (or `medium`) explicitly to keep a larger guide under `--tool-surface code`; an explicit `--guide-profile` always wins over this default. See [Choose a guide profile](#choose-a-guide-profile-optional) below for the three guide profiles.
+The tool surface controls the available capabilities; it does not choose the
+guide size. Setup defaults to `compact` on both surfaces. See
+[Choose a guide profile](#choose-a-guide-profile-optional) below.
 
 ## Choose a guide profile (optional)
 
-`tl workspace setup` writes one of three guide sizes into AGENTS.md/CLAUDE.md: `full` (the default for the `full` tool surface, with detailed instructions), `medium` (shorter instructions), or `compact` (essential routing rules, with capability details provided when needed). Choose explicitly with:
+`tl workspace setup` writes one of three guide sizes into AGENTS.md/CLAUDE.md:
+`compact` (the default, essential routing rules with capability details
+provided when needed), `medium` (longer instructions), or `full` (detailed
+instructions). Choose explicitly with:
 
 ```bash
-tl workspace setup --guide-profile compact
+tl workspace setup --guide-profile full
 ```
 
-An explicit `--guide-profile` always wins over any default, including the `--tool-surface code` default described above.
+An explicit `--guide-profile` or VS Code `tokenlighten.guideProfile` setting
+wins over the compact default.
+
+## Client startup settings
+
+Claude Code's generated TokenLighten entry uses `alwaysLoad: true`, so its
+tools are available in the first request. An existing explicit workspace
+`alwaysLoad` boolean is preserved; other servers are not changed.
+
+Codex's generated `.codex/config.toml` sets the top-level
+`mcp_optional_startup_grace_ms = 0` only when that workspace value is absent.
+This waits for optional servers up to their individual startup timeouts,
+including other optional servers in the workspace. It does not make
+TokenLighten a required server. Machine-wide `codex mcp add` alone does not
+apply this project setting; run workspace setup as well.
+
+These controls require client support. Higher-precedence user or organization
+settings may override project configuration. GitHub Copilot retains its
+existing VS Code MCP registration and dedicated guide; Claude-specific
+startup settings are not added to its configuration.
 
 ## Verify the installation
 
@@ -217,4 +239,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - If you use VS Code, see [VS Code extension](vscode-extension.md).
 - Deploying to a fleet or a policy-managed machine? See [Managed environments](managed-environments.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
-- Read the [v0.15.1 release notes](github-release-v0.15.1.md) for the current changes, compatibility, and known limitations.
+- Read the [v0.15.2 release notes](github-release-v0.15.2.md) for the current changes, compatibility, and known limitations.

@@ -65,6 +65,7 @@ import { emitFinalizedPayload, emitOpaqueText } from "./emit.js";
 import { isEditFamilyKind, projectEditBody } from "./editFamily.js";
 import { applyAnswerLineGutter } from "./lineGutter.js";
 import { isReadFamilyKind, projectReadBody, receiptOf } from "./readFamily.js";
+import { applySourceFidelity } from "./sourceFidelity.js";
 import {
   applySearchDedup,
   isSearchFamilyKind,
@@ -1998,6 +1999,8 @@ export function servedWindowsOf(
 ): {
   unattributed: boolean;
   windows: Array<{ path: string; start: number; end: number }>;
+  /** TL-REVIEW-2: disclosed policy-elided comment windows (see the walk below). */
+  elidedWindows?: Array<{ path: string; start: number; end: number }>;
 } {
   // F-A1-6: a `refusal` payload is structurally evidence-free — `Refusal` /
   // `RefusalCore` (types/mcp/protocol.ts:443) has no `body`/`content`/`path`
@@ -2027,6 +2030,7 @@ export function servedWindowsOf(
   if (payload["kind"] === "refusal") return { unattributed: false, windows: [] };
 
   const windows: Array<{ path: string; start: number; end: number }> = [];
+  const elidedWindows: Array<{ path: string; start: number; end: number }> = [];
   let unattributed = false;
 
   const visit = (value: unknown, inheritedPath: string | undefined): void => {
@@ -2187,6 +2191,23 @@ export function servedWindowsOf(
       }
     }
 
+    // TL-REVIEW-2 (2026-10-06): the comment windows this payload DISCLOSED as
+    // policy-elided (`Evidence.elided` / batch `elided`, written only by
+    // protocol/sourceFidelity.ts from renderer-verified windows and by the
+    // producers' own renderer accounting — never parsed out of body text).
+    // They used to sit inside a body's `range` and so reached the settlement
+    // through `windows`; now that bodies are source-faithful they ride here:
+    // they confirm FX-V1 elision-gap candidates and complete a shipped span a
+    // body window already reached (`_settleSessionServeBookings`), never a
+    // span on their own.
+    const disclosed = record["elided"];
+    if (scopePath !== undefined && Array.isArray(disclosed)) {
+      for (const raw of disclosed) {
+        const window = parseServedRange(raw);
+        if (window !== undefined && window[0] >= 1) elidedWindows.push({ path: scopePath, start: window[0], end: window[1] });
+      }
+    }
+
     for (const [key, child] of Object.entries(record)) {
       // Not payload content: an emitted call's own arguments can carry a
       // `content` string (an edit's replacement text) that no consumer is
@@ -2197,7 +2218,7 @@ export function servedWindowsOf(
   };
 
   visit(payload, undefined);
-  return { unattributed, windows };
+  return { unattributed, windows, ...(elidedWindows.length > 0 ? { elidedWindows } : {}) };
 }
 
 /**
@@ -2312,6 +2333,15 @@ function projectSuccessBody(
       verifyClosureWorkspace: context.verifyClosureWorkspace,
       args: context.args,
     });
+    // TL-REVIEW-2 (2026-10-06): every `evidence[].body` / `read.batch`
+    // `entries[].content` leaves this funnel as the source's own contiguous
+    // line range, with policy-elided comment blocks disclosed in `elided`
+    // instead of collapsed into the body — see protocol/sourceFidelity.ts.
+    // Runs HERE, before the certificate binding, the answer-line gutter and
+    // emit.ts's ladder/settle, so everything downstream (budget truncation,
+    // `limit.next`, the read-request remainder, the served-range settlement)
+    // works in source coordinates.
+    projected = applySourceFidelity(projected, kind, context);
   } else if (isSearchFamilyKind(kind)) {
     // -----------------------------------------------------------------------
     // A.5.8–A.5.10 (C2-4): the search family's authored bodies.

@@ -6,7 +6,7 @@ The TokenLighten VS Code extension bundles the CLI, MCP server, parsers, and req
 
 ## Install without building
 
-Download **[tokenlighten-vscode-extension-0.15.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.1/tokenlighten-vscode-extension-0.15.1.vsix)** from the v0.15.1 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
+Download **[tokenlighten-vscode-extension-0.15.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.2/tokenlighten-vscode-extension-0.15.2.vsix)** from the v0.15.2 GitHub Release. The same VSIX works on Windows, macOS, and Linux.
 
 1. Open **Extensions**.
 2. Select **Install from VSIX…**.
@@ -14,7 +14,7 @@ Download **[tokenlighten-vscode-extension-0.15.1.vsix](https://github.com/Takayu
 4. Reload VS Code if prompted.
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.15.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.2.vsix
 ~~~
 
 To package the VSIX from source, use Node.js 22 or later:
@@ -36,7 +36,11 @@ v0.13.0 includes a schema stamp in the MCP provider version. When the advertised
 
 The `tokenlighten.toolSurface` setting (default `full`) selects the advertised tool schema: `full` includes every capability, `code` advertises code/plain-text/config `tl_read_file`/`tl_edit_file`/`tl_search_files` only — a smaller schema, with Office/archive/credential inputs removed rather than merely refused. See [MCP tools](mcp-tools.md#tool-surface) for details. Changing it is a schema-affecting change like the one above, so VS Code refreshes automatically the same way.
 
-The `tokenlighten.guideProfile` setting selects the size of guide written into AGENTS.md/CLAUDE.md during setup: `full`, `medium`, or `compact`. When it is unset and the tool surface is `full`, setup offers a choice of the full guide or a compact guide for Copilot-only workspaces. Dismissing the choice keeps the full guide. With `tokenlighten.toolSurface: code`, the default is compact without a prompt. The guide is shared with Codex and Claude Code in the same folder. Set `tokenlighten.guideProfile` explicitly to override this default in either direction.
+The `tokenlighten.guideProfile` setting selects the guide written into
+AGENTS.md/CLAUDE.md during setup: `compact` (default), `medium`, or `full`.
+The default is compact on both tool surfaces and for Codex and Claude Code
+in the same folder. An explicit folder, workspace or user setting takes
+precedence; setup no longer asks a separate guide-size question.
 
 Use normal Copilot **Agent** chats for source questions or changes.
 **tokenlighten-explore** remains an optional mode for read-only questions;
@@ -55,7 +59,7 @@ permissions. Use `tl workspace setup --clients vscode --copilot-session-context 
 to leave the hook configuration unchanged. Disable/native controls turn off
 TokenLighten's managed Copilot guidance too.
 
-After upgrading to v0.15.1, re-run **Set up this workspace**, then start a
+After upgrading to v0.15.2, re-run **Set up this workspace**, then start a
 new agent session or reconnect the MCP client. This refreshes the managed
 guides, Copilot configuration, and prefixed tool names. See
 [Refresh an existing workspace](getting-started.md#refresh-an-existing-workspace-after-upgrading)
@@ -95,6 +99,6 @@ Repository indexing and context selection run locally. The extension does not ad
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically or selects English/Japanese explicitly. |
 | `tokenlighten.toolSurface` | `full` | Advertised MCP tool surface: `full` (every capability) or `code` (code/plain-text/config only, a smaller tool schema). Changing this requires reconnecting. |
 | `tokenlighten.copilotGuide` | `standalone` | Copilot guide mode: short self-contained instructions, shared AGENTS.md instructions, or keep existing configuration. |
-| `tokenlighten.guideProfile` | `full` | Guide size written during setup: `full`, `medium`, or `compact`. Left unset, setup writes `compact` instead of `full` when `tokenlighten.toolSurface` is `code`; an explicit value here always wins over that default. |
+| `tokenlighten.guideProfile` | `compact` | Shared guide size written during setup: `compact`, `medium`, or `full`. An explicit value takes precedence on both tool surfaces. |
 
-The desktop application is not included in the public v0.15.1 release.
+The desktop application is not included in the public v0.15.2 release.

@@ -540,6 +540,8 @@ export async function buildSmallFile(
     languageForPath(resolvedPath),
     options.keepComments === true,
     1,
+    // TL-REVIEW-2: the WHOLE file — a doc-only fallback here is a doc-only FILE.
+    "file",
   );
 
   // Feature 1 (2026-07-12b2): full content IS the whole file — record the

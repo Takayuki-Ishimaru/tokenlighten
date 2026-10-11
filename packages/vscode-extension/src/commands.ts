@@ -36,8 +36,6 @@ import {
   agentsMdHoldsOnlyTokenLighten,
   agentsMdPresent,
   copilotGuideIsStandalone,
-  predictStandaloneCopilotGuide,
-  predictStandaloneInWorkspaceFile,
 } from "./copilotGuide.js";
 import type { DisplayTier, MeasurementDisplayTiers } from "@tokenlighten/usage";
 
@@ -62,7 +60,7 @@ function localized(en: string, ja: string): string {
  */
 export function workspaceSetupArgs(
   root: string,
-  profile: GuideProfile = "full",
+  profile: GuideProfile = defaultGuideProfileForSurface(undefined),
   toolSurface?: "full" | "code",
   // Undefined (the default "Set up TokenLighten" button) omits the flag —
   // `tl install` itself already defaults to "raise" — so this function's
@@ -512,9 +510,7 @@ export async function showStatusMenu(
   }
 }
 
-interface GuideProfileQuickPickItem extends vscode.QuickPickItem {
-  profile: Extract<GuideProfile, "full" | "compact">;
-}
+
 
 /**
  * Sets up the first workspace folder through `tl install`. The extension
@@ -569,25 +565,6 @@ export async function setupWorkspace(bar: StatusBarManager, context?: vscode.Ext
   const copilotGuide: "agents-md" | "keep" | undefined = choice === keepCopilotSettings
     ? "keep"
     : workspaceConfig.get<string>("copilotGuide", "standalone") === "agents-md" ? "agents-md" : undefined;
-  // Whether Copilot will read the standalone guide — and so never attach
-  // AGENTS.md, whatever its profile — predicted from this folder's own
-  // `chat.useAgentsMdFile` the way `tl install` will decide it
-  // (copilotGuide.ts). In a window opened through a `.code-workspace` file VS
-  // Code ignores the folder's value (see the `.code-workspace` section above),
-  // so only a workspace-file value that is already `false` counts there.
-  const chatAgentsMd = vscode.workspace.getConfiguration("chat", vscode.Uri.file(root)).inspect<boolean>("useAgentsMdFile");
-  const workspaceFile = localWorkspaceFile();
-  const copilotReadsStandaloneGuide = workspaceFile === undefined
-    ? predictStandaloneCopilotGuide(
-      root,
-      copilotGuide ?? "standalone",
-      chatAgentsMd?.workspaceFolderValue ?? chatAgentsMd?.workspaceValue,
-    )
-    : predictStandaloneInWorkspaceFile(
-      copilotGuide ?? "standalone",
-      chatAgentsMd?.workspaceValue,
-      context?.workspaceState.get<string>(WORKSPACE_FILE_SETTING_KEY) === workspaceFile.fsPath,
-    );
   // DESIGN-v0.15 §8.2 (R7 Part B): keeps the generated .vscode/mcp.json /
   // .mcp.json / .codex/config.toml in sync with the SAME setting
   // mcpProvider.ts's direct-registration path reads — a Codex/Claude Code
@@ -595,15 +572,8 @@ export async function setupWorkspace(bar: StatusBarManager, context?: vscode.Ext
   // this generated file config selects.
   const configuredToolSurface = workspaceConfig.get<string>("toolSurface", "full");
   const toolSurface: "full" | "code" = configuredToolSurface === "code" ? "code" : "full";
-  // P2-3(1): package.json's contributes.configuration declares "full" as
-  // guideProfile's own schema default, so get(key, "full") can never tell
-  // "the user never touched this setting" apart from "the user explicitly
-  // chose full" — inspect() only populates *Value fields when something
-  // actually wrote a value at that scope, which is what a real override
-  // always does. An explicit value (workspace-folder, workspace, or user
-  // scope) always wins over the toolSurface-coupled default; an unset
-  // setting defers to it so --tool-surface code stops silently writing the
-  // full 12 KB guide (P2-3(1), v0.14.1 hands-on report).
+  // inspect() distinguishes an explicit profile from the schema default.
+  // Folder, workspace and user overrides still take precedence.
   const guideProfileInspect = workspaceConfig.inspect<string>("guideProfile");
   const explicitGuideProfileRaw =
     guideProfileInspect?.workspaceFolderValue
@@ -615,65 +585,7 @@ export async function setupWorkspace(bar: StatusBarManager, context?: vscode.Ext
     || explicitGuideProfileRaw === "compact"
       ? explicitGuideProfileRaw
       : undefined;
-  let profile: GuideProfile = explicitGuideProfile ?? defaultGuideProfileForSurface(toolSurface);
-  // USER RULING (2026-09-20): TL must not guess that a workspace is "VS Code
-  // only" — AGENTS.md is a shared file, and Codex / Claude Code can be
-  // registered machine-wide with no workspace file of their own, so silently
-  // writing the compact guide here would change what those other tools read
-  // too. The choice has to be the user's own, explicit and informed — ask
-  // only when nothing has already decided the profile: an explicit
-  // guideProfile setting at any scope (handled above) or the `code` tool
-  // surface (which already defaults to compact on its own — see
-  // defaultGuideProfileForSurface) both skip the question entirely — and so
-  // does a workspace whose Copilot will read the standalone guide (Copilot
-  // standard-setup evaluation, 2026-10-02): Copilot then never attaches
-  // AGENTS.md, so the only readers left are Codex and Claude Code, which keep
-  // the full guide (the profile's default).
-  if (explicitGuideProfile === undefined && toolSurface === "full" && !copilotReadsStandaloneGuide) {
-    const picked = await vscode.window.showQuickPick<GuideProfileQuickPickItem>(
-      [
-        {
-          profile: "full",
-          label: localized(
-            "Full guide (recommended if Codex or Claude Code also work in this folder)",
-            "フルガイド（このフォルダーでCodexやClaude Codeも使う場合におすすめ）",
-          ),
-          description: localized(
-            "AGENTS.md carries the complete TokenLighten protocol (~12.5 KB)",
-            "AGENTS.mdにTokenLightenの完全なプロトコル（約12.5KB）が含まれます",
-          ),
-        },
-        {
-          profile: "compact",
-          label: localized(
-            "Compact guide (GitHub Copilot only)",
-            "コンパクトガイド（GitHub Copilotのみ）",
-          ),
-          description: localized(
-            "about 2,600 fewer tokens on every Copilot conversation; Codex / Claude Code in this folder would read the compact guide too",
-            "Copilotの会話ごとに約2,600トークン節約できます。このフォルダー内のCodex / Claude Codeもコンパクトガイドを読み込むことになります",
-          ),
-        },
-      ],
-      {
-        title: localized("TokenLighten guide size", "TokenLighten ガイドのサイズ"),
-        ignoreFocusOut: true,
-      },
-    );
-    // Dismissing (Esc / undefined) or picking the first (Full) item is
-    // today's behaviour exactly: `profile` already resolved to "full" above
-    // and nothing is persisted. Only Compact changes anything — and it also
-    // persists the choice so later repair runs and the status bar's own
-    // setupWorkspace call never ask again.
-    if (picked?.profile === "compact") {
-      profile = "compact";
-      await workspaceConfig.update(
-        "guideProfile",
-        "compact",
-        getTokenLightenConfigurationTarget(),
-      );
-    }
-  }
+  const profile: GuideProfile = explicitGuideProfile ?? defaultGuideProfileForSurface(toolSurface);
   const result = await spawnTl(
     workspaceSetupArgs(
       root,

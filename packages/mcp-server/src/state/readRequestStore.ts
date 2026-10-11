@@ -276,7 +276,15 @@ export interface OpenReadRequestInput {
     totalLines: number;
     representation: ContentRepresentation;
     requested: LineWindow[];
+    /** TL-REVIEW-2: see `ReadRequestTargetState.elided`. */
+    elided?: LineWindow[];
   }>;
+}
+
+/** `{ elided }` when there is anything to record, `{}` otherwise (absence = nothing elided). */
+function elidedOf(elided: readonly LineWindow[] | undefined): { elided?: LineWindow[] } {
+  if (elided === undefined || elided.length === 0) return {};
+  return { elided: elided.map((window) => ({ start: window.start, end: window.end })) };
 }
 
 /**
@@ -317,6 +325,7 @@ export function openReadRequest(input: OpenReadRequestInput): StagedReadRequest 
       representation: target.representation,
       requested: normalizeWindows(target.requested),
       remaining: normalizeWindows(target.requested),
+      ...elidedOf(target.elided),
     })),
     pages: [],
     created_at_ms: now,
@@ -369,6 +378,8 @@ export function appendReadRequestTarget(
     totalLines: number;
     representation: ContentRepresentation;
     requested: LineWindow[];
+    /** TL-REVIEW-2: see `ReadRequestTargetState.elided`. */
+    elided?: LineWindow[];
   },
 ): void {
   if (staged.mode !== "open" || staged.version !== 0) return;
@@ -381,6 +392,7 @@ export function appendReadRequestTarget(
     representation: target.representation,
     requested: windows,
     remaining: windows,
+    ...elidedOf(target.elided),
   };
   const nextState: ReadRequestState = {
     ...staged.state,
@@ -1016,9 +1028,11 @@ function settledTargets(
     // A page with no `shipped` at all credits NOTHING (see
     // `ReadRequestPage.shipped`): it stays owed and is re-served, which is
     // the safe direction. The elide-hole credit this union exists for is
-    // unaffected — `evidence[].range` names the SEMANTIC extent an entry
-    // claims and elision only changes the body text inside it, so an elided
-    // block is `shipped` in full.
+    // unaffected — an elided block is `shipped` in full: since TL-REVIEW-2
+    // (2026-10-06) `evidence[].range` names only the source lines its body
+    // carries and the block rides that entry's `elided` list, which the emit
+    // tail (`readRequestContinuation.ts`'s `shippedWindowsByPath`) credits
+    // alongside the ranges.
     const delivered: LineWindow[] = [];
     for (const page of staged.state.pages) {
       for (const entry of page.shipped ?? []) {

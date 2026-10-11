@@ -34,6 +34,24 @@
 //   An archive tree therefore sheds nothing at rung 6 and keeps whatever
 //   `capped` limit the emitter gave it — clause 2 of the E3 merge.
 //
+// TPB (2026-10-10): THE FILESYSTEM TREE'S EMITTER NOW PAGES ITSELF.
+// `tools/exploreTree.ts`'s `buildTreeResponse` sizes each page to the caller's
+// budget and names the REMAINDER with a cursor (`limit:{cause:"wire",next}`,
+// see `projectTree`) — the continuation the [R5-9] note above said could not
+// be named. This ladder therefore no longer runs on a filesystem tree page at
+// any budget that holds one line beside its envelope (below that the emitter
+// refuses `budget-below-minimum` itself). It stays as the net for any body that
+// still arrives over budget; on a paged body its rung-6 shallower-tree
+// continuation would replace the cursor, which is honest (a complete tree one
+// level shallower) but not the remainder.
+//
+// ATP (2026-10-10): THE ARCHIVE TREE'S EMITTER PAGES ITSELF TOO
+// (`tools/archiveTreePage.ts`, the same pager over the member listing). The E5
+// decline above used to leave it a `capped` limit with no `next`, or, under a
+// budget below its fixed 200-member page, a `cap-exceeded` refusal; now an
+// archive tree page reaches this ladder over budget only when one member path
+// alone is longer than the whole row.
+//
 // `archive.total_entries` IS NEVER TOUCHED. It is the same inventory invariant
 // §5.5 states for `search.matches` — the count is computed over the full
 // manifest and a shed does not reduce it.

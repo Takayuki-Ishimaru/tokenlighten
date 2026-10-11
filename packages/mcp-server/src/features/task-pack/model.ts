@@ -832,6 +832,15 @@ export interface TaskPackArgs {
    */
   executedSearchLocatedUnclassified?: readonly string[];
   /**
+   * TL_EFF_LIGHT_ANSWER (readCodeTaskPack.ts `buildLightAnswerPack`): set only
+   * on the internal seeded build of a light answer pack, naming where its one
+   * path came from — `"query-named"` when the query itself named the file (the
+   * seed is stamped like the full pipeline's own query-named surface, not as
+   * caller-supplied), `"caller-supplied"` for a one-entry `targets[]`.
+   * Server-derived; internal only, never serialized or fingerprinted.
+   */
+  lightAnswer?: "query-named" | "caller-supplied";
+  /**
    * Canonical, server-resolved task identity for result-consumption state.
    *
    * This is the durable `task.id` / task-handle's underlying fingerprint, not

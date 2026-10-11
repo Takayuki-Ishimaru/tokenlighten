@@ -676,6 +676,17 @@ function projectReferences(body: Body): Body {
  * `capped` rather than `source` because the unlisted entries plainly exist; the
  * tree text also keeps its own truncation marker, so the caller can see where
  * it stopped and re-request from there.
+ *
+ * TPB (2026-10-10 independent runtime review): THE FILESYSTEM TREE NOW TAKES
+ * THE `wire` ARM. `tools/exploreTree.ts`'s `buildTreeResponse` pages the
+ * listing to the caller's budget and hands a page that stops short a
+ * `next_call` whose `cursor` resumes the SAME listing at the line it stopped
+ * at — the remainder [R5-9] said could not be named, named without choosing a
+ * subtree. Folded here like `find`'s `next_call`: `limit:{cause:"wire",next}`.
+ * ATP (2026-10-10): the archive-scoped tree pages its member listing the same
+ * way (`tools/archiveTreePage.ts`) and takes the same `wire` arm. A body with
+ * no `next_call` (a cursor that could not be minted) keeps the `capped` arm
+ * exactly as before (clause 4).
  */
 function projectTree(body: Body): Body {
   const projected: Body = {
@@ -704,9 +715,12 @@ function projectTree(body: Body): Body {
   // "the walk was exhaustive".
   keep(projected, body, ["note", "scope_report"]);
 
+  const next = emittableToolCall(body["next_call"]);
   const limit = foldLimit({
     withheld: body["truncated"] === true,
+    wire: next !== undefined,
     omitted: ["results"],
+    next,
   });
   if (limit !== undefined) projected["limit"] = limit;
   return projected;

@@ -114,7 +114,7 @@ import {
   nextStringToCall,
   type ContinuationPlan,
 } from "../../util/continuation.js";
-import { collectSymbols, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
+import { collectSymbols, type CollectedSymbol, type CollectedSymbolKind } from "../../symbols/collectSymbols.js";
 import { recordPackChecks, getPackChecks, tokenizeForEpoch, deriveCheckId, recordConcernTokens, recordServedEditAdmissibility, recordWithheldEditAddresses, isCandidateListPackPending, recordServedRange, beginServeCall, servedFindWindowHasUnservedLines, servedClusterRanges, servedRangeReceipt, servedRangeCoverage, getIntentEditObserved, getSession, type PackCheckRecord } from "../../state/session.js";
 import {
   extractRequestItems,
@@ -237,6 +237,7 @@ import {
   concernRecoveryEnabled,
   coveragePackerEnabled,
   coveragePackerV2Enabled,
+  effLightAnswerEnabled,
   foldSmallRemainderEnabled,
   graphEvidenceEnabled,
   identifierGroundingEnabled,
@@ -532,6 +533,14 @@ import type {
 } from "@tokenlighten/types";
 import * as fs from "fs";
 import * as path from "path";
+import {
+  LIGHT_ANSWER_MAX_BYTES,
+  LIGHT_ANSWER_MAX_LINES,
+  lightAnswerDependencyLine,
+  lightAnswerHasWholeIdentifier,
+  lightAnswerLanguage,
+  lightAnswerLineCount,
+} from "./lightAnswer.js";
 import type {
   ArtifactKind,
   ArtifactTaskPackSection,
@@ -579,7 +588,7 @@ function deriveNextFromPlan(plan: ContinuationPlan): ContinuationCall | undefine
   return plan.stages[0]?.calls[0] as ContinuationCall | undefined;
 }
 
-import { applySemanticFrontierDemotion, attachSfDemotionResidency, deriveCanonicalTaskDecision, hasCertificateBinding, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
+import { applySemanticFrontierDemotion, attachSfDemotionResidency, deriveCanonicalTaskDecision, hasCertificateBinding, isSupportingEvidenceWhy, reapplySemanticFrontierDecision } from "./canonicalDecision.js";
 import { markSemanticFrontierNamedJoin, markCallerRangeSurface, isCallerRangeSurface, markExplicitRangeSurface, markSurfaceProvenance, surfaceProvenance, wasSemanticFrontierBodyWithheld } from "./sfWithholdingMarks.js";
 import { withdrawProvisionalServedRanges } from "../../state/session.js";
 import { decisionInvariantStrictEnabled, effHubWholeEnabled } from "../../util/flags.js";
@@ -4569,6 +4578,15 @@ async function buildTaskPackCore(
   // of `cleanedProfile` is unaffected.
   const taskProfileBinding = noteInheritedTaskProfile(bindTaskProfile(args.taskProfile, query, args.writeAllowed), args);
   const cleanedProfile = taskProfileBinding.selected;
+  // TL_EFF_LIGHT_ANSWER (class (B), default OFF): a fresh answer question about
+  // ONE small, self-contained file skips everything below that discovers —
+  // the named-project inference, the routing, the pathless locator — and is
+  // built by the seeded builder a caller-supplied target takes (see
+  // `lightAnswerTarget`). OFF, `lightAnswerTarget` returns at its first line.
+  if (locatingQuery === query && effLightAnswerEnabled()) {
+    const light = await lightAnswerVerdict(args, query, workspace, taskProfileBinding);
+    if ("target" in light) return buildLightAnswerPack(args, query, workspace, light.target);
+  }
   const directoryLike = (candidatePath: string): boolean =>
     isDirectoryWithin(candidatePath, workspace) || path.extname(candidatePath) === "";
   const directoryEntries = cleanedEntries.filter((entry) => directoryLike(entry.path));
@@ -6426,7 +6444,7 @@ async function buildAnswerTaskPack(
   // Issue #3 dominance tie-break: computed once, reused below (after `result`
   // exists) to serve the winner's body — see `applyDominancePromotion`.
   const dominantSurfaceIndex = resolveDominantSurfaceIndex(surfaces);
-  const { coverage, reason, dominancePromoted } = exactLocatedAnswer || sameNameAmbiguousAnswer
+  const derivedAnswerCoverage = exactLocatedAnswer || sameNameAmbiguousAnswer
     ? { coverage: "focused" as const, reason: undefined, dominancePromoted: undefined }
     : locateResult.hit
     ? deriveCoverage(
@@ -6448,6 +6466,30 @@ async function buildAnswerTaskPack(
     : strongRecoveredAnswer
       ? { coverage: "focused" as const, reason: undefined, dominancePromoted: undefined }
       : { coverage: "partial" as const, reason: "candidate-list" as const, dominancePromoted: undefined };
+  // v0.15.1 runtime review TL-REVIEW-3 (2026-10-06): a locator HIT whose ONE
+  // primary is a file the question names by path — a name no other
+  // workspace file shares — and whose body this pack serves is not a choice
+  // between candidates. The locator scores a filename match at 0.625, under
+  // `deriveCoverage`'s 0.7 "single-site" bar, so rule 6 used to brand it
+  // "candidate-list": 「http.ts の retry 関数について…」 came back as
+  // `await_input`/`choose-candidate` naming http.ts as its ONE candidate, and
+  // "Explain the retry function in http.ts." as a `discover` whose only gap
+  // was `ambiguous-target` and whose bundle re-served the bytes it already
+  // held. The question settled the target; the file's supporting evidence
+  // (closure constants, callers, counterexamples) is never a rival for it.
+  // Only the candidate-list verdict changes — a missing role, an uncovered
+  // concern or an open request item still keeps the pack open, and the
+  // certificate gates below are untouched.
+  const namedSinglePrimaryAnswer = locateResult.hit
+    && derivedAnswerCoverage.reason === "candidate-list"
+    && locateResult.primary.length === 1
+    && surfaces[0] !== undefined
+    && surfaces[0].path === locateResult.primary[0]!.path
+    && hasServedCode(surfaces[0])
+    && queryNamesWorkspaceFileUniquely(query, workspace, surfaces[0].path);
+  const { coverage, reason, dominancePromoted } = namedSinglePrimaryAnswer
+    ? { coverage: "focused" as const, reason: "single-site" as const, dominancePromoted: undefined }
+    : derivedAnswerCoverage;
   const needsConfirmation = !locateResult.hit && !strongRecoveredAnswer && !sameNameAmbiguousAnswer;
   const topRange = surfaces[0]!.range.match(/^(\d+)-(\d+)$/);
   // The ±40-line confirmation window stops at the file's last line — the
@@ -10463,6 +10505,300 @@ function namedDirClauseWorkList(purposeText: string, query: string): ClauseHygie
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// TL_EFF_LIGHT_ANSWER (2026-10-10, small-task cost; class (B), default OFF).
+//
+// An answer question about ONE small, self-contained file is built by the
+// seeded builder a caller-supplied target takes, entered straight from
+// buildTaskPackCore: nothing that DISCOVERS runs — the named-project inference,
+// the routing shortcuts, and for a file the query names, the whole pathless
+// answer path (source-index build and its git calls, symbol search, reference
+// scan, the answer builder's augmentation passes). Measured 2026-10-10 on the
+// built CLI, a 1,501-file synthetic TypeScript workspace: the query-named
+// question took ~640 ms warm against ~165 ms for the same question with the
+// file as a target. What certifies is unchanged: the seeded builder's facet
+// plan and the shared tail (`dedupeTrimAndPersist`: profile binding, answer
+// dependency closure, readiness contract, decision, persistence) run exactly
+// as for a target, so this path cannot certify an answer the seeded pack
+// would not — and `lightAnswerTarget` admits only questions the differential
+// spec (smallTaskLightAnswerDifferential.spec.ts) shows the full pipeline
+// answers from the same file.
+// ---------------------------------------------------------------------------
+
+/** The one file a light answer pack serves, and where its path came from. */
+interface LightAnswerTarget {
+  readonly path: string;
+  readonly origin: "query-named" | "caller-supplied";
+}
+
+/** `lightAnswerVerdict`'s answer: the target, or the first condition that failed. */
+export type LightAnswerVerdict = { readonly target: LightAnswerTarget } | { readonly skip: string };
+
+/** Facets a light pack may answer: what the file's own code computes or decides. */
+const LIGHT_ANSWER_FACETS: ReadonlySet<string> = new Set(["value", "condition"]);
+
+/**
+ * The light answer path's applicability test: `{target}` when EVERY condition
+ * holds, else `{skip}` naming the first that failed (the full pipeline runs).
+ * The request-shape checks run before the one file read, and nothing here
+ * writes anything.
+ *
+ *  1. TL_EFF_LIGHT_ANSWER is on.
+ *  2. An answer task: the binding selected `answer` — declared, or inferred
+ *     from an interrogative with no defect-symptom marker (the §14 guardrail
+ *     `bindTaskProfile` already applies) — and the query carries no mutation
+ *     or defect-symptom wording either way.
+ *  3. A fresh task: `task.epoch:"new"`, and no qref replay, task handle,
+ *     inherited profile, forced serve, budget, symbol, language, limit,
+ *     surface-role selector or credential.
+ *  4. Exactly one file named: either one `targets[]` entry (no range, symbol
+ *     or purpose) whose path every path token of the query repeats exactly, or
+ *     no targets and exactly one path token in the query, directory-qualified
+ *     (`src/math.ts`; a bare basename could name several files).
+ *  5. The file is a regular file inside the workspace, not a test, in a light
+ *     answer language, at most LIGHT_ANSWER_MAX_BYTES / LIGHT_ANSWER_MAX_LINES,
+ *     decodes clean under the serve policy, and names no other module
+ *     (features/task-pack/lightAnswer.ts).
+ *  6. One concern about that file's own code: at most one request item (none
+ *     coordinated), at most one facet and only a value/condition facet, not a
+ *     locate/relate request, and every name the question asks about — a code
+ *     identifier it spells, a name it frames as code ("the add function"), a
+ *     facet's subject — is DECLARED in the file (its parsed symbols), so
+ *     nothing the question names has to be looked for anywhere else.
+ */
+async function lightAnswerVerdict(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  binding: TaskProfileBinding,
+): Promise<LightAnswerVerdict> {
+  if (!effLightAnswerEnabled()) return { skip: "flag-off" };
+  // 2. answer task
+  if (binding.selected !== "answer") return { skip: "not-answer" };
+  if (binding.source !== "explicit" && binding.source !== "inferred") return { skip: "profile-source" };
+  if (query.trim().length === 0) return { skip: "empty-query" };
+  if (hasRequestedMutationIntent(query)) return { skip: "mutation-wording" };
+  if (hasDefectSymptomMarker(query)) return { skip: "defect-wording" };
+  // 3. fresh task, plain request
+  if (args.taskEpoch !== "new") return { skip: "not-new-epoch" };
+  if (
+    args.taskQueryRefReplay === true
+    || args.taskBinding !== undefined
+    || args.taskProfileInherited === true
+    || args.forceServe === true
+    || args.forceServeCallerTargetsOnly === true
+    || args.namedScopeRequest !== undefined
+    || args.autoDiscoveredLocation === true
+    || (args.executedSearchLocated?.length ?? 0) > 0
+    || (args.executedSearchLocatedUnclassified?.length ?? 0) > 0
+    || args.lightAnswer !== undefined
+  ) return { skip: "continuation" };
+  if (
+    args.symbol !== undefined
+    || args.lang !== undefined
+    || args.limit !== undefined
+    || (args.surfaceRoles?.length ?? 0) > 0
+    || args.maxBytes !== undefined
+    || args.maxTokens !== undefined
+    || args.credentialRef !== undefined
+  ) return { skip: "request-option" };
+  // 4. exactly one file named
+  const tokens = queryNamedPathTokens(query);
+  let relPath: string;
+  let origin: LightAnswerTarget["origin"];
+  if ((args.paths?.length ?? 0) > 0) {
+    if (args.path !== undefined || args.paths!.length !== 1) return { skip: "target-count" };
+    const entry = normalizePathEntry(args.paths![0]!);
+    if (entry.range !== undefined || entry.symbol !== undefined || entry.purpose !== undefined) return { skip: "target-window" };
+    relPath = entry.path.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (tokens.some((token) => token !== relPath)) return { skip: "query-names-another-path" };
+    origin = "caller-supplied";
+  } else {
+    if (args.path !== undefined) return { skip: "legacy-path" };
+    if (tokens.length !== 1) return { skip: "query-path-count" };
+    if (!tokens[0]!.includes("/")) return { skip: "bare-basename" };
+    relPath = tokens[0]!;
+    origin = "query-named";
+  }
+  if (relPath.length === 0 || relPath.startsWith("/") || relPath.split("/").includes("..")) return { skip: "path-shape" };
+  // 6 (request side, before the read).
+  const items = extractRequestItems(query);
+  if (items.length > 1 || items.some((item) => item.coordinated === true)) return { skip: "multi-item" };
+  const facets = extractFacetRequirements(query);
+  if (facets.length > 1) return { skip: "multi-facet" };
+  if (facets.some((facet) => !LIGHT_ANSWER_FACETS.has(facet.facet))) return { skip: "relation-facet" };
+  if (isStructuralOnlyRequest(query)) return { skip: "structural" };
+  // A behaviour question ("when …", "how …") owes a `behavior-body` proof,
+  // which the full pipeline's answer path discharges from the callable it
+  // FOCUSES on; a whole-file surface proves it only through declaration-shape
+  // text tests that miss some forms (a Go method's receiver, measured by the
+  // differential spec). A target takes the same seeded builder either way, so
+  // only a query-named file is held back.
+  if (origin === "query-named" && BEHAVIOR_QUERY_RE.test(query)) return { skip: "behavior-question" };
+  // 5. the file
+  const language = lightAnswerLanguage(relPath);
+  if (language === undefined) return { skip: "language" };
+  if (isTestConcernPath(relPath)) return { skip: "test-file" };
+  const abs = safeResolve(relPath, workspace);
+  if (abs === undefined) return { skip: "outside-workspace" };
+  let text: string;
+  try {
+    const real = fs.realpathSync(abs);
+    if (!isWithin(real, resolveReal(workspace))) return { skip: "outside-workspace" };
+    const stat = fs.statSync(real);
+    if (!stat.isFile()) return { skip: "not-a-file" };
+    if (stat.size > LIGHT_ANSWER_MAX_BYTES) return { skip: "over-bytes" };
+    // served-bytes: readServedText (the serve policy's verdict; never served from here)
+    const verdict = readServedText(fs.readFileSync(real));
+    if (verdict.kind !== "clean") return { skip: "not-clean-text" };
+    text = verdict.text;
+  } catch {
+    return { skip: "unreadable" };
+  }
+  if (lightAnswerLineCount(text) > LIGHT_ANSWER_MAX_LINES) return { skip: "over-lines" };
+  if (lightAnswerDependencyLine(text, language) !== undefined) return { skip: "dependency-line" };
+  // 6 (file side): every name the question asks about is declared here.
+  const subjects = new Set<string>([
+    ...explicitCodeIdentifiers(query),
+    ...framedCodeNamesIn(query),
+    ...facets.flatMap((facet) => [...facet.subjectIdentifiers, ...(facet.subjectCallables ?? [])]),
+  ]);
+  if (subjects.size > 0) {
+    let parsed: CollectedSymbol[] | undefined;
+    try {
+      parsed = await collectSymbols(text, language, {});
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed === undefined || parsed.length === 0) return { skip: "no-parse" };
+    const declared = new Set(parsed.map((symbol) => unqualifiedSymbolTail(symbol.name)));
+    for (const name of subjects) if (!declared.has(name)) return { skip: `undeclared:${name}` };
+  }
+  for (const facet of facets) {
+    if (
+      facet.subjectIdentifiers.length === 0
+      && (facet.subjectCallables?.length ?? 0) === 0
+      && facet.subjectTerms.length > 0
+      && !facet.subjectTerms.some((term) => lightAnswerHasWholeIdentifier(text, term, true))
+    ) return { skip: "facet-subject-absent" };
+  }
+  // 7. A file the QUERY names (no target) goes down the pathless answer path in
+  // the full pipeline, which locates the question's words across the whole
+  // workspace: measured on the bench fixtures, a plain-word subject
+  // ("capitalize", "port") drew in another project's `util/` and ended
+  // `discover`, and a name re-exported by a barrel file added that file.
+  // So the question must name what it asks about — a code identifier or a
+  // framed name — and none of those names may occur in the CODE (comments and
+  // strings masked) of any other workspace file. A caller-supplied target
+  // takes the seeded builder in both arms and needs neither test.
+  if (origin === "query-named") {
+    if (subjects.size === 0) return { skip: "no-named-subject" };
+    const elsewhere = lightAnswerSubjectElsewhere(workspace, relPath, [...subjects]);
+    if (elsewhere !== undefined) return { skip: `named-elsewhere:${elsewhere}` };
+  }
+  return { target: { path: relPath, origin } };
+}
+
+/** The other-file scan gives up (and the light path with it) past this many code files. */
+const LIGHT_ANSWER_MAX_SCAN_FILES = 5000;
+
+/**
+ * `name@path` for the first subject name with a whole-identifier occurrence in
+ * the code (comments and string literals masked) of a workspace file other
+ * than `relPath`, over the same walk the find universe uses; `"scan-bound"` when
+ * the walk is too large to scan; undefined when no other file names any.
+ */
+function lightAnswerSubjectElsewhere(workspace: string, relPath: string, names: readonly string[]): string | undefined {
+  const files = walkCodeFiles(workspace, {});
+  if (files.length > LIGHT_ANSWER_MAX_SCAN_FILES) return "scan-bound";
+  for (const file of files) {
+    if (file.relPath === relPath || file.kind === "artifact") continue;
+    let content: string;
+    try {
+      const stat = fs.statSync(file.absPath);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) continue;
+      // served-bytes: not-served (TL_EFF_LIGHT_ANSWER applicability scan: only tested for a subject name's whole-identifier occurrence; the light path serves the one target file through readServedText, never these)
+      content = fs.readFileSync(file.absPath, "utf8");
+    } catch {
+      continue;
+    }
+    const present = names.filter((name) => content.includes(name));
+    if (present.length === 0) continue;
+    const masked = maskCommentsAndStrings(content, { language: file.language });
+    for (const name of present) {
+      if (lightAnswerHasWholeIdentifier(masked, name)) return `${name}@${file.relPath}`;
+    }
+  }
+  return undefined;
+}
+
+/** Test seam: `lightAnswerVerdict` with the request's own profile binding (smallTaskLightAnswer.spec.ts). */
+export function lightAnswerVerdictForTest(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+): Promise<LightAnswerVerdict> {
+  return lightAnswerVerdict(args, query, workspace, bindTaskProfile(args.taskProfile, query, args.writeAllowed));
+}
+
+/**
+ * Build the light answer pack: the seeded builder over the one file, then the
+ * wire trim. A query-named file is seeded as the full pipeline seeds a
+ * query-named file (`why:"query-named-file"`, required), and the captured
+ * pack is also recorded under the request as the caller sent it — the
+ * `namedScopeRequest` re-key the named-project rewrite uses — so the
+ * dispatcher's receipt preflight finds it.
+ */
+async function buildLightAnswerPack(
+  args: TaskPackArgs,
+  query: string,
+  workspace: string,
+  target: LightAnswerTarget,
+): Promise<TaskPackResult> {
+  handleTable.upsert({ kind: "repo", workspaceRoot: workspace });
+  const seededArgs: TaskPackArgs = {
+    ...args,
+    path: undefined,
+    paths: [{ path: target.path }],
+    lightAnswer: target.origin,
+  };
+  if (target.origin === "query-named") {
+    seededArgs.namedScopeRequest = {
+      args,
+      signature: namedScopeSignature(seededArgs, computePackFingerprint(seededArgs, workspace)),
+    };
+  }
+  const result = await buildSeededTaskPack(seededArgs, query, workspace);
+  const trimmed = trimLightAnswerWire(result, target.path);
+  // Diagnostic only (TL_TRACE): which requests took the light path, for the
+  // differential spec and for bench attribution. No path or query text.
+  trace("light_answer_pack", {
+    origin: target.origin,
+    surfaces: result.surfaces.length,
+    trimmed,
+  }, workspace);
+  return result;
+}
+
+/**
+ * The members a one-file answer carries nothing with: the served row's `why`
+ * (the request named the file; there was no selection to explain) and its
+ * `symbol` (the whole file is the body). Applied only to the clean shape — one
+ * surface, the target file, its whole body served, and a certified answer —
+ * after the tail has booked and recorded the pack, so nothing but the wire
+ * projection reads the trimmed object.
+ */
+function trimLightAnswerWire(result: TaskPackResult, relPath: string): boolean {
+  if (result.surfaces.length !== 1) return false;
+  const surface = result.surfaces[0] as TaskPackSurface;
+  if (surface.path !== relPath || typeof surface.code !== "string") return false;
+  if ((surface.remaining_ranges?.length ?? 0) > 0) return false;
+  if (deriveCanonicalTaskDecision(result)?.kind !== "act-answer") return false;
+  delete surface.why;
+  delete surface.symbol;
+  return true;
+}
+
 async function buildSeededTaskPack(
   args: TaskPackArgs,
   query: string,
@@ -10886,7 +11222,14 @@ async function buildSeededTaskPack(
       // sandwich "nul-stripped" between two "caller-supplied" tokens instead
       // of reading as one clean qualifier list.
       const nulStripped = nulStrippedSeedPaths.has(seed.entry.path);
-      const baseWhy = executedSearchLocatedPaths.has(seed.entry.path)
+      // TL_EFF_LIGHT_ANSWER: a light pack's file the QUERY named is stamped
+      // like the full pipeline's own query-named surface
+      // (`augmentQueryNamedFileSurfaces`: `query-named-file`, required), never
+      // as caller-supplied — the caller supplied no target.
+      const lightQueryNamed = args.lightAnswer === "query-named" && !nulStripped;
+      const baseWhy = lightQueryNamed
+        ? "query-named-file"
+        : executedSearchLocatedPaths.has(seed.entry.path)
         ? nulStripped ? `${EXECUTED_SEARCH_LOCATED_WHY}; nul-stripped` : EXECUTED_SEARCH_LOCATED_WHY
         : executedSearchUnclassifiedPaths.has(seed.entry.path)
         ? nulStripped ? `${EXECUTED_SEARCH_UNCLASSIFIED_WHY}; nul-stripped` : EXECUTED_SEARCH_UNCLASSIFIED_WHY
@@ -10920,7 +11263,7 @@ async function buildSeededTaskPack(
         // the executed-search ledger are renamed.
         why: seedWhy,
         confidence: wantsEmbed ? 0.85 : 0.3,
-        required: requiredSet.has(seed.role),
+        required: lightQueryNamed || requiredSet.has(seed.role),
       };
       // WP-S2 rule 2: spend the widened allowance ONLY on the whole-file body
       // the water-filling pass actually budgeted for, and only when the body
@@ -11767,7 +12110,11 @@ async function buildSeededTaskPack(
         range: surface.range,
         ...(surface.symbol !== undefined ? { symbol: surface.symbol } : {}),
         surface: asImpactSurface(surface.role),
-        why: "caller-supplied",
+        // TL_EFF_LIGHT_ANSWER: the one seed of a light pack whose file the
+        // query named plans as the query-named surface it is, so a name the
+        // file shares with another file settles on it exactly as the full
+        // pipeline's named-path rule settles it (`findDeclaredCallableAmong`).
+        why: args.lightAnswer === "query-named" ? "query-named-file" : "caller-supplied",
         confidence: 1,
       }));
       await recoverFacetClosureCandidates(args, query, workspace, cache, planSelection, facetRequirements, true);
@@ -16641,9 +16988,16 @@ async function recoverSameNameAnswerSubjects(
   const usageOnly = usageOnlyExplicitIdentifiers(query, identifiers);
   const declares = (entry: RankedAnswerEvidenceCandidate, identifier: string): boolean =>
     entry.candidate.symbol !== undefined && unqualifiedSymbolTail(entry.candidate.symbol) === identifier;
+  // v0.15.1 runtime review (2026-10-06): a bare basename several roots share
+  // names every one of them here. Resolved to one (`queryNamedWorkspaceFiles`
+  // picks the alphabetically first), "What is the value of RETRY_LIMIT in
+  // settings.ts?" over `a/settings.ts` (4) and `b/settings.ts` (9) bound the
+  // subject to `a/` and certified 4 with no word about `b/`; naming both, the
+  // binding below reads it as the ambiguity it is — every declaration served,
+  // the certificate disclosing it.
   const anchors = {
     named: [
-      ...queryNamedWorkspaceFiles(query, workspace, ranked.map((entry) => entry.candidate.path)),
+      ...queryNamedWorkspaceFilesKeepingSharedBasenames(query, workspace),
       ...(args.path ? [args.path] : []),
     ],
     targets: [],
@@ -16793,6 +17147,51 @@ function sameNameAmbiguityDisclosures(
       omitted_count: 0,
       undetermined: true,
       undetermined_reason: capWords(`${sameNameDeclarationList(subject)} and this pack could not tell which one the question means`, 28),
+    });
+  }
+  return out;
+}
+
+const SHARED_BASENAME_DISCLOSURE_PREFIX = "shared-basename:";
+
+/**
+ * v0.15.1 runtime review (2026-10-06): a bare basename the question writes
+ * (`http.ts`) that several project roots share (`a/http.ts`, `b/http.ts`)
+ * leaves the target open, and an answer served from SOME of those files
+ * picked one the question never chose: 「http.ts の retry 関数について…」 over
+ * two `http.ts` files was certified from `a/http.ts` alone with no word
+ * about `b/http.ts`. The certificate says so instead (which files the name
+ * matches, which this pack served). Silent when a root-level file carries the
+ * exact name (the bare token names it), when every match is served (the
+ * answer can address each), or when none is.
+ */
+function sharedBasenameDisclosures(
+  result: TaskPackResult,
+  query: string,
+  workspace: string,
+): Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number; undetermined: true; undetermined_reason: string }> {
+  const tokens = queryNamedPathTokens(query).filter((token) => !token.includes("/"));
+  if (tokens.length === 0) return [];
+  const served = new Set(codeTaskPackSurfaces(result.surfaces).filter(hasServedCode).map((surface) => surface.path));
+  if (served.size === 0) return [];
+  const walked = walkedFilesForQueryNamedResolution(workspace, false);
+  const out: Array<{ id: string; term: string; scope_complete: boolean; omitted_count: number; undetermined: true; undetermined_reason: string }> = [];
+  for (const token of tokens) {
+    const named = filesNamedByPathToken(token, walked, query);
+    if (named.length < 2) continue;
+    const servedNamed = named.filter((relPath) => served.has(relPath));
+    if (servedNamed.length === 0 || servedNamed.length === named.length) continue;
+    const listed = named.slice(0, 4);
+    out.push({
+      id: `${SHARED_BASENAME_DISCLOSURE_PREFIX}${token}`,
+      term: token,
+      scope_complete: false,
+      omitted_count: 0,
+      undetermined: true,
+      undetermined_reason: capWords(
+        `${token} names ${named.length} files (${listed.join(", ")}${named.length > listed.length ? ", …" : ""}); this pack served ${servedNamed.join(", ")} and the question does not say which one it means`,
+        32,
+      ),
     });
   }
   return out;
@@ -20857,7 +21256,19 @@ async function constantClosureForFocal(
     const specs = importSpecifiersNaming(ownerLines, depName, ownerHashComment, ownerPath);
     const namedSpecs = disclosableNamedSpecs(depName, specs);
     const packageSpec = namedSpecs.find((spec) => !spec.relative && spec.packageEligible === true);
-    const importedValueRead = namedSpecs.length > 0 && hasValuePositionOccurrence(readLines, ownerHashComment, depName, ownerPath);
+    // 2026-10-06 v0.15.1 review follow-up: the depth-0 package-namespace rule
+    // (see `packageNamespaceMembersOnly` in the focal pass below) holds for a
+    // dependency too. A class focal reaches its methods' bodies through this
+    // path, so `vscode.workspace.workspaceFolders` read by `isTracked` was
+    // disclosed "vscode (read by isTracked in src/watcher.ts) could not be
+    // resolved" beside a pack that served the whole file. The alias set is
+    // the OWNER file's, which is where the import lives.
+    const ownerModuleAliases = ownerPath === focal.path ? moduleAliases : importedModuleAliasesIn(ownerLines, ownerHashComment);
+    const packageNamespaceMembersOnly = packageSpec !== undefined
+      && ownerModuleAliases.has(depName)
+      && !hasValuePositionOccurrence(readLines, ownerHashComment, depName, ownerPath, true);
+    const importedValueRead = namedSpecs.length > 0 && !packageNamespaceMembersOnly
+      && hasValuePositionOccurrence(readLines, ownerHashComment, depName, ownerPath);
     // R2-T3: a search that ended for want of its own work bound (a Go package
     // too large to read whole, a re-export graph wider than the file budget)
     // proves nothing about a value read of this name -- undetermined, not absent.
@@ -20946,7 +21357,23 @@ async function constantClosureForFocal(
         // binding, not noise; a call-only import is a CALLEE this scan may
         // still chase through when it DOES resolve (P0-4), so a FAILED
         // call-only resolution is never disclosed as missing VALUE evidence.
-        const importedValueRead = namedSpecs.length > 0 && depth === 0 && hasValuePositionOccurrence(bodyLines, hashComment, name, focal.path);
+        //
+        // v0.15.1 runtime review (2026-10-06): a PACKAGE module/namespace alias
+        // reached only through its members (`import * as https from
+        // "node:https"` + `https.get(...)`, `import * as vscode from "vscode"`
+        // + `vscode.workspace.workspaceFolders`) is an external API the body
+        // calls, never a value it computes with — disclosing it as an
+        // undetermined value ("https is imported from package node:https; its
+        // declaration could not be resolved") gave "the timeout and maximum
+        // response size used by fetchLatestRelease" a gap no read could close.
+        // A qualified constant through the alias (`cfg.TIMEOUT_MS`) is judged
+        // by the qualified-reference pass below, and a bare value read of the
+        // alias itself still discloses.
+        const packageNamespaceMembersOnly = packageSpec !== undefined
+          && moduleAliases.has(name)
+          && !hasValuePositionOccurrence(bodyLines, hashComment, name, focal.path, true);
+        const importedValueRead = namedSpecs.length > 0 && depth === 0 && !packageNamespaceMembersOnly
+          && hasValuePositionOccurrence(bodyLines, hashComment, name, focal.path);
         // R2-T3 (eval-0929 final review, P0-4's cap ruling): the search for
         // this name's declaration ended for want of its own WORK bound (a Go
         // package too large to read whole, a module graph wider than the
@@ -22667,6 +23094,25 @@ interface FlowWindows {
  * a class whose relevant members are still unserved, or whose clause names
  * something no served member accounts for, is not yet answered.
  */
+/**
+ * v0.15.1 runtime review (2026-10-06): the stem an English clause word shares
+ * with the member that does it — "authorization" / `authorize()`, "settlement"
+ * / `settle()`, "processing" / `process()`. A flow clause names the steps as
+ * nouns or gerunds while the class names them as verbs, so the literal match
+ * alone disclosed "authorization … matches no member of PaymentPipeline" over
+ * a served class whose `authorize()` is the very step. Only common
+ * derivational/inflectional endings are stripped, and never below four
+ * letters, so the stem still names the word.
+ */
+const DERIVATIONAL_SUFFIXES_EN = ["izations", "isations", "ization", "isation", "ations", "ation", "ments", "ment", "ings", "ing", "ers", "er", "ed", "es", "ize", "ise", "s", "e"];
+function derivationalStemEn(word: string): string {
+  if (!/^[a-z]+$/u.test(word)) return word;
+  for (const suffix of DERIVATIONAL_SUFFIXES_EN) {
+    if (word.endsWith(suffix) && word.length - suffix.length >= 4) return word.slice(0, -suffix.length);
+  }
+  return word;
+}
+
 /** P1-8: safety ceiling on how many matched members become required flow windows at all — MAX_CALLEES_PER_REQUIREMENT (3) still bounds the costlier one-hop callee-expansion (`steps`), a separate, smaller concern. */
 const MAX_FLOW_REQUIRED_MEMBER_WINDOWS = 64;
 
@@ -22688,18 +23134,24 @@ async function flowStepWindowsForNonCallableFocal(
       && normalizeCallerIdent(unqualifiedSymbolTail(s.enclosingSymbol?.name ?? "")) === ownName)
     .sort((a, b) => a.startLine - b.startLine);
   const lines = content.split(/\r?\n/);
+  // 2026-10-10 (false flow gaps): a word naming no point of the flow — the
+  // file's path, a flow descriptor, a declaration kind (requestFacets.ts
+  // `nonPointTermsIn`) — is no term a member must carry; a clause left with
+  // no point word asks for the type's whole flow, so every member is a step.
+  const nonPoint = new Set((requirement.nonPointTerms ?? []).map((t) => t.toLowerCase()));
   const terms = [...new Set(
-    requirement.subjectTerms.map((t) => t.toLowerCase()).filter((t) => t.length >= 3 && t !== ownName),
+    requirement.subjectTerms.map((t) => t.toLowerCase()).filter((t) => t.length >= 3 && t !== ownName && !nonPoint.has(t)),
   )];
   const ungroundedTerms = new Set(terms);
-  const matched: typeof members = [];
+  const matched: typeof members = terms.length === 0 ? [...members] : [];
   for (const member of members) {
     if (terms.length === 0) break;
     const nameLower = unqualifiedSymbolTail(member.name).toLowerCase();
     const bodyLower = lines.slice(member.startLine - 1, member.endLine).join("\n").toLowerCase();
     let hit = false;
     for (const term of terms) {
-      if (nameLower.includes(term) || bodyLower.includes(term)) {
+      const stem = derivationalStemEn(term);
+      if (nameLower.includes(term) || bodyLower.includes(term) || (stem !== term && (nameLower.includes(stem) || bodyLower.includes(stem)))) {
         ungroundedTerms.delete(term);
         hit = true;
       }
@@ -25120,6 +25572,9 @@ const ANSWER_INTENT_JA: readonly string[] = [
   // "answer" unless hasDefectSymptomMarker also matches the query.
   "理解", "知りたい", "把握", "どの", "どれ", "どのように", "どうやって", "どんな",
   "流れ", "概要", "全体像", "一覧", "何が", "何を", "どこで",
+  // 2026-10-10: 「…を示してください」「…を見せてください」 ask to be SHOWN
+  // something; with no marker they fell to generic and certified act.edit.
+  "示して", "見せて",
 ];
 const ANALYSIS_INTENT_EN_RE = /\b(?:analy[sz]e|analysis|review|inspect|check|verify|validate|audit|recommend|recommendation|proposal|propose|measure|measurement|evaluate|evaluation|benchmark(?:ing)?|compare|comparison|metrics?|rate|ratio|percentage)\b/i;
 const ANALYSIS_INTENT_JA: readonly string[] = [
@@ -25141,7 +25596,12 @@ const EXPLICIT_NO_EDIT_JA_RE = /(?:コードの?)?(?:変更|修正|追加|実装
 const ARTIFACT_BUILD_INTENT_EN_RE = /\b(?:implement|add|build|create|generate|update|change|fix|refactor)\b/i;
 const ARTIFACT_BUILD_INTENT_JA: readonly string[] = ["実装", "追加", "作成", "生成", "変更", "修正"];
 const ARTIFACT_BUILD_REFERENCE_EN_RE = /\b(?:spreadsheet|xlsx|workbook|sheet|table|document|docx|pptx|pdf|artifact)\b/i;
-const ARTIFACT_BUILD_REFERENCE_JA: readonly string[] = ["スプレッドシート", "表", "資料", "シート"];
+// 「表」 names a table only as a word of its own (料率表, 一覧表, 表に追加, 表計算):
+// as a bare substring it also matched 表示/表現/表記/表明/表面 and 代表/発表/
+// 公表, so a Japanese fix request that merely mentioned the display (表示)
+// classified as artifact_build and inlined an unrelated workbook (2026-10-10,
+// a pasted review asking to fix the reported issues).
+const ARTIFACT_BUILD_REFERENCE_JA_RE = /スプレッドシート|資料|シート|(?<![代発公辞])表(?![示現記明面情彰層裏出])/u;
 const WIRING_INTENT_EN_RE = /\b(?:wire|connect|integrate|plumb|route|propagate|feed|forward|expose)\b/i;
 const WIRING_INTENT_JA: readonly string[] = [
   "接続", "連携", "配線", "結線", "組み込", "組み入れ", "流し込", "受け渡", "反映させ",
@@ -25368,7 +25828,8 @@ function hasRenameRequestMarker(query: string): boolean {
     || RENAME_REQUEST_JA.some((marker) => query.includes(marker));
 }
 
-function hasArtifactBuildIntentMarker(query: string): boolean {
+/** Exported for independentReview1010.spec.ts (the 表示 false positive). */
+export function hasArtifactBuildIntentMarker(query: string): boolean {
   const positiveText = query
     .replace(EXPLICIT_NO_EDIT_EN_RE, " ")
     .replace(EXPLICIT_NO_EDIT_JA_RE, " ");
@@ -25376,7 +25837,7 @@ function hasArtifactBuildIntentMarker(query: string): boolean {
     || ARTIFACT_BUILD_INTENT_JA.some((marker) => positiveText.includes(marker));
   if (!hasEditIntent) return false;
   return ARTIFACT_BUILD_REFERENCE_EN_RE.test(query)
-    || ARTIFACT_BUILD_REFERENCE_JA.some((marker) => query.includes(marker))
+    || ARTIFACT_BUILD_REFERENCE_JA_RE.test(query)
     || ARTIFACT_EXTS.some((ext) => query.toLowerCase().includes(ext));
 }
 
@@ -27005,10 +27466,7 @@ export function queryNamedWorkspaceFiles(
   anchorPaths: readonly string[] = [],
 ): string[] {
   if (query.trim().length === 0) return [];
-  const tokens = [...new Set(
-    (query.match(/[A-Za-z0-9_$][A-Za-z0-9_$.\-/]*\.[A-Za-z][A-Za-z0-9]{0,5}\b/g) ?? [])
-      .map((token) => token.replace(/^\.\//, "")),
-  )];
+  const tokens = queryNamedPathTokens(query);
   if (tokens.length === 0) return [];
   // R0 (2026-08-21, W4-A): a bare basename token (no directory component,
   // e.g. "server.ts") can suffix-match MULTIPLE workspace files when the
@@ -27042,6 +27500,69 @@ export function queryNamedWorkspaceFiles(
     if (resolved.length >= MAX_QUERY_NAMED_FILES) break;
   }
   return resolved;
+}
+
+/** The path-shaped tokens of `query` (`src/http.ts`, `http.ts`), deduplicated, `./` dropped. */
+function queryNamedPathTokens(query: string): string[] {
+  return [...new Set(
+    (query.match(/[A-Za-z0-9_$][A-Za-z0-9_$.\-/]*\.[A-Za-z][A-Za-z0-9]{0,5}\b/g) ?? [])
+      .map((token) => token.replace(/^\.\//, "")),
+  )];
+}
+
+/**
+ * Every workspace file one path token of `query` can mean: the file AT that
+ * path when there is one (`src/http.ts`, or a root-level `http.ts` for the
+ * bare basename — `resolveQueryNamedToken`'s own first rule), else every file
+ * the token is a path suffix of — narrowed to the one match whose own
+ * directory the question also names ("…in fixtures/aeroctl/firmware/src and
+ * … CONTRACT.md" means `fixtures/aeroctl/CONTRACT.md`, not the four sibling
+ * families' contracts). Several entries mean the question does not say which
+ * file it is about.
+ */
+function filesNamedByPathToken(token: string, walked: readonly string[], query: string): string[] {
+  const exact = walked.find((rel) => rel === token);
+  if (exact !== undefined) return [exact];
+  const matches = walked.filter((rel) => rel.endsWith(`/${token}`));
+  if (matches.length < 2) return matches;
+  const dirsOf = (rel: string): string[] => rel.slice(0, rel.length - token.length).split("/").filter(Boolean).map((segment) => segment.toLowerCase());
+  const shared = new Set(dirsOf(matches[0]!).filter((segment) => matches.every((rel) => dirsOf(rel).includes(segment))));
+  const words = new Set(query.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter((word) => word.length >= 3));
+  const mentioned = matches.filter((rel) => dirsOf(rel).some((segment) => !shared.has(segment) && words.has(segment)));
+  return mentioned.length === 1 ? mentioned : matches;
+}
+
+/**
+ * v0.15.1 runtime review TL-REVIEW-3: true when one of `query`'s path tokens
+ * names `relPath` and no other workspace file. A bare basename two project
+ * roots share (`a/http.ts`, `b/http.ts`) names neither uniquely, so a
+ * question carrying it keeps whatever coverage the locator gave it.
+ */
+function queryNamesWorkspaceFileUniquely(query: string, workspace: string, relPath: string): boolean {
+  const tokens = queryNamedPathTokens(query);
+  if (tokens.length === 0) return false;
+  const walked = walkedFilesForQueryNamedResolution(workspace, false);
+  return tokens.some((token) => {
+    const named = filesNamedByPathToken(token, walked, query);
+    return named.length === 1 && named[0] === relPath;
+  });
+}
+
+/**
+ * The files `query`'s path tokens name, keeping EVERY file a shared bare
+ * basename can mean (`settings.ts` → `a/settings.ts` and `b/settings.ts`)
+ * rather than `queryNamedWorkspaceFiles`' single alphabetical pick. Used where
+ * a name decides which same-name declaration a question means: a basename
+ * two roots share decides nothing.
+ */
+function queryNamedWorkspaceFilesKeepingSharedBasenames(query: string, workspace: string): string[] {
+  const walked = walkedFilesForQueryNamedResolution(workspace, false);
+  const named: string[] = [];
+  for (const token of queryNamedPathTokens(query)) {
+    const files = token.includes("/") ? queryNamedWorkspaceFiles(token, workspace) : filesNamedByPathToken(token, walked, query);
+    for (const file of files.slice(0, MAX_QUERY_NAMED_FILES)) if (!named.includes(file)) named.push(file);
+  }
+  return named;
 }
 
 /**
@@ -27691,7 +28212,15 @@ export function capExtraEvidenceRelativeToNamedPaths(
   /** WP-B: true when removing `candidate` from `current` would withdraw evidence the certificate cites. */
   keep?: (candidate: TaskPackSurface, current: readonly TaskPackSurface[]) => boolean,
 ): void {
-  const namedPaths = queryNamedWorkspaceFiles(query, workspace, trustworthySurfaceAnchorPaths(surfaces));
+  // v0.15.1 runtime review (2026-10-06): every file a shared bare basename
+  // names is named — the question chose none of them, so none is the
+  // incidental extra this cap sheds (`b/http.ts` was dropped after
+  // certification for "Explain the retry function in http.ts.", leaving an
+  // answer from `a/http.ts` alone).
+  const namedPaths = [...new Set([
+    ...queryNamedWorkspaceFiles(query, workspace, trustworthySurfaceAnchorPaths(surfaces)),
+    ...queryNamedWorkspaceFilesKeepingSharedBasenames(query, workspace),
+  ])];
   if (namedPaths.length === 0) return;
   let namedBytesTotal = 0;
   for (const namedPath of namedPaths) {
@@ -33165,15 +33694,34 @@ function isImplementationPath(filePath: string): boolean {
     && !/\.(?:spec|test)\.[^./]+$/i.test(filePath);
 }
 
+// v0.15.1 runtime review (2026-10-06): a method's declared return type sits
+// between its `)` and its `{` — `scan(paths: string[]): string[] {` (TS),
+// `fun scan(): Int {` (Kotlin), `fn scan(&self) -> usize {` (Rust), `func
+// scan() -> Int {` (Swift). Without it a TypeScript class whose methods all
+// declare return types had no "callable body": "Explain how many files
+// WorkspaceScanner in scanner.ts scans." left `behavior-body` open over the
+// fully served class and sent the caller to re-read its import lines, a chain
+// that ended with no decision at all.
+const CALLABLE_RETURN_TYPE_SRC = "(?:\\s*(?::|->)\\s*[^;{}=()]+?)?";
+const CALLABLE_MODIFIER_DECLARATION_RE = new RegExp(
+  `\\b(?:public|private|protected|static|async|virtual|inline|constexpr)\\b[^;{}\\n]*\\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?\\s*\\([^;{}]*\\)${CALLABLE_RETURN_TYPE_SRC}\\s*(?:const\\s*)?\\{`,
+);
+const CALLABLE_QUALIFIED_DECLARATION_RE = new RegExp(
+  `\\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+\\s*\\([^;{}]*\\)${CALLABLE_RETURN_TYPE_SRC}\\s*(?:const\\s*)?\\{`,
+);
+const CALLABLE_BARE_DECLARATION_RE = new RegExp(
+  `\\b(?!if\\b|for\\b|while\\b|switch\\b|catch\\b)[A-Za-z_][A-Za-z0-9_]*\\s*\\([^;{}]*\\)${CALLABLE_RETURN_TYPE_SRC}\\s*\\{`,
+);
+
 function hasCallableBody(surface: TaskPackSurface): boolean {
   if (!isImplementationPath(surface.path)) return false;
   const symbol = surface.symbol ?? "";
   if (symbol && (/::|\./.test(symbol) || /^[a-z_]/.test(symbol))) return true;
   const text = servedSurfaceText(surface);
-  return /\b(?:def|fn|func|function)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(text)
-    || /\b(?:public|private|protected|static|async|virtual|inline|constexpr)\b[^;{}\n]*\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?\s*\([^;{}]*\)\s*(?:const\s*)?\{/.test(text)
-    || /\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+\s*\([^;{}]*\)\s*(?:const\s*)?\{/.test(text)
-    || /\b(?!if\b|for\b|while\b|switch\b|catch\b)[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*\{/.test(text);
+  return /\b(?:def|fn|func|fun|function)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(text)
+    || CALLABLE_MODIFIER_DECLARATION_RE.test(text)
+    || CALLABLE_QUALIFIED_DECLARATION_RE.test(text)
+    || CALLABLE_BARE_DECLARATION_RE.test(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -43744,6 +44292,20 @@ export function buildTaskExecutionContract(
         && (entry.undetermined_reason ?? "").includes(`${disclosure.term} is declared in`))) continue;
       merged.push(disclosure);
     }
+    // v0.15.1 runtime review (2026-10-06): a bare basename several roots
+    // share does not say which file the question means — see
+    // `sharedBasenameDisclosures`. Recomputed every build, like WP-O's.
+    if (workspace !== undefined) {
+      for (let index = merged.length - 1; index >= 0; index--) {
+        if (merged[index]!.id.startsWith(SHARED_BASENAME_DISCLOSURE_PREFIX)) merged.splice(index, 1);
+      }
+      if (profile === "answer") {
+        for (const disclosure of sharedBasenameDisclosures(result, query, workspace)) {
+          if (merged.some((entry) => entry.term === disclosure.term)) continue;
+          merged.push(disclosure);
+        }
+      }
+    }
     if (merged.length > 0) result.request_item_absences = merged;
     else delete result.request_item_absences;
   }
@@ -44054,11 +44616,15 @@ export function buildTaskExecutionContract(
   // the caller's. Suppressing the bounded-call fallbacks here is what lands
   // the typestate on awaiting-input instead of a discovery next_call that
   // re-serves already-served handles (the T13 rep0 thrash fuel).
+  // v0.15.1 runtime review TL-REVIEW-3: a closure window or a falsification
+  // counterexample supports the target; it is never one of the candidates a
+  // choice is pending between (canonicalDecision.ts `isSupportingEvidenceWhy`).
   const contractSurfaces = codeTaskPackSurfaces(result.surfaces);
+  const choiceSurfaces = contractSurfaces.filter((surface) => !isSupportingEvidenceWhy(surface.why));
   const candidateChoicePending = !accepted
     && (result.route?.action === "confirm_candidates" || result.coverage_reason === "candidate-list")
-    && contractSurfaces.length > 1
-    && contractSurfaces.every(hasServedCode)
+    && new Set(choiceSurfaces.map((surface) => surface.path)).size > 1
+    && choiceSurfaces.every(hasServedCode)
     && artifactFallback === undefined;
   const concernChoicePending = !accepted
     && result.route?.action === "confirm_candidates"
@@ -44273,7 +44839,7 @@ export function buildTaskExecutionContract(
         ? `ready rejected: false-ready risk ${risk.estimated_false_ready_risk} exceeds ${risk.max_false_ready_risk}`
         : result.route?.reason ?? "task surfaces still need bounded follow-up";
   const chooseCandidateHandles = candidateChoicePending
-    ? [...new Set(contractSurfaces.map((surface) => surface.handle))].slice(0, MAX_BATCH_NEXT_HANDLES)
+    ? [...new Set(choiceSurfaces.map((surface) => surface.handle))].slice(0, MAX_BATCH_NEXT_HANDLES)
     : [];
   const reasonFinal = awaitingUserInput
     ? candidateChoicePending
@@ -48336,6 +48902,31 @@ function surfaceRangeShipped(workspace: string, path: string, range: string): bo
 }
 
 /**
+ * v0.15.1 runtime review (2026-10-06): true when a stored record's surface
+ * says part of its range reached the caller — a body served partially
+ * (`content_completeness:"partial"`) whose `remaining_ranges` leave some line
+ * of the range out. A surface a byte cap withheld whole reports its entire
+ * range remaining, and is never resident on its record's word.
+ */
+function recordSurfacePartlyServed(surface: { range: string; content_completeness?: "partial"; remaining_ranges?: readonly string[] }): boolean {
+  if (surface.content_completeness !== "partial") return false;
+  const span = parseSurfaceSpan(surface.range);
+  if (span === undefined) return false;
+  const remaining = (surface.remaining_ranges ?? [])
+    .map(parseSurfaceSpan)
+    .filter((entry): entry is { start: number; end: number } => entry !== undefined)
+    .sort((a, b) => a.start - b.start);
+  let cursor = span.start;
+  for (const window of remaining) {
+    if (window.end < cursor) continue;
+    if (window.start > cursor) return true;
+    cursor = window.end + 1;
+    if (cursor > span.end) return false;
+  }
+  return cursor <= span.end;
+}
+
+/**
  * P1-1 (2026-09-08): the receipt path's own consumption scope.
  *
  * `hasExecutedNext` partitions its ledger by (workspace, lane, taskBinding),
@@ -49634,6 +50225,29 @@ function tryServeSubsetReceipt(
   if (result.execution_contract?.workspace_state === undefined) return undefined;
   const records = servedPacksByWorkspace.get(laneScopedKey(workspace));
   if (records === undefined || records.length === 0) return undefined;
+  // v0.15.1 runtime review TL-REVIEW-5 (2026-10-06): a receipt restates the
+  // bytes, and the `pack-unchanged` wire form has no member for a decision —
+  // `readFamily.ts`'s projector keeps the addressing and drops the rest. That
+  // is right when the decision did not move, and wrong when THIS pack is the
+  // one that certified it: the reviewer's "Explain the timeout, maximum
+  // retries, and retryable status codes of retry in http.ts." ran the
+  // `discover`'s own bundle `next`, the re-pack certified `act.answer` over
+  // the very bytes the first pack served, and the caller received
+  // `pack-unchanged` with coverage complete and no decision at all — a chain
+  // that never said "answer now". A terminal certificate no earlier pack of
+  // this lane carried is news, so the fresh pack (its already-served windows
+  // still restated as `prior`) ships with its decision instead. A plain
+  // re-ask after that finds the certificate on the stored record and still
+  // gets this compact receipt.
+  const certificateIdOf = (contract: TaskExecutionContract | undefined): string | undefined =>
+    contract?.readiness_certificate?.id ?? contract?.typestate.certificate_id;
+  const freshCertificateId = certificateIdOf(result.execution_contract);
+  const receiptLane = currentSessionLane();
+  if (
+    freshCertificateId !== undefined
+    && recordCertifiedTerminal(result.execution_contract)
+    && !records.some((rec) => rec.lane === receiptLane && certificateIdOf(rec.executionContract) === freshCertificateId)
+  ) return undefined;
   // Whole-workspace-unchanged proof: the CURRENT inventory-complete fingerprint
   // must equal one a prior serve captured. This rules out a new/changed UNSERVED
   // file (which per-surface shas alone cannot see) silently invalidating the
@@ -49651,6 +50265,15 @@ function tryServeSubsetReceipt(
       const capturedSha = shaByPath.get(s.path);
       if (capturedSha === undefined) continue; // unproven file — cannot claim unchanged
       if (surfaceFileSha(workspace, s.path) !== capturedSha) continue; // changed
+      // v0.15.1 runtime review (2026-10-06): a record lists every surface its
+      // pack ADDRESSED, the ones a byte cap withheld whole included, and a
+      // receipt over such a row claimed `prior` for bytes no call had sent.
+      // A window is resident when the served-range ledger proves it shipped,
+      // or when the record itself says part of it shipped (a partially
+      // served body: `content_completeness:"partial"` with only part of the
+      // range left `remaining`) — `compactReceiptFromRecord` still judges
+      // each row's `prior` by the ledger alone.
+      if (!surfaceRangeShipped(workspace, s.path, s.range) && !recordSurfacePartlyServed(s)) continue;
       resident.add(`${s.path}\u0000${s.range}`);
     }
   }
@@ -54308,7 +54931,19 @@ async function runAnswerDependencyClosure(
     const parsed = (await fileCache.parsedSymbols(content, lang, surface.path)) ?? [];
     const typeName = callerExpansionTypeNameFor(parsed, surface.path);
     for (const symbol of parsed) {
-      if (symbol.kind !== "function" && symbol.kind !== "method") continue;
+      // v0.15.1 runtime review TL-REVIEW-1 (2026-10-06): a CLASS the answer is
+      // about, served whole, is one focal too — its methods' module reads
+      // are the class's values. "Explain the save debounce duration and
+      // watched languages of WorkspaceWatcher in src/watcher.ts." served the
+      // class body (23-83) and was certified `act.answer` with no gap, while
+      // DEBOUNCE_MS = 5000 and WATCHED_LANGUAGES (lines 15-20, read by
+      // `scheduleRun`/`isTracked`) were never served: no method is named
+      // `WorkspaceWatcher`, and the class itself was not a callable. One focal
+      // over the whole class span (not one per method) keeps a large class
+      // inside MAX_DEPENDENCY_FOCALS, and the closure's own rules still decide
+      // what a read is: parameters, locals, `this.x` and built-ins are never
+      // constants.
+      if (symbol.kind !== "function" && symbol.kind !== "method" && symbol.kind !== "class") continue;
       const name = unqualifiedSymbolTail(symbol.name);
       if (name !== surface.symbol && !named.has(name.toLowerCase())) continue;
       const body = focalRequiredSpan(symbol.startLine, symbol.endLine, lines) ?? { start: symbol.startLine, end: symbol.endLine };
@@ -54321,8 +54956,8 @@ async function runAnswerDependencyClosure(
         name,
         startLine: symbol.startLine,
         endLine: symbol.endLine,
-        typeName: unqualifiedSymbolTail(symbol.enclosingSymbol?.name ?? typeName),
-        hasRealType: symbolIsRealMember(symbol, surface.path),
+        typeName: symbol.kind === "class" ? name : unqualifiedSymbolTail(symbol.enclosingSymbol?.name ?? typeName),
+        hasRealType: symbol.kind === "class" ? true : symbolIsRealMember(symbol, surface.path),
         kind: symbol.kind,
       });
     }

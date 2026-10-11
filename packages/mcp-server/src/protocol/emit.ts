@@ -84,7 +84,7 @@ import {
 import {
   applySearchRequestContinuation,
   rewindSearchRequestDelivered,
-  shrinkLastSearchMatchGroup,
+  shrinkSearchPageToFit,
 } from "./searchRequestContinuation.js";
 import { recordServedBytes } from "../util/packServeLog.js";
 import { decisionInvariantStrictEnabled } from "../util/flags.js";
@@ -740,9 +740,14 @@ export function emitFinalizedPayload(
     // `entries[]`-shaped sibling next. Exactly one of the two ever applies to
     // a given payload (the two shapes are mutually exclusive kinds), so the
     // order is immaterial; evidence first only because it was here first.
+    // SPB (2026-10-10): a search page is filled to its byte budget now, so its
+    // net drops as many trailing match groups as the overshoot needs (never
+    // the last one) rather than exactly one — see `shrinkSearchPageToFit`.
+    // The candidate still carries the cursor installed above; the re-installed
+    // one below is the same length, so this measures the page that will ship.
     const shrunk = context.readRequest !== undefined
       ? shrinkLargestEvidenceByOneLine(current) ?? shrinkLargestBatchEntryByOneLine(current)
-      : shrinkLastSearchMatchGroup(current);
+      : shrinkSearchPageToFit(current, (candidate) => measureResponseBytes(JSON.stringify(candidate)) <= limit);
     if (shrunk !== undefined) {
       let reRewritten: ShedPayload;
       if (context.readRequest !== undefined) {

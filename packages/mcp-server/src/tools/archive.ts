@@ -894,6 +894,25 @@ export async function readArchiveMember(
   }
 }
 
+/**
+ * The member prefix a manifest or tree selects by: trailing slashes dropped and
+ * normalized like a member path (`./a//b/` -> `a/b`). A prefix that does not
+ * normalize (absolute, `..`) is kept verbatim, so it selects nothing.
+ * `undefined` for no prefix.
+ */
+export function normalizeArchivePrefix(prefix?: string): string | undefined {
+  if (!prefix) return undefined;
+  const normalized = normalizeMemberPath(prefix.replace(/\/+$/, ""));
+  return normalized.ok ? normalized.member : prefix;
+}
+
+/** The entries under `normalizedPrefix` (the member itself or anything below it), in archive order. */
+function selectArchiveEntries(entries: ArchiveEntry[], normalizedPrefix: string | undefined): ArchiveEntry[] {
+  return normalizedPrefix
+    ? entries.filter((entry) => entry.member === normalizedPrefix || entry.member.startsWith(`${normalizedPrefix}/`))
+    : entries;
+}
+
 export async function buildArchiveManifest(
   bytes: Uint8Array,
   outerPath: string,
@@ -904,14 +923,7 @@ export async function buildArchiveManifest(
   const opened = await openArchive(bytes, outerPath, workspace, password);
   if (!opened.ok) return opened;
   try {
-    const normalizedPrefix = prefix
-      ? normalizeMemberPath(prefix.replace(/\/+$/, "")).ok
-        ? (normalizeMemberPath(prefix.replace(/\/+$/, "")) as { ok: true; member: string }).member
-        : prefix
-      : undefined;
-    const selected = normalizedPrefix
-      ? opened.data.entries.filter((entry) => entry.member === normalizedPrefix || entry.member.startsWith(`${normalizedPrefix}/`))
-      : opened.data.entries;
+    const selected = selectArchiveEntries(opened.data.entries, normalizeArchivePrefix(prefix));
     const visible = selected.slice(0, ARCHIVE_LIMITS.maxManifestEntries);
     const entries = visible.map((entry) => {
       const virtualPath = virtualArchivePath(outerPath, entry.member);
@@ -1255,25 +1267,51 @@ export async function findInArchive(
   }
 }
 
-export async function archiveTree(
+/** Every member an archive-scoped `search.tree` lists, in archive order — what `tools/archiveTreePage.ts` pages. */
+export interface ArchiveTreeListing {
+  /** `<outerPath>!/`, the tree's `root`. */
+  root: string;
+  format: ArchiveFormat;
+  /** The archive bytes' full `sha256:` digest — what a tree cursor binds the archive's content to. */
+  sha: string;
+  /** The normalized member prefix the listing was selected by ("" for the whole archive). */
+  prefix: string;
+  /** Every selected member path (ignore-rule exclusions already applied), in archive order. */
+  members: string[];
+  warnings: string[];
+}
+
+/**
+ * ATP (2026-10-10): the WHOLE member listing of an archive-scoped tree. It was
+ * `archiveTree`, which joined `buildArchiveManifest`'s first
+ * `maxManifestEntries` (200) members into one fixed page with no way to reach
+ * the rest; the 200-member legacy page is now the pager's no-budget page.
+ * Mints no per-member handles: the tree never shows one, and a paged walk
+ * would otherwise grow the handle table by every member it lists.
+ */
+export async function archiveTreeListing(
   bytes: Uint8Array,
   outerPath: string,
   workspace: string,
   prefix?: string,
   password?: string,
-): Promise<{ ok: true; data: { root: string; tree: string; truncated: boolean; total_entries: number; format: ArchiveFormat; warnings: string[] } } | ArchiveFailure> {
-  const manifest = await buildArchiveManifest(bytes, outerPath, workspace, prefix, password);
-  if (!manifest.ok) return manifest;
-  const tree = manifest.data.entries.map((entry) => entry.member).join("\n");
-  return {
-    ok: true,
-    data: {
-      root: `${outerPath}!/`,
-      tree,
-      truncated: manifest.data.truncated,
-      total_entries: manifest.data.total_entries,
-      format: manifest.data.format,
-      warnings: manifest.data.warnings,
-    },
-  };
+): Promise<{ ok: true; data: ArchiveTreeListing } | ArchiveFailure> {
+  const opened = await openArchive(bytes, outerPath, workspace, password);
+  if (!opened.ok) return opened;
+  try {
+    const normalizedPrefix = normalizeArchivePrefix(prefix);
+    return {
+      ok: true,
+      data: {
+        root: `${outerPath}!/`,
+        format: opened.data.format,
+        sha: opened.data.sha,
+        prefix: normalizedPrefix ?? "",
+        members: selectArchiveEntries(opened.data.entries, normalizedPrefix).map((entry) => entry.member),
+        warnings: opened.data.warnings,
+      },
+    };
+  } finally {
+    await opened.data.reader.close();
+  }
 }

@@ -157,11 +157,11 @@ function cappedRecoveryCall(staged: StagedSearchRequest): ToolCall | undefined {
  * a group is never split, so "one whole unit" here means one group, not one
  * line of it).
  *
- * Exported for `emit.ts`'s post-rewrite budget check ONLY. Returns
- * `undefined` when there is nothing left to drop (`matches.files` absent or
- * empty); the caller fails closed in that case.
+ * The one step `shrinkSearchPageToFit` (below, `emit.ts`'s post-rewrite budget
+ * check) repeats. Returns `undefined` when there is nothing left to drop
+ * (`matches.files` absent or empty); the caller fails closed in that case.
  */
-export function shrinkLastSearchMatchGroup(payload: ShedPayload): ShedPayload | undefined {
+function shrinkLastSearchMatchGroup(payload: ShedPayload): ShedPayload | undefined {
   const matches = payload["matches"];
   if (!isRecord(matches)) return undefined;
   const files = matches["files"];
@@ -173,10 +173,54 @@ export function shrinkLastSearchMatchGroup(payload: ShedPayload): ShedPayload | 
   const snippets = lastFile["snippets"];
   const shrunkLines = lines.slice(0, -1);
   const shrunkSnippets = Array.isArray(snippets) ? snippets.slice(0, -1) : snippets;
+  // SPB: the dropped line is still owed (D re-owes it), so the file that keeps
+  // its other lines discloses one more `more_lines` — `lines.length +
+  // more_lines` stays the file's true count (FindFileGroup's own contract).
+  const moreLines = typeof lastFile["more_lines"] === "number" ? lastFile["more_lines"] : 0;
   const shrunkFiles = shrunkLines.length === 0
     ? files.slice(0, -1)
-    : [...files.slice(0, -1), { ...lastFile, lines: shrunkLines, snippets: shrunkSnippets }];
+    : [...files.slice(0, -1), { ...lastFile, lines: shrunkLines, snippets: shrunkSnippets, more_lines: moreLines + 1 }];
   return { ...payload, matches: { ...matches, files: shrunkFiles } };
+}
+
+/** How many `(path,line)` match groups `matches.files[]` carries (one per `lines[]` entry). */
+function searchMatchGroupCount(payload: ShedPayload): number {
+  const matches = payload["matches"];
+  if (!isRecord(matches) || !Array.isArray(matches["files"])) return 0;
+  let count = 0;
+  for (const file of matches["files"]) {
+    if (isRecord(file) && Array.isArray(file["lines"])) count += file["lines"].length;
+  }
+  return count;
+}
+
+/**
+ * SPB (2026-10-10): the finding-11 budget net for a search page, generalised
+ * from ONE dropped group to as many as the overshoot needs. A page is now
+ * filled to its byte budget (`searchRequestStore.ts`'s `chooseSearchPage`), so
+ * a reserve that misses even a few bytes overshoots by more than one group's
+ * worth more often than a fixed-size page did; dropping groups from the END
+ * until `fits` accepts the page keeps it a clean prefix (D re-owes every
+ * dropped group, exactly as for the single drop), where stopping after one
+ * would turn a slightly-too-full page into a `budget-below-minimum` refusal.
+ *
+ * Never drops the LAST remaining group: an empty page would settle nothing and
+ * hand back a cursor naming the very same page, a loop the caller cannot leave.
+ * When even one group does not fit, the shrink stops at one group and the
+ * caller's own fail-closed refusal names the floor. `fits` is the funnel's own
+ * measurement (`emit.ts`), so this module still measures nothing itself.
+ * Returns `undefined` when there is nothing to drop.
+ */
+export function shrinkSearchPageToFit(
+  payload: ShedPayload,
+  fits: (candidate: ShedPayload) => boolean,
+): ShedPayload | undefined {
+  if (searchMatchGroupCount(payload) <= 1) return undefined;
+  let candidate = shrinkLastSearchMatchGroup(payload);
+  while (candidate !== undefined && !fits(candidate) && searchMatchGroupCount(candidate) > 1) {
+    candidate = shrinkLastSearchMatchGroup(candidate);
+  }
+  return candidate;
 }
 
 /**

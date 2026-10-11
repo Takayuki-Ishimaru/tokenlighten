@@ -17,22 +17,22 @@
 
 It exposes exactly three tools: `tl_read_file`, `tl_search_files`, and `tl_edit_file`.
 
-## v0.15.1 release
+## v0.15.2 release
 
-**Public Beta.** TokenLighten v0.15.1 improves evidence for code explanations and calculations, keeps task-pack discovery inside the workspace, and makes edit retries show their recorded result. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.15.2 uses shorter setup guides and improves source fidelity, Japanese questions and search continuation. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main changes in v0.15.1 are:
+The main changes in v0.15.2 are:
 
-- answer packs follow constants read by the complete functions relevant to your question, including imports, aliases and re-exports;
-- an explicitly named function such as `retry` takes precedence over a similar name such as `retryDelay`;
-- questions about the callers of multiple functions retain every named subject;
-- explanation phrases such as “edge cases” no longer produce false missing-code reports;
-- task-pack reads refuse imports and symlinks that lead outside the workspace; and
-- retrying an edit with the same `operation_id` returns the original post-edit window and indicates whether the files still match it.
+- workspace setup defaults to the compact guide for Claude Code, Codex and GitHub Copilot, while explicit guide choices take precedence;
+- Claude Code loads TokenLighten upfront, and generated Codex workspace settings wait for the initial tool catalog;
+- comment omission preserves accurate source lines, and repeated reads respect the selected comment view;
+- Japanese explanation and return-value questions avoid false missing-code reports;
+- text search, workspace trees and archive-member trees use budgeted continuations; and
+- invalid requests are rejected before edits or task-state updates.
 
 The public release includes four platform install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime, source code with public package tests, and a self-contained VS Code VSIX. The desktop application is not included.
 
-**Upgrade:** install the v0.15.1 archive or VSIX, re-run `tl workspace setup` or **Set up this workspace**, then start a new agent session or reconnect your MCP client. The canonical request fields and tool names are unchanged from v0.15.0. See the [v0.15.1 release notes](release-docs/github-release-v0.15.1.md) for upgrade steps and known limitations.
+**Upgrade:** install the v0.15.2 archive or VSIX, re-run `tl workspace setup` or **Set up this workspace**, then start a new agent session or reconnect your MCP client. The canonical request fields and tool names are unchanged from v0.15.1. See the [v0.15.2 release notes](release-docs/github-release-v0.15.2.md) for upgrade steps and known limitations.
 
 ## Why TokenLighten
 
@@ -50,7 +50,7 @@ Symbol and reference search can return relevant definitions and call sites direc
 
 ### Indicative savings (v0.15.0)
 
-These observations are from v0.15.0; they are not new measurements of v0.15.1.
+These observations are from v0.15.0; they are not new measurements of v0.15.2.
 
 #### Sonnet comparison
 
@@ -109,7 +109,7 @@ Prefer VS Code's own extension instead? See the next section.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.15.1.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.1/tokenlighten-vscode-extension-0.15.1.vsix)** from the v0.15.1 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.15.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.2/tokenlighten-vscode-extension-0.15.2.vsix)** from the v0.15.2 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -120,7 +120,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.15.1.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.2.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required. This performs the same machine install as the archive above (`tl install --from-extension`) and sets up the current workspace, but leaves other hosts on the machine — Claude Code, Codex — unregistered (`--clients none`); register them separately with `tl clients activate`, or with an archive's `tl-setup`.
@@ -156,7 +156,7 @@ tl workspace setup
 
 `tl workspace setup` configures workspace MCP access and maintains the TokenLighten guide blocks in AGENTS.md/CLAUDE.md. Keep those blocks so supported agents can follow the current tool instructions across sessions. See [Getting started](release-docs/getting-started.md#set-up-a-workspace) for details and for machine-wide client registration with `tl clients activate`.
 
-The shared agent guides tell Codex and Claude Code to send the complete request to `tl_read_file`, discover unknown paths, and reuse source already returned. Codex receives the managed AGENTS.md block; Claude Code uses the CLAUDE.md import. After upgrading, re-run `tl workspace setup` for the selected clients and start a new session. Savings depend on the task, client, and model.
+The shared agent guides default to `compact` for all tool surfaces. They tell Codex and Claude Code to send the complete request to `tl_read_file`, discover unknown paths, and reuse source already returned. Choose `--guide-profile full` or `medium` explicitly for a longer guide. Codex receives the managed AGENTS.md block; Claude Code uses the CLAUDE.md import. After upgrading, re-run `tl workspace setup` for the selected clients and start a new session. Savings depend on the task, client, and model.
 
 VS Code setup also creates a SessionStart hook that gives ordinary Agent local chats the TL first-read and no-reread workflow. It requires a trusted workspace, enabled `chat.useHooks`, and `node` on PATH. It leaves tools and approval settings unchanged and preserves existing hooks and user edits. Use `tl workspace setup --clients vscode --copilot-session-context keep` to leave these hook files untouched.
 

@@ -436,12 +436,23 @@ export function servedSpansOfDisplayedText(
  * (nothing was actually removed from what shipped in any of those cases).
  * Serve sites book their ledger spans from this list (`spansExcludingWindows`)
  * instead of re-parsing `content` for marker-shaped lines.
+ *
+ * TL-REVIEW-2 (2026-10-06 review of v0.15.1): the fallback note now says what
+ * it actually knows. `scope` defaults to `"window"` whenever a `startLine` is
+ * passed (a slice, a ledger-difference gap, a batch item) and to `"file"`
+ * otherwise; a whole-file caller that passes `startLine: 1` for clarity says
+ * `"file"` explicitly. A window that happens to be one comment block is
+ * labelled `comment-only window`, never `doc-only file` — the reviewer's
+ * repeat read of a 136-line module with three JSDoc blocks was told three
+ * times that the FILE was doc-only. The whole-file wording is unchanged
+ * (replay corpus tec2).
  */
 export function elideDocCommentsForDisplay(
   text: string,
   lang: string | undefined,
   keepComments: boolean,
   startLine?: number,
+  scope: "file" | "window" = startLine === undefined ? "file" : "window",
 ): { content: string; note?: string; elided: Array<[number, number]> } {
   if (keepComments || text.trim() === "") return { content: text, elided: [] };
   const { text: elidedText, elided } = elideDocCommentsWithWindows(text, lang, startLine);
@@ -450,7 +461,9 @@ export function elideDocCommentsForDisplay(
   if (withoutMarkers === "") {
     return {
       content: text,
-      note: "doc-only file; comments kept (elision would have removed all content)",
+      note: scope === "file"
+        ? "doc-only file; comments kept (elision would have removed all content)"
+        : "comment-only window; comments kept (elision would have removed all content)",
       elided: [],
     };
   }
@@ -500,10 +513,10 @@ function elideCBlockComments(text: string, startLine: number = 1): { text: strin
       const block = text.slice(i, blockEnd);
       const span = countNewlines(block);
       if (span >= 1) {
-        // Spans 2+ source lines (1+ embedded newline). Preserve any real code
-        // that follows `*/` on the closing line — only the block itself goes.
-        out.push(`/* doc elided L${line}-${line + span} */`);
-        elided.push([line, line + span]);
+        // Spans 2+ source lines (1+ embedded newline). Real code that follows
+        // `*/` on the closing line is never part of the elided window — see
+        // `emitMultiLineBlock`.
+        emitMultiLineBlock(text, i, closeIdx, blockEnd, line, span, "c", out, elided);
         line += span;
         atLineStart = false;
         i = blockEnd;
@@ -590,8 +603,7 @@ function elidePythonDocstrings(text: string, startLine: number = 1): { text: str
       const block = text.slice(i, blockEnd);
       const span = countNewlines(block);
       if (span >= 1) {
-        out.push(`# doc elided L${line}-${line + span}`);
-        elided.push([line, line + span]);
+        emitMultiLineBlock(text, i, closeIdx, blockEnd, line, span, "python", out, elided);
         line += span;
         sawStatement = true;
         prevNonBlankEndsColon = false;
@@ -686,6 +698,66 @@ function lineEndsWithColon(text: string, from: number): boolean {
   let j = end - 1;
   while (j >= from && (text[j] === " " || text[j] === "\t" || text[j] === "\r")) j--;
   return j >= from && text[j] === ":";
+}
+
+/**
+ * Emit a multi-line (`span >= 1` embedded newlines) comment block / docstring
+ * that opens at `openIdx` (line-start anchored, file line `line`) and closes
+ * with the delimiter ending at `blockEnd`.
+ *
+ * TL-REVIEW-2 (2026-10-06 review of v0.15.1): AN ELIDED WINDOW IS PURE COMMENT
+ * LINES. The previous rule collapsed the WHOLE block into one marker and let
+ * any code after the closing delimiter ride that marker's line
+ * (`/* doc elided L5-7 *\/ export const x = 1;`). That made the renderer's own
+ * window ([5,7]) name a line that still carried code, so a projection that
+ * ships source lines and lists elided windows separately
+ * (`protocol/sourceFidelity.ts`) would have had to either drop that code or
+ * contradict the window. Now:
+ *
+ *   - nothing but whitespace after the closing delimiter: unchanged — one
+ *     marker for the whole block, window [line, line+span];
+ *   - code after it, and the block spans 3+ lines: the marker covers the pure
+ *     comment lines [line, line+span-1] and the CLOSING LINE is emitted
+ *     verbatim on its own output line (`*\/ export const x = 1;`), so the
+ *     window and the shipped line are disjoint and the line is booked as
+ *     served like any other code line;
+ *   - code after it and only 2 lines: nothing worth collapsing (a one-line
+ *     window would save no line and still split the serve), so the block is
+ *     kept verbatim and no window is recorded.
+ *
+ * Either way every window still maps to exactly ONE output line, which is the
+ * invariant `resolveElidedEditAnchor` (server.ts), `lineGutter.ts`'s
+ * `sourceLineNumbersFor` and `sourceFidelity.ts`'s display model all walk by.
+ */
+function emitMultiLineBlock(
+  text: string,
+  openIdx: number,
+  closeIdx: number,
+  blockEnd: number,
+  line: number,
+  span: number,
+  style: "c" | "python",
+  out: string[],
+  elided: Array<[number, number]>,
+): void {
+  const marker = (from: number, to: number): string => style === "c"
+    ? `/* doc elided L${from}-${to} */`
+    : `# doc elided L${from}-${to}`;
+  const trailing = text.slice(blockEnd, lineEnd(text, blockEnd));
+  if (trailing.trim() === "") {
+    out.push(marker(line, line + span));
+    elided.push([line, line + span]);
+    return;
+  }
+  if (span >= 2) {
+    const closingLineStart = text.lastIndexOf("\n", closeIdx) + 1;
+    out.push(marker(line, line + span - 1));
+    out.push("\n");
+    out.push(text.slice(closingLineStart, blockEnd));
+    elided.push([line, line + span - 1]);
+    return;
+  }
+  out.push(text.slice(openIdx, blockEnd));
 }
 
 /** Index of the end of the current line (position of '\n', or text.length). */

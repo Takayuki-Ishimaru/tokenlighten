@@ -37,6 +37,7 @@ import * as path from "node:path";
 import { waitForExit } from "./helpers/rmDirWithRetry.js";
 
 import { applyAnswerLineGutter, stripAnswerLineGutter } from "../protocol/lineGutter.js";
+import { elideDocCommentsWithWindows } from "../util/formatCompress.js";
 import { killServerGroup } from "./helpers/killServerGroup.js";
 
 const FLAG = "TL_ANSWER_LINE_GUTTER";
@@ -216,6 +217,16 @@ function findRow(body: Record<string, unknown>, relPath: string): Record<string,
     ?? entriesOf(body).find((row) => row["path"] === relPath);
 }
 
+/**
+ * TL-REVIEW-2 (2026-10-06): every row of `relPath`, in wire order. A body
+ * whose doc comments the default policy elides now ships as several
+ * source-faithful rows on one handle (protocol/sourceFidelity.ts), the
+ * comment windows disclosed in the first row's `elided`.
+ */
+function rowsOf(body: Record<string, unknown>, relPath: string): Array<Record<string, unknown>> {
+  return [...evidenceOf(body), ...entriesOf(body)].filter((row) => row["path"] === relPath);
+}
+
 /** Text of a row, whichever field family it arrived under (`body` or `content`). */
 function textOf(row: Record<string, unknown>): string {
   return String(row["body"] ?? row["content"] ?? "");
@@ -250,29 +261,34 @@ describe("TL_ANSWER_LINE_GUTTER — answer-profile task_pack", () => {
     expect(stripAnswerLineGutter(served)).toBe(served);
   }, 60000);
 
-  it("ON + answer profile: every line is numbered, the doc-comment marker carries its FIRST source line, and the following line is the true source line", async () => {
+  it("ON + answer profile: every line of every faithful segment is numbered with its TRUE source line; the elided doc comment is disclosed, not numbered", async () => {
     const root = makeWorkspace();
     const { body } = await taskPackCall(root, { [FLAG]: "1" }, "answer", [{ path: "src/OrderService.java" }]);
-    const row = findRow(body, "src/OrderService.java");
-    expect(row).toBeDefined();
-    expect(row!["range"]).toBe(`1-${JAVA_TOTAL_LINES}`);
+    // TL-REVIEW-2 (2026-10-06): the 1-29 surface used to ship ONE body whose
+    // line 10 was a `/* doc elided L10-17 */` marker numbered `10|` and whose
+    // next line jumped to `18|`. Bodies are now the source's own ranges, so
+    // the surface ships as 1-9 and 18-29 with the Javadoc in `elided`, and
+    // the gutter's numbering is simply each segment's own line numbers.
+    const rows = rowsOf(body, "src/OrderService.java");
+    expect(rows.map((row) => row["range"])).toEqual(["1-9", `18-${JAVA_TOTAL_LINES}`]);
+    expect(rows[0]!["elided"]).toEqual(["10-17"]);
 
-    const served = textOf(row!);
-    const lines = served.split("\n").filter((_, i, arr) => !(i === arr.length - 1 && arr[i] === ""));
-    expect(lines[0]).toBe("1|package com.example.billing;");
+    const head = nonEmptyLines(textOf(rows[0]!));
+    expect(head[0]).toBe("1|package com.example.billing;");
+    expect(head[head.length - 1]).toBe("9|");
+    const tail = nonEmptyLines(textOf(rows[1]!));
+    expect(tail[0]).toMatch(/^18\|.*public OrderResponse cancel\(long id\) \{/);
+    expect(tail[tail.length - 1]).toBe(`${JAVA_TOTAL_LINES}|}`);
+    expect(rows.map((row) => textOf(row)).join("\n")).not.toContain("doc elided");
 
-    const markerIndex = lines.findIndex((l) => l.includes("doc elided"));
-    expect(markerIndex).toBeGreaterThanOrEqual(0);
-    expect(lines[markerIndex]).toMatch(/^10\|\s*\/\* doc elided L10-17 \*\/$/);
-    expect(lines[markerIndex + 1]).toMatch(/^18\|.*public OrderResponse cancel\(long id\) \{/);
-
-    // Stripping the gutter recovers exactly the flag-off body (the SAME
-    // renderer, just with a `<n>|` prefix per line) — proves numbering never
-    // touches anything but the prefix.
+    // Stripping the gutter recovers exactly the flag-off bodies (the SAME
+    // faithful rows, just with a `<n>|` prefix per line) — proves numbering
+    // never touches anything but the prefix.
     const offRoot = makeWorkspace();
     const { body: offBody } = await taskPackCall(offRoot, {}, "answer", [{ path: "src/OrderService.java" }]);
-    const offRow = findRow(offBody, "src/OrderService.java");
-    expect(stripAnswerLineGutter(served)).toBe(textOf(offRow!));
+    const offRows = rowsOf(offBody, "src/OrderService.java");
+    expect(offRows.length).toBe(rows.length);
+    rows.forEach((row, index) => expect(stripAnswerLineGutter(textOf(row))).toBe(textOf(offRows[index]!)));
   }, 60000);
 
   it("ON + generic profile: un-numbered (bodies must stay copy-exact for tl_edit_file)", async () => {
@@ -448,29 +464,41 @@ function nonEmptyLines(text: string): string[] {
 }
 
 describe("TL_ANSWER_LINE_GUTTER — whole-file read.batch entries (Copilot retest r2)", () => {
-  it("ON + answer lane, the live qref follow-up: rangeless whole-file entries are numbered from line 1, across each elided doc comment", async () => {
+  it("ON + answer lane, the live qref follow-up: whole-file entries ship as faithful ranged segments, each numbered from its own true first line", async () => {
     const body = await wholeFileFollowUp({ [FLAG]: "1" }, "answer", true);
     expect(body["kind"], JSON.stringify(body).slice(0, 400)).toBe("read.batch");
-    const gauge = findRow(body, "src/metrics/Gauge.java");
-    const window = findRow(body, "src/metrics/window.ts");
-    expect(gauge, JSON.stringify(body).slice(0, 400)).toBeDefined();
-    expect(window, JSON.stringify(body).slice(0, 400)).toBeDefined();
-    // The shape under test: no `range` on the entry at all.
-    expect(gauge!["range"]).toBeUndefined();
-    const gaugeLines = nonEmptyLines(textOf(gauge!));
-    expect(gaugeLines[0]).toBe("1|package com.example.metrics;");
-    expect(gaugeLines.filter((line) => !/^\d+\|/.test(line)), textOf(gauge!)).toEqual([]);
-    expect(gaugeLines.find((line) => line.includes("doc elided")), textOf(gauge!)).toMatch(/^6\|/);
-    expect(gaugeLines.find((line) => line.includes("public void record(long sample) {")), textOf(gauge!)).toMatch(/^12\|/);
-    expect(gaugeLines[gaugeLines.length - 1]).toBe("15|}");
-    const windowLines = nonEmptyLines(textOf(window!));
-    expect(windowLines.find((line) => line.includes("export function windowSum")), textOf(window!)).toMatch(/^6\|/);
+    // TL-REVIEW-2 (2026-10-06): a whole-file (`form:"file"`, rangeless) entry
+    // whose doc comments the default policy elides used to carry the marker
+    // display, numbered across each marker. A `file` entry promises the WHOLE
+    // file, which an elided rendering is not, so it now ships as `handle`
+    // entries — one per faithful source range on the file's handle, the
+    // comment windows in the first one's `elided` — and each is numbered by
+    // its own `range`.
+    const gauge = rowsOf(body, "src/metrics/Gauge.java");
+    const window = rowsOf(body, "src/metrics/window.ts");
+    expect(gauge.map((row) => row["range"]), JSON.stringify(body).slice(0, 400)).toEqual(["1-5", "12-15"]);
+    expect(gauge.every((row) => row["form"] === "handle")).toBe(true);
+    expect(gauge[0]!["elided"]).toEqual(["6-11"]);
+    const gaugeHead = nonEmptyLines(textOf(gauge[0]!));
+    expect(gaugeHead[0]).toBe("1|package com.example.metrics;");
+    expect(gaugeHead.filter((line) => !/^\d+\|/.test(line)), textOf(gauge[0]!)).toEqual([]);
+    const gaugeTail = nonEmptyLines(textOf(gauge[1]!));
+    expect(gaugeTail[0]).toBe("12|  public void record(long sample) {");
+    expect(gaugeTail[gaugeTail.length - 1]).toBe("15|}");
+    expect(window.map((row) => row["range"])).toEqual(["6-8"]);
+    expect(window[0]!["elided"]).toEqual(["1-5"]);
+    const windowLines = nonEmptyLines(textOf(window[0]!));
+    expect(windowLines[0], textOf(window[0]!)).toMatch(/^6\|export function windowSum/);
     expect(windowLines[windowLines.length - 1]).toBe("8|}");
+    expect([...gauge, ...window].map((row) => textOf(row)).join("\n")).not.toContain("doc elided");
 
     // Stripping the gutter recovers exactly the flag-off bytes.
     const offBody = await wholeFileFollowUp({}, "answer", true);
     for (const p of WHOLE_FILE_PATHS) {
-      expect(stripAnswerLineGutter(textOf(findRow(body, p)!))).toBe(textOf(findRow(offBody, p)!));
+      const on = rowsOf(body, p);
+      const off = rowsOf(offBody, p);
+      expect(off.length).toBe(on.length);
+      on.forEach((row, index) => expect(stripAnswerLineGutter(textOf(row))).toBe(textOf(off[index]!)));
     }
   }, 90000);
 
@@ -491,9 +519,13 @@ describe("TL_ANSWER_LINE_GUTTER — whole-file read.batch entries (Copilot retes
   }, 60000);
 
   it("ON: the renderer's exact whole-file bytes are numbered only on a whole-file entry, never on another rangeless shape (direct seam check)", async () => {
-    // The flag-off server's own rendering, so only the entry's shape differs between the two calls below.
-    const offBody = await wholeFileFollowUp({}, "answer", false);
-    const rendered = textOf(findRow(offBody, "src/metrics/Gauge.java")!);
+    // The renderer's own whole-file bytes, so only the entry's shape differs
+    // between the calls below. TL-REVIEW-2 (2026-10-06): taken from the
+    // renderer directly — the flag-off server no longer ships this display
+    // (its whole-file entry is now faithful ranged segments), but the gutter's
+    // own verification of a rangeless `file` entry is still what is pinned here.
+    const rendered = elideDocCommentsWithWindows(GAUGE_LINES.join("\n") + "\n", "java").text;
+    expect(rendered).toContain("doc elided");
     expect(rendered).not.toMatch(/^\d+\|/m);
     process.env[FLAG] = "1";
     const root = makeWholeFileWorkspace();

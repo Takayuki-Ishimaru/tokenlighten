@@ -13,4 +13,4 @@
 // consumers (injectAll.ts, index.ts) — this file is the source of truth.
 
 /** Current version string. Bump when prose changes materially. */
-export const INSTRUCTIONS_VERSION = "2026-10-04-v112-shared";
+export const INSTRUCTIONS_VERSION = "2026-10-11-v114-compact-default";

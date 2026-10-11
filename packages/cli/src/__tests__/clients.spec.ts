@@ -207,6 +207,7 @@ describe("tl clients engine", () => {
     const payload = JSON.parse(add?.args[3] ?? "{}") as FakeEntry;
     expect(payload).toEqual({
       type: "stdio",
+      alwaysLoad: true,
       command: launcher.command,
       args: ["mcp", "start", "--stdio", "--allow-write"],
       env: {

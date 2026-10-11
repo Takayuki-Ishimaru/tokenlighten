@@ -112,6 +112,24 @@ tl mcp start --stdio --workspace /path/to/project
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
 
+## v0.15.2 updates
+
+Workspace setup defaults to the compact guide for both tool surfaces. Claude
+Code loads TokenLighten upfront; Codex workspace settings wait for the initial
+optional-server catalog. Explicit workspace startup values are preserved.
+See [Client startup settings](getting-started.md#client-startup-settings) for
+scope, timeouts and overrides.
+
+Evidence retains source line fidelity when comments are omitted. An
+identical read respects its comment projection, while a changed projection
+serves the requested view. Japanese explanation and return-value questions
+keep their subjects without treating request wording as missing source.
+
+Workspace and archive-member `tree` results use budgeted continuations;
+execute the returned `next` unchanged. Canonical argument validation occurs
+before edits or task-state updates. Numeric column and section selectors
+remain accepted.
+
 ## v0.15.1 evidence selection
 
 For an answer that explains behaviour or computes a value, complete returned

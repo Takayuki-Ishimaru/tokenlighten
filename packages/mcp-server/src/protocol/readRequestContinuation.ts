@@ -40,6 +40,7 @@ import type { Kind, LineWindow, ToolCall } from "@tokenlighten/types";
 import { demoteToDiscover } from "./budget/actFloor.js";
 import { carriesStripDisclosure, type ShedPayload } from "./budget/shedders/registry.js";
 import { canonicalToolCall } from "./envelope.js";
+import { joinBodyLines } from "./sourceFidelity.js";
 import {
   markReadRequestOpenness,
   mintReadCursor,
@@ -86,22 +87,36 @@ function evidenceOf(payload: ShedPayload): Record<string, unknown>[] {
  *
  * Matched by `handle` where both sides have one, by position otherwise, so a
  * shedder that rebuilt the array in order is compared entry-for-entry.
+ *
+ * TL-REVIEW-2 (2026-10-06): one handle routinely carries SEVERAL entries now
+ * (a comment-elided window ships as faithful segments on the same handle), so
+ * an entry is matched by its handle AND the first line of its `range` — the
+ * one coordinate every shedder preserves (rung 4 and the fit narrow a range's
+ * END, never its start). A handle-only key compared every segment against
+ * the LAST segment of its handle and reported a decrease that never happened.
  */
 export function evidenceDecreased(before: ShedPayload, after: ShedPayload): boolean {
   const pre = evidenceOf(before);
   const post = evidenceOf(after);
+  const keyOf = (entry: Record<string, unknown>): string | undefined => {
+    const handle = entry["handle"];
+    if (typeof handle !== "string" || handle === "") return undefined;
+    const range = entry["range"];
+    const start = typeof range === "string" ? parseWindow(range)?.start : undefined;
+    return `${handle}@${start ?? ""}`;
+  };
   const byHandle = new Map<string, Record<string, unknown>>();
   for (const entry of post) {
-    const handle = entry["handle"];
-    if (typeof handle === "string" && handle !== "") byHandle.set(handle, entry);
+    const key = keyOf(entry);
+    if (key !== undefined) byHandle.set(key, entry);
   }
   for (let index = 0; index < pre.length; index += 1) {
     const entry = pre[index]!;
     const body = entry["body"];
     if (typeof body !== "string" || body === "") continue;
-    const handle = entry["handle"];
-    const match = typeof handle === "string" && handle !== ""
-      ? byHandle.get(handle)
+    const key = keyOf(entry);
+    const match = key !== undefined
+      ? byHandle.get(key)
       : post[index];
     if (match === undefined) return true;
     const shipped = match["body"];
@@ -169,10 +184,12 @@ function replaceableNext(value: unknown): boolean {
  * `settleReadRequest` so a page a later shed pass narrowed cannot let D
  * advance past lines that never reached the wire (see `readRequestStore.ts`'s
  * `settledTargets` doc comment for the "CURRENT PAGE" rationale in full).
- * `evidence[].range` names the semantic extent an entry claims; elision only
- * changes the BODY TEXT inside that range, never the range itself, and a rung
- * that truncates a body rewrites the range to match (`readText.ts`'s
- * `truncateLargestBody`) — so this always reads the TRUE shipped extent.
+ * `evidence[].range` names exactly the source lines its `body` carries
+ * (TL-REVIEW-2: bodies are source-faithful, protocol/sourceFidelity.ts), the
+ * comment blocks a default-policy read elided ride the same entry's `elided`
+ * list, and a rung that truncates a body rewrites the range to match
+ * (`readText.ts`'s `truncateLargestBody`) — so this always reads the TRUE
+ * shipped extent.
  *
  * Returns `undefined` when the response carries no `evidence` array AT ALL
  * (a receipt, most notably) — that is "no information", not "nothing
@@ -196,6 +213,22 @@ function shippedWindowsByPath(payload: ShedPayload): Map<string, LineWindow[]> |
     const path = raw["path"];
     if (typeof path !== "string") continue;
     if (!map.has(path)) map.set(path, []);
+    // TL-REVIEW-2 (2026-10-06): a comment block the default policy ELIDED is
+    // delivered in the representation the request asked for (`comments:
+    // "elide"`) — it used to sit INSIDE the entry's `range`, and the store's
+    // own note relies on exactly that ("an elided block is `shipped` in
+    // full"). Faithful bodies (protocol/sourceFidelity.ts) moved it out of
+    // `range` into `elided` on the entry that disclosed it (the first of its
+    // handle, whether or not that entry carries a body), so it is credited
+    // from there; without this a fully delivered read kept every comment
+    // block in D and minted a cursor that re-served them raw.
+    const elided = raw["elided"];
+    if (Array.isArray(elided)) {
+      for (const disclosed of elided) {
+        const elidedWindow = parseWindow(disclosed);
+        if (elidedWindow !== undefined) map.get(path)!.push(elidedWindow);
+      }
+    }
     const body = raw["body"];
     const range = raw["range"];
     if (typeof body !== "string" || typeof range !== "string") continue;
@@ -250,7 +283,7 @@ export function shrinkLargestEvidenceByOneLine(payload: ShedPayload): ShedPayloa
   const lines = (trailingNewline ? body.slice(0, -1) : body).split("\n");
   if (lines.length < 2) return undefined;
   lines.pop();
-  const shrunkBody = lines.join("\n") + (trailingNewline ? "\n" : "");
+  const shrunkBody = joinBodyLines(lines, trailingNewline);
   const shrunkRange = `${window.start}-${window.end - 1}`;
   const shrunkEvidence = evidence.map((raw, i) => (
     i === index ? { ...entry, body: shrunkBody, range: shrunkRange } : raw
@@ -346,7 +379,7 @@ export function shrinkLargestBatchEntryByOneLine(payload: ShedPayload): ShedPayl
   const lines = (trailingNewline ? content.slice(0, -1) : content).split("\n");
   if (lines.length < 2) return undefined;
   lines.pop();
-  const shrunkContent = lines.join("\n") + (trailingNewline ? "\n" : "");
+  const shrunkContent = joinBodyLines(lines, trailingNewline);
   const shrunkRange = `${window.start}-${window.end - 1}`;
   const priorRemaining = Array.isArray(entry["remaining_ranges"])
     ? (entry["remaining_ranges"] as unknown[]).filter((value): value is string => typeof value === "string")
@@ -364,14 +397,47 @@ export function shrinkLargestBatchEntryByOneLine(payload: ShedPayload): ShedPayl
 }
 
 /**
+ * TL-REVIEW-2 (2026-10-06): each target's policy-elided comment windows, as
+ * the wire spells them — `ReadRequestTargetState.elided`, recorded at staging
+ * and excluded from Q.
+ */
+function elidedByPathOf(targets: ReadonlyArray<{ path: string; elided?: readonly LineWindow[] }>): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const target of targets) {
+    if (target.elided !== undefined && target.elided.length > 0) map.set(target.path, windowStrings([...target.elided]));
+  }
+  return map;
+}
+
+/** `existing` (an entry's own `elided`, if any) united with `restated`, ascending and de-duplicated. */
+function unitedElided(existing: unknown, restated: readonly string[]): string[] {
+  const seen = new Map<string, LineWindow>();
+  for (const raw of [...(Array.isArray(existing) ? existing : []), ...restated]) {
+    const window = parseWindow(raw);
+    if (window !== undefined) seen.set(`${window.start}-${window.end}`, window);
+  }
+  return [...seen.values()]
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+    .map((window) => `${window.start}-${window.end}`);
+}
+
+/**
  * Rewrite every `next` position to the ONE cursor call, and every
  * `evidence[].remaining` to that target's D.
+ *
+ * TL-REVIEW-2 (2026-10-06): and RESTATE each target's policy-elided comment
+ * windows (`elidedByPath`) on the same first entry, as `elided`. They are not
+ * part of D (never owed), so no page of the chain serves them — and a chain
+ * whose first page lost the entry that disclosed them (a batch page that shed
+ * that file's entries, a page that never reaches the block) would otherwise
+ * never name them at all.
  */
 function rewriteContinuation(
   payload: ShedPayload,
   call: ToolCall,
   remainingByPath: Map<string, string[]>,
   soleRemaining: string[],
+  elidedByPath: ReadonlyMap<string, string[]> = new Map(),
 ): ShedPayload {
   const next: ShedPayload = { ...payload };
 
@@ -417,15 +483,28 @@ function rewriteContinuation(
       const copy = { ...entry };
       if (!first || windows.length === 0) delete copy["remaining"];
       else copy["remaining"] = windows;
+      const restated = typeof path === "string" ? elidedByPath.get(path) : undefined;
+      if (first && restated !== undefined) copy["elided"] = unitedElided(copy["elided"], restated);
       return copy;
     });
   }
 
   const entries = next["entries"];
   if (Array.isArray(entries)) {
+    const restatedFor = new Set<string>();
     next["entries"] = entries.map((entry) => {
-      if (!isRecord(entry) || !replaceableNext(entry["next"])) return entry;
-      return { ...entry, next: call };
+      if (!isRecord(entry)) return entry;
+      let copy = entry;
+      if (replaceableNext(entry["next"])) copy = { ...copy, next: call };
+      const path = entry["path"];
+      const restated = typeof path === "string" && typeof entry["content"] === "string"
+        ? elidedByPath.get(path)
+        : undefined;
+      if (restated !== undefined && !restatedFor.has(path as string)) {
+        restatedFor.add(path as string);
+        copy = { ...copy, elided: unitedElided(copy["elided"], restated) };
+      }
+      return copy;
     });
   }
 
@@ -656,6 +735,7 @@ export function applyReadRequestContinuation(
     refusalFloor !== undefined ? budgetedCursorCall(staged, cursor, refusalFloor) : cursorCall(staged, cursor),
     remainingByPath,
     sole,
+    elidedByPathOf(settled.targets),
   );
 }
 
@@ -747,7 +827,10 @@ function previewContinuation(
   const remainingByPath = new Map<string, string[]>();
   for (const target of targets) remainingByPath.set(target.path, windowStrings(remaining.get(target.path) ?? []));
   const sole = targets.length === 1 ? windowStrings(remaining.get(targets[0]!.path) ?? []) : [];
-  return { payload: rewriteContinuation(payload, call, remainingByPath, sole), continued: true };
+  return {
+    payload: rewriteContinuation(payload, call, remainingByPath, sole, elidedByPathOf(targets)),
+    continued: true,
+  };
 }
 
 /**
@@ -810,10 +893,41 @@ function shrinkEvidenceBySavedBytes(payload: ShedPayload, excessBytes: number): 
   const kept = lines.length - drop;
   const shrunkEntry = {
     ...entry,
-    body: lines.slice(0, kept).join("\n") + (trailingNewline ? "\n" : ""),
+    body: joinBodyLines(lines.slice(0, kept), trailingNewline),
     range: `${window.start}-${window.start + kept - 1}`,
   };
   return { ...payload, evidence: evidence.map((raw, i) => (i === index ? shrunkEntry : raw)) };
+}
+
+/**
+ * TL-REVIEW-2 (2026-10-06): the whole-segment fallback of the fit — drop the
+ * LAST body-bearing evidence entry that is not its handle's first (the first
+ * carries the handle's `remaining`/`elided`). Source-faithful bodies ship a
+ * comment-elided window as several entries, possibly all one line long, which
+ * `shrinkEvidenceBySavedBytes` cannot narrow; without this a tight budget was
+ * refused even though a shorter faithful page fits. `remaining` is not touched:
+ * the preview and the real tail both derive D from what the evidence carries,
+ * so the dropped window is simply owed by the next page. At least one body
+ * always survives.
+ */
+function dropLastEvidenceSegment(payload: ShedPayload): ShedPayload | undefined {
+  const evidence = payload["evidence"];
+  if (!Array.isArray(evidence)) return undefined;
+  const seenHandles = new Set<string>();
+  let bodies = 0;
+  let index = -1;
+  evidence.forEach((raw, i) => {
+    if (!isRecord(raw)) return;
+    const handle = typeof raw["handle"] === "string" ? raw["handle"] : "";
+    const firstOfHandle = !seenHandles.has(handle);
+    seenHandles.add(handle);
+    const body = raw["body"];
+    if (typeof body !== "string" || body === "") return;
+    bodies += 1;
+    if (!firstOfHandle) index = i;
+  });
+  if (bodies < 2 || index === -1) return undefined;
+  return { ...payload, evidence: evidence.filter((_, i) => i !== index) };
 }
 
 /** What `fitStagedReadToBudget` decided. */
@@ -896,7 +1010,8 @@ export function fitStagedReadToBudget(input: {
     const peeled = peelReadProse(candidate);
     const smaller = peeled
       ?? shrinkEvidenceBySavedBytes(candidate, bytes - limit)
-      ?? shrinkLargestBatchEntryByOneLine(candidate);
+      ?? shrinkLargestBatchEntryByOneLine(candidate)
+      ?? dropLastEvidenceSegment(candidate);
     if (smaller === undefined) return { ok: false, requiredMinBytes: bytes };
     if (peeled === undefined) shrunk = true;
     candidate = smaller;

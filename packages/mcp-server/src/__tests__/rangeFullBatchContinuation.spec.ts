@@ -164,7 +164,11 @@ describe("FIX-A3 item 3: the A7 handles=[] loop honors content:\"full\" directly
     }, ws);
     const text = JSON.stringify(res);
     expect(res["kind"], text.slice(0, 300)).toBe("read.batch");
-    expect(ELISION_MARKER_RE.test(text), `precondition: this fixture really does elide by default: ${text.slice(0, 600)}`).toBe(true);
+    // TL-REVIEW-2 (2026-10-06): the default serve DOES elide — the block is
+    // disclosed as an `elided` window beside faithful content, never a marker.
+    expect(text, `precondition: this fixture really does elide by default: ${text.slice(0, 600)}`).toContain('"elided":["5-18"]');
+    expect(ELISION_MARKER_RE.test(text)).toBe(false);
+    expect(text).not.toContain("doc comment content line 0");
   });
 });
 

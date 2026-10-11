@@ -406,7 +406,7 @@ describe("FX1: a window that fits whole is served whole (v0.14.4), a narrowed on
 // ---------------------------------------------------------------------------
 
 describe("FX1: a body the wire may rewrite is served as v0.14.4 served it (the ladder measures the real bytes)", () => {
-  it("a window whose doc comments elide is served whole when its DISPLAY fits, though its raw text does not", async () => {
+  it("a window whose doc comments elide ships faithful segments; when they do not fit, the chain pages them — never a refusal, every code line exactly once", async () => {
     const ws = freshWs("elide");
     const doc = Array.from({ length: 12 }, (_, i) => `/**\n * Doc for item ${i}.\n * More text here.\n */\nexport const D${i} = ${i};`).join("\n") + "\n";
     put(ws, "src/doc.ts", doc);
@@ -414,13 +414,48 @@ describe("FX1: a body the wire may rewrite is served as v0.14.4 served it (the l
     const rawResponseBytes = sliceWireEnvelopeBytes({ path: "src/doc.ts", totalLines: 60, rowRanges: ["1-30"], withSha: true })
       - 2 + jsonBytes(windowBody(doc, 1, 30));
     expect(rawResponseBytes).toBeGreaterThan(480);
-    // ...while the DISPLAY (each comment block collapsed to a marker) fits: v0.14.4 served it whole.
-    const { body, bytes } = await read(ws, { targets: [{ path: "src/doc.ts", range: "1-30" }], budget: { bytes: 480 } });
-    expect(body["kind"], JSON.stringify(body).slice(0, 300)).toBe("read.text");
-    expect(rows(body)[0]!["range"]).toBe("1-30");
-    expect(body["limit"], "the window is complete: nothing was cut").toBeUndefined();
-    expect(bytes).toBeLessThanOrEqual(480);
-    expect(String(rows(body)[0]!["body"])).toContain("doc elided");
+    // TL-REVIEW-2 (2026-10-06): v0.14.4 served the marker DISPLAY whole here
+    // (`range:"1-30"` over a 12-line body whose markers stood for the six
+    // comment blocks — line N of that body was not source line N). Bodies are
+    // now the source's own ranges, so 1-30 ships as six one-line code
+    // segments (5, 10, …, 30) with the blocks disclosed in `elided`. That
+    // faithful shape costs more than the marker display for THIS pathological
+    // fixture (a 4-line block before every single code line): at 480 B not
+    // even its smallest page fits, and the answer is the honest, actionable
+    // `budget-below-minimum` naming the exact floor — never a lossy page and
+    // never `cap-exceeded`.
+    const tight = await read(ws, { targets: [{ path: "src/doc.ts", range: "1-30" }], budget: { bytes: 480 } });
+    expect(tight.body["kind"], JSON.stringify(tight.body).slice(0, 300)).toBe("refusal");
+    expect(tight.body["code"]).toBe("budget-below-minimum");
+    const floor = tight.body["required_min_bytes"] as number;
+    expect(floor).toBeGreaterThan(480);
+
+    // At a budget a page fits, the window degrades to a cursor chain (whole
+    // trailing segments are dropped, rung 5 / the staged fit) — every hop
+    // within budget, every code line delivered exactly once, the comment
+    // blocks never served nor owed, and their windows disclosed.
+    const budget = Math.max(floor, 800);
+    let response = await read(ws, { targets: [{ path: "src/doc.ts", range: "1-30" }], budget: { bytes: budget } });
+    const seen = new Map<number, number>();
+    const elided = new Set<string>();
+    for (let hop = 0; hop < 20; hop += 1) {
+      const where = `hop ${hop}: ${JSON.stringify(response.body).slice(0, 300)}`;
+      expect(response.body["kind"], where).toBe("read.text");
+      expect(response.bytes, where).toBeLessThanOrEqual(budget);
+      for (const row of rows(response.body)) {
+        expect(String(row["body"] ?? ""), where).not.toContain("doc elided");
+        for (const window of (row["elided"] as string[] | undefined) ?? []) elided.add(window);
+        if (typeof row["body"] !== "string") continue;
+        const [a, z] = (row["range"] as string).split("-").map(Number) as [number, number];
+        for (let l = a; l <= z; l += 1) seen.set(l, (seen.get(l) ?? 0) + 1);
+      }
+      const call = next(response.body);
+      if (call === undefined) break;
+      response = await read(ws, { ...call.arguments, budget: { bytes: budget } });
+    }
+    expect([...seen.keys()].sort((a, b) => a - b)).toEqual([5, 10, 15, 20, 25, 30]);
+    expect([...seen.values()].every((count) => count === 1)).toBe(true);
+    expect([...elided].sort()).toEqual(["1-4", "11-14", "16-19", "21-24", "26-29", "6-9"]);
   });
 });
 

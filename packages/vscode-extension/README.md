@@ -16,7 +16,7 @@ The TokenLighten Workspace view is for developers using GitHub Copilot, the VS C
 - Japanese and English display languages.
 - An optional startup check for newer VSIX releases published on GitHub.
 
-For normal installation or recovery, use **Set up this workspace**. It installs or repairs the TokenLighten MCP configuration and managed AI instructions in one operation, then enables TL for the workspace. Existing project instructions outside TokenLighten-managed sections are preserved.
+For normal installation or recovery, use **Set up this workspace**. It installs or repairs the TokenLighten MCP configuration and managed AI instructions in one operation, then enables TL for the workspace. Existing project instructions outside TokenLighten-managed sections are preserved. Shared guides now default to `compact`; set `tokenlighten.guideProfile` to `full` or `medium` explicitly for longer instructions. The existing dedicated Copilot guide is retained.
 
 If TokenLighten causes a problem, clear **Enable TL in this workspace** and save the setting. Check it again, or rerun workspace setup, to restore TL.
 
@@ -54,6 +54,9 @@ Workspace-changing actions require a trusted VS Code workspace.
 | `tokenlighten.enabled` | `true` | Enables or disables TokenLighten for the current workspace. |
 | `tokenlighten.language` | `auto` | Uses the VS Code display language automatically, or selects Japanese or English explicitly. |
 | `tokenlighten.updateCheck.enabled` | `true` | Checks GitHub Releases for a newer VSIX when VS Code starts. |
+| `tokenlighten.guideProfile` | `compact` | Shared guide written during workspace setup; explicit `full` or `medium` choices take precedence. |
+| `tokenlighten.toolSurface` | `full` | MCP capabilities: `full` or the smaller code/plain-text/config `code` surface. Reconnect after changing it. |
+| `tokenlighten.copilotGuide` | `standalone` | Copilot instructions: dedicated guide, shared AGENTS.md, or keep existing configuration. |
 
 ## Main workflow
 
@@ -81,4 +84,4 @@ npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.1/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.1/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.2/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.2/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.

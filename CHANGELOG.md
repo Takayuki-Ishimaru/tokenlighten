@@ -2,6 +2,29 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.15.2
+
+- Workspace setup uses the compact guide by default for Claude Code, Codex
+  and GitHub Copilot. Explicit guide profiles remain supported.
+- Claude Code loads TokenLighten upfront; generated Codex workspace settings
+  wait for the initial optional-server tool catalog. Existing explicit
+  workspace startup settings are preserved.
+- Source evidence retains accurate line ranges when comments are omitted;
+  repeated reads respect the requested comment view.
+- Japanese explanation and return-value questions avoid false missing-code
+  reports and incorrect task routing.
+- Text search, workspace trees and archive-member trees continue through
+  budgeted pages without dropping the remaining results.
+- Invalid requests are rejected before edits or task-state updates. First
+  task setup and repeated local state writes avoid unnecessary work.
+- Updated MCP SDK dependencies to upstream patched releases and refreshed
+  production dependency notices.
+
+Upgrade the archive or VSIX, re-run workspace setup and start a new client
+session. Tool names and canonical request fields are unchanged from v0.15.1.
+See the [v0.15.2 release notes](release-docs/github-release-v0.15.2.md) for
+startup-setting scope, migration and limitations.
+
 ## 0.15.1
 
 - Answer packs include constants read by the complete functions relevant to

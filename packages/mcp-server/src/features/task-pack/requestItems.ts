@@ -25,6 +25,7 @@ import {
   callShapedNamesIn,
   maskCallArgumentPunctuation,
   maskExplanationAspectPhrases,
+  maskJapaneseRequestPredicates,
 } from "./requestFacets.js";
 import { isProseAcronym } from "./concernRecovery.js";
 import { JA_GLOSSARY } from "../retrieval/jaGlossary.js";
@@ -179,10 +180,13 @@ const GLOSSARY_SEEDS: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
 ];
 
 function glossarySeeds(text: string): string[] {
+  // 2026-10-10: a request predicate is no subject — 「…を確認してください」 must
+  // not seed "check" (requestFacets.ts `maskJapaneseRequestPredicates`).
+  const subject = maskJapaneseRequestPredicates(text);
   const seeds = new Set<string>();
   for (const [pattern, words] of GLOSSARY_SEEDS) {
     pattern.lastIndex = 0;
-    if (pattern.test(text)) for (const w of words) seeds.add(w);
+    if (pattern.test(subject)) for (const w of words) seeds.add(w);
   }
   return [...seeds];
 }
@@ -448,8 +452,12 @@ const HOW_X_HANDLES_IDIOM_RE = /\b(how)\b([^.?!]*?)\b(handles?)\b/giu;
 
 function maskPhrasingIdiomSpans(text: string): string {
   // 2026-10-06 independent review (P2-1): "edge cases" and its kin name the
-  // kind of answer, never a searchable word (requestFacets.ts).
-  let out = maskExplanationAspectPhrases(text);
+  // kind of answer, never a searchable word (requestFacets.ts). 2026-10-10: a
+  // Japanese request / politeness predicate closing a clause (「…を教えて
+  // ください」「…を知りたいです」「…について教えて」) is never one either — the
+  // te-form 教えて survived ください's peel as a second topic word of its
+  // point (requestFacets.ts `maskJapaneseRequestPredicates`).
+  let out = maskJapaneseRequestPredicates(maskExplanationAspectPhrases(text));
   for (const re of [STEP_BY_STEP_IDIOM_RE, END_TO_END_IDIOM_RE, IN_ITS_LIFECYCLE_IDIOM_RE, IN_WHAT_ORDER_IDIOM_RE]) {
     out = out.replace(re, (m) => " ".repeat(m.length));
   }

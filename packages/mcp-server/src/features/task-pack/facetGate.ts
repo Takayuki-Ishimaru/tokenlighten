@@ -17,7 +17,10 @@
 //   covered       every required window is served;
 //   empty         verified empty (0 call sites in the scanned scope; a focal
 //                 that reads no module constant and holds no literal) — the
-//                 served focal IS the evidence, the empty fact is disclosed;
+//                 served focal IS the evidence, the empty fact is disclosed
+//                 (a question that only asks what that focal RETURNS is
+//                 covered instead when its served body returns an expression:
+//                 the body is the answer, 2026-10-10);
 //   open          required windows are known but not (fully) served — the
 //                 exact unserved sub-spans are returned as read targets;
 //   undetermined  no plan / no focal / budget ran out / a constant the focal
@@ -45,9 +48,10 @@
 // arithmetic; the per-language work (declarations, imports, call shapes) is
 // evidenceClosure.ts's and callerExpansion.ts's.
 
-import type { FacetRequirement, RequestFacet } from "./requestFacets.js";
+import { asksForCallableResult, type FacetRequirement, type RequestFacet } from "./requestFacets.js";
 import { hasHashComments } from "./callerExpansion.js";
 import { declarationRealExtent } from "./evidenceClosure.js";
+import { languageForPath } from "../../util/languages.js";
 
 // ---------------------------------------------------------------------------
 // Plan types (recorded by the hook, read by the gate)
@@ -175,7 +179,7 @@ export interface FacetPlanEntry {
   readonly flowMembersComplete?: boolean;
   /** flow / value / condition, callable focal (Copilot retest 2026-10-02): false when the focal's direct callee list was cut at MAX_SCANNED_CALLEE_NAMES / MAX_REQUIRED_CALLEE_WINDOWS (readCodeTaskPack.ts `calleeDefinitionsForFocal`) -- the facet is then undetermined, never covered by the callees that did fit. Absent = taken whole. */
   readonly calleesComplete?: boolean;
-  /** flow, non-callable focal only (FIX-FAB2): clause subject terms (length >= 3, excluding the focal's own name) that matched NO member of the focal at all — a non-empty list means the clause names something no served member accounts for, so the facet is never "covered" (P1/P3). */
+  /** flow, non-callable focal only (FIX-FAB2): clause subject terms (length >= 3, excluding the focal's own name and — 2026-10-10 — the clause's non-point words, requestFacets.ts `nonPointTermsIn`) that matched NO member of the focal at all — a non-empty list means the clause names something no served member accounts for, so the facet is never "covered" (P1/P3). */
   readonly ungroundedFlowTerms?: readonly string[];
   /**
    * MENTION GUARD (R5-A1, the round-5 principle). `callers`/`flow` only:
@@ -586,6 +590,212 @@ const IDENTIFIER_TOKEN_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
 function lineHasLiteral(line: string): boolean {
   const code = line.replace(/\s(?:\/\/|#).*$/u, "").replace(/^\s*(?:\/\/|#|\*|\/\*).*$/u, "");
   return /\d/u.test(code.replace(IDENTIFIER_TOKEN_RE, "")) || /["'`]/u.test(code);
+}
+
+/**
+ * 2026-10-10 re-run — true when a line of a callable's body returns an
+ * expression once its trailing `//` / `#` comment (or a comment-only line) is
+ * dropped: `return <expression>` (every mainstream language with the keyword;
+ * a bare `return;` returns nothing) or an arrow function's expression body
+ * (`=> a + b`, outside any parenthesis or bracket, so the arrow of a
+ * parameter's function TYPE never counts — also C#'s `=> a + b;` members and
+ * PHP's `fn($a) => …`). A body that returns its tail expression without the
+ * keyword (Rust, Ruby, a Kotlin expression body) is read by
+ * `declarationReturnsTailExpression` instead.
+ */
+function lineReturnsExpression(line: string): boolean {
+  const code = line.replace(/\s(?:\/\/|#).*$/u, "").replace(/^\s*(?:\/\/|#|\*|\/\*).*$/u, "");
+  if (/\breturn\b[ \t]*[^\s;]/u.test(code)) return true;
+  let depth = 0;
+  for (let i = 0; i + 1 < code.length; i += 1) {
+    const ch = code[i]!;
+    if (ch === "(" || ch === "[") depth += 1;
+    else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    else if (ch === "=" && code[i + 1] === ">" && depth === 0) {
+      const rest = code.slice(i + 2).trimStart();
+      if (rest.length > 0 && rest[0] !== "{") return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 2026-10-10 (tail-expression returns) — `text` with every comment blanked
+ * (spaces, newlines kept): `#` line comments when `hashComments`, otherwise
+ * `//` line comments and (nested) `/* … *\/` blocks. String literals need no
+ * masking here: the only caller reads a declaration that holds no literal at
+ * all (`lineHasLiteral`), and the readers below give up on any quote left.
+ */
+function blankComments(text: string, hashComments: boolean): string {
+  let out = "";
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    const next = text[i + 1];
+    if (depth > 0) {
+      if (ch === "*" && next === "/") { depth -= 1; out += "  "; i += 1; }
+      else if (ch === "/" && next === "*") { depth += 1; out += "  "; i += 1; }
+      else out += ch === "\n" ? "\n" : " ";
+      continue;
+    }
+    if (!hashComments && ch === "/" && next === "*") { depth = 1; out += "  "; i += 1; continue; }
+    if (hashComments ? ch === "#" : ch === "/" && next === "/") {
+      while (i < text.length && text[i] !== "\n") { out += " "; i += 1; }
+      if (i < text.length) out += "\n";
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Rust: the function declares a value return type (`-> T`, never `()` or `!`)
+ * and its body has a TAIL — whatever follows the body's last top-level `;` is
+ * not empty (`a + b`, `match x { … }`, `Ok(v)`). `a + b;` leaves no tail: the
+ * body returns unit, whatever its signature says. A declaration without a body
+ * (a trait method's `;`) has none either.
+ */
+function rustReturnsTailExpression(code: string): boolean {
+  const fn = /\bfn\b/u.exec(code);
+  if (fn === null) return false;
+  let paren = 0;
+  let angle = 0;
+  let arrow = -1;
+  let bodyOpen = -1;
+  for (let i = fn.index + 2; i < code.length && bodyOpen < 0; i += 1) {
+    const ch = code[i]!;
+    if (ch === "-" && code[i + 1] === ">") {
+      if (paren === 0 && angle === 0 && arrow < 0) arrow = i + 2;
+      i += 1;
+    } else if (ch === "(" || ch === "[") paren += 1;
+    else if (ch === ")" || ch === "]") paren = Math.max(0, paren - 1);
+    else if (ch === "<") angle += 1;
+    else if (ch === ">") angle = Math.max(0, angle - 1);
+    else if (paren === 0 && angle === 0 && ch === ";") return false;
+    else if (paren === 0 && angle === 0 && ch === "{") bodyOpen = i;
+  }
+  if (arrow < 0 || bodyOpen < 0) return false;
+  const returnType = code.slice(arrow, bodyOpen).replace(/\bwhere\b[\s\S]*$/u, "").trim();
+  if (returnType === "" || returnType === "!" || /^\(\s*\)$/u.test(returnType)) return false;
+  let depth = 0;
+  let tailStart = bodyOpen + 1;
+  for (let i = bodyOpen + 1; i < code.length; i += 1) {
+    const ch = code[i]!;
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return code.slice(tailStart, i).trim().length > 0;
+      depth -= 1;
+    } else if (ch === ";" && depth === 0) tailStart = i + 1;
+  }
+  return false;
+}
+
+const RUBY_DEF_LEAD = String.raw`^\s*(?:(?:private|protected|public|module_function)\s+)?def\s+`;
+const RUBY_DEF_RE = new RegExp(RUBY_DEF_LEAD, "u");
+/** An endless method, `def add(a, b) = a + b` (never a setter's `def name=(v)`). */
+const RUBY_ENDLESS_DEF_RE = new RegExp(`${RUBY_DEF_LEAD}(?:self\\.)?[A-Za-z_]\\w*[?!]?(?:\\s*\\([^)]*\\)\\s*|\\s+)=(?![=~>])\\s*\\S`, "u");
+/** The signature of a block-bodied method: the name, then its parameters — parenthesized, or the rest of the line. */
+const RUBY_SIGNATURE_RE = new RegExp(`${RUBY_DEF_LEAD}(?:self\\.)?[^\\s(;]+(?:\\s*\\([^)]*\\))?[^\\n;]*`, "u");
+/** A last statement that hands back no value of its own: a block closer (an inner `end`, `}`), a bare jump, or a clause keyword. */
+const RUBY_VALUELESS_TAIL_RE = /^(?:end|\}|\]|\))(?![\w?!])|^(?:return|break|next|redo|retry)$|^(?:else|elsif|when|in|rescue|ensure|then|do|begin)\b/u;
+
+/**
+ * Ruby: a `def` returns the value of its last statement — the tail before its
+ * closing `end` — unless that statement is a block closer, a bare jump or a
+ * clause keyword (an inner `if … end` as the last statement stays unread:
+ * which branch's value comes back is not this line's to say). An endless
+ * `def f(a) = expression` returns its expression.
+ */
+function rubyReturnsImplicitValue(code: string): boolean {
+  const text = code.replace(/^\s*\n/u, "").trimEnd();
+  if (!RUBY_DEF_RE.test(text)) return false;
+  if (RUBY_ENDLESS_DEF_RE.test(text.split("\n")[0]!)) return true;
+  if (!/(?:^|[\s;])end$/u.test(text)) return false;
+  const signature = RUBY_SIGNATURE_RE.exec(text);
+  if (signature === null) return false;
+  const body = text.slice(signature[0].length, text.length - "end".length);
+  const statements = body.split(/[\n;]/u).map((statement) => statement.trim()).filter((statement) => statement.length > 0);
+  const tail = statements[statements.length - 1];
+  return tail !== undefined && !RUBY_VALUELESS_TAIL_RE.test(tail);
+}
+
+/**
+ * Kotlin: an expression body, `fun add(a: Int, b: Int) = a + b` (with or
+ * without a declared type): an `=` after the parameter list, before any block
+ * body, outside brackets. A block body returns only through `return`, which
+ * `lineReturnsExpression` reads.
+ */
+function kotlinHasExpressionBody(code: string): boolean {
+  const fun = /\bfun\b/u.exec(code);
+  if (fun === null) return false;
+  let i = fun.index + 3;
+  let angle = 0;
+  for (; i < code.length; i += 1) {
+    const ch = code[i]!;
+    if (ch === "<") angle += 1;
+    else if (ch === ">") angle = Math.max(0, angle - 1);
+    else if (ch === "(" && angle === 0) break;
+    else if (ch === "{" || ch === "=" || ch === ";") return false;
+  }
+  let depth = 0;
+  for (; i < code.length; i += 1) {
+    if (code[i] === "(") depth += 1;
+    else if (code[i] === ")" && (depth -= 1) === 0) break;
+  }
+  depth = 0;
+  for (i += 1; i < code.length; i += 1) {
+    const ch = code[i]!;
+    const next = code[i + 1];
+    if (ch === "-" && next === ">") i += 1;
+    else if (ch === "(" || ch === "[" || ch === "<") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === ">") depth = Math.max(0, depth - 1);
+    else if (depth === 0 && ch === "{") return false;
+    else if (depth === 0 && ch === "=" && next !== "=" && !"=!<>".includes(code[i - 1] ?? "")) return code.slice(i + 1).trim().length > 0;
+  }
+  return false;
+}
+
+/**
+ * 2026-10-10 (tail-expression returns) — true when `declaration` (a
+ * callable's whole noise-trimmed declaration, holding no literal) returns a
+ * value WITHOUT a `return` keyword, in a language whose function hands back an
+ * expression of its own: a Rust tail expression, a Ruby method's last
+ * statement, a Kotlin expression body (see each reader above). Every other
+ * language returns a value only through `return` or an expression-bodied
+ * arrow, which `lineReturnsExpression` reads — a TS/JS, Python, Go, Java, C,
+ * C++, C# or PHP body without one returns nothing and keeps its disclosure.
+ * A quote left in the code (a Rust lifetime, a literal) gives up: false.
+ */
+function declarationReturnsTailExpression(declaration: readonly string[], path: string): boolean {
+  const language = languageForPath(path);
+  if (language !== "rust" && language !== "ruby" && language !== "kotlin") return false;
+  const code = blankComments(declaration.join("\n"), language === "ruby");
+  if (/["'`]/u.test(code)) return false;
+  if (language === "rust") return rustReturnsTailExpression(code);
+  if (language === "ruby") return rubyReturnsImplicitValue(code);
+  return kotlinHasExpressionBody(code);
+}
+
+/**
+ * 2026-10-10 re-run — the focal window of a callable whose WHOLE
+ * (noise-trimmed) declaration is served in this epoch and whose body returns
+ * an expression (`lineReturnsExpression`, or a tail expression:
+ * `declarationReturnsTailExpression`), or `undefined`. For a question that
+ * asks what the callable returns (requestFacets.ts `asksForCallableResult`),
+ * that served body is the answer itself.
+ */
+function servedReturningBody(
+  focal: NonNullable<FacetPlanEntry["focal"]>,
+  lines: readonly string[],
+  ctx: FacetEvaluationContext,
+): FacetPlanWindow | undefined {
+  const span = trimmedFocalSpan(focal.start, focal.end, lines);
+  if (span === undefined) return undefined;
+  if (unservedSubSpans(span, ctx.servedSpans(focal.path)).length > 0) return undefined;
+  const declaration = lines.slice(span.start - 1, span.end);
+  if (!declaration.some(lineReturnsExpression) && !declarationReturnsTailExpression(declaration, focal.path)) return undefined;
+  return { kind: "focal", path: focal.path, start: span.start, end: span.end, name: focal.name };
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,6 +1339,26 @@ export function evaluateFacetRequirement(
       const lines = ctx.fileLines(focal.path) ?? [];
       const body = lines.slice(Math.max(0, focal.start - 1), focal.end);
       if (!body.some(lineHasLiteral)) {
+        // 2026-10-10 re-run: a question that asks what the callable RETURNS
+        // ("What does the add function return?", 「add 関数は何を返しますか？」)
+        // is answered by the served body itself — `return a + b` — so a body
+        // with no constant and no literal is no gap to disclose there; the
+        // disclosure stays for a question that names a value of its own
+        // ("What is the timeout value used by X?"), and for a body that
+        // returns no expression or is not on the wire.
+        const resultWindow = requirement.facet === "value" && asksForCallableResult(requirement.clause)
+          ? servedReturningBody(focal, lines, ctx)
+          : undefined;
+        if (resultWindow !== undefined) {
+          return {
+            kind: "covered",
+            term,
+            reason: `${focal.name} reads no module constant and holds no literal: the served body's return expression is the answer`,
+            focalResolved: true,
+            servedWindows: servedWindows.some((window) => window.kind === "focal") ? servedWindows : [...servedWindows, resultWindow],
+            openTargets: [],
+          };
+        }
         return {
           kind: "empty",
           term,

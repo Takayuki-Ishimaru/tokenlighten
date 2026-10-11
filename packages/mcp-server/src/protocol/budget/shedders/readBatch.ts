@@ -37,6 +37,7 @@
 // ---------------------------------------------------------------------------
 
 import { emittableToolCall } from "../../refusal.js";
+import { joinBodyLines } from "../../sourceFidelity.js";
 import {
   arrayAt,
   dropTrailingEntry,
@@ -377,7 +378,9 @@ function truncateRangedEntries(payload: ShedPayload, context: ShedContext): Shed
     nextEntries[i] = {
       ...entry,
       range: keptRange,
-      content: lines.slice(0, keep).join("\n"),
+      // TL-REVIEW-2: a cut ending on a blank line keeps its trailing "\n" so
+      // the kept content still reads as `keep` lines (`joinBodyLines`).
+      content: joinBodyLines(lines.slice(0, keep)),
       truncated: true,
       remaining_ranges: priorRemaining.length === 1 && priorRemaining[0] === unkeptRange
         ? priorRemaining

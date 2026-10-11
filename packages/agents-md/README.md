@@ -43,6 +43,12 @@ The equivalent through the CLI wrapper: `tl agents update [--targets <id,...>]`,
 or via the root package script: `npm run generate` (runs
 `tl-agents update --force`).
 
+The default is the compact guide for every client and tool surface. Pass
+`--profile full` or `--profile medium` to select a larger guide explicitly.
+Workspace setup uses `--guide-profile`; VS Code uses
+`tokenlighten.guideProfile`. Claude imports the selected `AGENTS.md` profile;
+Copilot's default standalone guide lives in `.github/copilot-instructions.md`.
+
 ## Tests
 
 ```bash

@@ -44,6 +44,9 @@ import { PROTOCOL_META } from "../../protocol/envelope.js";
 // protocol/serverInstructions.ts, not server.ts, so this leg reads the exact
 // same frozen string with no hop through the cycle.
 import { SERVER_INSTRUCTIONS } from "../../protocol/serverInstructions.js";
+// The startup warm-up, scheduled at the same handshake point as the
+// hand-rolled leg's `notifications/initialized` (server.ts's `handleRequest`).
+import { scheduleStartupWarmup } from "../../util/startupWarmup.js";
 import type { CallToolResult, ListToolsResult, Server } from "@modelcontextprotocol/server";
 
 /** The `Server` class as dynamically imported by a leg's own try/catch. */
@@ -133,6 +136,7 @@ export function makeModernServerFactory(
     // timer exists for any client but VS Code (startHostActivationWatch).
     let hostActivationWatch: HostActivationWatch | undefined;
     server.oninitialized = () => {
+      scheduleStartupWarmup(activeRoot);
       hostActivationWatch?.stop();
       hostActivationWatch = startHostActivationWatch(activeRoot, () => {
         void server.sendToolListChanged().catch(() => undefined);

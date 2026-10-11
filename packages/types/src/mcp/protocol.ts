@@ -396,6 +396,19 @@ export type Evidence = {
   remaining?: string[];
 
   /**
+   * TL-REVIEW-2 (2026-10-06), additive under §1.4(a). Comment-only windows
+   * ("28-37") of this source that the default comment policy
+   * (`select.comments:"elide"`) left OUT of `body`: multi-line comment blocks
+   * and docstrings. `body` is always the source's own contiguous `range`, so
+   * a rendering that elided blocks ships as several entries on the same
+   * handle, and this list — on the first of them — names what lies between.
+   * NOT `remaining`: these lines are not owed by the request and no `next`
+   * fetches them; re-read with `select.comments:"keep"` to receive them.
+   * Absence means nothing in this entry's window was elided.
+   */
+  elided?: string[];
+
+  /**
    * [R4-2], adjudicated 2026-08-13. The server's classification of this
    * surface. Emitted on FRESH evidence WHEN the server classified the surface;
    * absent when it did not, and carried on `pack-unchanged` receipt surfaces as

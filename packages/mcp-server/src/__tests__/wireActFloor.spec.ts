@@ -535,15 +535,33 @@ describe("[R5-30] branch 3 (`act-on-served-evidence`) is re-sited, gated on the 
 
   it("the OTHER three await-input branches are untouched — the re-site is scoped to branch 3 by its own token", () => {
     for (const code of ["choose-candidate", "name-intended-target", "no-grounded-call-remains"] as const) {
+      // v0.15.1 runtime review (2026-10-06): `choose-candidate` gets TWO
+      // candidates here — a choice is only ever between alternatives, and a
+      // lone candidate with a window left is re-sited to `discover` (pinned
+      // just below), never by branch 3.
       const decision = projectTaskDecision({
         result: {},
         contract: branchThreeContract({ await_input_code: code } as unknown as Partial<TaskExecutionContract>),
         canonicalKind: "await-input",
-        evidence: [{ handle: "hpartial", path: "p", range: "1-80", body: "b", remaining: ["81-160"] }],
+        evidence: [
+          { handle: "hpartial", path: "p", range: "1-80", body: "b", remaining: ["81-160"] },
+          ...(code === "choose-candidate" ? [{ handle: "hother", path: "q", range: "1-20", body: "c" }] : []),
+        ],
       });
       expect(decision?.kind).toBe("await_input");
       expect((decision as { code: string }).code).toBe(code);
     }
+  });
+
+  it("a lone candidate is no choice: with a window left, `choose-candidate` becomes the `discover` that fetches it (v0.15.1 review TL-REVIEW-3)", () => {
+    const decision = projectTaskDecision({
+      result: {},
+      contract: branchThreeContract({ await_input_code: "choose-candidate" } as unknown as Partial<TaskExecutionContract>),
+      canonicalKind: "await-input",
+      evidence: [{ handle: "hpartial", path: "p", range: "1-80", body: "b", remaining: ["81-160"] }],
+    });
+    expect(decision?.kind).toBe("discover");
+    expect((decision as { next: unknown }).next).toEqual({ tool: "tl_read_file", arguments: { handle: "hpartial", range: "81-160" } });
   });
 });
 

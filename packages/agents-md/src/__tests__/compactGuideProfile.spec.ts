@@ -2,8 +2,7 @@
 // mirroring injectAll.spec.ts's own per-target patterns. Compact was wired
 // as a first-class GuideProfile (alongside full/medium) in the 2026-08-27
 // compact/medium first-class wave — see render.ts's renderCompactBlock/
-// loadCompactTemplate. The default profile stays "full"; these tests only
-// cover the opt-in `profile: "compact"` path across every stub target and
+// loadCompactTemplate. These tests cover explicit profile switches across every stub target and
 // both locales.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -109,7 +108,7 @@ describe("compact GuideProfile round-trip via injectAll (all targets, both local
   }
 
   it("switching profile full -> compact replaces the managed block but preserves content outside it", async () => {
-    await injectAll({ repoRoot: repo, driftMode: "auto-rewrite" }); // full (default)
+    await injectAll({ repoRoot: repo, driftMode: "auto-rewrite", profile: "full" });
     const before = readFile(repo, "AGENTS.md");
     writeFileSync(join(repo, "AGENTS.md"), `${before}\n## My own notes\n\nkeep me\n`, "utf8");
 
@@ -122,7 +121,7 @@ describe("compact GuideProfile round-trip via injectAll (all targets, both local
 
   it("switching profile compact -> full restores the full stable-prefix guide", async () => {
     await injectAll({ repoRoot: repo, driftMode: "auto-rewrite", profile: "compact" });
-    await injectAll({ repoRoot: repo, driftMode: "auto-rewrite" });
+    await injectAll({ repoRoot: repo, driftMode: "auto-rewrite", profile: "full" });
 
     const agents = readFile(repo, "AGENTS.md");
     expect(agents).not.toContain("## TokenLighten MCP (compact)");

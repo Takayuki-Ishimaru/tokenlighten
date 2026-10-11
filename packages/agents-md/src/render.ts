@@ -164,6 +164,7 @@ Do not fetch AGENTS.md/CLAUDE.md for this protocol.
 - Replies are \`{v:1,kind,...}\`; an unknown \`kind\` => stop and report. \`act.answer\`/\`act.edit\` => act NOW; \`discover\`/\`await_input\` => run its \`next\` (else re-pack ONCE with \`{qref, targets:[<candidate paths>]}\`, or ask); \`done\` => stop.
 - Run every \`next\` verbatim. \`refusal.retry\`: \`call\` => fix \`field\`; \`new-task\` => re-pack; \`user-input\` => ask; \`none\` => stop that shape. \`read.receipt\` => already served; lost context => same call with \`task.force_serve:true\`.
 - Edits: ONE \`mcp__tokenlighten_tl_edit_file\` call for all of them; \`edit.state_unknown\` => run its \`recovery\`; \`edit.rolled_back\` => nothing landed. Stop after a passing check.
+- Every call: own \`cwd\`; shared workspace: fixed \`lane\`. Continue via returned \`task.id\` as \`task.handle\`; \`expected_state_version\` only beside that handle. New files/tests: \`edits:[{path,create:true,content}]\`+\`cwd\`; edit only served bytes this epoch. Never retry a failed edit verbatim. Verification kit \`omitted\` => run its \`next\` before compile/tests; discharge \`recipe.gaps\`.
 - "Large tool result ... written to file" => re-issue with \`budget.bytes\` <= 7000; otherwise omit \`budget\`.
 - Subagent: \`agentName:"tokenlighten-explore"\`; large jobs only.
 ${SENTINEL_END}

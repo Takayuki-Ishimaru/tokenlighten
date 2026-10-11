@@ -922,8 +922,13 @@ describe("FX-W3 static fence: every recordServedRange call site books renderer-a
   });
 
   it("resolveFullReadForPath's governed head chunk books spansExcludingWindows over the renderer's chunk.elided", () => {
+    // TL-REVIEW-2 (2026-10-06): the head is rendered as a WINDOW
+    // (`, 1, "window"` — an all-comment head is a comment-only window, never a
+    // "doc-only file"), and the whole-file windows past the head are computed
+    // for disclosure between the render and the booking; the booking itself is
+    // unchanged.
     expect(SERVER).toMatch(
-      /const chunk = elideDocCommentsForDisplay\(head, language, keepComments\);[\s\S]{0,1100}?spansExcludingWindows\(1, servedLines, chunk\.elided\)\)\s*\{\s*recordServedRange\(workspace, filePath, sha, spanStart, spanEnd, totalLines, \{\s*mode: "full-head",/,
+      /const chunk = elideDocCommentsForDisplay\(head, language, keepComments, 1, "window"\);[\s\S]{0,2000}?spansExcludingWindows\(1, servedLines, chunk\.elided\)\)\s*\{\s*recordServedRange\(workspace, filePath, sha, spanStart, spanEnd, totalLines, \{\s*mode: "full-head",/,
     );
   });
 

@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import { emittableToolCall } from "../../refusal.js";
+import { joinBodyLines } from "../../sourceFidelity.js";
 import {
   arrayAt,
   isRecord,
@@ -142,7 +143,16 @@ function truncateLargestBody(payload: ShedPayload): ShedOutcome | undefined {
   // E5: no parsable addressing means no executable continuation, so no shed.
   if (handle === undefined || bounds === undefined) return undefined;
 
-  const lines = String(entry["body"]).split("\n");
+  // TL-REVIEW-2 (2026-10-06): evidence bodies are source-faithful and a body
+  // that reaches EOF (or ends on a blank line) carries ONE terminating "\n"
+  // (`joinBodyLines`, protocol/sourceFidelity.ts). Strip exactly that before
+  // splitting — the same TL-A6-3 rule `readBatch.ts`'s `truncateRangedEntries`
+  // already applies — so the phantom empty segment can never be counted as a
+  // line (it pushed `unkeptEnd` to N+1 of an N-line file), and re-join the
+  // kept lines canonically so a cut ending on a blank line still reads as
+  // `keep` lines to every consumer of the narrowed `range`.
+  const rawBody = String(entry["body"]);
+  const lines = (rawBody.endsWith("\n") ? rawBody.slice(0, -1) : rawBody).split("\n");
   if (lines.length < 2) return undefined;
   const keep = Math.ceil(lines.length / 2);
   if (keep >= lines.length) return undefined;
@@ -197,7 +207,7 @@ function truncateLargestBody(payload: ShedPayload): ShedOutcome | undefined {
   const nextEntry: Record<string, unknown> = {
     ...entry,
     range: keptRange,
-    body: lines.slice(0, keep).join("\n"),
+    body: joinBodyLines(lines.slice(0, keep)),
     remaining: remaining.length === 1 && remaining[0] === unkeptRange
       ? remaining
       : [unkeptRange],
@@ -223,11 +233,97 @@ function parseRange(value: unknown): [number, number] | undefined {
   return [start, end];
 }
 
+// ---------------------------------------------------------------------------
+// Rung 5 — drop the last whole segment
+// ---------------------------------------------------------------------------
+
+/**
+ * TL-REVIEW-2 (2026-10-06): drop the trailing HALF of the last handle's
+ * trailing segments — whole body-bearing evidence entries — moving their
+ * window (and everything after it that the handle still owes) into that
+ * handle's `remaining`.
+ *
+ * WHY THIS RUNG EXISTS NOW. Evidence bodies are source-faithful
+ * (protocol/sourceFidelity.ts): a window whose comment blocks the default
+ * policy elides ships as SEVERAL entries — one per run of code lines, the
+ * blocks listed in `elided` — instead of one body with marker lines. Rung 4
+ * halves a body down to one line and no further, so a comment-dense window of
+ * many one-line segments (`/** … *\/` + `export const X = 1;`, ×12) could not
+ * shrink at all under a tight `budget.bytes` and failed closed to
+ * `cap-exceeded` where the marker display used to fit. Dropping trailing
+ * segments is the whole-entry analogue of rung 4's line cut: the response
+ * keeps a faithful PREFIX of the window and the continuation names the rest.
+ *
+ * HALF, for rung 4's reason: the step is budget-blind, and the ladder refuses
+ * a first limit-bearing step whose disclosure (`limit` + its `next`) costs more
+ * than the cut saved — one small segment never pays for that, half of them
+ * does, and later passes halve again.
+ *
+ * ONLY A CONTIGUOUS SUFFIX of ONE handle's body-bearing entries (so the
+ * continuation is one honest window), NEVER that handle's FIRST entry (it
+ * carries the handle's `remaining` and `elided`, the per-handle facts
+ * `textEvidence` and the source-fidelity seam put there), and at least one
+ * body always survives — the required-set floor of `read.text`.
+ */
+function dropTrailingSegments(payload: ShedPayload): ShedOutcome | undefined {
+  const evidence = arrayAt(payload, "evidence");
+  if (evidence === undefined || evidence.length < 2) return undefined;
+  const last = evidence[evidence.length - 1];
+  if (!isRecord(last)) return undefined;
+  const handle = str(last["handle"]);
+  if (handle === undefined) return undefined;
+  const headIndex = evidence.findIndex((raw) => isRecord(raw) && str(raw["handle"]) === handle);
+  // The droppable suffix: body-bearing, addressed entries of this handle,
+  // walking back from the end, stopping at anything else or at the head.
+  const suffix: number[] = [];
+  for (let i = evidence.length - 1; i > headIndex; i -= 1) {
+    const entry = evidence[i];
+    if (!isRecord(entry) || str(entry["handle"]) !== handle) break;
+    const body = entry["body"];
+    if (typeof body !== "string" || body === "" || parseRange(entry["range"]) === undefined) break;
+    suffix.unshift(i);
+  }
+  if (suffix.length === 0) return undefined;
+  const drop = suffix.slice(suffix.length - Math.ceil(suffix.length / 2));
+  const dropped = new Set(drop);
+
+  const [start] = parseRange((evidence[drop[0]!] as Record<string, unknown>)["range"])!;
+  let unkeptEnd = parseRange((evidence[drop[drop.length - 1]!] as Record<string, unknown>)["range"])![1];
+  const head = evidence[headIndex] as Record<string, unknown>;
+  const headRemaining = Array.isArray(head["remaining"])
+    ? (head["remaining"] as unknown[]).filter((value): value is string => typeof value === "string")
+    : [];
+  // Everything from the first dropped window onward that this handle already
+  // owed is one contiguous continuation, exactly rung 4's R2 rule.
+  const kept: string[] = [];
+  for (const span of headRemaining) {
+    const parsed = parseRange(span);
+    if (parsed !== undefined && parsed[0] >= start) unkeptEnd = Math.max(unkeptEnd, parsed[1]);
+    else kept.push(span);
+  }
+  const unkeptRange = `${start}-${unkeptEnd}`;
+  const continuation = emittableToolCall({
+    tool: "tl_read_file",
+    arguments: { mode: "slice", handle, range: unkeptRange },
+  });
+  if (continuation === undefined) return undefined;
+
+  const nextEvidence = evidence
+    .map((raw, i) => (i === headIndex ? { ...(raw as Record<string, unknown>), remaining: [...kept, unkeptRange] } : raw))
+    .filter((_, i) => !dropped.has(i));
+  return {
+    next: withKey(payload, "evidence", nextEvidence),
+    note: { rung: 5, refs: [handle] },
+    continuation,
+  };
+}
+
 export const READ_TEXT_SHEDDER: Shedder = {
   kind: "read.text",
   rungs: [
     { rung: 1, step: shedTextProse },
     { rung: 4, step: truncateLargestBody },
+    { rung: 5, step: dropTrailingSegments },
   ],
   refusalConvertible: true,
 };

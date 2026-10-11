@@ -260,10 +260,18 @@ function renderSpan(
   span: LineSpan,
   lang: string | undefined,
 ): { lines: string[]; sourceLines: number[] } | undefined {
-  const sourceSlice = sliceLines(fileText, span[0], span[1]);
+  // TL-REVIEW-2 (2026-10-06): `sliceLines` JOINS the span's lines with "\n"
+  // (no terminator), so the rendering is split back the same way — a span
+  // whose LAST line is blank keeps that line. `splitLines` (terminator
+  // semantics) dropped it, so a source-faithful body ending on a blank line
+  // (the canonical `"…\n\n"`, protocol/sourceFidelity.ts) numbered its last
+  // line `~|` as if it were foreign context. The span is clamped to the real
+  // line count first, so no phantom past-EOF element can enter the walk.
+  const end = Math.min(span[1], splitLines(fileText).length);
+  const sourceSlice = sliceLines(fileText, span[0], end);
   if (sourceSlice === undefined) return undefined;
   const rendered = elideDocCommentsWithWindows(sourceSlice, lang, span[0]);
-  const lines = splitLines(rendered.text);
+  const lines = rendered.text.split("\n");
   const sourceLines = sourceLineNumbersFor(rendered.elided, span[0], lines.length);
   return { lines, sourceLines };
 }

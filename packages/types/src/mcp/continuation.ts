@@ -77,6 +77,15 @@ export interface ReadRequestTargetState {
   requested: LineWindow[];
   /** D — recomputed on every settle. */
   remaining: LineWindow[];
+  /**
+   * TL-REVIEW-2 (2026-10-06). Under `comments:"elide"`, the comment-only
+   * windows this target's representation ELIDES: excluded from `requested`
+   * (they are disclosed, never owed), and restated as `Evidence.elided` on
+   * every continuation page of this path so a chain whose first page lost
+   * its disclosure (a shed entry, a batch page) still names them. Absent for
+   * `comments:"keep"` and when nothing is elided.
+   */
+  elided?: LineWindow[];
 }
 
 /**

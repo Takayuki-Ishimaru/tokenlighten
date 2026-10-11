@@ -155,11 +155,28 @@ export async function enforcePreconditions(
 ): Promise<{ ok: true } | { ok: false; failure: EditFailure }> {
   const pre = args["precondition"];
 
+  // 2026-10-10 v0.15.1 runtime review (P1): a guard argument the caller SENT
+  // is a guard the caller gets. `expectedSha` and `scopeHandle` used to be
+  // read only under their own precondition value, so a stale `expectedSha`
+  // beside an omitted or `unique-match` precondition was silently ignored and
+  // the edit landed on a file changed since it was read (measured: both
+  // `edit.applied`). Either field now enforces its check whatever
+  // `precondition` says; the precondition value itself still decides the
+  // rest (e.g. only `expected-hash` acknowledges a whole-file-scale
+  // replacement — blastRadius.ts). An EMPTY string is "not sent" (a client
+  // that serialises an unset optional string as "" asked for no guard), the
+  // same rule `scopeHandle` follows; under precondition:"expected-hash" an
+  // empty or missing expectedSha still refuses with the current sha (S1).
+  const checkHash = pre === "expected-hash"
+    || (typeof args["expectedSha"] === "string" && args["expectedSha"] !== "");
+  const checkScope = pre === "scope-handle"
+    || (typeof args["scopeHandle"] === "string" && args["scopeHandle"] !== "");
+
   // -------------------------------------------------------------------------
-  // "expected-hash": the current file sha256 must match expectedSha before
-  // the edit is applied.
+  // "expected-hash" (or any sent expectedSha): the current file sha256 must
+  // match expectedSha before the edit is applied.
   // -------------------------------------------------------------------------
-  if (pre === "expected-hash") {
+  if (checkHash) {
     const want = String(args["expectedSha"] ?? "");
     // S1: even the missing-param case reads the live content so it can hand
     // back the current sha + a concrete retry — a bare {reason:"hash-mismatch"}
@@ -232,7 +249,7 @@ export async function enforcePreconditions(
   // instead of a kind tag nothing produces. The request schema is unchanged:
   // `scopeHandle` still names one handle id.
   // -------------------------------------------------------------------------
-  if (pre === "scope-handle") {
+  if (checkScope) {
     const scopeId = String(args["scopeHandle"] ?? "");
     const entry = scopeId ? handleTable.get(scopeId) : undefined;
     // Unknown, never-minted, or minted for a different worktree: none of

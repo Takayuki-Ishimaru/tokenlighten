@@ -57,6 +57,9 @@ const WIRE_SERVING_MODULES = [
   "tools/readCodePack.ts",
   "protocol/envelope.ts",
   "protocol/readFamily.ts",
+  // TL-REVIEW-2 (2026-10-06): the source-fidelity seam re-reads a served file
+  // to ship its evidence bodies as the source's own lines.
+  "protocol/sourceFidelity.ts",
   "protocol/emit.ts",
   "state/readRequestStore.ts",
   "state/stateStore.ts",
