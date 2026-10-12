@@ -29,6 +29,12 @@ tl workspace setup          # one-step AI rules + MCP setup for this repo
 tl help                     # full command reference
 ```
 
+Workspace setup enables writes in generated MCP settings by default.
+Use `tl workspace setup --read-only` to disable them or `--allow-write`
+to select them explicitly. These flags cannot be combined. Pass
+`--read-only` again when refreshing a read-only configuration. A manually
+started `tl mcp start` server requires `--allow-write` for edits.
+
 ## Tests
 
 ```bash

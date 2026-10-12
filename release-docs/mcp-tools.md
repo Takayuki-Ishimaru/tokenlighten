@@ -78,7 +78,10 @@ Whole-file reads of small files are capped per task (six by default); past the c
 
 ## Editing
 
-The server starts in read-only mode. `tl_edit_file` requires `--allow-write`.
+A manually started server is read-only unless passed `--allow-write`;
+`tl_edit_file` requires that permission. Workspace setup enables writes in
+generated settings by default; use `tl workspace setup --read-only` to
+generate read-only settings.
 
 Edits are checked against previously served context and can be batched across independent concerns. The result distinguishes applied, rolled-back, and state-unknown outcomes. A successful create receipt proves the exact submitted content, and a successful bounded edit carries hashes and ranges for the resulting slice.
 
@@ -111,6 +114,23 @@ tl mcp start --stdio --workspace /path/to/project
 ```
 
 For command details, run `tl help`. See [Getting started](getting-started.md) for setup and operational notes.
+
+## v0.15.3 updates
+
+- Questions combining a call's return value and computation order retain
+  both requirements and request the helper implementations needed to answer.
+  Japanese explanations of functions named like English edit verbs remain
+  read-only questions; explicit edit requests still take precedence.
+- Symbol bodies retain their original source line coordinates. Supplementary
+  scope headers and signatures appear in `note`, outside the source body.
+  Budgeted symbol and multi-target reads continue through the remaining
+  requested lines. Follow the returned `next` unchanged.
+- A budgeted text-search page may suggest a larger `budget.bytes` for
+  fetching the remaining results. This is an estimate, and it does not
+  change the current budget or the executable continuation.
+- Line-range replacement retains the boundary before an untouched following
+  line even when replacement text omits its final newline. Existing LF,
+  CRLF and CR line endings are preserved.
 
 ## v0.15.2 updates
 

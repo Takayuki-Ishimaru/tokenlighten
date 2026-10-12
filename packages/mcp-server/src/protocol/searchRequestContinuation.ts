@@ -26,9 +26,12 @@
 import type { ToolCall } from "@tokenlighten/types";
 
 import type { ShedPayload } from "./budget/shedders/registry.js";
+import { measureResponseBytes } from "./budget/measure.js";
 import { canonicalToolCall } from "./envelope.js";
 import {
   fixPage,
+  defaultSearchPageBudgetBytes,
+  effectiveSearchPageBudgetBytes,
   mintSearchCursor,
   rewindSearchRequestDelivered,
   searchRequestCappedExhausted,
@@ -102,6 +105,33 @@ function cursorCall(staged: StagedSearchRequest, cursor: string): ToolCall {
   if (echo.lane !== undefined && echo.lane !== "") args["lane"] = echo.lane;
   if (echo.taskHandle !== undefined && echo.taskHandle !== "") args["task"] = { handle: echo.taskHandle };
   return canonicalToolCall("tl_search_files", args) as ToolCall;
+}
+
+/** Advisory only: never widen the executable next call or displace matches. */
+function withPaginationAdvice(payload: ShedPayload, staged: StagedSearchRequest): ShedPayload {
+  const budget = staged.state.budget;
+  const matches = payload["matches"];
+  if (staged.mode !== "open" || staged.state.snapshot_capped || !staged.state.walk_complete
+    || budget?.bytes === undefined || budget.items !== undefined
+    || budget.tokens !== undefined || !isRecord(matches) || matches["hint"] !== undefined) return payload;
+  const files = matches["files"];
+  if (!Array.isArray(files) || files.length === 0) return payload;
+  const shippedLines = shippedLineKeysOf(matches).size;
+  if (shippedLines === 0) return payload;
+  const remaining = new Set(staged.state.matches.slice(staged.state.delivered).map(row => `${row.path}:${row.line}`)).size;
+  const dataBytes = measureResponseBytes(JSON.stringify(files));
+  const envelopeBytes = measureResponseBytes(JSON.stringify(payload)) - dataBytes;
+  // The observed page prices both path/snippet data and cursor metadata.
+  // It is an estimate: later lines can have different lengths.
+  const estimatedRemainingBytes = envelopeBytes + Math.ceil(dataBytes * remaining / shippedLines);
+  if (estimatedRemainingBytes <= budget.bytes * 2) return payload;
+  const recommended = Math.min(defaultSearchPageBudgetBytes(), Math.ceil(estimatedRemainingBytes / 1000) * 1000);
+  if (recommended <= budget.bytes) return payload;
+  const advised = { ...payload, matches: { ...matches,
+    hint: `For all ${remaining} remaining lines, try budget.bytes:${recommended} (estimate). Current budget is unchanged.` } };
+  // Optional advice must fit without shrinking this page's real evidence.
+  return measureResponseBytes(JSON.stringify(advised)) <= effectiveSearchPageBudgetBytes(staged.state, budget.bytes)
+    ? advised : payload;
 }
 
 /**
@@ -273,7 +303,7 @@ export function applySearchRequestContinuation(
 
   const cursor = mintSearchCursor(staged);
   if (cursor === undefined) return payload;
-  return { ...payload, limit: { cause: "wire", next: cursorCall(staged, cursor) } };
+  return withPaginationAdvice({ ...payload, limit: { cause: "wire", next: cursorCall(staged, cursor) } }, staged);
 }
 
 /**

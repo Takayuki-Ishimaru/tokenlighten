@@ -12024,6 +12024,7 @@ async function resolveRangedPathsBatchEntry(
   workspace: string,
   path: string,
   selector: { range?: string; ranges?: string[]; symbol?: string },
+  stageRequest = false,
 ): Promise<
   | { ok: true; items: Array<Record<string, unknown>> }
   | { ok: false; reason: string }
@@ -12043,6 +12044,7 @@ async function resolveRangedPathsBatchEntry(
     const batch = await resolveSliceRanges(workspace, path, content, selector.ranges);
     if (!batch.ok) return { ok: false, reason: batch.error };
     const batchData = batch.data;
+    if (stageRequest) stageWindowReadRequest(workspace, path, content, selector.ranges, true);
     const call = beginServeCall(workspace);
     const items: Array<Record<string, unknown>> = batchData.segments.map((segment): Record<string, unknown> => {
       const segStart = rangeStartLine(segment.range);
@@ -12074,6 +12076,7 @@ async function resolveRangedPathsBatchEntry(
   const sliceResult = await resolveSlice(workspace, path, content, selector.symbol, selector.range);
   if (!sliceResult.ok) return { ok: false, reason: sliceResult.error };
   const data = sliceResult.data;
+  if (data.assembled || stageRequest) stageWindowReadRequest(workspace, path, content, selector.range ?? data.range, true);
   if (!data.assembled) {
     const start = rangeStartLine(data.range);
     const end = Math.min(totalLines, start + countLines(data.content) - 1);
@@ -12778,6 +12781,37 @@ function stageFullReadRequest(
   });
 }
 
+function stageWindowReadRequest(
+  workspace: string,
+  filePath: string,
+  content: string,
+  ranges: string | string[],
+  keepComments: boolean,
+): void {
+  const args = protocolCallContext()?.args;
+  const totalLines = countLines(content);
+  if (args === undefined || totalLines <= 0) return;
+  const requested: LineWindow[] = [];
+  const elided: LineWindow[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const window of parseWindows(Array.isArray(ranges) ? ranges : [ranges])) {
+    const start = Math.max(1, window.start);
+    const end = Math.min(totalLines, window.end);
+    if (start > end) continue;
+    const raw = lines.slice(start - 1, end).join("\n");
+    const policyElided = keepComments
+      ? []
+      : elideDocCommentsForDisplay(raw, languageForPath(filePath), false, start).elided;
+    requested.push(...(keepComments ? [[start, end]] : spansExcludingWindows(start, end, policyElided))
+      .map(([first, last]) => ({ start: first!, end: last! })));
+    elided.push(...policyElided.map(([first, last]) => ({ start: first, end: last })));
+  }
+  stageReadRequestForServe({
+    workspace, relPath: filePath, fileSha: shaOfText(content), totalLines,
+    requested, content: "auto", keepComments, args, elided,
+  });
+}
+
 function stageReadRequestForServe(input: {
   workspace: string;
   relPath: string;
@@ -13285,7 +13319,7 @@ function projectCanonicalRequest(canonical: string, input: Record<string, unknow
         // above is unaffected: A7's handles=[] batch dispatch fires before
         // any mode branch regardless of what `mode` resolves to here.
         else if (targets.length === 1 && (first["ranges"] !== undefined || first["range"] !== undefined)) args["mode"] = "slice";
-        else if (first["symbol"] !== undefined) args["mode"] = "symbol";
+        else if (targets.length === 1 && first["symbol"] !== undefined) args["mode"] = "symbol";
         else if (args["content"] === "full") args["mode"] = "full";
         else if (args["content"] === "outline") args["mode"] = "skeleton";
         else if (args["content"] === "defer") args["mode"] = "small_file";
@@ -17540,6 +17574,9 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // code-relative (startLine 1), mirroring mode=symbol's documented
         // exception (server.ts ~:7308).
         const sliceData = sliceResult.data;
+        if (sliceData.assembled) {
+          stageWindowReadRequest(workspace, slicePath, content, sliceData.range, effectiveKeepComments);
+        }
         // F1 (2026-08-02 serve-honesty): the display text is composed HERE,
         // ABOVE the ledger, because the ledger must book what the wire carries
         // and not what was asked for. This is a MOVE of the composition that
@@ -18523,7 +18560,16 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
         // FX-M1/E1: also resolves a `{handle}`-only entry (no `path`) via
         // `resolvePathsBatchEntry`, instead of coercing it to `""` — see that
         // helper's own doc comment for the mixed-batch defect this closes.
-        const requestedEntries = (args["paths"] as unknown[]).map((p) => resolvePathsBatchEntry(p, workspace));
+        const requestedEntries = (args["paths"] as unknown[]).map((p) => {
+          const entry = resolvePathsBatchEntry(p, workspace);
+          const held = entry.handle !== undefined ? handleTable.get(entry.handle) : undefined;
+          // A bare handle asks for its own stored window under content:full.
+          if (entry.range === undefined && entry.ranges === undefined && entry.symbol === undefined
+            && held?.workspaceRoot === workspace && held.path === entry.path && held.range !== undefined) {
+            return { ...entry, range: held.range };
+          }
+          return entry;
+        });
         const allowFullRequested = args["allowFull"] === true;
         const officeOpts = {
           ...taskCredential,
@@ -18593,13 +18639,17 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
           // Office document, or a failed content read) falls through to the
           // ordinary whole-file route below, unchanged.
           const ranged = hasSelector
-            ? await resolveRangedPathsBatchEntry(workspace, p, requestedEntry)
+            ? await resolveRangedPathsBatchEntry(workspace, p, requestedEntry, requestedEntries.some((entry) => entry.symbol !== undefined))
             : undefined;
 
           let resolvedItems: Array<Record<string, unknown>> | undefined;
           let failureReason: string | undefined;
           if (ranged !== undefined) {
-            if (ranged.ok) resolvedItems = ranged.items;
+            if (ranged.ok) {
+              resolvedItems = requestedEntry.handle === undefined
+                ? ranged.items
+                : ranged.items.map((item) => ({ ...item, handle: requestedEntry.handle }));
+            }
             else failureReason = ranged.reason;
           } else {
             // DESIGN-v0.15 §5.1/§5.3 (R2): EVERY requested path is resolved —
@@ -19178,6 +19228,11 @@ async function dispatchTool(canonical: string, rawArgs: Record<string, unknown>)
             }), workspace));
           }
         }
+        // The wire budget may shrink the producer's symbol prefix again.
+        // Stage the entire resolved symbol so continuation is computed from
+        // the final served lines, including any lines shed after projection.
+        stageWindowReadRequest(workspace, filePath, content,
+          `${result.data.range.start}-${result.data.range.end}`, keepComments);
         const symbolBytes = Buffer.byteLength(result.data.code, "utf8");
         // Augment with handle + sha (C.6). DESIGN-v0.8 §C3: sha/handle are
         // minted from the RAW (unelided) code — elision only ever changes

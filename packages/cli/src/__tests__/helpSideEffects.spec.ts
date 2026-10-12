@@ -157,6 +157,7 @@ describe("tl workspace setup --help / -h", () => {
     const exit = stubExit();
     await runWorkspace(["setup", "--root", root, "--rules-only", flag], {
       registryPath,
+      installHome: join(base, "install"),
       launcher: fixtureLauncher,
     });
     expect(stdoutText(stdout)).toContain("tl workspace setup");
@@ -171,6 +172,7 @@ describe("tl workspace setup --help / -h", () => {
     const stdout = captureStdout();
     await runWorkspace(["setup", "--root", root, "--rules-only"], {
       registryPath,
+      installHome: join(base, "install"),
       launcher: fixtureLauncher,
     });
     void stdout;

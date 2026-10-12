@@ -25559,7 +25559,7 @@ const ANSWER_INTENT_EN_RE = /\b(explain|describe|assess|trace|determine|investig
 // intent matched), so 「実装」 here cannot flip an actual implement-request.
 const ANSWER_INTENT_JA_NOUN_RE = /の(?:実装|定義|役割|仕組み|使い方|場所|中身|挙動|意味|目的)/;
 const ANSWER_INTENT_JA: readonly string[] = [
-  "説明", "解説", "なぜ", "どういう", "挙動",
+  "説明", "解説", "要約", "なぜ", "どういう", "挙動",
   // 2026-08-01 probe sweep: JA interrogatives were unrepresented, so 「教えて
   // ください」/「〜ですか」-shaped questions fell to the no-marker generic
   // fallback and received edit-imperative certificates. Mutation intent is
@@ -26128,8 +26128,12 @@ function hasMixedIntentMutationMarkerJa(text: string): boolean {
  * across a boundary), never remove one: the predicate is an OR over clauses.
  */
 function hasMixedIntentMutationMarkerEn(query: string): boolean {
-  if (MIXED_INTENT_MUTATION_EN_RE.test(query)) return true;
-  return splitIntoLeadClauses(query, { splitCoordinators: true })
+  // In Japanese prose, "add 関数" names a declaration; the Latin name is
+  // not an English imperative. Keep requested edits elsewhere in the query.
+  const prose = query.replace(/\b[A-Za-z_$][\w$]*\s*(?=(?:関数|メソッド|クラス)(?:[をのがは]|について|\s|[。、]|$))/gu,
+    name => " ".repeat(name.length));
+  if (MIXED_INTENT_MUTATION_EN_RE.test(prose)) return true;
+  return splitIntoLeadClauses(prose, { splitCoordinators: true })
     .some((clause) => MIXED_INTENT_MUTATION_EN_RE.test(clause));
 }
 

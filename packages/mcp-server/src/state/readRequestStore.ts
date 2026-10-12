@@ -358,10 +358,9 @@ export function openReadRequest(input: OpenReadRequestInput): StagedReadRequest 
  * `limit.next` at all. This makes every target the loop visits, not just the
  * first, part of the SAME request's Q.
  *
- * Idempotent on `path`: a target already present is left untouched, so a
- * producer that visits the same path twice (a retry, or a caller-supplied
- * `targets[]` naming one path more than once) never creates a duplicate Q
- * entry or resets its `remaining`.
+ * Compatible windows on the same path are unioned before persistence.
+ * Repeating a window is idempotent; a distinct symbol/range on the same
+ * file still enters Q without creating a duplicate path entry.
  *
  * A no-op once the request has already been persisted (`staged.version > 0`,
  * i.e. `fixPage`/`settleReadRequest` already wrote it) or once it addresses a
@@ -383,7 +382,21 @@ export function appendReadRequestTarget(
   },
 ): void {
   if (staged.mode !== "open" || staged.version !== 0) return;
-  if (staged.state.targets.some((existing) => existing.path === target.path)) return;
+  const existing = staged.state.targets.find((entry) => entry.path === target.path);
+  if (existing !== undefined) {
+    if (existing.sha !== target.sha || existing.total_lines !== target.totalLines
+      || existing.representation.content !== target.representation.content
+      || existing.representation.comments !== target.representation.comments) return;
+    const requested = normalizeWindows([...existing.requested, ...target.requested]);
+    const elided = normalizeWindows([...(existing.elided ?? []), ...(target.elided ?? [])]);
+    staged.state = {
+      ...staged.state,
+      targets: staged.state.targets.map((entry) => entry === existing
+        ? { ...entry, requested, remaining: normalizeWindows([...entry.remaining, ...target.requested]), ...elidedOf(elided) }
+        : entry),
+    };
+    return;
+  }
   const windows = normalizeWindows(target.requested);
   const entry: ReadRequestTargetState = {
     path: target.path,

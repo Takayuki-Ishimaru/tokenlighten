@@ -316,7 +316,7 @@ describe("P2-11: a bare-handle read.batch entry under content:\"full\" is verbat
     expect(contentStr).toBe(expectedVerbatim);
   }, 60_000);
 
-  it("recall control: an EXPLICIT per-item override symbol still gets the assembled scope view (this fix must not suppress a deliberate ask)", async () => {
+  it("recall control: an explicit symbol keeps supplementary scope context outside its source body", async () => {
     const ws = makeWorkspace("p211-recall");
     writeBigWidget(ws);
     const server = await spawnedServer(ws);
@@ -335,7 +335,8 @@ describe("P2-11: a bare-handle read.batch entry under content:\"full\" is verbat
     const entries: Array<Record<string, unknown>> = Array.isArray(batch.body?.entries) ? batch.body.entries : [];
     const paintEntry = entries.find((e) => typeof e["content"] === "string" && String(e["content"]).includes("paint("));
     expect(paintEntry, `no paint entry found: ${JSON.stringify(entries)}`).toBeDefined();
-    expect(String(paintEntry?.["content"] ?? "")).toMatch(/tokenlighten:scope/);
+    expect(String(paintEntry?.["content"] ?? "")).not.toMatch(/tokenlighten:scope/);
+    expect(String(paintEntry?.["note"] ?? "")).toMatch(/tokenlighten:scope/);
   }, 60_000);
 });
 

@@ -65,7 +65,7 @@ const CLIENTS = new Set<TokenLightenSetupClient>([
 
 const WORKSPACE_USAGE = `\
 Usage:
-  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--guide-profile full|medium|compact] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--rules-only] [--json]
+  tl workspace setup [--root DIR] [--clients vscode,codex,claude-code] [--read-only | --allow-write] [--guide-profile full|medium|compact] [--tool-surface code|full] [--copilot-inline-results raise|keep] [--copilot-guide standalone|agents-md|keep] [--copilot-session-context install|keep] [--rules-only] [--json]
   tl workspace status [--root DIR] [--json]
   tl workspace list [--json]
 
@@ -73,7 +73,9 @@ Setup creates AI rules and project-scoped MCP settings. Status verifies one
 workspace without changing it. List reports every
 workspace registered by setup on this machine for desktop-wide management.
 TokenLighten write tools and local privacy-preserving usage logging are enabled
-by default. The guide profile defaults to compact for all clients and tool
+by default in generated MCP settings. Pass --read-only to disable writes or
+--allow-write to select them explicitly. A manual 'tl mcp start' is read-only
+unless --allow-write is supplied. The guide profile defaults to compact for all clients and tool
 surfaces (an explicit --guide-profile always wins). Claude Code loads the
 TokenLighten server upfront; Codex waits for its initial MCP tool catalog.
 Existing explicit startup settings are preserved. With --clients including vscode,
@@ -904,6 +906,7 @@ function serverConfig(
   // `ensureCopilotSettings`/`setupWorkspace` below. Never passed true for
   // "claude-code": Claude Code and Codex never get this env var.
   linkTaskPackCeiling = false,
+  writeEnabled = true,
 ): Record<string, unknown> {
   return {
     command: launcher.command,
@@ -912,7 +915,7 @@ function serverConfig(
       "mcp",
       "start",
       "--stdio",
-      "--allow-write",
+      ...(writeEnabled ? ["--allow-write"] : []),
       "--workspace",
       root,
       // DESIGN-v0.15 §8.2 (R7 Part B): omitted (not merely "full") when the
@@ -1010,12 +1013,13 @@ function configureVsCode(
   installHomeDefault: boolean,
   platform: NodeJS.Platform,
   linkTaskPackCeiling: boolean,
+  writeEnabled: boolean,
 ): string {
   const target = join(root, ".vscode", "mcp.json");
   const document = readJsonObject(target);
   const servers = objectMember(document, "servers");
   const portable = portableIdentityFor(launcher, "vscode-user", installHomeDefault, platform);
-  servers["tokenlighten"] = serverConfig(root, "vscode", portable, schemaStamp, toolSurface, linkTaskPackCeiling);
+  servers["tokenlighten"] = serverConfig(root, "vscode", portable, schemaStamp, toolSurface, linkTaskPackCeiling, writeEnabled);
   writeJsonAtomic(root, target, document);
   return target;
 }
@@ -1027,6 +1031,7 @@ function configureClaude(
   toolSurface: ToolSurface | undefined,
   installHomeDefault: boolean,
   platform: NodeJS.Platform,
+  writeEnabled: boolean,
 ): string {
   const target = join(root, ".mcp.json");
   const document = readJsonObject(target);
@@ -1042,7 +1047,7 @@ function configureClaude(
     // This is a Claude CLIENT setting: a server env variable cannot make
     // the host wait. Only TL loads upfront; other servers stay deferred.
     alwaysLoad,
-    ...serverConfig(root, "claude-code", portable, schemaStamp, toolSurface),
+    ...serverConfig(root, "claude-code", portable, schemaStamp, toolSurface, false, writeEnabled),
   };
   writeJsonAtomic(root, target, document);
   return target;
@@ -1053,6 +1058,7 @@ function configureCodex(
   launcher: SetupLauncher,
   schemaStamp: string | undefined,
   toolSurface: ToolSurface | undefined,
+  writeEnabled: boolean,
 ): string {
   const target = join(root, ".codex", "config.toml");
   assertInsideRoot(root, target);
@@ -1071,7 +1077,7 @@ function configureCodex(
       "mcp",
       "start",
       "--stdio",
-      "--allow-write",
+      ...(writeEnabled ? ["--allow-write"] : []),
       "--workspace",
       root,
       ...(toolSurface !== undefined ? ["--tool-surface", toolSurface] : []),
@@ -1095,6 +1101,8 @@ export async function setupWorkspace(options: {
   clients?: readonly TokenLightenSetupClient[];
   launcher?: SetupLauncher;
   rulesOnly?: boolean;
+  /** Generated MCP settings allow writes by default; false selects read-only. */
+  writeEnabled?: boolean;
   /**
    * Guide profile to inject. Omitted defers to
    * `defaultGuideProfileForSurface(options.toolSurface)`: "compact" for
@@ -1223,6 +1231,7 @@ export async function setupWorkspace(options: {
     : undefined;
   const installHomeDefault = options.installHomeDefault ?? isDefaultInstallHome();
   const platform = options.platform ?? process.platform;
+  const writeEnabled = options.writeEnabled ?? true;
 
   // Resolved once, before configureVsCode runs, so its result can gate the
   // TOKENLIGHTEN_TASK_PACK_MAX_BYTES link in the SAME write. `not-applicable`
@@ -1240,7 +1249,7 @@ export async function setupWorkspace(options: {
 
   for (const client of clients) {
     if (client === "vscode") {
-      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, linkTaskPackCeiling));
+      configFilesWritten.push(configureVsCode(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, linkTaskPackCeiling, writeEnabled));
       if (options.copilotSessionContext !== "keep") {
         const sessionHook = installCopilotSessionHook(root);
         configFilesWritten.push(...sessionHook.files);
@@ -1248,17 +1257,17 @@ export async function setupWorkspace(options: {
       }
     }
     if (client === "codex") {
-      configFilesWritten.push(configureCodex(root, launcher, schemaStamp, options.toolSurface));
+      configFilesWritten.push(configureCodex(root, launcher, schemaStamp, options.toolSurface, writeEnabled));
     }
     if (client === "claude-code") {
-      configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform));
+      configFilesWritten.push(configureClaude(root, launcher, schemaStamp, options.toolSurface, installHomeDefault, platform, writeEnabled));
     }
   }
   return {
     schemaVersion: 1,
     workspaceRoot: root,
     clients,
-    writeEnabled: true,
+    writeEnabled,
     usageLoggingEnabled: true,
     rulesWritten,
     configFilesWritten,
@@ -1745,6 +1754,12 @@ export async function runWorkspace(
     ? rawClients.split(",").map((item) => item.trim()) as TokenLightenSetupClient[]
     : undefined;
   const rulesOnly = rest.includes("--rules-only");
+  const readOnly = rest.includes("--read-only");
+  if (readOnly && rest.includes("--allow-write")) {
+    process.stderr.write("tl workspace: choose either --read-only or --allow-write\n");
+    process.exitCode = 1;
+    return;
+  }
   const rawGuideProfile = valueAfter(rest, "--guide-profile");
   // B-F6(c): validate against the canonical VALID_PROFILES allowlist
   // (@tokenlighten/agents-md) instead of re-declaring the same three
@@ -1811,6 +1826,7 @@ export async function runWorkspace(
     ...(clients ? { clients } : {}),
     launcher,
     rulesOnly,
+    writeEnabled: !readOnly,
     ...(guideProfile !== undefined ? { guideProfile } : {}),
     ...(toolSurface !== undefined ? { toolSurface } : {}),
     ...(copilotInlineResults !== undefined ? { copilotInlineResults } : {}),
@@ -1848,7 +1864,10 @@ export async function runWorkspace(
     `TokenLighten is ready for ${result.clients.join(", ")}.\n`
       + `AI rules: ${result.rulesWritten.length} file(s)\n`
       + `MCP settings: ${result.configFilesWritten.length} file(s)\n`
-      + "Write tools: enabled\n"
+      + (rulesOnly ? "Write tools: not configured (--rules-only)\n"
+        : result.writeEnabled
+          ? "Write tools: enabled in generated MCP settings (--allow-write); use --read-only to disable\n"
+          : "Write tools: disabled in generated MCP settings (--read-only)\n")
       + "Usage log: local, content-free\n"
       + `guide_profile: ${effectiveGuideProfile}\n`
       + (serverBuild !== undefined ? "server_build: " + serverBuild + "\n" : "")

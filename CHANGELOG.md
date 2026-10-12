@@ -2,6 +2,28 @@
 
 User-facing release highlights for TokenLighten.
 
+## 0.15.3
+
+- Compound return-value and computation-order questions retain both
+  requirements and request the relevant helper implementations.
+- Japanese explanations of functions named like English edit verbs remain
+  read-only questions; explicit change requests keep their edit behavior.
+- Symbol bodies retain original source line coordinates; supplementary
+  scope headers and signatures appear in `note`.
+- Budgeted symbol and multi-target reads continue through all remaining
+  requested lines. Text-search pages may suggest a larger budget without
+  changing the current page or continuation.
+- Line-range replacements preserve the newline before an untouched
+  following line, including LF, CRLF and CR files.
+- Workspace setup accepts `--read-only` or explicit `--allow-write` and
+  reports the generated settings' permission. Setup remains write-enabled
+  by default; manually started servers require `--allow-write` for edits.
+
+Upgrade the archive or VSIX, refresh workspace setup and reconnect your
+client. Pass `--read-only` again when refreshing read-only CLI settings.
+Tool names and canonical request fields are unchanged from v0.15.2.
+See the [v0.15.3 release notes](release-docs/github-release-v0.15.3.md).
+
 ## 0.15.2
 
 - Workspace setup uses the compact guide by default for Claude Code, Codex

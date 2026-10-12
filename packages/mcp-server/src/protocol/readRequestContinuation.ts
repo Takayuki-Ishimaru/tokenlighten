@@ -206,9 +206,11 @@ function replaceableNext(value: unknown): boolean {
 function shippedWindowsByPath(payload: ShedPayload): Map<string, LineWindow[]> | undefined {
   if (payload["kind"] === "refusal") return new Map<string, LineWindow[]>();
   const evidence = payload["evidence"];
-  if (!Array.isArray(evidence)) return undefined;
+  const entries = payload["entries"];
+  const rows = Array.isArray(evidence) ? evidence : Array.isArray(entries) ? entries : undefined;
+  if (rows === undefined) return undefined;
   const map = new Map<string, LineWindow[]>();
-  for (const raw of evidence) {
+  for (const raw of rows) {
     if (!isRecord(raw)) continue;
     const path = raw["path"];
     if (typeof path !== "string") continue;
@@ -229,7 +231,7 @@ function shippedWindowsByPath(payload: ShedPayload): Map<string, LineWindow[]> |
         if (elidedWindow !== undefined) map.get(path)!.push(elidedWindow);
       }
     }
-    const body = raw["body"];
+    const body = Array.isArray(evidence) ? raw["body"] : raw["content"];
     const range = raw["range"];
     if (typeof body !== "string" || typeof range !== "string") continue;
     const window = parseWindow(range);

@@ -6,7 +6,7 @@ TokenLightenのVS Code拡張機能は、CLI、MCPサーバー、パーサー、�
 
 ## ビルドせずにインストールする
 
-v0.15.2のGitHub Releaseから**[tokenlighten-vscode-extension-0.15.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.2/tokenlighten-vscode-extension-0.15.2.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
+v0.15.3のGitHub Releaseから**[tokenlighten-vscode-extension-0.15.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.3/tokenlighten-vscode-extension-0.15.3.vsix)**をダウンロードしてください。同じVSIXをWindows、macOS、Linuxで使用できます。
 
 1. **拡張機能**を開きます。
 2. **VSIXからのインストール…**を選びます。
@@ -14,7 +14,7 @@ v0.15.2のGitHub Releaseから**[tokenlighten-vscode-extension-0.15.2.vsix](http
 4. 求められた場合はVS Codeを再読み込みします。
 
 ~~~bash
-code --install-extension tokenlighten-vscode-extension-0.15.2.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.3.vsix
 ~~~
 
 ソースからVSIXを作成する場合はNode.js 22以降を使用してください:
@@ -54,12 +54,16 @@ VS Codeのセットアップは、新しいローカルAgentチャット向け�
 既存のフック構成を維持できます。無効化またはnative切替時には、TokenLightenが
 管理するCopilotガイドも無効になります。
 
-v0.15.2へアップグレードした後は、**このワークスペースをセットアップ**を
+v0.15.3へアップグレードした後は、**このワークスペースをセットアップ**を
 再実行し、新しいエージェントセッションを開始するかMCPクライアントを再接続
 してください。管理ガイド、Copilot設定、接頭辞付きツール名を更新できます。
 応答をインラインに保持する設定とCLIの変更回避オプションは、
 [既存ワークスペースの更新](getting-started.md#refresh-an-existing-workspace-after-upgrading)
 を参照してください。
+
+拡張機能からのセットアップは、生成するMCP設定で書き込みを有効にします。
+読み取り専用の設定にする場合は、CLIで`tl workspace setup --read-only`を
+実行してください。拡張機能のセットアップを再実行すると、書き込みは再び有効になります。
 
 ## アンインストール
 
@@ -97,4 +101,4 @@ TokenLightenのステータスバーをクリックすると、診断、有効�
 | `tokenlighten.copilotGuide` | `standalone` | Copilotガイドの形式：短い自己完結型、共通AGENTS.md、または既存構成の維持。 |
 | `tokenlighten.guideProfile` | `compact` | セットアップ時に書き込む共通ガイド: `compact`／`medium`／`full`。どちらのツールサーフェスでも明示設定を優先します。 |
 
-デスクトップアプリケーションは公開v0.15.2リリースに含まれません。
+デスクトップアプリケーションは公開v0.15.3リリースに含まれません。

@@ -469,15 +469,16 @@ describe("TL-REVIEW-2 — applySourceFidelity unit cases", () => {
     expect(project(ws, "read.text", [outline])).toEqual({ evidence: [outline] });
   });
 
-  it("an assembled scope view keeps its labelled preamble minus markers, and its target part becomes verbatim", () => {
+  it("an assembled scope view moves its labelled preamble to metadata and serves the verbatim target", () => {
     const ws = workspace({ "calc.ts": CALC });
     const target = splitlines(CALC).slice(1, 13).join("\n");
     const view = elideDocComments(["// tokenlighten:scope path=calc.ts symbol=calc lang=typescript", "", "// sibling signatures:", "/**", " * x", " */", "", "// target:", target].join("\n"), "typescript");
     const out = project(ws, "read.text", [{ handle: "h1", path: "calc.ts", range: "2-13", body: view }]);
     const body = String(rows(out)[0]!["body"]);
     expect(body).not.toMatch(MARKER);
-    expect(body.split("\n// target:\n")[1]).toBe(target);
-    expect(body.startsWith("// tokenlighten:scope path=calc.ts")).toBe(true);
+    expect(body).toBe(target);
+    expect(rows(out)[0]!["note"]).toMatch(/^\/\/ tokenlighten:scope path=calc.ts/);
+    expect(rows(out)[0]!["note"]).not.toMatch(MARKER);
   });
 
   it("read.batch: an elided whole-file entry becomes handle-form segments; a compress-only one stays a file entry", () => {

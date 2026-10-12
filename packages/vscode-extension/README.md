@@ -18,6 +18,8 @@ The TokenLighten Workspace view is for developers using GitHub Copilot, the VS C
 
 For normal installation or recovery, use **Set up this workspace**. It installs or repairs the TokenLighten MCP configuration and managed AI instructions in one operation, then enables TL for the workspace. Existing project instructions outside TokenLighten-managed sections are preserved. Shared guides now default to `compact`; set `tokenlighten.guideProfile` to `full` or `medium` explicitly for longer instructions. The existing dedicated Copilot guide is retained.
 
+Workspace setup through the extension enables writes in generated MCP settings. For read-only settings, use `tl workspace setup --read-only` from the CLI. Re-running the extension's setup enables writes again.
+
 If TokenLighten causes a problem, clear **Enable TL in this workspace** and save the setting. Check it again, or rerun workspace setup, to restore TL.
 
 To remove TokenLighten from the machine entirely — not just this workspace — run **TokenLighten: Uninstall TokenLighten from This Machine** from the Command Palette. It removes the staged runtime and host identity, and TokenLighten-managed registrations for Claude Code and Codex. For every workspace this machine install set up, it also removes TokenLighten's managed guide blocks and managed MCP entries (keeping a `.tl-backup` copy next to each edited MCP file); your own content, other servers' entries, and workspaces it never set up are left untouched.
@@ -84,4 +86,4 @@ npm run package -w tokenlighten-vscode-extension
 code --install-extension packages/vscode-extension/tokenlighten-vscode-extension-<version>.vsix
 ```
 
-See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.2/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.2/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.
+See the [project README](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.3/README.md) and [public release documentation](https://github.com/Takayuki-Ishimaru/tokenlighten/blob/v0.15.3/release-docs/README.md) for setup, MCP tools, language support, privacy, and licensing.

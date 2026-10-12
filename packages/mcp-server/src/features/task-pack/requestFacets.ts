@@ -550,6 +550,20 @@ const VALUE_COMPUTED_IMPERATIVE_EN_RE = new RegExp(
 const VALUE_COMPUTED_JA_RE =
   /何を返|計算結果(?:は|を(?:教えて|知りたい|求めて|出して))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*の(?:計算)?(?:結果|出力)(?:[はと](?![^。？?]*(?:使われ|使って|呼ば|参照|表示|渡さ|受け取))|を(?:具体的に)?(?:教えて|知りたい|求めて|計算))|(?:`[^`]+`|[A-Za-z_$][\w$.]*\([^)]*\))\s*(?:を(?:具体的に)?(?:計算|算出|求め)|[はが](?:いくら|何円|何になる))/u;
 
+// An explicit call's return value is an evaluation request, including when
+// coordinated with another aspect. Bare return-type descriptions retain the
+// existing negative guard. Inspect the original clause before that guard
+// blanks "return value" / 戻り値.
+const CALL_RETURN_VALUE_SUBJECT = "(?:`[A-Za-z_$][\\w$.]*\\([^`]*\\)`|[A-Za-z_$][\\w$.]*\\([^)]*\\))";
+const CALL_RETURN_VALUE_EN_RE = new RegExp(
+  `\\b(?:explain|describe|calculate|compute|what(?:'s|\\s+is|\\s+will\\s+be))\\s+(?:(?:the|actual|computed|exact)\\s+)*return\\s+value\\s+(?:of|from|for)\\s+${CALL_RETURN_VALUE_SUBJECT}`,
+  "i",
+);
+const CALL_RETURN_VALUE_JA_RE = new RegExp(`${CALL_RETURN_VALUE_SUBJECT}\\s*の(?:戻り値|返り値)(?:\\s*[はと]|\\s*を(?:詳しく|具体的に)?(?:説明|教えて|計算|求め))`, "u");
+function asksForCallReturnValue(clause: string): boolean {
+  return CALL_RETURN_VALUE_EN_RE.test(clause) || CALL_RETURN_VALUE_JA_RE.test(clause);
+}
+
 function isValueClause(guardedClause: string): boolean {
   return isComputedValueClause(guardedClause) || isValueNounClause(guardedClause);
 }
@@ -596,6 +610,7 @@ const VALUE_COMPUTED_NAMED_OBJECT_EN_RE = new RegExp(
  * closure still fetches the callees and constants the result depends on.
  */
 export function asksForCallableResult(clause: string): boolean {
+  if (asksForCallReturnValue(clause)) return true;
   const guarded = stripGuardedSpans(clause, ALL_NEGATIVE_GUARDS);
   if (!isComputedValueClause(guarded) || isValueNounClause(guarded)) return false;
   if (VALUE_COMPUTED_WHAT_DOES_EN_RE.test(guarded) && !VALUE_COMPUTED_PLAIN_WHAT_DOES_EN_RE.test(guarded)) return false;
@@ -1057,9 +1072,9 @@ const FLOW_PROCEDURE_JA_RE = /手順(?:を教えて|を段階的に)/;
  * テストはある？") still never fires -- unchanged from before this fix.
  */
 function isFlowFramedJaClause(clause: string): boolean {
-  if (!/経路|流れ/.test(clause)) return false;
+  if (!/経路|流れ|順序/.test(clause)) return false;
   if (/から[\s\S]*まで/.test(clause)) return true;
-  return /(?:経路|流れ)(?:を教えて|を追って|をステップごとに|を説明して)/.test(clause);
+  return /(?:経路|流れ|順序)(?:を教えて|を追って|をステップごとに|を説明して)/.test(clause);
 }
 
 function isFlowClause(guardedClause: string): boolean {
@@ -1101,7 +1116,7 @@ const ALL_NEGATIVE_GUARDS: readonly RegExp[] = [
 function detectFacets(clause: string): RequestFacet[] {
   const guarded = stripGuardedSpans(clause, ALL_NEGATIVE_GUARDS);
   const hits = new Set<RequestFacet>();
-  if (isValueClause(guarded)) hits.add("value");
+  if (isValueClause(guarded) || asksForCallReturnValue(clause)) hits.add("value");
   if (isConditionClause(guarded)) hits.add("condition");
   if (isCallersClause(guarded)) hits.add("callers");
   if (isFlowClause(guarded)) hits.add("flow");

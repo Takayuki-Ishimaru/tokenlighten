@@ -70,7 +70,7 @@ export interface TokenLightenWorkspaceSetupResult {
   schemaVersion: 1;
   workspaceRoot: string;
   clients: readonly TokenLightenSetupClient[];
-  writeEnabled: true;
+  writeEnabled: boolean;
   usageLoggingEnabled: true;
   rulesWritten: readonly string[];
   configFilesWritten: readonly string[];

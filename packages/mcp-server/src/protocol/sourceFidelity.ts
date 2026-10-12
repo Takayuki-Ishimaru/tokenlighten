@@ -64,15 +64,10 @@
 // file that changed between the serve and this projection — is left exactly
 // as the producer built it. This function never throws and never guesses.
 //
-// WHAT IS NOT SPLIT. An ASSEMBLED symbol scope view (`// tokenlighten:scope …`
-// header, used imports, enclosing scope, sibling signatures, `// target:`,
-// then the body — getSymbolWithContext.ts) is a labelled synthetic rendering
-// by design (evaluation0927.smallFileScopeViewLabel.spec.ts and
-// r4cWireHonestyAndReplay.spec.ts pin the label as a deliberate ask), so it
-// cannot be split into source ranges. Its TARGET part is still made faithful:
-// verified against the symbol's own range and replaced by the verbatim source
-// lines (comments kept — nothing inside a labelled view is elided), so no
-// elision marker reaches that body either.
+// ASSEMBLED SYMBOL VIEWS. Verify their target against its declared source
+// window, then put only that source in the body. The synthetic scope header,
+// imports and sibling signatures remain supplementary metadata in `note`.
+// They never acquire the target's source coordinates or edit authority.
 //
 // THE DOC-ONLY FALLBACK. A rendering that would leave a window with no source
 // line at all (every line inside elided blocks) is served RAW, comments kept —
@@ -492,29 +487,24 @@ const TARGET_LABEL_RE = /^(?:\/\/|#)\s*target:$|^\/\*\s*target:\s*\*\/$/;
 const AST_FALLBACK_NOTE_RE = /^(?:\/\/|#)\s*note: AST-fallback mode/;
 
 /**
- * The view with its target part replaced by the verbatim source lines of
- * `[start, end]` (when it verifies against the renderer) and every elision
- * marker line dropped from its synthetic preamble, or `undefined` when nothing
- * changes. The rest of the preamble (header, imports, enclosing scope, sibling
- * signatures, the `target:` label) and a trailing AST-fallback note are kept
- * byte-for-byte: they are the view's labelled synthetic part. A marker there
- * stood for a doc block inside a SIBLING's skeleton — synthetic context with
- * no source range of its own — so it is simply not shipped.
+ * Separate a verified assembled view into its source target and supplementary
+ * context. An unverified rendering is never guessed into a source range.
  */
-function faithfulAssembledView(source: SourceText, bodyText: string, start: number, end: number): string | undefined {
+function faithfulAssembledView(source: SourceText, bodyText: string, start: number, end: number): { body: string; range: string; note: string } | undefined {
   const { lines, trailingNewline } = bodyLinesOf(bodyText);
   if (lines.length < 2 || !isTokenlightenSentinelLine(lines[0]!)) return undefined;
   const label = lines.findIndex((line, index) => index > 0 && TARGET_LABEL_RE.test(line.trim()));
   if (label < 0) return undefined;
   let tailStart = lines.length;
   if (tailStart - 1 > label && AST_FALLBACK_NOTE_RE.test(lines[tailStart - 1]!.trim())) tailStart -= 1;
-  const preamble = lines.slice(0, label + 1).filter((line) => !MARKER_LINE_RE.test(line));
+  const preamble = lines.slice(0, label).filter((line) => !MARKER_LINE_RE.test(line));
   let target = lines.slice(label + 1, tailStart);
   const declaredEnd = Math.min(end, source.lines.length);
   if (target.length > 0 && declaredEnd >= start) {
     const verbatim = source.lines.slice(start - 1, declaredEnd);
     const alreadyVerbatim = verbatim.length === target.length && verbatim.every((line, index) => line === target[index]);
     const verified = alreadyVerbatim ? undefined : verifyWindow(target, source, start, declaredEnd);
+    if (!alreadyVerbatim && verified === undefined) return undefined;
     if (verified !== undefined) {
       const lastLine = Math.max(
         verified.covered.length > 0 ? verified.covered[verified.covered.length - 1]! : start - 1,
@@ -523,9 +513,12 @@ function faithfulAssembledView(source: SourceText, bodyText: string, start: numb
       if (lastLine >= start) target = source.lines.slice(start - 1, lastLine);
     }
   }
-  const rebuilt = [...preamble, ...target, ...lines.slice(tailStart)];
-  if (rebuilt.length === lines.length && rebuilt.every((line, index) => line === lines[index])) return undefined;
-  return rebuilt.join("\n") + (trailingNewline ? "\n" : "");
+  if (target.length === 0 || declaredEnd < start) return undefined;
+  return {
+    body: joinBodyLines(target, trailingNewline),
+    range: `${start}-${start + target.length - 1}`,
+    note: [...preamble, ...lines.slice(tailStart)].join("\n").trimEnd(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +652,34 @@ function mergedRemaining(existing: unknown, extra: Window | undefined): string[]
   return merged.map(windowString);
 }
 
+/** An assembled prefix's remainder excludes the source it now proves served. */
+function assembledEntry(
+  entry: Record_,
+  view: NonNullable<ReturnType<typeof faithfulAssembledView>>,
+  source: SourceText,
+  fields: { body: "body" | "content"; remaining: "remaining" | "remaining_ranges" },
+): Record_ {
+  const out = { ...entry, [fields.body]: view.body, range: view.range,
+    note: [entry["note"], view.note].filter(nonEmptyString).join("\n") };
+  const declared = parseRange(entry["range"])!;
+  const served = parseRange(view.range)!;
+  const existing = entry[fields.remaining];
+  const windows = parsedWindows(existing);
+  // Preserve an unrecognized carrier rather than guess its meaning.
+  if (existing !== undefined && (!Array.isArray(existing) || windows.length !== existing.length)) return out;
+  const owed: Window[] = [];
+  for (const window of windows) {
+    if (window[0] < served[0]) owed.push([window[0], Math.min(window[1], served[0] - 1)]);
+    if (window[1] > served[1]) owed.push([Math.max(window[0], served[1] + 1), window[1]]);
+  }
+  const end = Math.min(declared[1], source.lines.length);
+  if (served[1] < end) owed.push([served[1] + 1, end]);
+  const remaining = mergedRemaining(owed.map(windowString), undefined);
+  if (remaining === undefined) delete out[fields.remaining];
+  else out[fields.remaining] = remaining;
+  return out;
+}
+
 /**
  * Rebuild one entry into its faithful segments, preserving the producer's key
  * order: `range` and the body field are replaced per segment, `elided` is
@@ -724,7 +745,7 @@ function faithfulEvidence(entry: unknown, resolve: SourceResolver): unknown[] {
   const resolved = resolve(entry["handle"], entry["path"]);
   if (resolved === undefined) return [entry];
   const view = faithfulAssembledView(resolved.source, body, window[0], window[1]);
-  if (view !== undefined) return [{ ...entry, body: view }];
+  if (view !== undefined) return [assembledEntry(entry, view, resolved.source, { body: "body", remaining: "remaining" })];
   const plan = rebuildPlan(resolved.source, body, window[0], window[1], entry["remaining"]);
   if (plan === undefined) return [entry];
   return rebuiltEntries(entry, plan, resolved.source, { body: "body", remaining: "remaining" });
@@ -742,7 +763,7 @@ function faithfulBatchEntry(entry: unknown, resolve: SourceResolver): unknown[] 
     const resolved = resolve(entry["handle"], entry["path"]);
     if (resolved === undefined) return [entry];
     const view = faithfulAssembledView(resolved.source, content, window[0], window[1]);
-    if (view !== undefined) return [{ ...entry, content: view }];
+    if (view !== undefined) return [assembledEntry(entry, view, resolved.source, { body: "content", remaining: "remaining_ranges" })];
     const plan = rebuildPlan(resolved.source, content, window[0], window[1], entry["remaining_ranges"]);
     if (plan === undefined) return [entry];
     return rebuiltEntries(entry, plan, resolved.source, { body: "content", remaining: "remaining_ranges" });
@@ -782,6 +803,50 @@ function faithfulBatchEntry(entry: unknown, resolve: SourceResolver): unknown[] 
   return [entry];
 }
 
+/** Narrow each continuation only when its own file capability matches. */
+function assembledContinuation(
+  payload: Record_,
+  resolve: SourceResolver,
+  prefixes: readonly { source: SourceText; declared: Window; served: Window }[],
+): Record_ {
+  if (prefixes.length === 0) return payload;
+  const narrowCall = (next: unknown): unknown => {
+    if (!isRecord(next)) return next;
+    const args = next["arguments"];
+    if (next["tool"] !== "tl_read_file" || !isRecord(args) || !Array.isArray(args["targets"])) return next;
+    let changed = false;
+    const targets = args["targets"].map(target => {
+      if (!isRecord(target)) return target;
+      const source = resolve(target["handle"], target["path"]);
+      const prefix = prefixes.find(row => source?.source === row.source && target["range"] === windowString(row.declared));
+      if (prefix === undefined) return target;
+      changed = true;
+      return { ...target, range: `${prefix.served[1] + 1}-${Math.min(prefix.declared[1], prefix.source.lines.length)}` };
+    });
+    return changed ? { ...next, arguments: { ...args, targets } } : next;
+  };
+  let out = payload;
+  for (const field of ["evidence", "entries"]) {
+    const list = out[field];
+    if (!Array.isArray(list)) continue;
+    let changed = false;
+    const entries = list.map(entry => {
+      if (!isRecord(entry)) return entry;
+      const next = narrowCall(entry["next"]);
+      if (next === entry["next"]) return entry;
+      changed = true;
+      return { ...entry, next };
+    });
+    if (changed) out = { ...out, [field]: entries };
+  }
+  const topNext = narrowCall(out["next"]);
+  if (topNext !== out["next"]) out = { ...out, next: topNext };
+  const limit = out["limit"];
+  if (!isRecord(limit)) return out;
+  const next = narrowCall(limit["next"]);
+  return next === limit["next"] ? out : { ...out, limit: { ...limit, next } };
+}
+
 /**
  * The read-family seam (see this file's header). Returns `payload` unchanged
  * (same reference) for every other kind, when no workspace root is known, and
@@ -807,6 +872,7 @@ export function applySourceFidelity(
   const resolve = sourceResolver(context?.readServeWorkspace ?? context?.codecTraceWorkspace ?? context?.workspace);
   let changed = false;
   const rebuilt: unknown[] = [];
+  const prefixes: { source: SourceText; declared: Window; served: Window }[] = [];
   for (const entry of list) {
     let replacement: unknown[];
     try {
@@ -815,7 +881,18 @@ export function applySourceFidelity(
       replacement = [entry];
     }
     if (replacement.length !== 1 || replacement[0] !== entry) changed = true;
+    if (replacement.length === 1 && replacement[0] !== entry && isRecord(entry) && isRecord(replacement[0])) {
+      const body = entry[kind === "read.batch" ? "content" : "body"];
+      const declared = parseRange(entry["range"]);
+      const served = parseRange(replacement[0]["range"]);
+      const source = resolve(entry["handle"], entry["path"]);
+      if (typeof body === "string" && isTokenlightenSentinelLine(body.split("\n")[0] ?? "")
+        && declared !== undefined && served !== undefined && source !== undefined
+        && served[0] === declared[0] && served[1] < Math.min(declared[1], source.source.lines.length)) {
+        prefixes.push({ source: source.source, declared, served });
+      }
+    }
     rebuilt.push(...replacement);
   }
-  return changed ? { ...payload, [field]: rebuilt } : payload;
+  return changed ? assembledContinuation({ ...payload, [field]: rebuilt }, resolve, prefixes) : payload;
 }

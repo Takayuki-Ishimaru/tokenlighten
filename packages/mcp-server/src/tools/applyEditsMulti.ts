@@ -55,6 +55,7 @@ import {
 import { handleTable, shaOfText, shortSha } from "../util/handles.js";
 import { throwIfRequestCancelled } from "../util/requestCancellation.js";
 import { measureBlastRadius, type BlastRadiusMeasure } from "../write/blastRadius.js";
+import { rangeReplacementText } from "../write/rangeEdit.js";
 
 // ---------------------------------------------------------------------------
 // A7: range-scoped edit-entry line math (mirrors write/rangeEdit.ts).
@@ -705,7 +706,7 @@ export async function applyEditsMulti(
 
       if (edit.search === "") {
         // Range-content replacement: {handle, content}.
-        const replacement = toLfEntry(edit.content ?? "");
+        const replacement = rangeReplacementText(edit.content ?? "", normalized, endIndex);
         const blast = measureBlastRadius({
           fileText: normalized,
           spanStart: range.start,

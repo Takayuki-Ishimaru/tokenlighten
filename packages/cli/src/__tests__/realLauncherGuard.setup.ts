@@ -34,6 +34,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll } from "vitest";
 import { legacyLauncherPath, managedLauncherPath } from "../launcher.js";
 import { configFilePath } from "../paths.js";
+import { installRecordPath, resolveInstallHome } from "../installHome.js";
 
 // Content hash ALONE is not enough: writeManagedLauncher() derives the shim
 // body from process.argv[1], which resolves to the same tinypool worker
@@ -68,6 +69,7 @@ const WATCHED = [
   ...watched("managed launcher (managedLauncherPath)", () => managedLauncherPath()),
   ...watched("legacy launcher (legacyLauncherPath)", () => legacyLauncherPath()),
   ...watched("workspace registry config (configFilePath)", () => configFilePath()),
+  ...watched("machine install registry (install.json)", () => installRecordPath(resolveInstallHome())),
   // The one vendor-owned file TokenLighten writes DIRECTLY (config-file host
   // writer; every other host goes through its vendor CLI, which specs mock).
   // Found rewritten on the developer's real machines on 2026-09-18 by a spec

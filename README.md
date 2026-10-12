@@ -17,22 +17,24 @@
 
 It exposes exactly three tools: `tl_read_file`, `tl_search_files`, and `tl_edit_file`.
 
-## v0.15.2 release
+## v0.15.3 release
 
-**Public Beta.** TokenLighten v0.15.2 uses shorter setup guides and improves source fidelity, Japanese questions and search continuation. It keeps the same three MCP tools and remains read-only by default. Interfaces and supported workflows may change as feedback is incorporated.
+**Public Beta.** TokenLighten v0.15.3 improves compound code questions, source ranges and continuation, and line-range editing. Workspace setup now lets you choose write permission explicitly. Interfaces and supported workflows may change as feedback is incorporated.
 
-The main changes in v0.15.2 are:
+The main changes in v0.15.3 are:
 
-- workspace setup defaults to the compact guide for Claude Code, Codex and GitHub Copilot, while explicit guide choices take precedence;
-- Claude Code loads TokenLighten upfront, and generated Codex workspace settings wait for the initial tool catalog;
-- comment omission preserves accurate source lines, and repeated reads respect the selected comment view;
-- Japanese explanation and return-value questions avoid false missing-code reports;
-- text search, workspace trees and archive-member trees use budgeted continuations; and
-- invalid requests are rejected before edits or task-state updates.
+- questions about a call's return value and computation order retain both requirements and request the relevant helper implementations;
+- Japanese explanations of functions named `add` or similar English edit verbs remain read-only questions;
+- symbol bodies use their original source line numbers, with supplementary scope information in `note`;
+- budgeted symbol reads and multi-target reads continue through the remaining requested lines;
+- line-range replacements preserve the newline before an untouched following line; and
+- `tl workspace setup --read-only` disables writes in generated settings, while `--allow-write` selects them explicitly. Setup reports the choice.
+
+The three MCP tools remain `tl_read_file`, `tl_search_files`, and `tl_edit_file`. A manually started server is read-only unless passed `--allow-write`; workspace setup enables writes by default.
 
 The public release includes four platform install archives (win-x64, darwin-arm64, darwin-x64, linux-x64) with the CLI, MCP server and a bundled Node.js runtime, source code with public package tests, and a self-contained VS Code VSIX. The desktop application is not included.
 
-**Upgrade:** install the v0.15.2 archive or VSIX, re-run `tl workspace setup` or **Set up this workspace**, then start a new agent session or reconnect your MCP client. The canonical request fields and tool names are unchanged from v0.15.1. See the [v0.15.2 release notes](release-docs/github-release-v0.15.2.md) for upgrade steps and known limitations.
+**Upgrade:** install the v0.15.3 archive or VSIX, re-run `tl workspace setup` or **Set up this workspace**, then start a new agent session or reconnect your MCP client. To keep CLI workspace settings read-only, run `tl workspace setup --read-only` when refreshing them. The canonical request fields and tool names are unchanged from v0.15.2. See the [v0.15.3 release notes](release-docs/github-release-v0.15.3.md) for upgrade steps and known limitations.
 
 ## Why TokenLighten
 
@@ -50,7 +52,7 @@ Symbol and reference search can return relevant definitions and call sites direc
 
 ### Indicative savings (v0.15.0)
 
-These observations are from v0.15.0; they are not new measurements of v0.15.2.
+These observations are from v0.15.0; they are not new measurements of v0.15.3.
 
 #### Sonnet comparison
 
@@ -109,7 +111,7 @@ Prefer VS Code's own extension instead? See the next section.
 
 ## Install the VS Code extension (no build required)
 
-Download **[tokenlighten-vscode-extension-0.15.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.2/tokenlighten-vscode-extension-0.15.2.vsix)** from the v0.15.2 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
+Download **[tokenlighten-vscode-extension-0.15.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.3/tokenlighten-vscode-extension-0.15.3.vsix)** from the v0.15.3 GitHub Release. You do not need Node.js or a source build. The same VSIX is used on Windows, macOS, and Linux because this release does not include OS-specific native binaries.
 
 Then:
 
@@ -120,7 +122,7 @@ Then:
 Or install it from a terminal:
 
 ```sh
-code --install-extension tokenlighten-vscode-extension-0.15.2.vsix
+code --install-extension tokenlighten-vscode-extension-0.15.3.vsix
 ```
 
 Open a trusted project folder, select the TokenLighten view, and choose **Set up this workspace**. The packaged VSIX includes the CLI, MCP server, parsers, and required assets; a separate global installation is not required. This performs the same machine install as the archive above (`tl install --from-extension`) and sets up the current workspace, but leaves other hosts on the machine — Claude Code, Codex — unregistered (`--clients none`); register them separately with `tl clients activate`, or with an archive's `tl-setup`.
@@ -160,7 +162,9 @@ The shared agent guides default to `compact` for all tool surfaces. They tell Co
 
 VS Code setup also creates a SessionStart hook that gives ordinary Agent local chats the TL first-read and no-reread workflow. It requires a trusted workspace, enabled `chat.useHooks`, and `node` on PATH. It leaves tools and approval settings unchanged and preserves existing hooks and user edits. Use `tl workspace setup --clients vscode --copilot-session-context keep` to leave these hook files untouched.
 
-The MCP server is read-only by default. Enable writes only when you intend to allow workspace changes:
+Workspace setup enables writes in generated MCP settings by default. Use `tl workspace setup --read-only` to omit `--allow-write` for every selected client, or `--allow-write` to select writes explicitly. Setup reports the actual choice in its text and JSON output.
+
+A manually started MCP server is read-only unless you pass `--allow-write`:
 
 ```sh
 tl mcp start --stdio --workspace /path/to/project

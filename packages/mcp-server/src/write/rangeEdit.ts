@@ -53,6 +53,15 @@ function toLf(s: string): string {
   return s.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+/** Line replacement keeps the boundary before an untouched following line. */
+export function rangeReplacementText(content: string, normalized: string, endIndex: number): string {
+  const replacement = toLf(content);
+  return replacement !== "" && !replacement.endsWith("\n") && endIndex < normalized.length
+    && normalized[endIndex - 1] === "\n"
+    ? `${replacement}\n`
+    : replacement;
+}
+
 function restoreLineEnding(s: string, lineEnding: "\n" | "\r\n" | "\r"): string {
   return lineEnding === "\n" ? s : s.replace(/\n/g, lineEnding);
 }
@@ -219,7 +228,7 @@ export function replaceRangeContent(
   }
   const startIndex = lineStartIndex(normalized, range.start);
   const endIndex = lineEndWithNewlineIndex(normalized, range.end);
-  const replacement = toLf(input.content ?? "");
+  const replacement = rangeReplacementText(input.content ?? "", normalized, endIndex);
   const next = normalized.slice(0, startIndex) + replacement + normalized.slice(endIndex);
   const restored = restoreLineEnding(next, lineEnding);
   const writeError = writeExistingFile(resolved.abs, restored, stat.mode, {

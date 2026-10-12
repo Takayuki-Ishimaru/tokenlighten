@@ -80,7 +80,7 @@ describe("Trim A keeps the label on an assembled view", () => {
 });
 
 describe("a symbol batch entry over a small file is labelled on the wire", () => {
-  it("tl_read_file {targets:[{path, symbol}]}: the entry content opens with the scope sentinel", async () => {
+  it("tl_read_file {targets:[{path, symbol}]}: source and supplementary scope context are separate", async () => {
     const ws = fs.realpathSync(shortTmpDir(HOME, ".tl-scopelabel-"));
     tmpDirs.push(ws);
     fs.mkdirSync(path.join(ws, "src"), { recursive: true });
@@ -96,7 +96,10 @@ describe("a symbol batch entry over a small file is labelled on the wire", () =>
     expect(body.kind).toBe("read.batch");
     for (const entry of body.entries) {
       expect(typeof entry.content).toBe("string");
-      expect(entry.content.split("\n")[0], JSON.stringify(entry)).toContain("tokenlighten:scope");
+      expect(entry.content, JSON.stringify(entry)).not.toContain("tokenlighten:scope");
+      expect(entry.note, JSON.stringify(entry)).toContain("tokenlighten:scope");
+      const [start, end] = entry.range.split("-").map(Number);
+      expect(entry.content.replace(/\n$/, "")).toBe(SMALL_CLASS.split("\n").slice(start - 1, end).join("\n"));
     }
   });
 });

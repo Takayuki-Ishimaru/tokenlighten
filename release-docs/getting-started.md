@@ -78,7 +78,7 @@ Removes the machine install (staged runtime and app files) and TokenLighten-mana
 
 ## Install the VS Code extension without building
 
-Users can download **[tokenlighten-vscode-extension-0.15.2.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.2/tokenlighten-vscode-extension-0.15.2.vsix)** from the v0.15.2 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
+Users can download **[tokenlighten-vscode-extension-0.15.3.vsix](https://github.com/Takayuki-Ishimaru/tokenlighten/releases/download/v0.15.3/tokenlighten-vscode-extension-0.15.3.vsix)** from the v0.15.3 GitHub Release and install it with VS Code's **Extensions → Install from VSIX…** command. The same file works on Windows, macOS, and Linux. Node.js is not required for this packaged extension.
 
 Open a trusted project folder, open the TokenLighten view, and choose **Set up this workspace**. This runs the same machine install described above (`tl install --from-extension --clients none`), using VS Code's own Node.js runtime instead of a bundled one: it stages the extension's bundled CLI as the machine install and sets up the current workspace, all in one operation — it does not register other hosts on the machine (Claude Code, Codex); do that separately with `tl clients activate`, or with an archive's `tl-setup`. Remove it with **TokenLighten: Uninstall TokenLighten from This Machine** from the command palette, or the absolute `tl install --uninstall` invocation described in [Uninstall](#uninstall) below.
 
@@ -130,7 +130,14 @@ To start the server directly instead, use:
 tl mcp start --stdio --workspace /path/to/project
 ```
 
-The server is read-only by default. Enable edits only when you intend to allow them:
+Workspace setup enables writes in its generated MCP settings by default.
+Use `tl workspace setup --read-only` to omit `--allow-write` for every
+selected client, or `tl workspace setup --allow-write` to select writes
+explicitly. The two flags cannot be combined. Text and JSON output report
+the selected permission. When refreshing a read-only configuration, pass
+`--read-only` again. `--rules-only` leaves MCP settings untouched.
+
+A manually started server is read-only unless you pass `--allow-write`:
 
 ```bash
 tl mcp start --stdio --allow-write --workspace /path/to/project
@@ -239,4 +246,4 @@ Run `tl help` for the complete CLI reference. If you do not want TokenLighten ac
 - If you use VS Code, see [VS Code extension](vscode-extension.md).
 - Deploying to a fleet or a policy-managed machine? See [Managed environments](managed-environments.md).
 - Review the [Privacy, security, and support](privacy-security-support.md) notes before enabling write access.
-- Read the [v0.15.2 release notes](github-release-v0.15.2.md) for the current changes, compatibility, and known limitations.
+- Read the [v0.15.3 release notes](github-release-v0.15.3.md) for the current changes, compatibility, and known limitations.
